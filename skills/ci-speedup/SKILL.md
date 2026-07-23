@@ -428,7 +428,7 @@ only) § Adding a pattern to the catalog.
 
 ## Methodology
 
-Reference docs (read on demand — each links one level deep from here):
+Reference docs (read on demand — each links one level deep from here; outside the repo, [starsling.dev/ci-speedup](https://starsling.dev/ci-speedup) walks through the same model):
 
 - [references/wall-clock-methodology.md](references/wall-clock-methodology.md) —
   critical-path / long-pole / cluster-floor model: wall-clock is `max(parallel

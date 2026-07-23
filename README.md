@@ -3,7 +3,8 @@
 Public agent skills from StarSling. Each skill lives in its own self-contained
 directory under `skills/<name>/` and installs individually.
 
-Today this repo ships one skill: **`ci-speedup`**.
+Today this repo ships one skill: **`ci-speedup`**
+([overview](https://starsling.dev/ci-speedup)).
 
 ## ci-speedup: measured CI audits for GitHub Actions
 
@@ -100,6 +101,9 @@ third party. See [SECURITY.md](SECURITY.md) for the data-handling model.
 - [`PROVENANCE.md`](PROVENANCE.md): how the detection catalog was developed and
   validated.
 - [`examples/`](examples/): a sanitized sample report showing the output shape.
+- [starsling.dev/ci-speedup](https://starsling.dev/ci-speedup): the skill's
+  landing page — what a run does, walked through end to end, without cloning
+  anything.
 
 ## For maintainers
 
