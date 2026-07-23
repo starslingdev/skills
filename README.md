@@ -1,5 +1,7 @@
 # StarSling Skills
 
+[![skills.sh](https://skills.sh/b/starslingdev/skills)](https://skills.sh/starslingdev/skills)
+
 Public agent skills from StarSling. Each skill lives in its own self-contained
 directory under `skills/<name>/` and installs individually.
 
