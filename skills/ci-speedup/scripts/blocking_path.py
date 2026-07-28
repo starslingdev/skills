@@ -8419,14 +8419,19 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
             # render NO drill and NO "optimize this step" prompt for the sink itself.
             _ag_slow = _clean_label(_check_name(_agg["slowest"]))
             _ag_dur = _clock(_num(_agg["slowest"].get("p50_s")))
+            # BOTH caveats compose — they are independent, and neither may silently drop the
+            # other. "Runs no work of its own" rests on the measured P50 plus the `needs:`
+            # structure whenever no per-step data was captured, so that basis is disclosed on
+            # its own terms even when an unmeasured upstream member is ALSO disclosed (an
+            # `elif` hid the weaker basis exactly when the sample was thinnest — greptile P1).
             _ag_tail = ""
             if _agg["unmeasured"]:
-                _ag_tail = (f" ({_count_noun(len(_agg['unmeasured']), 'upstream job')} had no "
-                            "measured check timing in this sample, so the slowest upstream "
-                            "member could be a heavier one.)")
-            elif not _agg["steps_known"]:
-                _ag_tail = (" (No per-step data was captured for this check; the shape is read "
-                            "from its `needs:` structure and its measured P50.)")
+                _ag_tail += (f" ({_count_noun(len(_agg['unmeasured']), 'upstream job')} had no "
+                             "measured check timing in this sample, so the slowest upstream "
+                             "member could be a heavier one.)")
+            if not _agg["steps_known"]:
+                _ag_tail += (" (No per-step data was captured for this check; the shape is read "
+                             "from its `needs:` structure and its measured P50.)")
             role = cs.add(claims.Claim(
                 kind="pole_role_line", subject=check,
                 fields={"dur": dur, "job_id": str(_agg["job_id"]),
@@ -8644,10 +8649,17 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
             # buys nothing, which is exactly what the role line just said. The reader is
             # pointed at the pole that drills the slowest upstream member, or told which
             # check it is when it isn't among the rendered poles (never a dead link).
+            # IDENTITY, not presentation: the pole this links to is matched on the RAW check
+            # name + workflow file — the same (name, file) identity the spine carries. Matching
+            # on the CLEANED display label instead would fold two distinct checks whose labels
+            # normalize together (`@scope/lint` and `lint` both clean to `lint`) and link the
+            # gate's pointer at an unrelated pole's drill (greptile P2; the #13 name-join
+            # lesson). `_ag_slow` stays the DISPLAY label only.
             _ag_wf = str(_agg["slowest"].get("workflow_file") or p.get("workflow_file") or "")
+            _ag_raw = _check_name(_agg["slowest"])
             _ag_pole_i = next(
                 (j for j, pw in enumerate(pole_wfs, 1)
-                 if _clean_label(str(pw.get("check", ""))) == _ag_slow
+                 if _check_name(pw) == _ag_raw
                  and str(pw.get("workflow_file") or "") == _ag_wf), None)
             if _ag_pole_i is not None:
                 out += [f"**➡️ Where the wait actually is:** [Long pole {_ag_pole_i}]"

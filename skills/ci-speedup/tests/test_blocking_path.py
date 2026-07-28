@@ -6906,3 +6906,30 @@ def test_agg_gate_shape_structural_conditions():
                                if c["workflow_file"] != _AGG_DEPLOY]) is None
     # No scanned graph for the workflow → the shape is unknowable, never guessed.
     assert bp._agg_gate_shape(poles["thank you, build"], {}, checks) is None
+
+
+def test_aggregation_gate_discloses_both_thin_data_caveats():
+    # Both caveats are independent and BOTH must render: an unmeasured upstream member (the
+    # named "slowest" could be beaten by one with no timing) AND the absence of per-step data
+    # (which is what "runs no work of its own" rests on, together with the measured P50). An
+    # `elif` dropped the second exactly when the sample was thinnest.
+    md = bp.render(_agg_gate_doc(), {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    sec = _pole_section(md, "thank you, build")
+    assert "had no measured check timing in this sample" in sec
+    assert "No per-step data was captured for this check" in sec
+
+
+def test_aggregation_gate_pointer_links_the_upstream_members_own_pole():
+    # When the slowest upstream member IS itself a rendered pole, the pointer links to THAT
+    # pole's anchor — matched on the raw check name + workflow file (the spine's identity),
+    # never on the cleaned display label, which can fold two distinct checks together.
+    doc = _agg_gate_doc()
+    doc["pr_critical_path"]["poles"].append(
+        {"check": "stable - x86_64-linux", "p50_s": 355.0, "workflow_file": _AGG_DEPLOY,
+         "job": "native", "dominant_step": "cargo build", "dominant_p50_s": 300.0,
+         "steps": [{"step": "cargo build", "category": "build", "p50_s": 300.0}]})
+    md = bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    sec = _pole_section(md, "thank you, build")
+    n = int(re.search(r"## .*Long pole (\d+): .*▸ `stable - x86_64-linux`", md).group(1))
+    assert f"**➡️ Where the wait actually is:** [Long pole {n}](#pole-{n}) drills " \
+           f"`stable - x86_64-linux` (5m 55s)" in sec

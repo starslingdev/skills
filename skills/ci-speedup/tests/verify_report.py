@@ -1784,13 +1784,17 @@ def check_speed_poles_complete(report: str, findings_path: Path | None) -> Check
     # carries the renderer's aggregation framing; `check_aggregation_gate_poles_never_prescribe`
     # holds the other half (such a pole must carry the upstream pointer and no prompt), so the
     # exemption can't launder a genuinely stunted pole.
+    # Keyed by the section BODY, never by ordinal: `_pole_sections` and `_pole_header_sections`
+    # split on the same header line and so yield byte-identical bodies, but their header
+    # patterns differ (the latter also requires the `` `wf` ▸ check `` shape) — a header that
+    # ever fails the stricter pattern would shift the ordinals and move the exemption onto a
+    # DIFFERENT pole. Matching on bodies cannot drift that way.
     _agg_keys = _agg_gate_pole_keys(findings_path)
-    _agg_exempt = {i for i, (wf, check, body)
-                   in enumerate(_pole_header_sections(report), 1)
-                   if _AGG_GATE_ROLE_MARKER in body
-                   and (_wf_base(wf), _cmp_name(check)) in _agg_keys}
+    _agg_exempt_bodies = {body for wf, check, body in _pole_header_sections(report)
+                          if _AGG_GATE_ROLE_MARKER in body
+                          and (_wf_base(wf), _cmp_name(check)) in _agg_keys}
     bare = [i + 1 for i, s in enumerate(sections)
-            if "Prompt for your coding agent" not in s and (i + 1) not in _agg_exempt]
+            if "Prompt for your coding agent" not in s and s not in _agg_exempt_bodies]
     if bare:
         return Check(name, False, f"long pole(s) {bare} lack an agent prompt - a bare/"
                      "stunted pole, not the same drill as pole 1")
