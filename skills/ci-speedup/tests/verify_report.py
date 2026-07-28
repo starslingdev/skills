@@ -3288,7 +3288,10 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
     `runner_minute_spine` rows (`billable_equiv_min_per_month`, the sampled-and-extrapolated cost the
     spine already stamps and `check_runner_minute_spine_contract` re-derives), matched to the
     finding's `affected_jobs` by workflow_file + job base name (matrix `(variant)` stripped, the same
-    `_cmp_name`/base join the spine uses). A finding whose jobs ALL resolve to spine rows must have
+    `_cmp_name`/base join the spine uses), resolving a finding's YAML job key against the spine's
+    `name:`-overridden display name through the scanned `workflow_job_graph` (issue #2) so a
+    same-workflow match always beats the cross-workflow same-name fallback. A finding whose jobs ALL
+    resolve to spine rows must have
     saving <= their summed billable compute (directional upper bound + tolerance; L6). SKIPs loud when
     there is no render-ready cost spine, or when savings exist but NONE of them resolve any affected
     job to a spine row — the check bounded nothing, so it SKIPs loud rather than pass green (the
@@ -3315,6 +3318,30 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
     def _base(job: str) -> str:
         # Strip a trailing matrix `(variant)` so a finding's bare job name matches its expanded legs.
         return _cmp_name(re.sub(r"\s*\([^()]*\)\s*$", "", str(job or "")).strip())
+
+    # YAML KEY ↔ `name:` OVERRIDE (issue #2). A finding names its job by YAML key (`lint`), but the
+    # spine records the job under its rendered DISPLAY name (`Lint project (depot-windows-2022)`) —
+    # the key misses the join entirely. Resolve both identities through the scanned
+    # `workflow_job_graph` (`{wf: {job_id: {name, ...}}}`, already stamped on the artifact, so no
+    # producer change): key → declared `name:`, and DISPLAY name → key for the reverse direction.
+    # Candidates stay per-workflow, so a same-workflow resolution is always tried before the
+    # cross-workflow same-name fallback below — biome's OPT33 on `lint` bound the unrelated
+    # `pull_request_markdown.yml` job literally named `lint` (553 min/mo) instead of its own job's
+    # 13,381.6, and false-FAILed. An artifact with no graph keeps the bare-name behavior.
+    graph = _as_dict(data.get("workflow_job_graph"))
+
+    def _identities(wf: str, job: str) -> list[str]:
+        """Job bases `job` may appear under in `wf`'s spine rows, literal first (so an already-
+        matching name keeps today's binding), then the graph-resolved counterpart identity."""
+        b = _base(job)
+        out = [b] if b else []
+        for jid, info in _as_dict(graph.get(wf)).items():
+            nm = _base(_as_dict(info).get("name") or jid)
+            # key → its `name:` override, and display name → its key; both directions, one pass.
+            for alias in ((nm,) if _base(jid) == b else ((_base(jid),) if nm == b else ())):
+                if alias and alias not in out:
+                    out.append(alias)
+        return out
 
     compute: dict[tuple[str, str], float] = {}
     for r in rows:
@@ -3357,17 +3384,25 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
         seen: set[str] = set()
         for j in jobs:
             b = _base(j)
-            if not b or b in seen:
+            if not b:
                 continue
-            seen.add(b)
+            # Same-workflow identities first (literal, then graph-resolved) — a job that resolves
+            # in its OWN workflow never reaches the cross-workflow fallback, so a foreign namesake
+            # can't win. `compute` already sums a base's matrix legs, so the resolved display name
+            # brings the whole job's compute (all legs) in one figure.
+            cands = _identities(wf, j)
+            key = next(((wf, c) for c in cands if (wf, c) in compute), None)
+            ident = key[1] if key else b
+            if ident in seen:
+                continue
+            seen.add(ident)
             distinct += 1
-            key = (wf, b)
-            if key in compute:
+            if key:
                 matched += 1
                 bound += compute[key]
             else:
                 # Job base present under ANY workflow file (a reusable-workflow caller loses the wf).
-                alt = [v for (w, jb), v in compute.items() if jb == b]
+                alt = [v for (w, jb), v in compute.items() if jb in cands]
                 if alt:
                     matched += 1
                     bound += max(alt)

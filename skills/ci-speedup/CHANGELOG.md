@@ -36,6 +36,24 @@ unversioned and updates by reinstall from `main`.
   quote a credential; mask it and note the mask), and the repo's `SECURITY.md`
   documents the three-layer log-data model (W011).
 
+### Fixed
+
+- **2026-07-28** — **The physical-bound sizing guard now joins a finding's jobs
+  through the scanned job graph, never a cross-workflow name match** (issue #2).
+  `verify_report.check_saving_within_measured_compute` matched a finding's
+  `affected_jobs` (YAML keys) against the cost spine's job names (rendered
+  `name:` display names, one row per matrix leg). A `name:`-overridden job missed
+  that join entirely and fell through to the cross-workflow same-name fallback,
+  which bound an UNRELATED job in another workflow that happened to share the bare
+  name — on biomejs/biome, OPT33's `lint` in `pull_request.yml` (real compute
+  13,381.6 min/mo across two matrix legs) bound `pull_request_markdown.yml`'s
+  553.0 min/mo `lint`, and a correctly-sized 3,187.9 min/mo credit false-FAILed
+  the gate. The join now resolves key ↔ `name:` in BOTH directions through the
+  artifact's own `workflow_job_graph`, tries every same-workflow identity before
+  the cross-workflow fallback, and sums all matrix legs of the resolved job. An
+  affected job genuinely absent from the spine still surfaces as a coverage gap,
+  and an artifact with no job graph keeps the previous bare-name behavior.
+
 ### Fixed (pre-flip audit wave 2)
 
 - **2026-07-22** — **Catalog deep-links now use GitHub's real GFM anchor rule.**
