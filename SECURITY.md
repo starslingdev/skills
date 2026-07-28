@@ -44,9 +44,17 @@ quotes them verbatim as evidence — so three layers apply, in order:
 - **Instruction level.** The skill's prompts (`SKILL.md` phase 4a,
   `references/gap-fill.md`) treat log content as data, never as instructions: it
   is quoted as evidence, and directives embedded in it are never followed.
-- **Render boundary.** Every verbatim line passes through one sink
-  (`blocking_path._fence_safe`) that defuses Markdown fence breakouts and
-  deterministically masks credential-shaped strings — GitHub tokens, AWS access
-  keys, Slack tokens, JWTs, Google API keys, private-key headers, and
-  `key=value` credential assignments — as `[REDACTED:<kind>]`. This catches
+- **Render boundary.** Every verbatim line passes through a sink that defuses
+  Markdown fence breakouts and deterministically masks **common credential
+  shapes** as `[REDACTED:<kind>]` — GitHub, npm, Slack and Docker Hub tokens,
+  AWS access keys, JWTs, Google and LLM-provider API keys, private-key headers,
+  and `key=value` / `Authorization: Bearer` credential assignments. This catches
   tokens that were echoed into a log without being registered as secrets.
+
+  This is **pattern matching, not secret detection**: it masks the shapes listed
+  above and nothing else. A secret with no recognisable shape — an opaque
+  high-entropy string with no key name or prefix next to it — can still reach the
+  report, and there is deliberately no entropy heuristic, because a report whose
+  step names, cache keys and commit shas came back `[REDACTED]` would be useless.
+  Treat a generated report as you would the job log it quotes: review it before
+  committing or sharing it.

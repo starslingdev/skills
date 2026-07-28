@@ -296,17 +296,32 @@ _SECRET_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
     ("google-api-key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}")),
     ("private-key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("npm-token", re.compile(r"\bnpm_[A-Za-z0-9]{30,}")),
+    ("docker-token", re.compile(r"\bdckr_pat_[A-Za-z0-9_-]{20,}")),
+    # OpenAI / Anthropic style. Anchored on the `sk-` prefix AND a >=20-char alphanumeric
+    # tail, so a hyphenated step name can't reach it.
+    ("llm-api-key", re.compile(r"\bsk-(?:proj-|ant-[a-z0-9]+-|live-|test-)?[A-Za-z0-9]{20,}")),
 )
 # The un-shaped catch-all: `<key> = <value>` / `<key>: <value>`. Only the VALUE is masked
 # (the key name is half the diagnostic value of the line). The key may carry the usual
 # env-var prefix (`NPM_TOKEN=`, `GH_API_KEY:`) — the plain `\btoken\b` form would miss
-# every real-world log line, since `_` is a word char. The value must be >=8 chars AND
-# (a digit anywhere OR >=16 chars), so ordinary prose (`token: yes`, `authorization:
-# required`) and timing lines are left alone. The lookahead makes the mask idempotent.
+# every real-world log line, since `_` is a word char. An HTTP auth SCHEME word may sit
+# between the separator and the value (`Authorization: Bearer <opaque>` is the single most
+# common real form, and the value — not the scheme — is the credential). The value must be
+# >=8 chars AND (a digit anywhere OR >=16 chars), so ordinary prose (`token: yes`,
+# `authorization: required`) and timing lines are left alone. The lookahead makes the mask
+# idempotent.
 _ASSIGN_SECRET_RE = re.compile(
     r"(?i)\b(?:[A-Za-z0-9]+[._-])*"
     r"(?:token|secret|password|passwd|api[_-]?key|authorization|bearer)\b\s*[=:]\s*"
+    r"(?:(?:bearer|basic|token)\s+)?"
     r"(?!\[REDACTED:)(\S{8,})")
+# A value that is a variable REFERENCE, not a value: `${{ secrets.X }}` (the actions
+# expression, with or without inner spaces), `${VAR}`, `$VAR`, `%VAR%`. These are exactly
+# what a correctly-written workflow YAML line looks like, and they are the lines the
+# catalog detectors quote as evidence — masking them would destroy the diagnostic and
+# falsely suggest the repo hardcodes a token.
+_ASSIGN_VAR_REF_RE = re.compile(r"^(?:\$\{\{?[^}]*\}?\}|\$[A-Za-z_][A-Za-z0-9_]*|%[^%]+%)")
 
 
 def _redact_secrets(s: str) -> str:
@@ -321,6 +336,8 @@ def _redact_secrets(s: str) -> str:
         val = m.group(1)
         if not (len(val) >= 16 or any(c.isdigit() for c in val)):
             return m.group(0)          # `password: changeme` — prose, not a credential
+        if _ASSIGN_VAR_REF_RE.match(val):
+            return m.group(0)          # `TOKEN: ${{secrets.X}}` — a reference, not a value
         return m.group(0)[: m.start(1) - m.start(0)] + "[REDACTED:credential]"
 
     return _ASSIGN_SECRET_RE.sub(_assign, s)
@@ -4550,9 +4567,15 @@ def _flatten_cell(text: str) -> str:
     """A markdown table cell can't contain a raw newline or an unescaped pipe — and a
     >=3-backtick run in the repo evidence text that flows through here (structural /
     workflow-YAML `evidence`) would break out of a ```text fence elsewhere in the report
-    AND desync `verify_report`'s fence split, so defuse it here too. No-op on clean cells."""
-    return _defuse_backtick_runs(
-        re.sub(r"\s+", " ", str(text)).replace("|", "\\|").strip())
+    AND desync `verify_report`'s fence split, so defuse it here too. No-op on clean cells.
+
+    This is the THIRD untrusted-text sink (with `_fence_safe` and `_llm_analysis_block`):
+    the appendix `**Evidence:**` lines and the Tier-2 / structural rows quote workflow-YAML
+    verbatim through here WITHOUT going through `_fence_safe`, and a hardcoded token in a
+    workflow file is the most likely place a credential is quoted from — so mask here too
+    (#12). Masking is a no-op on clean cells, so the byte-identity contract holds."""
+    return _redact_secrets(_defuse_backtick_runs(
+        re.sub(r"\s+", " ", str(text)).replace("|", "\\|").strip()))
 
 
 def _dedupe_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:

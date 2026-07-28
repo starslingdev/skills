@@ -23,12 +23,18 @@ unversioned and updates by reinstall from `main`.
   access keys, Slack tokens, JWTs, Google API keys, private-key headers and
   `key=value` credential assignments with `[REDACTED:<kind>]` while keeping the
   surrounding words, so the evidence stays readable. The LLM gap-fill's `cause`
-  and `breakdown` (markdown prose, the only untrusted-derived text that bypasses
-  `_fence_safe`) are masked at their own site. Shaped patterns only, no entropy
-  heuristic: step names, durations, run URLs and 40-hex provenance shas render
-  unchanged. SKILL.md phase 4a and `references/gap-fill.md` gained the matching
-  instruction-level rule (never quote a credential; mask it and note the mask),
-  and the repo's `SECURITY.md` documents the three-layer log-data model (W011).
+  and `breakdown` (markdown prose, which renders as markdown rather than fenced
+  text) are masked at their own site, and `_flatten_cell` — the appendix
+  `**Evidence:**` lines and the Tier-2 / structural rows, which quote workflow
+  YAML verbatim without passing through `_fence_safe` — is the third masked sink.
+  Shaped patterns only, no entropy heuristic: step names, durations, run URLs and
+  40-hex provenance shas render unchanged, and a value that is a *reference*
+  (`${{ secrets.X }}`, `${VAR}`, `%VAR%`) is left alone — that is what correct
+  workflow YAML looks like, and masking it would destroy the diagnostic and imply
+  a hardcoded token that isn't there. SKILL.md phase 4a and
+  `references/gap-fill.md` gained the matching instruction-level rule (never
+  quote a credential; mask it and note the mask), and the repo's `SECURITY.md`
+  documents the three-layer log-data model (W011).
 
 ### Fixed (pre-flip audit wave 2)
 

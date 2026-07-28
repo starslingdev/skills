@@ -15,6 +15,7 @@ Run: pytest -v skills/ci-speedup/tests/test_secret_redaction.py
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -63,6 +64,20 @@ _SECRET_LINES = [
     ("generic colon form",
      "config: api-key: 8f2b91aa5c7d3e40 loaded",
      "8f2b91aa5c7d3e40", "credential"),
+    # `Authorization: Bearer <opaque>` is the single most common real credential line in a
+    # job log, and the scheme word sits between the separator and the value.
+    ("authorization bearer header",
+     "> Authorization: Bearer 7c1d0e9f8a6b5c4d3e2f1a09 (retrying)",
+     "7c1d0e9f8a6b5c4d3e2f1a09", "credential"),
+    ("npm publish token",
+     "npm notice using npm_1a2b3c4d5e6f7g8h9i0jKLMNOPQRSTUVWXYZ for registry auth",
+     "npm_1a2b3c4d5e6f7g8h9i0jKLMNOPQRSTUVWXYZ", "npm-token"),
+    ("docker hub pat",
+     "docker login -u ci -p dckr_pat_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123",
+     "dckr_pat_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123", "docker-token"),
+    ("llm api key",
+     "OPENAI probe failed for sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4",
+     "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4", "llm-api-key"),
 ]
 
 # Lines the mask must leave BYTE-IDENTICAL. Ordinary CI text that superficially rhymes
@@ -81,7 +96,20 @@ _CLEAN_LINES = [
     "downloading node-v20.11.1-linux-x64.tar.gz (23847361 bytes)",
     "cache restored from key Linux-pnpm-store-9f8e7d6c5b4a39281706f5e4d3c2b1a0",
     "[REDACTED:github-token] was already masked upstream",
+    # A CORRECTLY-written workflow line: the value is a reference, not a credential. These
+    # are exactly the lines the catalog detectors quote as evidence, so masking them would
+    # destroy the diagnostic AND falsely imply the repo hardcodes a token.
+    "  GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}",
+    "  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+    "  NPM_TOKEN: ${{secrets.NPM_PUBLISH_TOKEN}}",
+    "export NODE_AUTH_TOKEN=${NPM_TOKEN_FOR_PUBLISH}",
+    "set NUGET_API_KEY=%NUGET_KEY_FROM_CI%",
 ]
+# The idempotence fixture above is the one clean line that ALREADY carries a mask marker, so
+# the "a clean report renders no `[REDACTED`" end-to-end guard has to exclude it. Filtered by
+# value, not by slice index - a positional `[:-1]` silently stops excluding it the moment a
+# line is appended.
+_CLEAN_LINES_NO_MARKER = [l for l in _CLEAN_LINES if "[REDACTED" not in l]
 
 
 # --------------------------------------------------------------------------- #
@@ -133,6 +161,22 @@ def test_fence_safe_is_the_chokepoint_for_verbatim_evidence():
     # Still byte-identical for clean single-line text (the existing `_fence_safe` contract).
     for line in _CLEAN_LINES:
         assert bp._fence_safe(line) == line
+
+
+def test_flatten_cell_masks_workflow_yaml_evidence():
+    # `_flatten_cell` is the OTHER verbatim sink: the appendix `**Evidence:**` lines and the
+    # Tier-2 / structural rows quote workflow YAML through it without touching `_fence_safe`.
+    # A hardcoded token in a workflow file is the likeliest thing to be quoted from, so the
+    # mask has to hold here too - otherwise coverage is site-by-site, not by construction.
+    for _label, line, secret, kind in _SECRET_LINES:
+        cell = bp._flatten_cell(line)
+        assert secret not in cell, line
+        assert f"[REDACTED:{kind}]" in cell, line
+    # Clean cells keep the pre-existing contract: whitespace collapse + pipe escape only,
+    # with no mask introduced.
+    for line in _CLEAN_LINES:
+        expected = re.sub(r"\s+", " ", line).replace("|", "\\|").strip()
+        assert bp._flatten_cell(line) == expected, f"false positive on cell: {line}"
 
 
 # --------------------------------------------------------------------------- #
@@ -196,8 +240,8 @@ def test_ordinary_report_text_is_untouched_by_the_mask():
                    analyses={"pipeline": {
                        "cause": "The test job installs its toolchain from scratch.",
                        "breakdown": [["toolchain install", "~40s of the 91s step"]],
-                       "evidence": _CLEAN_LINES[:-1],   # last line already carries a marker
+                       "evidence": _CLEAN_LINES_NO_MARKER,
                        "prompt": "REPO: o/r\nInvestigate the toolchain install."}})
     assert "[REDACTED" not in md
-    for line in _CLEAN_LINES[:-1]:
+    for line in _CLEAN_LINES_NO_MARKER:
         assert line.strip() in md, line
