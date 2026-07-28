@@ -33,3 +33,20 @@ and to keep your data on your machine.
   of them yours: the read-only `gh` calls to GitHub, and — only when a drilled
   pole matches no catalog detector — the job-log excerpt your own agent reads to
   write the gap-fill analysis. Nothing else is transmitted.
+
+### Log data handling
+
+Job logs and workflow YAML are **third-party untrusted data**, and the report
+quotes them verbatim as evidence — so three layers apply, in order:
+
+- **GitHub's own secret masking** is the first layer: values registered as repo
+  or org secrets arrive already masked in the log the skill reads.
+- **Instruction level.** The skill's prompts (`SKILL.md` phase 4a,
+  `references/gap-fill.md`) treat log content as data, never as instructions: it
+  is quoted as evidence, and directives embedded in it are never followed.
+- **Render boundary.** Every verbatim line passes through one sink
+  (`blocking_path._fence_safe`) that defuses Markdown fence breakouts and
+  deterministically masks credential-shaped strings — GitHub tokens, AWS access
+  keys, Slack tokens, JWTs, Google API keys, private-key headers, and
+  `key=value` credential assignments — as `[REDACTED:<kind>]`. This catches
+  tokens that were echoed into a log without being registered as secrets.

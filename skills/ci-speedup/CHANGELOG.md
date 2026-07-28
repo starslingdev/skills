@@ -11,6 +11,25 @@ unversioned and updates by reinstall from `main`.
 
 ## [Unreleased]
 
+### Added
+
+- **2026-07-28** — **Credential-shaped strings are masked in every quoted log
+  line.** The report quotes verbatim job-log and workflow-YAML text as evidence,
+  and that is the artifact users commit and share; GitHub masks only the secrets
+  registered as repo/org secrets, so an accidentally-echoed token reached the
+  report in the clear (skills.sh Snyk W007, HIGH; issue #12). `_redact_secrets`
+  now runs inside `_fence_safe` — the single sink every evidence line, repo name
+  and agent-prompt line already flows through — replacing GitHub tokens, AWS
+  access keys, Slack tokens, JWTs, Google API keys, private-key headers and
+  `key=value` credential assignments with `[REDACTED:<kind>]` while keeping the
+  surrounding words, so the evidence stays readable. The LLM gap-fill's `cause`
+  and `breakdown` (markdown prose, the only untrusted-derived text that bypasses
+  `_fence_safe`) are masked at their own site. Shaped patterns only, no entropy
+  heuristic: step names, durations, run URLs and 40-hex provenance shas render
+  unchanged. SKILL.md phase 4a and `references/gap-fill.md` gained the matching
+  instruction-level rule (never quote a credential; mask it and note the mask),
+  and the repo's `SECURITY.md` documents the three-layer log-data model (W011).
+
 ### Fixed (pre-flip audit wave 2)
 
 - **2026-07-22** — **Catalog deep-links now use GitHub's real GFM anchor rule.**
