@@ -55,7 +55,10 @@ unversioned and updates by reinstall from `main`.
   still matches the literal base, so a job with no spine row in its own workflow
   can never bind an unrelated namesake's compute and inflate the upper bound. An
   affected job genuinely absent from the spine still surfaces as a coverage gap,
-  and an artifact with no job graph keeps the previous bare-name behavior.
+  and an artifact with no job graph keeps the previous bare-name behavior. An
+  AMBIGUOUS display name — two job keys in one workflow rendering to the same
+  `name:`, hence one shared spine row — yields no alias, so a finding is never
+  bounded by its twin's compute.
 
 ### Fixed (pre-flip audit wave 2)
 

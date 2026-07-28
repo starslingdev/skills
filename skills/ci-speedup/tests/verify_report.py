@@ -3339,11 +3339,23 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
     def _identities(wf: str, job: str) -> list[str]:
         """Job bases `job` may appear under in `wf`'s spine rows, literal first (so an already-
         matching name keeps today's binding), then the graph-resolved counterpart identity.
-        Only valid WITHIN `wf` — the cross-workflow fallback must not use these aliases."""
+        Only valid WITHIN `wf` — the cross-workflow fallback must not use these aliases.
+        An AMBIGUOUS display name (two job keys in `wf` rendering to the same name) yields no
+        alias: the spine indexes by that one name, so aliasing a key onto it would bound the
+        finding by BOTH jobs' summed compute and inflate the ceiling. Ambiguity stays an honest
+        coverage gap, same as the cross-workflow rule above."""
         b = _base(job)
         out = [b] if b else []
-        for jid, info in _as_dict(graph.get(wf)).items():
+        jobs_in_wf = _as_dict(graph.get(wf))
+        names: dict[str, int] = {}
+        for jid, info in jobs_in_wf.items():
             nm = _base(_as_dict(info).get("name") or jid)
+            if nm:
+                names[nm] = names.get(nm, 0) + 1
+        for jid, info in jobs_in_wf.items():
+            nm = _base(_as_dict(info).get("name") or jid)
+            if names.get(nm, 0) > 1:
+                continue  # collision: this display name identifies more than one job — no alias.
             # key → its `name:` override, and display name → its key; both directions, one pass.
             for alias in ((nm,) if _base(jid) == b else ((_base(jid),) if nm == b else ())):
                 if alias and alias not in out:

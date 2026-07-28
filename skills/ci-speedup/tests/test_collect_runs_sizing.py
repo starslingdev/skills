@@ -2378,6 +2378,25 @@ def test_name_override_alias_never_widens_the_cross_workflow_fallback(tmp_path):
     assert res.skipped and "coverage gap" in res.detail, res.detail
 
 
+def test_name_override_alias_skips_a_colliding_display_name(tmp_path):
+    # Two job KEYS in one workflow rendering to the SAME display name are one row in
+    # the spine (which indexes by name), so that row's compute belongs to BOTH jobs.
+    # Aliasing either key onto it would bound the finding by the SUM and inflate the
+    # ceiling — a 9,000 credit against a 5,000-min job would read "within measured
+    # compute" off its twin's 5,000. An ambiguous name yields no alias, so this stays
+    # an honest coverage gap (nothing bounded → loud SKIP).
+    doc = _name_doc(9000.0, jobs=("test_unit",))
+    doc["workflow_job_graph"] = {
+        _NAME_WF: {"test_unit": {"name": "Test suite", "needs": [], "matrix": False},
+                   "test_e2e": {"name": "Test suite", "needs": [], "matrix": False}},
+    }
+    doc["runner_minute_spine"]["rows"].append(
+        {"workflow_file": _NAME_WF, "job_name": "Test suite",
+         "billable_equiv_min_per_month": 10000.0})
+    res = _name_result(doc, tmp_path)
+    assert res.skipped and "coverage gap" in res.detail, res.detail
+
+
 def test_name_override_join_without_a_graph_keeps_the_legacy_fallback(tmp_path):
     # An artifact predating `workflow_job_graph` keeps today's behavior: the bare
     # key resolves only through the cross-workflow same-name fallback (553.0), so
