@@ -38,6 +38,40 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-07-28** — **An aggregation-gate pole tells the honest upstream story
+  instead of prompting the reader to optimize a 3-second no-op** (issue #1). Many
+  repos make one trivial job the single required status check: it runs no work,
+  `needs:` everything else in its workflow, and exists only so branch protection
+  has one name to require (vercel/next.js `thank you, build` — job `buildPassed`,
+  `needs: [deploy-target, build, build-wasm, build-native]`, body `run: exit 1`,
+  P50 **3s**). Because it gates every PR it was correctly crowned Long pole 1 by
+  frequency — and then rendered with a drill placeholder plus a "capture timing,
+  then optimize this step" agent prompt: correct data, inert advice, at the first
+  thing a reader sees. `blocking_path._agg_gate_shape` now detects the shape at
+  render time from data the artifact already stamps (`workflow_job_graph` + the
+  check spine — no producer change): trivial P50 (<= 30s, below any real hosted
+  job's checkout+setup floor), a *terminal* job whose transitive `needs:` closure
+  (>= 2 jobs) covers every non-terminal job in its workflow (uncovered siblings
+  must themselves be terminal — the shape of an `if:`-conditional peer sink like
+  `publishRelease`), no sampled step above that threshold, and at least one
+  upstream member with measured timing. Such a pole now renders a role line
+  saying what it is — its wait IS its `needs:` upstream — names the slowest
+  measured upstream member with its P50, and points at the pole that drills it
+  (an anchor when it renders, otherwise the check name and what a re-run does —
+  never a dead link), with **no drill, no floor note and no agent prompt**.
+  Structure, not duration, is the test: a real 3s `lint` job with no `needs:`
+  coverage renders byte-identically to before. Crowning and ranking are
+  unchanged, a sink that is a modal-chain member keeps its chain-stage framing
+  (no double-framing), and a pole with a matched log-detector leaf or a routed
+  structural lever keeps its drill (there the advice is not inert, and dropping
+  it would lose a measured lever). `verify_report` gained the matching pair:
+  `check_speed_poles_complete` exempts such a pole from the every-pole-has-a-
+  prompt rule, and the new `check_aggregation_gate_poles_never_prescribe` fails
+  any aggregation-framed pole that carries a prompt, omits the upstream pointer,
+  or whose shape does not re-derive from `findings.json` — so the exemption can
+  never launder a genuinely stunted pole. ARCHITECTURE §12.6b documents the
+  shape; SKILL.md 5b carries the matching self-audit carve-out.
+
 - **2026-07-28** — **The physical-bound sizing guard now joins a finding's jobs
   through the scanned job graph, never a cross-workflow name match** (issue #2).
   `verify_report.check_saving_within_measured_compute` matched a finding's

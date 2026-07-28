@@ -760,6 +760,141 @@ def _floor_note(pole: dict[str, Any],
         + _recoverable_reconciliation(addr_leg, _tw), ""]
 
 
+# ── Aggregation gate (the degenerate chain SINK) ─────────────────────────────────────
+# A "success-aggregation gate" is the trivial job whose ONLY purpose is to `needs:` a set
+# of real jobs so that ONE check can be the single required status check — vercel/next.js'
+# `thank you, build` (job `buildPassed`: `needs: [deploy-target, build, build-wasm,
+# build-native]`, body `run: exit 1` behind an `if:`, P50 3s, required). Crowning it is
+# CORRECT data (it literally gates every PR), but drilling it and handing the reader a
+# "capture timing, then optimize this step" prompt is INERT advice: there is nothing inside
+# a 3-second no-op to speed, and moving it off the PR path defeats the reason it exists.
+# Its wait IS its `needs:` upstream, so the honest lever is the slowest upstream member.
+#
+# THRESHOLD. `_AGG_GATE_TRIVIAL_S` = 30s: a hosted-runner job that does any real work
+# (checkout + toolchain setup alone) clears 30s comfortably, so a check whose P50 sits under
+# it did nothing but wait on `needs:`. Duration ALONE never matches — it is one necessary
+# condition of a STRUCTURAL test (terminal node + covers every non-terminal job in its
+# workflow); a genuinely fast real job (a 3s lint) fails the structure test and keeps
+# today's rendering.
+_AGG_GATE_TRIVIAL_S = 30.0
+
+
+def _agg_job_produces_check(job_name: str, is_matrix: bool, check: str) -> bool:
+    """True iff a workflow job whose display `name:` is `job_name` (matrix-flagged iff
+    `is_matrix`) produces the check-run named `check`. Mirrors the scanned check->job
+    matching used elsewhere in the pipeline (exact display name; a matrix `name:` template
+    with `${{ … }}` holes compiled to `.+?`; a static matrix job's `Name (leg…)` legs). An
+    ENTIRELY-placeholder template is refused — a match-anything `^.+?$` would bind any
+    check-run and let this gate name an unrelated check as "the slowest upstream member"."""
+    if not job_name:
+        return False
+    if job_name == check:
+        return True
+    if "${{" in job_name:
+        parts = re.split(r"\$\{\{.*?\}\}", job_name)
+        if not any(p.strip() for p in parts):
+            return False  # degenerate all-placeholder template
+        return bool(re.match("^" + ".+?".join(re.escape(p) for p in parts) + "$", check))
+    if is_matrix:
+        return bool(re.match("^" + re.escape(job_name) + r"(?: \(.*\))?$", check))
+    return False
+
+
+def _agg_gate_shape(pole: dict[str, Any], job_graph: dict[str, Any] | None,
+                    checks: list[dict[str, Any]],
+                    timeline: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """The aggregation-gate shape for `pole`, or None when it doesn't match.
+
+    ALL of the following must hold (structure first — duration alone never matches):
+
+    (a) TRIVIAL — the check's headline P50 is <= `_AGG_GATE_TRIVIAL_S` (see above).
+    (b) TERMINAL SINK COVERING ITS WORKFLOW — the pole's job is a terminal node (no job in
+        the workflow `needs:` it) and its TRANSITIVE `needs:` closure contains every
+        NON-terminal job in that workflow. Uncovered siblings must themselves be terminal,
+        which is exactly the shape of an `if:`-conditional peer (next.js' `publishRelease`,
+        `deploy-tarball`): a conditional peer sink is never something the gate could
+        `needs:`, so "effectively all the other jobs" is expressed STRUCTURALLY rather than
+        by reading `if:` (which the scanned graph does not carry). The closure must hold
+        >= 2 jobs, so a single-parent `needs: [build]` stage — a chain member, not an
+        aggregation sink — never matches.
+    (c) NO SUBSTANTIVE WORK OF ITS OWN — step data is used only as a DISQUALIFIER, because
+        it usually does not exist for a check like this (a 3s gate is never drilled). When
+        per-step data IS present and any step exceeds the trivial threshold, the job does
+        real work and the shape is refused. With no step data, (a)+(b) stand on their own
+        and the rendered role line discloses that.
+    (d) A NAMED, MEASURED UPSTREAM — at least one member of the `needs:` closure resolves to
+        a measured check. Without one there is no honest "the real lever is over there" to
+        point at, so the pole keeps today's rendering rather than trading an inert prompt
+        for a contentless role line.
+
+    Returns `{"job_id", "upstream" (job ids), "slowest" (the measured check dict),
+    "unmeasured" (upstream display names with no measured check), "steps_known"}`."""
+    head_s, _ = _pole_headline(pole)
+    if head_s > _AGG_GATE_TRIVIAL_S:
+        return None
+    wf = str(pole.get("workflow_file") or "")
+    jobs = _as_dict(_as_dict(job_graph).get(wf))
+    if not jobs:
+        return None  # no scanned graph for this workflow — the shape is unknowable
+    check = str(pole.get("check") or "")
+    jid = str(pole.get("job") or "")
+    if jid not in jobs:
+        # The pole's `job` may be a DISPLAY name (or absent); resolve it back to the YAML key.
+        cands = [k for k, meta in jobs.items()
+                 if _agg_job_produces_check(str(_as_dict(meta).get("name") or k),
+                                            bool(_as_dict(meta).get("matrix")), check)]
+        if len(cands) != 1:
+            return None  # unresolvable or ambiguous identity — never guess
+        jid = cands[0]
+    needs_of = {k: [str(n) for n in _as_list(_as_dict(m).get("needs"))]
+                for k, m in jobs.items()}
+    depended_on = {n for ns in needs_of.values() for n in ns}
+    if jid in depended_on:
+        return None  # something `needs:` it — a chain stage, not a terminal sink
+    closure: set[str] = set()
+    frontier = list(needs_of.get(jid) or [])
+    while frontier:
+        n = frontier.pop()
+        if n in closure or n not in jobs:
+            continue
+        closure.add(n)
+        frontier.extend(needs_of.get(n) or [])
+    if len(closure) < 2:
+        return None
+    non_terminal = {k for k in jobs if k in depended_on}
+    if not non_terminal <= closure:
+        return None
+    _step_durs = [_num(_as_dict(s).get("dur_s"))
+                  for s in _as_list(_as_dict(timeline).get("steps"))]
+    _step_durs += [_num(_as_dict(s).get("p50_s")) for s in _as_list(pole.get("steps"))]
+    if any((d or 0.0) > _AGG_GATE_TRIVIAL_S for d in _step_durs):
+        return None  # it does substantive work of its own
+    # Resolve each upstream job to its measured check(s) IN THE SAME WORKFLOW — a
+    # cross-workflow same-name check is a different job entirely.
+    slowest: dict[str, Any] | None = None
+    unmeasured: list[str] = []
+    for j in sorted(closure):
+        meta = _as_dict(jobs.get(j))
+        nm = str(meta.get("name") or j)
+        matched = [_as_dict(c) for c in checks
+                   if str(_as_dict(c).get("workflow_file") or "") == wf
+                   and _agg_job_produces_check(nm, bool(meta.get("matrix")),
+                                               _check_name(_as_dict(c)))]
+        if not matched:
+            unmeasured.append(nm)
+            continue
+        top = max(matched, key=lambda c: _num(c.get("p50_s")) or 0.0)
+        if slowest is None or ((_num(top.get("p50_s")) or 0.0)
+                               > (_num(slowest.get("p50_s")) or 0.0)):
+            slowest = top
+    if slowest is None:
+        return None
+    return {"job_id": jid, "upstream": sorted(closure), "slowest": slowest,
+            "unmeasured": unmeasured,
+            "steps_known": bool(_as_list(_as_dict(timeline).get("steps"))
+                                or _as_list(pole.get("steps")))}
+
+
 # Wall-clock severity dot for a long-pole title, by the gate's measured P50 wait:
 # 🔴 >= 5m, 🟠 2-5m, 🟡 < 2m. Makes each finding's impact tier scannable in its title.
 _SEV_HIGH_S = 300.0
@@ -8248,6 +8383,20 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         head_s, bi_caveat = _pole_headline(p)
         dur = _clock(head_s)
         _raw_check = str(p.get("check", ""))
+        # AGGREGATION-GATE (success-sink) detection — issue #1, see `_agg_gate_shape`. Three
+        # deliberate carve-outs: a modal-chain MEMBER keeps the chain-stage framing (the chain
+        # rendering wins; never double-frame), and a pole carrying real measured content of its
+        # own — a matched log-detector leaf, or a structural lever routed to it — keeps today's
+        # rendering, because there the drill/prompt is NOT inert and suppressing it would
+        # silently drop a measured lever that renders nowhere else.
+        _agg_key = pole_owner_keys.get(id(p))
+        _agg = None
+        if (not (chain_active and _raw_check in set(_chain_modal))
+                and _pole_leaves[id(p)][1] is None
+                and not _structural_for_pole(p, all_findings)):
+            _agg = _agg_gate_shape(
+                p, doc.get("workflow_job_graph"), list(checks or src),
+                steps.get(_agg_key) if _agg_key is not None else None)
         if chain_active and _raw_check in set(_chain_modal):
             # ENG-1 PR-N2: a chain MEMBER must never carry the concurrent
             # framing — `needs:` serializes it; its time ADDS to the headline
@@ -8263,6 +8412,34 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                     "the chain wait in the headline rather than overlapping it; "
                     "time cut here helps until the next-longest competing path "
                     "gates instead.")))
+        elif _agg:
+            # AGGREGATION GATE (issue #1). Crowning it is correct — it really is the check
+            # most PRs gate on — but its wait is NOT its own: it is the `needs:` upstream it
+            # aggregates. Say that, name the slowest measured upstream member, and (below)
+            # render NO drill and NO "optimize this step" prompt for the sink itself.
+            _ag_slow = _clean_label(_check_name(_agg["slowest"]))
+            _ag_dur = _clock(_num(_agg["slowest"].get("p50_s")))
+            _ag_tail = ""
+            if _agg["unmeasured"]:
+                _ag_tail = (f" ({_count_noun(len(_agg['unmeasured']), 'upstream job')} had no "
+                            "measured check timing in this sample, so the slowest upstream "
+                            "member could be a heavier one.)")
+            elif not _agg["steps_known"]:
+                _ag_tail = (" (No per-step data was captured for this check; the shape is read "
+                            "from its `needs:` structure and its measured P50.)")
+            role = cs.add(claims.Claim(
+                kind="pole_role_line", subject=check,
+                fields={"dur": dur, "job_id": str(_agg["job_id"]),
+                        "upstream_n": len(_agg["upstream"]),
+                        "upstream_slowest": _ag_slow, "upstream_dur": _ag_dur},
+                rendered=_strip_emdashes(
+                    f"**Aggregation gate — it exists to be the single required check.** Its "
+                    f"job (`{_agg['job_id']}`) runs no work of its own ({dur}); it `needs:` "
+                    f"{_count_noun(len(_agg['upstream']), 'upstream job')} so one check can "
+                    f"stand for all of them. So its {dur} is not the wait — the wait IS that "
+                    f"`needs:` upstream, whose slowest measured member is `{_ag_slow}` "
+                    f"(~{_ag_dur}). That member, not this check, is the lever."
+                    + _ag_tail)))
         elif p is blocker:
             if not npop:
                 # Claims layer (pole_role_line): the blocker pole's role label.
@@ -8457,6 +8634,34 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
             out += [_LEAF_CROWN_MARKER.format(fk=str(leaf.get("fix_key", ""))), ""]
         if bi_caveat:
             out += [bi_caveat, ""]
+        if _agg:
+            # AGGREGATION GATE (issue #1): the section ENDS at the honest pointer. No
+            # per-step drill and no "capture timing, then optimize this step" agent prompt
+            # for the sink itself — both are inert over a job that runs no work, and the
+            # prompt actively misdirects (there is nothing to speed, and moving it off the
+            # PR path defeats the single-required-check job it does). The `_floor_note`
+            # ("what a change here can buy") is skipped for the same reason: a change HERE
+            # buys nothing, which is exactly what the role line just said. The reader is
+            # pointed at the pole that drills the slowest upstream member, or told which
+            # check it is when it isn't among the rendered poles (never a dead link).
+            _ag_wf = str(_agg["slowest"].get("workflow_file") or p.get("workflow_file") or "")
+            _ag_pole_i = next(
+                (j for j, pw in enumerate(pole_wfs, 1)
+                 if _clean_label(str(pw.get("check", ""))) == _ag_slow
+                 and str(pw.get("workflow_file") or "") == _ag_wf), None)
+            if _ag_pole_i is not None:
+                out += [f"**➡️ Where the wait actually is:** [Long pole {_ag_pole_i}]"
+                        f"(#pole-{_ag_pole_i}) drills `{_ag_slow}` ({_ag_dur}) - the slowest "
+                        "measured member of this gate's `needs:` upstream. Attack it there; "
+                        "this check follows it down for free.", ""]
+            else:
+                out += [f"**➡️ Where the wait actually is:** `{_ag_slow}` ({_ag_dur}), the "
+                        "slowest measured member of this gate's `needs:` upstream. It is not "
+                        "among the long poles drilled in this report (it ranks below them, or "
+                        "its own job timing wasn't sampled), so there is no step-level drill "
+                        "for it here - a re-run that samples it will drill it. Attack it "
+                        "there; this check follows it down for free.", ""]
+            continue
         out += _floor_note(p, floor_pool)
         # A data-driven match is on-path only if ANY joined finding is NOT `spine_rare`; a match
         # made up solely of presence-demoted (opt-in/rare) findings is still coverage, but the

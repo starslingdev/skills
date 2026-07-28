@@ -267,11 +267,11 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
      + a path to fix each pole* — and **surface any shortfall yourself**
      rather than shipping a technically-rendered report and waiting for the
      user to notice. Flag (don't silently ship) any pole that is a bare
-     timeline, is missing its drill / root cause / hand-off prompt, or omits
-     the next-biggest lever as a second finding. The dead-end ban (4a) and the
-     5a gate are specific instances; generalize the instinct so an
-     *unanticipated* goal-failure is caught by your own judgment, not only by
-     the operator.
+     timeline, is missing its drill / root cause / hand-off prompt (an
+     aggregation gate has none by design — it points at its slowest `needs:`
+     upstream member), or omits the next-biggest lever as a second finding.
+     The dead-end ban (4a) and 5a are instances; generalize the instinct so an
+     *unanticipated* goal-failure is caught by you, not only by the operator.
    - **5/5a/5b are an INTERNAL gate — run them, never narrate them.** The
      verification run, the symmetric-pole check, and the self-audit are quality
      controls for *you*, not output. Never tell the user "all checks passed",

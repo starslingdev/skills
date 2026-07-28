@@ -1561,7 +1561,10 @@ catalog pattern lacking a registered detector in
   a `measured_signal`; Tier-2 rows re-derive from the stamped measured basis,
   neutrality certificates, de-overlapped totals, and billing rates; and the
   report drills **one fully-formed long pole per independent gating check** (>=2
-  when >=2 gate), each ending in a hand-off prompt.
+  when >=2 gate), each ending in a hand-off prompt — the sole exception being an
+  **aggregation gate** (§12.6b), which carries no drill and no prompt by design
+  and is held to the mirror-image invariant instead (it must name its slowest
+  upstream member and prescribe nothing).
 
 ## 8. Reproducibility & determinism
 
@@ -2708,6 +2711,53 @@ The honesty guard is a re-derivation invariant, not a renderer patch: each
 **fails any static-only report that has a measured merge-path long pole**. A cron/release-only
 repo (timed but on no merge-path event) stays legitimately static-only; an older findings
 JSON without the `events` stamp declines to fire rather than false-flag.
+
+### 12.6b The aggregation gate — the degenerate chain SINK (issue #1)
+
+Many repos make a single trivial job the **one required status check**: it runs no
+work, `needs:` everything else in its workflow, and exists only so branch
+protection has one name to require (vercel/next.js `thank you, build` — job
+`buildPassed`, `needs: [deploy-target, build, build-wasm, build-native]`, body
+`run: exit 1` behind an `if:`, P50 **3s**). Because it gates every PR it is
+correctly crowned by pole frequency — but the generic pole render then handed the
+reader a drill placeholder and a "capture timing, then optimize this step" agent
+prompt over a 3-second no-op: correct data, **inert advice**, at the very first
+thing a reader sees.
+
+`blocking_path._agg_gate_shape` detects the shape at render time from artifact
+data already stamped (`workflow_job_graph` + the check spine — no producer
+change): **(a)** headline P50 <= `_AGG_GATE_TRIVIAL_S` (30s — below any real
+hosted-runner job's checkout+setup floor); **(b)** the pole's job is a *terminal*
+node whose transitive `needs:` closure (>= 2 jobs) covers **every non-terminal job
+in its workflow** — uncovered siblings must themselves be terminal, which is
+exactly the shape of an `if:`-conditional peer sink (`publishRelease`), so
+"effectively all the other jobs" is expressed structurally rather than by reading
+`if:` (which the scanned graph does not carry); **(c)** no captured/sampled step
+above the trivial threshold (step data is a *disqualifier* only — a 3s gate is
+never drilled, and the role line discloses when the shape rests on structure
+alone); **(d)** at least one upstream member resolves to a **measured** check, so
+the report can name where the wait actually is. Duration alone never matches: a
+real 3s `lint` job with no `needs:` coverage keeps the ordinary rendering.
+
+On a match the pole renders a `pole_role_line` claim saying what it is — an
+aggregation gate whose wait IS its `needs:` upstream — names the slowest measured
+upstream member with its P50, and closes with a pointer to the pole that drills
+that member (an anchor when it renders, otherwise a named check plus what a re-run
+would do — never a dead link). It renders **no drill, no floor note, and no agent
+prompt**. Crowning/ranking is untouched (the frequency crown is correct data), and
+a sink that is itself a **modal-chain member** keeps the chain-stage framing (the
+chain model already frames it as serialized; no double-framing). A pole carrying a
+matched log-detector leaf or a routed structural lever also keeps today's render —
+there the drill is not inert, and suppressing it would silently drop a measured
+lever.
+
+Two coupled invariants hold the seam:
+`verify_report.check_speed_poles_complete` **exempts** such a pole from the
+"every pole ends in a prompt" rule, and
+`check_aggregation_gate_poles_never_prescribe` **fails** any aggregation-framed
+pole that carries a prompt, omits the upstream pointer, or whose shape does not
+re-derive from `findings.json` (`_agg_gate_pole_keys`, mirroring the renderer) —
+so the exemption can never launder a genuinely stunted pole.
 
 ### 12.7 The coverage-gap fallback — never dead-end on an unrecognised stack
 

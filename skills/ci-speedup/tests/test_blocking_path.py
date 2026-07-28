@@ -6725,3 +6725,184 @@ def test_single_backtick_name_stays_symmetric_between_heading_and_verifier():
     assert bp._clean_label("run `unit` tests") == "run 'unit' tests"
     assert bp._clean_label("x ``y`` z") == "x ''y'' z"
     assert bp._clean_label("guard shard 2/4") == "guard shard 2/4"
+
+
+# ── Aggregation-gate poles (issue #1) ─────────────────────────────────────────────────
+# A success-aggregation gate is the trivial job that exists ONLY to `needs:` a set of real
+# jobs so ONE check can be the single required status check (vercel/next.js `thank you,
+# build`: job `buildPassed`, `needs: [deploy-target, build, build-wasm, build-native]`, body
+# `run: exit 1`, P50 3s, required). Crowning it by frequency is CORRECT data; drilling it and
+# prompting "capture timing, then optimize this step" is inert advice over a 3-second no-op.
+# The renderer must instead tell the honest upstream story and point at the slowest member.
+
+_AGG_DEPLOY = ".github/workflows/deploy.yml"
+_AGG_CI = ".github/workflows/ci.yml"
+
+
+def _agg_gate_doc() -> dict:
+    """Two workflows. `deploy.yml` carries the SINK (`thank you, build`, 3s, terminal, its
+    transitive `needs:` covering every non-terminal job) plus a conditional peer sink
+    (`Potentially publish release`, terminal and uncovered — the `publishRelease` shape).
+    `ci.yml` carries the near-miss: a real 3s `lint` job that `needs:` nothing."""
+    return {
+        "repo": "acme/site", "repo_visibility": "public",
+        "scanned_at": "2026-07-28T00:00:00Z", "commit_sha": "09e8243",
+        "skill_commit_sha": "dd51d85", "findings": [],
+        "data_sources": {"runs_sampled": 20, "jobs_sampled": 60, "workflows_analyzed": 2},
+        "workflow_job_graph": {
+            _AGG_DEPLOY: {
+                "target": {"name": "deploy-target", "needs": []},
+                "build": {"name": "build", "needs": ["target"]},
+                "matrixgen": {"name": "generate-native-matrix", "needs": ["target"]},
+                "native": {"name": "stable - ${{ matrix.target }}", "matrix": True,
+                           "needs": ["target", "matrixgen"]},
+                "publish": {"name": "Potentially publish release",
+                            "needs": ["target", "build", "native"]},
+                "gate": {"name": "thank you, build", "needs": ["target", "build", "native"]},
+            },
+            _AGG_CI: {
+                "lint": {"name": "lint", "needs": []},
+                "unit": {"name": "unit", "needs": []},
+            },
+        },
+        "pr_critical_path": {
+            "sampled_pr_count": 20, "sample_target": 20, "sample_complete": True,
+            "check_present_n_pr": 20, "critical_path_check": "unit",
+            "poles": [
+                {"check": "unit", "p50_s": 600.0, "workflow_file": _AGG_CI, "job": "unit",
+                 "dominant_step": "Run tests", "dominant_p50_s": 480.0,
+                 "steps": [{"step": "Checkout", "category": "setup", "p50_s": 20.0},
+                           {"step": "Run tests", "category": "test", "p50_s": 480.0}]},
+                {"check": "thank you, build", "p50_s": 3.0, "workflow_file": _AGG_DEPLOY,
+                 "job": "gate", "timing_source": "pr_check_runs", "steps": []},
+                {"check": "lint", "p50_s": 3.0, "workflow_file": _AGG_CI, "job": "lint",
+                 "dominant_step": "Run eslint", "dominant_p50_s": 2.0,
+                 "steps": [{"step": "Run eslint", "category": "lint", "p50_s": 2.0}]},
+            ],
+            "checks": [
+                {"name": "unit", "p50_s": 600.0, "present_on": 20, "workflow_file": _AGG_CI},
+                {"name": "stable - x86_64-linux", "p50_s": 355.0, "present_on": 20,
+                 "workflow_file": _AGG_DEPLOY},
+                {"name": "build", "p50_s": 240.0, "present_on": 20,
+                 "workflow_file": _AGG_DEPLOY},
+                {"name": "deploy-target", "p50_s": 19.0, "present_on": 20,
+                 "workflow_file": _AGG_DEPLOY},
+                {"name": "thank you, build", "p50_s": 3.0, "present_on": 20,
+                 "workflow_file": _AGG_DEPLOY},
+                {"name": "lint", "p50_s": 3.0, "present_on": 20, "workflow_file": _AGG_CI},
+            ],
+            "populations": [],
+        },
+    }
+
+
+def _pole_section(md: str, check: str) -> str:
+    """The `## … Long pole N: … ▸ <check>` section body for `check`."""
+    i = md.index(f"▸ `{check}`")
+    i = md.rindex("\n## ", 0, i)
+    j = md.find("\n## ", i + 4)
+    return md[i:j if j != -1 else len(md)]
+
+
+def test_aggregation_gate_pole_tells_the_upstream_story_not_a_prompt():
+    # The whole fix (issue #1): the `needs:`-everything 3s sink renders the honest role line,
+    # names its slowest MEASURED upstream member, points the reader there — and carries NO
+    # drill and NO "optimize this step" agent prompt.
+    md = bp.render(_agg_gate_doc(), {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    sec = _pole_section(md, "thank you, build")
+    assert "**Aggregation gate" in sec
+    assert "it exists to be the single required check" in sec
+    assert "runs no work of its own" in sec
+    # The slowest upstream is the matrix leg (355s), resolved through the `${{ }}` name
+    # template — not the sink's own 3s and not the unrelated `unit` pole in the other workflow.
+    assert "`stable - x86_64-linux` (~5m 55s)" in sec
+    assert "**➡️ Where the wait actually is:**" in sec
+    # The two inert artifacts are gone.
+    assert "🤖 Prompt for your coding agent" not in sec
+    assert "Level 2" not in sec
+    assert "before optimizing" not in sec
+    # The OTHER poles are untouched — each still drills and hands off.
+    assert "🤖 Prompt for your coding agent" in _pole_section(md, "unit")
+
+
+def test_aggregation_gate_pole_role_line_is_a_registered_claim():
+    # Claims parity: the role line is a `pole_role_line` Claim whose rendered sentence appears
+    # verbatim in the report, exactly like its neighbouring role lines.
+    md = bp.render(_agg_gate_doc(), {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    cs = bp._LAST_CLAIMS
+    agg = [c for c in cs.claims
+           if c.kind == "pole_role_line" and "Aggregation gate" in c.rendered]
+    assert len(agg) == 1
+    assert agg[0].subject == "thank you, build"
+    assert agg[0].fields["upstream_slowest"] == "stable - x86_64-linux"
+    for c in cs.claims:
+        assert c.rendered in md, f"claim not byte-identical in the report: {c.rendered!r}"
+
+
+def test_aggregation_gate_near_miss_renders_byte_identically(monkeypatch):
+    # A real 3s `lint` job with NO `needs:` coverage must keep today's rendering exactly —
+    # duration alone never triggers the framing. Pinned byte-for-byte against the renderer
+    # with detection disabled (the pre-fix behaviour).
+    doc = _agg_gate_doc()
+    after = _pole_section(bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {}), "lint")
+    monkeypatch.setattr(bp, "_agg_gate_shape", lambda *a, **k: None)
+    before = _pole_section(bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {}), "lint")
+    assert after == before
+    assert "**Aggregation gate" not in after
+    assert "🤖 Prompt for your coding agent" in after
+
+
+def test_aggregation_gate_yields_to_the_chain_member_framing(monkeypatch):
+    # A sink that IS a modal-chain member keeps the chain-stage rendering (`thank you, next`
+    # as stage 3/3): the chain model already frames it as serialized, and double-framing it
+    # would contradict that. Pinned byte-for-byte against detection-disabled rendering.
+    doc = _agg_gate_doc()
+    doc["pr_critical_path"]["chain_summary"] = {
+        "modal_chain": ["build", "stable - x86_64-linux", "thank you, build"],
+        "chain_p50_s": 598.0}
+    after = _pole_section(bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {}),
+                          "thank you, build")
+    monkeypatch.setattr(bp, "_agg_gate_shape", lambda *a, **k: None)
+    before = _pole_section(bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {}),
+                           "thank you, build")
+    assert after == before
+    assert "Stage 3/3 of the" in after and "gate chain" in after
+    assert "**Aggregation gate" not in after
+
+
+def test_agg_gate_shape_structural_conditions():
+    # The shape helper itself: each condition is load-bearing.
+    doc = _agg_gate_doc()
+    graph = doc["workflow_job_graph"]
+    checks = doc["pr_critical_path"]["checks"]
+    poles = {p["check"]: p for p in doc["pr_critical_path"]["poles"]}
+    hit = bp._agg_gate_shape(poles["thank you, build"], graph, checks)
+    assert hit and hit["job_id"] == "gate"
+    # The closure walks TRANSITIVELY: `matrixgen` is reached via `native`, so the
+    # conditional peer sink `publish` is the only uncovered job — and it is terminal.
+    assert hit["upstream"] == ["build", "matrixgen", "native", "target"]
+    assert bp._clean_label(bp._check_name(hit["slowest"])) == "stable - x86_64-linux"
+    # (a) duration: a job doing real work never matches on structure alone.
+    heavy = dict(poles["thank you, build"], p50_s=180.0)
+    assert bp._agg_gate_shape(heavy, graph, checks) is None
+    # (b) coverage: a non-terminal job outside the closure → not an aggregation sink.
+    gapped = json.loads(json.dumps(graph))
+    gapped[_AGG_DEPLOY]["extra"] = {"name": "extra", "needs": ["target"]}
+    gapped[_AGG_DEPLOY]["afterextra"] = {"name": "afterextra", "needs": ["extra"]}
+    assert bp._agg_gate_shape(poles["thank you, build"], gapped, checks) is None
+    # (b) a single-parent stage (a chain member's shape) needs >= 2 upstream jobs.
+    thin = json.loads(json.dumps(graph))
+    thin[_AGG_DEPLOY]["gate"]["needs"] = ["build"]
+    assert bp._agg_gate_shape(poles["thank you, build"], thin, checks) is None
+    # (b) the near-miss lint job: trivial, but `needs:` nothing.
+    assert bp._agg_gate_shape(poles["lint"], graph, checks) is None
+    # (c) step data DISQUALIFIES when it shows real work.
+    busy = dict(poles["thank you, build"],
+                steps=[{"step": "Run the suite", "p50_s": 400.0}])
+    assert bp._agg_gate_shape(busy, graph, checks) is None
+    # (d) no measured upstream check → nothing honest to point at.
+    assert bp._agg_gate_shape(poles["thank you, build"], graph,
+                              [c for c in checks
+                               if c["workflow_file"] != _AGG_DEPLOY]) is None
+    # No scanned graph for the workflow → the shape is unknowable, never guessed.
+    assert bp._agg_gate_shape(poles["thank you, build"], {}, checks) is None

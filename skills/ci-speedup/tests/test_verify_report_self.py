@@ -114,7 +114,15 @@ def test_phase0_literals_stay_coupled_to_the_renderer():
                     # permanent no-op (it fires only on a rare gap-fill pole), so pin both fragments —
                     # the em-dash-free "verbatim from the captured job log" is the contiguous one.
                     "🤖 LLM root-cause analysis",
-                    "verbatim from the captured job log"):
+                    "verbatim from the captured job log",
+                    # The aggregation-gate role line + upstream pointer (issue #1).
+                    # `check_aggregation_gate_poles_never_prescribe` finds such a pole by the role
+                    # marker and asserts the pointer is present; `check_speed_poles_complete`
+                    # exempts it from the prompt requirement on the same marker. A renderer reword
+                    # would silently drop BOTH — the exemption (false FAIL on a correct report)
+                    # and the invariant (a permanent no-op).
+                    "**Aggregation gate",
+                    "**➡️ Where the wait actually is:**"):
         assert literal in renderer, f"renderer no longer emits {literal!r} — update verify_report"
         assert literal in verifier, f"verify_report lost the {literal!r} coupling literal"
 
@@ -1159,6 +1167,122 @@ def test_poles_complete_fails_on_external_check_misbound_to_a_file(tmp_path: Pat
             {"check": "Redirect rules - tokio-rs", "workflow_file": _ci, "job": "wasm32-wasip1",
              "timing_source": "pr_check_runs", "p50_s": 22.0}]}}
     assert _tag_for(_good(), _POLES, tmp_path, findings=findings) == "FAIL"
+
+
+# ── Aggregation-gate poles (issue #1) ────────────────────────────────────────────────────
+# A `needs:`-everything success sink (next.js `thank you, build`: 3s, `run: exit 1`) renders
+# the honest upstream story INSTEAD of a drill + "optimize this step" prompt. Two coupled
+# guards: `check_speed_poles_complete` must EXEMPT such a pole from its prompt requirement,
+# and `check_aggregation_gate_poles_never_prescribe` must FAIL any aggregation-framed pole
+# that carries a prompt, lacks the upstream pointer, or isn't re-derivable from the findings.
+_AGG_GATE = "aggregation-gate poles"
+_AGG_WF = ".github/workflows/deploy.yml"
+_AGG_FINDINGS = {
+    "workflow_job_graph": {_AGG_WF: {
+        "target": {"name": "target", "needs": []},
+        "build": {"name": "build", "needs": ["target"]},
+        # A conditional PEER sink (uncovered by the gate's needs, but itself terminal) —
+        # the `publishRelease` shape the "effectively all" rule must tolerate.
+        "publish": {"name": "Potentially publish release", "needs": ["target", "build"]},
+        "gate": {"name": "thank you, build", "needs": ["target", "build"]}}},
+    "pr_critical_path": {"poles": [
+        {"check": "thank you, build", "workflow_file": _AGG_WF, "job": "gate",
+         "p50_s": 3.0, "timing_source": "pr_check_runs"}],
+        "checks": [{"name": "build", "workflow_file": _AGG_WF, "p50_s": 355.0},
+                   {"name": "target", "workflow_file": _AGG_WF, "p50_s": 19.0},
+                   {"name": "thank you, build", "workflow_file": _AGG_WF, "p50_s": 3.0}]}}
+
+
+def _agg_report(*, prompt: bool = False, pointer: bool = True, framed: bool = True) -> str:
+    """The `_good()` report with its pole rewritten as an aggregation-gate pole."""
+    role = ("**Aggregation gate - it exists to be the single required check.** Its job "
+            "(`gate`) runs no work of its own (3s); it `needs:` 2 upstream jobs so one check "
+            "can stand for all of them. So its 3s is not the wait - the wait IS that `needs:` "
+            "upstream, whose slowest measured member is `build` (~5m 55s). That member, not "
+            "this check, is the lever."
+            if framed else "**The check most PRs gate on.**")
+    body = [f"## Long pole 1: `deploy.yml` ▸ thank you, build - 3s", "", role, ""]
+    if pointer:
+        body += ["**➡️ Where the wait actually is:** `build` (5m 55s), the slowest measured "
+                 "member of this gate's `needs:` upstream.", ""]
+    if prompt:
+        body += ["#### 🤖 Prompt for your coding agent", "", "```text",
+                 "ci-speedup measured the root cause below but does NOT prescribe the fix -",
+                 "capture timing, then optimize the dominant step.", "```", ""]
+    old = _good().split("## Long pole 1:", 1)[1].split("## 🗄️ Data sources", 1)[0]
+    return _good().replace("## Long pole 1:" + old, "\n".join(body) + "\n")
+
+
+def test_aggregation_gate_pole_ships_without_a_prompt(tmp_path: Path):
+    # GREEN both ways: the honest render passes the new invariant AND is exempted from the
+    # "every pole carries a prompt" rule (which FAILs it without the exemption — the
+    # pre-fix behaviour this test pins).
+    rep = _agg_report()
+    assert _tag_for(rep, _AGG_GATE, tmp_path, findings=_AGG_FINDINGS) == "PASS"
+    assert _tag_for(rep, _POLES, tmp_path, findings=_AGG_FINDINGS) == "PASS"
+    # The exemption is findings-gated, not framing-gated: with NO findings to re-derive the
+    # shape from, the promptless pole is still a bare pole and FAILs.
+    assert _tag_for(rep, _POLES, tmp_path) == "FAIL"
+
+
+def test_aggregation_gate_pole_with_an_optimize_prompt_fails(tmp_path: Path):
+    # RED: the exact defect from issue #1 — a `needs:`-everything 3s sink handed an
+    # "optimize this step" agent prompt.
+    assert _tag_for(_agg_report(prompt=True), _AGG_GATE, tmp_path,
+                    findings=_AGG_FINDINGS) == "FAIL"
+
+
+def test_aggregation_framing_without_the_pointer_fails(tmp_path: Path):
+    # RED: framing with no upstream pointer is a dead end — the reader is told the lever is
+    # elsewhere and never told where.
+    assert _tag_for(_agg_report(pointer=False), _AGG_GATE, tmp_path,
+                    findings=_AGG_FINDINGS) == "FAIL"
+
+
+def test_aggregation_framing_unsupported_by_the_job_graph_fails(tmp_path: Path):
+    # RED: the framing may never be applied to a pole that isn't structurally a sink. Here the
+    # gate `needs:` nothing, so the shape doesn't re-derive from the job graph.
+    bad = copy.deepcopy(_AGG_FINDINGS)
+    bad["workflow_job_graph"][_AGG_WF]["gate"]["needs"] = []
+    assert _tag_for(_agg_report(), _AGG_GATE, tmp_path, findings=bad) == "FAIL"
+
+
+def test_aggregation_check_skips_when_no_pole_is_framed(tmp_path: Path):
+    # A report with no aggregation-gate pole neither passes nor fails on this axis.
+    assert _tag_for(_agg_report(framed=True, prompt=False).replace(
+        "**Aggregation gate", "**The check most PRs gate on."), _AGG_GATE, tmp_path,
+        findings=_AGG_FINDINGS) == "SKIP"
+
+
+def test_agg_gate_pole_keys_rederives_the_shape(tmp_path: Path):
+    # Unit-level: the verifier's re-derivation mirrors `blocking_path._agg_gate_shape` —
+    # trivial P50 + terminal sink covering every non-terminal job + a measured upstream.
+    vr = _load_verify_report()
+
+    def _keys(doc: dict):
+        fp = tmp_path / "f.json"
+        fp.write_text(json.dumps(doc), encoding="utf-8")
+        return vr._agg_gate_pole_keys(fp)
+
+    assert _keys(_AGG_FINDINGS) == {("deploy.yml", vr._cmp_name("thank you, build"))}
+    # Not trivial (a 3-minute job does real work) → no match on duration alone.
+    heavy = copy.deepcopy(_AGG_FINDINGS)
+    heavy["pr_critical_path"]["poles"][0]["p50_s"] = 180.0
+    assert _keys(heavy) == set()
+    # A trivial job that `needs:` nothing (the 3s-lint near miss) → no match.
+    lint = copy.deepcopy(_AGG_FINDINGS)
+    lint["workflow_job_graph"][_AGG_WF]["gate"]["needs"] = []
+    assert _keys(lint) == set()
+    # Coverage gap: a non-terminal job outside the closure → not an aggregation sink.
+    gap = copy.deepcopy(_AGG_FINDINGS)
+    gap["workflow_job_graph"][_AGG_WF]["extra"] = {"name": "extra", "needs": ["target"]}
+    gap["workflow_job_graph"][_AGG_WF]["after"] = {"name": "after", "needs": ["extra"]}
+    assert _keys(gap) == set()
+    # No measured upstream check → nothing honest to point at → no match.
+    unmeasured = copy.deepcopy(_AGG_FINDINGS)
+    unmeasured["pr_critical_path"]["checks"] = [
+        {"name": "thank you, build", "workflow_file": _AGG_WF, "p50_s": 3.0}]
+    assert _keys(unmeasured) == set()
 
 
 def test_vr_produces_check_mirrors_engine_degenerate_rule():

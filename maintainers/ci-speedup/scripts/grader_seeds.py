@@ -56,7 +56,7 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # The committed, reviewable TRIAGE ALLOWLIST. Keyed by the live `verify_report.Check.name` string
 # (what `run_checks` actually yields) so the classification can be applied at runtime and the
 # "every check is classified" invariant is directly testable; the originating `check_*` function
-# name is in the trailing comment for cross-reference with spec §2-A. 61 AUTO_SEED / 1 EXCLUDE /
+# name is in the trailing comment for cross-reference with spec §2-A. 62 AUTO_SEED / 1 EXCLUDE /
 # 2 TRIAGE — a new `verify_report` check makes `test_every_check_is_classified` go red until it's
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
@@ -74,6 +74,7 @@ TRIAGE_ALLOWLIST = {
     "every rendered finding pattern exists in the findings JSON": AUTO_SEED,                        # check_rendered_patterns_exist
     "every data-driven finding carries a measured signal (no unsupported claims)": AUTO_SEED,       # check_data_driven_have_signal
     "report drills every gating pole, each with a hand-off prompt": AUTO_SEED,                      # check_speed_poles_complete
+    "aggregation-gate poles tell the upstream story, never an optimize-this prompt": AUTO_SEED,    # check_aggregation_gate_poles_never_prescribe
     "each rendered pole's drill belongs to its own job (no cross-job log leak)": AUTO_SEED,         # check_pole_drill_belongs_to_its_job
     "every 🤖 gap-fill evidence line is verbatim from the captured job log (issue #106)": AUTO_SEED,  # check_gap_fill_evidence_grounded
     "no spine-dropped check is also framed on the merge-gating critical path": AUTO_SEED,           # check_dropped_check_not_framed_on_path
@@ -168,6 +169,7 @@ CHECK_CLASS = {
     "every rendered finding pattern exists in the findings JSON": "fabricated-or-unsupported-finding",  # rendered claim not backed by findings
     "every data-driven finding carries a measured signal (no unsupported claims)": "estimated-not-measured",  # exact match
     "report drills every gating pole, each with a hand-off prompt": "missing-second-pole-or-finding",  # a required pole/finding is missing
+    "aggregation-gate poles tell the upstream story, never an optimize-this prompt": "prescribed-a-fix",  # an "optimize this step" prompt over a `needs:`-only success sink that runs no work
     "each rendered pole's drill belongs to its own job (no cross-job log leak)": "fabricated-or-unsupported-finding",  # a drill misattributed to the wrong job's evidence
     "every 🤖 gap-fill evidence line is verbatim from the captured job log (issue #106)": "fabricated-or-unsupported-finding",  # a quoted evidence line not in the captured log = a fabricated/altered quote
     "no spine-dropped check is also framed on the merge-gating critical path": "mis-ranked-lever",  # spine/critical-path framing error

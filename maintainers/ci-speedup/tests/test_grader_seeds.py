@@ -38,7 +38,7 @@ def test_every_check_is_classified():
 
 def test_classification_counts_match_spec():
     counts = Counter(gs.TRIAGE_ALLOWLIST.values())
-    assert counts[gs.AUTO_SEED] == 61   # +1 (pre-flip audit: static-only banner matches CI shape — no dormant-repo hedge at a live no-PR-gating repo, no "no run timing" beside priced timed runs);
+    assert counts[gs.AUTO_SEED] == 62   # +1 (pre-flip audit: static-only banner matches CI shape — no dormant-repo hedge at a live no-PR-gating repo, no "no run timing" beside priced timed runs);
     # +2 (issue #114: crowned cluster lever is on the merge-gating spine — no off-spine crown; issue #115: headline leads with the observed wall when the chain sum diverges from the makespan);
     # +1 (issue #106: every 🤖 gap-fill evidence line is verbatim from the captured job log — the injection-residual grounding backstop);
     # +1 (fence-escaping: code fences are balanced — no stray ``` breaks out of a fence / desyncs the verifier's fence split);
@@ -64,6 +64,7 @@ def test_classification_counts_match_spec():
     # +1 (payload-binned-as-build class — the OPT72 misroute guard, nrwl/nx).
     # +1 (MEASURED CAUSE never asserts unrendered timeline steps — the nrwl/nx playwright-parallel fix).
     # +1 (#12: no fileless/managed status check crowns the headline — disclosed as PR-lifetime latency).
+    # +1 (#1: aggregation-gate poles tell the upstream story, never an optimize-this prompt).
     assert counts[gs.EXCLUDE] == 1
     assert counts[gs.TRIAGE] == 2
 

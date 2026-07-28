@@ -1520,6 +1520,135 @@ def _external_check_misbound_offenders(findings_path: Path | None) -> list[str] 
 # `test_phase0_literals_stay_coupled_to_the_renderer` so a reword breaks both sides in lockstep.)
 _NO_PER_STEP_DRILL = "No per-step breakdown was captured"
 
+# ── Aggregation-gate poles (issue #1) ────────────────────────────────────────────────────
+# A success-aggregation gate is the trivial job that exists ONLY to `needs:` a set of real
+# jobs so one check can be the single required status check (next.js' `thank you, build`:
+# job `buildPassed`, `needs: [deploy-target, build, build-wasm, build-native]`, P50 3s).
+# `blocking_path._agg_gate_shape` detects that shape and renders the honest upstream story
+# INSTEAD of a drill + "optimize this step" prompt — so such a pole legitimately carries no
+# agent prompt, and `check_speed_poles_complete`'s prompt requirement must not false-FAIL it.
+# The exemption is NOT taken on the report's word: the shape is RE-DERIVED from findings.json
+# (`workflow_job_graph` + `pr_critical_path`), and the rendered section must also show the
+# renderer's aggregation framing — findings-derived structure AND honest rendering, both.
+# The paired invariant lives in `check_aggregation_gate_poles_never_prescribe`.
+# (Literals pinned to the renderer by `test_phase0_literals_stay_coupled_to_the_renderer`.)
+_AGG_GATE_ROLE_MARKER = "**Aggregation gate"
+_AGG_GATE_POINTER_MARKER = "**➡️ Where the wait actually is:**"
+_VR_AGG_GATE_TRIVIAL_S = 30.0
+
+
+def _agg_gate_pole_keys(findings_path: Path | None) -> set[tuple[str, str]]:
+    """`{(wf_base, _cmp_name(check))}` for every `pr_critical_path.poles[*]` matching the
+    aggregation-gate shape, re-derived from findings.json alone — mirroring
+    `blocking_path._agg_gate_shape` (a) trivial P50, (b) terminal job whose transitive
+    `needs:` closure (>= 2 jobs) covers every non-terminal job in its workflow, (c) no
+    sampled step above the trivial threshold, (d) >= 1 upstream member with a measured check.
+
+    Deliberately re-derived (never read off the rendered report): the render is what this
+    guard is auditing. The renderer's additional carve-outs (a modal-chain member, or a pole
+    that matched a log detector / carries a routed structural lever) can only make the
+    renderer render MORE than this set — and those poles all carry a prompt, so they never
+    reach the exemption's `bare` list anyway."""
+    if not findings_path:
+        return set()
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return set()
+    graph = _as_dict(data.get("workflow_job_graph"))
+    cp = _as_dict(data.get("pr_critical_path"))
+    checks = [_as_dict(c) for c in _as_list(cp.get("checks"))]
+    out: set[tuple[str, str]] = set()
+    for pole in _as_list(cp.get("poles")):
+        pole = _as_dict(pole)
+        if (_num(pole.get("p50_s")) or 0.0) > _VR_AGG_GATE_TRIVIAL_S:
+            continue
+        wf = str(pole.get("workflow_file") or "")
+        jobs = _as_dict(graph.get(wf))
+        if not jobs:
+            continue
+        check = str(pole.get("check") or "")
+        jid = str(pole.get("job") or "")
+        if jid not in jobs:
+            cands = [k for k, meta in jobs.items()
+                     if _vr_job_produces_check(str(_as_dict(meta).get("name") or k),
+                                               bool(_as_dict(meta).get("matrix")), check)]
+            if len(cands) != 1:
+                continue
+            jid = cands[0]
+        needs_of = {k: [str(n) for n in _as_list(_as_dict(m).get("needs"))]
+                    for k, m in jobs.items()}
+        depended_on = {n for ns in needs_of.values() for n in ns}
+        if jid in depended_on:
+            continue
+        closure: set[str] = set()
+        frontier = list(needs_of.get(jid) or [])
+        while frontier:
+            n = frontier.pop()
+            if n in closure or n not in jobs:
+                continue
+            closure.add(n)
+            frontier.extend(needs_of.get(n) or [])
+        if len(closure) < 2 or not {k for k in jobs if k in depended_on} <= closure:
+            continue
+        if any((_num(_as_dict(s).get("p50_s")) or 0.0) > _VR_AGG_GATE_TRIVIAL_S
+               for s in _as_list(pole.get("steps"))):
+            continue
+        measured = any(
+            str(c.get("workflow_file") or "") == wf
+            and _vr_job_produces_check(
+                str(_as_dict(jobs.get(j)).get("name") or j),
+                bool(_as_dict(jobs.get(j)).get("matrix")),
+                str(c.get("name") or c.get("check") or ""))
+            for j in closure for c in checks)
+        if measured:
+            out.add((_wf_base(wf), _cmp_name(check)))
+    return out
+
+
+def check_aggregation_gate_poles_never_prescribe(
+        report: str, findings_path: Path | None) -> Check:
+    """An aggregation-gate pole must render the honest upstream story and NOTHING that tells
+    the reader to optimize a job that runs no work (issue #1).
+
+    Two directions, both re-derived from findings.json (`_agg_gate_pole_keys`):
+
+    - A pole rendered with the aggregation framing must genuinely BE one structurally, and
+      must carry the "where the wait actually is" pointer at the slowest upstream member —
+      framing without the structure, or without the pointer, is a dead end.
+    - A pole rendered with the aggregation framing must carry NO `🤖 Prompt for your coding
+      agent`: that prompt asks the reader to capture timing and speed up a 3-second no-op,
+      which is exactly the inert advice this shape exists to suppress. (The complementary
+      exemption in `check_speed_poles_complete` lets such a pole ship without a prompt; this
+      is the invariant that keeps the exemption from being a hole.)"""
+    name = "aggregation-gate poles tell the upstream story, never an optimize-this prompt"
+    framed = [(wf, check, body) for wf, check, body in _pole_header_sections(report)
+              if _AGG_GATE_ROLE_MARKER in body]
+    if not framed:
+        return Check(name, True, "no aggregation-gate pole rendered", skipped=True)
+    keys = _agg_gate_pole_keys(findings_path)
+    if findings_path and not keys:
+        return Check(name, False,
+                     f"{len(framed)} pole(s) render the aggregation-gate framing, but findings.json "
+                     "supports NO pole of that shape (re-derived from workflow_job_graph + "
+                     "pr_critical_path) - the framing must never be applied to a pole that isn't "
+                     "structurally a `needs:`-everything success sink")
+    bad: list[str] = []
+    for wf, check, body in framed:
+        where = f"`{wf}` ▸ {check}"
+        if findings_path and (_wf_base(wf), _cmp_name(check)) not in keys:
+            bad.append(f"{where}: framed as an aggregation gate but findings don't re-derive "
+                       "that shape for it")
+        if "Prompt for your coding agent" in body:
+            bad.append(f"{where}: carries an agent prompt over a job that runs no work - "
+                       "the sink must point at its slowest upstream member instead")
+        if _AGG_GATE_POINTER_MARKER not in body:
+            bad.append(f"{where}: no upstream pointer - the reader is left with a role line "
+                       "and nowhere to go")
+    if bad:
+        return Check(name, False, "; ".join(bad[:4]))
+    return Check(name, True, f"{len(framed)} aggregation-gate pole(s): each re-derives from the "
+                 "job graph, points at its slowest upstream member, and prescribes nothing")
+
 
 def check_speed_poles_complete(report: str, findings_path: Path | None) -> Check:
     """The report must drill one fully-formed long pole per independent gating check
@@ -1648,8 +1777,20 @@ def check_speed_poles_complete(report: str, findings_path: Path | None) -> Check
         return Check(name, False, f"long pole(s) {stunted} carry NO per-step breakdown - a "
                      "bare/stunted pole (a timeline with no drill, per SKILL.md 5a), not the "
                      "same drill as pole 1 (it hands off a prompt over an empty drill)")
+    # AGGREGATION-GATE exemption (issue #1). A pole whose job exists only to `needs:` the
+    # rest of its workflow (a 3s success sink) renders the honest upstream story INSTEAD of a
+    # drill + prompt — a prompt there would tell the reader to speed up a job that runs no
+    # work. Exempt ONLY when the shape re-derives from findings.json AND the section actually
+    # carries the renderer's aggregation framing; `check_aggregation_gate_poles_never_prescribe`
+    # holds the other half (such a pole must carry the upstream pointer and no prompt), so the
+    # exemption can't launder a genuinely stunted pole.
+    _agg_keys = _agg_gate_pole_keys(findings_path)
+    _agg_exempt = {i for i, (wf, check, body)
+                   in enumerate(_pole_header_sections(report), 1)
+                   if _AGG_GATE_ROLE_MARKER in body
+                   and (_wf_base(wf), _cmp_name(check)) in _agg_keys}
     bare = [i + 1 for i, s in enumerate(sections)
-            if "Prompt for your coding agent" not in s]
+            if "Prompt for your coding agent" not in s and (i + 1) not in _agg_exempt]
     if bare:
         return Check(name, False, f"long pole(s) {bare} lack an agent prompt - a bare/"
                      "stunted pole, not the same drill as pole 1")
@@ -7537,6 +7678,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_rendered_patterns_exist(report, findings_path),
         check_data_driven_have_signal(findings_path),
         check_speed_poles_complete(report, findings_path),
+        check_aggregation_gate_poles_never_prescribe(report, findings_path),
         check_pole_drill_belongs_to_its_job(report, findings_path),
         check_gap_fill_evidence_grounded(report, findings_path),
         check_dropped_check_not_framed_on_path(report, findings_path),
