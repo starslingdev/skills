@@ -3290,9 +3290,10 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
     finding's `affected_jobs` by workflow_file + job base name (matrix `(variant)` stripped, the same
     `_cmp_name`/base join the spine uses), resolving a finding's YAML job key against the spine's
     `name:`-overridden display name through the scanned `workflow_job_graph` (issue #2) so a
-    same-workflow match always beats the cross-workflow same-name fallback. A finding whose jobs ALL
-    resolve to spine rows must have
-    saving <= their summed billable compute (directional upper bound + tolerance; L6). SKIPs loud when
+    same-workflow match always beats the cross-workflow same-name fallback (which stays on the
+    LITERAL base — graph aliases never widen it). A finding whose jobs ALL resolve to spine rows
+    must have saving <= their summed billable compute (directional upper bound + tolerance; L6).
+    SKIPs loud when
     there is no render-ready cost spine, or when savings exist but NONE of them resolve any affected
     job to a spine row — the check bounded nothing, so it SKIPs loud rather than pass green (the
     fragile-join failure mode: if the spine's job-naming ever drifts from `affected_jobs`, every
@@ -3328,11 +3329,17 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
     # cross-workflow same-name fallback below — biome's OPT33 on `lint` bound the unrelated
     # `pull_request_markdown.yml` job literally named `lint` (553 min/mo) instead of its own job's
     # 13,381.6, and false-FAILed. An artifact with no graph keeps the bare-name behavior.
+    # Graph-resolved aliases are SAME-WORKFLOW ONLY — they never widen the cross-workflow fallback,
+    # which stays on the LITERAL base exactly as before this fix. An alias is evidence about THIS
+    # workflow's job ("`lint` here renders as `Lint project`"); carrying it into a foreign workflow
+    # would let a job with no spine row of its own bind an unrelated namesake's compute and INFLATE
+    # the upper bound, masking an oversized finding. Unresolvable stays an honest coverage gap.
     graph = _as_dict(data.get("workflow_job_graph"))
 
     def _identities(wf: str, job: str) -> list[str]:
         """Job bases `job` may appear under in `wf`'s spine rows, literal first (so an already-
-        matching name keeps today's binding), then the graph-resolved counterpart identity."""
+        matching name keeps today's binding), then the graph-resolved counterpart identity.
+        Only valid WITHIN `wf` — the cross-workflow fallback must not use these aliases."""
         b = _base(job)
         out = [b] if b else []
         for jid, info in _as_dict(graph.get(wf)).items():
@@ -3402,7 +3409,10 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
                 bound += compute[key]
             else:
                 # Job base present under ANY workflow file (a reusable-workflow caller loses the wf).
-                alt = [v for (w, jb), v in compute.items() if jb in cands]
+                # LITERAL base only — graph aliases are same-workflow evidence and must not widen
+                # this cross-workflow match (see `_identities`); a job with no row in its own
+                # workflow stays an honest coverage gap rather than binding a foreign namesake.
+                alt = [v for (w, jb), v in compute.items() if jb == b]
                 if alt:
                     matched += 1
                     bound += max(alt)

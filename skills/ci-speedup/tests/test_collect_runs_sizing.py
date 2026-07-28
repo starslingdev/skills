@@ -2358,6 +2358,26 @@ def test_name_override_join_leaves_an_absent_job_uncovered(tmp_path):
     assert res.skipped and "coverage gap" in res.detail
 
 
+def test_name_override_alias_never_widens_the_cross_workflow_fallback(tmp_path):
+    # A graph-resolved alias is evidence about ITS OWN workflow only. `deploy` in
+    # pull_request.yml renders as `Deploy app` but has NO spine row there; an
+    # UNRELATED `Deploy app` in another workflow bills 50,000. Carrying the alias
+    # into the cross-workflow fallback would bind that foreign compute and let a
+    # 40,000 credit read "within measured compute" — an inflated upper bound
+    # masking an oversized finding. The fallback stays on the LITERAL base, so
+    # this stays an honest coverage gap (nothing bounded → loud SKIP).
+    doc = _name_doc(40000.0, jobs=("deploy",))
+    doc["workflow_job_graph"] = {
+        _NAME_WF: {"deploy": {"name": "Deploy app", "needs": [], "matrix": False}},
+        _NAME_OTHER_WF: {"deploy_app": {"name": "Deploy app", "needs": [], "matrix": False}},
+    }
+    doc["runner_minute_spine"]["rows"].append(
+        {"workflow_file": _NAME_OTHER_WF, "job_name": "Deploy app",
+         "billable_equiv_min_per_month": 50000.0})
+    res = _name_result(doc, tmp_path)
+    assert res.skipped and "coverage gap" in res.detail, res.detail
+
+
 def test_name_override_join_without_a_graph_keeps_the_legacy_fallback(tmp_path):
     # An artifact predating `workflow_job_graph` keeps today's behavior: the bare
     # key resolves only through the cross-workflow same-name fallback (553.0), so

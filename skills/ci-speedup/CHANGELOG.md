@@ -50,7 +50,10 @@ unversioned and updates by reinstall from `main`.
   553.0 min/mo `lint`, and a correctly-sized 3,187.9 min/mo credit false-FAILed
   the gate. The join now resolves key ↔ `name:` in BOTH directions through the
   artifact's own `workflow_job_graph`, tries every same-workflow identity before
-  the cross-workflow fallback, and sums all matrix legs of the resolved job. An
+  the cross-workflow fallback, and sums all matrix legs of the resolved job.
+  Graph-resolved aliases are SAME-WORKFLOW ONLY — the cross-workflow fallback
+  still matches the literal base, so a job with no spine row in its own workflow
+  can never bind an unrelated namesake's compute and inflate the upper bound. An
   affected job genuinely absent from the spine still surfaces as a coverage gap,
   and an artifact with no job graph keeps the previous bare-name behavior.
 
