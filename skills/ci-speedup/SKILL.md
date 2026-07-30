@@ -278,7 +278,7 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
      verification run, the symmetric-pole check, and the self-audit are quality
      controls for *you*, not output. Never tell the user "all checks passed",
      name the phases, or call the report "complete / trustworthy" — that is
-     skill-mechanics noise. If a check fails, fix it and re-render silently;
+     skill-mechanics noise. If a check fails, fix it and re-render once, silently;
      only ever surface a limitation that affects *their result* (e.g. a data
      coverage gap), never the gate itself. This covers intermediate step
      narration too — don't announce "now the internal verification gate" or
@@ -334,7 +334,7 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
    always-last save option, **fold** extra per-pole options into "Fix all". There
    is **no standalone "nothing for now" option** — declining without saving is the
    agent's own decline / free-text (Esc in Claude Code). On a dead-end repo (Tier 1 found no addressable
-   lever) the Tier-2 option is listed first; the save option is still last. The
+   lever) the Tier-2 option is listed first; the save option, when offered, is still last. The
    report's section order never changes, only the menu's. **The full markdown
    report is opt-in (issue #18), fused into that last option.** When the user picks
    **`None, just save the report (.md)`**: make no changes, copy the
