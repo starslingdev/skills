@@ -134,23 +134,25 @@ a save pick, the default one keystroke ("Reply **y** to audit <owner/repo>, or n
 different repo/path"). Only the delivery mechanism varies; the contract is **agent-independent.**
 
 1. **Pick repo — default to the current repo, but confirm first.** But FIRST, the
-   gh gate: if `gh` isn't installed or `gh auth status` fails, STOP and tell the
-   user plainly — the audit measures their real CI runs over the GitHub API, so
-   without an authenticated `gh` the merge-wait numbers they came for are
-   unavailable and only a config-pattern scan remains. Give the path (install:
-   https://cli.github.com, `brew install gh` on macOS; then `gh auth login`);
-   continue static-only ONLY if they say so — that path skips every gh step
-   below (no `--repo`, no data pass: `scan.py --root` on the checkout is the
-   whole run). Then resolve the target: `git -C . rev-parse --show-toplevel` is
-   the clone root (`--root`), `gh repo view --json nameWithOwner -q
-   .nameWithOwner` the `owner/repo` (`--repo`).
-   **Always check with the user before scanning — the interaction contract
-   above (AskUserQuestion where available), never open-ended prose, >= 2
-   options**: one option confirms the detected `owner/repo` + path, one is "a
-   different repo or path" (its pick or Other supplies the target). If the user already named a target, re-confirm only if ambiguous. When the chosen target is an `owner/repo` that is NOT the local
-   checkout — or the working directory isn't a git repo — `gh repo view
-   <owner>/<repo>` confirms access and you clone it shallow to a temp path
-   for `--root`. Do not start the scan until the target is settled.
+   gh gate: if `gh` isn't installed or `gh auth status` fails (sandboxed agent
+   shells — Codex — can't reach keyring creds: retry with host access before
+   trusting a failure, and never report auth "expired" off a sandboxed probe;
+   live miss 2026-07-30), STOP and tell the user plainly — the audit measures
+   their real CI runs over the GitHub API, so without an authenticated `gh` the
+   merge-wait numbers they came for are unavailable and only a config-pattern
+   scan remains. Give the path (https://cli.github.com; then `gh auth login`); continue static-only ONLY
+   if they say so — that path skips every gh step below (`scan.py --root` on
+   the checkout is the whole run). Then resolve the target: `git -C . rev-parse --show-toplevel` is the
+   clone root (`--root`), `gh repo view --json nameWithOwner -q .nameWithOwner`
+   the `owner/repo` (`--repo`). **Always check with the user
+   before scanning — the interaction contract above (AskUserQuestion where
+   available), never open-ended prose, >= 2 options**: one option confirms the
+   detected `owner/repo` + path, one is "a different repo or path" (its pick or
+   Other supplies the target). If the user already named a target, re-confirm
+   only if ambiguous. When the chosen target is an `owner/repo` that is NOT the
+   local checkout — or the working directory isn't a git repo — `gh repo view
+   <owner>/<repo>` confirms access and you clone it shallow to a temp path for
+   `--root`. Do not start the scan until the target is settled.
 2. **Static scan** — `scripts/scan.py` emits the findings JSON from all
    deterministic detector layers (per-file, declarative, cross-workflow,
    repo-file, source-grep). Its output also lists
@@ -317,9 +319,8 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
    as you retype (`8m36s` stays `8m36s`). Do NOT explain how the report was built
    or narrate phases/verification. Then ask which pole to fix **via
    the interaction contract above (AskUserQuestion where available) — ONE
-   question, ONE page, never multiple questions** (Claude Code renders extra
-   questions as hidden **tabs** behind a separate Submit; a real run buried the
-   save option in an unseen second tab). Slots 1..3
+   question, ONE page, never multiple questions** (extra questions render as hidden
+   **tabs** — a real run buried the save option in an unseen second tab). Slots 1..3
    are fix options: **per-pole, top pole first** — each **label is the plain check
    name + its measured wait**, e.g. `Fix the test check (8m36s wait)`, **never**
    the word "pole" or an OPT-id in a user-facing label — then **"Fix all gating
@@ -327,7 +328,9 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
    only when the Runner-minute reductions section renders a source-backed R-row (or,
    with zero admitted rows, its Bottom line carries the "modeled bill opportunities
    remain in Also noticed" pointer). The **last option is ALWAYS**, verbatim:
-   **`None, just save the report (.md)`**. To keep the total ≤4 **including** that
+   **`None, just save the report (.md)`** — unless phase-5 verify is still red
+   after its retry: a report that failed its own checker is never offered;
+   drop the save option and say why in one line (live run, 2026-07-30). To keep the total ≤4 **including** that
    always-last save option, **fold** extra per-pole options into "Fix all". There
    is **no standalone "nothing for now" option** — declining without saving is the
    agent's own decline / free-text (Esc in Claude Code). On a dead-end repo (Tier 1 found no addressable
@@ -431,23 +434,19 @@ only) § Adding a pattern to the catalog.
 Reference docs (read on demand — each links one level deep from here; outside the repo, [starsling.dev/ci-speedup](https://starsling.dev/ci-speedup) walks through the same model):
 
 - [references/wall-clock-methodology.md](references/wall-clock-methodology.md) —
-  critical-path / long-pole / cluster-floor model: wall-clock is `max(parallel
-  jobs) + serial glue`; speeding a job below the cluster floor saves
-  runner-minutes but zero wall-clock.
+  the critical-path / long-pole / cluster-floor model (below-floor speedups
+  save runner-minutes, zero wall-clock).
 - [references/savings-methodology.md](references/savings-methodology.md) —
-  two-axis sizing: report ranks Δ wall-clock; measured+certified spine-backed
-  runner-minute findings promote to the wall-clock-neutral section; modeled
-  residuals stay in "Also noticed"; volume/cache/retry/serial guards.
-- [references/optimization-patterns.md](references/optimization-patterns.md) —
-  the pattern catalog (every OPT-id the static scan emits).
-- [references/spine-scoping.md](references/spine-scoping.md) — which checks form
-  the spine: required-scoping, PR-floor fallback, provenance, one-path demotion.
-- [references/structural-track.md](references/structural-track.md) — the OPT70–75
-  risk model + the git-history/intent interrogation baked into every structural prompt.
-- [references/gap-fill.md](references/gap-fill.md) — the coverage-gap fallback
-  (4a/4b/4c): fill, capture, promote a pole the catalog can't analyse.
-- [references/adversarial-review-rubric.md](references/adversarial-review-rubric.md)
-  — the hostile-review contract for trusting a report ("Quality review").
+  two-axis sizing: Δ wall-clock ranks; measured runner-minute findings
+  promote; modeled residuals stay in "Also noticed".
+- [references/optimization-patterns.md](references/optimization-patterns.md) — the pattern catalog (every OPT-id).
+- [references/spine-scoping.md](references/spine-scoping.md) — which checks
+  form the spine (required-scoping, PR-floor fallback, one-path demotion).
+- [references/structural-track.md](references/structural-track.md) — the
+  OPT70–75 risk model + intent interrogation for structural prompts.
+- [references/gap-fill.md](references/gap-fill.md) — the coverage-gap
+  fallback (4a/4b/4c) for poles the catalog can't analyse.
+- [references/adversarial-review-rubric.md](references/adversarial-review-rubric.md) — the hostile-review contract ("Quality review").
 - `maintainers/ci-speedup/MAINTAINERS.md` (maintainer-only, not in an installed
   skill — source checkout only) — the maintainer gap → catalog + transcript loops;
   [ARCHITECTURE.md](ARCHITECTURE.md) — how the whole pipeline fits together (the

@@ -9,6 +9,19 @@ unversioned and updates by reinstall from `main`.
 > this repository's history. The numbers are kept for the maintainers' audit
 > trail; they are not links you can follow here.
 
+### Changed (2026-07-30)
+
+- **gh gate is sandbox-aware**: in approval-gated agent environments (Codex),
+  the first restricted shell can't reach a keyring-held credential, so
+  `gh auth status` false-fails for a logged-in account. The gate now retries
+  with host access before concluding, and never reports auth "expired" off a
+  sandboxed probe (live Codex run 2026-07-30 told a logged-in user to
+  re-authenticate).
+- **Verify-fail withholds the save option**: if phase-5 verification stays red
+  after its one re-render retry, the close drops `None, just save the report
+  (.md)` and says why in one line — a report that failed its own checker is
+  never offered for saving (codifies behavior a live Codex run improvised).
+
 ## [Unreleased]
 
 ### Added
