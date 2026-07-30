@@ -2846,6 +2846,94 @@ def test_second_pole_role_names_the_real_slowest_concurrent_check_above_it():
     assert "Runs concurrently behind `changed-tests`" in md
 
 
+def _doc_sibling_floor() -> dict:
+    """A two-pole shape reproducing the sibling-family spine-drop bug (a live-run false FAIL):
+    a matrix-sharded family `web-tests (shard N)` where pole 1 is the p50-slowest leg (`shard 1`,
+    drilled at the top) but the leg that actually CAPS the second pole is `shard 4` — a DIFFERENT
+    leg whose bimodal SLOW mode (245s / 4m 05s) is the effective ceiling even though its blended
+    p50 (227s) sits BELOW shard 1's (234s). The second pole `typecheck` runs concurrently behind
+    the family. Generic shapes only — no real repo's check names or logs. `populations` make each
+    pole the per-PR slowest on 6 of 12 sampled PRs, with shard 4 co-occurring on the majority of
+    `typecheck`'s gating PRs so verify_report re-derives it as `typecheck`'s binding floor."""
+    def leg(n: int, p50: float, hi: float | None = None) -> dict:
+        c = {"name": f"web-tests (shard {n})", "p50_s": p50,
+             "workflow_file": ".github/workflows/ci.yml"}
+        if hi is not None:
+            c["bimodal"] = {"low_p50_s": 180.0, "high_p50_s": hi, "slow_frac": 0.55}
+        return c
+    checks = [leg(1, 234.0), leg(4, 227.0, hi=245.0), leg(2, 226.0), leg(3, 221.0),
+              {"name": "typecheck", "p50_s": 206.0, "workflow_file": ".github/workflows/ci.yml"}]
+    pops = []
+    for _ in range(6):   # shard 1 is the per-PR slowest here (pole 1's gating PRs)
+        pops.append([0.05, [["web-tests (shard 1)", 234.0], ["web-tests (shard 4)", 200.0],
+                            ["web-tests (shard 2)", 190.0], ["typecheck", 150.0]]])
+    for _ in range(6):   # typecheck is the per-PR slowest here; shard 4 co-occurs (its floor)
+        pops.append([0.05, [["typecheck", 206.0], ["web-tests (shard 4)", 200.0],
+                            ["web-tests (shard 1)", 190.0], ["web-tests (shard 2)", 180.0]]])
+    return {
+        "repo": "o/r", "scanned_at": "2026-06-08T00:00:00Z",
+        "data_sources": {"runs_sampled": 100, "jobs_sampled": 300, "workflows_analyzed": 2},
+        "pr_critical_path": {
+            "sampled_pr_count": 12, "sample_target": 12, "sample_complete": True,
+            "checks": checks, "populations": pops,
+            "poles": [
+                {"check": "web-tests (shard 1)", "p50_s": 234.0,
+                 "workflow_file": ".github/workflows/ci.yml", "job": "web-tests (shard 1)",
+                 "dominant_step": "run tests", "dominant_p50_s": 120.0,
+                 "steps": [{"step": "run tests", "category": "test", "p50_s": 120.0},
+                           {"step": "Build", "category": "build", "p50_s": 40.0}]},
+                {"check": "typecheck", "p50_s": 206.0,
+                 "workflow_file": ".github/workflows/ci.yml", "job": "typecheck",
+                 "dominant_step": "tsc", "dominant_p50_s": 150.0,
+                 "steps": [{"step": "tsc", "category": "test", "p50_s": 150.0},
+                           {"step": "Build", "category": "build", "p50_s": 40.0}]}]}}
+
+
+def test_below_gate_pole_role_names_effective_floor_not_p50_slowest_sibling():
+    # Regression (sibling-family spine drop): a below-gate pole's role line must NAME the check that
+    # actually caps it — the EFFECTIVE-slowest concurrent check (`_eff_floor_s`, bimodal-aware) — not
+    # the bare-p50-slowest sibling leg. `shard 1` has the highest blended p50 (234s) but `shard 4`'s
+    # slow mode (245s / 4m 05s) is the true binding floor; selecting by p50 named `shard 1`, leaving
+    # the real floor (`shard 4`) disclosed nowhere and tripping verify_report's spine-drop check.
+    md = bp.render(_doc_sibling_floor(), {}, {}, {}, "2026-06-08")
+    assert "Runs concurrently behind `web-tests (shard 4)` (4m 05s)" in md   # the effective floor
+    assert "Runs concurrently behind `web-tests (shard 1)`" not in md        # NOT the p50-slowest leg
+
+
+def _spine_drop_line(report: str, findings: dict, tmp_path: Path) -> str:
+    """Run verify_report.py's CLI with --findings and return the spine-drop (#6) check line."""
+    import subprocess
+    verify = Path(__file__).resolve().parent / "verify_report.py"
+    rp = tmp_path / "report-2026-05-29.md"
+    rp.write_text(report, encoding="utf-8")
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(findings), encoding="utf-8")
+    out = subprocess.run([sys.executable, str(verify), "--report", str(rp), "--findings", str(fp)],
+                         capture_output=True, text=True).stdout
+    for ln in out.splitlines():
+        if "binding floor is disclosed on the spine" in ln:
+            return ln
+    raise AssertionError(f"no spine-drop check line in verify_report output:\n{out}")
+
+
+def test_sibling_floor_disclosure_passes_verify_report_end_to_end(tmp_path: Path):
+    # End-to-end coupling: the rendered sibling-family report (fixed renderer names `shard 4`) must
+    # PASS verify_report's spine-drop check, and a report that DROPS that disclosure must still FAIL
+    # — so a renderer wording drift can't silently slip past the gate, and the gate can't be softened
+    # into always-passing. Ties the SAME rendered bytes to the actual verifier CLI.
+    doc = _doc_sibling_floor()
+    md = bp.render(doc, {}, {}, {}, "2026-06-08")
+    assert _spine_drop_line(md, doc, tmp_path).split(None, 1)[0] == "PASS"
+    # Drop the disclosure: strip `shard 4` from the pole role line (simulate the pre-fix p50 pick,
+    # which named `shard 1` and left `shard 4` disclosed nowhere). The gate must catch it.
+    dropped = md.replace("Runs concurrently behind `web-tests (shard 4)`",
+                         "Runs concurrently behind `web-tests (shard 1)`")
+    assert dropped != md
+    fail_line = _spine_drop_line(dropped, doc, tmp_path)
+    assert fail_line.split(None, 1)[0] == "FAIL"
+    assert "web-tests (shard 4)" in fail_line   # names the exact dropped binding floor
+
+
 def test_unmatched_pole_still_gets_crossrun_check_and_agent_prompt():
     # A pole whose log matches NO catalog detector must still be a complete finding:
     # a cross-run check on its dominant step + an agent prompt - not a bare timeline.

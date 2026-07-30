@@ -5664,7 +5664,14 @@ _SPINE_FLOOR_NAME_RE = re.compile(
     # check is `X`") NAMES the pole's floor on the spine, but its phrasing differs from the floor-note
     # forms above — without it a legitimately-disclosed floor read as a silent spine drop (a
     # wording-coupled false FAIL on the frequency-gate shape; caught on out-of-sample dogfood repos).
-    r"|slowest concurrent check is)"
+    r"|slowest concurrent check is"
+    # A BELOW-gate drilled pole's role line ("Runs concurrently behind `X` (…); it becomes the gate
+    # only once every slower concurrent check drops below …") NAMES the check `X` this pole runs
+    # behind — the slowest concurrent check above it, which the renderer selects by effective floor
+    # (`_eff_floor_s`), i.e. the pole's binding floor. Without this the floor a pole names ONLY here
+    # read as a silent spine drop (the sibling-family shape: a below-gate pole's floor is a matrix leg
+    # of an already-drilled family, named nowhere else — a live-run false FAIL).
+    r"|Runs concurrently behind)"
     r",?\s*`([^`]+)`")
 
 

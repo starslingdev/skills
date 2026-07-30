@@ -8526,25 +8526,34 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
             def _cn(c: dict[str, Any]) -> str:
                 return _clean_label(str(c.get("name") or c.get("check") or ""))
             _pole_wf = str(p.get("workflow_file", ""))
+            # Rank the concurrent checks above this pole by their EFFECTIVE floor
+            # (`_eff_floor_s`, bimodal-aware `max(p50, high_p50_s)`) — the SAME notion
+            # every other floor path and verify_report's spine-drop check use — NOT the
+            # bare p50. Selecting by p50 named the p50-slowest sibling of a matrix while
+            # the check that actually CAPS the wait was a DIFFERENT leg whose bimodal SLOW
+            # mode is the effective ceiling (e.g. `guard shard 4/4`: blended p50 below
+            # `1/4` but slow-mode above it). The report then named a shard that isn't the
+            # binding floor, so the floor went undisclosed and verify_report FAILed.
             above = sorted(
                 (c for c in src
-                 if (_num(c.get("p50_s")) or 0.0) > head_s and _cn(c) != check
+                 if _eff_floor_s(c) > head_s and _cn(c) != check
                  and not _same_matrix(check, _cn(c),
                                       _pole_wf, str(c.get("workflow_file", "")))),
-                key=lambda c: -(_num(c.get("p50_s")) or 0.0))
+                key=lambda c: -_eff_floor_s(c))
             if above:
                 lead = above[0]
+                _lead_floor = _clock(_eff_floor_s(lead))
                 # Claims layer (pole_role_line family): `subject` is the interpolated
-                # lead-check name (the concurrent check this pole runs behind). Wrap in
-                # `_strip_emdashes` for parity with the headline claims, so the manifest's
-                # `rendered` matches the em-dash-stripped report text; the report-wide strip
-                # is idempotent, so this stays byte-identical.
+                # lead-check name (the concurrent check this pole runs behind), valued at
+                # its effective floor. Wrap in `_strip_emdashes` for parity with the
+                # headline claims, so the manifest's `rendered` matches the em-dash-stripped
+                # report text; the report-wide strip is idempotent, so this stays byte-identical.
                 role = cs.add(claims.Claim(
                     kind="pole_role_line", subject=_cn(lead),
-                    fields={"lead_p50": _clock(_num(lead.get("p50_s"))), "dur": dur},
+                    fields={"lead_p50": _lead_floor, "dur": dur},
                     rendered=_strip_emdashes(
                         f"Runs concurrently behind `{_cn(lead)}` "
-                        f"({_clock(_num(lead.get('p50_s')))}); it becomes the gate only "
+                        f"({_lead_floor}); it becomes the gate only "
                         f"once every slower concurrent check drops below {dur}.")))
             else:
                 role = (f"Runs concurrently — becomes the gate once the slower checks "

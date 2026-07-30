@@ -74,6 +74,24 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-07-30** — **A below-gate pole names the check that actually caps it —
+  the effective floor, not the p50-slowest sibling.** A drilled pole that runs
+  concurrently behind the gate gets a "Runs concurrently behind `X`; it becomes
+  the gate only once every slower concurrent check drops below …" role line. It
+  selected `X` by the bare blended `p50_s`, while every other floor path — and
+  `verify_report`'s spine-drop check — rank floors by the EFFECTIVE floor
+  (`_eff_floor_s`, `max(p50, bimodal high_p50_s)`). When a matrix leg's slow mode
+  is the true ceiling but its blended p50 sits below a faster-median sibling, the
+  role line named the wrong leg: it pointed at a shard that isn't the binding
+  floor, so the check that actually caps the wait was disclosed nowhere and the
+  report tripped its own verifier. Live miss: a report with a sharded family had
+  `shard 1/4` (highest p50) named while the binding floor under a second pole was
+  `shard 4/4` (highest slow-mode) — disclosed nowhere, a silent spine drop. The
+  role line now ranks concurrent checks by `_eff_floor_s` and shows the effective
+  floor duration, naming the exact capping leg; `verify_report`'s
+  `_SPINE_FLOOR_NAME_RE` now recognizes the "Runs concurrently behind `X`"
+  phrasing as a spine disclosure so a floor named only there counts.
+
 - **2026-07-28** — **An aggregation-gate pole tells the honest upstream story
   instead of prompting the reader to optimize a 3-second no-op** (issue #1). Many
   repos make one trivial job the single required status check: it runs no work,
