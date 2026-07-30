@@ -303,21 +303,24 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
    entirely — the whole close reads like a plain sentence to a PM.
    **Open with the measured result** — lead with the biggest lever: the slowest
    check gating the merge and its developer-wait cost, in plain words.
-   **Era disclosures lead even earlier**: when the report carries a config-era fact,
-   say it before any number — narrowed ("measures only the N runs since <workflow>
-   changed <when>"), or disclosed_pre: the headline measures the PREVIOUS config
-   ("<workflow> changed <when>; too few runs since — these numbers describe the
-   RETIRED config; re-audit as runs accumulate"). Never present a retired-era
-   number as current (live miss 2026-07-30: a user read their shipped fix as absent).
-   Then state
+   **Era disclosures lead even earlier**: when the report's top matter shows a
+   config-era ⚠️, say it before any number — narrowed ("measures only the N runs
+   since <workflow> changed <when>"); disclosed_pre (headline measures the PREVIOUS
+   config: "<workflow> changed <when>; too few runs since — these numbers reflect
+   the config BEFORE it; re-audit as runs accumulate"); post_only_thin (numbers are
+   PROVISIONAL: the new config on too few post-change runs — "treat as provisional;
+   re-audit"). Never present a retired-era or provisional number as current (live
+   miss 2026-07-30). **Fast-CI preface (owner UX):** when that merge-wait figure is
+   under ~2 min AND carries no such era caveat, open by saying their CI is in good
+   shape — nothing to change unless a finding is a cheap, glaring easy win — then the
+   same options, menu unchanged. Then state
    each gating long pole as one plain finding — the check it gates, its measured
    merge-wait cost, and its named root cause — and stop. **Do NOT** announce that a
    report was written or point at a file path in the opening: the full markdown
    report is **opt-in** (issue #18), one of the fix options below, not the default
    deliverable. It is still **rendered and verify-gated internally** every run (phases 4–5,
-   unconditional); opting in merely copies the verified artifact into the
-   working directory. **Quote the report's merge-wait figure verbatim** — one canonical value
-   everywhere in the close; never re-round or restyle (`8m36s` stays `8m36s`). Do NOT explain how the report was built
+   unconditional); opting in merely copies the verified artifact. **Quote the report's
+   merge-wait figure verbatim** — one canonical value everywhere in the close; never re-round or restyle (`8m36s` stays `8m36s`). Do NOT explain how the report was built
    or narrate phases/verification. Then ask which pole to fix **via the interaction
    contract above (AskUserQuestion where available) — ONE question, ONE page, never
    multiple questions** (extra questions render as hidden **tabs** — a real run buried
