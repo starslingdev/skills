@@ -323,19 +323,19 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
    merge-wait figure verbatim** — one canonical value everywhere in the close; never re-round or restyle (`8m36s` stays `8m36s`). Do NOT explain how the report was built
    or narrate phases/verification. Then ask which pole to fix **via the interaction
    contract above (AskUserQuestion where available) — ONE question, ONE page, never
-   multiple questions** (extra questions render as hidden **tabs** — a real run buried
-   the save option in an unseen second tab). Slots 1..3 are fix options: **per-pole, top
-   pole first** — each **label is the plain check name + its measured wait**, e.g. `Fix
-   the test check (8m36s wait)`, **never** the word "pole" or an OPT-id in a user-facing
-   label — then **"Fix all gating checks"** when ≥2 poles, then **"Take the bill savings
-   (~N min/mo)"**, offered only when the Runner-minute reductions section renders a
-   source-backed R-row (or, with zero admitted rows, its Bottom line carries the
-   "modeled bill opportunities remain in Also noticed" pointer). The **last option is
+   multiple questions** (extra questions render as hidden tabs — a real run buried the
+   save option in one). Slots 1..3 are fix options: **per-pole, top pole first** — each
+   **label is the plain check name + its measured wait** (`Fix the test check (8m36s
+   wait)`), **never** "pole" or an OPT-id in a user-facing label. With exactly TWO gating poles, **both get their own slot** plus "Fix both" —
+   the bill option folds out to the close prose instead (a user who already fixed pole 1
+   must be able to pick pole 2 alone — live miss 2026-07-30). With ≥3 poles: top pole, then **"Fix all gating checks"**. Then
+   **"Take the bill savings (~N min/mo)"** when a slot remains, offered only when the
+   Runner-minute reductions section renders a source-backed R-row (or, with zero
+   admitted rows, its Bottom line carries the "modeled bill opportunities remain in
+   Also noticed" pointer; a folded-out bill option is named by that same pointer). The **last option is
    ALWAYS**, verbatim: **`None, just save the report (.md)`** — unless phase-5 verify is
    still red after its retry: a report that failed its own checker is never offered;
-   drop the save option and say why in one line (live run, 2026-07-30). To keep the
-   total ≤4 **including** that always-last save option, **fold** extra per-pole options
-   into "Fix all". There is **no standalone "nothing for now" option** — declining
+   drop the save option and say why in one line (live run, 2026-07-30). The ≤4 cap (incl. the always-last save) drives both folds. There is **no standalone "nothing for now" option** — declining
    without saving is free-text/Esc. On a dead-end repo (Tier 1 found no addressable
    lever) the Tier-2 option lists first; save, when offered, is still last. The report's
    section order never changes, only the menu's. **The full markdown report is opt-in
