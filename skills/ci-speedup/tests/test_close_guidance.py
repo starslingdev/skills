@@ -113,6 +113,7 @@ def test_close_two_gating_poles_get_their_own_slots_and_bill_folds_to_prose():
     # A folded-out bill must stay named in prose in BOTH the source-backed and modeled
     # cases (not only via the modeled "Also noticed" pointer), so a real R-row saving is
     # never silently dropped from the close.
+    assert "named in the close prose either way" in close
     assert "stays reachable by free text" in close
 
 
