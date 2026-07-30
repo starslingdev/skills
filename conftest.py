@@ -18,11 +18,23 @@ Guard 2 — tripwire: record the repo's HEAD / branch / bareness before
 the first test and verify them after the last. If any test mutates the
 real repo again — by this vector or a new one — the suite fails loudly
 at session end instead of leaving silent corruption.
+
+Scope of Guard 2: it watches exactly the three invariants a hijacked repo
+violates (it gets re-pointed, re-branched, or flipped bare) — the incident's
+signature. It is a deliberately narrow backstop, NOT a working-tree audit:
+Guard 1 is the actual prevention, and a status/index snapshot would
+false-positive on the ``__pycache__`` the suite itself writes. A net HEAD
+move from any source trips it — including a developer committing in this
+checkout while the ~70s suite runs; that loud stop is intended. If the git
+state can't be read at start (or re-read at end), the tripwire says so
+loudly (a warning to stderr) rather than passing — or falsely alarming —
+in silence.
 """
 from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -36,7 +48,13 @@ for _var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
     os.environ.pop(_var, None)
 
 
-def _repo_state() -> dict | None:
+def _guard_warn(msg: str) -> None:
+    """Loud, non-fatal notice to stderr — used when the tripwire cannot do its
+    job so 'guard inactive/inconclusive' is never mistaken for 'guard passed'."""
+    print(f"REPO-STATE TRIPWIRE: {msg}", file=sys.stderr, flush=True)
+
+
+def _repo_state() -> dict[str, str] | None:
     """(HEAD sha, symbolic branch, core.bare) of THIS repo — None outside git."""
     def probe(*args: str) -> str | None:
         try:
@@ -55,14 +73,32 @@ def _repo_state() -> dict | None:
 
 
 def pytest_sessionstart(session):
-    session.config._repo_guard_state = _repo_state()
+    state = _repo_state()
+    session.config._repo_guard_state = state
+    if state is None:
+        # No baseline (git missing/timeout, or not a git repo) => nothing to
+        # compare against at session end. Fail-open is unavoidable here, but it
+        # must not be SILENT: announce that the tripwire is inactive for this run.
+        _guard_warn(
+            "INACTIVE — could not read this repo's git state at session start; "
+            "repo corruption during this run will NOT be detected."
+        )
 
 
 def pytest_sessionfinish(session, exitstatus):
     before = getattr(session.config, "_repo_guard_state", None)
     if before is None:
-        return
+        return  # already announced at session start; nothing to compare against
     after = _repo_state()
+    if after is None:
+        # Re-read failed at session end. That is INCONCLUSIVE (a transient git
+        # hiccup), not proof of mutation — do not cry corruption. Say so loudly
+        # instead of raising a misleading "a test mutated this repo" tripwire.
+        _guard_warn(
+            "INCONCLUSIVE — could not re-read this repo's git state at session "
+            f"end (baseline was {before}); drift could not be verified."
+        )
+        return
     if after != before:
         raise pytest.UsageError(
             "REPO-STATE TRIPWIRE: a test mutated this repository's git state "
