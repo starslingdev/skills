@@ -332,7 +332,7 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
    **"Take the bill savings (~N min/mo)"** when a slot remains, offered only when the
    Runner-minute reductions section renders a source-backed R-row (or, with zero
    admitted rows, its Bottom line carries the "modeled bill opportunities remain in
-   Also noticed" pointer; a folded-out bill option is named by that same pointer). The **last option is
+   Also noticed" pointer; a folded-out bill is named in the close prose either way — the source-backed `~N min/mo` saving, or that modeled pointer — so it stays reachable by free text). The **last option is
    ALWAYS**, verbatim: **`None, just save the report (.md)`** — unless phase-5 verify is
    still red after its retry: a report that failed its own checker is never offered;
    drop the save option and say why in one line (live run, 2026-07-30). The ≤4 cap (incl. the always-last save) drives both folds. There is **no standalone "nothing for now" option** — declining

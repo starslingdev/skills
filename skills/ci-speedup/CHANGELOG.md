@@ -43,7 +43,9 @@ unversioned and updates by reinstall from `main`.
   way to pick pole 2 alone — a live user who had just fixed pole 1 had no
   button for the other check. With exactly two poles the menu is now pole 1 /
   pole 2 / "Fix both" / save, and the bill option folds out to the close
-  prose pointer instead (≥3 poles keep the old fold).
+  prose instead — named there either way (the source-backed `~N min/mo`
+  saving or the modeled pointer) so it stays reachable (≥3 poles keep the
+  old fold).
 
 - **2026-07-30** — **Era disclosures lead the close.** When the report's top
   matter carries a config-era caveat — `disclosed_pre` (too few runs since the

@@ -99,6 +99,23 @@ def test_close_folds_extra_options_to_stay_within_four():
     assert 'Fix all gating checks' in close
 
 
+def test_close_two_gating_poles_get_their_own_slots_and_bill_folds_to_prose():
+    close = re.sub(r"\s+", " ", _phase6())
+    # Live miss 2026-07-30: with exactly TWO poles the ≤4 fold used to collapse the
+    # second pole into "Fix all", so a user who'd fixed pole 1 had no button for pole 2.
+    # Fixed shape: pole 1 / pole 2 / "Fix both" / save; the bill option folds out to the
+    # close prose. These pins keep that shape from regressing while CI stays green.
+    assert "exactly TWO gating poles" in close
+    assert 'plus "Fix both"' in close, "the two-pole combined 'Fix both' option is missing"
+    assert "the bill option folds out to the close prose" in close
+    # ≥3 poles keep the OLD fold (top pole + "Fix all"), unchanged by the two-pole rule.
+    assert "With ≥3 poles" in close and "Fix all gating checks" in close
+    # A folded-out bill must stay named in prose in BOTH the source-backed and modeled
+    # cases (not only via the modeled "Also noticed" pointer), so a real R-row saving is
+    # never silently dropped from the close.
+    assert "stays reachable by free text" in close
+
+
 def test_close_does_not_reoffer_the_fix_menu_after_a_save_pick():
     close = re.sub(r"\s+", " ", _phase6())
     # Picking the save option explicitly DECLINES fixes, so the fix menu is NOT
