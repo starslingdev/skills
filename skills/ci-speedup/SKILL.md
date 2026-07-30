@@ -302,52 +302,50 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
    *cloud CI billing minutes*. Avoid "lever" and "critical path" in the chat
    entirely — the whole close reads like a plain sentence to a PM.
    **Open with the measured result** — lead with the biggest lever: the slowest
-   check gating the merge and its developer-wait cost, in plain words. **Fast-CI
-   preface (owner UX): when the report's quoted merge-wait figure (the Bottom
-   line's "typical PR waits N" value this close reuses verbatim) is under ~2
-   minutes, open by SAYING their CI is already in good shape** — nothing needs
-   changing unless a finding is a cheap, glaring easy win — then present the
-   same options with that framing (menu unchanged). Then state
+   check gating the merge and its developer-wait cost, in plain words.
+   **Era disclosures lead even earlier**: when the report carries a config-era fact,
+   say it before any number — narrowed ("measures only the N runs since <workflow>
+   changed <when>"), or disclosed_pre: the headline measures the PREVIOUS config
+   ("<workflow> changed <when>; too few runs since — these numbers describe the
+   RETIRED config; re-audit as runs accumulate"). Never present a retired-era
+   number as current (live miss 2026-07-30: a user read their shipped fix as absent).
+   Then state
    each gating long pole as one plain finding — the check it gates, its measured
    merge-wait cost, and its named root cause — and stop. **Do NOT** announce that a
    report was written or point at a file path in the opening: the full markdown
    report is **opt-in** (issue #18), one of the fix options below, not the default
-   deliverable. It has still been **rendered and verify-gated internally** on this run (phases
-   4–5, unconditional) — opting in merely copies that already-verified artifact
-   into the working directory. **Quote the report's merge-wait figure verbatim** —
-   one canonical value, reused everywhere in the close; don't re-round or restyle
-   as you retype (`8m36s` stays `8m36s`). Do NOT explain how the report was built
-   or narrate phases/verification. Then ask which pole to fix **via
-   the interaction contract above (AskUserQuestion where available) — ONE
-   question, ONE page, never multiple questions** (extra questions render as hidden
-   **tabs** — a real run buried the save option in an unseen second tab). Slots 1..3
-   are fix options: **per-pole, top pole first** — each **label is the plain check
-   name + its measured wait**, e.g. `Fix the test check (8m36s wait)`, **never**
-   the word "pole" or an OPT-id in a user-facing label — then **"Fix all gating
-   checks"** when ≥2 poles, then **"Take the bill savings (~N min/mo)"**, offered
-   only when the Runner-minute reductions section renders a source-backed R-row (or,
-   with zero admitted rows, its Bottom line carries the "modeled bill opportunities
-   remain in Also noticed" pointer). The **last option is ALWAYS**, verbatim:
-   **`None, just save the report (.md)`** — unless phase-5 verify is still red
-   after its retry: a report that failed its own checker is never offered;
-   drop the save option and say why in one line (live run, 2026-07-30). To keep the total ≤4 **including** that
-   always-last save option, **fold** extra per-pole options into "Fix all". There
-   is **no standalone "nothing for now" option** — declining without saving is the
-   agent's own decline / free-text (Esc in Claude Code). On a dead-end repo (Tier 1 found no addressable
-   lever) the Tier-2 option is listed first; the save option, when offered, is still last. The
-   report's section order never changes, only the menu's. **The full markdown
-   report is opt-in (issue #18), fused into that last option.** When the user picks
-   **`None, just save the report (.md)`**: make no changes, copy the
-   internally-rendered, already-verified `.md` (phase 4's session path) into the
-   working tree at `./ci-speedup-findings-report.md`, and tell them where it landed
-   in one clause (a generated artifact they can gitignore or delete — don't
-   auto-commit it or edit their `.gitignore`). Because this pick **explicitly
-   declined the fixes**, do **NOT** re-offer the fix menu after saving — close with
-   one line naming the remaining levers briefly. No other pick writes the report into
-   the working tree. **Set the honest expectation for what a pick does.** A pick doesn't return a
-   "proposal" — the skill investigates the real runs and the target file's intent,
-   **makes the change and verifies it**, then checks with the user **before committing
-   or opening a PR** (the real stop point) — all the way to a finished, verified,
+   deliverable. It is still **rendered and verify-gated internally** every run (phases 4–5,
+   unconditional); opting in merely copies the verified artifact into the
+   working directory. **Quote the report's merge-wait figure verbatim** — one canonical value
+   everywhere in the close; never re-round or restyle (`8m36s` stays `8m36s`). Do NOT explain how the report was built
+   or narrate phases/verification. Then ask which pole to fix **via the interaction
+   contract above (AskUserQuestion where available) — ONE question, ONE page, never
+   multiple questions** (extra questions render as hidden **tabs** — a real run buried
+   the save option in an unseen second tab). Slots 1..3 are fix options: **per-pole, top
+   pole first** — each **label is the plain check name + its measured wait**, e.g. `Fix
+   the test check (8m36s wait)`, **never** the word "pole" or an OPT-id in a user-facing
+   label — then **"Fix all gating checks"** when ≥2 poles, then **"Take the bill savings
+   (~N min/mo)"**, offered only when the Runner-minute reductions section renders a
+   source-backed R-row (or, with zero admitted rows, its Bottom line carries the
+   "modeled bill opportunities remain in Also noticed" pointer). The **last option is
+   ALWAYS**, verbatim: **`None, just save the report (.md)`** — unless phase-5 verify is
+   still red after its retry: a report that failed its own checker is never offered;
+   drop the save option and say why in one line (live run, 2026-07-30). To keep the
+   total ≤4 **including** that always-last save option, **fold** extra per-pole options
+   into "Fix all". There is **no standalone "nothing for now" option** — declining
+   without saving is free-text/Esc. On a dead-end repo (Tier 1 found no addressable
+   lever) the Tier-2 option lists first; save, when offered, is still last. The report's
+   section order never changes, only the menu's. **The full markdown report is opt-in
+   (issue #18), fused into that last option.** When the user picks **`None, just save
+   the report (.md)`**: make no changes, copy the verified `.md` (phase 4's session
+   path) to `./ci-speedup-findings-report.md`, and say where it landed in one clause (a
+   generated artifact they can gitignore or delete — never auto-commit it or edit their
+   `.gitignore`). Because this pick **explicitly declined the fixes**, do NOT re-offer
+   the menu after saving — close naming the remaining levers in one line. No other pick
+   writes the report into the working tree. **Set the honest expectation for what a pick
+   does.** A pick doesn't return a "proposal": the skill investigates the real runs and
+   the file's intent, **makes the change and verifies it**, then checks with the user
+   **before committing or opening a PR** (the real stop point) — a finished, verified,
    uncommitted change. On their pick, run that pole's agent prompt verbatim through
    that same pause; the bill-savings pick runs the Tier-2 R-row prompts (or, with only
    the modeled pointer, the "Also noticed" bill prompts). **When a picked fix

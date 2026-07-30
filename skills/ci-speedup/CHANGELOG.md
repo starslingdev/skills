@@ -38,6 +38,15 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-07-30** — **Era disclosures lead the close.** When the engine
+  measures a retired configuration (`disclosed_pre` — the workflow changed
+  recently, too few runs since), the close says so before any number, with
+  re-audit guidance; a narrowed measurement states its window the same way.
+  Live miss: a post-fix audit led with the pre-fix merge wait and no era
+  note, so the user read their freshly shipped speedup as absent. Offsetting
+  close-prose compressions keep SKILL.md under the 500-line budget (no rule
+  lost).
+
 - **2026-07-30** — **The `gh` gate is sandbox-aware.** In approval-gated agent
   environments (Codex), the first restricted shell can't reach a keyring-held
   credential, so `gh auth status` false-fails for a logged-in account. The gate
