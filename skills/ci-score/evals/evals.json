@@ -58,7 +58,7 @@
     "_contract": "The three B4 layers, encoded here per the launch spec; each names its runnable artifact and pass bar.",
     "a_exact_match_controls": {
       "runner": "python3 -m pytest skills/ci-score/tests/test_b4_controls.py",
-      "pass_bar": "mastra fixture scores exactly 83 (B+) and better-auth exactly 75 (B) via the FULL collector path, offline, from the frozen trees under tests/fixtures/checkouts/"
+      "pass_bar": "mastra fixture scores exactly 83 (B+) and better-auth exactly 75 (B) via the FULL collector path, offline, from the frozen trees under tests/fixtures/checkouts-src/ (cloaked; materialized to their exact original layout at test time)"
     },
     "b_live_smoke": {
       "runner": "collect+render+verify on real checkouts incl. one refusal repo (no workflows: stamp refusal, exit 0, report renders, verify OK) and one dirty-checkout provenance case (-dirty recorded and shown)",

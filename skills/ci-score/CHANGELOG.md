@@ -11,6 +11,16 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **Fixed**: registry security scanners attributed the frozen third-party
+  control fixtures' workflow files to this repository, because they sat at real
+  `.github/workflows/` paths that scanners parse as this repo's live automation.
+  The fixtures now ship under fixture-suffixed, non-workflow paths
+  (`tests/fixtures/checkouts-src/`, with each `.github` path segment renamed and
+  every file given a `.fixture` suffix) and are materialized back to their exact
+  original layout at test time. The relocation is byte-identical — a committed
+  manifest and `test_fixture_cloak.py` prove the round trip is lossless — and no
+  control score changed.
+
 - **Fixed**: the repository-name parser's negative-control example — a fake
   look-alike host used to prove typosquats are rejected — appeared as a
   literal domain in a docstring, a test table, and this changelog, and a

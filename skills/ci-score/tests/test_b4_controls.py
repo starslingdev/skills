@@ -5,8 +5,11 @@ reproduce EXACTLY from the committed fixture trees under
 `tests/fixtures/checkouts/` — the full collector path (acquire → facts →
 score), not just the arithmetic. Live repos drift; these trees cannot, so
 an exact-match failure here means the ENGINE changed, never the input.
-Offline: each cell rebuilds the fixture as a throwaway local git repo and
-runs with sockets booby-trapped.
+Offline: each cell materializes the cloaked fixture into a throwaway local git
+repo and runs with sockets booby-trapped. (The fixtures ship cloaked — see
+``_fixture_checkouts`` — so registry scanners don't attribute the third-party
+workflow files to this repo; :func:`materialize` restores the exact original
+tree byte-for-byte, so what the collector scores is unchanged.)
 
 Layer (b) (live smoke) and layer (c) (the wide sweep) run outside CI —
 their record lives in the B4 sweep notes; this module is the part of B4
@@ -15,15 +18,15 @@ that CI re-proves forever.
 from __future__ import annotations
 
 import importlib.util
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from _fixture_checkouts import materialize
+
 _SKILL_DIR = Path(__file__).resolve().parents[1]
-_CHECKOUTS = _SKILL_DIR / "tests" / "fixtures" / "checkouts"
 
 # The frozen expectations — recomputed under v0.1.2 (OD-CS18 removed
 # ci.trigger.draft-gate) by running the collector over the frozen checkout
@@ -72,10 +75,9 @@ def _git(root: Path, *args: str) -> None:
 
 @pytest.mark.parametrize("name", sorted(_CONTROLS))
 def test_control_reproduces_calibration_grade_exactly(name, tmp_path):
-    fixture = _CHECKOUTS / name
-    assert fixture.is_dir(), f"missing frozen checkout fixture {name}"
     root = tmp_path / name
-    shutil.copytree(fixture, root)
+    root.mkdir()
+    materialize(name, root)  # restore the cloaked fixture to its exact tree
     _git(root, "init", "-q")
     _git(root, "add", "-A")  # throwaway fixture repo, not a working tree
     _git(root, "commit", "-qm", "fixture")
