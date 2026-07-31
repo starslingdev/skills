@@ -31,6 +31,9 @@ from _fixture_checkouts import (
 )
 
 _SRC = Path(__file__).resolve().parent / "fixtures" / "checkouts-src"
+_SKILL_DIR = Path(__file__).resolve().parents[1]
+_FIXTURES = _SRC.parent
+_WORKFLOW_SUFFIXES = (".yml", ".yaml")
 
 
 def _sha256(b: bytes) -> str:
@@ -70,3 +73,39 @@ def test_shipped_fixture_paths_are_cloaked(name):
         parts = p.relative_to(_SRC).parts
         assert ".github" not in parts, f"un-cloaked .github segment in {p}"
         assert p.name.endswith(".fixture"), f"bare (un-suffixed) fixture file {p}"
+
+
+def test_no_uncloaked_workflow_shape_anywhere_under_skill():
+    """Whole-tree backstop — NOT scoped to the two known control names.
+
+    The per-name test above only walks ``checkouts-src/{better-auth,mastra}/``.
+    The realistic un-cloak regression is adding a *new* third-party control
+    checkout (a new name, or a bare workflow file dropped elsewhere under the
+    fixtures tree) that ships a raw ``.github/workflows/*.yml`` — exactly what
+    registry scanners attribute to this repo — which the per-name test would
+    never see. This scans the entire skill: NO path segment anywhere under
+    ``skills/ci-score/`` may equal ``.github``, and NO file under the fixtures
+    tree may have a bare workflow-parseable name (``*.yml``/``*.yaml``); the
+    only workflow-shaped fixtures that ship must carry the ``.fixture`` cloak
+    suffix. ci-score ships zero real workflow files, so both sets are empty.
+    """
+    github_hits = sorted(
+        str(p.relative_to(_SKILL_DIR))
+        for p in _SKILL_DIR.rglob("*")
+        if "__pycache__" not in p.parts
+        and ".github" in p.relative_to(_SKILL_DIR).parts
+    )
+    assert not github_hits, (
+        "un-cloaked '.github' path segment(s) under the skill — registry "
+        f"scanners attribute these workflows to this repo: {github_hits}"
+    )
+
+    bare_workflow = sorted(
+        str(p.relative_to(_FIXTURES))
+        for p in _FIXTURES.rglob("*")
+        if p.is_file() and p.suffix in _WORKFLOW_SUFFIXES
+    )
+    assert not bare_workflow, (
+        "bare workflow-parseable fixture file(s) — must carry the '.fixture' "
+        f"cloak suffix so no shipped path is a raw workflow: {bare_workflow}"
+    )

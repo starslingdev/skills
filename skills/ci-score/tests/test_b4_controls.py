@@ -1,8 +1,8 @@
 """B4 layer (a): exact-match controls on frozen fixture checkouts.
 
-The calibration positive controls (mastra 83 B+, better-auth 75 B) must
+The calibration positive controls (mastra 82 B+, better-auth 82 B+) must
 reproduce EXACTLY from the committed fixture trees under
-`tests/fixtures/checkouts/` — the full collector path (acquire → facts →
+`tests/fixtures/checkouts-src/` — the full collector path (acquire → facts →
 score), not just the arithmetic. Live repos drift; these trees cannot, so
 an exact-match failure here means the ENGINE changed, never the input.
 Offline: each cell materializes the cloaked fixture into a throwaway local git

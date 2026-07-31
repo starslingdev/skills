@@ -19,7 +19,10 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   every file given a `.fixture` suffix) and are materialized back to their exact
   original layout at test time. The relocation is byte-identical — a committed
   manifest and `test_fixture_cloak.py` prove the round trip is lossless — and no
-  control score changed.
+  control score changed. `test_fixture_cloak.py` also scans the whole skill tree
+  (not just the two known control names) so a *new* fixture checkout added later
+  under a raw `.github/workflows/` path turns CI red instead of silently
+  re-introducing a scanner-attributable workflow.
 
 - **Fixed**: the repository-name parser's negative-control example — a fake
   look-alike host used to prove typosquats are rejected — appeared as a
