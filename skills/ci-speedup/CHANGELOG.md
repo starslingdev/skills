@@ -103,9 +103,12 @@ unversioned and updates by reinstall from `main`.
   effective floor exceeds `X`'s p50, it names that TUNABLE check as the one that
   sets the wall-clock floor on slow-mode PRs (the reader is told to attack it);
   (b) when the check that out-floors `X` is MANAGED/external (no workflow file —
-  not tunable), the role line DROPS the floor claim entirely rather than
-  mis-crediting `X`, and `_floor_note` sets the floor straight via its dedicated
-  "no workflow file to speed up here" phrasing; (c) when nothing out-floors `X`,
+  not tunable), the role line does not credit `X` and does not frame the managed
+  check as attackable, but DOES name it as the real cap using the "no workflow file
+  to speed up here `Z`" phrasing — honest about untunability AND the form the spine
+  parser (`verify_report._SPINE_FLOOR_NAME_RE`) reads, so the managed ceiling is
+  disclosed on the spine even when the gate pole's own `_floor_note` is suppressed
+  (`binding_s >= pole_p`); (c) when nothing out-floors `X`,
   it keeps the plain "sets the wall-clock floor". The out-floor test uses
   `_pole_headline` (the seconds the named check's own drilled header shows), not
   frac-blind `_eff_floor_s`, so the quoted time matches the check's own drill and a

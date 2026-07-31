@@ -5682,16 +5682,18 @@ def test_frequency_gate_role_line_discloses_bimodal_effective_floor():
     assert "`flaky`" in md
 
 
-def test_frequency_gate_role_line_managed_floor_drops_credit_not_misattributed():
-    # Issue #22 class, site B — the managed-floor edge (greptile). The disclosure clause frames the
-    # named check as the one to ATTACK ("sets the wall-clock floor on slow-mode PRs"), so it must be
-    # a tunable, file-backed check. When the binding floor is a MANAGED/external check (no
-    # `workflow_file`) that out-floors `floor_name`, the role line must NOT name it as attackable —
-    # but it must ALSO NOT credit `floor_name` (the lower p50 sibling) with setting the wall-clock
-    # floor, because the managed check genuinely caps the merge higher. So the role line names the
-    # slowest TYPICAL check and stays SILENT on the floor; `_floor_note` sets it straight via its own
-    # "no workflow file to speed up here `X`" phrasing (the form the spine parser reads). Same fixture
-    # as the file-backed test, but `flaky` carries NO `workflow_file`.
+def test_frequency_gate_role_line_managed_floor_disclosed_not_misattributed():
+    # Issue #22 class, site B — the managed-floor edge (greptile). The file-backed disclosure clause
+    # frames the named check as the one to ATTACK ("sets the wall-clock floor on slow-mode PRs"), so
+    # it must be a tunable, file-backed check. When the binding floor is a MANAGED/external check (no
+    # `workflow_file`) that out-floors `floor_name`, the role line must (i) NOT credit `floor_name`
+    # (the lower p50 sibling) with setting the floor, (ii) NOT frame the untunable managed check as
+    # attackable, yet (iii) still NAME the managed check as the real cap so it isn't disclosed
+    # nowhere — using the "no workflow file to speed up here `X`" phrasing, which is BOTH honest
+    # about untunability AND the form `verify_report._SPINE_FLOOR_NAME_RE` reads (so the managed cap
+    # lands in the spine-disclosed set even when the gate pole's own `_floor_note` is suppressed
+    # because `binding_s >= pole_p`). Same fixture as the file-backed test, but `flaky` carries NO
+    # `workflow_file`.
     doc = _doc_one_pole()
     cp = doc["pr_critical_path"]
     cp["checks"] = [
@@ -5710,14 +5712,16 @@ def test_frequency_gate_role_line_managed_floor_drops_credit_not_misattributed()
     role = next(l for l in md.split("\n") if "The check most PRs gate on." in l)
     # `heavy` is still named the slowest concurrent (typical) check — the stamp-consistent p50 pick.
     assert "the slowest concurrent check is `heavy` (~15m 00s)" in role
-    # But `heavy` is NOT credited with setting the floor (the managed `flaky` out-floors it), and
-    # the managed check is NOT framed as attackable here. The role line stays SILENT on the floor.
-    # (Spine disclosure of a managed binding floor is `_floor_note`'s responsibility when it renders
-    # — the pre-existing Class A #6 behavior, unchanged and out of this role-line clause's scope.)
+    # `heavy` is NOT credited with setting the floor, and the managed check is NOT framed as tunable.
     assert "which sets the wall-clock floor" not in role
     assert "bimodal slow mode" not in role
-    # The role line ends cleanly after the p50 pick (no dangling connective, no floor claim).
-    assert "the slowest concurrent check is `heavy` (~15m 00s)." in role
+    # The managed `flaky` IS named as the real cap, with the untunable "no workflow file" framing.
+    assert "no workflow file to speed up here, `flaky` (~20m 00s)" in role
+    assert "caps the wall-clock floor on slow-mode PRs" in role
+    # And that phrasing is the form the spine parser reads, so the managed cap is disclosed on the
+    # spine (not dropped) — the managed-floor disclosure gap is fully closed.
+    import verify_report as _vr
+    assert "flaky" in {_n for _n in _vr._spine_disclosed_names(md)}
 
 
 def test_frequency_gate_role_line_ignores_degenerate_bimodal_floor():

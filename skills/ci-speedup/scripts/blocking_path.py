@@ -8559,7 +8559,18 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                                    f"(~{_clock(_bf_hd)}) runs longer, so it — not "
                                    f"`{floor_name}` — sets the wall-clock floor on slow-mode PRs")
                 elif _bf_outfloors:
-                    _sets_floor = ""   # managed check out-floors floor_name; _floor_note names it
+                    # Managed/external `_bf` (no `workflow_file`) out-floors `floor_name`. Don't
+                    # credit `floor_name`, and don't frame the untunable check as attackable — but
+                    # DO name it as the real cap, using `_floor_note`'s "no workflow file to speed
+                    # up here `X`" phrasing (the form `verify_report._SPINE_FLOOR_NAME_RE` reads).
+                    # This DISCLOSES the managed ceiling on the spine even when the gate pole's own
+                    # `_floor_note` is suppressed (`binding_s >= pole_p`, which always holds when
+                    # this clause fires), closing the managed-floor disclosure gap rather than
+                    # leaving the capping check named nowhere.
+                    _bf_name = _clean_label(_check_name(_bf))
+                    _sets_floor = (f"; but a concurrent check with no workflow file to speed up "
+                                   f"here, `{_bf_name}` (~{_clock(_bf_hd)}), runs longer — so it, "
+                                   f"not `{floor_name}`, caps the wall-clock floor on slow-mode PRs")
                 else:
                     _sets_floor = "" if floor_lowered else ", which sets the wall-clock floor"
                 role = (f"**The check most PRs gate on.** A typical PR waits on this most "
