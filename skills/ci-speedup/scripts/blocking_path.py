@@ -883,17 +883,23 @@ def _agg_gate_shape(pole: dict[str, Any], job_graph: dict[str, Any] | None,
         if not matched:
             unmeasured.append(nm)
             continue
-        # Rank the upstream members by their EFFECTIVE floor (`_eff_floor_s`, bimodal-aware
-        # `max(p50, high_p50_s)`) — the SAME notion every other floor path and verify_report's
-        # spine-drop check use — NOT the bare p50. Both max() calls: WITHIN a matrix job's legs
-        # (`top`) and ACROSS jobs (`slowest`). Selecting by p50 named the p50-slowest sibling
-        # while the member that actually CAPS the sink's `needs:` wait is the one whose bimodal
-        # SLOW mode is the true ceiling (a matrix leg whose blended p50 sits below a faster-median
-        # sibling but whose slow mode exceeds it) — so the sink pointed the reader at the wrong
-        # lever, and the drilled pole it links to (headlined at its slow mode) showed a longer
-        # time than the sink named (issue #22 class).
-        top = max(matched, key=_eff_floor_s)
-        if slowest is None or _eff_floor_s(top) > _eff_floor_s(slowest):
+        # Rank the upstream members by the SECONDS their own drilled pole HEADER would show
+        # (`_pole_headline(c)[0]`, the bimodal-aware header duration), NOT the bare p50. Both
+        # max() calls: WITHIN a matrix job's legs (`top`) and ACROSS jobs (`slowest`). Selecting
+        # by p50 named the p50-slowest sibling while the member that actually CAPS the sink's
+        # `needs:` wait is the one whose bimodal SLOW mode is the true ceiling (a matrix leg whose
+        # blended p50 sits below a faster-median sibling but whose slow mode exceeds it) — so the
+        # sink pointed the reader at the wrong lever, and the pole it links to (headlined at its
+        # slow mode) showed a longer time than the sink named (issue #22 class). We rank by
+        # `_pole_headline`, NOT `_eff_floor_s`: for a member whose median sits on the FAST cluster
+        # `_pole_headline` returns the slow mode (== `_eff_floor_s`, the #22 case we must catch),
+        # but for a member whose median ALREADY sits in the SLOW cluster it returns the p50 that
+        # its header shows (`_eff_floor_s` would over-state that to the high mode). Ranking AND
+        # rendering by the header value keeps the pick, its quoted duration, and the linked pole's
+        # header in exact agreement — `_eff_floor_s` would quote a duration ABOVE the linked pole's
+        # header on a slow-median member (greptile P1).
+        top = max(matched, key=lambda c: _pole_headline(c)[0])
+        if slowest is None or _pole_headline(top)[0] > _pole_headline(slowest)[0]:
             slowest = top
     if slowest is None:
         return None
@@ -8426,12 +8432,15 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
             # aggregates. Say that, name the slowest measured upstream member, and (below)
             # render NO drill and NO "optimize this step" prompt for the sink itself.
             _ag_slow = _clean_label(_check_name(_agg["slowest"]))
-            # Render the member's EFFECTIVE floor (`_eff_floor_s`, the bimodal-aware
-            # `max(p50, high_p50_s)`), not the bare p50 — it MUST agree with the selection above
-            # (which now ranks by effective floor) or the sink would name a member `X` yet quote a
-            # duration SMALLER than an unnamed sibling's p50, and would disagree with the slow-mode
-            # header of the very pole its "Where the wait actually is" pointer links to (issue #22).
-            _ag_dur = _clock(_eff_floor_s(_agg["slowest"]))
+            # Render the member's own drilled-pole HEADER duration (`_pole_headline(...)[0]`), not
+            # the bare p50 and not `_eff_floor_s` — it MUST agree with the selection above (which
+            # ranks by the same header value) or the sink would name a member `X` yet quote a
+            # duration SMALLER than an unnamed sibling, and it MUST equal the header of the very
+            # pole its "Where the wait actually is" pointer links to. `_eff_floor_s` (always the
+            # high mode) satisfies neither on a member whose median already sits IN the slow
+            # cluster: there `_pole_headline` shows the p50 the linked pole's header shows, while
+            # `_eff_floor_s` would over-quote the high mode above it (issue #22 / greptile P1).
+            _ag_dur = _clock(_pole_headline(_agg["slowest"])[0])
             # BOTH caveats compose — they are independent, and neither may silently drop the
             # other. "Runs no work of its own" rests on the measured P50 plus the `needs:`
             # structure whenever no per-step data was captured, so that basis is disclosed on
@@ -8492,15 +8501,31 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 # mirroring `_floor_note`). If a DIFFERENT check's effective (bimodal slow-mode)
                 # floor exceeds `floor_name`'s p50, THAT check — not `floor_name` — sets the
                 # wall-clock floor on slow-mode PRs; name it, rather than silently crediting the
-                # p50-slowest sibling with a floor a slower bimodal sibling actually sets. The
-                # named ceiling is ALSO disclosed by this pole's `_floor_note`, so this only
-                # corrects the role line's prose; it adds no new spine-disclosure obligation.
+                # p50-slowest sibling with a floor a slower bimodal sibling actually sets.
+                #
+                # `_others` is the FULL concurrent set minus the gate (managed checks INCLUDED),
+                # exactly `_floor_note`'s pool, so `_bf` here is the SAME binding floor
+                # `_floor_note` computes — the two can never name different checks as the cap.
+                #
+                # But FIRE only when that binding floor is FILE-BACKED (greptile P1). The role line
+                # frames the named check as the one to attack ("sets the wall-clock floor on
+                # slow-mode PRs"), so it must be a tunable check the reader can act on — one with a
+                # `workflow_file`. When the true binding floor is a MANAGED/external check (no
+                # `workflow_file`), `_floor_note` owns its disclosure via the dedicated "no
+                # workflow file to speed up here `X`" phrasing (the form
+                # `verify_report._SPINE_FLOOR_NAME_RE` recognizes); crediting it in THIS clause
+                # would mis-frame an untunable check as actionable and — since this clause's
+                # phrasing is NOT one the spine parser reads — name a ceiling the parser can't
+                # confirm is disclosed. Suppressing the clause there keeps the managed case
+                # byte-identical to `main` and makes the "already disclosed by `_floor_note`"
+                # guarantee hold for every check this clause names.
                 _others = [c for c in floor_pool
                            if _clean_label(_check_name(c)) != gate_check]
                 _bf = (_binding_floor(_others, p.get("_cooccur"),
                                       int(p.get("_gating_n") or 0))
                        if (not floor_lowered and _others) else None)
-                if (_bf is not None and _clean_label(_check_name(_bf)) != floor_name
+                if (_bf is not None and str(_bf.get("workflow_file") or "")
+                        and _clean_label(_check_name(_bf)) != floor_name
                         and _eff_floor_s(_bf) > (slowest_p50 or 0.0) + 0.5):
                     _bf_name = _clean_label(_check_name(_bf))
                     _sets_floor = (f"; but `{_bf_name}`'s bimodal slow mode "

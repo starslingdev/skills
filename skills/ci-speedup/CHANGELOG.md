@@ -83,8 +83,13 @@ unversioned and updates by reinstall from `main`.
   ceiling but whose blended p50 sits below a faster-median sibling went unnamed,
   and the "Where the wait actually is" pointer sent the reader to the wrong lever
   (at a duration smaller than the slow-mode header of the very pole it linked to).
-  Both picks now rank by `_eff_floor_s` and render that effective floor, so the
-  sink, its pointer, and the linked drilled pole all agree. (2) The
+  Both picks now rank by — and the pointer renders — the seconds the member's own
+  drilled pole HEADER shows (`_pole_headline`, the bimodal-aware header duration),
+  so the sink, its pointer, and the linked pole all agree exactly. (This is the
+  member's slow mode when its median sits on the fast cluster — the case above —
+  but its p50 when the median already sits IN the slow cluster, where the header
+  keeps the p50; ranking/rendering by a bare `max(p50, high)` would there quote a
+  duration ABOVE the linked pole's header.) (2) The
   FREQUENCY-GATE pole's role line ("**The check most PRs gate on.** … the slowest
   concurrent check is `X`, which sets the wall-clock floor") named `X` from
   `src[0]`, the p50-slowest typical check. That pick is STAMP-BOUND to the data
@@ -92,12 +97,17 @@ unversioned and updates by reinstall from `main`.
   re-ranking it would desync the headline from its stamp and break
   `verify_report.check_headline_slowest_matches_stamp` — a joint re-rank is
   genuinely unsafe. Instead the role line keeps the stamp-consistent p50 pick and
-  now DISCLOSES the true ceiling beside it: when a different concurrent check's
-  effective (bimodal slow-mode) floor exceeds `X`'s p50, it names that check as
-  the one that sets the wall-clock floor on slow-mode PRs (`_binding_floor`, the
-  same `_eff_floor_s` selector the per-pole floor note and the spine-drop verifier
-  use). The named ceiling is already disclosed by the pole's floor note, so the
-  correction adds no silent spine drop and leaves committed example reports valid.
+  now DISCLOSES the true ceiling beside it: when a different **file-backed**
+  concurrent check's effective (bimodal slow-mode) floor exceeds `X`'s p50, it
+  names that check as the one that sets the wall-clock floor on slow-mode PRs
+  (`_binding_floor`, the same `_eff_floor_s` selector the per-pole floor note and
+  the spine-drop verifier use). The clause fires for TUNABLE (file-backed) floors
+  only — the reader is told to attack the named check, and a file-backed binding
+  floor is always disclosed by the pole's own floor note (the phrasing the spine
+  parser reads). A MANAGED/external binding floor (no workflow file) stays with
+  `_floor_note`, which discloses it via its dedicated "no workflow file to speed up
+  here" phrasing; this clause simply doesn't fire there (byte-identical to `main`),
+  so it adds no silent spine drop and leaves committed example reports valid.
 
 - **2026-07-30** — **A below-gate pole names the check that actually caps it —
   the effective floor, not the p50-slowest sibling.** A drilled pole that runs

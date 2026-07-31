@@ -5682,6 +5682,39 @@ def test_frequency_gate_role_line_discloses_bimodal_effective_floor():
     assert "`flaky`" in md
 
 
+def test_frequency_gate_role_line_suppresses_disclosure_for_managed_floor():
+    # Issue #22 class, site B — the managed-floor edge (greptile P1). The disclosure clause frames
+    # the named check as the one to ATTACK ("sets the wall-clock floor on slow-mode PRs"), so it
+    # must be a tunable, file-backed check. When the binding floor is a MANAGED/external check (no
+    # `workflow_file`), the clause must NOT fire — `_floor_note` owns the managed floor's
+    # disclosure via its own "no workflow file to speed up here `X`" phrasing (the form the spine
+    # parser reads), and this clause's phrasing is not one the parser recognizes. Same fixture as
+    # the file-backed test, but `flaky` carries NO `workflow_file`.
+    doc = _doc_one_pole()
+    cp = doc["pr_critical_path"]
+    cp["checks"] = [
+        {"name": "tests-web", "p50_s": 255.0,
+         "workflow_file": ".github/workflows/pipeline.yml"},
+        {"name": "heavy", "p50_s": 900.0, "present_on": 20,
+         "workflow_file": ".github/workflows/heavy.yml"},
+        {"name": "flaky", "p50_s": 600.0, "present_on": 20,   # MANAGED: no workflow_file
+         "bimodal": {"low_p50_s": 300.0, "high_p50_s": 1200.0, "slow_frac": 0.4}},
+        {"name": "lint", "p50_s": 100.0, "present_on": 20},
+    ]
+    cp["populations"] = [[0.05, [["heavy", 900.0], ["flaky", 600.0],
+                                 ["tests-web", 255.0], ["lint", 100.0]]]] * 20
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {},
+                   {"pipeline": "https://github.com/o/r/actions/runs/1"}, "2026-06-08")
+    role = next(l for l in md.split("\n") if "The check most PRs gate on." in l)
+    # The p50 pick is unchanged; the clause falls back to the plain wording (byte-identical to a
+    # world with no bimodal floor at all — the same as `main` for a managed binding floor).
+    assert "the slowest concurrent check is `heavy` (~15m 00s), which sets the wall-clock floor." \
+        in role
+    # The managed check is NOT credited in the role line (the clause is suppressed).
+    assert "bimodal slow mode" not in role
+    assert "sets the wall-clock floor on slow-mode PRs" not in role
+
+
 def test_headline_floor_excludes_partial_presence_slowest_check():
     # OneSignal/OneSignal-Android-SDK class: the slowest TYPICAL check (`Claude Code Review`,
     # a managed app check at 944.5s) ran on only 12/20 PRs; `build` (619.5s) ran on 20/20.
@@ -7106,9 +7139,11 @@ def test_aggregation_gate_names_upstream_member_by_effective_floor_not_bare_p50(
     # median sits below a faster-median sibling but whose bimodal SLOW mode is the true ceiling
     # went unnamed — the sink pointed the reader at the wrong lever. A second matrix leg,
     # `stable - aarch64-darwin`, has a LOWER blended p50 (300s) than `stable - x86_64-linux`
-    # (355s) but a bimodal high mode (520s) that is the real ceiling of the gate's wait. Both the
-    # WITHIN-matrix `top` pick and the ACROSS-jobs `slowest` pick must rank by `_eff_floor_s`, and
-    # the rendered duration must be that effective floor (8m 40s), not a bare p50.
+    # (355s) but a bimodal high mode (520s) that is the real ceiling of the gate's wait. Its
+    # median (300s) sits on the FAST cluster (<= (180+520)/2 = 350s), so the member's own drilled
+    # HEADER shows the slow mode — both the WITHIN-matrix `top` pick and the ACROSS-jobs `slowest`
+    # pick must rank by that header value (`_pole_headline`, == the 520s slow mode here), and the
+    # rendered duration must be that header time (8m 40s), not a bare p50.
     doc = _agg_gate_doc()
     doc["pr_critical_path"]["checks"].append(
         {"name": "stable - aarch64-darwin", "p50_s": 300.0, "present_on": 20,
@@ -7123,3 +7158,33 @@ def test_aggregation_gate_names_upstream_member_by_effective_floor_not_bare_p50(
     # RED against the pre-fix renderer: it named the p50-slowest leg as the lever, at its p50.
     assert "`stable - x86_64-linux`" not in sec
     assert "5m 55s" not in sec
+
+
+def test_aggregation_gate_pointer_agrees_with_slow_cluster_median_pole_header():
+    # Issue #22 class, site A — the divergence a bare `_eff_floor_s` render (greptile P1) leaves.
+    # When the winning member's MEDIAN already sits IN the slow cluster (a strict majority of runs
+    # slow), its own drilled pole HEADER shows its p50, NOT its bimodal high mode — `_pole_headline`
+    # keeps the p50 there (the median already reflects the slow mode; the high mode would over-state
+    # it). `_eff_floor_s` (always `max(p50, high)`) would quote the high mode, so the aggregation
+    # pointer would name a duration ABOVE the very pole header it links to. The pointer MUST quote
+    # the header value so the two agree.
+    doc = _agg_gate_doc()
+    # p50 500s sits ABOVE the midpoint (300+560)/2 = 430s -> slow-cluster median -> header = p50.
+    _bi = {"low_p50_s": 300.0, "high_p50_s": 560.0, "slow_frac": 0.6}
+    doc["pr_critical_path"]["checks"].append(
+        {"name": "stable - aarch64-darwin", "p50_s": 500.0, "present_on": 20,
+         "workflow_file": _AGG_DEPLOY, "bimodal": _bi})
+    doc["pr_critical_path"]["poles"].append(
+        {"check": "stable - aarch64-darwin", "p50_s": 500.0, "workflow_file": _AGG_DEPLOY,
+         "job": "native", "dominant_step": "cargo build", "dominant_p50_s": 400.0,
+         "bimodal": _bi, "steps": [{"step": "cargo build", "category": "build", "p50_s": 400.0}]})
+    md = bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    sec = _pole_section(md, "thank you, build")
+    n = int(re.search(r"## .*Long pole (\d+): .*▸ `stable - aarch64-darwin` - (\d+m \d+s)",
+                      md).group(1))
+    hdr_dur = re.search(r"▸ `stable - aarch64-darwin` - (\d+m \d+s)", md).group(1)
+    assert hdr_dur == "8m 20s"                                    # header shows the p50, not 9m 20s
+    # GREEN: the pointer links the pole and quotes the SAME 8m 20s the header shows.
+    assert f"[Long pole {n}](#pole-{n}) drills `stable - aarch64-darwin` (8m 20s)" in sec
+    # RED against a bare `_eff_floor_s` render: it quoted the 9m 20s high mode, above the header.
+    assert "9m 20s" not in sec
