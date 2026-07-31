@@ -49,9 +49,38 @@ def _decloak_parts(parts: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def iter_cloaked_files(name: str):
-    """Yield every cloaked file path under fixture ``name`` (sorted, stable)."""
+    """Return every cloaked file path under fixture ``name`` (sorted, stable)."""
     base = _SRC / name
     return sorted(p for p in base.rglob("*") if p.is_file())
+
+
+_WORKFLOW_SUFFIXES = (".yml", ".yaml")
+
+
+def scan_uncloaked(skill_dir: Path, fixtures_dir: Path) -> dict[str, list[str]]:
+    """Find cloak violations under a skill tree — the shape registry scanners
+    attribute to this repo.
+
+    Returns ``{"github": [...], "bare_workflow": [...]}`` (paths relative to
+    ``skill_dir`` / ``fixtures_dir`` respectively): any path segment equal to
+    ``.github`` anywhere under ``skill_dir``, and any bare workflow-parseable
+    file (``*.yml``/``*.yaml``) under ``fixtures_dir``. Both empty => fully
+    cloaked. Shared by the shipped whole-tree guard and its negative
+    proof-of-detection test, so the detection logic itself is pinned and cannot
+    be silently neutered by a refactor.
+    """
+    github = sorted(
+        str(p.relative_to(skill_dir))
+        for p in skill_dir.rglob("*")
+        if "__pycache__" not in p.parts
+        and _ORIG_SEGMENT in p.relative_to(skill_dir).parts
+    )
+    bare_workflow = sorted(
+        str(p.relative_to(fixtures_dir))
+        for p in fixtures_dir.rglob("*")
+        if p.is_file() and p.suffix in _WORKFLOW_SUFFIXES
+    )
+    return {"github": github, "bare_workflow": bare_workflow}
 
 
 def materialize(name: str, dest: Path) -> Path:

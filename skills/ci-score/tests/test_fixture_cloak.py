@@ -28,12 +28,12 @@ from _fixture_checkouts import (
     iter_cloaked_files,
     load_manifest,
     materialize,
+    scan_uncloaked,
 )
 
 _SRC = Path(__file__).resolve().parent / "fixtures" / "checkouts-src"
 _SKILL_DIR = Path(__file__).resolve().parents[1]
 _FIXTURES = _SRC.parent
-_WORKFLOW_SUFFIXES = (".yml", ".yaml")
 
 
 def _sha256(b: bytes) -> str:
@@ -89,23 +89,56 @@ def test_no_uncloaked_workflow_shape_anywhere_under_skill():
     only workflow-shaped fixtures that ship must carry the ``.fixture`` cloak
     suffix. ci-score ships zero real workflow files, so both sets are empty.
     """
-    github_hits = sorted(
-        str(p.relative_to(_SKILL_DIR))
-        for p in _SKILL_DIR.rglob("*")
-        if "__pycache__" not in p.parts
-        and ".github" in p.relative_to(_SKILL_DIR).parts
-    )
-    assert not github_hits, (
+    violations = scan_uncloaked(_SKILL_DIR, _FIXTURES)
+    assert not violations["github"], (
         "un-cloaked '.github' path segment(s) under the skill — registry "
-        f"scanners attribute these workflows to this repo: {github_hits}"
+        f"scanners attribute these workflows to this repo: {violations['github']}"
+    )
+    assert not violations["bare_workflow"], (
+        "bare workflow-parseable fixture file(s) — must carry the '.fixture' "
+        f"cloak suffix so no shipped path is a raw workflow: "
+        f"{violations['bare_workflow']}"
     )
 
-    bare_workflow = sorted(
-        str(p.relative_to(_FIXTURES))
-        for p in _FIXTURES.rglob("*")
-        if p.is_file() and p.suffix in _WORKFLOW_SUFFIXES
+
+def test_cloak_scan_actually_detects_violations(tmp_path):
+    """Proof-of-detection for the whole-tree guard above: on a synthetic tree
+    that DOES carry the scanner-attributable shapes, ``scan_uncloaked`` must
+    flag them — so a future refactor that silently neuters the detection (e.g.
+    scoping the walk to the wrong root, or dropping the ``.github`` membership
+    test) turns this red instead of passing forever on a clean tree."""
+    skill = tmp_path / "skill"
+    fixtures = skill / "tests" / "fixtures"
+    # a new un-cloaked third-party checkout — the realistic regression
+    new_wf = fixtures / "checkouts-src" / "newctl" / ".github" / "workflows"
+    new_wf.mkdir(parents=True)
+    (new_wf / "ci.yml").write_text("name: ci\n", encoding="utf-8")
+    # a bare workflow file dropped elsewhere under the fixtures tree
+    corpora = fixtures / "corpora"
+    corpora.mkdir(parents=True)
+    (corpora / "loose.yaml").write_text("on: push\n", encoding="utf-8")
+    # a correctly cloaked file must NOT be flagged
+    cloaked = fixtures / "checkouts-src" / "mastra" / "dot-github" / "workflows"
+    cloaked.mkdir(parents=True)
+    (cloaked / "ci.yml.fixture").write_text("name: ci\n", encoding="utf-8")
+
+    violations = scan_uncloaked(skill, fixtures)
+
+    assert any(
+        v.startswith("tests/fixtures/checkouts-src/newctl/.github")
+        for v in violations["github"]
+    ), violations["github"]
+    assert "corpora/loose.yaml" in violations["bare_workflow"], (
+        violations["bare_workflow"]
     )
-    assert not bare_workflow, (
-        "bare workflow-parseable fixture file(s) — must carry the '.fixture' "
-        f"cloak suffix so no shipped path is a raw workflow: {bare_workflow}"
-    )
+    # the cloaked file trips neither check
+    assert not any("mastra" in v for v in violations["github"])
+    assert not any("ci.yml.fixture" in v for v in violations["bare_workflow"])
+
+    # and a fully-cloaked tree yields no violations at all
+    (new_wf / "ci.yml").unlink()
+    new_wf.rmdir()
+    new_wf.parent.rmdir()  # remove the .github dir
+    (corpora / "loose.yaml").unlink()
+    clean = scan_uncloaked(skill, fixtures)
+    assert clean == {"github": [], "bare_workflow": []}, clean
