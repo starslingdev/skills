@@ -97,17 +97,19 @@ unversioned and updates by reinstall from `main`.
   re-ranking it would desync the headline from its stamp and break
   `verify_report.check_headline_slowest_matches_stamp` — a joint re-rank is
   genuinely unsafe. Instead the role line keeps the stamp-consistent p50 pick and
-  now DISCLOSES the true ceiling beside it: when a different **file-backed**
-  concurrent check's effective (bimodal slow-mode) floor exceeds `X`'s p50, it
-  names that check as the one that sets the wall-clock floor on slow-mode PRs
-  (`_binding_floor`, the same `_eff_floor_s` selector the per-pole floor note and
-  the spine-drop verifier use). The clause fires for TUNABLE (file-backed) floors
-  only — the reader is told to attack the named check, and a file-backed binding
-  floor is always disclosed by the pole's own floor note (the phrasing the spine
-  parser reads). A MANAGED/external binding floor (no workflow file) stays with
-  `_floor_note`, which discloses it via its dedicated "no workflow file to speed up
-  here" phrasing; this clause simply doesn't fire there (byte-identical to `main`),
-  so it adds no silent spine drop and leaves committed example reports valid.
+  now handles the true ceiling beside it via `_binding_floor` (the same
+  `_eff_floor_s` selector the per-pole floor note and the spine-drop verifier use)
+  so `X` is NEVER credited with a floor a slower sibling actually sets: (a) when a
+  different **file-backed** concurrent check's effective (bimodal slow-mode) floor
+  exceeds `X`'s p50, it names that TUNABLE check as the one that sets the
+  wall-clock floor on slow-mode PRs (the reader is told to attack it; a file-backed
+  floor is disclosed by the pole's own floor note, the phrasing the spine parser
+  reads); (b) when the check that out-floors `X` is MANAGED/external (no workflow
+  file — not tunable), the role line DROPS the floor claim entirely rather than
+  mis-crediting `X`, and `_floor_note` sets the floor straight via its dedicated
+  "no workflow file to speed up here" phrasing; (c) when nothing out-floors `X`,
+  it keeps the plain "sets the wall-clock floor". Leaves committed example reports
+  valid (full suite green, no re-render required).
 
 - **2026-07-30** — **A below-gate pole names the check that actually caps it —
   the effective floor, not the p50-slowest sibling.** A drilled pole that runs

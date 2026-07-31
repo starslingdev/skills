@@ -8498,39 +8498,41 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 # wall-clock floor (`not floor_lowered`), consult `_binding_floor` — the SAME
                 # bimodal-aware `_eff_floor_s` selector every per-pole floor path and the
                 # spine-drop verifier use — over the concurrent set (the pole itself excluded,
-                # mirroring `_floor_note`). If a DIFFERENT check's effective (bimodal slow-mode)
-                # floor exceeds `floor_name`'s p50, THAT check — not `floor_name` — sets the
-                # wall-clock floor on slow-mode PRs; name it, rather than silently crediting the
-                # p50-slowest sibling with a floor a slower bimodal sibling actually sets.
+                # mirroring `_floor_note`). `_others` is the FULL concurrent set minus the gate
+                # (managed checks INCLUDED), exactly `_floor_note`'s pool, so `_bf` is the SAME
+                # binding floor `_floor_note` computes — the two can never name different checks as
+                # the cap.
                 #
-                # `_others` is the FULL concurrent set minus the gate (managed checks INCLUDED),
-                # exactly `_floor_note`'s pool, so `_bf` here is the SAME binding floor
-                # `_floor_note` computes — the two can never name different checks as the cap.
-                #
-                # But FIRE only when that binding floor is FILE-BACKED (greptile P1). The role line
-                # frames the named check as the one to attack ("sets the wall-clock floor on
-                # slow-mode PRs"), so it must be a tunable check the reader can act on — one with a
-                # `workflow_file`. When the true binding floor is a MANAGED/external check (no
-                # `workflow_file`), `_floor_note` owns its disclosure via the dedicated "no
-                # workflow file to speed up here `X`" phrasing (the form
-                # `verify_report._SPINE_FLOOR_NAME_RE` recognizes); crediting it in THIS clause
-                # would mis-frame an untunable check as actionable and — since this clause's
-                # phrasing is NOT one the spine parser reads — name a ceiling the parser can't
-                # confirm is disclosed. Suppressing the clause there keeps the managed case
-                # byte-identical to `main` and makes the "already disclosed by `_floor_note`"
-                # guarantee hold for every check this clause names.
+                # Three outcomes, so `floor_name` is NEVER credited with a floor a slower sibling
+                # actually sets (greptile: "managed floor is misattributed"):
+                #   (a) `_bf` out-floors `floor_name` AND is FILE-BACKED → name it as the tunable
+                #       ceiling to attack ("sets the wall-clock floor on slow-mode PRs"). It is a
+                #       `workflow_file`-backed check, so `_floor_note` discloses it in a form the
+                #       spine parser (`verify_report._SPINE_FLOOR_NAME_RE`) reads.
+                #   (b) `_bf` out-floors `floor_name` but is MANAGED/external (no `workflow_file`)
+                #       → DROP the floor claim entirely (`_sets_floor = ""`). We must not credit
+                #       `floor_name` (a slower check genuinely caps the merge), but must not frame
+                #       an untunable managed check as attackable here either — `_floor_note` owns
+                #       the managed cap's disclosure via its dedicated "no workflow file to speed up
+                #       here `X`" phrasing. So the role line just names the slowest TYPICAL check
+                #       and stays silent on the floor, which `_floor_note` sets straight.
+                #   (c) nothing out-floors `floor_name` → it genuinely sets the floor; keep the
+                #       plain ", which sets the wall-clock floor" (as before).
                 _others = [c for c in floor_pool
                            if _clean_label(_check_name(c)) != gate_check]
                 _bf = (_binding_floor(_others, p.get("_cooccur"),
                                       int(p.get("_gating_n") or 0))
                        if (not floor_lowered and _others) else None)
-                if (_bf is not None and str(_bf.get("workflow_file") or "")
-                        and _clean_label(_check_name(_bf)) != floor_name
-                        and _eff_floor_s(_bf) > (slowest_p50 or 0.0) + 0.5):
+                _bf_outfloors = (_bf is not None
+                                 and _clean_label(_check_name(_bf)) != floor_name
+                                 and _eff_floor_s(_bf) > (slowest_p50 or 0.0) + 0.5)
+                if _bf_outfloors and str(_bf.get("workflow_file") or ""):
                     _bf_name = _clean_label(_check_name(_bf))
                     _sets_floor = (f"; but `{_bf_name}`'s bimodal slow mode "
                                    f"(~{_clock(_eff_floor_s(_bf))}) runs longer, so it — not "
                                    f"`{floor_name}` — sets the wall-clock floor on slow-mode PRs")
+                elif _bf_outfloors:
+                    _sets_floor = ""   # managed check out-floors floor_name; _floor_note names it
                 else:
                     _sets_floor = "" if floor_lowered else ", which sets the wall-clock floor"
                 role = (f"**The check most PRs gate on.** A typical PR waits on this most "

@@ -5682,14 +5682,16 @@ def test_frequency_gate_role_line_discloses_bimodal_effective_floor():
     assert "`flaky`" in md
 
 
-def test_frequency_gate_role_line_suppresses_disclosure_for_managed_floor():
-    # Issue #22 class, site B — the managed-floor edge (greptile P1). The disclosure clause frames
-    # the named check as the one to ATTACK ("sets the wall-clock floor on slow-mode PRs"), so it
-    # must be a tunable, file-backed check. When the binding floor is a MANAGED/external check (no
-    # `workflow_file`), the clause must NOT fire — `_floor_note` owns the managed floor's
-    # disclosure via its own "no workflow file to speed up here `X`" phrasing (the form the spine
-    # parser reads), and this clause's phrasing is not one the parser recognizes. Same fixture as
-    # the file-backed test, but `flaky` carries NO `workflow_file`.
+def test_frequency_gate_role_line_managed_floor_drops_credit_not_misattributed():
+    # Issue #22 class, site B — the managed-floor edge (greptile). The disclosure clause frames the
+    # named check as the one to ATTACK ("sets the wall-clock floor on slow-mode PRs"), so it must be
+    # a tunable, file-backed check. When the binding floor is a MANAGED/external check (no
+    # `workflow_file`) that out-floors `floor_name`, the role line must NOT name it as attackable —
+    # but it must ALSO NOT credit `floor_name` (the lower p50 sibling) with setting the wall-clock
+    # floor, because the managed check genuinely caps the merge higher. So the role line names the
+    # slowest TYPICAL check and stays SILENT on the floor; `_floor_note` sets it straight via its own
+    # "no workflow file to speed up here `X`" phrasing (the form the spine parser reads). Same fixture
+    # as the file-backed test, but `flaky` carries NO `workflow_file`.
     doc = _doc_one_pole()
     cp = doc["pr_critical_path"]
     cp["checks"] = [
@@ -5706,13 +5708,16 @@ def test_frequency_gate_role_line_suppresses_disclosure_for_managed_floor():
     md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {},
                    {"pipeline": "https://github.com/o/r/actions/runs/1"}, "2026-06-08")
     role = next(l for l in md.split("\n") if "The check most PRs gate on." in l)
-    # The p50 pick is unchanged; the clause falls back to the plain wording (byte-identical to a
-    # world with no bimodal floor at all — the same as `main` for a managed binding floor).
-    assert "the slowest concurrent check is `heavy` (~15m 00s), which sets the wall-clock floor." \
-        in role
-    # The managed check is NOT credited in the role line (the clause is suppressed).
+    # `heavy` is still named the slowest concurrent (typical) check — the stamp-consistent p50 pick.
+    assert "the slowest concurrent check is `heavy` (~15m 00s)" in role
+    # But `heavy` is NOT credited with setting the floor (the managed `flaky` out-floors it), and
+    # the managed check is NOT framed as attackable here. The role line stays SILENT on the floor.
+    # (Spine disclosure of a managed binding floor is `_floor_note`'s responsibility when it renders
+    # — the pre-existing Class A #6 behavior, unchanged and out of this role-line clause's scope.)
+    assert "which sets the wall-clock floor" not in role
     assert "bimodal slow mode" not in role
-    assert "sets the wall-clock floor on slow-mode PRs" not in role
+    # The role line ends cleanly after the p50 pick (no dangling connective, no floor claim).
+    assert "the slowest concurrent check is `heavy` (~15m 00s)." in role
 
 
 def test_headline_floor_excludes_partial_presence_slowest_check():
