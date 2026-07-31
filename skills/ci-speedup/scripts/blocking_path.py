@@ -8538,8 +8538,19 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 _bf = (_binding_floor(_others, p.get("_cooccur"),
                                       int(p.get("_gating_n") or 0))
                        if (not floor_lowered and _others) else None)
-                _bf_hd = _pole_headline(_bf)[0] if _bf is not None else 0.0
-                _bf_outfloors = (_bf is not None
+                # `_bf_caveat` is non-empty ONLY when `_pole_headline`'s bimodal override fired —
+                # `_bf` is a genuine fast-median bimodal whose SLOW mode is a hidden ceiling
+                # (`_bf_hd` == that slow mode). Require it: the clause's wording asserts a "bimodal
+                # slow mode … on slow-mode PRs", so it must NOT fire for a UNIMODAL `_bf` whose
+                # plain p50 merely out-ranks `floor_name` (a heavy path-conditional/minority check
+                # from `floor_pool` that isn't in the typical `src` — the lightdash `E2E` class).
+                # Such a check doesn't run on a TYPICAL PR, so it does not out-floor the typical
+                # wait the role line describes; `floor_name` genuinely sets that floor (outcome c),
+                # and the heavy check's own gating is disclosed on its DRILLED pole, not here.
+                # Without this guard the clause would print "bimodal slow mode … on slow-mode PRs"
+                # for a check that is neither (silent-failure-hunter).
+                _bf_hd, _bf_caveat = _pole_headline(_bf) if _bf is not None else (0.0, "")
+                _bf_outfloors = (_bf is not None and bool(_bf_caveat)
                                  and _clean_label(_check_name(_bf)) != floor_name
                                  and _bf_hd > (slowest_p50 or 0.0) + 0.5)
                 if _bf_outfloors and str(_bf.get("workflow_file") or ""):

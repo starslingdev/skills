@@ -5755,6 +5755,49 @@ def test_frequency_gate_role_line_ignores_degenerate_bimodal_floor():
         assert "20m 00s" not in role, (_bad_bimodal, role)
 
 
+def test_frequency_gate_role_line_never_calls_a_unimodal_floor_bimodal():
+    # Issue #22 class, site B — the UNIMODAL out-flooring edge (silent-failure-hunter). The
+    # clause's wording asserts "bimodal slow mode ... on slow-mode PRs", so it must fire ONLY when
+    # `_bf` is a genuine fast-median bimodal (the `_pole_headline` override fired). A heavy
+    # path-conditional/minority check drawn from the full floor pool (the lightdash `E2E` class)
+    # can be the pole's BINDING FLOOR yet be UNIMODAL: its blended p50 out-ranks the slowest
+    # TYPICAL check, but it has no slow MODE and it doesn't run on a typical PR. The role line must
+    # credit the slowest typical check (`base`) with the typical wall-clock floor and NOT print a
+    # phantom "bimodal slow mode" for the unimodal `E2E` (whose own gating is disclosed on its
+    # drilled pole). `E2E`'s per-PR values sit BELOW the gate on the gate's own gating PRs (so the
+    # gate wins them and `E2E` co-occurs as a floor candidate) while its stamped p50 is high.
+    doc = _doc_one_pole()
+    cp = doc["pr_critical_path"]
+    cp["checks"] = [
+        {"name": "tests-web", "p50_s": 255.0, "present_on": 20,
+         "workflow_file": ".github/workflows/pipeline.yml"},
+        {"name": "base", "p50_s": 400.0, "present_on": 20,
+         "workflow_file": ".github/workflows/base.yml"},
+        {"name": "E2E", "p50_s": 1000.0, "present_on": 6,          # UNIMODAL, minority-presence
+         "workflow_file": ".github/workflows/e2e.yml"},
+        {"name": "lint", "p50_s": 100.0, "present_on": 20},
+    ]
+    pops = []
+    for i in range(20):
+        if i < 6:   # tests-web (the gate) wins; E2E present but LOW-valued here → co-occurs
+            pops.append([0.05, [["tests-web", 700.0], ["base", 400.0],
+                                ["E2E", 300.0], ["lint", 100.0]]])
+        else:       # base wins; E2E absent → E2E is a global minority (6/20)
+            pops.append([0.05, [["base", 450.0], ["tests-web", 255.0], ["lint", 100.0]]])
+    cp["populations"] = pops
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {},
+                   {"pipeline": "https://github.com/o/r/actions/runs/1"}, "2026-06-08")
+    role = next(l for l in md.split("\n") if "The check most PRs gate on." in l)
+    # `base` (the slowest TYPICAL check) genuinely sets the typical floor; plain phrasing stands.
+    assert "the slowest concurrent check is `base` (~6m 40s), which sets the wall-clock floor." \
+        in role, role
+    # RED against the pre-guard renderer: it printed "`E2E`'s bimodal slow mode (~16m 40s) ... on
+    # slow-mode PRs" — false on both counts (`E2E` is unimodal and runs on a minority, not a "slow
+    # mode"). The clause must not name `E2E` at all here.
+    assert "bimodal slow mode" not in role, role
+    assert "`E2E`" not in role, role
+
+
 def test_headline_floor_excludes_partial_presence_slowest_check():
     # OneSignal/OneSignal-Android-SDK class: the slowest TYPICAL check (`Claude Code Review`,
     # a managed app check at 944.5s) ran on only 12/20 PRs; `build` (619.5s) ran on 20/20.
@@ -7228,3 +7271,28 @@ def test_aggregation_gate_pointer_agrees_with_slow_cluster_median_pole_header():
     assert f"[Long pole {n}](#pole-{n}) drills `stable - aarch64-darwin` (8m 20s)" in sec
     # RED against a bare `_eff_floor_s` render: it quoted the 9m 20s high mode, above the header.
     assert "9m 20s" not in sec
+
+
+def test_aggregation_gate_cross_job_pick_ranks_by_header_not_p50():
+    # Issue #22 class, site A — guards the ACROSS-JOBS `slowest` comparison (`_agg_gate_shape`
+    # second `max`) INDEPENDENTLY of the within-matrix `top` pick (pr-test-analyzer). A non-matrix
+    # `build` job (p50 550s, no bimodal → header 550s) competes across jobs with a matrix leg
+    # `stable - x86_64-linux` (p50 300s, fast-median bimodal high 900s → header 900s). By bare p50
+    # `build` (550) out-ranks the leg (300) and would be named the lever at 9m 10s; by header the
+    # leg (900) is the true ceiling and must be named at 15m 00s. A regression that dropped
+    # `_pole_headline` from only the cross-job leg would be invisible to the other Site A tests
+    # (there the bimodal winner also wins on bare p50), so this fixture is the distinguishing case.
+    doc = _agg_gate_doc()
+    for c in doc["pr_critical_path"]["checks"]:
+        if c["name"] == "build":
+            c["p50_s"] = 550.0
+        if c["name"] == "stable - x86_64-linux":
+            c["p50_s"] = 300.0
+            c["bimodal"] = {"low_p50_s": 180.0, "high_p50_s": 900.0, "slow_frac": 0.4}
+    md = bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    sec = _pole_section(md, "thank you, build")
+    # GREEN: the header-ranked cross-job winner is named at its slow-mode time.
+    assert "slowest measured member is `stable - x86_64-linux` (~15m 00s)" in sec, sec
+    # RED against a bare-p50 cross-job comparison: it named `build` at its 9m 10s p50.
+    assert "`build`" not in sec, sec
+    assert "9m 10s" not in sec, sec

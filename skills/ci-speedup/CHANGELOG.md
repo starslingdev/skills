@@ -110,7 +110,13 @@ unversioned and updates by reinstall from `main`.
   `_pole_headline` (the seconds the named check's own drilled header shows), not
   frac-blind `_eff_floor_s`, so the quoted time matches the check's own drill and a
   degenerate bimodal (missing `low_p50_s`/`slow_frac`) can't fire a phantom
-  slow-mode disclosure. The clause adds no new spine-disclosure obligation:
+  slow-mode disclosure. The clause fires ONLY when `_pole_headline`'s bimodal
+  override actually fired (a genuine fast-median slow mode), so its "bimodal slow
+  mode … on slow-mode PRs" wording can never be printed for a UNIMODAL heavy
+  path-conditional check whose blended p50 merely out-ranks the slowest typical
+  check (the lightdash `E2E` class — such a check doesn't run on a typical PR, so
+  the typical floor is the slowest typical check, disclosed on its own drilled
+  pole). The clause adds no new spine-disclosure obligation:
   `check_spine_heavy_check_disclosed` keys on drilled poles' binding floors
   (independent of this clause text) and `verify_report` is untouched, so a
   file-backed ceiling that must be disclosed is disclosed by its own drilled-pole
