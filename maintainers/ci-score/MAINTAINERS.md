@@ -18,9 +18,23 @@ publishing graded analyses of named third-party repositories would put those
 third-party grades into public git history.
 
 `tests/test_ci_score_install_surface.py` makes that boundary a PASS/FAIL
-invariant: it fails if calibration data, specs, dogfood/loop captures, or any
-collected third-party grade table appear under the installable
-`skills/ci-score/` tree.
+invariant: it fails if a calibration/specs/dogfood/loop directory, a
+`.ci-score-*` runtime-capture dir, a maintainer-data file (a `calibration` /
+`dry-run` / `collected` / `receipts` / `grade` / `corpus` / `dogfood` name), or a
+third-party **grade table** (a markdown row pairing a Repo/Repository column with
+a Score/Grade column) appears under the installable `skills/ci-score/` tree. A
+positive-control test asserts each detector actually fires, so the guard cannot
+pass vacuously if a pattern is later broken.
+
+**Scope of the "no third-party grades" boundary.** What stays out is the bulk
+calibration **corpus** — the multi-repo dry-run grade *tables* and collected
+per-repo receipts. It is *not* a blanket ban on any score of any public repo
+appearing in the tree: the frozen `references/ci-score-spec.json` decision record
+and `skills/ci-score/CHANGELOG.md` legitimately cite a handful of public
+positive-control reference scores (e.g. the two calibration anchors) as
+governance receipts for version bumps. Those are part of the frozen registry, are
+computed from public CI configuration, and ship by design — the install-surface
+invariant intentionally does not flag them.
 
 ## The frozen registry
 
