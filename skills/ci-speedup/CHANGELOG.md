@@ -90,7 +90,10 @@ unversioned and updates by reinstall from `main`.
   role line now ranks concurrent checks by `_eff_floor_s` and shows the effective
   floor duration, naming the exact capping leg; `verify_report`'s
   `_SPINE_FLOOR_NAME_RE` now recognizes the "Runs concurrently behind `X`"
-  phrasing as a spine disclosure so a floor named only there counts.
+  phrasing as a spine disclosure so a floor named only there counts. The
+  `pole_role_line` claim's field key is `lead_floor` (was `lead_p50`): the value
+  is the effective floor (a slow mode, not necessarily a median), so the old key
+  misnamed it.
 
 - **2026-07-28** — **An aggregation-gate pole tells the honest upstream story
   instead of prompting the reader to optimize a 3-second no-op** (issue #1). Many

@@ -8532,7 +8532,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
             # bare p50. Selecting by p50 named the p50-slowest sibling of a matrix while
             # the check that actually CAPS the wait was a DIFFERENT leg whose bimodal SLOW
             # mode is the effective ceiling (e.g. `guard shard 4/4`: blended p50 below
-            # `1/4` but slow-mode above it). The report then named a shard that isn't the
+            # `1/4` but slow-mode above `1/4`'s). The report then named a shard that isn't the
             # binding floor, so the floor went undisclosed and verify_report FAILed.
             above = sorted(
                 (c for c in src
@@ -8545,12 +8545,16 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 _lead_floor = _clock(_eff_floor_s(lead))
                 # Claims layer (pole_role_line family): `subject` is the interpolated
                 # lead-check name (the concurrent check this pole runs behind), valued at
-                # its effective floor. Wrap in `_strip_emdashes` for parity with the
-                # headline claims, so the manifest's `rendered` matches the em-dash-stripped
-                # report text; the report-wide strip is idempotent, so this stays byte-identical.
+                # its effective floor. The field key is `lead_floor` (NOT `lead_p50`): the
+                # value is `_eff_floor_s(lead)` — the bimodal-aware `max(p50, high_p50_s)`,
+                # which can be the slow mode, not the median — so a `p50` key would misname
+                # it and invite a consumer to read a floor as a median. Wrap in
+                # `_strip_emdashes` for parity with the headline claims, so the manifest's
+                # `rendered` matches the em-dash-stripped report text; the report-wide strip
+                # is idempotent, so this stays byte-identical.
                 role = cs.add(claims.Claim(
                     kind="pole_role_line", subject=_cn(lead),
-                    fields={"lead_p50": _lead_floor, "dur": dur},
+                    fields={"lead_floor": _lead_floor, "dur": dur},
                     rendered=_strip_emdashes(
                         f"Runs concurrently behind `{_cn(lead)}` "
                         f"({_lead_floor}); it becomes the gate only "

@@ -2934,6 +2934,33 @@ def test_sibling_floor_disclosure_passes_verify_report_end_to_end(tmp_path: Path
     assert "web-tests (shard 4)" in fail_line   # names the exact dropped binding floor
 
 
+def test_below_gate_pole_role_admits_sibling_below_headline_when_slow_mode_exceeds_it():
+    # Predicate-change regression (the OTHER half of the fix): the fix switched the role line's
+    # membership FILTER — not only the sort key — from bare `p50_s > head_s` to
+    # `_eff_floor_s(c) > head_s`. A concurrent sibling whose BLENDED p50 sits BELOW the below-gate
+    # pole's headline (so the OLD filter EXCLUDED it outright, dropping it from `above` entirely)
+    # but whose bimodal SLOW mode exceeds that headline is now admitted and, as the effective-
+    # slowest, named. Pre-fix, such a check was invisible to the role line and the pole named the
+    # p50-slowest ADMITTED sibling instead — a strictly worse miss than the reordering case, since
+    # the true cap was excluded, not merely out-ranked. Generic shapes only.
+    doc = _doc_sibling_floor()
+    # `lint-heavy`: a different-family concurrent check whose blended p50 (200s) is BELOW the
+    # below-gate pole `typecheck`'s headline (206s) — so `p50 > head_s` is FALSE — but whose slow
+    # mode (260s / 4m 20s) is above it AND above every shard's effective floor (shard 4 == 245s).
+    # It must be a TYPICAL-PR check (present in `populations`) to reach the role line's candidate
+    # set at all, so add it to every sampled PR at a per-PR value that never unseats the winner.
+    cp = doc["pr_critical_path"]
+    cp["checks"].append(
+        {"name": "lint-heavy", "p50_s": 200.0, "workflow_file": ".github/workflows/ci.yml",
+         "bimodal": {"low_p50_s": 150.0, "high_p50_s": 260.0, "slow_frac": 0.55}})
+    for _share, cks in cp["populations"]:
+        cks.append(["lint-heavy", 200.0])
+    md = bp.render(doc, {}, {}, {}, "2026-06-08")
+    assert "Runs concurrently behind `lint-heavy` (4m 20s)" in md   # admitted by the eff-floor filter
+    assert "Runs concurrently behind `web-tests (shard 4)`" not in md  # no longer the effective max
+    assert "Runs concurrently behind `web-tests (shard 1)`" not in md  # never the p50-slowest pick
+
+
 def test_unmatched_pole_still_gets_crossrun_check_and_agent_prompt():
     # A pole whose log matches NO catalog detector must still be a complete finding:
     # a cross-run check on its dominant step + an agent prompt - not a bare timeline.

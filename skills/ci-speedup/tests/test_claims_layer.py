@@ -144,7 +144,7 @@ def test_claimset_round_trip_add_returns_rendered_and_to_json_serializes_both():
                       rendered="**3m 17s until all checks finish** - `CI / test` is the "
                                "slowest check a typical PR waits on. ")
     c2 = claims.Claim(kind="pole_role_line", subject="Build",
-                      fields={"lead_p50": "6m 58s"},
+                      fields={"lead_floor": "6m 58s"},
                       rendered="Runs concurrently behind `Build` (6m 58s); ...")
     # add() returns the exact rendered string (so a call site can inline it).
     assert cs.add(c1) == c1.rendered
@@ -157,7 +157,7 @@ def test_claimset_round_trip_add_returns_rendered_and_to_json_serializes_both():
     assert out["claims"][0] == {"kind": "headline_slowest", "subject": "CI / test",
                                 "fields": {"merge_dur": "3m 17s"}, "rendered": c1.rendered}
     assert out["claims"][1] == {"kind": "pole_role_line", "subject": "Build",
-                                "fields": {"lead_p50": "6m 58s"}, "rendered": c2.rendered}
+                                "fields": {"lead_floor": "6m 58s"}, "rendered": c2.rendered}
     # round-trips through JSON unchanged (it is what gets written to disk).
     assert json.loads(json.dumps(out)) == out
 
