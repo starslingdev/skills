@@ -6,11 +6,15 @@ typosquat host proving the repo-slug parser rejects look-alikes — shipped
 as a literal domain in a docstring, a test table, and the changelog. The
 scanner read the antibody as the virus.
 
-This guard scans every git-tracked text file for brand-prefix look-alike
-domains: a well-known host name followed by FURTHER domain labels (the
-typosquat shape, e.g. a domain that merely begins with a trusted host's
-name). Tests that need such a string must construct it at runtime from
-concatenated parts; prose must describe the class without naming a domain.
+This guard scans git-tracked text files (by a suffix allowlist covering
+every text type the tree actually ships; extensionless files like the git
+hook are outside it) for brand-prefix look-alike domains: one of the
+trusted hosts THIS REPO references, followed by FURTHER domain labels
+(the typosquat shape). The brand/TLD lists are deliberately bounded to
+those hosts — a generic scanner is the registry's job; this guard exists
+to keep OUR examples from tripping it. Tests that need such a string must
+construct it at runtime from concatenated parts; prose must describe the
+class without naming a domain.
 
 The detector carries its own positive control (the fail-open lesson from
 the launch's install-surface review): a runtime-constructed sample must
@@ -48,12 +52,22 @@ def _tracked_text_files() -> list[Path]:
 
 
 def test_detector_fires_on_a_constructed_lookalike():
-    """Positive control: the detector must match a runtime-constructed
-    look-alike, or every scan below is vacuous."""
-    sample = "https://" + "github.com" + ".not-really" + ".test" + "/x"
-    assert _LOOKALIKE.search(sample), "look-alike detector no longer matches its own class"
+    """Positive controls: every brand arm, more than one TLD arm, and a
+    MIXED-CASE sample (defends re.IGNORECASE) must match, or the scan below
+    is vacuous against that regression. Each sample is runtime-constructed."""
+    brands = ["github.com", "gitlab.com", "bitbucket.org", "npmjs.com",
+              "pypi.org", "anthropic.com", "starsling.dev"]
+    for brand in brands:
+        sample = "https://" + brand + ".not-really" + ".test" + "/x"
+        assert _LOOKALIKE.search(sample), f"detector lost the {brand} arm"
+    mixed = "https://" + "GitHub.Com" + ".Not-Really" + ".Test" + "/x"
+    assert _LOOKALIKE.search(mixed), "detector lost case-insensitivity"
+    io_arm = "https://" + "starsling.io" + ".not-really" + ".test"
+    assert _LOOKALIKE.search(io_arm), "detector lost the io TLD arm"
     benign = "https://github.com/starslingdev/skills"
     assert not _LOOKALIKE.search(benign), "detector must not flag the real host"
+    cctld = "https://" + "github.com" + ".au" + "/owner/repo"
+    assert not _LOOKALIKE.search(cctld), "bare ccTLD-style host must not flag"
 
 
 def test_no_lookalike_domains_in_tracked_files():
