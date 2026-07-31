@@ -97,19 +97,25 @@ unversioned and updates by reinstall from `main`.
   re-ranking it would desync the headline from its stamp and break
   `verify_report.check_headline_slowest_matches_stamp` — a joint re-rank is
   genuinely unsafe. Instead the role line keeps the stamp-consistent p50 pick and
-  now handles the true ceiling beside it via `_binding_floor` (the same
-  `_eff_floor_s` selector the per-pole floor note and the spine-drop verifier use)
-  so `X` is NEVER credited with a floor a slower sibling actually sets: (a) when a
-  different **file-backed** concurrent check's effective (bimodal slow-mode) floor
-  exceeds `X`'s p50, it names that TUNABLE check as the one that sets the
-  wall-clock floor on slow-mode PRs (the reader is told to attack it; a file-backed
-  floor is disclosed by the pole's own floor note, the phrasing the spine parser
-  reads); (b) when the check that out-floors `X` is MANAGED/external (no workflow
-  file — not tunable), the role line DROPS the floor claim entirely rather than
+  now handles the true ceiling beside it via `_binding_floor` (over the same full
+  concurrent set `_floor_note` uses) so `X` is NEVER credited with a floor a slower
+  sibling actually sets: (a) when a different **file-backed** concurrent check's
+  effective floor exceeds `X`'s p50, it names that TUNABLE check as the one that
+  sets the wall-clock floor on slow-mode PRs (the reader is told to attack it);
+  (b) when the check that out-floors `X` is MANAGED/external (no workflow file —
+  not tunable), the role line DROPS the floor claim entirely rather than
   mis-crediting `X`, and `_floor_note` sets the floor straight via its dedicated
   "no workflow file to speed up here" phrasing; (c) when nothing out-floors `X`,
-  it keeps the plain "sets the wall-clock floor". Leaves committed example reports
-  valid (full suite green, no re-render required).
+  it keeps the plain "sets the wall-clock floor". The out-floor test uses
+  `_pole_headline` (the seconds the named check's own drilled header shows), not
+  frac-blind `_eff_floor_s`, so the quoted time matches the check's own drill and a
+  degenerate bimodal (missing `low_p50_s`/`slow_frac`) can't fire a phantom
+  slow-mode disclosure. The clause adds no new spine-disclosure obligation:
+  `check_spine_heavy_check_disclosed` keys on drilled poles' binding floors
+  (independent of this clause text) and `verify_report` is untouched, so a
+  file-backed ceiling that must be disclosed is disclosed by its own drilled-pole
+  header exactly as on `main`. Leaves committed example reports valid (full suite
+  green, no re-render required).
 
 - **2026-07-30** — **A below-gate pole names the check that actually caps it —
   the effective floor, not the p50-slowest sibling.** A drilled pole that runs

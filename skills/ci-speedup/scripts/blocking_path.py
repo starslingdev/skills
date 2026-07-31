@@ -8495,41 +8495,57 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 # the effective floor would desync the headline from its stamp (which is NOT
                 # bimodal-aware), so we keep the p50 pick and instead DISCLOSE the true ceiling
                 # beside it: when we would otherwise credit `floor_name` with setting the
-                # wall-clock floor (`not floor_lowered`), consult `_binding_floor` — the SAME
-                # bimodal-aware `_eff_floor_s` selector every per-pole floor path and the
-                # spine-drop verifier use — over the concurrent set (the pole itself excluded,
-                # mirroring `_floor_note`). `_others` is the FULL concurrent set minus the gate
-                # (managed checks INCLUDED), exactly `_floor_note`'s pool, so `_bf` is the SAME
-                # binding floor `_floor_note` computes — the two can never name different checks as
-                # the cap.
+                # wall-clock floor (`not floor_lowered`), consult `_binding_floor` over the
+                # concurrent set (the pole itself excluded, mirroring `_floor_note`). `_others` is
+                # the FULL concurrent set minus the gate (managed checks INCLUDED), exactly
+                # `_floor_note`'s pool, so `_bf` is the SAME binding floor `_floor_note` computes —
+                # the two can never name different checks as the cap.
+                #
+                # Gate AND quote by `_pole_headline(_bf)[0]` (the seconds `_bf`'s OWN drilled-pole
+                # header would show), NOT frac-blind `_eff_floor_s` — the same choice site A makes.
+                # `_pole_headline` returns the slow mode only for a WELL-FORMED bimodal whose median
+                # sits on the fast cluster (`hi and lo and frac and hi > p50*1.15 and p50 <= mid`),
+                # else the p50. So (i) the quoted duration equals `_bf`'s own header (no "names a
+                # check at a time its drill contradicts"), and (ii) a DEGENERATE bimodal (missing
+                # `low_p50_s`/`slow_frac`, or `slow_frac == 0`) can't fire a phantom "slow mode on
+                # ~0% of runs" — `_eff_floor_s` would, reading only `high_p50_s`.
                 #
                 # Three outcomes, so `floor_name` is NEVER credited with a floor a slower sibling
                 # actually sets (greptile: "managed floor is misattributed"):
                 #   (a) `_bf` out-floors `floor_name` AND is FILE-BACKED → name it as the tunable
-                #       ceiling to attack ("sets the wall-clock floor on slow-mode PRs"). It is a
-                #       `workflow_file`-backed check, so `_floor_note` discloses it in a form the
-                #       spine parser (`verify_report._SPINE_FLOOR_NAME_RE`) reads.
+                #       ceiling to attack ("sets the wall-clock floor on slow-mode PRs").
                 #   (b) `_bf` out-floors `floor_name` but is MANAGED/external (no `workflow_file`)
                 #       → DROP the floor claim entirely (`_sets_floor = ""`). We must not credit
                 #       `floor_name` (a slower check genuinely caps the merge), but must not frame
                 #       an untunable managed check as attackable here either — `_floor_note` owns
                 #       the managed cap's disclosure via its dedicated "no workflow file to speed up
-                #       here `X`" phrasing. So the role line just names the slowest TYPICAL check
-                #       and stays silent on the floor, which `_floor_note` sets straight.
+                #       here `X`" phrasing. So the role line names the slowest TYPICAL check and
+                #       stays silent on the floor, which `_floor_note` sets straight.
                 #   (c) nothing out-floors `floor_name` → it genuinely sets the floor; keep the
                 #       plain ", which sets the wall-clock floor" (as before).
+                #
+                # SPINE-DISCLOSURE NOTE (not a disclosure mechanism of its own). This clause's tail
+                # phrasing is NOT one `verify_report._SPINE_FLOOR_NAME_RE` reads, and it adds no new
+                # spine-disclosure obligation: `check_spine_heavy_check_disclosed` keys on each
+                # DRILLED pole's binding floor re-derived from `populations`, independent of this
+                # text. A file-backed `_bf` that must be disclosed there is disclosed by ITS OWN
+                # drilled-pole header (a heavy concurrent check is normally a pole) — NOT by the gate
+                # pole's `_floor_note`, which is suppressed whenever this clause fires (`binding_s >=
+                # pole_p` for the gate). `verify_report` is untouched by this change, so the
+                # obligation set and the satisfaction set are exactly `main`'s.
                 _others = [c for c in floor_pool
                            if _clean_label(_check_name(c)) != gate_check]
                 _bf = (_binding_floor(_others, p.get("_cooccur"),
                                       int(p.get("_gating_n") or 0))
                        if (not floor_lowered and _others) else None)
+                _bf_hd = _pole_headline(_bf)[0] if _bf is not None else 0.0
                 _bf_outfloors = (_bf is not None
                                  and _clean_label(_check_name(_bf)) != floor_name
-                                 and _eff_floor_s(_bf) > (slowest_p50 or 0.0) + 0.5)
+                                 and _bf_hd > (slowest_p50 or 0.0) + 0.5)
                 if _bf_outfloors and str(_bf.get("workflow_file") or ""):
                     _bf_name = _clean_label(_check_name(_bf))
                     _sets_floor = (f"; but `{_bf_name}`'s bimodal slow mode "
-                                   f"(~{_clock(_eff_floor_s(_bf))}) runs longer, so it — not "
+                                   f"(~{_clock(_bf_hd)}) runs longer, so it — not "
                                    f"`{floor_name}` — sets the wall-clock floor on slow-mode PRs")
                 elif _bf_outfloors:
                     _sets_floor = ""   # managed check out-floors floor_name; _floor_note names it

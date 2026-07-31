@@ -5720,6 +5720,41 @@ def test_frequency_gate_role_line_managed_floor_drops_credit_not_misattributed()
     assert "the slowest concurrent check is `heavy` (~15m 00s)." in role
 
 
+def test_frequency_gate_role_line_ignores_degenerate_bimodal_floor():
+    # Issue #22 class, site B — the degenerate-bimodal edge. The clause gates + quotes by
+    # `_pole_headline(_bf)[0]` (the seconds `_bf`'s own drilled header shows), NOT frac-blind
+    # `_eff_floor_s` (which reads only `high_p50_s`). A malformed bimodal dict — `slow_frac == 0`,
+    # or missing `slow_frac`/`low_p50_s` — has no genuine slow MODE: `_pole_headline` returns the
+    # p50, so the clause must NOT emit a phantom "slow mode on ~0% of runs" disclosure. `flaky`
+    # here is file-backed with a degenerate bimodal (high 1200s but no honest slow mode); its p50
+    # (600s) is below `heavy`'s (900s), so it does not out-floor `heavy` on any honest reading.
+    for _bad_bimodal in ({"low_p50_s": 300.0, "high_p50_s": 1200.0, "slow_frac": 0.0},
+                         {"low_p50_s": 300.0, "high_p50_s": 1200.0},          # missing slow_frac
+                         {"high_p50_s": 1200.0, "slow_frac": 0.4}):           # missing low_p50_s
+        doc = _doc_one_pole()
+        cp = doc["pr_critical_path"]
+        cp["checks"] = [
+            {"name": "tests-web", "p50_s": 255.0,
+             "workflow_file": ".github/workflows/pipeline.yml"},
+            {"name": "heavy", "p50_s": 900.0, "present_on": 20,
+             "workflow_file": ".github/workflows/heavy.yml"},
+            {"name": "flaky", "p50_s": 600.0, "present_on": 20,
+             "workflow_file": ".github/workflows/flaky.yml", "bimodal": _bad_bimodal},
+            {"name": "lint", "p50_s": 100.0, "present_on": 20},
+        ]
+        cp["populations"] = [[0.05, [["heavy", 900.0], ["flaky", 600.0],
+                                     ["tests-web", 255.0], ["lint", 100.0]]]] * 20
+        md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {},
+                       {"pipeline": "https://github.com/o/r/actions/runs/1"}, "2026-06-08")
+        role = next(l for l in md.split("\n") if "The check most PRs gate on." in l)
+        # `heavy` genuinely sets the floor (nothing out-floors it once the degenerate bimodal is
+        # discounted); the plain phrasing stands, and no phantom "20m slow mode" is emitted.
+        assert "the slowest concurrent check is `heavy` (~15m 00s), which sets the wall-clock " \
+            "floor." in role, (_bad_bimodal, role)
+        assert "bimodal slow mode" not in role, (_bad_bimodal, role)
+        assert "20m 00s" not in role, (_bad_bimodal, role)
+
+
 def test_headline_floor_excludes_partial_presence_slowest_check():
     # OneSignal/OneSignal-Android-SDK class: the slowest TYPICAL check (`Claude Code Review`,
     # a managed app check at 944.5s) ran on only 12/20 PRs; `build` (619.5s) ran on 20/20.
