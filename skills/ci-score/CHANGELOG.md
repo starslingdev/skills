@@ -11,6 +11,13 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **Fixed**: the repository-name parser's negative-control example — a fake
+  look-alike host used to prove typosquats are rejected — appeared as a
+  literal domain in a docstring, a test table, and this changelog, and a
+  registry security scan read it as a real malicious URL. The test still
+  exercises the identical attack string (now constructed at runtime); the
+  prose describes the class without naming a domain.
+
 - **2026-07-31** — **Public launch.** Ported the finished skill from the
   pre-public development archive into the public `starslingdev/skills` repo at
   CI Score registry `ci-score-v0.1.3`. The port is the launch: it moves a
@@ -260,7 +267,8 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   now reserves a 2-space right margin for every content row, test-pinned.
   Also hardened in the same pass: `_repo_slug` now recognises `git://`,
   explicit-port, non-`git` scp-user, and mixed-case github.com remotes (and
-  still rejects `github.com.evil.com` look-alikes), the no-remote header cell
+  still rejects look-alike hosts that merely begin with
+  github.com), the no-remote header cell
   no longer falsely asserts "no GitHub remote detected" (an unrecognised URL
   also lands there), a slug-without-commit no longer emits a broken
   `/commit/?` link, and the HEADER invariant's SHA/dirty checks are scoped to

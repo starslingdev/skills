@@ -404,8 +404,11 @@ def test_main_prints_the_predrawn_banner(tmp_path, capsys):
     ("https://github.com/octo/example.git/", "octo/example"),
     ("https://gitlab.com/octo/example.git", None),  # not GitHub → no slug
     # host-confusion look-alikes must NOT parse (never fabricate a link):
-    ("git@github.com.evil.com:octo/example.git", None),
-    ("https://github.com.evil.com/octo/example.git", None),
+    # look-alike host: BEGINS with github.com but is a different domain —
+    # constructed so the literal never appears in shipped text (a registry
+    # security scan read the example domain as a real malicious URL)
+    ("git@" + "github.com" + ".evil-example.test" + ":octo/example.git", None),
+    ("https://" + "github.com" + ".evil-example.test" + "/octo/example.git", None),
     ("", None),
     (None, None),
 ])

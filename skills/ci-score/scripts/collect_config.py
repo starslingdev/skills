@@ -95,8 +95,9 @@ def _repo_slug(root: Path) -> str | None:
     off it. Recognises every common GitHub URL shape — https/ssh/git schemes,
     the scp `user@github.com:owner/repo` form with any user (not just `git`),
     an optional port, an optional `.git`/trailing slash — case-insensitively.
-    A non-github host (gitlab, a `github.com.evil.com` look-alike, an
-    unrecognised form) yields None, so the header never fabricates a link."""
+    A non-github host (gitlab, a look-alike whose name merely BEGINS with
+    github.com, an unrecognised form) yields None, so the header never
+    fabricates a link."""
     url = _git(root, "config", "--get", "remote.origin.url")
     if not url:
         return None
