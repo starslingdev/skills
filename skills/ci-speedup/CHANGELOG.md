@@ -74,6 +74,31 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-07-30** — **Two more floor-ranking sites name the check that actually
+  caps the wait — the effective floor, not the p50-slowest sibling** (same class
+  as #22's below-gate role line, found by its floor-semantics audit). (1) The
+  SUCCESS-AGGREGATION-GATE pole names its slowest measured `needs:` upstream
+  member as the lever; it ranked candidates — both within a matrix job's legs and
+  across jobs — by bare `p50_s`, so a leg whose bimodal SLOW mode is the true
+  ceiling but whose blended p50 sits below a faster-median sibling went unnamed,
+  and the "Where the wait actually is" pointer sent the reader to the wrong lever
+  (at a duration smaller than the slow-mode header of the very pole it linked to).
+  Both picks now rank by `_eff_floor_s` and render that effective floor, so the
+  sink, its pointer, and the linked drilled pole all agree. (2) The
+  FREQUENCY-GATE pole's role line ("**The check most PRs gate on.** … the slowest
+  concurrent check is `X`, which sets the wall-clock floor") named `X` from
+  `src[0]`, the p50-slowest typical check. That pick is STAMP-BOUND to the data
+  layer's p50-based `critical_path_check` (which is not bimodal-aware), so
+  re-ranking it would desync the headline from its stamp and break
+  `verify_report.check_headline_slowest_matches_stamp` — a joint re-rank is
+  genuinely unsafe. Instead the role line keeps the stamp-consistent p50 pick and
+  now DISCLOSES the true ceiling beside it: when a different concurrent check's
+  effective (bimodal slow-mode) floor exceeds `X`'s p50, it names that check as
+  the one that sets the wall-clock floor on slow-mode PRs (`_binding_floor`, the
+  same `_eff_floor_s` selector the per-pole floor note and the spine-drop verifier
+  use). The named ceiling is already disclosed by the pole's floor note, so the
+  correction adds no silent spine drop and leaves committed example reports valid.
+
 - **2026-07-30** — **A below-gate pole names the check that actually caps it —
   the effective floor, not the p50-slowest sibling.** A drilled pole that runs
   concurrently behind the gate gets a "Runs concurrently behind `X`; it becomes

@@ -883,9 +883,17 @@ def _agg_gate_shape(pole: dict[str, Any], job_graph: dict[str, Any] | None,
         if not matched:
             unmeasured.append(nm)
             continue
-        top = max(matched, key=lambda c: _num(c.get("p50_s")) or 0.0)
-        if slowest is None or ((_num(top.get("p50_s")) or 0.0)
-                               > (_num(slowest.get("p50_s")) or 0.0)):
+        # Rank the upstream members by their EFFECTIVE floor (`_eff_floor_s`, bimodal-aware
+        # `max(p50, high_p50_s)`) — the SAME notion every other floor path and verify_report's
+        # spine-drop check use — NOT the bare p50. Both max() calls: WITHIN a matrix job's legs
+        # (`top`) and ACROSS jobs (`slowest`). Selecting by p50 named the p50-slowest sibling
+        # while the member that actually CAPS the sink's `needs:` wait is the one whose bimodal
+        # SLOW mode is the true ceiling (a matrix leg whose blended p50 sits below a faster-median
+        # sibling but whose slow mode exceeds it) — so the sink pointed the reader at the wrong
+        # lever, and the drilled pole it links to (headlined at its slow mode) showed a longer
+        # time than the sink named (issue #22 class).
+        top = max(matched, key=_eff_floor_s)
+        if slowest is None or _eff_floor_s(top) > _eff_floor_s(slowest):
             slowest = top
     if slowest is None:
         return None
@@ -8418,7 +8426,12 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
             # aggregates. Say that, name the slowest measured upstream member, and (below)
             # render NO drill and NO "optimize this step" prompt for the sink itself.
             _ag_slow = _clean_label(_check_name(_agg["slowest"]))
-            _ag_dur = _clock(_num(_agg["slowest"].get("p50_s")))
+            # Render the member's EFFECTIVE floor (`_eff_floor_s`, the bimodal-aware
+            # `max(p50, high_p50_s)`), not the bare p50 — it MUST agree with the selection above
+            # (which now ranks by effective floor) or the sink would name a member `X` yet quote a
+            # duration SMALLER than an unnamed sibling's p50, and would disagree with the slow-mode
+            # header of the very pole its "Where the wait actually is" pointer links to (issue #22).
+            _ag_dur = _clock(_eff_floor_s(_agg["slowest"]))
             # BOTH caveats compose — they are independent, and neither may silently drop the
             # other. "Runs no work of its own" rests on the measured P50 plus the `needs:`
             # structure whenever no per-step data was captured, so that basis is disclosed on
@@ -8465,7 +8478,36 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 # one "the slowest"; that would contradict the headline's truthful split.
                 # Quote `floor_name`'s OWN time (`slowest_dur`); it only "sets the wall-clock
                 # floor" when it isn't a non-universal check (else a median PR finishes sooner).
-                _sets_floor = "" if floor_lowered else ", which sets the wall-clock floor"
+                #
+                # Effective-floor honesty (issue #22 class). `floor_name`/`slowest_dur` come from
+                # `src[0]` — the p50-slowest TYPICAL check — and are STAMP-BOUND to the data
+                # layer's p50-based `critical_path_check`
+                # (`verify_report.check_headline_slowest_matches_stamp`). Re-ranking THIS pick to
+                # the effective floor would desync the headline from its stamp (which is NOT
+                # bimodal-aware), so we keep the p50 pick and instead DISCLOSE the true ceiling
+                # beside it: when we would otherwise credit `floor_name` with setting the
+                # wall-clock floor (`not floor_lowered`), consult `_binding_floor` — the SAME
+                # bimodal-aware `_eff_floor_s` selector every per-pole floor path and the
+                # spine-drop verifier use — over the concurrent set (the pole itself excluded,
+                # mirroring `_floor_note`). If a DIFFERENT check's effective (bimodal slow-mode)
+                # floor exceeds `floor_name`'s p50, THAT check — not `floor_name` — sets the
+                # wall-clock floor on slow-mode PRs; name it, rather than silently crediting the
+                # p50-slowest sibling with a floor a slower bimodal sibling actually sets. The
+                # named ceiling is ALSO disclosed by this pole's `_floor_note`, so this only
+                # corrects the role line's prose; it adds no new spine-disclosure obligation.
+                _others = [c for c in floor_pool
+                           if _clean_label(_check_name(c)) != gate_check]
+                _bf = (_binding_floor(_others, p.get("_cooccur"),
+                                      int(p.get("_gating_n") or 0))
+                       if (not floor_lowered and _others) else None)
+                if (_bf is not None and _clean_label(_check_name(_bf)) != floor_name
+                        and _eff_floor_s(_bf) > (slowest_p50 or 0.0) + 0.5):
+                    _bf_name = _clean_label(_check_name(_bf))
+                    _sets_floor = (f"; but `{_bf_name}`'s bimodal slow mode "
+                                   f"(~{_clock(_eff_floor_s(_bf))}) runs longer, so it — not "
+                                   f"`{floor_name}` — sets the wall-clock floor on slow-mode PRs")
+                else:
+                    _sets_floor = "" if floor_lowered else ", which sets the wall-clock floor"
                 role = (f"**The check most PRs gate on.** A typical PR waits on this most "
                         f"often; the slowest concurrent check is `{floor_name}` "
                         f"(~{slowest_dur}){_sets_floor}.")
