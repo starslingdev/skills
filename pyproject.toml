@@ -11,5 +11,5 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "skills/ci-speedup/tests", "maintainers/ci-speedup/tests"]
-pythonpath = [".", "skills/ci-speedup/scripts", "maintainers/ci-speedup/scripts"]
+testpaths = ["tests", "skills/ci-speedup/tests", "maintainers/ci-speedup/tests", "skills/ci-score/tests"]
+pythonpath = [".", "skills/ci-speedup/scripts", "maintainers/ci-speedup/scripts", "skills/ci-score/scripts"]

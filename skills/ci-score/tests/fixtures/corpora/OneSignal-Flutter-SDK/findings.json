@@ -1,0 +1,4403 @@
+{
+  "findings": [
+    {
+      "id": "f1",
+      "pattern": "OPT45",
+      "pattern_class": "static",
+      "severity": "LOW",
+      "title": "Missing Concurrency Groups",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 2,
+      "affected_jobs": [
+        "build"
+      ],
+      "workflow_activity": {
+        "runs_30d": 6,
+        "last_run": "2026-07-09T19:20:03Z",
+        "dormant": false
+      },
+      "evidence": "workflow triggers on pull_request but declares no `concurrency:` (top-level or per-job) — superseded runs keep occupying a runner",
+      "fix_strategy": "missing-concurrency-groups",
+      "fix_recipe_anchor": "opt45--missing-concurrency-groups",
+      "evidence_snippet": "on:\n  pull_request:\n    branches:\n      - \"**\"\n    paths-ignore:\n      - \".github/**\"\n      - \".vscode/**\"\n      - \"README.md\"",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": 3.3,
+      "size_note": "below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/cd.yml",
+          "long_pole_p50_s": 6.0
+        },
+        {
+          "workflow": ".github/workflows/lint-pr-title.yml",
+          "long_pole_p50_s": 4.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 164.5,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.375,
+      "workflow_runs_30d": 6,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.02
+    },
+    {
+      "id": "f2",
+      "pattern": "OPT32",
+      "pattern_class": "static",
+      "severity": "HIGH",
+      "title": "Missing `paths`/`paths-ignore` on Expensive Workflows",
+      "workflow_file": ".github/workflows/codeql.yml",
+      "line": 7,
+      "affected_jobs": [
+        "analyze"
+      ],
+      "workflow_activity": {
+        "runs_30d": 16,
+        "last_run": "2026-07-12T20:01:58Z",
+        "dormant": false
+      },
+      "evidence": "workflow triggers on pull_request/push but declares no `paths:`/`paths-ignore:` filter (the `on:` block below has no `paths:` key). NOTE: if this workflow is a REQUIRED status check, add a per-job `dorny/paths-filter` gate that returns a neutral pass — a workflow-level `paths:` filter would strand the required check on excluded PRs.",
+      "fix_strategy": "missing-paths-paths-ignore-on-expensive-workflows",
+      "fix_recipe_anchor": "opt32--missing-paths-paths-ignore-on-expensive-workflows",
+      "evidence_snippet": "on:\n  push:\n    branches: [\"main\"]\n  pull_request:\n    branches: [\"main\"]\n  schedule:\n    - cron: \"37 19 * * 0\"",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": null,
+      "size_note": "below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "runner_min_unrealizable_s": 8.2,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "gross upper bound — assumes every irrelevant run runs the full job and a `paths:` filter skips it; realizable only where the workflow's jobs don't ALREADY self-skip (via `if:` guards or an internal change-gate) and the trigger can be narrowed safely — verify per workflow before crediting",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 164.5
+        },
+        {
+          "workflow": ".github/workflows/cd.yml",
+          "long_pole_p50_s": 6.0
+        },
+        {
+          "workflow": ".github/workflows/lint-pr-title.yml",
+          "long_pole_p50_s": 4.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 103.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 1.0,
+      "workflow_runs_30d": 16,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sizing_basis": "modeled",
+      "sku": null,
+      "sku_class": "unpriced",
+      "billing_class": "unpriced",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f3",
+      "pattern": "OPT33",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "No Draft PR Gating on Expensive Jobs",
+      "workflow_file": ".github/workflows/codeql.yml",
+      "line": 16,
+      "affected_jobs": [
+        "analyze"
+      ],
+      "workflow_activity": {
+        "runs_30d": 16,
+        "last_run": "2026-07-12T20:01:58Z",
+        "dormant": false
+      },
+      "evidence": "expensive job `analyze` (matrix) runs on every PR including drafts — no `if: github.event.pull_request.draft == false` gate",
+      "fix_strategy": "no-draft-pr-gating-on-expensive-jobs",
+      "fix_recipe_anchor": "opt33--no-draft-pr-gating-on-expensive-jobs",
+      "evidence_snippet": "  analyze:",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": 8.2,
+      "size_note": "below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 164.5
+        },
+        {
+          "workflow": ".github/workflows/cd.yml",
+          "long_pole_p50_s": 6.0
+        },
+        {
+          "workflow": ".github/workflows/lint-pr-title.yml",
+          "long_pole_p50_s": 4.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 103.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 1.0,
+      "workflow_runs_30d": 16,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sizing_basis": "modeled",
+      "sku": null,
+      "sku_class": "unpriced",
+      "billing_class": "unpriced",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f4",
+      "pattern": "OPT21",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "Unnecessary `needs:` Dependencies",
+      "workflow_file": ".github/workflows/e2e.yml",
+      "line": 145,
+      "affected_jobs": [
+        "e2e-android"
+      ],
+      "workflow_activity": {
+        "runs_30d": 12,
+        "last_run": "2026-07-09T20:11:38Z",
+        "dormant": false
+      },
+      "evidence": "job `e2e-android` declares `needs: ['build-android']` but references no `needs.*.outputs` and downloads no artifact from them — verify the dependency isn't a required gate before removing",
+      "fix_strategy": "unnecessary-needs-dependencies",
+      "fix_recipe_anchor": "opt21--unnecessary-needs-dependencies",
+      "evidence_snippet": "    needs: build-android",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "affected job's duration couldn't be resolved from sampled runs — runner-minute (bill) only, wall-clock unproven",
+      "runner_min_unrealizable_s": 6.0,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "removing a `needs:` edge changes WHEN a job starts (queue wait), not how long it runs — compute is unchanged, so there is no runner-minute saving (the wall-clock/queue effect is sized separately)",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/publish.yml",
+          "long_pole_p50_s": 85.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 618.0,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.75,
+      "workflow_runs_30d": 12,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "off_spine": true,
+      "sizing_basis": "modeled",
+      "sku": null,
+      "sku_class": "unpriced",
+      "billing_class": "unpriced",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f5",
+      "pattern": "OPT21",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "Unnecessary `needs:` Dependencies",
+      "workflow_file": ".github/workflows/e2e.yml",
+      "line": 156,
+      "affected_jobs": [
+        "e2e-ios"
+      ],
+      "workflow_activity": {
+        "runs_30d": 12,
+        "last_run": "2026-07-09T20:11:38Z",
+        "dormant": false
+      },
+      "evidence": "job `e2e-ios` declares `needs: ['build-ios']` but references no `needs.*.outputs` and downloads no artifact from them — verify the dependency isn't a required gate before removing",
+      "fix_strategy": "unnecessary-needs-dependencies",
+      "fix_recipe_anchor": "opt21--unnecessary-needs-dependencies",
+      "evidence_snippet": "    needs: build-ios",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "affected job's duration couldn't be resolved from sampled runs — runner-minute (bill) only, wall-clock unproven",
+      "runner_min_unrealizable_s": 6.0,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "removing a `needs:` edge changes WHEN a job starts (queue wait), not how long it runs — compute is unchanged, so there is no runner-minute saving (the wall-clock/queue effect is sized separately)",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/publish.yml",
+          "long_pole_p50_s": 85.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 618.0,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.75,
+      "workflow_runs_30d": 12,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "off_spine": true,
+      "sizing_basis": "modeled",
+      "sku": null,
+      "sku_class": "unpriced",
+      "billing_class": "unpriced",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f6",
+      "pattern": "OPT32",
+      "pattern_class": "static",
+      "severity": "HIGH",
+      "title": "Missing `paths`/`paths-ignore` on Expensive Workflows",
+      "workflow_file": ".github/workflows/e2e.yml",
+      "line": 3,
+      "affected_jobs": [
+        "build-android",
+        "build-ios",
+        "e2e-android",
+        "e2e-ios"
+      ],
+      "workflow_activity": {
+        "runs_30d": 12,
+        "last_run": "2026-07-09T20:11:38Z",
+        "dormant": false
+      },
+      "evidence": "workflow triggers on push but declares no `paths:`/`paths-ignore:` filter (the `on:` block below has no `paths:` key).",
+      "fix_strategy": "missing-paths-paths-ignore-on-expensive-workflows",
+      "fix_recipe_anchor": "opt32--missing-paths-paths-ignore-on-expensive-workflows",
+      "evidence_snippet": "on:\n  push:\n    branches:\n      - rel/**\n  workflow_dispatch:\n    inputs:\n      platform:\n        description: 'Platform to test'\n        required: true\n        default: 'both'\n        type: choice\n        options:",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": null,
+      "size_note": "below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "runner_min_unrealizable_s": 37.1,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "gross upper bound — assumes every irrelevant run runs the full job and a `paths:` filter skips it; realizable only where the workflow's jobs don't ALREADY self-skip (via `if:` guards or an internal change-gate) and the trigger can be narrowed safely — verify per workflow before crediting",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/publish.yml",
+          "long_pole_p50_s": 85.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 618.0,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.75,
+      "workflow_runs_30d": 12,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "off_spine": true,
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f7",
+      "pattern": "OPT32",
+      "pattern_class": "static",
+      "severity": "HIGH",
+      "title": "Missing `paths`/`paths-ignore` on Expensive Workflows",
+      "workflow_file": ".github/workflows/lint-pr-title.yml",
+      "line": 4,
+      "affected_jobs": [
+        "call"
+      ],
+      "workflow_activity": {
+        "runs_30d": 10,
+        "last_run": "2026-07-09T19:16:56Z",
+        "dormant": false
+      },
+      "evidence": "workflow triggers on pull_request but declares no `paths:`/`paths-ignore:` filter (the `on:` block below has no `paths:` key). NOTE: if this workflow is a REQUIRED status check, add a per-job `dorny/paths-filter` gate that returns a neutral pass — a workflow-level `paths:` filter would strand the required check on excluded PRs.",
+      "fix_strategy": "missing-paths-paths-ignore-on-expensive-workflows",
+      "fix_recipe_anchor": "opt32--missing-paths-paths-ignore-on-expensive-workflows",
+      "evidence_snippet": "on:\n  pull_request:\n    types: [opened, edited, synchronize]",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": null,
+      "size_note": "below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "runner_min_unrealizable_s": 0.2,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "gross upper bound — assumes every irrelevant run runs the full job and a `paths:` filter skips it; realizable only where the workflow's jobs don't ALREADY self-skip (via `if:` guards or an internal change-gate) and the trigger can be narrowed safely — verify per workflow before crediting",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 164.5
+        },
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/cd.yml",
+          "long_pole_p50_s": 6.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 4.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.625,
+      "workflow_runs_30d": 10,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sizing_basis": "modeled",
+      "sku": null,
+      "sku_class": "unpriced",
+      "billing_class": "unpriced",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f8",
+      "pattern": "OPT45",
+      "pattern_class": "static",
+      "severity": "LOW",
+      "title": "Missing Concurrency Groups",
+      "workflow_file": ".github/workflows/lint-pr-title.yml",
+      "line": 4,
+      "affected_jobs": [
+        "call"
+      ],
+      "workflow_activity": {
+        "runs_30d": 10,
+        "last_run": "2026-07-09T19:16:56Z",
+        "dormant": false
+      },
+      "evidence": "workflow triggers on pull_request but declares no `concurrency:` (top-level or per-job) — superseded runs keep occupying a runner",
+      "fix_strategy": "missing-concurrency-groups",
+      "fix_recipe_anchor": "opt45--missing-concurrency-groups",
+      "evidence_snippet": "on:\n  pull_request:\n    types: [opened, edited, synchronize]",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": 0.1,
+      "size_note": "below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 164.5
+        },
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/cd.yml",
+          "long_pole_p50_s": 6.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 4.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.625,
+      "workflow_runs_30d": 10,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sizing_basis": "modeled",
+      "sku": null,
+      "sku_class": "unpriced",
+      "billing_class": "unpriced",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f9",
+      "pattern": "OPT32",
+      "pattern_class": "static",
+      "severity": "HIGH",
+      "title": "Missing `paths`/`paths-ignore` on Expensive Workflows",
+      "workflow_file": ".github/workflows/publish.yml",
+      "line": 5,
+      "affected_jobs": [
+        "publish"
+      ],
+      "workflow_activity": {
+        "runs_30d": 4,
+        "last_run": "2026-07-09T21:37:42Z",
+        "dormant": false
+      },
+      "evidence": "workflow triggers on push but declares no `paths:`/`paths-ignore:` filter (the `on:` block below has no `paths:` key).",
+      "fix_strategy": "missing-paths-paths-ignore-on-expensive-workflows",
+      "fix_recipe_anchor": "opt32--missing-paths-paths-ignore-on-expensive-workflows",
+      "evidence_snippet": "on:\n  push:\n    tags:\n      # must align with the tag-pattern configured on pub.dev, often just replace\n      # {{version}} with [0-9]+.[0-9]+.[0-9]+\n      - \"[0-9]+.[0-9]+.[0-9]+\" # tag-pattern on pub.dev: '{{version}}'",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": null,
+      "size_note": "below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "runner_min_unrealizable_s": 1.7,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "gross upper bound — assumes every irrelevant run runs the full job and a `paths:` filter skips it; realizable only where the workflow's jobs don't ALREADY self-skip (via `if:` guards or an internal change-gate) and the trigger can be narrowed safely — verify per workflow before crediting",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/e2e.yml",
+          "long_pole_p50_s": 618.0
+        },
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 85.0,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.25,
+      "workflow_runs_30d": 4,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f10",
+      "pattern": "OPT46",
+      "pattern_class": "data-driven",
+      "severity": "MEDIUM",
+      "title": "Superseded Runs Not Cancelled (Missing Concurrency or `cancel-in-progress: false`)",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 0,
+      "affected_jobs": [],
+      "workflow_activity": {
+        "runs_30d": 6,
+        "last_run": "2026-07-09T19:20:03Z",
+        "dormant": false
+      },
+      "evidence": "9 run(s) across 5 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~2–13 runner-min/mo of superseded compute (mean over 20 timed run(s); ×0.06 to the 30d volume (6 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE — the API marks no run 'cancelled-by-concurrency'.",
+      "measured_signal": "overlap-confirmed superseded runs x mean job-minutes (9 confirmed; naive 79; 20 timed run(s); scale 0.06)",
+      "fix_strategy": "superseded-runs-not-cancelled-missing-concurrency-or-cancel-",
+      "fix_recipe_anchor": "opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 1.5,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "runner-minute (bill) only — superseded runs don't gate the merge (the latest run does); range is lower(overlap-confirmed)–upper(naive runs-1).",
+      "measured_evidence": {
+        "summary": "9 run(s) across 5 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~2–13 runner-min/mo of superseded compute (mean over 20 timed run(s); ×0.06 to the 30d volume (6 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE — the API marks no run 'cancelled-by-concurrency'.",
+        "table": {
+          "headers": [
+            "Workflow",
+            "Overlapping (raced) runs",
+            "Mean compute/run (timed basis)",
+            "Superseded runner-min/mo (range)"
+          ],
+          "rows": [
+            [
+              "`.github/workflows/ci.yml`",
+              "9 confirmed (naive 79)",
+              "2.7 job-min over 20 timed run(s)",
+              "~2–13 (lower=overlap-confirmed, upper=naive runs-1)"
+            ]
+          ]
+        },
+        "note": "Superseded = a run a NEWER run started before it finished — measured by timestamp overlap, so sequential (non-racing) commits are NOT charged. Cancellation cause is unknowable from the API, so the attribution is INFERENCE. Basis: the count is from the all-status slice (100 runs); the per-run PRICE is the mean of 20 PR-success timed runs (superseded runs' own jobs aren't fetched) — different populations. GUARDRAIL: verify this is NOT a deploy/release/publish workflow (a mid-flight run may be uploading artifacts / pushing a tag) before enabling cancellation — and take the predicate from the catalog recipe, which scopes cancellation with an expression; never a bare `cancel-in-progress: true`, which also kills in-flight runs on the default branch and on release tags. ROUTING: this workflow triggers on `pull_request` — with a `pull_request` trigger use the catalog's DEFAULT (PR-scoped) predicate; without one, the PR-scoped predicate is never true and saves nothing, so use the catalog's WIDENED predicate."
+      },
+      "superseded_confirmed_n": 9,
+      "superseded_slice_n": 100,
+      "explicit_cancel_disabled": false,
+      "tier2_neutrality": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "ref": "superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference"
+      },
+      "runner_min_range_s": [
+        1.5,
+        13.0
+      ],
+      "tier2_sample_run_ids": [
+        "27785281406",
+        "27244346501",
+        "26906929182",
+        "26915507892",
+        "26915560250",
+        "26919415871",
+        "26919425354",
+        "26544090530",
+        "24418896603"
+      ],
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/cd.yml",
+          "long_pole_p50_s": 6.0
+        },
+        {
+          "workflow": ".github/workflows/lint-pr-title.yml",
+          "long_pole_p50_s": 4.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 164.5,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.375,
+      "workflow_runs_30d": 6,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sizing_basis": "measured",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.01
+    },
+    {
+      "id": "f11",
+      "pattern": "OPT25",
+      "pattern_class": "data-driven",
+      "severity": "MEDIUM",
+      "title": "Matrix Leg Imbalance",
+      "workflow_file": ".github/workflows/codeql.yml",
+      "line": 0,
+      "affected_jobs": [
+        "Analyze"
+      ],
+      "workflow_activity": {
+        "runs_30d": 16,
+        "last_run": "2026-07-12T20:01:58Z",
+        "dormant": false
+      },
+      "evidence": "leg `Analyze (java, none, true)` median 103s vs `Analyze (actions, none)` 36s — 2.9× imbalance over 18 sampled runs (heterogeneous legs — split the slow leg, don't rebalance)",
+      "measured_signal": "leg `Analyze (java, none, true)` median 103s vs `Analyze (actions, none)` 36s — 2.9× imbalance over 18 sampled runs (heterogeneous legs — split the slow leg, don't rebalance)",
+      "fix_strategy": "shard-imbalance",
+      "fix_recipe_anchor": "opt25--shard-imbalance",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "split the slow leg `Analyze (java, none, true)`; saving (~52s) is bounded by the next-slowest leg (36s); population-weighted measured floor — the merge gate is bimodal, so the critical path differs by PR; this check is the pole on ~0/20 PR populations (sampled PRs that ran a gated check), giving an expected Δ 0s of the 52s raw saving",
+      "measured_evidence": {
+        "summary": "Across 18 sampled `Analyze` runs, the slowest leg (`Analyze (java, none, true)`, median 103s) is 2.9× the fastest (`Analyze (actions, none)`, 36s) and gates the matrix. These legs do DIFFERENT work, so they cannot be rebalanced — the slow leg is the long pole.",
+        "table": {
+          "headers": [
+            "Leg",
+            "Median",
+            "Samples",
+            "Slowest run (job log)"
+          ],
+          "rows": [
+            [
+              "`Analyze (java, none, true)`",
+              "103s",
+              "9",
+              "[124s](https://github.com/OneSignal/OneSignal-Flutter-SDK/actions/runs/27779727918/job/82201099011)"
+            ],
+            [
+              "`Analyze (actions, none)`",
+              "36s",
+              "9",
+              "[50s](https://github.com/OneSignal/OneSignal-Flutter-SDK/actions/runs/27260405025/job/80504464814)"
+            ]
+          ]
+        },
+        "note": "Each link opens that leg's worst observed run. Fix: SPLIT the slowest leg `Analyze (java, none, true)` itself (sub-shard its suite, or split its backends into parallel jobs) — not rebalance across legs. That floors at the next-slowest leg `Analyze (actions, none)` (36s), which becomes the new pole, so the realistic first-step saving is ~52s; split that leg next to go lower."
+      },
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 164.5
+        },
+        {
+          "workflow": ".github/workflows/cd.yml",
+          "long_pole_p50_s": 6.0
+        },
+        {
+          "workflow": ".github/workflows/lint-pr-title.yml",
+          "long_pole_p50_s": 4.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 103.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 1.0,
+      "workflow_runs_30d": 16,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "wall_clock_uncapped_p50_s": 51.5,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 51.5,
+          "to_s": 0.0,
+          "reason": "population-weighted measured floor — the merge gate is bimodal, so the critical path differs by PR; this check is the pole on ~0/20 PR populations (sampled PRs that ran a gated check), giving an expected Δ 0s of the 52s raw saving"
+        }
+      ],
+      "sizing_basis": "measured",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f12",
+      "pattern": "OPT36",
+      "pattern_class": "data-driven",
+      "severity": "LOW",
+      "title": "Cron Schedule Too Frequent",
+      "workflow_file": ".github/workflows/codeql.yml",
+      "line": 0,
+      "affected_jobs": [],
+      "workflow_activity": {
+        "runs_30d": 16,
+        "last_run": "2026-07-12T20:01:58Z",
+        "dormant": false
+      },
+      "evidence": "4 scheduled run(s) in 3 consecutive same-head_sha group(s) re-ran without a code change in the sampled schedule slice (14% of 29 schedule run(s)); ~1 runner-min/mo of schedule-event compute (mean over 20 timed run(s); ×0.14 to the 30d volume (4 runs); 29-run recent slice (not a full 30d census)).",
+      "measured_signal": "event=schedule total_count x mean job-minutes (4 schedule run(s)/30d; 4 same-head_sha redundant run(s); 20 timed run(s); scale 0.138)",
+      "fix_strategy": "cron-schedule-too-frequent",
+      "fix_recipe_anchor": "opt36--cron-schedule-too-frequent",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 1.4,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "runner-minute (bill) only — schedule-event runs do not gate a PR; frequency change must preserve any operational cadence requirement.",
+      "measured_evidence": {
+        "summary": "4 scheduled run(s) in 3 consecutive same-head_sha group(s) re-ran without a code change in the sampled schedule slice (14% of 29 schedule run(s)); ~1 runner-min/mo of schedule-event compute (mean over 20 timed run(s); ×0.14 to the 30d volume (4 runs); 29-run recent slice (not a full 30d census)).",
+        "table": {
+          "headers": [
+            "Workflow",
+            "Consecutive same-head_sha schedule runs",
+            "Mean compute/run",
+            "Credited runner-min/mo"
+          ],
+          "rows": [
+            [
+              "`.github/workflows/codeql.yml`",
+              "4 redundant run(s) in 3 group(s)",
+              "2.5 job-min over 20 timed run(s)",
+              "~1"
+            ]
+          ]
+        },
+        "note": "Schedule burn is counted only on event=schedule runs whose head_sha repeats consecutively, so the detector proves the workflow ran again without a code change. Basis: the count is from the all-status schedule slice; the per-run price is the mean of 20 successful schedule-event timed run(s). GUARDRAIL: confirm the current cadence is not an operational SLA before increasing the cron interval."
+      },
+      "sizing_basis": "measured",
+      "tier2_neutrality": {
+        "proof": "non_pr_event",
+        "margin_s": null,
+        "ref": "event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event"
+      },
+      "tier2_run_subset_events": [
+        "schedule"
+      ],
+      "tier2_sample_run_ids": [
+        "20698147164",
+        "21117536140",
+        "21338441494",
+        "28753165519"
+      ],
+      "guardrail": "Confirm the cron cadence is not an operational SLA; prefer widening the interval only for cleanup/triage/build jobs where delayed execution is acceptable.",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 164.5
+        },
+        {
+          "workflow": ".github/workflows/cd.yml",
+          "long_pole_p50_s": 6.0
+        },
+        {
+          "workflow": ".github/workflows/lint-pr-title.yml",
+          "long_pole_p50_s": 4.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 103.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 1.0,
+      "workflow_runs_30d": 16,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.01
+    },
+    {
+      "id": "f13",
+      "pattern": "OPT24",
+      "pattern_class": "data-driven",
+      "severity": "HIGH",
+      "title": "Long Test Job Without Sharding",
+      "workflow_file": ".github/workflows/e2e.yml",
+      "line": 0,
+      "affected_jobs": [
+        "e2e-ios / e2e"
+      ],
+      "workflow_activity": {
+        "runs_30d": 12,
+        "last_run": "2026-07-09T20:11:38Z",
+        "dormant": false
+      },
+      "evidence": "job `e2e-ios / e2e` p50 510s over 10 runs, no shard axis observed (job names lack a `shard` / `partition` matrix marker)",
+      "measured_signal": "job `e2e-ios / e2e` p50 510s over 10 runs, no shard axis observed (job names lack a `shard` / `partition` matrix marker)",
+      "fix_strategy": "long-test-job-without-sharding",
+      "fix_recipe_anchor": "opt24--long-test-job-without-sharding",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "a longer concurrent job gates the run, so sharding this one saves ~0 wall-clock until that job is addressed; no runner-min saving either",
+      "measured_evidence": {
+        "summary": "`e2e-ios / e2e` is a long unsharded test job in this workflow at P50 510s (P95 2793s) over 10 sampled runs, and it runs as a single job with no `shard`/`partition` axis. `e2e-android / e2e` runs concurrently and is at least as long (618s), so IT — not this job — gates the run's wall-clock; sharding this job alone won't cut the run.",
+        "table": {
+          "headers": [
+            "Job",
+            "P50",
+            "P95",
+            "Samples",
+            "Slowest run (job log)",
+            "Role"
+          ],
+          "rows": [
+            [
+              "`e2e-android / e2e`",
+              "618s",
+              "2682s",
+              "10",
+              "[2932s](https://github.com/OneSignal/OneSignal-Flutter-SDK/actions/runs/29043739960/job/86208340588)",
+              "runs in parallel, LONGER than this job"
+            ],
+            [
+              "`e2e-ios / e2e`",
+              "510s",
+              "2793s",
+              "10",
+              "[3054s](https://github.com/OneSignal/OneSignal-Flutter-SDK/actions/runs/27327087964/job/80865043739)",
+              "**flagged: long unsharded test job (a concurrent job gates the run)**"
+            ],
+            [
+              "`build-android`",
+              "388s",
+              "412s",
+              "10",
+              "[417s](https://github.com/OneSignal/OneSignal-Flutter-SDK/actions/runs/26980859623/job/79619482246)",
+              "runs in parallel, finishes before this job"
+            ],
+            [
+              "`build-ios`",
+              "234s",
+              "287s",
+              "10",
+              "[307s](https://github.com/OneSignal/OneSignal-Flutter-SDK/actions/runs/27779714832/job/82201109466)",
+              "runs in parallel, finishes before this job"
+            ]
+          ]
+        },
+        "note": "Each link opens that job's slowest observed run. `e2e-android / e2e` runs concurrently and is at least as long, so sharding `e2e-ios / e2e` alone doesn't cut the run's wall-clock (~0s saved until that job is addressed too) (does not reduce runner-minutes)."
+      },
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/publish.yml",
+          "long_pole_p50_s": 85.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 618.0,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.75,
+      "workflow_runs_30d": 12,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "off_spine": true,
+      "sizing_basis": "measured",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.0
+    },
+    {
+      "id": "f14",
+      "pattern": "OPT24",
+      "pattern_class": "data-driven",
+      "severity": "HIGH",
+      "title": "Long Test Job Without Sharding",
+      "workflow_file": ".github/workflows/e2e.yml",
+      "line": 0,
+      "affected_jobs": [
+        "e2e-android / e2e"
+      ],
+      "workflow_activity": {
+        "runs_30d": 12,
+        "last_run": "2026-07-09T20:11:38Z",
+        "dormant": false
+      },
+      "evidence": "job `e2e-android / e2e` p50 618s over 10 runs, no shard axis observed (job names lack a `shard` / `partition` matrix marker)",
+      "measured_signal": "job `e2e-android / e2e` p50 618s over 10 runs, no shard axis observed (job names lack a `shard` / `partition` matrix marker)",
+      "fix_strategy": "long-test-job-without-sharding",
+      "fix_recipe_anchor": "opt24--long-test-job-without-sharding",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "sharding parallelizes the long pole — saves wall-clock, does NOT save runner-min (more jobs, more setup tax); workflow runs only on non-developer-facing triggers (push, workflow_dispatch) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only",
+      "measured_evidence": {
+        "summary": "`e2e-android / e2e` is the long pole of this workflow at P50 618s (P95 2682s) over 10 sampled runs — 1.2× the next-longest job (`e2e-ios / e2e`, 510s), and it runs as a single job with no `shard`/`partition` axis. Every other job finishes earlier and in parallel, so the run's wall-clock is gated by this one serial job.",
+        "table": {
+          "headers": [
+            "Job",
+            "P50",
+            "P95",
+            "Samples",
+            "Slowest run (job log)",
+            "Role"
+          ],
+          "rows": [
+            [
+              "`e2e-android / e2e`",
+              "618s",
+              "2682s",
+              "10",
+              "[2932s](https://github.com/OneSignal/OneSignal-Flutter-SDK/actions/runs/29043739960/job/86208340588)",
+              "**long pole — one serial job, no shard axis**"
+            ],
+            [
+              "`e2e-ios / e2e`",
+              "510s",
+              "2793s",
+              "10",
+              "[3054s](https://github.com/OneSignal/OneSignal-Flutter-SDK/actions/runs/27327087964/job/80865043739)",
+              "runs in parallel, finishes before this job"
+            ],
+            [
+              "`build-android`",
+              "388s",
+              "412s",
+              "10",
+              "[417s](https://github.com/OneSignal/OneSignal-Flutter-SDK/actions/runs/26980859623/job/79619482246)",
+              "runs in parallel, finishes before this job"
+            ],
+            [
+              "`build-ios`",
+              "234s",
+              "287s",
+              "10",
+              "[307s](https://github.com/OneSignal/OneSignal-Flutter-SDK/actions/runs/27779714832/job/82201109466)",
+              "runs in parallel, finishes before this job"
+            ]
+          ]
+        },
+        "note": "Each link opens that job's slowest observed run. The run waits on `e2e-android / e2e` because no concurrent job takes as long; splitting it across parallel shards parallelizes the long pole, cutting the critical path by ~300s (does not reduce runner-minutes)."
+      },
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/publish.yml",
+          "long_pole_p50_s": 85.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 618.0,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.75,
+      "workflow_runs_30d": 12,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "wall_clock_uncapped_p50_s": 299.5,
+      "wall_clock_derivation": [
+        {
+          "bound": "developer-facing",
+          "from_s": 299.5,
+          "to_s": 0.0,
+          "reason": "workflow runs only on non-developer-facing triggers (push, workflow_dispatch) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only"
+        }
+      ],
+      "off_spine": true,
+      "sizing_basis": "measured",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.0
+    },
+    {
+      "id": "f15",
+      "pattern": "OPT43",
+      "pattern_class": "data-driven",
+      "severity": "MEDIUM",
+      "title": "Excessive Queue Time",
+      "workflow_file": ".github/workflows/e2e.yml",
+      "line": 0,
+      "affected_jobs": [
+        "build-ios"
+      ],
+      "workflow_activity": {
+        "runs_30d": 12,
+        "last_run": "2026-07-09T20:11:38Z",
+        "dormant": false
+      },
+      "evidence": "job `build-ios` P90 queue 1992s over 10 runs (threshold 120s for release/scheduled workflows)",
+      "measured_signal": "job `build-ios` P90 queue 1992s over 10 runs (threshold 120s for release/scheduled workflows)",
+      "fix_strategy": "excessive-queue-time",
+      "fix_recipe_anchor": "opt43--excessive-queue-time",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "wall-clock wait before the job starts (a gated job's number includes the gating job(s) it waits on); workflow runs only on non-developer-facing triggers (push, workflow_dispatch) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only",
+      "measured_evidence": {
+        "summary": "job `build-ios` waited P90 1992s in queue over 10 sampled runs (threshold 120s for release/scheduled workflows).",
+        "table": {
+          "headers": [
+            "Job",
+            "P90 queue",
+            "Samples",
+            "Worst queued run (job log)"
+          ],
+          "rows": [
+            [
+              "`build-ios`",
+              "1992s",
+              "10",
+              "[12401s](https://github.com/OneSignal/OneSignal-Flutter-SDK/actions/runs/26859622052/job/79233125089)"
+            ]
+          ]
+        },
+        "note": "Wait-to-start (run trigger → job started) is developer wait before this job runs. For a job gated by `needs:` it spans the gating job(s)' own queue AND run time — so the savable portion is whatever the gating job's own fix removes, not necessarily the whole number. The link opens the worst-queued run."
+      },
+      "queue_cause": "config_controllable",
+      "queue_cause_note": "50% of queued samples overlapped an in-flight sibling run of this workflow — a concurrency group would have prevented the race",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/publish.yml",
+          "long_pole_p50_s": 85.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 618.0,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.75,
+      "workflow_runs_30d": 12,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "wall_clock_uncapped_p50_s": 1991.6,
+      "wall_clock_derivation": [
+        {
+          "bound": "developer-facing",
+          "from_s": 1991.6,
+          "to_s": 0.0,
+          "reason": "workflow runs only on non-developer-facing triggers (push, workflow_dispatch) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only"
+        }
+      ],
+      "off_spine": true,
+      "sizing_basis": "measured",
+      "sku": "macos_standard",
+      "sku_class": "macos-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f16",
+      "pattern": "OPT43",
+      "pattern_class": "data-driven",
+      "severity": "MEDIUM",
+      "title": "Excessive Queue Time",
+      "workflow_file": ".github/workflows/e2e.yml",
+      "line": 0,
+      "affected_jobs": [
+        "e2e-ios / e2e"
+      ],
+      "workflow_activity": {
+        "runs_30d": 12,
+        "last_run": "2026-07-09T20:11:38Z",
+        "dormant": false
+      },
+      "evidence": "job `e2e-ios / e2e` P90 queue 2387s over 10 runs (threshold 120s for release/scheduled workflows)",
+      "measured_signal": "job `e2e-ios / e2e` P90 queue 2387s over 10 runs (threshold 120s for release/scheduled workflows)",
+      "fix_strategy": "excessive-queue-time",
+      "fix_recipe_anchor": "opt43--excessive-queue-time",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "wall-clock wait before the job starts (a gated job's number includes the gating job(s) it waits on); workflow runs only on non-developer-facing triggers (push, workflow_dispatch) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only",
+      "measured_evidence": {
+        "summary": "job `e2e-ios / e2e` waited P90 2387s in queue over 10 sampled runs (threshold 120s for release/scheduled workflows).",
+        "table": {
+          "headers": [
+            "Job",
+            "P90 queue",
+            "Samples",
+            "Worst queued run (job log)"
+          ],
+          "rows": [
+            [
+              "`e2e-ios / e2e`",
+              "2387s",
+              "10",
+              "[14171s](https://github.com/OneSignal/OneSignal-Flutter-SDK/actions/runs/26859622052/job/79233124921)"
+            ]
+          ]
+        },
+        "note": "Wait-to-start (run trigger → job started) is developer wait before this job runs. For a job gated by `needs:` it spans the gating job(s)' own queue AND run time — so the savable portion is whatever the gating job's own fix removes, not necessarily the whole number. The link opens the worst-queued run."
+      },
+      "queue_cause": "config_controllable",
+      "queue_cause_note": "50% of queued samples overlapped an in-flight sibling run of this workflow — a concurrency group would have prevented the race",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/publish.yml",
+          "long_pole_p50_s": 85.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 618.0,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.75,
+      "workflow_runs_30d": 12,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "wall_clock_uncapped_p50_s": 2387.3,
+      "wall_clock_derivation": [
+        {
+          "bound": "developer-facing",
+          "from_s": 2387.3,
+          "to_s": 0.0,
+          "reason": "workflow runs only on non-developer-facing triggers (push, workflow_dispatch) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only"
+        }
+      ],
+      "off_spine": true,
+      "sizing_basis": "measured",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f17",
+      "pattern": "OPT43",
+      "pattern_class": "data-driven",
+      "severity": "MEDIUM",
+      "title": "Excessive Queue Time",
+      "workflow_file": ".github/workflows/e2e.yml",
+      "line": 0,
+      "affected_jobs": [
+        "e2e-android / e2e"
+      ],
+      "workflow_activity": {
+        "runs_30d": 12,
+        "last_run": "2026-07-09T20:11:38Z",
+        "dormant": false
+      },
+      "evidence": "job `e2e-android / e2e` P90 queue 4595s over 10 runs (threshold 120s for release/scheduled workflows)",
+      "measured_signal": "job `e2e-android / e2e` P90 queue 4595s over 10 runs (threshold 120s for release/scheduled workflows)",
+      "fix_strategy": "excessive-queue-time",
+      "fix_recipe_anchor": "opt43--excessive-queue-time",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "wall-clock wait before the job starts (a gated job's number includes the gating job(s) it waits on); workflow runs only on non-developer-facing triggers (push, workflow_dispatch) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only",
+      "measured_evidence": {
+        "summary": "job `e2e-android / e2e` waited P90 4595s in queue over 10 sampled runs (threshold 120s for release/scheduled workflows).",
+        "table": {
+          "headers": [
+            "Job",
+            "P90 queue",
+            "Samples",
+            "Worst queued run (job log)"
+          ],
+          "rows": [
+            [
+              "`e2e-android / e2e`",
+              "4595s",
+              "10",
+              "[42013s](https://github.com/OneSignal/OneSignal-Flutter-SDK/actions/runs/27327087964/job/80865042832)"
+            ]
+          ]
+        },
+        "note": "Wait-to-start (run trigger → job started) is developer wait before this job runs. For a job gated by `needs:` it spans the gating job(s)' own queue AND run time — so the savable portion is whatever the gating job's own fix removes, not necessarily the whole number. The link opens the worst-queued run."
+      },
+      "queue_cause": "config_controllable",
+      "queue_cause_note": "50% of queued samples overlapped an in-flight sibling run of this workflow — a concurrency group would have prevented the race",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/publish.yml",
+          "long_pole_p50_s": 85.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 618.0,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.75,
+      "workflow_runs_30d": 12,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "wall_clock_uncapped_p50_s": 4594.6,
+      "wall_clock_derivation": [
+        {
+          "bound": "developer-facing",
+          "from_s": 4594.6,
+          "to_s": 0.0,
+          "reason": "workflow runs only on non-developer-facing triggers (push, workflow_dispatch) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only"
+        }
+      ],
+      "off_spine": true,
+      "sizing_basis": "measured",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f18",
+      "pattern": "OPT64",
+      "pattern_class": "data-driven",
+      "severity": "LOW",
+      "title": "Repeated Workflow Attempts From Same Failing Job",
+      "workflow_file": ".github/workflows/e2e.yml",
+      "line": 0,
+      "affected_jobs": [],
+      "workflow_activity": {
+        "runs_30d": 12,
+        "last_run": "2026-07-09T20:11:38Z",
+        "dormant": false
+      },
+      "evidence": "1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `e2e-android / e2e` (1 failed/timed-out prior-attempt job(s), 0.6 failed min) and it appeared again in the latest attempt. ~7 runner-min/mo of prior-attempt compute (12/30d ÷ 100 sampled all-status run(s)).",
+      "measured_signal": "run_attempt>1 prior-attempt job delta from filter=all minus filter=latest; dominant failing job `e2e-android / e2e` present in latest attempt (60.9 sampled prior-attempt min; scale 0.12)",
+      "fix_strategy": "repeated-workflow-attempts-from-same-failing-job",
+      "fix_recipe_anchor": "opt64--repeated-workflow-attempts-from-same-failing-job",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 7.3,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "runner-minute (bill) only — prior workflow attempts are superseded by the latest attempt's signal.",
+      "measured_evidence": {
+        "summary": "1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `e2e-android / e2e` (1 failed/timed-out prior-attempt job(s), 0.6 failed min) and it appeared again in the latest attempt. ~7 runner-min/mo of prior-attempt compute (12/30d ÷ 100 sampled all-status run(s)).",
+        "table": {
+          "headers": [
+            "Run",
+            "Latest attempt",
+            "Dominant failing job",
+            "Prior attempts",
+            "Prior attempt compute min",
+            "Dominant failure min"
+          ],
+          "rows": [
+            [
+              "`27327087964`",
+              "2",
+              "`e2e-android / e2e`",
+              "1",
+              "60.9",
+              "0.6"
+            ]
+          ]
+        },
+        "note": "Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow runs whose run_attempt > 1. The finding is emitted only when each credited prior attempt has the same unique dominant failed/timed-out job and that dominant failing job appears in the latest attempt; ambiguous ties, mixed-cause attempts, and retry-only volume are withheld."
+      },
+      "sizing_basis": "measured",
+      "tier2_neutrality": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "ref": "run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `e2e-android / e2e` identifies the retry cause, so prior-attempt compute is post-completion waste"
+      },
+      "rerun_dominant_job": "e2e-android / e2e",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/publish.yml",
+          "long_pole_p50_s": 85.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 618.0,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.75,
+      "workflow_runs_30d": 12,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.04
+    },
+    {
+      "id": "f19",
+      "pattern": "OPT64",
+      "pattern_class": "data-driven",
+      "severity": "LOW",
+      "title": "Repeated Workflow Attempts From Same Failing Job",
+      "workflow_file": ".github/workflows/e2e.yml",
+      "line": 0,
+      "affected_jobs": [],
+      "workflow_activity": {
+        "runs_30d": 12,
+        "last_run": "2026-07-09T20:11:38Z",
+        "dormant": false
+      },
+      "evidence": "4 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `build-ios` (4 failed/timed-out prior-attempt job(s), 7.9 failed min) and it appeared again in the latest attempt. ~4 runner-min/mo of prior-attempt compute (12/30d ÷ 100 sampled all-status run(s)).",
+      "measured_signal": "run_attempt>1 prior-attempt job delta from filter=all minus filter=latest; dominant failing job `build-ios` present in latest attempt (32.8 sampled prior-attempt min; scale 0.12)",
+      "fix_strategy": "repeated-workflow-attempts-from-same-failing-job",
+      "fix_recipe_anchor": "opt64--repeated-workflow-attempts-from-same-failing-job",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 3.9,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "runner-minute (bill) only — prior workflow attempts are superseded by the latest attempt's signal.",
+      "measured_evidence": {
+        "summary": "4 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `build-ios` (4 failed/timed-out prior-attempt job(s), 7.9 failed min) and it appeared again in the latest attempt. ~4 runner-min/mo of prior-attempt compute (12/30d ÷ 100 sampled all-status run(s)).",
+        "table": {
+          "headers": [
+            "Run",
+            "Latest attempt",
+            "Dominant failing job",
+            "Prior attempts",
+            "Prior attempt compute min",
+            "Dominant failure min"
+          ],
+          "rows": [
+            [
+              "`27785292439`",
+              "2",
+              "`build-ios`",
+              "1",
+              "15.7",
+              "2.3"
+            ],
+            [
+              "`26326618634`",
+              "2",
+              "`build-ios`",
+              "1",
+              "12.1",
+              "0.7"
+            ],
+            [
+              "`24680718532`",
+              "2",
+              "`build-ios`",
+              "1",
+              "2.6",
+              "2.6"
+            ],
+            [
+              "`24678923411`",
+              "2",
+              "`build-ios`",
+              "1",
+              "2.3",
+              "2.3"
+            ]
+          ]
+        },
+        "note": "Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow runs whose run_attempt > 1. The finding is emitted only when each credited prior attempt has the same unique dominant failed/timed-out job and that dominant failing job appears in the latest attempt; ambiguous ties, mixed-cause attempts, and retry-only volume are withheld."
+      },
+      "sizing_basis": "measured",
+      "tier2_neutrality": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "ref": "run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `build-ios` identifies the retry cause, so prior-attempt compute is post-completion waste"
+      },
+      "rerun_dominant_job": "build-ios",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/codeql.yml",
+          "long_pole_p50_s": 103.0
+        },
+        {
+          "workflow": ".github/workflows/publish.yml",
+          "long_pole_p50_s": 85.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 618.0,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.75,
+      "workflow_runs_30d": 12,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.02
+    },
+    {
+      "id": "f20",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `build`",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 0,
+      "affected_jobs": [
+        "build"
+      ],
+      "workflow_activity": {
+        "runs_30d": 6,
+        "last_run": "2026-07-09T19:20:03Z",
+        "dormant": false
+      },
+      "evidence": "critical-path check `build` (164s): dominant step `Check formatting (dart,java,c) + 1 more other step` (other, 21% of job `build`)",
+      "measured_signal": "critical-path check `build` (164s): dominant step `Check formatting (dart,java,c) + 1 more other step` (other, 21% of job `build`)",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": 2.8,
+      "runner_min_saving": null,
+      "tier": 1,
+      "realization": "direct",
+      "size_note": "other phase (3 steps) 33s above a ~30s warm/cached floor; population-weighted measured floor — the merge gate is bimodal, so the critical path differs by PR; this check is the pole on ~19/20 PR populations (sampled PRs that ran a gated check), giving an expected Δ 3s of the 3s raw saving",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "decomposition": {
+        "dominant_step": "Check formatting (dart,java,c) + 1 more other step",
+        "dominant_category": "other",
+        "dominant_p50_s": 33.0,
+        "dominant_share": 0.212,
+        "redundant_ratio": 4.85,
+        "job_p50_s": 156.0
+      },
+      "measured_evidence": {
+        "summary": "check `build` (164s) maps to job `build`; dominant step `Check formatting (dart,java,c) + 1 more other step` (other) is 21% of the job. Redundant-work ratio (setup+build / payload) = 4.85.",
+        "table": {
+          "headers": [
+            "Step",
+            "Category",
+            "p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`Set up Flutter`",
+              "setup",
+              "66s",
+              "42%"
+            ],
+            [
+              "`Setup Clang`",
+              "setup",
+              "28s",
+              "18%"
+            ],
+            [
+              "`Check formatting (dart,java,c)`",
+              "other",
+              "24s",
+              "15%"
+            ],
+            [
+              "`Run Flutter unit tests`",
+              "test",
+              "20s",
+              "13%"
+            ],
+            [
+              "`Static Analysis`",
+              "other",
+              "10s",
+              "6%"
+            ],
+            [
+              "`Set up job`",
+              "setup",
+              "2s",
+              "2%"
+            ]
+          ]
+        },
+        "note": "Decomposed from the sampled job's per-step timings. The dominant step is the addressable cost — attack it by category, don't declare the whole check inherent."
+      },
+      "wall_clock_uncapped_p50_s": 3.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 3.0,
+          "to_s": 2.8,
+          "reason": "population-weighted measured floor — the merge gate is bimodal, so the critical path differs by PR; this check is the pole on ~19/20 PR populations (sampled PRs that ran a gated check), giving an expected Δ 3s of the 3s raw saving"
+        }
+      ],
+      "workflow_run_share": 0.375,
+      "workflow_runs_30d": 6,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f21",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `Claude Code Review`",
+      "workflow_file": "Claude",
+      "line": 0,
+      "affected_jobs": [
+        "Claude Code Review"
+      ],
+      "workflow_activity": {},
+      "evidence": "critical-path check `Claude Code Review` (388s): fileless check (no sampled job/steps — e.g. a default setup or third-party app check); name suggests a `other` cost, addressable at the check's source",
+      "measured_signal": "critical-path check `Claude Code Review` (388s): fileless check (no sampled job/steps — e.g. a default setup or third-party app check); name suggests a `other` cost, addressable at the check's source",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": null,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "fileless check (no sampled job/steps — e.g. a default setup or third-party app check); name suggests a `other` cost, addressable at the check's source",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sku": null,
+      "sku_class": "unpriced",
+      "billing_class": "unpriced",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f22",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `Analyze (java, none, true)`",
+      "workflow_file": ".github/workflows/codeql.yml",
+      "line": 0,
+      "affected_jobs": [
+        "Analyze (java, none, true)"
+      ],
+      "workflow_activity": {
+        "runs_30d": 16,
+        "last_run": "2026-07-12T20:01:58Z",
+        "dormant": false
+      },
+      "evidence": "critical-path check `Analyze (java, none, true)` (103s): dominant step `Perform CodeQL Analysis + 1 more scan step` (scan, 95% of job `Analyze (java, none, true)`)",
+      "measured_signal": "critical-path check `Analyze (java, none, true)` (103s): dominant step `Perform CodeQL Analysis + 1 more scan step` (scan, 95% of job `Analyze (java, none, true)`)",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "scan phase (2 steps) 97s above a ~30s warm/cached floor; population-weighted measured floor — the merge gate is bimodal, so the critical path differs by PR; this check is the pole on ~0/20 PR populations (sampled PRs that ran a gated check), giving an expected Δ 0s of the 67s raw saving",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "decomposition": {
+        "dominant_step": "Perform CodeQL Analysis + 1 more scan step",
+        "dominant_category": "scan",
+        "dominant_p50_s": 97.0,
+        "dominant_share": 0.951,
+        "redundant_ratio": 0.02,
+        "job_p50_s": 102.0
+      },
+      "measured_evidence": {
+        "summary": "check `Analyze (java, none, true)` (103s) maps to job `Analyze (java, none, true)`; dominant step `Perform CodeQL Analysis + 1 more scan step` (scan) is 95% of the job. Redundant-work ratio (setup+build / payload) = 0.02.",
+        "table": {
+          "headers": [
+            "Step",
+            "Category",
+            "p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`Perform CodeQL Analysis`",
+              "scan",
+              "80s",
+              "78%"
+            ],
+            [
+              "`Initialize CodeQL`",
+              "scan",
+              "17s",
+              "17%"
+            ],
+            [
+              "`Set up job`",
+              "setup",
+              "1s",
+              "1%"
+            ],
+            [
+              "`Checkout repository`",
+              "checkout",
+              "1s",
+              "1%"
+            ],
+            [
+              "`Post Initialize CodeQL`",
+              "post",
+              "1s",
+              "1%"
+            ],
+            [
+              "`Post Checkout repository`",
+              "post",
+              "1s",
+              "1%"
+            ]
+          ]
+        },
+        "note": "Decomposed from the sampled job's per-step timings. The dominant step is the addressable cost — attack it by category, don't declare the whole check inherent."
+      },
+      "wall_clock_uncapped_p50_s": 67.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 67.0,
+          "to_s": 0.0,
+          "reason": "population-weighted measured floor — the merge gate is bimodal, so the critical path differs by PR; this check is the pole on ~0/20 PR populations (sampled PRs that ran a gated check), giving an expected Δ 0s of the 67s raw saving"
+        }
+      ],
+      "workflow_run_share": 1.0,
+      "workflow_runs_30d": 16,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f23",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `Analyze (actions, none)`",
+      "workflow_file": ".github/workflows/codeql.yml",
+      "line": 0,
+      "affected_jobs": [
+        "Analyze (actions, none)"
+      ],
+      "workflow_activity": {
+        "runs_30d": 16,
+        "last_run": "2026-07-12T20:01:58Z",
+        "dormant": false
+      },
+      "evidence": "critical-path check `Analyze (actions, none)` (36s): dominant step `Perform CodeQL Analysis + 1 more scan step` (scan, 86% of job `Analyze (actions, none)`)",
+      "measured_signal": "critical-path check `Analyze (actions, none)` (36s): dominant step `Perform CodeQL Analysis + 1 more scan step` (scan, 86% of job `Analyze (actions, none)`)",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "scan phase (2 steps) 32s above a ~30s warm/cached floor; population-weighted measured floor — the merge gate is bimodal, so the critical path differs by PR; this check is the pole on ~0/20 PR populations (sampled PRs that ran a gated check), giving an expected Δ 0s of the 2s raw saving",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "decomposition": {
+        "dominant_step": "Perform CodeQL Analysis + 1 more scan step",
+        "dominant_category": "scan",
+        "dominant_p50_s": 32.0,
+        "dominant_share": 0.865,
+        "redundant_ratio": 0.06,
+        "job_p50_s": 37.0
+      },
+      "measured_evidence": {
+        "summary": "check `Analyze (actions, none)` (36s) maps to job `Analyze (actions, none)`; dominant step `Perform CodeQL Analysis + 1 more scan step` (scan) is 86% of the job. Redundant-work ratio (setup+build / payload) = 0.06.",
+        "table": {
+          "headers": [
+            "Step",
+            "Category",
+            "p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`Perform CodeQL Analysis`",
+              "scan",
+              "22s",
+              "59%"
+            ],
+            [
+              "`Initialize CodeQL`",
+              "scan",
+              "10s",
+              "27%"
+            ],
+            [
+              "`Set up job`",
+              "setup",
+              "1s",
+              "3%"
+            ],
+            [
+              "`Post Initialize CodeQL`",
+              "post",
+              "1s",
+              "3%"
+            ],
+            [
+              "`Checkout repository`",
+              "checkout",
+              "1s",
+              "3%"
+            ],
+            [
+              "`Post Checkout repository`",
+              "post",
+              "1s",
+              "3%"
+            ]
+          ]
+        },
+        "note": "Decomposed from the sampled job's per-step timings. The dominant step is the addressable cost — attack it by category, don't declare the whole check inherent."
+      },
+      "wall_clock_uncapped_p50_s": 2.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 2.0,
+          "to_s": 0.0,
+          "reason": "population-weighted measured floor — the merge gate is bimodal, so the critical path differs by PR; this check is the pole on ~0/20 PR populations (sampled PRs that ran a gated check), giving an expected Δ 0s of the 2s raw saving"
+        }
+      ],
+      "workflow_run_share": 1.0,
+      "workflow_runs_30d": 16,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f24",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `create-release / create_release`",
+      "workflow_file": ".github/workflows/cd.yml",
+      "line": 0,
+      "affected_jobs": [
+        "create-release / create_release"
+      ],
+      "workflow_activity": {
+        "runs_30d": 5,
+        "last_run": "2026-07-09T21:36:28Z",
+        "dormant": false
+      },
+      "evidence": "critical-path check `create-release / create_release` (6s): dominant step `Create release notes` (package, 17% of job `create-release / create_release`)",
+      "measured_signal": "critical-path check `create-release / create_release` (6s): dominant step `Create release notes` (package, 17% of job `create-release / create_release`)",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": null,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "package step 1s above a ~10s warm/cached floor",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "decomposition": {
+        "dominant_step": "Create release notes",
+        "dominant_category": "package",
+        "dominant_p50_s": 1.0,
+        "dominant_share": 0.167,
+        "redundant_ratio": 2.0,
+        "job_p50_s": 6.0
+      },
+      "measured_evidence": {
+        "summary": "check `create-release / create_release` (6s) maps to job `create-release / create_release`; dominant step `Create release notes` (package) is 17% of the job. Redundant-work ratio (setup+build / payload) = 2.0.",
+        "table": {
+          "headers": [
+            "Step",
+            "Category",
+            "p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`Set up job`",
+              "setup",
+              "1s",
+              "17%"
+            ],
+            [
+              "`Checkout`",
+              "checkout",
+              "1s",
+              "17%"
+            ],
+            [
+              "`Create release notes`",
+              "package",
+              "1s",
+              "17%"
+            ],
+            [
+              "`Create GitHub Release`",
+              "other",
+              "1s",
+              "17%"
+            ],
+            [
+              "`Post Checkout`",
+              "post",
+              "1s",
+              "17%"
+            ],
+            [
+              "`Complete job`",
+              "other",
+              "1s",
+              "17%"
+            ]
+          ]
+        },
+        "note": "Decomposed from the sampled job's per-step timings. The dominant step is the addressable cost — attack it by category, don't declare the whole check inherent."
+      },
+      "workflow_run_share": 0.312,
+      "workflow_runs_30d": 5,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f25",
+      "pattern": "OPT73",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "Shared step recurs across the cluster — fix once, lower the floor",
+      "workflow_file": ".github/workflows/e2e.yml",
+      "line": 0,
+      "affected_jobs": [
+        "e2e-android / e2e",
+        "e2e-ios / e2e"
+      ],
+      "workflow_activity": {
+        "runs_30d": 12,
+        "last_run": "2026-07-09T20:11:38Z",
+        "dormant": false
+      },
+      "evidence": "the `Run Appium tests` step is 97% of the slowest cluster job `e2e-android / e2e` (619s) and recurs across 2 concurrent jobs of `.github/workflows/e2e.yml` (~494–598s per job) — a cluster-floor lever",
+      "measured_signal": "the `Run Appium tests` step is 97% of the slowest cluster job `e2e-android / e2e` (619s) and recurs across 2 concurrent jobs of `.github/workflows/e2e.yml` (~494–598s per job) — a cluster-floor lever",
+      "fix_strategy": "shared-substep-floor",
+      "fix_recipe_anchor": "opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 193.8,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "cluster-floor lever — saving credited across all 2 jobs running the shared `test` step (~194 runner-min/mo); workflow runs only on non-developer-facing triggers (push, workflow_dispatch) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only",
+      "structural": true,
+      "risk": "LOW",
+      "guardrail": "make each parallel copy cheap (shared warm cache / prebuilt base image) — do NOT consolidate into one upstream job the others needs: (that adds a serial gate, OPT14/wall-clock-negative); verify the cache key captures the step's real inputs so a hit never serves stale artifacts",
+      "rollout": "ship the shared cache, measure the cluster FLOOR (second-tallest job p50) before/after across 5 PRs — the win shows only when the whole cluster comes down",
+      "failure_mode": "low — caching a shared setup step changes no test/build semantics; escalates only if the shared step is a build whose cache could serve stale outputs",
+      "measured_evidence": {
+        "summary": "The **`Run Appium tests`** (`test`) step is the root-cause cost in 2 concurrent critical-path jobs of `.github/workflows/e2e.yml` — **97% of the slowest job** (`e2e-android / e2e`, 619s). The SAME step runs in each, so optimizing it once lowers all of them at the same time (shared floor ~494s, the cheapest job's cost).",
+        "table": {
+          "headers": [
+            "Cluster job",
+            "Job p50",
+            "`Run Appium tests` p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`e2e-android / e2e`",
+              "619s",
+              "598s",
+              "97%"
+            ],
+            [
+              "`e2e-ios / e2e`",
+              "514s",
+              "494s",
+              "96%"
+            ]
+          ]
+        },
+        "note": "Cluster-floor lever: shaving any one pole stops at the floor, but the same step shared across concurrent jobs lowers all of them together. Credit spans every job that runs it.",
+        "waterfall": {
+          "job": "e2e-android / e2e",
+          "job_p50_s": 619.0,
+          "shared_step": "Run Appium tests",
+          "steps": [
+            {
+              "step": "Run Appium tests",
+              "category": "test",
+              "p50_s": 598.0,
+              "shared": true
+            },
+            {
+              "step": "Set up Vite+",
+              "category": "setup",
+              "p50_s": 8.5,
+              "shared": false
+            },
+            {
+              "step": "Upload app to BrowserStack",
+              "category": "other",
+              "p50_s": 3.0,
+              "shared": false
+            },
+            {
+              "step": "Set up job",
+              "category": "setup",
+              "p50_s": 2.0,
+              "shared": false
+            },
+            {
+              "step": "Download app artifact",
+              "category": "other",
+              "p50_s": 2.0,
+              "shared": false
+            },
+            {
+              "step": "Post Set up Vite+",
+              "category": "post",
+              "p50_s": 1.5,
+              "shared": false
+            },
+            {
+              "step": "Checkout sdk-shared (for test files)",
+              "category": "checkout",
+              "p50_s": 1.0,
+              "shared": false
+            },
+            {
+              "step": "Upload test results",
+              "category": "test",
+              "p50_s": 1.0,
+              "shared": false
+            }
+          ]
+        }
+      },
+      "wall_clock_uncapped_p50_s": 484.5,
+      "wall_clock_derivation": [
+        {
+          "bound": "developer-facing",
+          "from_s": 484.5,
+          "to_s": 0.0,
+          "reason": "workflow runs only on non-developer-facing triggers (push, workflow_dispatch) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only"
+        }
+      ],
+      "workflow_run_share": 0.75,
+      "workflow_runs_30d": 12,
+      "pr_critical_path_s": 164.5,
+      "pr_critical_path_check": "build",
+      "off_spine": true,
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 1.16
+    }
+  ],
+  "scanned_workflows": 9,
+  "scan_incomplete": [],
+  "workflow_triggers": {
+    ".github/workflows/cd.yml": [
+      "pull_request",
+      "workflow_dispatch"
+    ],
+    ".github/workflows/ci.yml": [
+      "pull_request"
+    ],
+    ".github/workflows/codeql.yml": [
+      "pull_request",
+      "push",
+      "schedule"
+    ],
+    ".github/workflows/create-release-pr.yml": [
+      "workflow_call",
+      "workflow_dispatch"
+    ],
+    ".github/workflows/e2e.yml": [
+      "push",
+      "workflow_dispatch"
+    ],
+    ".github/workflows/linear-deployed.yml": [
+      "release"
+    ],
+    ".github/workflows/lint-pr-title.yml": [
+      "pull_request"
+    ],
+    ".github/workflows/project.yml": [
+      "issues"
+    ],
+    ".github/workflows/publish.yml": [
+      "push"
+    ]
+  },
+  "workflow_trigger_conditionality": {
+    ".github/workflows/cd.yml": "branch_scoped",
+    ".github/workflows/ci.yml": "path_scoped",
+    ".github/workflows/codeql.yml": "branch_scoped",
+    ".github/workflows/create-release-pr.yml": "not_pr_triggered",
+    ".github/workflows/e2e.yml": "not_pr_triggered",
+    ".github/workflows/linear-deployed.yml": "not_pr_triggered",
+    ".github/workflows/lint-pr-title.yml": "type_scoped",
+    ".github/workflows/project.yml": "not_pr_triggered",
+    ".github/workflows/publish.yml": "not_pr_triggered"
+  },
+  "practice_facts": {
+    "ci.cache.dependency-cache": {
+      "state": "pass",
+      "evidence": "dependency caching configured in 3 workflow/action file(s)",
+      "files": [
+        ".github/actions/setup-android-build/action.yml",
+        ".github/actions/setup-flutter/action.yml",
+        ".github/actions/setup-ios-build/action.yml"
+      ]
+    },
+    "ci.cache.build-cache": {
+      "state": "not_applicable",
+      "evidence": "no build tool with a cache detected in the repo tree",
+      "files": []
+    },
+    "ci.checkout.shallow-clone": {
+      "state": "pass",
+      "evidence": "no PR-gating workflow checks out full history (post-merge automation like backport/changelog jobs is exempt - it needs history and gates nobody)",
+      "files": []
+    },
+    "ci.parallel.test-sharding": {
+      "state": "not_applicable",
+      "evidence": "CI is delegated to cross-repo reusable workflow(s) (OneSignal/sdk-shared/.github/workflows/appium-e2e.yml, OneSignal/sdk-shared/.github/workflows/create-release.yml); test strategy there is not visible from this repo",
+      "files": []
+    },
+    "ci.build.change-scoped": {
+      "state": "not_applicable",
+      "evidence": "no turbo/nx task graph detected (change-scoping is not checkable here)",
+      "files": []
+    },
+    "ci.trigger.concurrency-groups": {
+      "state": "pass",
+      "evidence": "concurrency group declared on 1 of 3 PR workflow(s)",
+      "files": [
+        ".github/workflows/codeql.yml"
+      ]
+    },
+    "ci.trigger.cancel-superseded": {
+      "state": "pass",
+      "evidence": "concurrency + cancel-in-progress on 1 of 3 PR workflow(s)",
+      "files": [
+        ".github/workflows/codeql.yml"
+      ]
+    },
+    "ci.trigger.path-filter": {
+      "state": "pass",
+      "evidence": "paths filters on 1 of 3 PR workflow(s)",
+      "files": [
+        ".github/workflows/ci.yml"
+      ]
+    },
+    "ci.hygiene.job-timeouts": {
+      "state": "fail",
+      "evidence": "no job sets timeout-minutes (GitHub's default is 360 minutes)",
+      "files": []
+    },
+    "ci.trigger.draft-gate": {
+      "state": "fail",
+      "evidence": "no workflow gates on PR draft status",
+      "files": []
+    },
+    "ci.security.scoped-id-token": {
+      "state": "pass",
+      "evidence": "id-token: write scoped at job level in 1 workflow(s)",
+      "files": [
+        ".github/workflows/publish.yml"
+      ]
+    },
+    "ci.security.pinned-action-shas": {
+      "state": "fail",
+      "evidence": "0 of 24 remote action references SHA-pinned (workflow + local composite action files; passes at >=95%)",
+      "files": [
+        ".github/actions/setup-android-build/action.yml",
+        ".github/actions/setup-flutter/action.yml",
+        ".github/workflows/ci.yml"
+      ]
+    }
+  },
+  "workflow_call_graph": {},
+  "workflow_job_graph": {
+    ".github/workflows/cd.yml": {
+      "publish": {
+        "name": "publish",
+        "needs": [],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      },
+      "create-release": {
+        "name": "create-release",
+        "needs": [
+          "publish"
+        ],
+        "reusable": true,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/ci.yml": {
+      "build": {
+        "name": "build",
+        "needs": [],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/codeql.yml": {
+      "analyze": {
+        "name": "Analyze",
+        "needs": [],
+        "reusable": false,
+        "matrix": true,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/create-release-pr.yml": {
+      "prep": {
+        "name": "prep",
+        "needs": [],
+        "reusable": true,
+        "matrix": false,
+        "timeout_minutes": false
+      },
+      "update_version": {
+        "name": "update_version",
+        "needs": [
+          "prep"
+        ],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      },
+      "create-pr": {
+        "name": "create-pr",
+        "needs": [
+          "prep",
+          "update_version"
+        ],
+        "reusable": true,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/e2e.yml": {
+      "build-android": {
+        "name": "build-android",
+        "needs": [],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      },
+      "build-ios": {
+        "name": "build-ios",
+        "needs": [],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      },
+      "e2e-android": {
+        "name": "e2e-android",
+        "needs": [
+          "build-android"
+        ],
+        "reusable": true,
+        "matrix": false,
+        "timeout_minutes": false
+      },
+      "e2e-ios": {
+        "name": "e2e-ios",
+        "needs": [
+          "build-ios"
+        ],
+        "reusable": true,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/linear-deployed.yml": {
+      "linear-deployed": {
+        "name": "linear-deployed",
+        "needs": [],
+        "reusable": true,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/lint-pr-title.yml": {
+      "call": {
+        "name": "call",
+        "needs": [],
+        "reusable": true,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/project.yml": {
+      "add-to-project": {
+        "name": "add-to-project",
+        "needs": [],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/publish.yml": {
+      "publish": {
+        "name": "publish",
+        "needs": [],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    }
+  },
+  "catalog_patterns_total": 73,
+  "catalog_patterns_with_detector": 38,
+  "catalog_patterns_without_detector": [
+    "OPT11",
+    "OPT13",
+    "OPT15",
+    "OPT18",
+    "OPT22",
+    "OPT24",
+    "OPT30",
+    "OPT34",
+    "OPT38",
+    "OPT4",
+    "OPT44",
+    "OPT54",
+    "OPT56",
+    "OPT61",
+    "OPT68",
+    "OPT69",
+    "OPT8"
+  ],
+  "catalog_structural_patterns_without_detector": [
+    "OPT74"
+  ],
+  "timings": {
+    "static_scan_s": 0.04,
+    "run_start_epoch": 1784066052.157164,
+    "gh_timing_s": 39.67,
+    "scripted_end_epoch": 1784066091.972,
+    "scripted_total_s": 39.86
+  },
+  "scanned_at": "2026-07-14T21:54:12.199724+00:00",
+  "skill_commit_sha": "df5d24a",
+  "commit_sha": "a730a66a25938530169aba40fc9b4edd60ddd801",
+  "repo": "OneSignal/OneSignal-Flutter-SDK",
+  "repo_visibility": "public",
+  "required_checks": null,
+  "required_checks_complete": false,
+  "pr_critical_path": {
+    "sampled_pr_count": 20,
+    "sample_target": 20,
+    "sample_complete": true,
+    "sample_fetch_failures": 1,
+    "sample_fetched": 21,
+    "required_suite_scoped": false,
+    "required_suite_unsatisfiable": false,
+    "required_checks_unobservable": [],
+    "critical_path_check": "build",
+    "critical_path_s": 164.5,
+    "check_present_n_pr": 20,
+    "checks": [
+      {
+        "name": "build",
+        "p50_s": 164.5,
+        "present_on": 19,
+        "pole_n": 19,
+        "workflow_file": ".github/workflows/ci.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "Claude Code Review",
+        "p50_s": 388.0,
+        "present_on": 1,
+        "pole_n": 1,
+        "timing_source": "pr_check_runs"
+      },
+      {
+        "name": "Analyze (java, none, true)",
+        "p50_s": 103.0,
+        "present_on": 19,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/codeql.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "Analyze (actions, none)",
+        "p50_s": 36.0,
+        "present_on": 19,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/codeql.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "create-release / create_release",
+        "p50_s": 6.0,
+        "present_on": 5,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/cd.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "publish",
+        "p50_s": 4.0,
+        "present_on": 5,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/cd.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "call / lint-pr-title",
+        "p50_s": 4.0,
+        "present_on": 20,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/lint-pr-title.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "CodeQL",
+        "p50_s": 2.0,
+        "present_on": 18,
+        "pole_n": 0,
+        "timing_source": "pr_check_runs"
+      }
+    ],
+    "population_weighted": true,
+    "populations_n": 20,
+    "chain_facts": [
+      {
+        "sha": "eec561651750c245b909b8f62a6ddcb02c81ac04",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 164.5
+        },
+        "chain_s": 164.5,
+        "co_longest_n": 1,
+        "runner_up_s": 103.0,
+        "chain_win_s": 61.5,
+        "fallback": null,
+        "makespan_s": 8388.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "a1e8afe4129cd2a929fd028300da897e875e34b4",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 158.0
+        },
+        "chain_s": 158.0,
+        "co_longest_n": 1,
+        "runner_up_s": 98.0,
+        "chain_win_s": 60.0,
+        "fallback": null,
+        "makespan_s": 159.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "43742063be644fb146d9e57d111d7997832b2ed9",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 164.5
+        },
+        "chain_s": 164.5,
+        "co_longest_n": 1,
+        "runner_up_s": 99.0,
+        "chain_win_s": 65.5,
+        "fallback": null,
+        "makespan_s": 5067.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "1ee16fe8741b222c74512a597d1745294998b450",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 128.0
+        },
+        "chain_s": 128.0,
+        "co_longest_n": 1,
+        "runner_up_s": 103.0,
+        "chain_win_s": 25.0,
+        "fallback": null,
+        "makespan_s": 1741.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "fab85842adb62034feda72e429557001208b3bdc",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 130.0
+        },
+        "chain_s": 130.0,
+        "co_longest_n": 1,
+        "runner_up_s": 12.0,
+        "chain_win_s": 118.0,
+        "fallback": null,
+        "makespan_s": 130.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "2f7b1ddf20f6d2b09bfe21fa3b985c81a7024dba",
+        "chain": [
+          "Claude Code Review"
+        ],
+        "member_spans_s": {
+          "Claude Code Review": 388.0
+        },
+        "chain_s": 388.0,
+        "co_longest_n": 1,
+        "runner_up_s": 91.0,
+        "chain_win_s": 297.0,
+        "fallback": null,
+        "makespan_s": 1365.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "67fc94273f104201b25fb06ef55f47e9d27a2294",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 164.5
+        },
+        "chain_s": 164.5,
+        "co_longest_n": 1,
+        "runner_up_s": 95.0,
+        "chain_win_s": 69.5,
+        "fallback": null,
+        "makespan_s": 344319.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "6af64611943ffbc10c55f2b7366367bfd1214f72",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 164.5
+        },
+        "chain_s": 164.5,
+        "co_longest_n": 1,
+        "runner_up_s": 103.0,
+        "chain_win_s": 61.5,
+        "fallback": null,
+        "makespan_s": 164.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "d65761b3412e06102347dd6bad1cbe1e848aa038",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 149.0
+        },
+        "chain_s": 149.0,
+        "co_longest_n": 1,
+        "runner_up_s": 103.0,
+        "chain_win_s": 46.0,
+        "fallback": null,
+        "makespan_s": 149.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "1a24a4930d9c30098cad435e97ffb89413b7c756",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 136.0
+        },
+        "chain_s": 136.0,
+        "co_longest_n": 1,
+        "runner_up_s": 91.0,
+        "chain_win_s": 45.0,
+        "fallback": null,
+        "makespan_s": 136.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "41e9a52a8ab7ee7ca23f57517aff0a51ff59907f",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 164.5
+        },
+        "chain_s": 164.5,
+        "co_longest_n": 1,
+        "runner_up_s": 96.0,
+        "chain_win_s": 68.5,
+        "fallback": null,
+        "makespan_s": 164.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "1e9ab25b1d31a4e98189dbe44c9d288c34c61319",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 133.0
+        },
+        "chain_s": 133.0,
+        "co_longest_n": 1,
+        "runner_up_s": 103.0,
+        "chain_win_s": 30.0,
+        "fallback": null,
+        "makespan_s": 744.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "6ec03a89f998bb04aff8950b9195de5b43bda0fc",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 156.0
+        },
+        "chain_s": 156.0,
+        "co_longest_n": 1,
+        "runner_up_s": 103.0,
+        "chain_win_s": 53.0,
+        "fallback": null,
+        "makespan_s": 156.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "000c24b0793a6935328371582a98bb9865fbfee4",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 160.0
+        },
+        "chain_s": 160.0,
+        "co_longest_n": 1,
+        "runner_up_s": 90.0,
+        "chain_win_s": 70.0,
+        "fallback": null,
+        "makespan_s": 162.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "c2ea12bfc0556f72c2020b0328655ea1288b8298",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 164.5
+        },
+        "chain_s": 164.5,
+        "co_longest_n": 1,
+        "runner_up_s": 44.0,
+        "chain_win_s": 120.5,
+        "fallback": null,
+        "makespan_s": 164.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "6c0ef48ab319bac8d3261d4efa16155829e890b9",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 164.5
+        },
+        "chain_s": 164.5,
+        "co_longest_n": 1,
+        "runner_up_s": 76.0,
+        "chain_win_s": 88.5,
+        "fallback": null,
+        "makespan_s": 165.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "aaedfaf1294fe80ad69b666e7ac52273311070a1",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 142.0
+        },
+        "chain_s": 142.0,
+        "co_longest_n": 1,
+        "runner_up_s": 75.0,
+        "chain_win_s": 67.0,
+        "fallback": null,
+        "makespan_s": 142.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "c0dcf64cce95e702a02d3b570306869a06db4fb8",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 164.5
+        },
+        "chain_s": 164.5,
+        "co_longest_n": 1,
+        "runner_up_s": 103.0,
+        "chain_win_s": 61.5,
+        "fallback": null,
+        "makespan_s": 164.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "c0509a2058980ee6025176cfb3f9441fb887df7a",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 164.5
+        },
+        "chain_s": 164.5,
+        "co_longest_n": 1,
+        "runner_up_s": 4.0,
+        "chain_win_s": 160.5,
+        "fallback": null,
+        "makespan_s": 164.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "0641a341ef8c4a049e399d790314d85d34f56a4a",
+        "chain": [
+          "build"
+        ],
+        "member_spans_s": {
+          "build": 146.0
+        },
+        "chain_s": 146.0,
+        "co_longest_n": 1,
+        "runner_up_s": 103.0,
+        "chain_win_s": 43.0,
+        "fallback": null,
+        "makespan_s": 146.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      }
+    ],
+    "chain_summary": {
+      "n": 20,
+      "chain_p50_s": 162.25,
+      "modal_chain": [
+        "build"
+      ],
+      "modal_n": 19,
+      "runner_up_p50_s": 97.0,
+      "chain_win_p50_s": 63.5,
+      "makespan_p50_s": 164.5,
+      "divergence_pct": -1.37
+    },
+    "populations": [
+      [
+        0.05,
+        [
+          [
+            "build",
+            164.5
+          ],
+          [
+            "Analyze (java, none, true)",
+            103.0
+          ],
+          [
+            "Analyze (actions, none)",
+            36.0
+          ],
+          [
+            "create-release / create_release",
+            6.0
+          ],
+          [
+            "publish",
+            4.0
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ],
+          [
+            "CodeQL",
+            1.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            158.0
+          ],
+          [
+            "Analyze (java, none, true)",
+            98.0
+          ],
+          [
+            "Analyze (actions, none)",
+            32.0
+          ],
+          [
+            "call / lint-pr-title",
+            3.0
+          ],
+          [
+            "CodeQL",
+            2.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            164.5
+          ],
+          [
+            "Analyze (java, none, true)",
+            99.0
+          ],
+          [
+            "Analyze (actions, none)",
+            34.0
+          ],
+          [
+            "create-release / create_release",
+            6.0
+          ],
+          [
+            "publish",
+            3.0
+          ],
+          [
+            "CodeQL",
+            3.0
+          ],
+          [
+            "call / lint-pr-title",
+            3.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            128.0
+          ],
+          [
+            "Analyze (java, none, true)",
+            103.0
+          ],
+          [
+            "Analyze (actions, none)",
+            34.0
+          ],
+          [
+            "create-release / create_release",
+            6.0
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ],
+          [
+            "publish",
+            3.0
+          ],
+          [
+            "CodeQL",
+            2.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            130.0
+          ],
+          [
+            "Analyze (actions, none)",
+            12.0
+          ],
+          [
+            "Analyze (java, none, true)",
+            11.0
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "Claude Code Review",
+            388.0
+          ],
+          [
+            "Analyze (java, none, true)",
+            91.0
+          ],
+          [
+            "Analyze (actions, none)",
+            36.0
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ],
+          [
+            "CodeQL",
+            1.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            164.5
+          ],
+          [
+            "Analyze (java, none, true)",
+            95.0
+          ],
+          [
+            "Analyze (actions, none)",
+            35.0
+          ],
+          [
+            "create-release / create_release",
+            6.0
+          ],
+          [
+            "publish",
+            4.0
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ],
+          [
+            "CodeQL",
+            2.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            164.5
+          ],
+          [
+            "Analyze (java, none, true)",
+            103.0
+          ],
+          [
+            "Analyze (actions, none)",
+            36.0
+          ],
+          [
+            "CodeQL",
+            3.0
+          ],
+          [
+            "call / lint-pr-title",
+            3.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            149.0
+          ],
+          [
+            "Analyze (java, none, true)",
+            103.0
+          ],
+          [
+            "Analyze (actions, none)",
+            36.0
+          ],
+          [
+            "create-release / create_release",
+            6.0
+          ],
+          [
+            "publish",
+            4.0
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ],
+          [
+            "CodeQL",
+            2.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            136.0
+          ],
+          [
+            "Analyze (java, none, true)",
+            91.0
+          ],
+          [
+            "Analyze (actions, none)",
+            36.0
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ],
+          [
+            "CodeQL",
+            2.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            164.5
+          ],
+          [
+            "Analyze (java, none, true)",
+            96.0
+          ],
+          [
+            "Analyze (actions, none)",
+            36.0
+          ],
+          [
+            "call / lint-pr-title",
+            3.0
+          ],
+          [
+            "CodeQL",
+            2.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            133.0
+          ],
+          [
+            "Analyze (java, none, true)",
+            103.0
+          ],
+          [
+            "Analyze (actions, none)",
+            33.0
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ],
+          [
+            "CodeQL",
+            1.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            156.0
+          ],
+          [
+            "Analyze (java, none, true)",
+            103.0
+          ],
+          [
+            "Analyze (actions, none)",
+            36.0
+          ],
+          [
+            "call / lint-pr-title",
+            3.0
+          ],
+          [
+            "CodeQL",
+            2.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            160.0
+          ],
+          [
+            "Analyze (java, none, true)",
+            90.0
+          ],
+          [
+            "Analyze (actions, none)",
+            36.0
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ],
+          [
+            "CodeQL",
+            2.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            164.5
+          ],
+          [
+            "Analyze (java, none, true)",
+            44.0
+          ],
+          [
+            "Analyze (actions, none)",
+            36.0
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ],
+          [
+            "CodeQL",
+            2.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            164.5
+          ],
+          [
+            "Analyze (java, none, true)",
+            76.0
+          ],
+          [
+            "Analyze (actions, none)",
+            36.0
+          ],
+          [
+            "call / lint-pr-title",
+            3.0
+          ],
+          [
+            "CodeQL",
+            2.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            142.0
+          ],
+          [
+            "Analyze (java, none, true)",
+            75.0
+          ],
+          [
+            "Analyze (actions, none)",
+            33.0
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ],
+          [
+            "CodeQL",
+            2.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            164.5
+          ],
+          [
+            "Analyze (java, none, true)",
+            103.0
+          ],
+          [
+            "Analyze (actions, none)",
+            36.0
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ],
+          [
+            "CodeQL",
+            1.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            164.5
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ]
+        ]
+      ],
+      [
+        0.05,
+        [
+          [
+            "build",
+            146.0
+          ],
+          [
+            "Analyze (java, none, true)",
+            103.0
+          ],
+          [
+            "Analyze (actions, none)",
+            36.0
+          ],
+          [
+            "call / lint-pr-title",
+            4.0
+          ],
+          [
+            "CodeQL",
+            2.0
+          ]
+        ]
+      ]
+    ],
+    "dropped_non_pr_checks": [
+      "e2e-android / e2e",
+      "e2e-ios / e2e",
+      "build-android",
+      "build-ios"
+    ],
+    "dropped_non_required_checks": [],
+    "spine_required_scoped": false,
+    "poles": [
+      {
+        "check": "build",
+        "p50_s": 164.5,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "build",
+        "dominant_step": "Check formatting (dart,java,c) + 1 more other step",
+        "dominant_category": "other",
+        "dominant_p50_s": 33.0,
+        "dominant_share": 0.212,
+        "job_p50_s": 156.0,
+        "steps": [
+          {
+            "step": "Set up Flutter",
+            "category": "setup",
+            "p50_s": 65.5
+          },
+          {
+            "step": "Setup Clang",
+            "category": "setup",
+            "p50_s": 28.0
+          },
+          {
+            "step": "Check formatting (dart,java,c)",
+            "category": "other",
+            "p50_s": 23.5
+          },
+          {
+            "step": "Run Flutter unit tests",
+            "category": "test",
+            "p50_s": 20.0
+          },
+          {
+            "step": "Static Analysis",
+            "category": "other",
+            "p50_s": 9.5
+          },
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 2.5
+          },
+          {
+            "step": "Post Setup Clang",
+            "category": "post",
+            "p50_s": 2.0
+          },
+          {
+            "step": "Post Set up Flutter",
+            "category": "post",
+            "p50_s": 2.0
+          },
+          {
+            "step": "Checkout OneSignal-Flutter-SDK",
+            "category": "checkout",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Checkout OneSignal-Flutter-SDK",
+            "category": "post",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Complete job",
+            "category": "other",
+            "p50_s": 1.0
+          }
+        ]
+      },
+      {
+        "check": "Claude Code Review",
+        "p50_s": 388.0,
+        "timing_source": "pr_check_runs"
+      },
+      {
+        "check": "Analyze (java, none, true)",
+        "p50_s": 103.0,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/codeql.yml",
+        "job": "Analyze (java, none, true)",
+        "dominant_step": "Perform CodeQL Analysis + 1 more scan step",
+        "dominant_category": "scan",
+        "dominant_p50_s": 97.0,
+        "dominant_share": 0.951,
+        "job_p50_s": 102.0,
+        "steps": [
+          {
+            "step": "Perform CodeQL Analysis",
+            "category": "scan",
+            "p50_s": 80.0
+          },
+          {
+            "step": "Initialize CodeQL",
+            "category": "scan",
+            "p50_s": 17.0
+          },
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Checkout repository",
+            "category": "checkout",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Initialize CodeQL",
+            "category": "post",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Checkout repository",
+            "category": "post",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Perform CodeQL Analysis",
+            "category": "post",
+            "p50_s": 1.0
+          }
+        ]
+      },
+      {
+        "check": "Analyze (actions, none)",
+        "p50_s": 36.0,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/codeql.yml",
+        "job": "Analyze (actions, none)",
+        "dominant_step": "Perform CodeQL Analysis + 1 more scan step",
+        "dominant_category": "scan",
+        "dominant_p50_s": 32.0,
+        "dominant_share": 0.865,
+        "job_p50_s": 37.0,
+        "steps": [
+          {
+            "step": "Perform CodeQL Analysis",
+            "category": "scan",
+            "p50_s": 22.0
+          },
+          {
+            "step": "Initialize CodeQL",
+            "category": "scan",
+            "p50_s": 10.0
+          },
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Initialize CodeQL",
+            "category": "post",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Checkout repository",
+            "category": "checkout",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Checkout repository",
+            "category": "post",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Perform CodeQL Analysis",
+            "category": "post",
+            "p50_s": 1.0
+          }
+        ]
+      },
+      {
+        "check": "create-release / create_release",
+        "p50_s": 6.0,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/cd.yml",
+        "job": "create-release / create_release",
+        "dominant_step": "Create release notes",
+        "dominant_category": "package",
+        "dominant_p50_s": 1.0,
+        "dominant_share": 0.167,
+        "job_p50_s": 6.0,
+        "steps": [
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Checkout",
+            "category": "checkout",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Create release notes",
+            "category": "package",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Create GitHub Release",
+            "category": "other",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Checkout",
+            "category": "post",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Complete job",
+            "category": "other",
+            "p50_s": 1.0
+          }
+        ]
+      }
+    ],
+    "provenance": "unresolved",
+    "required_check_conditionality": {}
+  },
+  "structural_analysis_top_n": 5,
+  "data_sources": {
+    "tiers_run": [
+      "gh-timing"
+    ],
+    "gh_available": true,
+    "workflows_analyzed": 9,
+    "runs_sampled": 130,
+    "jobs_sampled": 220,
+    "jobs_fetch_failures": 0,
+    "shallow_runs": 10,
+    "max_runs": 20,
+    "shallow_capped": true,
+    "capped_workflows": 9,
+    "pole_candidates": 4,
+    "deepened_workflows": 4,
+    "deepen_converged": true,
+    "triaged_fast_workflows": [],
+    "triaged_fast_count": 0,
+    "recovered_fast_workflows": [],
+    "recovered_fast_count": 0,
+    "cost_spine_triaged_workflows_included": [],
+    "cost_spine_triaged_workflow_count": 0,
+    "cost_spine_triaged_runs_sampled": 0,
+    "cost_spine_triaged_jobs_sampled": 0,
+    "logs_fetched": null,
+    "workflow_yaml_source": {
+      "checkout": 9,
+      "api": 0
+    },
+    "workflow_yaml_skew": null,
+    "detectors_skipped": [],
+    "gh_query_count": 300,
+    "gh_error_count": 1,
+    "sampled_runs_created_before": null,
+    "run_list_fetch_failures": [],
+    "job_fetch_failures": [],
+    "partial_reason": "1 gh API call(s) failed during collection",
+    "partial_kind": "sample_thinned",
+    "cost_spine_job_fetch_failures": 0,
+    "cost_deepen_candidate_workflows": [
+      ".github/workflows/e2e.yml",
+      ".github/workflows/codeql.yml",
+      ".github/workflows/ci.yml",
+      ".github/workflows/cd.yml",
+      ".github/workflows/lint-pr-title.yml",
+      ".github/workflows/publish.yml",
+      ".github/workflows/create-release-pr.yml",
+      ".github/workflows/linear-deployed.yml",
+      ".github/workflows/project.yml"
+    ],
+    "cost_deepen_candidate_count": 9,
+    "cost_deepened_workflows": [
+      ".github/workflows/create-release-pr.yml",
+      ".github/workflows/e2e.yml",
+      ".github/workflows/linear-deployed.yml",
+      ".github/workflows/project.yml",
+      ".github/workflows/publish.yml"
+    ],
+    "cost_deepened_workflow_count": 5,
+    "cost_deepen_runs_sampled": 33,
+    "cost_deepen_jobs_sampled": 62,
+    "full_depth_workflows": [
+      ".github/workflows/cd.yml",
+      ".github/workflows/ci.yml",
+      ".github/workflows/codeql.yml",
+      ".github/workflows/lint-pr-title.yml"
+    ],
+    "full_depth_workflow_count": 4,
+    "shallow_remaining_workflows": [
+      ".github/workflows/create-release-pr.yml",
+      ".github/workflows/e2e.yml",
+      ".github/workflows/linear-deployed.yml",
+      ".github/workflows/project.yml",
+      ".github/workflows/publish.yml"
+    ],
+    "shallow_remaining_workflow_count": 5,
+    "cost_spine_full_depth_workflows": [
+      ".github/workflows/cd.yml",
+      ".github/workflows/ci.yml",
+      ".github/workflows/codeql.yml",
+      ".github/workflows/create-release-pr.yml",
+      ".github/workflows/e2e.yml",
+      ".github/workflows/linear-deployed.yml",
+      ".github/workflows/lint-pr-title.yml",
+      ".github/workflows/project.yml",
+      ".github/workflows/publish.yml"
+    ],
+    "cost_spine_full_depth_workflow_count": 9,
+    "cost_spine_shallow_workflows": [],
+    "cost_spine_shallow_workflow_count": 0,
+    "prefetch_unconsumed": 0,
+    "attempt_stats": {
+      "scope": "pr-event runs of gating workflows (all-status slice)",
+      "gating_workflows": [
+        ".github/workflows/cd.yml",
+        ".github/workflows/ci.yml",
+        ".github/workflows/codeql.yml"
+      ],
+      "workflows_missing": [],
+      "pr_event_runs": 249,
+      "pr_event_runs_multi_attempt": 0,
+      "prior_attempt_gating_minutes": 0.0,
+      "sampled_prs": 20
+    }
+  },
+  "per_workflow_timing": {
+    ".github/workflows/cd.yml": {
+      "long_pole_job": "create-release / create_release",
+      "long_pole_p50": 6.0,
+      "long_pole_p95": 9.05,
+      "floor_p50": 4.0,
+      "job_p50": {
+        "publish": 4.0,
+        "create-release / create_release": 6.0
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "publish": "ubuntu-latest",
+        "create-release / create_release": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "pull_request",
+      "events": [
+        "pull_request"
+      ]
+    },
+    ".github/workflows/ci.yml": {
+      "long_pole_job": "build",
+      "long_pole_p50": 164.5,
+      "long_pole_p95": 202.05,
+      "floor_p50": 0.0,
+      "job_p50": {
+        "build": 164.5
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "build": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "pull_request",
+      "events": [
+        "pull_request"
+      ]
+    },
+    ".github/workflows/codeql.yml": {
+      "long_pole_job": "Analyze (java, none, true)",
+      "long_pole_p50": 103.0,
+      "long_pole_p95": 120.39999999999999,
+      "floor_p50": 36.0,
+      "job_p50": {
+        "Analyze (actions, none)": 36.0,
+        "Analyze (java, none, true)": 103.0
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "Analyze (actions, none)": "ubuntu-latest",
+        "Analyze (java, none, true)": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "pull_request",
+      "events": [
+        "pull_request",
+        "push",
+        "schedule"
+      ]
+    },
+    ".github/workflows/create-release-pr.yml": {
+      "long_pole_job": "update_version",
+      "long_pole_p50": 10.5,
+      "long_pole_p95": 46.00000000000004,
+      "floor_p50": 10.0,
+      "job_p50": {
+        "prep / prepare_release": 5.5,
+        "update_version": 10.5,
+        "create-pr / create_release": 10.0
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "prep / prepare_release": "ubuntu-latest",
+        "update_version": "macos-latest",
+        "create-pr / create_release": "ubuntu-latest"
+      },
+      "runner_scope": "macos-latest",
+      "event_scope": "all-events",
+      "events": [
+        "workflow_dispatch"
+      ]
+    },
+    ".github/workflows/e2e.yml": {
+      "long_pole_job": "e2e-android / e2e",
+      "long_pole_p50": 618.0,
+      "long_pole_p95": 2682.2500000000005,
+      "floor_p50": 510.5,
+      "job_p50": {
+        "build-ios": 233.5,
+        "build-android": 387.5,
+        "e2e-ios / e2e": 510.5,
+        "e2e-android / e2e": 618.0
+      },
+      "job_bimodal": {
+        "e2e-ios / e2e": {
+          "n": 10,
+          "slow_n": 3,
+          "slow_frac": 0.3,
+          "low_p50_s": 496.0,
+          "high_p50_s": 2474.0
+        }
+      },
+      "job_runner": {
+        "build-ios": "macos-latest",
+        "build-android": "ubuntu-latest",
+        "e2e-ios / e2e": "ubuntu-latest",
+        "e2e-android / e2e": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "all-events",
+      "events": [
+        "push",
+        "workflow_dispatch"
+      ]
+    },
+    ".github/workflows/linear-deployed.yml": {
+      "long_pole_job": "linear-deployed / update-linear",
+      "long_pole_p50": 5.5,
+      "long_pole_p95": 17.450000000000014,
+      "floor_p50": 0.0,
+      "job_p50": {
+        "linear-deployed / update-linear": 5.5
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "linear-deployed / update-linear": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "all-events",
+      "events": [
+        "release"
+      ]
+    },
+    ".github/workflows/lint-pr-title.yml": {
+      "long_pole_job": "call / lint-pr-title",
+      "long_pole_p50": 4.0,
+      "long_pole_p95": 6.0,
+      "floor_p50": 0.0,
+      "job_p50": {
+        "call / lint-pr-title": 4.0
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "call / lint-pr-title": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "pull_request",
+      "events": [
+        "pull_request"
+      ]
+    },
+    ".github/workflows/project.yml": {
+      "long_pole_job": "add-to-project",
+      "long_pole_p50": 4.5,
+      "long_pole_p95": 6.0,
+      "floor_p50": 0.0,
+      "job_p50": {
+        "add-to-project": 4.5
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "add-to-project": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "all-events",
+      "events": [
+        "issues"
+      ]
+    },
+    ".github/workflows/publish.yml": {
+      "long_pole_job": "publish",
+      "long_pole_p50": 85.0,
+      "long_pole_p95": 95.55,
+      "floor_p50": 0.0,
+      "job_p50": {
+        "publish": 85.0
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "publish": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "all-events",
+      "events": [
+        "push"
+      ]
+    }
+  },
+  "rates_verified_date": "2026-07-03",
+  "runner_minute_spine": {
+    "schema_version": 1,
+    "source": "jobs_api_sampled_runs",
+    "coverage_scope": "sampled_workflows_in_play_with_job_data",
+    "complete_repo_coverage": true,
+    "render_ready": true,
+    "render_blocker": "",
+    "extrapolation_basis": "sampled_job_occurrence_fraction_x_all_status_30d_workflow_volume",
+    "attempt_coverage": "latest_and_prior",
+    "prior_attempts_included": true,
+    "latest_attempt_row_count": 16,
+    "prior_attempt_row_count": 4,
+    "repo_visibility": "public",
+    "rates_verified_date": "2026-07-03",
+    "workflow_coverage": {
+      "scope": "positive_30d_workflows_in_play",
+      "workflow_count": 9,
+      "row_workflow_count": 9,
+      "omitted_workflows": [],
+      "unknown_volume_workflows": [],
+      "triaged_workflows_included": [],
+      "job_fetch_failures": 0
+    },
+    "rows": [
+      {
+        "workflow_file": ".github/workflows/cd.yml",
+        "job_name": "create-release / create_release",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-06T00:32:33Z",
+        "sample_window_end": "2026-07-09T21:36:11Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 5,
+        "effective_monthly_job_volume": 5.0,
+        "mean_sampled_compute_seconds": 6.4,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 0.533,
+        "billable_equiv_min_per_month": 5.0,
+        "sku_weighted_billable_min_per_month": 5.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.03,
+        "share_of_all_row_total": 0.008
+      },
+      {
+        "workflow_file": ".github/workflows/cd.yml",
+        "job_name": "publish",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-06T00:32:33Z",
+        "sample_window_end": "2026-07-09T21:36:11Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 5,
+        "effective_monthly_job_volume": 5.0,
+        "mean_sampled_compute_seconds": 4.15,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 0.346,
+        "billable_equiv_min_per_month": 5.0,
+        "sku_weighted_billable_min_per_month": 5.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.03,
+        "share_of_all_row_total": 0.008
+      },
+      {
+        "workflow_file": ".github/workflows/ci.yml",
+        "job_name": "build",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-09T23:32:42Z",
+        "sample_window_end": "2026-07-09T19:16:37Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 6,
+        "effective_monthly_job_volume": 6.0,
+        "mean_sampled_compute_seconds": 164.55,
+        "mean_sampled_billable_equiv_minutes": 3.3,
+        "raw_compute_runner_min_per_month": 16.455,
+        "billable_equiv_min_per_month": 19.8,
+        "sku_weighted_billable_min_per_month": 19.8,
+        "billing_class": "capacity",
+        "usd_per_month": 0.12,
+        "share_of_all_row_total": 0.033
+      },
+      {
+        "workflow_file": ".github/workflows/codeql.yml",
+        "job_name": "Analyze (actions, none)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-10T07:27:45Z",
+        "sample_window_end": "2026-07-12T20:00:12Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 16,
+        "effective_monthly_job_volume": 16.0,
+        "mean_sampled_compute_seconds": 38.35,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 10.227,
+        "billable_equiv_min_per_month": 16.0,
+        "sku_weighted_billable_min_per_month": 16.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.1,
+        "share_of_all_row_total": 0.026
+      },
+      {
+        "workflow_file": ".github/workflows/codeql.yml",
+        "job_name": "Analyze (java, none, true)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-10T07:27:45Z",
+        "sample_window_end": "2026-07-12T20:00:12Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 16,
+        "effective_monthly_job_volume": 16.0,
+        "mean_sampled_compute_seconds": 105.65,
+        "mean_sampled_billable_equiv_minutes": 2.1,
+        "raw_compute_runner_min_per_month": 28.173,
+        "billable_equiv_min_per_month": 33.6,
+        "sku_weighted_billable_min_per_month": 33.6,
+        "billing_class": "capacity",
+        "usd_per_month": 0.2,
+        "share_of_all_row_total": 0.055
+      },
+      {
+        "workflow_file": ".github/workflows/create-release-pr.yml",
+        "job_name": "create-pr / create_release",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2025-12-19T19:46:16Z",
+        "sample_window_end": "2026-06-18T19:49:58Z",
+        "sampled_workflow_run_count": 12,
+        "sampled_job_occurrence_count": 12,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 2,
+        "effective_monthly_job_volume": 2.0,
+        "mean_sampled_compute_seconds": 10.167,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 0.339,
+        "billable_equiv_min_per_month": 2.0,
+        "sku_weighted_billable_min_per_month": 2.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.01,
+        "share_of_all_row_total": 0.003
+      },
+      {
+        "workflow_file": ".github/workflows/create-release-pr.yml",
+        "job_name": "prep / prepare_release",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2025-12-19T19:46:16Z",
+        "sample_window_end": "2026-06-18T19:49:58Z",
+        "sampled_workflow_run_count": 12,
+        "sampled_job_occurrence_count": 12,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 2,
+        "effective_monthly_job_volume": 2.0,
+        "mean_sampled_compute_seconds": 6.083,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 0.203,
+        "billable_equiv_min_per_month": 2.0,
+        "sku_weighted_billable_min_per_month": 2.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.01,
+        "share_of_all_row_total": 0.003
+      },
+      {
+        "workflow_file": ".github/workflows/create-release-pr.yml",
+        "job_name": "update_version",
+        "runner_label": "macos-latest",
+        "sku": "macos_standard",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2025-12-19T19:46:16Z",
+        "sample_window_end": "2026-06-18T19:49:58Z",
+        "sampled_workflow_run_count": 12,
+        "sampled_job_occurrence_count": 12,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 2,
+        "effective_monthly_job_volume": 2.0,
+        "mean_sampled_compute_seconds": 39.25,
+        "mean_sampled_billable_equiv_minutes": 1.417,
+        "raw_compute_runner_min_per_month": 1.308,
+        "billable_equiv_min_per_month": 2.834,
+        "sku_weighted_billable_min_per_month": 29.285,
+        "billing_class": "capacity",
+        "usd_per_month": 0.18,
+        "share_of_all_row_total": 0.005
+      },
+      {
+        "workflow_file": ".github/workflows/e2e.yml",
+        "job_name": "build-android",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-04-17T00:02:59Z",
+        "sample_window_end": "2026-07-09T19:16:33Z",
+        "sampled_workflow_run_count": 17,
+        "sampled_job_occurrence_count": 17,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 12,
+        "effective_monthly_job_volume": 12.0,
+        "mean_sampled_compute_seconds": 362.235,
+        "mean_sampled_billable_equiv_minutes": 6.529,
+        "raw_compute_runner_min_per_month": 72.447,
+        "billable_equiv_min_per_month": 78.348,
+        "sku_weighted_billable_min_per_month": 78.348,
+        "billing_class": "capacity",
+        "usd_per_month": 0.47,
+        "share_of_all_row_total": 0.129
+      },
+      {
+        "workflow_file": ".github/workflows/e2e.yml",
+        "job_name": "build-ios",
+        "runner_label": "macos-latest",
+        "sku": "macos_standard",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-23T05:56:03Z",
+        "sample_window_end": "2026-07-09T19:16:33Z",
+        "sampled_workflow_run_count": 17,
+        "sampled_job_occurrence_count": 15,
+        "occurrence_fraction": 0.882,
+        "workflow_30d_volume": 12,
+        "effective_monthly_job_volume": 10.588,
+        "mean_sampled_compute_seconds": 221.467,
+        "mean_sampled_billable_equiv_minutes": 4.267,
+        "raw_compute_runner_min_per_month": 39.082,
+        "billable_equiv_min_per_month": 45.18,
+        "sku_weighted_billable_min_per_month": 466.86,
+        "billing_class": "capacity",
+        "usd_per_month": 2.8,
+        "share_of_all_row_total": 0.074
+      },
+      {
+        "workflow_file": ".github/workflows/e2e.yml",
+        "job_name": "e2e-android / e2e",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-04-17T00:02:59Z",
+        "sample_window_end": "2026-07-09T19:16:33Z",
+        "sampled_workflow_run_count": 17,
+        "sampled_job_occurrence_count": 17,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 12,
+        "effective_monthly_job_volume": 12.0,
+        "mean_sampled_compute_seconds": 814.765,
+        "mean_sampled_billable_equiv_minutes": 14.0,
+        "raw_compute_runner_min_per_month": 162.953,
+        "billable_equiv_min_per_month": 168.0,
+        "sku_weighted_billable_min_per_month": 168.0,
+        "billing_class": "capacity",
+        "usd_per_month": 1.01,
+        "share_of_all_row_total": 0.276
+      },
+      {
+        "workflow_file": ".github/workflows/e2e.yml",
+        "job_name": "e2e-ios / e2e",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-23T05:56:03Z",
+        "sample_window_end": "2026-07-09T19:16:33Z",
+        "sampled_workflow_run_count": 17,
+        "sampled_job_occurrence_count": 15,
+        "occurrence_fraction": 0.882,
+        "workflow_30d_volume": 12,
+        "effective_monthly_job_volume": 10.588,
+        "mean_sampled_compute_seconds": 941.8,
+        "mean_sampled_billable_equiv_minutes": 16.267,
+        "raw_compute_runner_min_per_month": 166.2,
+        "billable_equiv_min_per_month": 172.239,
+        "sku_weighted_billable_min_per_month": 172.239,
+        "billing_class": "capacity",
+        "usd_per_month": 1.03,
+        "share_of_all_row_total": 0.283
+      },
+      {
+        "workflow_file": ".github/workflows/e2e.yml",
+        "job_name": "build-android",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "all-status",
+        "attempt_filter": "prior",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-23T07:11:55Z",
+        "sample_window_end": "2026-06-18T19:50:30Z",
+        "sampled_workflow_run_count": 100,
+        "sampled_job_occurrence_count": 6,
+        "occurrence_fraction": 0.06,
+        "workflow_30d_volume": 12,
+        "effective_monthly_job_volume": 0.72,
+        "mean_sampled_compute_seconds": 388.5,
+        "mean_sampled_billable_equiv_minutes": 7.0,
+        "raw_compute_runner_min_per_month": 4.662,
+        "billable_equiv_min_per_month": 5.04,
+        "sku_weighted_billable_min_per_month": 5.04,
+        "billing_class": "capacity",
+        "usd_per_month": 0.03,
+        "share_of_all_row_total": 0.008
+      },
+      {
+        "workflow_file": ".github/workflows/e2e.yml",
+        "job_name": "build-ios",
+        "runner_label": "macos-latest",
+        "sku": "macos_standard",
+        "event_scope": "all-events",
+        "status_filter": "all-status",
+        "attempt_filter": "prior",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-04-20T16:48:19Z",
+        "sample_window_end": "2026-06-18T19:50:30Z",
+        "sampled_workflow_run_count": 100,
+        "sampled_job_occurrence_count": 8,
+        "occurrence_fraction": 0.08,
+        "workflow_30d_volume": 12,
+        "effective_monthly_job_volume": 0.96,
+        "mean_sampled_compute_seconds": 143.125,
+        "mean_sampled_billable_equiv_minutes": 3.0,
+        "raw_compute_runner_min_per_month": 2.29,
+        "billable_equiv_min_per_month": 2.88,
+        "sku_weighted_billable_min_per_month": 29.76,
+        "billing_class": "capacity",
+        "usd_per_month": 0.18,
+        "share_of_all_row_total": 0.005
+      },
+      {
+        "workflow_file": ".github/workflows/e2e.yml",
+        "job_name": "e2e-android / e2e",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "all-status",
+        "attempt_filter": "prior",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-23T07:11:55Z",
+        "sample_window_end": "2026-06-18T19:50:30Z",
+        "sampled_workflow_run_count": 100,
+        "sampled_job_occurrence_count": 6,
+        "occurrence_fraction": 0.06,
+        "workflow_30d_volume": 12,
+        "effective_monthly_job_volume": 0.72,
+        "mean_sampled_compute_seconds": 1321.333,
+        "mean_sampled_billable_equiv_minutes": 22.5,
+        "raw_compute_runner_min_per_month": 15.856,
+        "billable_equiv_min_per_month": 16.2,
+        "sku_weighted_billable_min_per_month": 16.2,
+        "billing_class": "capacity",
+        "usd_per_month": 0.1,
+        "share_of_all_row_total": 0.027
+      },
+      {
+        "workflow_file": ".github/workflows/e2e.yml",
+        "job_name": "e2e-ios / e2e",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "all-status",
+        "attempt_filter": "prior",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-03T02:14:52Z",
+        "sample_window_end": "2026-06-11T05:58:23Z",
+        "sampled_workflow_run_count": 100,
+        "sampled_job_occurrence_count": 3,
+        "occurrence_fraction": 0.03,
+        "workflow_30d_volume": 12,
+        "effective_monthly_job_volume": 0.36,
+        "mean_sampled_compute_seconds": 1404.0,
+        "mean_sampled_billable_equiv_minutes": 24.0,
+        "raw_compute_runner_min_per_month": 8.424,
+        "billable_equiv_min_per_month": 8.64,
+        "sku_weighted_billable_min_per_month": 8.64,
+        "billing_class": "capacity",
+        "usd_per_month": 0.05,
+        "share_of_all_row_total": 0.014
+      },
+      {
+        "workflow_file": ".github/workflows/linear-deployed.yml",
+        "job_name": "linear-deployed / update-linear",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-03-24T21:46:40Z",
+        "sample_window_end": "2026-07-09T22:29:09Z",
+        "sampled_workflow_run_count": 14,
+        "sampled_job_occurrence_count": 14,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 5,
+        "effective_monthly_job_volume": 5.0,
+        "mean_sampled_compute_seconds": 6.071,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 0.506,
+        "billable_equiv_min_per_month": 5.0,
+        "sku_weighted_billable_min_per_month": 5.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.03,
+        "share_of_all_row_total": 0.008
+      },
+      {
+        "workflow_file": ".github/workflows/lint-pr-title.yml",
+        "job_name": "call / lint-pr-title",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-10T00:16:41Z",
+        "sample_window_end": "2026-07-09T19:16:50Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 10,
+        "effective_monthly_job_volume": 10.0,
+        "mean_sampled_compute_seconds": 4.2,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 0.7,
+        "billable_equiv_min_per_month": 10.0,
+        "sku_weighted_billable_min_per_month": 10.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.06,
+        "share_of_all_row_total": 0.016
+      },
+      {
+        "workflow_file": ".github/workflows/project.yml",
+        "job_name": "add-to-project",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2025-10-15T12:47:14Z",
+        "sample_window_end": "2026-07-07T07:04:43Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 2,
+        "effective_monthly_job_volume": 2.0,
+        "mean_sampled_compute_seconds": 4.25,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 0.142,
+        "billable_equiv_min_per_month": 2.0,
+        "sku_weighted_billable_min_per_month": 2.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.01,
+        "share_of_all_row_total": 0.003
+      },
+      {
+        "workflow_file": ".github/workflows/publish.yml",
+        "job_name": "publish",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-06T00:32:51Z",
+        "sample_window_end": "2026-07-09T21:36:26Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 4,
+        "effective_monthly_job_volume": 4.0,
+        "mean_sampled_compute_seconds": 94.0,
+        "mean_sampled_billable_equiv_minutes": 2.1,
+        "raw_compute_runner_min_per_month": 6.267,
+        "billable_equiv_min_per_month": 8.4,
+        "sku_weighted_billable_min_per_month": 8.4,
+        "billing_class": "capacity",
+        "usd_per_month": 0.05,
+        "share_of_all_row_total": 0.014
+      }
+    ],
+    "totals": {
+      "row_count": 20,
+      "raw_compute_runner_min_per_month": 537.113,
+      "billable_equiv_min_per_month": 608.161,
+      "sku_weighted_billable_min_per_month": 1083.172,
+      "usd_per_month": 6.5,
+      "percentage_denominator": "all_rows_billable_equiv_min_per_month"
+    }
+  },
+  "per_workflow_monthly_volume": {
+    ".github/workflows/cd.yml": 5,
+    ".github/workflows/ci.yml": 6,
+    ".github/workflows/codeql.yml": 16,
+    ".github/workflows/create-release-pr.yml": 2,
+    ".github/workflows/e2e.yml": 12,
+    ".github/workflows/linear-deployed.yml": 5,
+    ".github/workflows/lint-pr-title.yml": 10,
+    ".github/workflows/project.yml": 2,
+    ".github/workflows/publish.yml": 4
+  },
+  "events_by_wf": {
+    ".github/workflows/cd.yml": [
+      "pull_request"
+    ],
+    ".github/workflows/ci.yml": [
+      "pull_request"
+    ],
+    ".github/workflows/codeql.yml": [
+      "pull_request",
+      "push",
+      "schedule"
+    ],
+    ".github/workflows/create-release-pr.yml": [
+      "workflow_dispatch"
+    ],
+    ".github/workflows/e2e.yml": [
+      "push",
+      "workflow_dispatch"
+    ],
+    ".github/workflows/linear-deployed.yml": [
+      "release"
+    ],
+    ".github/workflows/lint-pr-title.yml": [
+      "pull_request"
+    ],
+    ".github/workflows/project.yml": [
+      "issues"
+    ],
+    ".github/workflows/publish.yml": [
+      "push"
+    ]
+  },
+  "ci_score": {
+    "spec_version": "ci-score-v0.1.3",
+    "scope_statement": "CI Score gauges best-practice adherence on CI speed and gate hygiene: a straightforward pass/fail rubric of best-practice checks computed from a repo's workflow configuration.",
+    "value": 75,
+    "grade": "B",
+    "refusal": null,
+    "checks": [
+      {
+        "check_id": "ci.cache.dependency-cache",
+        "label": "Dependency caching",
+        "state": "pass",
+        "evidence": "dependency caching configured in 3 workflow/action file(s)",
+        "files": [
+          ".github/actions/setup-android-build/action.yml",
+          ".github/actions/setup-flutter/action.yml",
+          ".github/actions/setup-ios-build/action.yml"
+        ],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.cache.build-cache",
+        "label": "Build caching",
+        "state": "not_applicable",
+        "evidence": "no build tool with a cache detected in the repo tree",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.checkout.shallow-clone",
+        "label": "Shallow checkout",
+        "state": "pass",
+        "evidence": "no PR-gating workflow checks out full history (post-merge automation like backport/changelog jobs is exempt - it needs history and gates nobody)",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.parallel.test-sharding",
+        "label": "Test sharding / matrix",
+        "state": "not_applicable",
+        "evidence": "CI is delegated to cross-repo reusable workflow(s) (OneSignal/sdk-shared/.github/workflows/appium-e2e.yml, OneSignal/sdk-shared/.github/workflows/create-release.yml); test strategy there is not visible from this repo",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.build.change-scoped",
+        "label": "Change-scoped builds",
+        "state": "not_applicable",
+        "evidence": "no turbo/nx task graph detected (change-scoping is not checkable here)",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.trigger.concurrency-groups",
+        "label": "Concurrency groups",
+        "state": "pass",
+        "evidence": "concurrency group declared on 1 of 3 PR workflow(s)",
+        "files": [
+          ".github/workflows/codeql.yml"
+        ],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.trigger.cancel-superseded",
+        "label": "Superseded runs cancelled",
+        "state": "pass",
+        "evidence": "concurrency + cancel-in-progress on 1 of 3 PR workflow(s)",
+        "files": [
+          ".github/workflows/codeql.yml"
+        ],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.trigger.path-filter",
+        "label": "Path filters",
+        "state": "pass",
+        "evidence": "paths filters on 1 of 3 PR workflow(s)",
+        "files": [
+          ".github/workflows/ci.yml"
+        ],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.hygiene.job-timeouts",
+        "label": "Job timeouts",
+        "state": "fail",
+        "evidence": "no job sets timeout-minutes (GitHub's default is 360 minutes)",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.security.scoped-id-token",
+        "label": "Scoped OIDC id-token",
+        "state": "pass",
+        "evidence": "id-token: write scoped at job level in 1 workflow(s)",
+        "files": [
+          ".github/workflows/publish.yml"
+        ],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.security.pinned-action-shas",
+        "label": "Pinned action SHAs",
+        "state": "fail",
+        "evidence": "0 of 24 remote action references SHA-pinned (workflow + local composite action files; passes at >=95%)",
+        "files": [
+          ".github/actions/setup-android-build/action.yml",
+          ".github/actions/setup-flutter/action.yml",
+          ".github/workflows/ci.yml"
+        ],
+        "measured_note": null
+      }
+    ],
+    "checks_passed": 6,
+    "checks_applicable": 8
+  }
+}

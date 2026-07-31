@@ -1,0 +1,440 @@
+{
+  "spec_version": "ci-score-v0.1.3",
+  "scope_statement": "CI Score gauges best-practice adherence on CI speed and gate hygiene: a straightforward pass/fail rubric of best-practice checks computed from a repo's workflow configuration.",
+  "scope_note": "The score reads CONFIGURATION FACTS a maintainer can verify in their own YAML in seconds. The measured wall-clock report renders beside it and enriches check evidence; measured magnitudes never gate a score in v1. Security stays out of v1 except SHA pinning (owner-named); runner-minute efficiency is reported alongside, not scored.",
+  "formula": {
+    "check_states": [
+      "pass",
+      "fail",
+      "not_applicable"
+    ],
+    "score": "round_half_up(100 * checks_passed / checks_applicable) - not_applicable leaves the denominator",
+    "rounding": "ROUND HALF UP - floor(x + 0.5). Python's round() is banker's rounding; any reimplementation must agree.",
+    "rules": {
+      "config_facts_only": "Every check is a YAML/configuration FACT (a thing present or absent in the repo's own files), never a measured magnitude, occurrence ratio, or attribution. A maintainer must be able to self-verify any state in under a minute against their own workflows. This is the v1-basic reset (decision_log OD-CS15): the magnitude-gated rubric generated wrongful-deduction bugs faster than review removed them, and a grade nobody can debug fails both the maintainer and us.",
+      "evidence_display_only": "Where the measured pipeline has evidence for a failed check (e.g. the uncached install's observed cost on the gating job), the card MAY display it under the check. Display only - it never changes a state.",
+      "purity": "the scorer is a pure function of (findings.json minus the stamp, this spec.json): no network, no clock, no LLM. Same inputs, byte-identical stamp."
+    }
+  },
+  "bands": [
+    {
+      "grade": "A",
+      "min": 85,
+      "max": 100,
+      "minus": [
+        85,
+        89
+      ],
+      "bare": [
+        90,
+        94
+      ],
+      "plus": [
+        95,
+        100
+      ]
+    },
+    {
+      "grade": "B",
+      "min": 70,
+      "max": 84,
+      "minus": [
+        70,
+        74
+      ],
+      "bare": [
+        75,
+        79
+      ],
+      "plus": [
+        80,
+        84
+      ]
+    },
+    {
+      "grade": "C",
+      "min": 55,
+      "max": 69,
+      "minus": [
+        55,
+        59
+      ],
+      "bare": [
+        60,
+        64
+      ],
+      "plus": [
+        65,
+        69
+      ]
+    },
+    {
+      "grade": "D",
+      "min": 40,
+      "max": 54,
+      "minus": [
+        40,
+        44
+      ],
+      "bare": [
+        45,
+        49
+      ],
+      "plus": [
+        50,
+        54
+      ]
+    },
+    {
+      "grade": "F",
+      "min": 0,
+      "max": 39,
+      "minus": null,
+      "bare": [
+        0,
+        39
+      ],
+      "plus": null
+    }
+  ],
+  "bands_note": "Suffix ranges are PINNED, not computed. The A band is 16 points wide and does not divide evenly into three, so an implementer who divides by three gets A- 85-90 while this spec says A- 85-89 - a repo scoring 90 would be published as 'A-' by one implementation and 'A' by another. All bounds are inclusive. F is never suffixed (there is no F+ / F-), matching the convention every reader already holds.",
+  "refusals": [
+    {
+      "reason_code": "no_workflow_yaml",
+      "human_reason": "No score: no GitHub Actions workflow files were found, so there is nothing to check.",
+      "trigger": "scanned_workflows == 0 (an integer count)"
+    },
+    {
+      "reason_code": "facts_unavailable",
+      "human_reason": "No score: this document does not carry a complete practice-facts stamp for this spec version - re-run the skill to score this repo. This is a data-vintage limit, not a finding against the repo.",
+      "trigger": "practice_facts is absent, or does not cover every check in this spec's registry (a partial stamp must never publish a score computed from the subset)"
+    },
+    {
+      "reason_code": "automation_only",
+      "human_reason": "Not scored: this repository's workflows show no build or test activity - what is visible is automation (bots, releases, triage), not the project's CI.",
+      "trigger": "workflows exist (scanned_workflows > 0) but NONE do project build or test: no TEST signal (a test-like job id/name, OR a test-runner command in a step - pytest/go test/npm test/cargo test/rspec/... - so a real test-only repo whose job is named `ci` still scores), no BUILD signal (build tool / build-or-lint job / build command / build action), and no dependency-install COMMAND in any workflow. A setup-* action does NOT count (issue-triage bots use setup-node/setup-bun to run their scripts) and manifest presence does NOT count (an automation-only repo may carry a package.json its CI never installs). A repo that delegates its CI to a cross-repo reusable workflow is NEVER refused (invisible, not absent). Conservative: any one signal scores the repo. Added OD-CS20 after anthropics/claude-code, an npm package whose visible workflows are all issue-triage bots + release automation, graded a real-looking number off pure automation."
+    }
+  ],
+  "refusals_note": "THREE refusals, all 'nothing to score honestly' shapes: no workflows at all; a document whose facts stamp is missing/incomplete for this spec version; or an automation-only repo whose workflows do no build or test (OD-CS20). Config facts need no run history, no branch-protection access, and no merge-queue calibration - every repo with REAL CI scores on a fresh run (owner directive, OD-CS15; OD-CS20 refuses only pure automation).",
+  "checks": [
+    {
+      "check_id": "ci.cache.dependency-cache",
+      "label": "Dependency caching",
+      "fact": "at least one workflow or local composite action configures dependency caching (a cache action - actions/cache incl. restore/save, rust-cache, buildjet - or a setup-* action's cache input). Caching housed in cross-repo reusable workflows is not visible; run the score in that repo.",
+      "practice_slug": "cache-dependencies",
+      "not_applicable_when": "the repo shows NO dependency-install signal at all - no dependency manifest at the repo root (package.json / lockfiles / requirements*.txt / pyproject.toml / go.mod / Cargo.toml / build.gradle / pom.xml / *.csproj / mix.exs / build.sbt / Gemfile / composer.json / pubspec.yaml and the like), no dependency-install command in any workflow or composite step (pip / npm / pnpm / yarn / bun / poetry / uv / composer / bundle / gem / conda / mvn / gradle / dotnet / mix / cabal / stack with an install-style verb, or `go mod download` / `cargo fetch`), and no language setup action (actions/setup-node / setup-python / setup-java / setup-dotnet / setup-go / setup-ruby and the like) - and no cache is already configured; with nothing installed there is nothing to cache, so a missing cache is never a fail (OD-CS19). Any one of those three signals makes the check applicable. OR CI is delegated to cross-repo reusable workflows and no local caching is visible - a mechanism this fact cannot see is never failed"
+    },
+    {
+      "check_id": "ci.cache.build-cache",
+      "label": "Build caching",
+      "fact": "a build-tool cache is configured (turbo/nx/gradle/sccache/bazel remote or actions-cache-backed)",
+      "not_applicable_when": "no detectable build tool configuration in the repo tree (turbo.json / nx.json / settings.gradle(.kts) / .bazelrc)",
+      "practice_slug": null
+    },
+    {
+      "check_id": "ci.checkout.shallow-clone",
+      "label": "Shallow checkout",
+      "fact": "no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt: it needs history and gates nobody)",
+      "practice_slug": "shallow-checkout"
+    },
+    {
+      "check_id": "ci.parallel.test-sharding",
+      "label": "Test sharding / matrix",
+      "fact": "a test-like job (test/spec/e2e/integration/unit in its id or name) runs a matrix, or any job's matrix axis is shard-like (shard/chunk/split/partition)",
+      "practice_slug": "shard-tests",
+      "not_applicable_when": "no test-like job (test/spec/e2e/integration/unit in an id or name) and no shard-like matrix axis exists in any parsed workflow - you cannot shard tests you do not have, so a missing shard is never a fail (OD-CS19); OR CI is delegated to cross-repo reusable workflows and no local test job is visible"
+    },
+    {
+      "check_id": "ci.build.change-scoped",
+      "label": "Change-scoped builds",
+      "fact": "CI scopes work to what changed: --filter=...[base], nx affected, --changed/--onlyChanged/--affected run modes, turbo-ignore, or a changed-files step (dorny/paths-filter, tj-actions/changed-files)",
+      "not_applicable_when": "no turbo/nx task graph is detected - gradle/bazel scoping is not checkable from workflow YAML and is never failed for a mechanism this fact cannot see",
+      "practice_slug": "build-only-affected"
+    },
+    {
+      "check_id": "ci.trigger.concurrency-groups",
+      "label": "Concurrency groups",
+      "fact": "at least one PR-triggered workflow declares a concurrency group (the config lever against self-stampede queue time)",
+      "practice_slug": "cut-queue-time"
+    },
+    {
+      "check_id": "ci.trigger.cancel-superseded",
+      "label": "Superseded runs cancelled",
+      "fact": "at least one PR-triggered workflow sets concurrency with cancel-in-progress (true or a templated expression - conditional cancellation is the practice too; an explicit false is not)",
+      "practice_slug": "cancel-superseded-runs"
+    },
+    {
+      "check_id": "ci.trigger.path-filter",
+      "label": "Path filters",
+      "fact": "at least one PR-triggered workflow scopes itself with paths / paths-ignore",
+      "practice_slug": "path-filter-workflows"
+    },
+    {
+      "check_id": "ci.hygiene.job-timeouts",
+      "label": "Job timeouts",
+      "fact": "workflow jobs set timeout-minutes (any usage; GitHub's default is 360 minutes)",
+      "practice_slug": null
+    },
+    {
+      "check_id": "ci.security.scoped-id-token",
+      "label": "Scoped OIDC id-token",
+      "fact": "id-token: write is granted at job level, never workflow-wide (an explicit grant or a workflow-level permissions: write-all both count as workflow-wide)",
+      "not_applicable_when": "no workflow requests an OIDC id-token",
+      "practice_slug": "scope-id-token-per-job",
+      "note": "security-flavored; included under the owner's 'every best practice we have' directive"
+    },
+    {
+      "check_id": "ci.security.pinned-action-shas",
+      "label": "Pinned action SHAs",
+      "fact": "at least 95% of remote action references are pinned to a full commit SHA, across workflow files AND local composite actions (first-party actions/* included - the pinning practice does not exempt them; the evidence always shows pinned-of-total). The threshold asks 'is pinning an adopted, automated practice?': >=95% admits Renovate-style stragglers (at most 1 in 20) while rejecting partial adoption, and is gaming-resistant - reaching it from a low base means actually pinning the fleet (OD-CS17)",
+      "practice_slug": "pin-action-shas",
+      "note": "security-flavored; included by explicit owner direction (OD-CS15) despite D3's security-out-of-v1 scoping"
+    }
+  ],
+  "stamp_schema": {
+    "_note": "The shape the data pass stamps into findings.json as `ci_score`. Every surface renders FROM the stamp and never recomputes.",
+    "spec_version": "string",
+    "scope_statement": "string - verbatim",
+    "value": "int 0-100, or null on the single refusal",
+    "grade": "string (A+..F), or null on refusal",
+    "refusal": "null, or {reason_code, human_reason}",
+    "checks": [
+      {
+        "check_id": "string",
+        "label": "string - the check's display label, copied from the registry",
+        "state": "pass|fail|not_applicable",
+        "evidence": "string - the self-verifiable fact ('98 of 117 actions pinned', 'concurrency+cancel on ci.yml, e2e.yml'), never empty on fail",
+        "measured_note": "string or null - display-only enrichment from the measured pipeline",
+        "files": "list[str] - up to three files to look at, from the fact's evidence"
+      }
+    ],
+    "checks_passed": "int",
+    "checks_applicable": "int"
+  },
+  "v2_map": {
+    "_note": "Punted wholesale by OD-CS15 - the v1-granular rubric (built through PR #225, superseded before publication). Everything here exists in git history and in the measured pipeline's stamps; none of it gates a v1 score.",
+    "punted": [
+      "measured-magnitude fail gating (measured_only_fail, the two Doors, pole joins, pole_step_categories)",
+      "occurrence-ratio checks (T_occ superseded/draft ratios)",
+      "T_share/T_abs thresholds",
+      "tiers and category weights",
+      "confidence levels",
+      "the 9-refusal lattice (merge-queue, evaluability floor, visibility caps)",
+      "queue-cause attribution",
+      "sharding exemptions",
+      "retry-tax scoring"
+    ],
+    "speed_effectiveness_checks": "The decided path for measured speed into the composite (OD-CS16): size-fair effectiveness checks - retry-churn rate, self-inflicted queue time, shard balance, cache hit effectiveness - graded from the measured pipeline via the pole-anchored evidence machinery above. Raw gate-wait scoring (absolute or percentile) is REJECTED, not deferred: size-confounded (see OD-CS16)."
+  },
+  "decision_log": [
+    {
+      "id": "OD-CS13",
+      "status": "RESOLVED 2026-07-14 - executor recommendation under owner delegation ('come up with a recommendation and update the spec accordingly'); ratify alongside the Phase-3 pre-publication threshold review \u2014 SUPERSEDED for v0.1 by OD-CS15 (the measured rubric it governs is punted to the v2_map); its ratification review moves to the v2 design gate, not Phase 3.",
+      "title": "measured_only_fail makes 10 of the 13 checks unable to fail",
+      "problem": "The rule 'only sizing_basis == measured evidence can FAIL a check' is a hard product rule and its intent is right (never deduct on a public page from evidence we merely inferred). But the data pass stamps sizing_basis: 'measured' for only 13 detectors (OPT19/24/25/43/46/47/48/49/50/51/64/65/66), and those back only THREE of the 13 checks: ci.parallel.test-sharding (OPT24/25), ci.trigger.cancel-superseded (OPT46), and ci.trigger.queue-concurrency (OPT43). Every other check - INCLUDING both cache checks, the critical-path structural lever, and needless serialization, all of them majors - is capped at partial forever. Consequence: a repo with no dependency cache at all, a full-history checkout, and a 25%-of-gate structural lever cannot score below 50, and the card renders 'high confidence' beside it. The score is inflated by construction.",
+      "why_it_was_missed": "The product spec wrote the rule and then audited only two checks against it (path-filter and draft-gate, both correctly disclosed as dormant). The other eleven were never checked. The build plan then asserted the evidence-derivation block was 'executor-verified against the codebase'. It was not. The lesson: a rule ABOUT data is only as good as a census OF that data - a coverage claim needs a census, not a spot-check.",
+      "options": {
+        "A": "Broaden what counts as measured IN THE SCORER: sizing_basis == 'measured' OR the finding is sized off the measured critical path (carries an observed wall_clock_p50_s and joins to a pole). Scorer-only, no data-pass edit, no re-render of the six committed worked examples. Preserves the intent, because that evidence IS observed timing, not inference. Risk: a second, looser door into 'measured' - the definition must be tight and Phase-3 calibration must confirm it.",
+        "B": "Fix the label at the source: widen _stamp_sizing_basis in the data pass. Most correct, but sizing_basis already gates savings totals and Tier-2 promotion, so it changes shipped report behavior and forces a re-render of all six committed reports.",
+        "C": "Shrink the rubric to what can genuinely fail (3-5 checks). Honest, but breaks the owner-approved canonical description ('four-category, 13-check'), which is already in the website spec.",
+        "D": "Ship as-is with the dormancy disclosed for all 10. Not recommended: a score where most checks cannot fail is close to vacuous, and 'high confidence' beside it is misleading."
+      },
+      "blocks": "Blocked Phase 1 (the scorer) and everything downstream while OPEN. Resolved 2026-07-14 - Phase 1 may proceed; the resolution is ratified alongside the Phase-3 pre-publication threshold review.",
+      "must_be_recorded_in": "the product spec (maintained in the pre-public development archive), not only here - the rule lives there and the next reader must find the resolution beside it.",
+      "resolution": "The pole-anchored rule (formula.rules.measured_only_fail, Door 2): a fail test may read its magnitude from the drilled gating pole's observed step decomposition (steps[].p50_s / job_p50_s - observed over observed), from structural pole-anchored findings, or from measured chain membership - in addition to Door 1 (sizing_basis == 'measured'). Modeled constants remain banned from fail tests; an undrilled gate caps at partial. Scorer-only: no data-pass change, no re-render of the committed worked examples (poles already carry steps in every corpus). Second adversarial round refinements, same day: the join anchors on the finding's OWN workflow_file + affected_jobs (round 3 corrected round 2's claim that pr_critical_path_check was per-finding-resolved - it is the document's crown constant); structural findings qualify only from DRILLED poles; the Door-2 conjunction (deterministic YAML fact + observed magnitude in the check's pole_step_categories + the join) is explicit; step-name opacity is a disclosed lenient-direction limit.",
+      "census_after_resolution": "Checks able to FAIL: 7 immediately from fields that exist today (dependency-cache, build-cache, shallow-clone, no-repeated-setup, test-sharding, no-needless-serialization, critical-path-structure), +3 behind their named Phase-1 stamps (cancel-superseded: structured superseded counts; queue-concurrency: cause attribution; no-dead-required: YAML conditionality) = 10 of 13. path-filter and draft-gate stay dormant BY DESIGN (their occurrence evidence is deliberately not collected - new call shapes); real-gates-only is pass-or-partial on any published score by construction (its fail shape refuses the composite). All disclosed in the methodology.",
+      "options_rejected": "B (relabel more detectors 'measured' in the data pass) is not just riskier - the census shows it would be FALSE: 'direct'-sized magnitudes ARE heuristic constants (default_s), and relabeling them would let modeled numbers fail checks, the exact defamation vector the rule exists to block. C (shrink the rubric) breaks the owner-approved canonical description. D (ship inflated, disclosed) makes the score near-vacuous."
+    },
+    {
+      "id": "OD-CS15",
+      "status": "DECIDED 2026-07-14 - owner, verbatim",
+      "title": "v0.1 resets to a basic pass/fail best-practice rubric; the granular measured score is punted",
+      "owner_directives": [
+        "The entire point of the product is to score any repo using the skill. We should fix this and score every repo.",
+        "We need to rethink this design. And punt on the complicated more granular score.",
+        "We need a basic version that just checks whether best practices are being followed and scores based on that. What you've designed is very comprehensive and overly complicated.",
+        "Make sure we include every best practice we have in the score but yes this is the right approach."
+      ],
+      "context": "The magnitude-gated rubric (OD-CS8, OD-CS13) was defamation-safety machinery that backfired: three adversarial rounds kept finding wrongful-deduction bugs CREATED by its complexity (the crown-join fiction, cross-workflow fail conjunction, cross-PR overlap attribution), a heavily-optimized control repo scored D+ for reasons only an expert dig could explain, and merge-queue repos could not score at all. Config-fact checks are self-verifiable, nearly bug-proof, need no run history or calibration, and score every repo.",
+      "consequences": "ONE refusal (no workflows). Merge queues score. Pinned SHAs enters by owner direction despite D3. The measured pipeline remains the report + display-only check evidence. OD-CS8/OD-CS13 machinery moves to the v2 map; their decision records stay for history. Amendment (same day): the registry covers all published best-practice pages - 12 checks; keep-advisory-checks-non-blocking is explicitly accounted for as not config-determinable (v2)."
+    },
+    {
+      "id": "OD-CS16",
+      "status": "DECIDED 2026-07-14 - owner ('Lets keep the score independent of speed'), after a three-review pressure test of the ranking",
+      "title": "The score stays independent of measured speed; speed is displayed beside it and enters the composite only as size-fair effectiveness checks in v2",
+      "reasoning": [
+        "The emulated prior art does not score speed either: React Doctor grades code PATTERNS that correlate with performance (static scan, 0-100, fix-first), never runtime measurements - its virality was instant+actionable+shareable, and its most-criticized trait was formula opacity (which this spec inverts by being a public JSON file). A config-fact rubric IS the React Doctor shape.",
+        "Raw gate speed is size-confounded, measured on our own calibration set: score and merge-gate speed ANTI-correlate (Spearman ~ +0.5 across the 11 full-pipeline repos) because large monorepos adopt every practice and still run slow (test volume), while thin SDKs are fast because there is little to run. Scoring raw wait - even Lighthouse-style percentile curves - would publicly punish scale (sentry's 12-way-sharded pipeline eats a 'slow' label for being big). Lighthouse works for web pages because page speed is THE user outcome regardless of complexity; a CI gate's wait is not analogous.",
+        "The principled path for speed INTO the score exists and is deferred, not rejected: size-fair EFFECTIVENESS checks (retry-churn rate - the highest-scoring repos measured lowest; self-inflicted queue time; shard balance - sentry passes the sharding fact while its shard is the slowest measured gate; cache hit effectiveness). These measure pipeline engineering quality independent of repo size and ride the pole-anchored measured machinery already parked in the v2_map (OD-CS13).",
+        "Until then: adherence and speed are reported SIDE BY SIDE, never blended - the measured report renders beneath the card, and putting the measured wait ON the card is a pending display decision. This is the same reported-never-scored pattern as D4 (runner minutes)."
+      ],
+      "provenance": "Pressure test 2026-07-14 (three adversarial reviews: ranking sanity, score-vs-measured, per-deduction fairness) - verdict: all deductions factually true, scores stand, no tuning; recorded in maintainers/ci-speedup/calibration/README.md."
+    },
+    {
+      "id": "OD-CS17",
+      "status": "DECIDED 2026-07-14 - owner ('lets go with your recommendations for all except #2... we should just come up with a reasonable threshold'; on the >=95% proposal: '95% works, go ahead')",
+      "title": "The five pre-publication items ruled in one batch; pinned-action-shas passes at >=95% (the first post-freeze spec_version bump, v0.1.1)",
+      "rulings": [
+        "Token-pass semantics: KEEP for v0.1, disclosed via the k-of-n evidence strings; gating-aware coverage is v2.",
+        "Pinning threshold: the check passes at >=95% of remote action references SHA-pinned (this bump). The rationale is the question the check actually asks - 'is pinning an adopted, automated practice?': >=95% admits Renovate-style stragglers (at most 1 in 20 references between update cycles) while rejecting partial adoption, and it is gaming-resistant (a repo below the bar reaches it only by actually pinning its fleet).",
+        "Waiver mechanism (.ci-score.yml): DEFER to v2 - the post-merge-automation exemption already absorbed the worst legitimate-full-history case.",
+        "Measured notes on published cards: a per-profile pre-publish checklist item at Phase 6, not a rubric rule.",
+        "Grade resolution: ACCEPTED for v0.1 - empirically closed by the 31-repo spread (0-100, four scoring 85, eight scoring 70-84, honest low scores).",
+        "(Mailto was already final - the 4x-confirmed owner directive; listed here only so the batch is complete.)"
+      ],
+      "never_tune_justification": "Blast radius, censused over all 31 committed calibration findings docs BEFORE the change: exactly ONE repo flips - next-js at 146/147 = 99.3% pinned (67 -> 75). mastra at 101/120 = 84.2% stays a fail; every other pinning-failing repo sits below 80% pinned. The threshold was chosen from the practice-adoption rationale, not fitted to move rows - the census is the receipt that it could not have been (one row moved)."
+    },
+    {
+      "id": "OD-CS18",
+      "status": "DECIDED 2026-07-28 - owner",
+      "title": "The ci.trigger.draft-gate check is REMOVED from the registry (12 -> 11 checks; spec_version v0.1.1 -> v0.1.2)",
+      "decision": "Draft-PR gating is dropped from the CI Score. It is a contested COST PREFERENCE, not a consensus best practice - many teams push draft PRs precisely to get CI feedback before review, so gating on draft status trades feedback latency for runner spend in a direction reasonable teams disagree on.",
+      "rationale": [
+        "Not a consensus practice: unlike every other check, draft gating optimizes one team's cost tradeoff against another team's feedback loop; there is no single correct answer to grade against.",
+        "Calibration evidence: in the B4 18-repo sweep the top-scoring exemplars (vitejs/vite 90, home-assistant/core 90) each failed ONLY this check - the rubric was docking otherwise-exemplary CI for declining a philosophy.",
+        "No best-practice page behind it: draft-gate is the one check with practice_slug null (no published /best-practices/github-actions/ page argues for it), so it fails the 'every check maps to a published practice' spine the registry otherwise holds to."
+      ],
+      "timing": "Pre-publication - nothing is public yet, so this is the cheapest possible moment for a rubric fix. spec_version bumps v0.1.1 -> v0.1.2.",
+      "consequences": "11 checks. Every published best-practice page still maps to a check (draft-gate mapped to none, so the practice_coverage_note is unchanged). All committed corpus + synthetic stamps are recomputed under v0.1.2; the collected/ calibration receipts stay as their dated v0.1.1 snapshots. The draft-gate fact computation, its fix-table entry, and its methodology row are removed; the scorer arithmetic is unchanged (it iterates the registry, so a smaller registry simply scores over fewer checks)."
+    },
+    {
+      "id": "OD-CS19",
+      "status": "DECIDED 2026-07-28 - owner",
+      "title": "Two checks gain the applicability gate the rubric's own principle demands: dependency-cache is not_applicable only when the repo shows NO dependency-install signal at all (no manifest AND no inline install command), test-sharding is not_applicable without any test job (spec_version v0.1.2 -> v0.1.3)",
+      "decision": "The registry principle 'a check whose subject does not exist leaves the denominator; a mechanism this fact cannot see is never failed' already governs delegation, build-tool absence, and OIDC absence. Two content checks were not yet honouring it and could produce a FALSE FAIL: (1) ci.cache.dependency-cache failed a repo for not configuring a dependency cache even when the repo installs no dependencies at all - nothing is installed, so there is nothing to cache; (2) ci.parallel.test-sharding failed a repo for not sharding tests it does not have. Both now land not_applicable in those cases. For (1) the applicability signal is install-based, not file-based (see the round-6 retarget note in live_discovery): the check is applicable when ANY of three signals is present - a dependency manifest at the repo root, a dependency-install command in a step's run/script code, OR a language setup action (setup-node/python/java/dotnet/... - a general signal that does not depend on enumerating every ecosystem's install command); only a repo with NONE of the three is not_applicable.",
+      "live_discovery": "Found by dogfooding the public skills repo itself: its CI runs `pip install pytest pyyaml` and it was FAILED for not configuring a dependency cache. Round-6 dogfooding then exposed that a pure file-existence manifest gate was the wrong instrument on TWO counts: (a) it MISSED the motivating repo - the public skills repo actually carries a pyproject.toml (for pytest config, with dependencies=[]), so the file gate leaves it applicable, which is correct, but for the wrong reason and not because of the install it actually runs; and (b) a file-only gate would MASK real waste - a repo with no manifest file but a bare inline `pip install ...` in every run would go not_applicable, silently dropping a genuine fail from the denominator and INFLATING the grade. So the gate was retargeted to install-signal semantics: applicable when a manifest OR an inline dependency-install command exists; not_applicable only when the repo installs nothing at all. The skills repo is then applicable+fail on an honest basis (it installs deps and caches none - a real, two-step fix), and a manifest-less inline-install repo is applicable+fail (no masking).",
+      "gates": [
+        "ci.cache.dependency-cache: before the pass/fail branch, test for an INSTALL SIGNAL - (i) a documented dependency-manifest file at the repo ROOT by file existence or glob (package.json + JS/TS lockfiles, requirements*.txt, pyproject.toml, setup.py/cfg, Pipfile(.lock), poetry.lock, uv.lock, go.mod/sum, Cargo.toml/lock, build.gradle(.kts), pom.xml, *.csproj/fsproj/vbproj, packages.config, mix.exs/lock, build.sbt, *.gemspec, cabal.project/*.cabal, stack.yaml, Package.swift, Gemfile(.lock), composer.json/lock, pubspec.yaml/lock), OR (ii) a dependency-install command in any workflow/composite step's run:/script: code (a structural-ish regex over the existing step_code collection: a package manager - pip/pipx/poetry/uv/npm/pnpm/yarn/bun/composer/bundle/gem/conda - with the install/ci/sync/add verb ADJACENT (only flags between, so `npm run ci` does NOT match), plus mvn/gradle/dotnet/mix/cabal/stack build-and-resolve commands, `go mod download`, and `cargo fetch`; shell comments are stripped before matching so a commented install never signals), OR (iii) a language SETUP action (actions/setup-node/python/java/dotnet/go/ruby/erlef/setup-beam/... - a general ecosystem signal, excluding non-runtime setup-* like docker/setup-buildx). If NONE of the three exists AND no cache is already configured -> not_applicable ('no dependency manifest and no dependency-install step detected; nothing to cache'). Cache hits present still PASS regardless of the signal; the existing reusable-delegation n/a is unchanged and takes precedence. The three-signal union (added after a review caught that a manifest+install-verb-only gate MASKED non-JS/Python/Go/Rust ecosystems - .NET/Elixir/Scala/monorepos - dropping their real dep-cache fails and inflating grades) keeps the n/a to genuinely dependency-free repos; a truly exotic ecosystem with no root manifest, no recognised install verb, and no setup action is the only disclosed residual n/a.",
+        "ci.parallel.test-sharding: if NO job in any parsed workflow has a test-like id or name (test/spec/e2e/integration/unit) AND no shard-like matrix axis (shard/chunk/split/partition) exists AND no remote reusables -> not_applicable ('no test-like job (test/spec/e2e/integration/unit) detected; nothing to shard'). A test job WITHOUT a matrix still FAILS (you have tests, shard them); the existing reusable-delegation n/a is unchanged and takes precedence."
+      ],
+      "scorer_unchanged": "ci_score.py arithmetic is untouched - both gates land another not_applicable state, which already leaves the denominator. Only practice_facts.py changed (an install-signal probe = manifest file existence/glob OR a step-code install regex OR a language setup action, and a job-shape probe); the check count stays 11.",
+      "blast_radius": "Computed by re-running the scorer over the 31-repo calibration set, never hand-derived. The test-sharding gate is determinable from committed data (workflow_job_graph carries every job id + name, so has_testish_job is computed directly; a committed sharding FAIL implies no shard-like matrix axis existed, so the gate genuinely fires when no test-like job is present). It moves exactly TWO rows, both small/atypical repos with no test-like job at all: anthropics/claude-code 44 -> 50 and coollabsio/coolify 22 -> 25 (value only). adobe/leonardo also has no test-like job but already scored 0/9 (0 passed), so it holds at 0. The dependency-cache install-signal gate fires on NO calibration repo: the three-signal union (manifest OR install command OR setup action) is strictly MORE applicable than both the file-only gate and the manifest+install-verb gate it succeeded, so it can only ever remove n/a cases, never add them, and every dep-cache-fail repo in the set - leonardo, claude-code, coolify, deepgram, discord.js, bun - carries a standard root manifest, runs an install step, and uses a setup action, so each stays applicable+fail; committed dep-cache facts are kept (signal presence for these rows is not recoverable from committed findings, but the direction is monotone so no row can flip to n/a). The six committed corpora each retain a test-like job (requests's sharding fail stays fail) and both frozen checkout controls hold at 82 (verified by re-running the collector on their committed trees; they pass dependency-cache on cache hits, so the retarget cannot touch them). Per-row receipt: maintainers/ci-score/calibration/dry-run-2026-07-28-v0.1.3.md.",
+      "timing": "Pre-publication, the same cheapest-moment argument as OD-CS18. spec_version bumps v0.1.2 -> v0.1.3."
+    },
+    {
+      "id": "OD-CS20",
+      "status": "DECIDED 2026-07-28 - owner",
+      "title": "Automation-only repositories are NOT scored (third refusal added; part of the v0.1.3 bump)",
+      "decision": "A repository whose visible workflows do NO project build or test - only automation (bots, releases, triage) - is REFUSED, not scored. A technically-honest-but-absurd number on such a repo destroys trust in every other number; the owner chose refusal over a warning. New refusal reason_code `automation_only`, human reason 'Not scored: this repository's workflows show no build or test activity - what is visible is automation (bots, releases, triage), not the project's CI.' Home: refusals entry #3 + a scorer branch (compute_ci_score refuses when the collector sets doc.automation_only). ci_score.py arithmetic is otherwise unchanged; the check count stays 11.",
+      "live_discovery": "anthropics/claude-code scored a real-looking number (44, then 50 after OD-CS19's sharding gate) but its visible workflows are all issue-triage bots and release automation - the product's real CI is not in the repo. The number was technically honest and completely misleading.",
+      "predicate": "STRUCTURAL, from signals already computed on the parsed workflows. First, a repo that delegates its CI to a cross-repo reusable workflow is NEVER refused (a mechanism this fact cannot see is never failed - the module's standing rule). Otherwise refuse iff NONE of three project-work signals is present: (1) a TEST signal - a test-like job (test/spec/e2e/integration/unit in an id or name) OR a test-runner COMMAND in a run step (pytest / tox / go test / npm|yarn|pnpm test / bun test / jest / vitest / cargo test|nextest / rspec / phpunit / deno test / ctest / mix test / dotnet test / gradle|mvn ... test), because a real test-only repo commonly names its job `ci` and restores deps from a setup-* action rather than an inline install command - keying the test signal on the job NAME alone would false-refuse it; (2) a build signal - a build-tool/build-system config at the root (turbo/nx/gradle/bazel/Makefile/CMakeLists), a build-or-lint job name (build/compile/bundle/assemble/dist/package/lint/typecheck - NOT the bare word 'check', which names permission/status bots, and NOT deploy/release/publish, which are delivery), a build/lint command in a run step, or a container-build action; (3) a dependency-INSTALL COMMAND in a run step (npm ci, pip install, ...). A setup-* action does NOT count toward (3): issue-triage bots use setup-node/setup-bun to run their own scripts, so it is too weak to mean the project's CI installs its deps; manifest presence does NOT count either. Conservative by construction: ANY ONE signal scores the repo, so a small-but-real gate (a lint-only job, a single build job, a `pytest` step, `go test`) always scores - the design bias is toward scoring, never a false refusal.",
+      "blast_radius": "Verified, not assumed. Across the 31-repo calibration set, exactly THREE repos have no test-like job (computable from each committed findings.json's workflow_job_graph): anthropics/claude-code, coollabsio/coolify, adobe/leonardo - every other repo has a test job and scores. The committed findings predate this signal and carry no step-level data, so the build/install-command legs were resolved by re-collecting those three repos' workflows and running the predicate: (a) anthropics/claude-code REFUSES - every job is an issue/PR-management bot (its only apparent build/install signals are false: 'make' as an English word in a bot script, and setup-bun used by the triage bots), so its row becomes 'not scored'; (b) coollabsio/coolify SCORES - it has real build-push (docker image build) jobs; (c) adobe/leonardo SCORES - its pull_request ci.yml runs `pnpm install --frozen-lockfile` (a real install command). So the owner's initial three candidates resolve to ONE refusal on verification: only claude-code. The frozen no-test-job leg matches the committed snapshot for all three; the build/install legs are verified against current (2026-07-28) workflow shapes, whose automation-vs-CI character is stable. NET: one calibration row moves to 'not scored' (claude-code); coolify and leonardo keep their values; every scoring row is unchanged.",
+      "scorer_unchanged": "compute_ci_score gains one refusal branch (automation_only, ahead of facts_unavailable, behind no_workflow_yaml); the score arithmetic and the 11-check registry are untouched. The card and report render the refusal through the EXISTING refusal path (heading 'no score: <reason>', no grade, no recommendations, no disclosure) - verified.",
+      "timing": "Pre-publication, part of the same v0.1.3 bump as OD-CS19 (this is an unreleased version bump, so extending it is legitimate)."
+    }
+  ,
+    {
+      "id": "OD-CS21",
+      "status": "DECIDED 2026-07-29 - owner",
+      "title": "practice_coverage_note corrected in place (metadata-only; no spec_version bump)",
+      "decision": "The coverage footnote claimed exactly one published best-practices page (keep-advisory-checks-non-blocking) lacked a scored check; two pages shipped after it was written and were unaccounted - bound-job-timeouts (scored by ci.hygiene.job-timeouts, but with a null practice_slug binding here since the page postdates the v0.1.1 freeze) and replace-fixed-sleeps-with-polling (no scored check). The note is corrected to account for all three explicitly.",
+      "why_no_version_bump": "spec_version moves when scoring semantics move - checks, gates, refusals, bands, formula. This edit changes zero computation: no stamp, score, fixture, or calibration row is affected, and a bump would force regenerating every committed stamp for a byte-identical scoring outcome. The registry's changed-only-with-a-recorded-decision rule is satisfied by this entry; the website's vendored copy picks the corrected bytes up at its next deliberate re-pin (which it already owes for v0.1.3).",
+      "surfaced_by": "An internal-linking session (2026-07-29) hit the stale claim while working against the blob-hash-pinned vendored spec and routed the fix skills-side (a hand-edit of the vendored copy would fail the downstream provenance gate)."
+    }
+  ],
+  "changelog": [
+    {
+      "version": "ci-score-v0.1",
+      "date": "2026-07-14",
+      "change": "Initial rubric: 4 categories, 13 scored checks, 5 informational entries, 9 refusal conditions (7 caps + merge_queue + low_evaluability). Encodes section 1 of the CI Score v0.1 build plan.",
+      "corrections": [
+        "ci.parallel.test-sharding: legacy id corrected from OPT70 ('Scope the Build/Test to Only What Changed') to OPT23/OPT24/OPT25 (the actual sharding patterns).",
+        "ci.required.no-dead-required: OPT71 pin removed ('Expensive Non-Required Check on the Critical Path' is the inverse concept). Computed from required-check provenance fields instead.",
+        "ci.cache.dependency-cache: OPT1 pin removed ('Unnecessary Tool Install' is redundant work, not a cache defect). Third mis-binding of the same class; id-to-check bindings are now guarded by a golden manifest test against the catalog TITLES, not merely by an id-existence check.",
+        "Eight pinned ids had no detector at all and could never fire (OPT4/8/13/15/34/44/61/74); they are moved to dormant_rule_ids rather than silently dropped.",
+        "Refusal added: required_checks_unreadable - the common case on a repo you do not own (branch protection 404s), which previously surfaced as low_evaluability and read as the repo's fault.",
+        "Composite rounding pinned to ROUND HALF UP (Python's default round() is banker's rounding and gives 84 for 84.5, which straddles the B/A boundary).",
+        "Band suffix thirds pinned as explicit ranges (the A band is 16 wide and does not divide by 3).",
+        "Added the pass / not_applicable derivations and the refusal precedence rule, none of which existed.",
+        "Added the ci_score stamp schema (build plan section 1.4), which the first draft dropped - it is the contract the report card, the website pages, and the parity/recompute checks all consume."
+      ],
+      "known_gaps": [
+        "OD-CS13: 10 of 13 checks could not fail under the original per-detector measured_only_fail rule. RESOLVED same day by the pole-anchored refinement (next entry; decision_log OD-CS13).",
+        "Three checks and one informational entry name a coverage_gap that Phase 1 must close before they can be computed at all: ci.trigger.cancel-superseded (OPT46 stamps its count only as prose, and the denominator is a different population), ci.trigger.queue-concurrency (OPT43 measures time-to-start, not queue; no cause attribution), ci.required.no-dead-required (no YAML trigger/filter data is emitted), and ci.gate.retry-tax (run_attempt is never stamped into findings.json).",
+        "refusals.merge_queue can only see OBSERVED merge_group runs; a configured-but-unused merge queue is not detected, because no declared-trigger data is emitted."
+      ]
+    },
+    {
+      "version": "ci-score-v0.1",
+      "date": "2026-07-14",
+      "change": "OD-CS13 resolved pre-publication: measured_only_fail refined to the two-door (pole-anchored) rule; fail_evidence declared per check against the fail_evidence_sources enum; open_decisions renamed decision_log with the resolution, census, and rejected options recorded.",
+      "corrections": [
+        "The earlier framing 'this is a labeling gap, not a data gap' was WRONG for the cache/setup family: direct-sized findings genuinely carry heuristic default_s constants as their magnitude (census of _SIZING / _size_finding). The fix sources fail magnitudes from the drilled pole's observed step decomposition instead of relabeling modeled numbers."
+      ]
+    },
+    {
+      "version": "ci-score-v0.1",
+      "date": "2026-07-14",
+      "change": "Phase-1 build feedback: added the merge_queue_undeterminable refusal (9th; 7th cap) for old-vintage documents lacking both events_by_wf and workflow_triggers - the merge_queue coverage_gap mandated refuse-on-unavailable and the scorer needed a reason code for it; merge_queue's declared-trigger conjunct is now computable via the new scan.py workflow_triggers stamp; stamped checks gain an optional `note` field so by-design / blame-precise copy travels in the stamp the card renders from."
+    },
+    {
+      "version": "ci-score-v0.1",
+      "date": "2026-07-14",
+      "change": "Phase-1 adversarial round (4 reviewers) corrections: the Door-2 join anchors on the finding's own workflow_file + affected_jobs (pr_critical_path_check is the document's crown CONSTANT, not a per-finding key - the round-2 sentence claiming otherwise was itself an un-censused evidence claim); OPT43 sibling windows come from the all-status slice (success-only windows structurally exonerate the cancelled siblings and turned self-inflicted queueing into a provider-congestion pass); determinable-absent merge-queue requires the DECLARED trigger stamp + a clean scan; types:-filtered PR triggers classify type_scoped (never unconditional -> never a false dead-required FAIL); attempt_stats carries workflows_missing and the retry-tax line renders only on complete coverage, same-population; composite arithmetic is exact (Fraction - float ties lost round-half-up on 4 reachable half-integer composites); an unobserved drilled-pole denominator caps at partial (never pass-by-silence); scoring failures stamp data_sources.ci_score_error; by-design notes only ever ride a pass; explicit cancel-in-progress false must be literally False."
+    },
+    {
+      "version": "ci-score-v0.1",
+      "date": "2026-07-14",
+      "change": "OD-CS15 basic reset: 9 pass/fail config-fact checks, score = passed/applicable, ONE refusal, simplified stamp. The granular rubric (13 magnitude-gated checks, tiers, weights, 9 refusals, confidence) is punted to the v2 map before any publication. Bands and the purity/determinism/recompute architecture carry over unchanged. Amended same day per owner: 12 checks covering every published best-practice page (added change-scoped builds, concurrency groups, scoped id-token); keep-advisory-checks-non-blocking documented as not config-determinable (v2)."
+    },
+    {
+      "version": "ci-score-v0.1",
+      "date": "2026-07-14",
+      "change": "Post-reset adversarial round: _practice_facts rewritten as a YAML-STRUCTURE walk (raw-substring scanning produced false FAILs from comments, cross-step regex windows, and the 'sphinx contains nx' applicability bug, and false PASSes from tokens in comments). Facts now see local composite actions; dependency-caching recognizes cache-action families (rust-cache etc.) and actions/cache/restore+save; test-sharding recognizes e2e/spec/integration/unit jobs and shard-like matrix axes; change-scoped is n/a for gradle/bazel (undetectable mechanisms are never failed); draft-gate is n/a without PR workflows (merge-queue-only repos are not dinged); workflow-level write-all fails scoped-id-token; pinned-SHAs counts ALL remote references incl. first-party, across composite actions, with corrected wording. Second refusal added (facts_unavailable) so vintage/partial-stamp documents refuse with an honest reason and a partial stamp can never publish a subset score."
+    },
+    {
+      "version": "ci-score-v0.1",
+      "date": "2026-07-14",
+      "change": "Persona round (scored-maintainer + Series-B CTO): PR-GATING replaces PR-triggered for the PR-path checks (types-only-[closed] post-merge automation like backport jobs is exempt - the maintainer persona's top grievance, and our own methodology example was the false positive); cross-repo reusable-workflow delegation lands not_applicable on the content checks, never fail (the CTO's uninstall event - 'never fail a mechanism this fact cannot see' now applies to every check); evidence strings count all offenders and never phrase a capped file list as exhaustive (mastra has six fetch-depth offenders, the card named three as if complete); pinning offender files rank third-party first; draft-gate evidence uses k-of-n framing. Owner-decision items recorded in pre_publication_requirements."
+    },
+    {
+      "version": "ci-score-v0.1",
+      "date": "2026-07-14",
+      "change": "Phase-3 calibration recorded: 31-repo dry-run under blob 9d891b137f0b, zero rubric edits motivated (the calibration block is the receipt). OD-CS13's ratification venue moved to the v2 gate (its rubric is punted). The registry is now FROZEN for v0.1: any further change requires a spec_version bump \u2014 the pre-publication window closed with the calibration."
+    },
+    {
+      "version": "ci-score-v0.1",
+      "date": "2026-07-14",
+      "change": "Owner directive (4th confirmation): dispute machinery is removed from every surface and never re-surfaced as a concern or requirement. The ONE feedback channel on score pages is the mailto ('contact us for issues/corrections'). The pre_publication_requirements item is rewritten accordingly."
+    },
+    {
+      "version": "ci-score-v0.1",
+      "date": "2026-07-14",
+      "change": "OD-CS16 recorded: the score stays independent of measured speed (owner-decided after the ranking pressure test). Reasoning preserved in the decision log: React Doctor itself grades patterns not runtimes; raw gate speed is size-confounded (measured anti-correlation ~ +0.5 on our own calibration set); the v2 path is size-fair effectiveness checks (v2_map.speed_effectiveness_checks). Speed remains reported-never-scored beside the grade, the D4 pattern."
+    },
+    {
+      "version": "ci-score-v0.1.1",
+      "date": "2026-07-15",
+      "change": "First post-freeze spec_version bump (OD-CS17): ci.security.pinned-action-shas passes at >=95% of remote action references SHA-pinned, replacing all-or-nothing. Owner-decided 2026-07-14 ('95% works, go ahead') with the practice-adoption rationale (admits Renovate-style stragglers, rejects partial adoption, gaming-resistant). Blast radius censused over all 31 committed calibration docs before the change: exactly one repo flips (next-js, 146/147 = 99.3%, 67 -> 75); mastra (101/120 = 84.2%) stays a fail and every other pinning-failing repo is below 80%. The same batch ruled the remaining pre_publication_requirements items DECIDED (token-pass kept+disclosed, waivers deferred to v2, measured-notes as a Phase-6 checklist item, grade resolution accepted); all committed stamps are recomputed under the new version."
+    },
+    {
+      "version": "ci-score-v0.1.2",
+      "date": "2026-07-28",
+      "change": "Second post-freeze spec_version bump (OD-CS18): the ci.trigger.draft-gate check is REMOVED (12 -> 11 checks). Draft-PR gating is a contested cost preference, not a consensus best practice (many teams push draft PRs precisely to get CI feedback before review), the B4 18-repo sweep showed top-scoring exemplars (vitejs/vite 90, home-assistant/core 90) failing ONLY this check, and it is the one check with no published best-practice page behind it (practice_slug null). Pre-publication, the cheapest moment for a rubric fix. All committed corpus + synthetic stamps are recomputed under v0.1.2; the collected/ calibration receipts stay as their dated v0.1.1 snapshots (matched findings.json + report.md receipts kept coherent). Score movement, recomputed over the full 31-repo calibration table: every row shifts a few points because ~60% of the set was failing the removed check (promotions only, none demoted) - e.g. OneSignal-Flutter-SDK, requests, oven-sh/bun, cal.com, Infisical, nx and redpanda all rise, mastra/langfuse/grafana move 83 -> 82, deepgram holds, mastodon holds at 100. The complete per-row before/after (numeric) is in maintainers/ci-score/calibration/dry-run-2026-07-28-v0.1.2.md."
+    },
+    {
+      "version": "ci-score-v0.1.3",
+      "date": "2026-07-28",
+      "change": "Third post-freeze spec_version bump (OD-CS19): two checks gain the applicability gate the rubric's own principle already demanded ('a mechanism this fact cannot see is never failed'). ci.cache.dependency-cache is not_applicable when the repo shows NO dependency-install signal at all - NONE of three signals: (i) a dependency manifest at the repo root (package.json + JS/TS lockfiles, requirements*.txt, pyproject.toml, setup.py/cfg, Pipfile(.lock), poetry.lock, uv.lock, go.mod/sum, Cargo.toml/lock, build.gradle(.kts), pom.xml, *.csproj/fsproj/vbproj, packages.config, mix.exs/lock, build.sbt, *.gemspec, cabal.project/*.cabal, stack.yaml, Package.swift, Gemfile(.lock), composer.json/lock, pubspec.yaml/lock), (ii) a dependency-install command in a step (pip/npm/pnpm/yarn/bun/poetry/uv/composer/bundle/gem/conda with an install-verb ADJACENT, plus mvn/gradle/dotnet/mix/cabal/stack build commands, `go mod download`/`cargo fetch`; shell comments stripped first), (iii) a language setup action (setup-node/python/java/dotnet/...) - and no cache is already configured; with nothing installed there is nothing to cache. The gate is install-signal, not file-only: round-6 dogfooding showed a pure file-existence gate both MISSED the motivating repo (the public skills repo carries a pyproject.toml, so a file gate leaves it applicable but for the wrong reason) and would MASK real waste (a manifest-less repo with a bare inline `pip install ...` would go n/a, dropping a genuine fail and inflating the grade); a later review caught that a manifest+install-verb-only gate still MASKED non-JS/Python/Go/Rust ecosystems (.NET/Elixir/Scala/monorepos), which the setup-action signal and the broadened manifest/verb lists close. Applicable when ANY of the three signals exists; not_applicable only when NONE. ci.parallel.test-sharding is not_applicable when no test-like job (test/spec/e2e/integration/unit) and no shard-like matrix axis exists anywhere - you cannot shard tests you do not have. A cache hit still PASSES regardless of the signal; a test job WITHOUT a matrix still FAILS. Scorer arithmetic unchanged (both gates land another not_applicable, which already leaves the denominator); check count stays 11. Blast radius, computed over the full 31-repo calibration table under v0.1.3 (the test-sharding gate is determinable from committed data via workflow_job_graph; the dependency-cache install-signal gate is strictly more applicable than the file-only gate it replaced, so it can only remove n/a cases and never add them - it fires on NO calibration repo, every dep-cache-fail row carrying both a standard manifest and an install step, so committed dep-cache facts are kept): TWO rows move, both small/atypical repos with no test-like job, from the sharding gate firing - anthropics/claude-code 44 -> 50 and coollabsio/coolify 22 -> 25 (value only); adobe/leonardo has no test job either but already scored 0 (0 passed) so it holds at 0. Every other row is unchanged. The six committed corpora each retain a test-like job (requests's sharding fail stays fail) and both frozen checkout controls hold at 82 (re-run on their committed trees; they pass dependency-cache on cache hits, so the retarget cannot touch them). Committed corpus + synthetic stamps re-stamped under v0.1.3 (spec_version field only; facts and scores unchanged, since each keeps a manifest and a test job); collected/ calibration receipts stay their dated snapshots. Per-row receipt: maintainers/ci-score/calibration/dry-run-2026-07-28-v0.1.3.md."
+    }
+  ],
+  "practice_coverage_note": "Published /best-practices/github-actions/ page coverage (corrected 2026-07-29, OD-CS21 - two pages had shipped after this note was first written and were unaccounted): keep-advisory-checks-non-blocking has NO scored check (whether an advisory check blocks merges lives in branch-protection semantics, not workflow YAML, so no configuration fact can decide it honestly - deferred to v2 with the required-checks data); replace-fixed-sleeps-with-polling has NO scored check (fixed-sleep detection is step-content judgment, not a configuration fact a maintainer can verify in their own YAML in seconds - candidate for a future rubric revision); bound-job-timeouts IS scored (ci.hygiene.job-timeouts) but its practice_slug binding is null here because the page shipped after the v0.1.1 freeze - the report renderer supplies the link. Every other published page maps to a scored check via practice_slug. Recorded so 'every best practice' is accounted for, not silently missing.",
+  "pre_publication_requirements": {
+    "_note": "Owner-decision items raised by the two persona reviews (scored-maintainer, Series-B CTO). The five OPEN items were ruled by the owner 2026-07-14 in one batch (the mailto item was already final and is listed only for completeness) - the record is decision_log.OD-CS17; each item below states its ruling. The remaining pre-publication work is Phase 4-6 execution, not open decisions.",
+    "items": [
+      "TOKEN-PASS RESOLUTION (both personas) - DECIDED: keep for v0.1, disclosed. Several checks pass on 'at least one workflow'; the k-of-n evidence strings ('concurrency group declared on 1 of 4 PR workflow(s)') keep the coverage visible on every card. Gating-aware coverage (scoring over the measured critical path's workflows) is v2.",
+      "PINNING THRESHOLD (both personas) - DECIDED, implemented in v0.1.1: the check passes at >=95% of remote action references SHA-pinned, replacing all-or-nothing (the '84% pinned == 0% pinned' cliff the personas flagged). Rationale and blast-radius census in decision_log.OD-CS17. The check STAYS in the score (it entered by owner directive, OD-CS15).",
+      "WAIVER MECHANISM (CTO) - DECIDED: deferred to v2. The post-merge-automation exemption (types [closed] workflows leave the PR-gating denominators) already absorbed the worst legitimate case; an in-repo .ci-score.yml stays on the v2 table.",
+      "VENDOR DISCLOSURE + THE MAILTO (owner-decided, final \u2014 4x confirmed): the methodology carries the vendor-identity line, and every published score page carries the ONE feedback channel: a mailto ('contact us for issues/corrections'). No dispute machinery, no SLA workflow, no pre-notification \u2014 decided in planning and re-affirmed by the owner 2026-07-14; never re-surface it.",
+      "MEASURED NOTES MUST FIRE ON PUBLISHED CARDS (both personas) - DECIDED: a per-profile pre-publication checklist item at Phase 6 ('measured notes render on fails where the pipeline measured the practice'), not a rubric rule.",
+      "GRADE RESOLUTION (CTO) - DECIDED: accepted for v0.1. The 31-repo calibration spread (0-100, four scoring 85, eight scoring 70-84, honest low scores) closed the 'too few effective grades' concern empirically; fractional scoring or more checks is a v2 question."
+    ]
+  },
+  "calibration": {
+    "status": "PHASE-3 DRY-RUN COMPLETE (2026-07-14) \u2014 no registry or threshold change motivated",
+    "table": "maintainers/ci-speedup/calibration/dry-run-2026-07-14.md (maintainer-only; 31 repos: the full 27-repo site exemplar pool + 4 non-exemplar worked examples), committed under spec git blob 9d891b137f0b BEFORE any rubric edit - the never-tune rule's git-checkable receipt.",
+    "outcome": "Spread 0-100 (4band, 8band, honest F's); no check column pinned all-pass or all-fail; extremes hand-verified (mastodon's 100 earned; leonardo's 0 real). Positive controls hold in config-fact form: mastra passes test-sharding (83), better-auth passes the cache checks (75) and scores despite its merge queue. The rubric ships for v0.1 EXACTLY as registered here - zero post-calibration edits.",
+    "next_calibration": "Re-run the table (same tool, fresh collections) before Phase-6 publication - repos drift; a published page must be scored on collection-day data, not this snapshot.",
+    "post_freeze_receipts": "This block is the frozen v0.1 receipt and is not rewritten by later bumps (hash-object of the CURRENT spec will not match the blob above). Each bump commits its own post-change table beside this one: v0.1.1 -> maintainers/ci-advisor/calibration/dry-run-2026-07-15-v0.1.1.md (OD-CS17; exactly one row moved); v0.1.2 -> maintainers/ci-advisor/calibration/dry-run-2026-07-28-v0.1.2.md (OD-CS18; draft-gate removed, the multi-row grade movement recomputed there); v0.1.3 -> maintainers/ci-score/calibration/dry-run-2026-07-28-v0.1.3.md (OD-CS19; two applicability gates added; the test-sharding gate moved exactly two rows - anthropics/claude-code 44 -> 50 and coollabsio/coolify 22 -> 25, both small/atypical repos with no test-like job; the dependency-cache install-signal gate moved no row - every dep-cache-fail calibration repo installs dependencies)."
+  }
+}

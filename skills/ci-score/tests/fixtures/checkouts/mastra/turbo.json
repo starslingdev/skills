@@ -1,0 +1,43 @@
+{
+  "$schema": "https://v2-9-16.turborepo.dev/schema.json",
+  "ui": "stream",
+  "futureFlags": {
+    "affectedUsingTaskInputs": true
+  },
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
+      "outputLogs": "new-only"
+    },
+    "lint": {
+      "dependsOn": []
+    },
+    "lint:fix": {
+      "dependsOn": [],
+      "cache": false
+    },
+    "//#lint:format": {
+      "dependsOn": [],
+      "cache": false
+    },
+    "typecheck": {
+      "dependsOn": ["^build"]
+    },
+    "clean": {
+      "cache": false
+    },
+    "dev": {
+      "dependsOn": ["^build"],
+      "cache": false,
+      "persistent": true
+    },
+    "validate:package": {
+      "dependsOn": []
+    },
+    "//#format:oxfmt": {
+      "dependsOn": [],
+      "cache": false
+    }
+  }
+}

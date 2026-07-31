@@ -1,0 +1,204 @@
+{
+  "_fixture_provenance": "SYNTHETIC STAMPED FIXTURE for the recompute-and-diff guard (Phase 2): a hand-built practice_facts document plus the ci_score stamp computed from it at commit time. The guard recomputes the stamp from the doc-minus-stamp and asserts byte equality - so 'scores change only via re-run or spec bump' is checkable by anyone with git, not a promise. Never publish numbers from this file.",
+  "repo": "example/stamped-fixture",
+  "scanned_workflows": 4,
+  "practice_facts": {
+    "ci.cache.dependency-cache": {
+      "state": "pass",
+      "evidence": "dependency caching configured in 2 workflow/action file(s)",
+      "files": [
+        "ci.yml"
+      ]
+    },
+    "ci.cache.build-cache": {
+      "state": "not_applicable",
+      "evidence": "no build tool with a cache detected in the repo tree",
+      "files": []
+    },
+    "ci.checkout.shallow-clone": {
+      "state": "fail",
+      "evidence": "fetch-depth: 0 on 1 PR-gating workflow(s), e.g. ci.yml",
+      "files": [
+        "ci.yml"
+      ]
+    },
+    "ci.parallel.test-sharding": {
+      "state": "pass",
+      "evidence": "shard/matrix strategy on test job(s) in 1 workflow(s)",
+      "files": [
+        "ci.yml"
+      ]
+    },
+    "ci.build.change-scoped": {
+      "state": "not_applicable",
+      "evidence": "no turbo/nx task graph detected (change-scoping is not checkable here)",
+      "files": []
+    },
+    "ci.trigger.concurrency-groups": {
+      "state": "pass",
+      "evidence": "concurrency group declared on 2 of 2 PR workflow(s)",
+      "files": [
+        "ci.yml",
+        "e2e.yml"
+      ]
+    },
+    "ci.trigger.cancel-superseded": {
+      "state": "pass",
+      "evidence": "concurrency + cancel-in-progress on 2 of 2 PR workflow(s)",
+      "files": [
+        "ci.yml",
+        "e2e.yml"
+      ]
+    },
+    "ci.trigger.path-filter": {
+      "state": "fail",
+      "evidence": "paths filters on 0 of 2 PR workflow(s)",
+      "files": []
+    },
+    "ci.hygiene.job-timeouts": {
+      "state": "pass",
+      "evidence": "timeout-minutes set in 2 workflow(s)",
+      "files": [
+        "ci.yml",
+        "e2e.yml"
+      ]
+    },
+    "ci.trigger.draft-gate": {
+      "state": "pass",
+      "evidence": "draft gating in 1 of 2 PR-gating workflow(s)",
+      "files": [
+        "ci.yml"
+      ]
+    },
+    "ci.security.scoped-id-token": {
+      "state": "not_applicable",
+      "evidence": "no workflow file requests an OIDC id-token",
+      "files": []
+    },
+    "ci.security.pinned-action-shas": {
+      "state": "pass",
+      "evidence": "12 of 12 remote action references SHA-pinned (workflow + local composite action files)",
+      "files": []
+    }
+  },
+  "findings": [
+    {
+      "pattern": "OPT28",
+      "wall_clock_p50_s": 62.0
+    }
+  ],
+  "ci_score": {
+    "spec_version": "ci-score-v0.1.3",
+    "scope_statement": "CI Score gauges best-practice adherence on CI speed and gate hygiene: a straightforward pass/fail rubric of best-practice checks computed from a repo's workflow configuration.",
+    "value": 75,
+    "grade": "B",
+    "refusal": null,
+    "checks": [
+      {
+        "check_id": "ci.cache.dependency-cache",
+        "label": "Dependency caching",
+        "state": "pass",
+        "evidence": "dependency caching configured in 2 workflow/action file(s)",
+        "files": [
+          "ci.yml"
+        ],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.cache.build-cache",
+        "label": "Build caching",
+        "state": "not_applicable",
+        "evidence": "no build tool with a cache detected in the repo tree",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.checkout.shallow-clone",
+        "label": "Shallow checkout",
+        "state": "fail",
+        "evidence": "fetch-depth: 0 on 1 PR-gating workflow(s), e.g. ci.yml",
+        "files": [
+          "ci.yml"
+        ],
+        "measured_note": "measured cost on this repo: ~62s per run"
+      },
+      {
+        "check_id": "ci.parallel.test-sharding",
+        "label": "Test sharding / matrix",
+        "state": "pass",
+        "evidence": "shard/matrix strategy on test job(s) in 1 workflow(s)",
+        "files": [
+          "ci.yml"
+        ],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.build.change-scoped",
+        "label": "Change-scoped builds",
+        "state": "not_applicable",
+        "evidence": "no turbo/nx task graph detected (change-scoping is not checkable here)",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.trigger.concurrency-groups",
+        "label": "Concurrency groups",
+        "state": "pass",
+        "evidence": "concurrency group declared on 2 of 2 PR workflow(s)",
+        "files": [
+          "ci.yml",
+          "e2e.yml"
+        ],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.trigger.cancel-superseded",
+        "label": "Superseded runs cancelled",
+        "state": "pass",
+        "evidence": "concurrency + cancel-in-progress on 2 of 2 PR workflow(s)",
+        "files": [
+          "ci.yml",
+          "e2e.yml"
+        ],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.trigger.path-filter",
+        "label": "Path filters",
+        "state": "fail",
+        "evidence": "paths filters on 0 of 2 PR workflow(s)",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.hygiene.job-timeouts",
+        "label": "Job timeouts",
+        "state": "pass",
+        "evidence": "timeout-minutes set in 2 workflow(s)",
+        "files": [
+          "ci.yml",
+          "e2e.yml"
+        ],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.security.scoped-id-token",
+        "label": "Scoped OIDC id-token",
+        "state": "not_applicable",
+        "evidence": "no workflow file requests an OIDC id-token",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.security.pinned-action-shas",
+        "label": "Pinned action SHAs",
+        "state": "pass",
+        "evidence": "12 of 12 remote action references SHA-pinned (workflow + local composite action files)",
+        "files": [],
+        "measured_note": null
+      }
+    ],
+    "checks_passed": 6,
+    "checks_applicable": 8
+  }
+}

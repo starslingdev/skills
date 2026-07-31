@@ -1,0 +1,74 @@
+{
+  "_note": "B3 trigger/behavior scenarios + the B4 validation layers. Routing cases complement evals/prompt-routing.json (the OD-L4 contract).",
+  "evals": [
+    {
+      "skills": [
+        "ci-score"
+      ],
+      "query": "grade my CI",
+      "setup": "cwd is a full local checkout of a repo with GitHub Actions workflows",
+      "should_trigger": true,
+      "expected_behavior": [
+        "Before collecting, confirms the scoring target as ONE structured question (AskUserQuestion where available) — the detected <owner/repo> (or checkout-root path) as the default option, 'a different repo or path' as the alternative — and does not run the collector until the target is settled",
+        "Runs collect_config.py against the checkout root and reads the ci_score stamp from the written findings.json",
+        "Renders the report to scratch with render_report.py and runs verify_report.py, surfacing nothing from it (and printing no repo path) until it prints 'report: OK'",
+        "Close opens with the score read from the stamp (never invented or recomputed), lists up to three ranked recommendations, each naming its stake kind in plain words (security / reliability-cost / speed-cost, derived from the check_id family) plus impact/risk tier and concrete consequence, and ends BY ASKING the kickoff question (writing close text never completes the close) as ONE question — via AskUserQuestion where available, else the numbered options printed as the message's final block: up to two ranked fix slots (bundle counts as one) / 'a different recommendation' / 'None, just save the report (.md)' last; the report is rendered and verified in scratch, and — absent an explicit user request to save it earlier — is written into the repo and its path announced only on that save pick, never by any other structured pick and never with a repo path printed before then"
+      ]
+    },
+    {
+      "skills": [
+        "ci-score"
+      ],
+      "query": "what's our CI score",
+      "setup": "cwd is NOT inside a git checkout (or the target path is a plain directory)",
+      "should_trigger": true,
+      "expected_behavior": [
+        "Step 0 finds no detected checkout to confirm and asks the user to name a target rather than silently running the collector on an unconfirmed cwd",
+        "Relays the collector's not_a_git_checkout refusal reason instead of a score",
+        "Does not attempt a partial workaround (no API fetch of workflows, no scoring from an incomplete view)",
+        "Never fabricates a grade"
+      ]
+    },
+    {
+      "skills": [
+        "ci-score"
+      ],
+      "query": "audit our CI against best practices, then fix the top issue",
+      "setup": "full local checkout whose repo fails at least one check",
+      "should_trigger": true,
+      "expected_behavior": [
+        "Scores, reports, and on the user's explicit yes applies recommendation #1 only: creates a branch, edits every file the finding points at per the recipe and nothing else, shows the diff",
+        "Re-runs collect_config.py against the working tree and confirms the check now reads pass",
+        "Leaves the commit to the user; does not proceed to another recommendation without a fresh approval, offered as a structured question whose FIRST option is 'Commit this branch and open a PR' (picking it is the explicit commit+push+PR ask; the PR body carries the CI Score before \u2192 after; never merge; picking it ends the loop on the opened PR), then one next-fix slot from what still fails / a different one / 'None, just save the report (.md)' last"
+      ]
+    },
+    {
+      "skills": [
+        "ci-score"
+      ],
+      "query": "why is CI slow on this repo",
+      "should_trigger": false,
+      "expected_behavior": [
+        "ci-score does not trigger; speed/wall-clock analysis routes to ci-speedup per the OD-L4 contract (evals/prompt-routing.json)",
+        "No grade is surfaced from a speed question"
+      ]
+    }
+  ],
+  "b4_validation_layers": {
+    "_contract": "The three B4 layers, encoded here per the launch spec; each names its runnable artifact and pass bar.",
+    "a_exact_match_controls": {
+      "runner": "python3 -m pytest skills/ci-score/tests/test_b4_controls.py",
+      "pass_bar": "mastra fixture scores exactly 83 (B+) and better-auth exactly 75 (B) via the FULL collector path, offline, from the frozen trees under tests/fixtures/checkouts/"
+    },
+    "b_live_smoke": {
+      "runner": "collect+render+verify on real checkouts incl. one refusal repo (no workflows: stamp refusal, exit 0, report renders, verify OK) and one dirty-checkout provenance case (-dirty recorded and shown)",
+      "pass_bar": "pipeline completes and verify_report prints OK on every run; no specific grade ever asserted (live repos drift)",
+      "record": "maintainers/ci-score/B4-SWEEP-2026-07-27.md"
+    },
+    "c_dogfood_sweep": {
+      "runner": "the sweep script pattern in .ci-score-dogfood/ (gitignored captures): ~15-20 diverse repos through the whole pipeline",
+      "pass_bar": "verify_report OK on EVERY run; facts match frozen calibration rows wherever a row exists; every bug the sweep shakes out fixed + regression-tested in the same wave",
+      "record": "maintainers/ci-score/B4-SWEEP-2026-07-27.md"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "_contract": "OD-L4 (owner, 2026-07-27): the committed prompt-routing contract between ci-score and ci-speedup. Speed/cost language and the bare ambiguous middle route to ci-speedup (the flagship keeps ambiguous traffic); ci-score fires only on explicit grade / score / best-practice / hygiene language. B3's done-when binds to this artifact; tests/test_routing_artifact.py guards its shape and rules.",
+  "routes": [
+    {"prompt": "audit my CI", "expected": "ci-speedup", "why": "bare audit = ambiguous middle; flagship keeps it"},
+    {"prompt": "check my CI", "expected": "ci-speedup", "why": "ambiguous middle"},
+    {"prompt": "review my CI setup", "expected": "ci-speedup", "why": "ambiguous middle"},
+    {"prompt": "why is CI slow", "expected": "ci-speedup", "why": "speed language"},
+    {"prompt": "cut our CI costs", "expected": "ci-speedup", "why": "cost language"},
+    {"prompt": "find CI optimization opportunities", "expected": "ci-speedup", "why": "optimization language"},
+    {"prompt": "is my CI healthy", "expected": "ci-score", "why": "hygiene language"},
+    {"prompt": "grade my CI", "expected": "ci-score", "why": "explicit grade"},
+    {"prompt": "what's our CI score", "expected": "ci-score", "why": "explicit score"},
+    {"prompt": "audit our CI against best practices", "expected": "ci-score", "why": "explicit best-practice language beats the bare-audit default"},
+    {"prompt": "how healthy is my CI config", "expected": "ci-score", "why": "hygiene language"},
+    {"prompt": "is our GitHub Actions setup following best practices", "expected": "ci-score", "why": "explicit best-practice language"},
+    {"prompt": "review our workflows for security issues", "expected": "none", "why": "security audits are out of scope: ci-score is a best-practices rubric with exactly two security-related checks, not a security audit"}
+  ]
+}

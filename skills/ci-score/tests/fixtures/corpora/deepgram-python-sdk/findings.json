@@ -1,0 +1,4193 @@
+{
+  "findings": [
+    {
+      "id": "f1",
+      "pattern": "OPT12",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "Duplicated Setup Across Jobs",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 1,
+      "affected_jobs": [
+        "compile",
+        "test",
+        "publish"
+      ],
+      "workflow_activity": {
+        "runs_30d": 57,
+        "last_run": "2026-07-14T14:54:40Z",
+        "dormant": false
+      },
+      "evidence": "3 jobs share an identical 4-step setup preamble (compile, test, publish) — extract a composite action",
+      "fix_strategy": "duplicated-setup-across-jobs",
+      "fix_recipe_anchor": "opt12--duplicated-setup-across-jobs",
+      "evidence_snippet": "name: CI",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": 0.0,
+      "size_note": "maintainability only — a composite action de-duplicates the YAML but changes zero runtime (each job still runs checkout + install); no wall-clock or runner-minute saving",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/pr-title-check.yml",
+          "long_pole_p50_s": 14.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 66.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.713,
+      "workflow_runs_30d": 57,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.0
+    },
+    {
+      "id": "f2",
+      "pattern": "OPT14",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "Repeated Checkout/Setup Without Artifact Handoff (and Slow Tool Replacement)",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 1,
+      "affected_jobs": [
+        "compile",
+        "test",
+        "publish"
+      ],
+      "workflow_activity": {
+        "runs_30d": 57,
+        "last_run": "2026-07-14T14:54:40Z",
+        "dormant": false
+      },
+      "evidence": "3 jobs each run checkout + dependency install with no `actions/upload-artifact` / `download-artifact` handoff: compile, test, publish",
+      "fix_strategy": "repeated-checkout-setup-without-artifact-handoff-and-slow-to",
+      "fix_recipe_anchor": "opt14--repeated-checkout-setup-without-artifact-handoff-and-slow-tool-replacement",
+      "evidence_snippet": "name: CI",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 42.8,
+      "tier": 2,
+      "realization": "none",
+      "wall_clock_negative": true,
+      "size_note": "serial-gate fix is wall-clock-NEGATIVE (build-once + fan-out adds a serial gate) — prefer warming the cache so each parallel copy stays cheap; runner-minute (bill) saving only",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/pr-title-check.yml",
+          "long_pole_p50_s": 14.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 66.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.713,
+      "workflow_runs_30d": 57,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.26
+    },
+    {
+      "id": "f3",
+      "pattern": "OPT21",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "Unnecessary `needs:` Dependencies",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 35,
+      "affected_jobs": [
+        "test"
+      ],
+      "workflow_activity": {
+        "runs_30d": 57,
+        "last_run": "2026-07-14T14:54:40Z",
+        "dormant": false
+      },
+      "evidence": "job `test` declares `needs: ['compile']` but references no `needs.*.outputs` and downloads no artifact from them — verify the dependency isn't a required gate before removing NOTE: this workflow hosts the measured gate chain (compile (3.13) -> test (3.13)) — the `needs:` edge in question is the serialization the headline measures; removing a truly-unnecessary edge would collapse the chain into parallel checks.",
+      "fix_strategy": "unnecessary-needs-dependencies",
+      "fix_recipe_anchor": "opt21--unnecessary-needs-dependencies",
+      "evidence_snippet": "    needs: compile",
+      "wall_clock_p50_s": 1.0,
+      "runner_min_saving": null,
+      "tier": 1,
+      "realization": "direct",
+      "size_note": "",
+      "runner_min_unrealizable_s": 28.5,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "removing a `needs:` edge changes WHEN a job starts (queue wait), not how long it runs — compute is unchanged, so there is no runner-minute saving (the wall-clock/queue effect is sized separately)",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/pr-title-check.yml",
+          "long_pole_p50_s": 14.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 66.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.713,
+      "workflow_runs_30d": 57,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f4",
+      "pattern": "OPT21",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "Unnecessary `needs:` Dependencies",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 61,
+      "affected_jobs": [
+        "publish"
+      ],
+      "workflow_activity": {
+        "runs_30d": 57,
+        "last_run": "2026-07-14T14:54:40Z",
+        "dormant": false
+      },
+      "evidence": "job `publish` declares `needs: ['compile', 'test']` but references no `needs.*.outputs` and downloads no artifact from them — verify the dependency isn't a required gate before removing NOTE: this workflow hosts the measured gate chain (compile (3.13) -> test (3.13)) — the `needs:` edge in question is the serialization the headline measures; removing a truly-unnecessary edge would collapse the chain into parallel checks.",
+      "fix_strategy": "unnecessary-needs-dependencies",
+      "fix_recipe_anchor": "opt21--unnecessary-needs-dependencies",
+      "evidence_snippet": "    needs: [compile, test]",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "affected job's duration couldn't be resolved from sampled runs — runner-minute (bill) only, wall-clock unproven",
+      "runner_min_unrealizable_s": 28.5,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "removing a `needs:` edge changes WHEN a job starts (queue wait), not how long it runs — compute is unchanged, so there is no runner-minute saving (the wall-clock/queue effect is sized separately)",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/pr-title-check.yml",
+          "long_pole_p50_s": 14.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 66.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.713,
+      "workflow_runs_30d": 57,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "modeled",
+      "sku": null,
+      "sku_class": "unpriced",
+      "billing_class": "unpriced",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f5",
+      "pattern": "OPT32",
+      "pattern_class": "static",
+      "severity": "HIGH",
+      "title": "Missing `paths`/`paths-ignore` on Expensive Workflows",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 3,
+      "affected_jobs": [
+        "compile",
+        "test",
+        "publish"
+      ],
+      "workflow_activity": {
+        "runs_30d": 57,
+        "last_run": "2026-07-14T14:54:40Z",
+        "dormant": false
+      },
+      "evidence": "workflow triggers on push but declares no `paths:`/`paths-ignore:` filter (the `on:` block below has no `paths:` key).",
+      "fix_strategy": "missing-paths-paths-ignore-on-expensive-workflows",
+      "fix_recipe_anchor": "opt32--missing-paths-paths-ignore-on-expensive-workflows",
+      "evidence_snippet": "on: [push]",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": null,
+      "size_note": "below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "runner_min_unrealizable_s": 18.8,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "gross upper bound — assumes every irrelevant run runs the full job and a `paths:` filter skips it; realizable only where the workflow's jobs don't ALREADY self-skip (via `if:` guards or an internal change-gate) and the trigger can be narrowed safely — verify per workflow before crediting",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/pr-title-check.yml",
+          "long_pole_p50_s": 14.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 66.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.713,
+      "workflow_runs_30d": 57,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f6",
+      "pattern": "OPT32",
+      "pattern_class": "static",
+      "severity": "HIGH",
+      "title": "Missing `paths`/`paths-ignore` on Expensive Workflows",
+      "workflow_file": ".github/workflows/pr-title-check.yml",
+      "line": 3,
+      "affected_jobs": [
+        "title-check"
+      ],
+      "workflow_activity": {
+        "runs_30d": 80,
+        "last_run": "2026-07-14T14:24:44Z",
+        "dormant": false
+      },
+      "evidence": "workflow triggers on pull_request but declares no `paths:`/`paths-ignore:` filter (the `on:` block below has no `paths:` key). NOTE: if this workflow is a REQUIRED status check, add a per-job `dorny/paths-filter` gate that returns a neutral pass — a workflow-level `paths:` filter would strand the required check on excluded PRs.",
+      "fix_strategy": "missing-paths-paths-ignore-on-expensive-workflows",
+      "fix_recipe_anchor": "opt32--missing-paths-paths-ignore-on-expensive-workflows",
+      "evidence_snippet": "on:\n    pull_request:\n        types:\n            - opened\n            - edited\n            - synchronize\n            - reopened",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": null,
+      "size_note": "below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "runner_min_unrealizable_s": 5.6,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "gross upper bound — assumes every irrelevant run runs the full job and a `paths:` filter skips it; realizable only where the workflow's jobs don't ALREADY self-skip (via `if:` guards or an internal change-gate) and the trigger can be narrowed safely — verify per workflow before crediting",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 66.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 14.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 1.0,
+      "workflow_runs_30d": 80,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "modeled",
+      "sku": null,
+      "sku_class": "unpriced",
+      "billing_class": "unpriced",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f7",
+      "pattern": "OPT45",
+      "pattern_class": "static",
+      "severity": "LOW",
+      "title": "Missing Concurrency Groups",
+      "workflow_file": ".github/workflows/pr-title-check.yml",
+      "line": 3,
+      "affected_jobs": [
+        "title-check"
+      ],
+      "workflow_activity": {
+        "runs_30d": 80,
+        "last_run": "2026-07-14T14:24:44Z",
+        "dormant": false
+      },
+      "evidence": "workflow triggers on pull_request but declares no `concurrency:` (top-level or per-job) — superseded runs keep occupying a runner",
+      "fix_strategy": "missing-concurrency-groups",
+      "fix_recipe_anchor": "opt45--missing-concurrency-groups",
+      "evidence_snippet": "on:\n    pull_request:\n        types:\n            - opened\n            - edited\n            - synchronize\n            - reopened",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": 3.7,
+      "size_note": "below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 66.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 14.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 1.0,
+      "workflow_runs_30d": 80,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "modeled",
+      "sku": null,
+      "sku_class": "unpriced",
+      "billing_class": "unpriced",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f8",
+      "pattern": "OPT12",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "Duplicated Setup Across Jobs",
+      "workflow_file": ".github/workflows/release-please.yml",
+      "line": 1,
+      "affected_jobs": [
+        "compile",
+        "test",
+        "publish"
+      ],
+      "workflow_activity": {
+        "runs_30d": 6,
+        "last_run": "2026-07-14T14:54:58Z",
+        "dormant": false
+      },
+      "evidence": "3 jobs share an identical 4-step setup preamble (compile, test, publish) — extract a composite action",
+      "fix_strategy": "duplicated-setup-across-jobs",
+      "fix_recipe_anchor": "opt12--duplicated-setup-across-jobs",
+      "evidence_snippet": "name: Release Please",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": 0.0,
+      "size_note": "maintainability only — a composite action de-duplicates the YAML but changes zero runtime (each job still runs checkout + install); no wall-clock or runner-minute saving",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 66.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 39.5,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.075,
+      "workflow_runs_30d": 6,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.0
+    },
+    {
+      "id": "f9",
+      "pattern": "OPT14",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "Repeated Checkout/Setup Without Artifact Handoff (and Slow Tool Replacement)",
+      "workflow_file": ".github/workflows/release-please.yml",
+      "line": 1,
+      "affected_jobs": [
+        "compile",
+        "test",
+        "publish"
+      ],
+      "workflow_activity": {
+        "runs_30d": 6,
+        "last_run": "2026-07-14T14:54:58Z",
+        "dormant": false
+      },
+      "evidence": "3 jobs each run checkout + dependency install with no `actions/upload-artifact` / `download-artifact` handoff: compile, test, publish",
+      "fix_strategy": "repeated-checkout-setup-without-artifact-handoff-and-slow-to",
+      "fix_recipe_anchor": "opt14--repeated-checkout-setup-without-artifact-handoff-and-slow-tool-replacement",
+      "evidence_snippet": "name: Release Please",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 4.5,
+      "tier": 2,
+      "realization": "none",
+      "wall_clock_negative": true,
+      "size_note": "serial-gate fix is wall-clock-NEGATIVE (build-once + fan-out adds a serial gate) — prefer warming the cache so each parallel copy stays cheap; runner-minute (bill) saving only",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 66.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 39.5,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.075,
+      "workflow_runs_30d": 6,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.03
+    },
+    {
+      "id": "f10",
+      "pattern": "OPT21",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "Unnecessary `needs:` Dependencies",
+      "workflow_file": ".github/workflows/release-please.yml",
+      "line": 35,
+      "affected_jobs": [
+        "test"
+      ],
+      "workflow_activity": {
+        "runs_30d": 6,
+        "last_run": "2026-07-14T14:54:58Z",
+        "dormant": false
+      },
+      "evidence": "job `test` declares `needs: ['compile']` but references no `needs.*.outputs` and downloads no artifact from them — verify the dependency isn't a required gate before removing",
+      "fix_strategy": "unnecessary-needs-dependencies",
+      "fix_recipe_anchor": "opt21--unnecessary-needs-dependencies",
+      "evidence_snippet": "    needs: compile",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "workflow runs only on non-developer-facing triggers (push) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only",
+      "runner_min_unrealizable_s": 3.0,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "removing a `needs:` edge changes WHEN a job starts (queue wait), not how long it runs — compute is unchanged, so there is no runner-minute saving (the wall-clock/queue effect is sized separately)",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 66.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 39.5,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.075,
+      "workflow_runs_30d": 6,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "wall_clock_uncapped_p50_s": 1.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "developer-facing",
+          "from_s": 1.0,
+          "to_s": 0.0,
+          "reason": "workflow runs only on non-developer-facing triggers (push) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only"
+        }
+      ],
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f11",
+      "pattern": "OPT21",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "Unnecessary `needs:` Dependencies",
+      "workflow_file": ".github/workflows/release-please.yml",
+      "line": 55,
+      "affected_jobs": [
+        "release-please"
+      ],
+      "workflow_activity": {
+        "runs_30d": 6,
+        "last_run": "2026-07-14T14:54:58Z",
+        "dormant": false
+      },
+      "evidence": "job `release-please` declares `needs: ['test']` but references no `needs.*.outputs` and downloads no artifact from them — verify the dependency isn't a required gate before removing",
+      "fix_strategy": "unnecessary-needs-dependencies",
+      "fix_recipe_anchor": "opt21--unnecessary-needs-dependencies",
+      "evidence_snippet": "    needs: test",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "affected job finishes below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "runner_min_unrealizable_s": 3.0,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "removing a `needs:` edge changes WHEN a job starts (queue wait), not how long it runs — compute is unchanged, so there is no runner-minute saving (the wall-clock/queue effect is sized separately)",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 66.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 39.5,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.075,
+      "workflow_runs_30d": 6,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f12",
+      "pattern": "OPT32",
+      "pattern_class": "static",
+      "severity": "HIGH",
+      "title": "Missing `paths`/`paths-ignore` on Expensive Workflows",
+      "workflow_file": ".github/workflows/release-please.yml",
+      "line": 3,
+      "affected_jobs": [
+        "compile",
+        "test",
+        "release-please",
+        "publish"
+      ],
+      "workflow_activity": {
+        "runs_30d": 6,
+        "last_run": "2026-07-14T14:54:58Z",
+        "dormant": false
+      },
+      "evidence": "workflow triggers on push but declares no `paths:`/`paths-ignore:` filter (the `on:` block below has no `paths:` key).",
+      "fix_strategy": "missing-paths-paths-ignore-on-expensive-workflows",
+      "fix_recipe_anchor": "opt32--missing-paths-paths-ignore-on-expensive-workflows",
+      "evidence_snippet": "on:\n  push:\n    branches:\n      - main # stable releases",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": null,
+      "size_note": "below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "runner_min_unrealizable_s": 1.2,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "gross upper bound — assumes every irrelevant run runs the full job and a `paths:` filter skips it; realizable only where the workflow's jobs don't ALREADY self-skip (via `if:` guards or an internal change-gate) and the trigger can be narrowed safely — verify per workflow before crediting",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 66.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 39.5,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.075,
+      "workflow_runs_30d": 6,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f13",
+      "pattern": "OPT12",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "Duplicated Setup Across Jobs",
+      "workflow_file": ".github/workflows/tests-daily.yml",
+      "line": 1,
+      "affected_jobs": [
+        "compile",
+        "test"
+      ],
+      "workflow_activity": {
+        "runs_30d": 30,
+        "last_run": "2026-07-14T09:33:48Z",
+        "dormant": false
+      },
+      "evidence": "2 jobs share an identical 4-step setup preamble (compile, test) — extract a composite action",
+      "fix_strategy": "duplicated-setup-across-jobs",
+      "fix_recipe_anchor": "opt12--duplicated-setup-across-jobs",
+      "evidence_snippet": "name: Daily Tests",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": 0.0,
+      "size_note": "maintainability only — a composite action de-duplicates the YAML but changes zero runtime (each job still runs checkout + install); no wall-clock or runner-minute saving",
+      "workflow_run_share": 0.375,
+      "workflow_runs_30d": 30,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.0
+    },
+    {
+      "id": "f14",
+      "pattern": "OPT14",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "Repeated Checkout/Setup Without Artifact Handoff (and Slow Tool Replacement)",
+      "workflow_file": ".github/workflows/tests-daily.yml",
+      "line": 1,
+      "affected_jobs": [
+        "compile",
+        "test"
+      ],
+      "workflow_activity": {
+        "runs_30d": 30,
+        "last_run": "2026-07-14T09:33:48Z",
+        "dormant": false
+      },
+      "evidence": "2 jobs each run checkout + dependency install with no `actions/upload-artifact` / `download-artifact` handoff: compile, test",
+      "fix_strategy": "repeated-checkout-setup-without-artifact-handoff-and-slow-to",
+      "fix_recipe_anchor": "opt14--repeated-checkout-setup-without-artifact-handoff-and-slow-tool-replacement",
+      "evidence_snippet": "name: Daily Tests",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 22.5,
+      "tier": 2,
+      "realization": "none",
+      "wall_clock_negative": true,
+      "size_note": "serial-gate fix is wall-clock-NEGATIVE (build-once + fan-out adds a serial gate) — prefer warming the cache so each parallel copy stays cheap; runner-minute (bill) saving only",
+      "workflow_run_share": 0.375,
+      "workflow_runs_30d": 30,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.14
+    },
+    {
+      "id": "f15",
+      "pattern": "OPT21",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "Unnecessary `needs:` Dependencies",
+      "workflow_file": ".github/workflows/tests-daily.yml",
+      "line": 33,
+      "affected_jobs": [
+        "test"
+      ],
+      "workflow_activity": {
+        "runs_30d": 30,
+        "last_run": "2026-07-14T09:33:48Z",
+        "dormant": false
+      },
+      "evidence": "job `test` declares `needs: ['compile']` but references no `needs.*.outputs` and downloads no artifact from them — verify the dependency isn't a required gate before removing",
+      "fix_strategy": "unnecessary-needs-dependencies",
+      "fix_recipe_anchor": "opt21--unnecessary-needs-dependencies",
+      "evidence_snippet": "    needs: compile",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "workflow runs only on non-developer-facing triggers (schedule) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only",
+      "runner_min_unrealizable_s": 15.0,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "removing a `needs:` edge changes WHEN a job starts (queue wait), not how long it runs — compute is unchanged, so there is no runner-minute saving (the wall-clock/queue effect is sized separately)",
+      "workflow_run_share": 0.375,
+      "workflow_runs_30d": 30,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "wall_clock_uncapped_p50_s": 2.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "developer-facing",
+          "from_s": 2.0,
+          "to_s": 0.0,
+          "reason": "workflow runs only on non-developer-facing triggers (schedule) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only"
+        }
+      ],
+      "sizing_basis": "modeled",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f16",
+      "pattern": "OPT19",
+      "pattern_class": "static",
+      "severity": "HIGH",
+      "title": "Test Source Sleep Dominance (includes Playwright `waitForTimeout`)",
+      "workflow_file": "tests/manual/speak/v1/connect/with_auth_token.py",
+      "line": 0,
+      "affected_jobs": [],
+      "workflow_activity": {},
+      "evidence": "hardcoded test sleeps total ~36.0s per full run across 19 source file(s) [time.sleep×14, sleep/delay×5]; top: tests/manual/speak/v1/connect/with_auth_token.py (~3.0s), tests/manual/speak/v1/connect/main.py (~3.0s), tests/manual/speak/v1/connect/with_raw_response.py (~3.0s), tests/manual/speak/v2/connect/with_auth_token.py (~3.0s), tests/manual/speak/v2/connect/main.py (~3.0s), tests/manual/speak/v2/connect/with_raw_response.py (~3.0s)",
+      "fix_strategy": "test-source-sleep-dominance-includes-playwright-waitfortimeo",
+      "fix_recipe_anchor": "opt19--test-source-sleep-dominance-includes-playwright-waitfortimeout",
+      "advisory": true,
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "measured_signal": "hardcoded test sleeps total ~36.0s per full run across 19 source file(s) [time.sleep×14, sleep/delay×5]; top: tests/manual/speak/v1/connect/with_auth_token.py (~3.0s), tests/manual/speak/v1/connect/main.py (~3.0s), tests/manual/speak/v1/connect/with_raw_response.py (~3.0s), tests/manual/speak/v2/connect/with_auth_token.py (~3.0s), tests/manual/speak/v2/connect/main.py (~3.0s), tests/manual/speak/v2/connect/with_raw_response.py (~3.0s)",
+      "measured_evidence": {
+        "summary": "Hardcoded sleeps total ~36.0s per full test run across 19 source file(s) [time.sleep×14, sleep/delay×5]. These are fixed waits in the test code, not workflow YAML.",
+        "table": {
+          "headers": [
+            "Test source file",
+            "Sleep total",
+            "Sleep call lines"
+          ],
+          "rows": [
+            [
+              "`tests/manual/speak/v1/connect/with_auth_token.py`",
+              "~3.0s",
+              "L73"
+            ],
+            [
+              "`tests/manual/speak/v1/connect/main.py`",
+              "~3.0s",
+              "L63"
+            ],
+            [
+              "`tests/manual/speak/v1/connect/with_raw_response.py`",
+              "~3.0s",
+              "L67"
+            ],
+            [
+              "`tests/manual/speak/v2/connect/with_auth_token.py`",
+              "~3.0s",
+              "L105"
+            ],
+            [
+              "`tests/manual/speak/v2/connect/main.py`",
+              "~3.0s",
+              "L95"
+            ],
+            [
+              "`tests/manual/speak/v2/connect/with_raw_response.py`",
+              "~3.0s",
+              "L99"
+            ],
+            [
+              "`tests/manual/agent/v1/connect/with_auth_token.py`",
+              "~3.0s",
+              "L160"
+            ],
+            [
+              "`tests/manual/agent/v1/connect/main.py`",
+              "~3.0s",
+              "L150"
+            ],
+            [
+              "`tests/manual/listen/v1/connect/with_auth_token.py`",
+              "~2.0s",
+              "L112"
+            ],
+            [
+              "`tests/manual/listen/v1/connect/main.py`",
+              "~2.0s",
+              "L102"
+            ]
+          ]
+        },
+        "note": "Replace fixed waits with event-driven waits (`waitForSelector`/`expect(...).toBeVisible`, `cy.wait('@alias')`, bounded readiness probes). Files ranked by total sleep; top 10 of 19 shown."
+      },
+      "size_note": "not on the developer's critical path — this finding's workflow has no sampled run on a representative PR (modeled estimate only), so a saving here removes no measured PR wait; runner-minute / hygiene value only",
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "wall_clock_uncapped_p50_s": 36.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 36.0,
+          "to_s": 0.0,
+          "reason": "not on the developer's critical path — this finding's workflow has no sampled run on a representative PR (modeled estimate only), so a saving here removes no measured PR wait; runner-minute / hygiene value only"
+        }
+      ],
+      "sizing_basis": "measured",
+      "sku": null,
+      "sku_class": "unpriced",
+      "billing_class": "unpriced",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f17",
+      "pattern": "OPT43",
+      "pattern_class": "data-driven",
+      "severity": "MEDIUM",
+      "title": "Excessive Queue Time",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 0,
+      "affected_jobs": [
+        "publish"
+      ],
+      "workflow_activity": {
+        "runs_30d": 57,
+        "last_run": "2026-07-14T14:54:40Z",
+        "dormant": false
+      },
+      "evidence": "job `publish` P90 queue 121s over 3 runs (threshold 120s for release/scheduled workflows)",
+      "measured_signal": "job `publish` P90 queue 121s over 3 runs (threshold 120s for release/scheduled workflows)",
+      "fix_strategy": "excessive-queue-time",
+      "fix_recipe_anchor": "opt43--excessive-queue-time",
+      "wall_clock_p50_s": 5.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "direct",
+      "size_note": "wall-clock wait before the job starts (a gated job's number includes the gating job(s) it waits on); chain member — `needs:` serializes it, so time cut here comes 1:1 off the chain wait, capped at the chain's headroom (~5s)",
+      "measured_evidence": {
+        "summary": "job `publish` waited P90 121s in queue over 3 sampled runs (threshold 120s for release/scheduled workflows).",
+        "table": {
+          "headers": [
+            "Job",
+            "P90 queue",
+            "Samples",
+            "Worst queued run (job log)"
+          ],
+          "rows": [
+            [
+              "`publish`",
+              "121s",
+              "3",
+              "[121s](https://github.com/deepgram/deepgram-python-sdk/actions/runs/29036563853/job/86183250963)"
+            ]
+          ]
+        },
+        "note": "Wait-to-start (run trigger → job started) is developer wait before this job runs. For a job gated by `needs:` it spans the gating job(s)' own queue AND run time — so the savable portion is whatever the gating job's own fix removes, not necessarily the whole number. The link opens the worst-queued run."
+      },
+      "queue_cause": "config_controllable",
+      "queue_cause_note": "100% of queued samples overlapped an in-flight sibling run of this workflow — a concurrency group would have prevented the race",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/pr-title-check.yml",
+          "long_pole_p50_s": 14.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 66.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.713,
+      "workflow_runs_30d": 57,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "wall_clock_uncapped_p50_s": 120.6,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 120.6,
+          "to_s": 5.0,
+          "reason": "chain member — `needs:` serializes it, so time cut here comes 1:1 off the chain wait, capped at the chain's headroom (~5s)"
+        }
+      ],
+      "sizing_basis": "measured",
+      "sku": null,
+      "sku_class": "unpriced",
+      "billing_class": "unpriced",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f18",
+      "pattern": "OPT46",
+      "pattern_class": "data-driven",
+      "severity": "MEDIUM",
+      "title": "Superseded Runs Not Cancelled (Missing Concurrency or `cancel-in-progress: false`)",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 0,
+      "affected_jobs": [],
+      "workflow_activity": {
+        "runs_30d": 57,
+        "last_run": "2026-07-14T14:54:40Z",
+        "dormant": false
+      },
+      "evidence": "8 run(s) across 5 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~30–288 runner-min/mo of superseded compute (mean over 3 timed run(s); ×0.57 to the 30d volume (57 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE — the API marks no run 'cancelled-by-concurrency'.",
+      "measured_signal": "overlap-confirmed superseded runs x mean job-minutes (8 confirmed; naive 77; 3 timed run(s); scale 0.57)",
+      "fix_strategy": "superseded-runs-not-cancelled-missing-concurrency-or-cancel-",
+      "fix_recipe_anchor": "opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 30.0,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "runner-minute (bill) only — superseded runs don't gate the merge (the latest run does); range is lower(overlap-confirmed)–upper(naive runs-1).",
+      "measured_evidence": {
+        "summary": "8 run(s) across 5 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~30–288 runner-min/mo of superseded compute (mean over 3 timed run(s); ×0.57 to the 30d volume (57 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE — the API marks no run 'cancelled-by-concurrency'.",
+        "table": {
+          "headers": [
+            "Workflow",
+            "Overlapping (raced) runs",
+            "Mean compute/run (timed basis)",
+            "Superseded runner-min/mo (range)"
+          ],
+          "rows": [
+            [
+              "`.github/workflows/ci.yml`",
+              "8 confirmed (naive 77)",
+              "6.6 job-min over 3 timed run(s)",
+              "~30–288 (lower=overlap-confirmed, upper=naive runs-1)"
+            ]
+          ]
+        },
+        "note": "Superseded = a run a NEWER run started before it finished — measured by timestamp overlap, so sequential (non-racing) commits are NOT charged. Cancellation cause is unknowable from the API, so the attribution is INFERENCE. Basis: the count is from the all-status slice (100 runs); the per-run PRICE is the mean of 3 PR-success timed runs (superseded runs' own jobs aren't fetched) — different populations. GUARDRAIL: verify this is NOT a deploy/release/publish workflow (a mid-flight run may be uploading artifacts / pushing a tag) before enabling cancellation — and take the predicate from the catalog recipe, which scopes cancellation with an expression; never a bare `cancel-in-progress: true`, which also kills in-flight runs on the default branch and on release tags. ROUTING: this workflow triggers on `push` — with a `pull_request` trigger use the catalog's DEFAULT (PR-scoped) predicate; without one, the PR-scoped predicate is never true and saves nothing, so use the catalog's WIDENED predicate."
+      },
+      "superseded_confirmed_n": 8,
+      "superseded_slice_n": 100,
+      "explicit_cancel_disabled": false,
+      "tier2_neutrality": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "ref": "superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference"
+      },
+      "runner_min_range_s": [
+        30.0,
+        288.5
+      ],
+      "tier2_sample_run_ids": [
+        "28419588926",
+        "28611897335",
+        "29036561764",
+        "28208616715",
+        "28269047671",
+        "26808132010",
+        "25438052470",
+        "25429793594"
+      ],
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/pr-title-check.yml",
+          "long_pole_p50_s": 14.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 66.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.713,
+      "workflow_runs_30d": 57,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "measured",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.18
+    },
+    {
+      "id": "f19",
+      "pattern": "OPT64",
+      "pattern_class": "data-driven",
+      "severity": "LOW",
+      "title": "Repeated Workflow Attempts From Same Failing Job",
+      "workflow_file": ".github/workflows/pr-title-check.yml",
+      "line": 0,
+      "affected_jobs": [],
+      "workflow_activity": {
+        "runs_30d": 80,
+        "last_run": "2026-07-14T14:24:44Z",
+        "dormant": false
+      },
+      "evidence": "1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `Title Check` (2 failed/timed-out prior-attempt job(s), 0.5 failed min) and it appeared again in the latest attempt. ~0 runner-min/mo of prior-attempt compute (80/30d ÷ 100 sampled all-status run(s)).",
+      "measured_signal": "run_attempt>1 prior-attempt job delta from filter=all minus filter=latest; dominant failing job `Title Check` present in latest attempt (0.5 sampled prior-attempt min; scale 0.8)",
+      "fix_strategy": "repeated-workflow-attempts-from-same-failing-job",
+      "fix_recipe_anchor": "opt64--repeated-workflow-attempts-from-same-failing-job",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 0.4,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "runner-minute (bill) only — prior workflow attempts are superseded by the latest attempt's signal.",
+      "measured_evidence": {
+        "summary": "1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `Title Check` (2 failed/timed-out prior-attempt job(s), 0.5 failed min) and it appeared again in the latest attempt. ~0 runner-min/mo of prior-attempt compute (80/30d ÷ 100 sampled all-status run(s)).",
+        "table": {
+          "headers": [
+            "Run",
+            "Latest attempt",
+            "Dominant failing job",
+            "Prior attempts",
+            "Prior attempt compute min",
+            "Dominant failure min"
+          ],
+          "rows": [
+            [
+              "`28269049747`",
+              "3",
+              "`Title Check`",
+              "2",
+              "0.5",
+              "0.5"
+            ]
+          ]
+        },
+        "note": "Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow runs whose run_attempt > 1. The finding is emitted only when each credited prior attempt has the same unique dominant failed/timed-out job and that dominant failing job appears in the latest attempt; ambiguous ties, mixed-cause attempts, and retry-only volume are withheld."
+      },
+      "sizing_basis": "measured",
+      "tier2_neutrality": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "ref": "run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `Title Check` identifies the retry cause, so prior-attempt compute is post-completion waste"
+      },
+      "rerun_dominant_job": "Title Check",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 66.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 14.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 1.0,
+      "workflow_runs_30d": 80,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.0
+    },
+    {
+      "id": "f20",
+      "pattern": "OPT46",
+      "pattern_class": "data-driven",
+      "severity": "MEDIUM",
+      "title": "Superseded Runs Not Cancelled (Missing Concurrency or `cancel-in-progress: false`)",
+      "workflow_file": ".github/workflows/pr-title-check.yml",
+      "line": 0,
+      "affected_jobs": [],
+      "workflow_activity": {
+        "runs_30d": 80,
+        "last_run": "2026-07-14T14:24:44Z",
+        "dormant": false
+      },
+      "evidence": "4 run(s) across 3 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~1–17 runner-min/mo of superseded compute (mean over 20 timed run(s); ×0.80 to the 30d volume (80 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE — the API marks no run 'cancelled-by-concurrency'.",
+      "measured_signal": "overlap-confirmed superseded runs x mean job-minutes (4 confirmed; naive 84; 20 timed run(s); scale 0.8)",
+      "fix_strategy": "superseded-runs-not-cancelled-missing-concurrency-or-cancel-",
+      "fix_recipe_anchor": "opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 0.8,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "runner-minute (bill) only — superseded runs don't gate the merge (the latest run does); range is lower(overlap-confirmed)–upper(naive runs-1).",
+      "measured_evidence": {
+        "summary": "4 run(s) across 3 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~1–17 runner-min/mo of superseded compute (mean over 20 timed run(s); ×0.80 to the 30d volume (80 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE — the API marks no run 'cancelled-by-concurrency'.",
+        "table": {
+          "headers": [
+            "Workflow",
+            "Overlapping (raced) runs",
+            "Mean compute/run (timed basis)",
+            "Superseded runner-min/mo (range)"
+          ],
+          "rows": [
+            [
+              "`.github/workflows/pr-title-check.yml`",
+              "4 confirmed (naive 84)",
+              "0.3 job-min over 20 timed run(s)",
+              "~1–17 (lower=overlap-confirmed, upper=naive runs-1)"
+            ]
+          ]
+        },
+        "note": "Superseded = a run a NEWER run started before it finished — measured by timestamp overlap, so sequential (non-racing) commits are NOT charged. Cancellation cause is unknowable from the API, so the attribution is INFERENCE. Basis: the count is from the all-status slice (100 runs); the per-run PRICE is the mean of 20 PR-success timed runs (superseded runs' own jobs aren't fetched) — different populations. GUARDRAIL: verify this is NOT a deploy/release/publish workflow (a mid-flight run may be uploading artifacts / pushing a tag) before enabling cancellation — and take the predicate from the catalog recipe, which scopes cancellation with an expression; never a bare `cancel-in-progress: true`, which also kills in-flight runs on the default branch and on release tags. ROUTING: this workflow triggers on `pull_request` — with a `pull_request` trigger use the catalog's DEFAULT (PR-scoped) predicate; without one, the PR-scoped predicate is never true and saves nothing, so use the catalog's WIDENED predicate."
+      },
+      "superseded_confirmed_n": 4,
+      "superseded_slice_n": 100,
+      "explicit_cancel_disabled": false,
+      "tier2_neutrality": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "ref": "superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference"
+      },
+      "runner_min_range_s": [
+        0.8,
+        17.0
+      ],
+      "tier2_sample_run_ids": [
+        "29009504633",
+        "29239531921",
+        "28612499233",
+        "28396737933"
+      ],
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 66.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 14.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 1.0,
+      "workflow_runs_30d": 80,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sizing_basis": "measured",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.0
+    },
+    {
+      "id": "f21",
+      "pattern": "OPT43",
+      "pattern_class": "data-driven",
+      "severity": "MEDIUM",
+      "title": "Excessive Queue Time",
+      "workflow_file": ".github/workflows/release-please.yml",
+      "line": 0,
+      "affected_jobs": [
+        "publish"
+      ],
+      "workflow_activity": {
+        "runs_30d": 6,
+        "last_run": "2026-07-14T14:54:58Z",
+        "dormant": false
+      },
+      "evidence": "job `publish` P90 queue 123s over 7 runs (threshold 120s for release/scheduled workflows)",
+      "measured_signal": "job `publish` P90 queue 123s over 7 runs (threshold 120s for release/scheduled workflows)",
+      "fix_strategy": "excessive-queue-time",
+      "fix_recipe_anchor": "opt43--excessive-queue-time",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "wall-clock wait before the job starts (a gated job's number includes the gating job(s) it waits on); workflow runs only on non-developer-facing triggers (push) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only",
+      "measured_evidence": {
+        "summary": "job `publish` waited P90 123s in queue over 7 sampled runs (threshold 120s for release/scheduled workflows).",
+        "table": {
+          "headers": [
+            "Job",
+            "P90 queue",
+            "Samples",
+            "Worst queued run (job log)"
+          ],
+          "rows": [
+            [
+              "`publish`",
+              "123s",
+              "7",
+              "[129s](https://github.com/deepgram/deepgram-python-sdk/actions/runs/26885365524/job/79296389794)"
+            ]
+          ]
+        },
+        "note": "Wait-to-start (run trigger → job started) is developer wait before this job runs. For a job gated by `needs:` it spans the gating job(s)' own queue AND run time — so the savable portion is whatever the gating job's own fix removes, not necessarily the whole number. The link opens the worst-queued run."
+      },
+      "queue_cause": "provider_congestion",
+      "queue_cause_note": "no queued sample overlapped a sibling run of this workflow — the wait came from outside it (account-level concurrency cap / other workflows' load); no change to this workflow's YAML would remove it",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "long_pole_p50_s": 66.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 39.5,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.075,
+      "workflow_runs_30d": 6,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "wall_clock_uncapped_p50_s": 123.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "developer-facing",
+          "from_s": 123.0,
+          "to_s": 0.0,
+          "reason": "workflow runs only on non-developer-facing triggers (push) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only"
+        }
+      ],
+      "sizing_basis": "measured",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f22",
+      "pattern": "OPT36",
+      "pattern_class": "data-driven",
+      "severity": "LOW",
+      "title": "Cron Schedule Too Frequent",
+      "workflow_file": ".github/workflows/tests-daily.yml",
+      "line": 0,
+      "affected_jobs": [],
+      "workflow_activity": {
+        "runs_30d": 30,
+        "last_run": "2026-07-14T09:33:48Z",
+        "dormant": false
+      },
+      "evidence": "80 scheduled run(s) in 15 consecutive same-head_sha group(s) re-ran without a code change in the sampled schedule slice (80% of 100 schedule run(s)); ~112 runner-min/mo of schedule-event compute (mean over 20 timed run(s); ×0.30 to the 30d volume (30 runs); 100-run recent slice (not a full 30d census)).",
+      "measured_signal": "event=schedule total_count x mean job-minutes (30 schedule run(s)/30d; 80 same-head_sha redundant run(s); 20 timed run(s); scale 0.3)",
+      "fix_strategy": "cron-schedule-too-frequent",
+      "fix_recipe_anchor": "opt36--cron-schedule-too-frequent",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 112.5,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "runner-minute (bill) only — schedule-event runs do not gate a PR; frequency change must preserve any operational cadence requirement.",
+      "measured_evidence": {
+        "summary": "80 scheduled run(s) in 15 consecutive same-head_sha group(s) re-ran without a code change in the sampled schedule slice (80% of 100 schedule run(s)); ~112 runner-min/mo of schedule-event compute (mean over 20 timed run(s); ×0.30 to the 30d volume (30 runs); 100-run recent slice (not a full 30d census)).",
+        "table": {
+          "headers": [
+            "Workflow",
+            "Consecutive same-head_sha schedule runs",
+            "Mean compute/run",
+            "Credited runner-min/mo"
+          ],
+          "rows": [
+            [
+              "`.github/workflows/tests-daily.yml`",
+              "80 redundant run(s) in 15 group(s)",
+              "4.7 job-min over 20 timed run(s)",
+              "~112"
+            ]
+          ]
+        },
+        "note": "Schedule burn is counted only on event=schedule runs whose head_sha repeats consecutively, so the detector proves the workflow ran again without a code change. Basis: the count is from the all-status schedule slice; the per-run price is the mean of 20 successful schedule-event timed run(s). GUARDRAIL: confirm the current cadence is not an operational SLA before increasing the cron interval."
+      },
+      "sizing_basis": "measured",
+      "tier2_neutrality": {
+        "proof": "non_pr_event",
+        "margin_s": null,
+        "ref": "event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event"
+      },
+      "tier2_run_subset_events": [
+        "schedule"
+      ],
+      "tier2_sample_run_ids": [
+        "24074131543",
+        "24127995190",
+        "24182817764",
+        "24236139725",
+        "24336215739",
+        "24393156986",
+        "24502773524",
+        "24558089080",
+        "24601536484",
+        "24625641827",
+        "24659183022",
+        "24714898197",
+        "24770938919",
+        "24827793101",
+        "24882563520",
+        "24927585965",
+        "24953140925",
+        "24987852086",
+        "25101672873",
+        "25158441087",
+        "25248804006",
+        "25275461301",
+        "25312070976",
+        "25368740001",
+        "25548121206",
+        "25597694089",
+        "25625230350",
+        "25663905528",
+        "25853355409",
+        "25911619746",
+        "25988093140",
+        "26155674370",
+        "26219763357",
+        "26281436335",
+        "26329335379",
+        "26357714206",
+        "26395874493",
+        "26446576059",
+        "26505429335",
+        "26569072834",
+        "26680530399",
+        "26709368470",
+        "26749979810",
+        "26879109327",
+        "27009280495",
+        "27058868534",
+        "27089297609",
+        "27131746460",
+        "27269750836",
+        "27340621040",
+        "27410062483",
+        "27463542285",
+        "27497261654",
+        "27555078724",
+        "27620632537",
+        "27689807046",
+        "27826239167",
+        "27867747795",
+        "27901096040",
+        "27947389234",
+        "28018913849",
+        "28090801461",
+        "28162386561",
+        "28231227738",
+        "28318600574",
+        "28365742265",
+        "28436783623",
+        "28510487580",
+        "28581666770",
+        "28653178088",
+        "28702247955",
+        "28736740950",
+        "28785066883",
+        "28858340264",
+        "28933304150",
+        "29010591502",
+        "29085231356",
+        "29147807585",
+        "29187628989",
+        "29241376986"
+      ],
+      "guardrail": "Confirm the cron cadence is not an operational SLA; prefer widening the interval only for cleanup/triage/build jobs where delayed execution is acceptable.",
+      "workflow_run_share": 0.375,
+      "workflow_runs_30d": 30,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.68
+    },
+    {
+      "id": "f23",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `test (3.13)`",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 0,
+      "affected_jobs": [
+        "test (3.13)"
+      ],
+      "workflow_activity": {
+        "runs_30d": 57,
+        "last_run": "2026-07-14T14:54:40Z",
+        "dormant": false
+      },
+      "evidence": "critical-path check `test (3.13)` (66s): dominant step `Test + 3 more test steps` (test, 56% of job `test (3.13)`)",
+      "measured_signal": "critical-path check `test (3.13)` (66s): dominant step `Test + 3 more test steps` (test, 56% of job `test (3.13)`)",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": 5.0,
+      "runner_min_saving": null,
+      "tier": 1,
+      "realization": "direct",
+      "size_note": "conservative: assumes scoping removes at most 50% of the 36s test phase on the average PR (never the single best-case PR); chain member — `needs:` serializes it, so time cut here comes 1:1 off the chain wait, capped at the chain's headroom (~5s)",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "decomposition": {
+        "dominant_step": "Test + 3 more test steps",
+        "dominant_category": "test",
+        "dominant_p50_s": 36.0,
+        "dominant_share": 0.562,
+        "redundant_ratio": 0.69,
+        "job_p50_s": 64.0
+      },
+      "measured_evidence": {
+        "summary": "check `test (3.13)` (66s) maps to job `test (3.13)`; dominant step `Test + 3 more test steps` (test) is 56% of the job. Redundant-work ratio (setup+build / payload) = 0.69.",
+        "table": {
+          "headers": [
+            "Step",
+            "Category",
+            "p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`Test`",
+              "test",
+              "29s",
+              "45%"
+            ],
+            [
+              "`Bootstrap poetry`",
+              "setup",
+              "15s",
+              "23%"
+            ],
+            [
+              "`Pull ghcr.io/irongut/codecoveragesummary:v1.3.0`",
+              "test",
+              "4s",
+              "6%"
+            ],
+            [
+              "`Install dependencies`",
+              "install",
+              "4s",
+              "6%"
+            ],
+            [
+              "`Verify Docker is available`",
+              "other",
+              "3s",
+              "5%"
+            ],
+            [
+              "`Set up job`",
+              "setup",
+              "2s",
+              "3%"
+            ]
+          ]
+        },
+        "note": "Decomposed from the sampled job's per-step timings. The dominant step is the addressable cost — attack it by category, don't declare the whole check inherent."
+      },
+      "wall_clock_uncapped_p50_s": 18.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 18.0,
+          "to_s": 5.0,
+          "reason": "chain member — `needs:` serializes it, so time cut here comes 1:1 off the chain wait, capped at the chain's headroom (~5s)"
+        }
+      ],
+      "workflow_run_share": 0.713,
+      "workflow_runs_30d": 57,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f24",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `test (3.9)`",
+      "workflow_file": "test",
+      "line": 0,
+      "affected_jobs": [
+        "test (3.9)"
+      ],
+      "workflow_activity": {},
+      "evidence": "critical-path check `test (3.9)` (58s): fileless check (no sampled job/steps — e.g. a default setup or third-party app check); name suggests a `test` cost, addressable at the check's source",
+      "measured_signal": "critical-path check `test (3.9)` (58s): fileless check (no sampled job/steps — e.g. a default setup or third-party app check); name suggests a `test` cost, addressable at the check's source",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": null,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "fileless check (no sampled job/steps — e.g. a default setup or third-party app check); name suggests a `test` cost, addressable at the check's source",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sku": null,
+      "sku_class": "unpriced",
+      "billing_class": "unpriced",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f25",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `test (3.12)`",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 0,
+      "affected_jobs": [
+        "test (3.12)"
+      ],
+      "workflow_activity": {
+        "runs_30d": 57,
+        "last_run": "2026-07-14T14:54:40Z",
+        "dormant": false
+      },
+      "evidence": "critical-path check `test (3.12)` (57s): dominant step `Test + 1 more test step` (test, 58% of job `test (3.12)`)",
+      "measured_signal": "critical-path check `test (3.12)` (57s): dominant step `Test + 1 more test step` (test, 58% of job `test (3.12)`)",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "conservative: assumes scoping removes at most 50% of the 34s test phase on the average PR (never the single best-case PR); no wall-clock saving — `the gate chain` (76s) gates the merge as a serialized whole; this workflow's slowest check is only 57s, so shortening it doesn't move the developer's wait",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "decomposition": {
+        "dominant_step": "Test + 1 more test step",
+        "dominant_category": "test",
+        "dominant_p50_s": 34.0,
+        "dominant_share": 0.576,
+        "redundant_ratio": 0.59,
+        "job_p50_s": 59.0
+      },
+      "measured_evidence": {
+        "summary": "check `test (3.12)` (57s) maps to job `test (3.12)`; dominant step `Test + 1 more test step` (test) is 58% of the job. Redundant-work ratio (setup+build / payload) = 0.59.",
+        "table": {
+          "headers": [
+            "Step",
+            "Category",
+            "p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`Test`",
+              "test",
+              "30s",
+              "51%"
+            ],
+            [
+              "`Bootstrap poetry`",
+              "setup",
+              "11s",
+              "19%"
+            ],
+            [
+              "`Pull ghcr.io/irongut/codecoveragesummary:v1.3.0`",
+              "test",
+              "4s",
+              "7%"
+            ],
+            [
+              "`Install dependencies`",
+              "install",
+              "4s",
+              "7%"
+            ],
+            [
+              "`Verify Docker is available`",
+              "other",
+              "4s",
+              "7%"
+            ],
+            [
+              "`Set up job`",
+              "setup",
+              "2s",
+              "3%"
+            ]
+          ]
+        },
+        "note": "Decomposed from the sampled job's per-step timings. The dominant step is the addressable cost — attack it by category, don't declare the whole check inherent."
+      },
+      "wall_clock_uncapped_p50_s": 17.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 17.0,
+          "to_s": 0.0,
+          "reason": "no wall-clock saving — `the gate chain` (76s) gates the merge as a serialized whole; this workflow's slowest check is only 57s, so shortening it doesn't move the developer's wait"
+        }
+      ],
+      "workflow_run_share": 0.713,
+      "workflow_runs_30d": 57,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f26",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `test (3.10)`",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 0,
+      "affected_jobs": [
+        "test (3.10)"
+      ],
+      "workflow_activity": {
+        "runs_30d": 57,
+        "last_run": "2026-07-14T14:54:40Z",
+        "dormant": false
+      },
+      "evidence": "critical-path check `test (3.10)` (65s): dominant step `Test + 1 more test step` (test, 52% of job `test (3.10)`)",
+      "measured_signal": "critical-path check `test (3.10)` (65s): dominant step `Test + 1 more test step` (test, 52% of job `test (3.10)`)",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "conservative: assumes scoping removes at most 50% of the 34s test phase on the average PR (never the single best-case PR); no wall-clock saving — `the gate chain` (76s) gates the merge as a serialized whole; this workflow's slowest check is only 65s, so shortening it doesn't move the developer's wait",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "decomposition": {
+        "dominant_step": "Test + 1 more test step",
+        "dominant_category": "test",
+        "dominant_p50_s": 34.0,
+        "dominant_share": 0.515,
+        "redundant_ratio": 0.82,
+        "job_p50_s": 66.0
+      },
+      "measured_evidence": {
+        "summary": "check `test (3.10)` (65s) maps to job `test (3.10)`; dominant step `Test + 1 more test step` (test) is 52% of the job. Redundant-work ratio (setup+build / payload) = 0.82.",
+        "table": {
+          "headers": [
+            "Step",
+            "Category",
+            "p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`Test`",
+              "test",
+              "31s",
+              "47%"
+            ],
+            [
+              "`Bootstrap poetry`",
+              "setup",
+              "16s",
+              "24%"
+            ],
+            [
+              "`Install dependencies`",
+              "install",
+              "5s",
+              "8%"
+            ],
+            [
+              "`Pull ghcr.io/irongut/codecoveragesummary:v1.3.0`",
+              "test",
+              "3s",
+              "5%"
+            ],
+            [
+              "`Install coverage tool`",
+              "install",
+              "3s",
+              "5%"
+            ],
+            [
+              "`Verify Docker is available`",
+              "other",
+              "3s",
+              "5%"
+            ]
+          ]
+        },
+        "note": "Decomposed from the sampled job's per-step timings. The dominant step is the addressable cost — attack it by category, don't declare the whole check inherent."
+      },
+      "wall_clock_uncapped_p50_s": 17.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 17.0,
+          "to_s": 0.0,
+          "reason": "no wall-clock saving — `the gate chain` (76s) gates the merge as a serialized whole; this workflow's slowest check is only 65s, so shortening it doesn't move the developer's wait"
+        }
+      ],
+      "workflow_run_share": 0.713,
+      "workflow_runs_30d": 57,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f27",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `test (3.11)`",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 0,
+      "affected_jobs": [
+        "test (3.11)"
+      ],
+      "workflow_activity": {
+        "runs_30d": 57,
+        "last_run": "2026-07-14T14:54:40Z",
+        "dormant": false
+      },
+      "evidence": "critical-path check `test (3.11)` (55s): dominant step `Test + 1 more test step` (test, 61% of job `test (3.11)`)",
+      "measured_signal": "critical-path check `test (3.11)` (55s): dominant step `Test + 1 more test step` (test, 61% of job `test (3.11)`)",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "conservative: assumes scoping removes at most 50% of the 33s test phase on the average PR (never the single best-case PR); no wall-clock saving — `the gate chain` (76s) gates the merge as a serialized whole; this workflow's slowest check is only 55s, so shortening it doesn't move the developer's wait",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "decomposition": {
+        "dominant_step": "Test + 1 more test step",
+        "dominant_category": "test",
+        "dominant_p50_s": 33.0,
+        "dominant_share": 0.611,
+        "redundant_ratio": 0.64,
+        "job_p50_s": 54.0
+      },
+      "measured_evidence": {
+        "summary": "check `test (3.11)` (55s) maps to job `test (3.11)`; dominant step `Test + 1 more test step` (test) is 61% of the job. Redundant-work ratio (setup+build / payload) = 0.64.",
+        "table": {
+          "headers": [
+            "Step",
+            "Category",
+            "p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`Test`",
+              "test",
+              "29s",
+              "54%"
+            ],
+            [
+              "`Bootstrap poetry`",
+              "setup",
+              "13s",
+              "24%"
+            ],
+            [
+              "`Pull ghcr.io/irongut/codecoveragesummary:v1.3.0`",
+              "test",
+              "4s",
+              "7%"
+            ],
+            [
+              "`Install dependencies`",
+              "install",
+              "3s",
+              "6%"
+            ],
+            [
+              "`Install coverage tool`",
+              "install",
+              "2s",
+              "4%"
+            ],
+            [
+              "`Set up job`",
+              "setup",
+              "1s",
+              "2%"
+            ]
+          ]
+        },
+        "note": "Decomposed from the sampled job's per-step timings. The dominant step is the addressable cost — attack it by category, don't declare the whole check inherent."
+      },
+      "wall_clock_uncapped_p50_s": 16.5,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 16.5,
+          "to_s": 0.0,
+          "reason": "no wall-clock saving — `the gate chain` (76s) gates the merge as a serialized whole; this workflow's slowest check is only 55s, so shortening it doesn't move the developer's wait"
+        }
+      ],
+      "workflow_run_share": 0.713,
+      "workflow_runs_30d": 57,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": null
+    },
+    {
+      "id": "f28",
+      "pattern": "OPT73",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "Shared step recurs across the cluster — fix once, lower the floor",
+      "workflow_file": ".github/workflows/ci.yml",
+      "line": 0,
+      "affected_jobs": [
+        "test (3.10)",
+        "test (3.11)",
+        "test (3.12)",
+        "test (3.13)"
+      ],
+      "workflow_activity": {
+        "runs_30d": 57,
+        "last_run": "2026-07-14T14:54:40Z",
+        "dormant": false
+      },
+      "evidence": "the `Test` step is 47% of the slowest cluster job `test (3.10)` (66s) and recurs across 4 concurrent jobs of `.github/workflows/ci.yml` (~29–31s per job) — a cluster-floor lever",
+      "measured_signal": "the `Test` step is 47% of the slowest cluster job `test (3.10)` (66s) and recurs across 4 concurrent jobs of `.github/workflows/ci.yml` (~29–31s per job) — a cluster-floor lever",
+      "fix_strategy": "shared-substep-floor",
+      "fix_recipe_anchor": "opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever",
+      "wall_clock_p50_s": 5.0,
+      "runner_min_saving": 72.2,
+      "tier": 1,
+      "realization": "direct",
+      "size_note": "cluster-floor lever — saving credited across all 4 jobs running the shared `test` step (~72 runner-min/mo); chain member — `needs:` serializes it, so time cut here comes 1:1 off the chain wait, capped at the chain's headroom (~5s)",
+      "structural": true,
+      "risk": "LOW",
+      "guardrail": "make each parallel copy cheap (shared warm cache / prebuilt base image) — do NOT consolidate into one upstream job the others needs: (that adds a serial gate, OPT14/wall-clock-negative); verify the cache key captures the step's real inputs so a hit never serves stale artifacts",
+      "rollout": "ship the shared cache, measure the cluster FLOOR (second-tallest job p50) before/after across 5 PRs — the win shows only when the whole cluster comes down",
+      "failure_mode": "low — caching a shared setup step changes no test/build semantics; escalates only if the shared step is a build whose cache could serve stale outputs",
+      "measured_evidence": {
+        "summary": "The **`Test`** (`test`) step is the root-cause cost in 4 concurrent critical-path jobs of `.github/workflows/ci.yml` — **47% of the slowest job** (`test (3.10)`, 66s). The SAME step runs in each, so optimizing it once lowers all of them at the same time (shared floor ~29s, the cheapest job's cost).",
+        "table": {
+          "headers": [
+            "Cluster job",
+            "Job p50",
+            "`Test` p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`test (3.10)`",
+              "66s",
+              "31s",
+              "47%"
+            ],
+            [
+              "`test (3.13)`",
+              "64s",
+              "29s",
+              "45%"
+            ],
+            [
+              "`test (3.12)`",
+              "59s",
+              "30s",
+              "51%"
+            ],
+            [
+              "`test (3.11)`",
+              "54s",
+              "29s",
+              "54%"
+            ]
+          ]
+        },
+        "note": "Cluster-floor lever: shaving any one pole stops at the floor, but the same step shared across concurrent jobs lowers all of them together. Credit spans every job that runs it.",
+        "waterfall": {
+          "job": "test (3.10)",
+          "job_p50_s": 66.0,
+          "shared_step": "Test",
+          "steps": [
+            {
+              "step": "Test",
+              "category": "test",
+              "p50_s": 31.0,
+              "shared": true
+            },
+            {
+              "step": "Bootstrap poetry",
+              "category": "setup",
+              "p50_s": 16.0,
+              "shared": false
+            },
+            {
+              "step": "Install dependencies",
+              "category": "install",
+              "p50_s": 5.0,
+              "shared": false
+            },
+            {
+              "step": "Pull ghcr.io/irongut/codecoveragesummary:v1.3.0",
+              "category": "test",
+              "p50_s": 3.0,
+              "shared": false
+            },
+            {
+              "step": "Install coverage tool",
+              "category": "install",
+              "p50_s": 3.0,
+              "shared": false
+            },
+            {
+              "step": "Verify Docker is available",
+              "category": "other",
+              "p50_s": 3.0,
+              "shared": false
+            },
+            {
+              "step": "Set up job",
+              "category": "setup",
+              "p50_s": 2.0,
+              "shared": false
+            },
+            {
+              "step": "Checkout repo",
+              "category": "checkout",
+              "p50_s": 1.0,
+              "shared": false
+            }
+          ]
+        }
+      },
+      "wall_clock_uncapped_p50_s": 19.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 19.0,
+          "to_s": 5.0,
+          "reason": "chain member — `needs:` serializes it, so time cut here comes 1:1 off the chain wait, capped at the chain's headroom (~5s)"
+        }
+      ],
+      "workflow_run_share": 0.713,
+      "workflow_runs_30d": 57,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.43
+    },
+    {
+      "id": "f29",
+      "pattern": "OPT73",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "Shared step recurs across the cluster — fix once, lower the floor",
+      "workflow_file": ".github/workflows/release-please.yml",
+      "line": 0,
+      "affected_jobs": [
+        "compile (3.13)",
+        "test (3.13)"
+      ],
+      "workflow_activity": {
+        "runs_30d": 6,
+        "last_run": "2026-07-14T14:54:58Z",
+        "dormant": false
+      },
+      "evidence": "the `Bootstrap poetry` step is 38% of the slowest cluster job `test (3.13)` (39s) and recurs across 2 concurrent jobs of `.github/workflows/release-please.yml` (~15–16s per job) — a cluster-floor lever",
+      "measured_signal": "the `Bootstrap poetry` step is 38% of the slowest cluster job `test (3.13)` (39s) and recurs across 2 concurrent jobs of `.github/workflows/release-please.yml` (~15–16s per job) — a cluster-floor lever",
+      "fix_strategy": "shared-substep-floor",
+      "fix_recipe_anchor": "opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 2.0,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "cluster-floor lever — saving credited across all 2 jobs running the shared `setup` step (~2 runner-min/mo); workflow runs only on non-developer-facing triggers (push) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only",
+      "structural": true,
+      "risk": "LOW",
+      "guardrail": "make each parallel copy cheap (shared warm cache / prebuilt base image) — do NOT consolidate into one upstream job the others needs: (that adds a serial gate, OPT14/wall-clock-negative); verify the cache key captures the step's real inputs so a hit never serves stale artifacts",
+      "rollout": "ship the shared cache, measure the cluster FLOOR (second-tallest job p50) before/after across 5 PRs — the win shows only when the whole cluster comes down",
+      "failure_mode": "low — caching a shared setup step changes no test/build semantics; escalates only if the shared step is a build whose cache could serve stale outputs",
+      "measured_evidence": {
+        "summary": "The **`Bootstrap poetry`** (`setup`) step is the root-cause cost in 2 concurrent critical-path jobs of `.github/workflows/release-please.yml` — **38% of the slowest job** (`test (3.13)`, 39s). The SAME step runs in each, so optimizing it once lowers all of them at the same time (shared floor ~15s, the cheapest job's cost).",
+        "table": {
+          "headers": [
+            "Cluster job",
+            "Job p50",
+            "`Bootstrap poetry` p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`test (3.13)`",
+              "39s",
+              "15s",
+              "38%"
+            ],
+            [
+              "`compile (3.13)`",
+              "34s",
+              "16s",
+              "47%"
+            ]
+          ]
+        },
+        "note": "Cluster-floor lever: shaving any one pole stops at the floor, but the same step shared across concurrent jobs lowers all of them together. Credit spans every job that runs it.",
+        "waterfall": {
+          "job": "test (3.13)",
+          "job_p50_s": 39.0,
+          "shared_step": "Bootstrap poetry",
+          "steps": [
+            {
+              "step": "Bootstrap poetry",
+              "category": "setup",
+              "p50_s": 15.0,
+              "shared": true
+            },
+            {
+              "step": "Test",
+              "category": "test",
+              "p50_s": 14.0,
+              "shared": false
+            },
+            {
+              "step": "Install dependencies",
+              "category": "install",
+              "p50_s": 4.0,
+              "shared": false
+            },
+            {
+              "step": "Set up job",
+              "category": "setup",
+              "p50_s": 1.0,
+              "shared": false
+            },
+            {
+              "step": "Checkout repo",
+              "category": "checkout",
+              "p50_s": 1.0,
+              "shared": false
+            },
+            {
+              "step": "Complete job",
+              "category": "other",
+              "p50_s": 1.0,
+              "shared": false
+            },
+            {
+              "step": "Post Set up python",
+              "category": "post",
+              "p50_s": 1.0,
+              "shared": false
+            },
+            {
+              "step": "Post Checkout repo",
+              "category": "post",
+              "p50_s": 1.0,
+              "shared": false
+            }
+          ]
+        }
+      },
+      "wall_clock_uncapped_p50_s": 10.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "developer-facing",
+          "from_s": 10.0,
+          "to_s": 0.0,
+          "reason": "workflow runs only on non-developer-facing triggers (push) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only"
+        }
+      ],
+      "workflow_run_share": 0.075,
+      "workflow_runs_30d": 6,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.01
+    },
+    {
+      "id": "f30",
+      "pattern": "OPT73",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "Shared step recurs across the cluster — fix once, lower the floor",
+      "workflow_file": ".github/workflows/tests-daily.yml",
+      "line": 0,
+      "affected_jobs": [
+        "compile (3.13)",
+        "test (3.13)"
+      ],
+      "workflow_activity": {
+        "runs_30d": 30,
+        "last_run": "2026-07-14T09:33:48Z",
+        "dormant": false
+      },
+      "evidence": "the `Bootstrap poetry` step is 37% of the slowest cluster job `test (3.13)` (41s) and recurs across 2 concurrent jobs of `.github/workflows/tests-daily.yml` (~15s per job) — a cluster-floor lever",
+      "measured_signal": "the `Bootstrap poetry` step is 37% of the slowest cluster job `test (3.13)` (41s) and recurs across 2 concurrent jobs of `.github/workflows/tests-daily.yml` (~15s per job) — a cluster-floor lever",
+      "fix_strategy": "shared-substep-floor",
+      "fix_recipe_anchor": "opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 10.0,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "cluster-floor lever — saving credited across all 2 jobs running the shared `setup` step (~10 runner-min/mo); workflow runs only on non-developer-facing triggers (schedule) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only",
+      "structural": true,
+      "risk": "LOW",
+      "guardrail": "make each parallel copy cheap (shared warm cache / prebuilt base image) — do NOT consolidate into one upstream job the others needs: (that adds a serial gate, OPT14/wall-clock-negative); verify the cache key captures the step's real inputs so a hit never serves stale artifacts",
+      "rollout": "ship the shared cache, measure the cluster FLOOR (second-tallest job p50) before/after across 5 PRs — the win shows only when the whole cluster comes down",
+      "failure_mode": "low — caching a shared setup step changes no test/build semantics; escalates only if the shared step is a build whose cache could serve stale outputs",
+      "measured_evidence": {
+        "summary": "The **`Bootstrap poetry`** (`setup`) step is the root-cause cost in 2 concurrent critical-path jobs of `.github/workflows/tests-daily.yml` — **37% of the slowest job** (`test (3.13)`, 41s). The SAME step runs in each, so optimizing it once lowers all of them at the same time (shared floor ~15s, the cheapest job's cost).",
+        "table": {
+          "headers": [
+            "Cluster job",
+            "Job p50",
+            "`Bootstrap poetry` p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`test (3.13)`",
+              "41s",
+              "15s",
+              "37%"
+            ],
+            [
+              "`compile (3.13)`",
+              "34s",
+              "16s",
+              "45%"
+            ]
+          ]
+        },
+        "note": "Cluster-floor lever: shaving any one pole stops at the floor, but the same step shared across concurrent jobs lowers all of them together. Credit spans every job that runs it.",
+        "waterfall": {
+          "job": "test (3.13)",
+          "job_p50_s": 41.0,
+          "shared_step": "Bootstrap poetry",
+          "steps": [
+            {
+              "step": "Bootstrap poetry",
+              "category": "setup",
+              "p50_s": 15.0,
+              "shared": true
+            },
+            {
+              "step": "Test",
+              "category": "test",
+              "p50_s": 14.0,
+              "shared": false
+            },
+            {
+              "step": "Install dependencies",
+              "category": "install",
+              "p50_s": 4.0,
+              "shared": false
+            },
+            {
+              "step": "Verify Docker is available",
+              "category": "other",
+              "p50_s": 3.0,
+              "shared": false
+            },
+            {
+              "step": "Set up job",
+              "category": "setup",
+              "p50_s": 1.0,
+              "shared": false
+            },
+            {
+              "step": "Checkout repo",
+              "category": "checkout",
+              "p50_s": 1.0,
+              "shared": false
+            },
+            {
+              "step": "Set up python",
+              "category": "setup",
+              "p50_s": 1.0,
+              "shared": false
+            },
+            {
+              "step": "Post Checkout repo",
+              "category": "post",
+              "p50_s": 1.0,
+              "shared": false
+            }
+          ]
+        }
+      },
+      "wall_clock_uncapped_p50_s": 10.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "developer-facing",
+          "from_s": 10.0,
+          "to_s": 0.0,
+          "reason": "workflow runs only on non-developer-facing triggers (schedule) — its wall-clock is post-merge/scheduled time, not developer PR wait; runner-minute (bill) saving only"
+        }
+      ],
+      "workflow_run_share": 0.375,
+      "workflow_runs_30d": 30,
+      "pr_critical_path_s": 66.0,
+      "pr_critical_path_check": "test (3.13)",
+      "sku": "linux_2_core",
+      "sku_class": "linux-standard",
+      "billing_class": "capacity",
+      "usd_saving_per_month": 0.06
+    }
+  ],
+  "scanned_workflows": 5,
+  "scan_incomplete": [],
+  "workflow_triggers": {
+    ".github/workflows/ci.yml": [
+      "push"
+    ],
+    ".github/workflows/context7.yml": [
+      "release",
+      "workflow_dispatch"
+    ],
+    ".github/workflows/pr-title-check.yml": [
+      "pull_request"
+    ],
+    ".github/workflows/release-please.yml": [
+      "push"
+    ],
+    ".github/workflows/tests-daily.yml": [
+      "schedule",
+      "workflow_dispatch"
+    ]
+  },
+  "workflow_trigger_conditionality": {
+    ".github/workflows/ci.yml": "not_pr_triggered",
+    ".github/workflows/context7.yml": "not_pr_triggered",
+    ".github/workflows/pr-title-check.yml": "type_scoped",
+    ".github/workflows/release-please.yml": "not_pr_triggered",
+    ".github/workflows/tests-daily.yml": "not_pr_triggered"
+  },
+  "practice_facts": {
+    "ci.cache.dependency-cache": {
+      "state": "fail",
+      "evidence": "no cache action and no setup-* cache input in any workflow or local composite action",
+      "files": []
+    },
+    "ci.cache.build-cache": {
+      "state": "not_applicable",
+      "evidence": "no build tool with a cache detected in the repo tree",
+      "files": []
+    },
+    "ci.checkout.shallow-clone": {
+      "state": "pass",
+      "evidence": "no PR-gating workflow checks out full history (post-merge automation like backport/changelog jobs is exempt - it needs history and gates nobody)",
+      "files": []
+    },
+    "ci.parallel.test-sharding": {
+      "state": "pass",
+      "evidence": "shard/matrix strategy on test job(s) in 3 workflow(s)",
+      "files": [
+        ".github/workflows/ci.yml",
+        ".github/workflows/release-please.yml",
+        ".github/workflows/tests-daily.yml"
+      ]
+    },
+    "ci.build.change-scoped": {
+      "state": "not_applicable",
+      "evidence": "no turbo/nx task graph detected (change-scoping is not checkable here)",
+      "files": []
+    },
+    "ci.trigger.concurrency-groups": {
+      "state": "fail",
+      "evidence": "concurrency group declared on 0 of 1 PR workflow(s)",
+      "files": []
+    },
+    "ci.trigger.cancel-superseded": {
+      "state": "fail",
+      "evidence": "concurrency + cancel-in-progress on 0 of 1 PR workflow(s)",
+      "files": []
+    },
+    "ci.trigger.path-filter": {
+      "state": "fail",
+      "evidence": "paths filters on 0 of 1 PR workflow(s)",
+      "files": []
+    },
+    "ci.hygiene.job-timeouts": {
+      "state": "fail",
+      "evidence": "no job sets timeout-minutes (GitHub's default is 360 minutes)",
+      "files": []
+    },
+    "ci.trigger.draft-gate": {
+      "state": "fail",
+      "evidence": "no workflow gates on PR draft status",
+      "files": []
+    },
+    "ci.security.scoped-id-token": {
+      "state": "pass",
+      "evidence": "id-token: write scoped at job level in 1 workflow(s)",
+      "files": [
+        ".github/workflows/ci.yml"
+      ]
+    },
+    "ci.security.pinned-action-shas": {
+      "state": "fail",
+      "evidence": "0 of 22 remote action references SHA-pinned (workflow + local composite action files; passes at >=95%)",
+      "files": [
+        ".github/workflows/ci.yml",
+        ".github/workflows/context7.yml",
+        ".github/workflows/release-please.yml"
+      ]
+    }
+  },
+  "workflow_call_graph": {},
+  "workflow_job_graph": {
+    ".github/workflows/ci.yml": {
+      "compile": {
+        "name": "compile",
+        "needs": [],
+        "reusable": false,
+        "matrix": true,
+        "timeout_minutes": false
+      },
+      "test": {
+        "name": "test",
+        "needs": [
+          "compile"
+        ],
+        "reusable": false,
+        "matrix": true,
+        "timeout_minutes": false
+      },
+      "publish": {
+        "name": "publish",
+        "needs": [
+          "compile",
+          "test"
+        ],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/context7.yml": {
+      "update-docs": {
+        "name": "update-docs",
+        "needs": [],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/pr-title-check.yml": {
+      "title-check": {
+        "name": "Title Check",
+        "needs": [],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/release-please.yml": {
+      "compile": {
+        "name": "compile",
+        "needs": [],
+        "reusable": false,
+        "matrix": true,
+        "timeout_minutes": false
+      },
+      "test": {
+        "name": "test",
+        "needs": [
+          "compile"
+        ],
+        "reusable": false,
+        "matrix": true,
+        "timeout_minutes": false
+      },
+      "release-please": {
+        "name": "release-please",
+        "needs": [
+          "test"
+        ],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      },
+      "publish": {
+        "name": "publish",
+        "needs": [
+          "release-please"
+        ],
+        "reusable": false,
+        "matrix": true,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/tests-daily.yml": {
+      "compile": {
+        "name": "compile",
+        "needs": [],
+        "reusable": false,
+        "matrix": true,
+        "timeout_minutes": false
+      },
+      "test": {
+        "name": "test",
+        "needs": [
+          "compile"
+        ],
+        "reusable": false,
+        "matrix": true,
+        "timeout_minutes": false
+      }
+    }
+  },
+  "catalog_patterns_total": 73,
+  "catalog_patterns_with_detector": 38,
+  "catalog_patterns_without_detector": [
+    "OPT11",
+    "OPT13",
+    "OPT15",
+    "OPT18",
+    "OPT22",
+    "OPT24",
+    "OPT30",
+    "OPT34",
+    "OPT38",
+    "OPT4",
+    "OPT44",
+    "OPT54",
+    "OPT56",
+    "OPT61",
+    "OPT68",
+    "OPT69",
+    "OPT8"
+  ],
+  "catalog_structural_patterns_without_detector": [
+    "OPT74"
+  ],
+  "timings": {
+    "static_scan_s": 0.05,
+    "run_start_epoch": 1784066022.954145,
+    "gh_timing_s": 28.92,
+    "scripted_end_epoch": 1784066052.028,
+    "scripted_total_s": 29.12
+  },
+  "scanned_at": "2026-07-14T21:53:43.003982+00:00",
+  "skill_commit_sha": "df5d24a",
+  "commit_sha": "6ca71c40e158f5bdf084e6b55572deca1532c465",
+  "repo": "deepgram/deepgram-python-sdk",
+  "repo_visibility": "public",
+  "required_checks": null,
+  "required_checks_complete": false,
+  "pr_critical_path": {
+    "sampled_pr_count": 13,
+    "sample_target": 20,
+    "sample_complete": false,
+    "sample_fetch_failures": 0,
+    "sample_fetched": 13,
+    "required_suite_scoped": false,
+    "required_suite_unsatisfiable": false,
+    "required_checks_unobservable": [],
+    "critical_path_check": "test (3.13)",
+    "critical_path_s": 66.0,
+    "check_present_n_pr": 13,
+    "checks": [
+      {
+        "name": "test (3.13)",
+        "p50_s": 66.0,
+        "present_on": 11,
+        "pole_n": 7,
+        "workflow_file": ".github/workflows/ci.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "test (3.9)",
+        "p50_s": 58.5,
+        "present_on": 2,
+        "pole_n": 2,
+        "timing_source": "pr_check_runs"
+      },
+      {
+        "name": "test (3.12)",
+        "p50_s": 57.0,
+        "present_on": 11,
+        "pole_n": 2,
+        "workflow_file": ".github/workflows/ci.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "test (3.10)",
+        "p50_s": 65.0,
+        "present_on": 11,
+        "pole_n": 1,
+        "workflow_file": ".github/workflows/ci.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "test (3.11)",
+        "p50_s": 55.0,
+        "present_on": 11,
+        "pole_n": 1,
+        "workflow_file": ".github/workflows/ci.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "test (3.8)",
+        "p50_s": 54.5,
+        "present_on": 2,
+        "pole_n": 0,
+        "timing_source": "pr_check_runs"
+      },
+      {
+        "name": "compile (3.9)",
+        "p50_s": 39.0,
+        "present_on": 2,
+        "pole_n": 0,
+        "timing_source": "pr_check_runs"
+      },
+      {
+        "name": "compile (3.11)",
+        "p50_s": 37.0,
+        "present_on": 12,
+        "pole_n": 1,
+        "workflow_file": ".github/workflows/ci.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "compile (3.13)",
+        "p50_s": 36.0,
+        "present_on": 12,
+        "pole_n": 1,
+        "workflow_file": ".github/workflows/ci.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "compile (3.12)",
+        "p50_s": 35.0,
+        "present_on": 12,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/ci.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "compile (3.10)",
+        "p50_s": 34.0,
+        "present_on": 12,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/ci.yml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "compile (3.8)",
+        "p50_s": 32.5,
+        "present_on": 2,
+        "pole_n": 0,
+        "timing_source": "pr_check_runs"
+      },
+      {
+        "name": "Title Check",
+        "p50_s": 14.0,
+        "present_on": 13,
+        "pole_n": 1,
+        "workflow_file": ".github/workflows/pr-title-check.yml",
+        "timing_source": "workflow_jobs"
+      }
+    ],
+    "population_weighted": false,
+    "populations_n": 0,
+    "chain_facts": [
+      {
+        "sha": "0ddee61b3a54a8f8510fe413cf97c3f83c261cc9",
+        "chain": [
+          "compile (3.13)",
+          "test (3.11)"
+        ],
+        "member_spans_s": {
+          "compile (3.13)": 36.0,
+          "test (3.11)": 40.0
+        },
+        "chain_s": 76.0,
+        "co_longest_n": 1,
+        "runner_up_s": 73.0,
+        "chain_win_s": 3.0,
+        "fallback": null,
+        "makespan_s": 84.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "ec05f0fbac6839f4c030abe68c10340a28907cf0",
+        "chain": [
+          "compile (3.13)",
+          "test (3.13)"
+        ],
+        "member_spans_s": {
+          "compile (3.13)": 36.0,
+          "test (3.13)": 39.0
+        },
+        "chain_s": 75.0,
+        "co_longest_n": 1,
+        "runner_up_s": 69.0,
+        "chain_win_s": 6.0,
+        "fallback": null,
+        "makespan_s": 863.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "ee7e4c4f8e444653c5b82abbbcb004c46c752a04",
+        "chain": [
+          "compile (3.11)"
+        ],
+        "member_spans_s": {
+          "compile (3.11)": 35.0
+        },
+        "chain_s": 35.0,
+        "co_longest_n": 1,
+        "runner_up_s": 35.0,
+        "chain_win_s": 0.0,
+        "fallback": null,
+        "makespan_s": 35.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "88ecd49a25aa509dbc66112dbfb420229c9b1aa7",
+        "chain": [
+          "compile (3.13)",
+          "test (3.10)"
+        ],
+        "member_spans_s": {
+          "compile (3.13)": 35.0,
+          "test (3.10)": 39.0
+        },
+        "chain_s": 74.0,
+        "co_longest_n": 1,
+        "runner_up_s": 70.0,
+        "chain_win_s": 4.0,
+        "fallback": null,
+        "makespan_s": 77.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "883796266d0ca937f69127f9fdd507f19d739bd6",
+        "chain": [
+          "compile (3.13)",
+          "test (3.12)"
+        ],
+        "member_spans_s": {
+          "compile (3.13)": 33.0,
+          "test (3.12)": 41.0
+        },
+        "chain_s": 74.0,
+        "co_longest_n": 1,
+        "runner_up_s": 68.0,
+        "chain_win_s": 6.0,
+        "fallback": null,
+        "makespan_s": 127.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "4d7e204874f8abb452de4d76e1305f1de998c41f",
+        "chain": [
+          "Title Check"
+        ],
+        "member_spans_s": {
+          "Title Check": 14.0
+        },
+        "chain_s": 14.0,
+        "co_longest_n": 1,
+        "runner_up_s": 0.0,
+        "chain_win_s": 14.0,
+        "fallback": null,
+        "makespan_s": 14.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "b1238362e0d9741b0a41ac9f8efb0c223a1b72da",
+        "chain": [
+          "compile (3.13)",
+          "test (3.12)"
+        ],
+        "member_spans_s": {
+          "compile (3.13)": 35.0,
+          "test (3.12)": 41.0
+        },
+        "chain_s": 76.0,
+        "co_longest_n": 1,
+        "runner_up_s": 74.0,
+        "chain_win_s": 2.0,
+        "fallback": null,
+        "makespan_s": 14393.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "047a2dd8c89f6e6f2d78a48636bc4abd6d6c1656",
+        "chain": [
+          "compile (3.13)",
+          "test (3.13)"
+        ],
+        "member_spans_s": {
+          "compile (3.13)": 36.0,
+          "test (3.13)": 66.0
+        },
+        "chain_s": 102.0,
+        "co_longest_n": 1,
+        "runner_up_s": 100.0,
+        "chain_win_s": 2.0,
+        "fallback": null,
+        "makespan_s": 119.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "3469851d0d5ba363eee44892722566a6650a3ded",
+        "chain": [
+          "compile (3.11)",
+          "test (3.13)"
+        ],
+        "member_spans_s": {
+          "compile (3.11)": 37.0,
+          "test (3.13)": 66.0
+        },
+        "chain_s": 103.0,
+        "co_longest_n": 1,
+        "runner_up_s": 98.0,
+        "chain_win_s": 5.0,
+        "fallback": null,
+        "makespan_s": 641.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "2d0d3d1f557ca384b36498f35f251833c5835781",
+        "chain": [
+          "compile (3.11)",
+          "test (3.13)"
+        ],
+        "member_spans_s": {
+          "compile (3.11)": 37.0,
+          "test (3.13)": 66.0
+        },
+        "chain_s": 103.0,
+        "co_longest_n": 1,
+        "runner_up_s": 100.0,
+        "chain_win_s": 3.0,
+        "fallback": null,
+        "makespan_s": 68082.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "59e86a158ee48d5638b83a7ab8eb60c81c6b1f62",
+        "chain": [
+          "compile (3.13)",
+          "test (3.13)"
+        ],
+        "member_spans_s": {
+          "compile (3.13)": 35.0,
+          "test (3.13)": 66.0
+        },
+        "chain_s": 101.0,
+        "co_longest_n": 1,
+        "runner_up_s": 93.0,
+        "chain_win_s": 8.0,
+        "fallback": null,
+        "makespan_s": 247483.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "e0866a365732297076dfd70b215bcae79a493000",
+        "chain": [
+          "compile (3.13)",
+          "test (3.10)"
+        ],
+        "member_spans_s": {
+          "compile (3.13)": 36.0,
+          "test (3.10)": 54.0
+        },
+        "chain_s": 90.0,
+        "co_longest_n": 1,
+        "runner_up_s": 81.0,
+        "chain_win_s": 9.0,
+        "fallback": null,
+        "makespan_s": 99.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "f91873d481e3d699dc0c060c4c3963547ed52429",
+        "chain": [
+          "compile (3.11)",
+          "test (3.10)"
+        ],
+        "member_spans_s": {
+          "compile (3.11)": 32.0,
+          "test (3.10)": 54.0
+        },
+        "chain_s": 86.0,
+        "co_longest_n": 1,
+        "runner_up_s": 80.0,
+        "chain_win_s": 6.0,
+        "fallback": null,
+        "makespan_s": 593.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      }
+    ],
+    "chain_summary": {
+      "n": 13,
+      "chain_p50_s": 76.0,
+      "modal_chain": [
+        "compile (3.13)",
+        "test (3.13)"
+      ],
+      "modal_n": 3,
+      "runner_up_p50_s": 74.0,
+      "chain_win_p50_s": 5.0,
+      "makespan_p50_s": 127.0,
+      "divergence_pct": -40.16
+    },
+    "populations": [],
+    "dropped_non_pr_checks": [],
+    "dropped_non_required_checks": [],
+    "spine_required_scoped": false,
+    "poles": [
+      {
+        "check": "test (3.13)",
+        "p50_s": 66.0,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "test (3.13)",
+        "dominant_step": "Test + 3 more test steps",
+        "dominant_category": "test",
+        "dominant_p50_s": 36.0,
+        "dominant_share": 0.562,
+        "job_p50_s": 64.0,
+        "steps": [
+          {
+            "step": "Test",
+            "category": "test",
+            "p50_s": 29.0
+          },
+          {
+            "step": "Bootstrap poetry",
+            "category": "setup",
+            "p50_s": 15.0
+          },
+          {
+            "step": "Pull ghcr.io/irongut/codecoveragesummary:v1.3.0",
+            "category": "test",
+            "p50_s": 4.0
+          },
+          {
+            "step": "Install dependencies",
+            "category": "install",
+            "p50_s": 4.0
+          },
+          {
+            "step": "Verify Docker is available",
+            "category": "other",
+            "p50_s": 3.0
+          },
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 2.0
+          },
+          {
+            "step": "Install coverage tool",
+            "category": "install",
+            "p50_s": 2.0
+          },
+          {
+            "step": "Add coverage PR comment",
+            "category": "test",
+            "p50_s": 2.0
+          },
+          {
+            "step": "Checkout repo",
+            "category": "checkout",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Generate code coverage summary",
+            "category": "test",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Set up python",
+            "category": "setup",
+            "p50_s": 1.0
+          }
+        ]
+      },
+      {
+        "check": "test (3.9)",
+        "p50_s": 58.5,
+        "timing_source": "pr_check_runs"
+      },
+      {
+        "check": "test (3.12)",
+        "p50_s": 57.0,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "test (3.12)",
+        "dominant_step": "Test + 1 more test step",
+        "dominant_category": "test",
+        "dominant_p50_s": 34.0,
+        "dominant_share": 0.576,
+        "job_p50_s": 59.0,
+        "steps": [
+          {
+            "step": "Test",
+            "category": "test",
+            "p50_s": 30.0
+          },
+          {
+            "step": "Bootstrap poetry",
+            "category": "setup",
+            "p50_s": 11.0
+          },
+          {
+            "step": "Pull ghcr.io/irongut/codecoveragesummary:v1.3.0",
+            "category": "test",
+            "p50_s": 4.0
+          },
+          {
+            "step": "Install dependencies",
+            "category": "install",
+            "p50_s": 4.0
+          },
+          {
+            "step": "Verify Docker is available",
+            "category": "other",
+            "p50_s": 4.0
+          },
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 2.0
+          },
+          {
+            "step": "Install coverage tool",
+            "category": "install",
+            "p50_s": 2.0
+          },
+          {
+            "step": "Checkout repo",
+            "category": "checkout",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Set up python",
+            "category": "post",
+            "p50_s": 1.0
+          }
+        ]
+      },
+      {
+        "check": "test (3.10)",
+        "p50_s": 65.0,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "test (3.10)",
+        "dominant_step": "Test + 1 more test step",
+        "dominant_category": "test",
+        "dominant_p50_s": 34.0,
+        "dominant_share": 0.515,
+        "job_p50_s": 66.0,
+        "steps": [
+          {
+            "step": "Test",
+            "category": "test",
+            "p50_s": 31.0
+          },
+          {
+            "step": "Bootstrap poetry",
+            "category": "setup",
+            "p50_s": 16.0
+          },
+          {
+            "step": "Install dependencies",
+            "category": "install",
+            "p50_s": 5.0
+          },
+          {
+            "step": "Pull ghcr.io/irongut/codecoveragesummary:v1.3.0",
+            "category": "test",
+            "p50_s": 3.0
+          },
+          {
+            "step": "Install coverage tool",
+            "category": "install",
+            "p50_s": 3.0
+          },
+          {
+            "step": "Verify Docker is available",
+            "category": "other",
+            "p50_s": 3.0
+          },
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 2.0
+          },
+          {
+            "step": "Checkout repo",
+            "category": "checkout",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Complete job",
+            "category": "other",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Set up python",
+            "category": "setup",
+            "p50_s": 1.0
+          }
+        ]
+      },
+      {
+        "check": "test (3.11)",
+        "p50_s": 55.0,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "test (3.11)",
+        "dominant_step": "Test + 1 more test step",
+        "dominant_category": "test",
+        "dominant_p50_s": 33.0,
+        "dominant_share": 0.611,
+        "job_p50_s": 54.0,
+        "steps": [
+          {
+            "step": "Test",
+            "category": "test",
+            "p50_s": 29.0
+          },
+          {
+            "step": "Bootstrap poetry",
+            "category": "setup",
+            "p50_s": 13.0
+          },
+          {
+            "step": "Pull ghcr.io/irongut/codecoveragesummary:v1.3.0",
+            "category": "test",
+            "p50_s": 4.0
+          },
+          {
+            "step": "Install dependencies",
+            "category": "install",
+            "p50_s": 3.0
+          },
+          {
+            "step": "Install coverage tool",
+            "category": "install",
+            "p50_s": 2.0
+          },
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Set up python",
+            "category": "setup",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Checkout repo",
+            "category": "checkout",
+            "p50_s": 1.0
+          }
+        ]
+      },
+      {
+        "check": "compile (3.11)",
+        "p50_s": 37.0,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "compile (3.11)",
+        "dominant_step": "Bootstrap poetry",
+        "dominant_category": "setup",
+        "dominant_p50_s": 14.0,
+        "dominant_share": 0.4,
+        "job_p50_s": 35.0,
+        "steps": [
+          {
+            "step": "Bootstrap poetry",
+            "category": "setup",
+            "p50_s": 14.0
+          },
+          {
+            "step": "Compile",
+            "category": "build",
+            "p50_s": 10.0
+          },
+          {
+            "step": "Install dependencies",
+            "category": "install",
+            "p50_s": 4.0
+          },
+          {
+            "step": "Checkout repo",
+            "category": "checkout",
+            "p50_s": 2.0
+          },
+          {
+            "step": "Typecheck tests",
+            "category": "test",
+            "p50_s": 2.0
+          },
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Set up python",
+            "category": "setup",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Checkout repo",
+            "category": "post",
+            "p50_s": 1.0
+          }
+        ]
+      }
+    ],
+    "provenance": "unresolved",
+    "required_check_conditionality": {}
+  },
+  "structural_analysis_top_n": 5,
+  "data_sources": {
+    "tiers_run": [
+      "gh-timing"
+    ],
+    "gh_available": true,
+    "workflows_analyzed": 5,
+    "runs_sampled": 60,
+    "jobs_sampled": 380,
+    "jobs_fetch_failures": 0,
+    "shallow_runs": 10,
+    "max_runs": 20,
+    "shallow_capped": true,
+    "capped_workflows": 4,
+    "pole_candidates": 2,
+    "deepened_workflows": 2,
+    "deepen_converged": true,
+    "triaged_fast_workflows": [],
+    "triaged_fast_count": 0,
+    "recovered_fast_workflows": [],
+    "recovered_fast_count": 0,
+    "cost_spine_triaged_workflows_included": [],
+    "cost_spine_triaged_workflow_count": 0,
+    "cost_spine_triaged_runs_sampled": 0,
+    "cost_spine_triaged_jobs_sampled": 0,
+    "logs_fetched": null,
+    "workflow_yaml_source": {
+      "checkout": 5,
+      "api": 0
+    },
+    "workflow_yaml_skew": null,
+    "detectors_skipped": [],
+    "gh_query_count": 172,
+    "gh_error_count": 0,
+    "sampled_runs_created_before": null,
+    "run_list_fetch_failures": [],
+    "job_fetch_failures": [],
+    "partial_reason": null,
+    "partial_kind": null,
+    "cost_spine_job_fetch_failures": 0,
+    "cost_deepen_candidate_workflows": [
+      ".github/workflows/ci.yml",
+      ".github/workflows/tests-daily.yml",
+      ".github/workflows/pr-title-check.yml",
+      ".github/workflows/release-please.yml"
+    ],
+    "cost_deepen_candidate_count": 4,
+    "cost_deepened_workflows": [
+      ".github/workflows/release-please.yml",
+      ".github/workflows/tests-daily.yml"
+    ],
+    "cost_deepened_workflow_count": 2,
+    "cost_deepen_runs_sampled": 20,
+    "cost_deepen_jobs_sampled": 180,
+    "full_depth_workflows": [
+      ".github/workflows/ci.yml",
+      ".github/workflows/pr-title-check.yml"
+    ],
+    "full_depth_workflow_count": 2,
+    "shallow_remaining_workflows": [
+      ".github/workflows/release-please.yml",
+      ".github/workflows/tests-daily.yml"
+    ],
+    "shallow_remaining_workflow_count": 2,
+    "cost_spine_full_depth_workflows": [
+      ".github/workflows/ci.yml",
+      ".github/workflows/pr-title-check.yml",
+      ".github/workflows/release-please.yml",
+      ".github/workflows/tests-daily.yml"
+    ],
+    "cost_spine_full_depth_workflow_count": 4,
+    "cost_spine_shallow_workflows": [],
+    "cost_spine_shallow_workflow_count": 0,
+    "prefetch_unconsumed": 0,
+    "attempt_stats": {
+      "scope": "pr-event runs of gating workflows (all-status slice)",
+      "gating_workflows": [
+        ".github/workflows/ci.yml"
+      ],
+      "workflows_missing": [],
+      "pr_event_runs": 5,
+      "pr_event_runs_multi_attempt": 0,
+      "prior_attempt_gating_minutes": 0.0,
+      "sampled_prs": 13
+    }
+  },
+  "per_workflow_timing": {
+    ".github/workflows/ci.yml": {
+      "long_pole_job": "test (3.13)",
+      "long_pole_p50": 66.0,
+      "long_pole_p95": 68.7,
+      "floor_p50": 65.0,
+      "job_p50": {
+        "compile (3.12)": 35.0,
+        "compile (3.11)": 37.0,
+        "compile (3.13)": 36.0,
+        "compile (3.10)": 34.0,
+        "test (3.10)": 65.0,
+        "test (3.12)": 57.0,
+        "test (3.13)": 66.0,
+        "test (3.11)": 55.0
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "compile (3.12)": "ubuntu-latest",
+        "compile (3.11)": "ubuntu-latest",
+        "compile (3.13)": "ubuntu-latest",
+        "compile (3.10)": "ubuntu-latest",
+        "test (3.10)": "ubuntu-latest",
+        "test (3.12)": "ubuntu-latest",
+        "test (3.13)": "ubuntu-latest",
+        "test (3.11)": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "pull_request",
+      "events": [
+        "pull_request",
+        "push"
+      ]
+    },
+    ".github/workflows/context7.yml": {
+      "long_pole_job": "",
+      "long_pole_p50": 0.0,
+      "long_pole_p95": 0.0,
+      "floor_p50": 0.0,
+      "job_p50": {},
+      "job_bimodal": {},
+      "runner_scope": "all-runners",
+      "event_scope": "all-events",
+      "events": []
+    },
+    ".github/workflows/pr-title-check.yml": {
+      "long_pole_job": "Title Check",
+      "long_pole_p50": 14.0,
+      "long_pole_p95": 19.300000000000004,
+      "floor_p50": 0.0,
+      "job_p50": {
+        "Title Check": 14.0
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "Title Check": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "pull_request",
+      "events": [
+        "pull_request"
+      ]
+    },
+    ".github/workflows/release-please.yml": {
+      "long_pole_job": "test (3.13)",
+      "long_pole_p50": 39.5,
+      "long_pole_p95": 42.55,
+      "floor_p50": 38.5,
+      "job_p50": {
+        "compile (3.12)": 31.0,
+        "compile (3.13)": 34.5,
+        "compile (3.10)": 33.5,
+        "compile (3.11)": 31.0,
+        "test (3.10)": 38.5,
+        "test (3.11)": 35.5,
+        "test (3.12)": 36.5,
+        "test (3.13)": 39.5,
+        "release-please": 19.5,
+        "publish (3.10)": 31.0
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "compile (3.12)": "ubuntu-latest",
+        "compile (3.13)": "ubuntu-latest",
+        "compile (3.10)": "ubuntu-latest",
+        "compile (3.11)": "ubuntu-latest",
+        "test (3.10)": "ubuntu-latest",
+        "test (3.11)": "ubuntu-latest",
+        "test (3.12)": "ubuntu-latest",
+        "test (3.13)": "ubuntu-latest",
+        "release-please": "ubuntu-latest",
+        "publish (3.10)": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "all-events",
+      "events": [
+        "push"
+      ]
+    },
+    ".github/workflows/tests-daily.yml": {
+      "long_pole_job": "test (3.13)",
+      "long_pole_p50": 40.0,
+      "long_pole_p95": 62.20000000000002,
+      "floor_p50": 38.0,
+      "job_p50": {
+        "compile (3.13)": 35.5,
+        "compile (3.10)": 35.0,
+        "compile (3.12)": 31.0,
+        "compile (3.11)": 30.0,
+        "test (3.13)": 40.0,
+        "test (3.10)": 38.0,
+        "test (3.12)": 34.0,
+        "test (3.11)": 34.0
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "compile (3.13)": "ubuntu-latest",
+        "compile (3.10)": "ubuntu-latest",
+        "compile (3.12)": "ubuntu-latest",
+        "compile (3.11)": "ubuntu-latest",
+        "test (3.13)": "ubuntu-latest",
+        "test (3.10)": "ubuntu-latest",
+        "test (3.12)": "ubuntu-latest",
+        "test (3.11)": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "all-events",
+      "events": [
+        "schedule"
+      ]
+    }
+  },
+  "rates_verified_date": "2026-07-03",
+  "runner_minute_spine": {
+    "schema_version": 1,
+    "source": "jobs_api_sampled_runs",
+    "coverage_scope": "sampled_workflows_in_play_with_job_data",
+    "complete_repo_coverage": true,
+    "render_ready": true,
+    "render_blocker": "",
+    "extrapolation_basis": "sampled_job_occurrence_fraction_x_all_status_30d_workflow_volume",
+    "attempt_coverage": "latest_and_prior",
+    "prior_attempts_included": true,
+    "latest_attempt_row_count": 27,
+    "prior_attempt_row_count": 1,
+    "repo_visibility": "public",
+    "rates_verified_date": "2026-07-03",
+    "workflow_coverage": {
+      "scope": "positive_30d_workflows_in_play",
+      "workflow_count": 4,
+      "row_workflow_count": 4,
+      "omitted_workflows": [],
+      "unknown_volume_workflows": [],
+      "triaged_workflows_included": [],
+      "job_fetch_failures": 0
+    },
+    "rows": [
+      {
+        "workflow_file": ".github/workflows/ci.yml",
+        "job_name": "compile (3.10)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-30T04:07:57Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 57,
+        "effective_monthly_job_volume": 57.0,
+        "mean_sampled_compute_seconds": 36.1,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 34.295,
+        "billable_equiv_min_per_month": 57.0,
+        "sku_weighted_billable_min_per_month": 57.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.34,
+        "share_of_all_row_total": 0.065
+      },
+      {
+        "workflow_file": ".github/workflows/ci.yml",
+        "job_name": "compile (3.11)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-30T04:07:57Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 57,
+        "effective_monthly_job_volume": 57.0,
+        "mean_sampled_compute_seconds": 32.85,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 31.207,
+        "billable_equiv_min_per_month": 57.0,
+        "sku_weighted_billable_min_per_month": 57.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.34,
+        "share_of_all_row_total": 0.065
+      },
+      {
+        "workflow_file": ".github/workflows/ci.yml",
+        "job_name": "compile (3.12)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-30T04:07:57Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 57,
+        "effective_monthly_job_volume": 57.0,
+        "mean_sampled_compute_seconds": 33.5,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 31.825,
+        "billable_equiv_min_per_month": 57.0,
+        "sku_weighted_billable_min_per_month": 57.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.34,
+        "share_of_all_row_total": 0.065
+      },
+      {
+        "workflow_file": ".github/workflows/ci.yml",
+        "job_name": "compile (3.13)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-30T04:07:57Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 57,
+        "effective_monthly_job_volume": 57.0,
+        "mean_sampled_compute_seconds": 38.0,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 36.1,
+        "billable_equiv_min_per_month": 57.0,
+        "sku_weighted_billable_min_per_month": 57.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.34,
+        "share_of_all_row_total": 0.065
+      },
+      {
+        "workflow_file": ".github/workflows/ci.yml",
+        "job_name": "test (3.10)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-30T04:07:57Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 57,
+        "effective_monthly_job_volume": 57.0,
+        "mean_sampled_compute_seconds": 45.6,
+        "mean_sampled_billable_equiv_minutes": 1.2,
+        "raw_compute_runner_min_per_month": 43.32,
+        "billable_equiv_min_per_month": 68.4,
+        "sku_weighted_billable_min_per_month": 68.4,
+        "billing_class": "capacity",
+        "usd_per_month": 0.41,
+        "share_of_all_row_total": 0.079
+      },
+      {
+        "workflow_file": ".github/workflows/ci.yml",
+        "job_name": "test (3.11)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-30T04:07:57Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 57,
+        "effective_monthly_job_volume": 57.0,
+        "mean_sampled_compute_seconds": 43.0,
+        "mean_sampled_billable_equiv_minutes": 1.15,
+        "raw_compute_runner_min_per_month": 40.85,
+        "billable_equiv_min_per_month": 65.55,
+        "sku_weighted_billable_min_per_month": 65.55,
+        "billing_class": "capacity",
+        "usd_per_month": 0.39,
+        "share_of_all_row_total": 0.075
+      },
+      {
+        "workflow_file": ".github/workflows/ci.yml",
+        "job_name": "test (3.12)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-30T04:07:57Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 57,
+        "effective_monthly_job_volume": 57.0,
+        "mean_sampled_compute_seconds": 44.4,
+        "mean_sampled_billable_equiv_minutes": 1.1,
+        "raw_compute_runner_min_per_month": 42.18,
+        "billable_equiv_min_per_month": 62.7,
+        "sku_weighted_billable_min_per_month": 62.7,
+        "billing_class": "capacity",
+        "usd_per_month": 0.38,
+        "share_of_all_row_total": 0.072
+      },
+      {
+        "workflow_file": ".github/workflows/ci.yml",
+        "job_name": "test (3.13)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-30T04:07:57Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 57,
+        "effective_monthly_job_volume": 57.0,
+        "mean_sampled_compute_seconds": 45.8,
+        "mean_sampled_billable_equiv_minutes": 1.15,
+        "raw_compute_runner_min_per_month": 43.51,
+        "billable_equiv_min_per_month": 65.55,
+        "sku_weighted_billable_min_per_month": 65.55,
+        "billing_class": "capacity",
+        "usd_per_month": 0.39,
+        "share_of_all_row_total": 0.075
+      },
+      {
+        "workflow_file": ".github/workflows/pr-title-check.yml",
+        "job_name": "Title Check",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-26T15:17:45Z",
+        "sample_window_end": "2026-07-14T14:24:27Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 80,
+        "effective_monthly_job_volume": 80.0,
+        "mean_sampled_compute_seconds": 15.15,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 20.2,
+        "billable_equiv_min_per_month": 80.0,
+        "sku_weighted_billable_min_per_month": 80.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.48,
+        "share_of_all_row_total": 0.092
+      },
+      {
+        "workflow_file": ".github/workflows/pr-title-check.yml",
+        "job_name": "Title Check",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "all-status",
+        "attempt_filter": "prior",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-26T22:34:33Z",
+        "sample_window_end": "2026-06-26T22:34:33Z",
+        "sampled_workflow_run_count": 100,
+        "sampled_job_occurrence_count": 2,
+        "occurrence_fraction": 0.02,
+        "workflow_30d_volume": 80,
+        "effective_monthly_job_volume": 1.6,
+        "mean_sampled_compute_seconds": 16.0,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 0.427,
+        "billable_equiv_min_per_month": 1.6,
+        "sku_weighted_billable_min_per_month": 1.6,
+        "billing_class": "capacity",
+        "usd_per_month": 0.01,
+        "share_of_all_row_total": 0.002
+      },
+      {
+        "workflow_file": ".github/workflows/release-please.yml",
+        "job_name": "compile (3.10)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-06T12:30:33Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 6,
+        "effective_monthly_job_volume": 6.0,
+        "mean_sampled_compute_seconds": 34.5,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 3.45,
+        "billable_equiv_min_per_month": 6.0,
+        "sku_weighted_billable_min_per_month": 6.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.04,
+        "share_of_all_row_total": 0.007
+      },
+      {
+        "workflow_file": ".github/workflows/release-please.yml",
+        "job_name": "compile (3.11)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-06T12:30:33Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 6,
+        "effective_monthly_job_volume": 6.0,
+        "mean_sampled_compute_seconds": 31.05,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 3.105,
+        "billable_equiv_min_per_month": 6.0,
+        "sku_weighted_billable_min_per_month": 6.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.04,
+        "share_of_all_row_total": 0.007
+      },
+      {
+        "workflow_file": ".github/workflows/release-please.yml",
+        "job_name": "compile (3.12)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-06T12:30:33Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 6,
+        "effective_monthly_job_volume": 6.0,
+        "mean_sampled_compute_seconds": 31.55,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 3.155,
+        "billable_equiv_min_per_month": 6.0,
+        "sku_weighted_billable_min_per_month": 6.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.04,
+        "share_of_all_row_total": 0.007
+      },
+      {
+        "workflow_file": ".github/workflows/release-please.yml",
+        "job_name": "compile (3.13)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-06T12:30:33Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 6,
+        "effective_monthly_job_volume": 6.0,
+        "mean_sampled_compute_seconds": 34.8,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 3.48,
+        "billable_equiv_min_per_month": 6.0,
+        "sku_weighted_billable_min_per_month": 6.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.04,
+        "share_of_all_row_total": 0.007
+      },
+      {
+        "workflow_file": ".github/workflows/release-please.yml",
+        "job_name": "publish (3.10)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-06T12:38:55Z",
+        "sample_window_end": "2026-06-26T20:53:47Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 6,
+        "occurrence_fraction": 0.3,
+        "workflow_30d_volume": 6,
+        "effective_monthly_job_volume": 1.8,
+        "mean_sampled_compute_seconds": 37.167,
+        "mean_sampled_billable_equiv_minutes": 1.167,
+        "raw_compute_runner_min_per_month": 1.115,
+        "billable_equiv_min_per_month": 2.101,
+        "sku_weighted_billable_min_per_month": 2.101,
+        "billing_class": "capacity",
+        "usd_per_month": 0.01,
+        "share_of_all_row_total": 0.002
+      },
+      {
+        "workflow_file": ".github/workflows/release-please.yml",
+        "job_name": "release-please",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-06T12:30:33Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 6,
+        "effective_monthly_job_volume": 6.0,
+        "mean_sampled_compute_seconds": 19.05,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 1.905,
+        "billable_equiv_min_per_month": 6.0,
+        "sku_weighted_billable_min_per_month": 6.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.04,
+        "share_of_all_row_total": 0.007
+      },
+      {
+        "workflow_file": ".github/workflows/release-please.yml",
+        "job_name": "test (3.10)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-06T12:30:33Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 6,
+        "effective_monthly_job_volume": 6.0,
+        "mean_sampled_compute_seconds": 37.6,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 3.76,
+        "billable_equiv_min_per_month": 6.0,
+        "sku_weighted_billable_min_per_month": 6.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.04,
+        "share_of_all_row_total": 0.007
+      },
+      {
+        "workflow_file": ".github/workflows/release-please.yml",
+        "job_name": "test (3.11)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-06T12:30:33Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 6,
+        "effective_monthly_job_volume": 6.0,
+        "mean_sampled_compute_seconds": 41.35,
+        "mean_sampled_billable_equiv_minutes": 1.05,
+        "raw_compute_runner_min_per_month": 4.135,
+        "billable_equiv_min_per_month": 6.3,
+        "sku_weighted_billable_min_per_month": 6.3,
+        "billing_class": "capacity",
+        "usd_per_month": 0.04,
+        "share_of_all_row_total": 0.007
+      },
+      {
+        "workflow_file": ".github/workflows/release-please.yml",
+        "job_name": "test (3.12)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-06T12:30:33Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 6,
+        "effective_monthly_job_volume": 6.0,
+        "mean_sampled_compute_seconds": 36.35,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 3.635,
+        "billable_equiv_min_per_month": 6.0,
+        "sku_weighted_billable_min_per_month": 6.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.04,
+        "share_of_all_row_total": 0.007
+      },
+      {
+        "workflow_file": ".github/workflows/release-please.yml",
+        "job_name": "test (3.13)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-06T12:30:33Z",
+        "sample_window_end": "2026-07-14T14:53:08Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 6,
+        "effective_monthly_job_volume": 6.0,
+        "mean_sampled_compute_seconds": 38.1,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 3.81,
+        "billable_equiv_min_per_month": 6.0,
+        "sku_weighted_billable_min_per_month": 6.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.04,
+        "share_of_all_row_total": 0.007
+      },
+      {
+        "workflow_file": ".github/workflows/tests-daily.yml",
+        "job_name": "compile (3.10)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-25T10:01:58Z",
+        "sample_window_end": "2026-07-14T09:32:18Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 30,
+        "effective_monthly_job_volume": 30.0,
+        "mean_sampled_compute_seconds": 34.25,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 17.125,
+        "billable_equiv_min_per_month": 30.0,
+        "sku_weighted_billable_min_per_month": 30.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.18,
+        "share_of_all_row_total": 0.034
+      },
+      {
+        "workflow_file": ".github/workflows/tests-daily.yml",
+        "job_name": "compile (3.11)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-25T10:01:58Z",
+        "sample_window_end": "2026-07-14T09:32:18Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 30,
+        "effective_monthly_job_volume": 30.0,
+        "mean_sampled_compute_seconds": 30.15,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 15.075,
+        "billable_equiv_min_per_month": 30.0,
+        "sku_weighted_billable_min_per_month": 30.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.18,
+        "share_of_all_row_total": 0.034
+      },
+      {
+        "workflow_file": ".github/workflows/tests-daily.yml",
+        "job_name": "compile (3.12)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-25T10:01:58Z",
+        "sample_window_end": "2026-07-14T09:32:18Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 30,
+        "effective_monthly_job_volume": 30.0,
+        "mean_sampled_compute_seconds": 31.8,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 15.9,
+        "billable_equiv_min_per_month": 30.0,
+        "sku_weighted_billable_min_per_month": 30.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.18,
+        "share_of_all_row_total": 0.034
+      },
+      {
+        "workflow_file": ".github/workflows/tests-daily.yml",
+        "job_name": "compile (3.13)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-25T10:01:58Z",
+        "sample_window_end": "2026-07-14T09:32:18Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 30,
+        "effective_monthly_job_volume": 30.0,
+        "mean_sampled_compute_seconds": 33.75,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 16.875,
+        "billable_equiv_min_per_month": 30.0,
+        "sku_weighted_billable_min_per_month": 30.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.18,
+        "share_of_all_row_total": 0.034
+      },
+      {
+        "workflow_file": ".github/workflows/tests-daily.yml",
+        "job_name": "test (3.10)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-25T10:01:58Z",
+        "sample_window_end": "2026-07-14T09:32:18Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 30,
+        "effective_monthly_job_volume": 30.0,
+        "mean_sampled_compute_seconds": 38.35,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 19.175,
+        "billable_equiv_min_per_month": 30.0,
+        "sku_weighted_billable_min_per_month": 30.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.18,
+        "share_of_all_row_total": 0.034
+      },
+      {
+        "workflow_file": ".github/workflows/tests-daily.yml",
+        "job_name": "test (3.11)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-25T10:01:58Z",
+        "sample_window_end": "2026-07-14T09:32:18Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 30,
+        "effective_monthly_job_volume": 30.0,
+        "mean_sampled_compute_seconds": 36.7,
+        "mean_sampled_billable_equiv_minutes": 1.05,
+        "raw_compute_runner_min_per_month": 18.35,
+        "billable_equiv_min_per_month": 31.5,
+        "sku_weighted_billable_min_per_month": 31.5,
+        "billing_class": "capacity",
+        "usd_per_month": 0.19,
+        "share_of_all_row_total": 0.036
+      },
+      {
+        "workflow_file": ".github/workflows/tests-daily.yml",
+        "job_name": "test (3.12)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-25T10:01:58Z",
+        "sample_window_end": "2026-07-14T09:32:18Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 30,
+        "effective_monthly_job_volume": 30.0,
+        "mean_sampled_compute_seconds": 36.05,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 18.025,
+        "billable_equiv_min_per_month": 30.0,
+        "sku_weighted_billable_min_per_month": 30.0,
+        "billing_class": "capacity",
+        "usd_per_month": 0.18,
+        "share_of_all_row_total": 0.034
+      },
+      {
+        "workflow_file": ".github/workflows/tests-daily.yml",
+        "job_name": "test (3.13)",
+        "runner_label": "ubuntu-latest",
+        "sku": "linux_2_core",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-06-25T10:01:58Z",
+        "sample_window_end": "2026-07-14T09:32:18Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 30,
+        "effective_monthly_job_volume": 30.0,
+        "mean_sampled_compute_seconds": 40.3,
+        "mean_sampled_billable_equiv_minutes": 1.05,
+        "raw_compute_runner_min_per_month": 20.15,
+        "billable_equiv_min_per_month": 31.5,
+        "sku_weighted_billable_min_per_month": 31.5,
+        "billing_class": "capacity",
+        "usd_per_month": 0.19,
+        "share_of_all_row_total": 0.036
+      }
+    ],
+    "totals": {
+      "row_count": 28,
+      "raw_compute_runner_min_per_month": 496.139,
+      "billable_equiv_min_per_month": 871.201,
+      "sku_weighted_billable_min_per_month": 871.201,
+      "usd_per_month": 5.25,
+      "percentage_denominator": "all_rows_billable_equiv_min_per_month"
+    }
+  },
+  "per_workflow_monthly_volume": {
+    ".github/workflows/ci.yml": 57,
+    ".github/workflows/pr-title-check.yml": 80,
+    ".github/workflows/release-please.yml": 6,
+    ".github/workflows/tests-daily.yml": 30
+  },
+  "events_by_wf": {
+    ".github/workflows/ci.yml": [
+      "pull_request",
+      "push"
+    ],
+    ".github/workflows/context7.yml": [],
+    ".github/workflows/pr-title-check.yml": [
+      "pull_request"
+    ],
+    ".github/workflows/release-please.yml": [
+      "push"
+    ],
+    ".github/workflows/tests-daily.yml": [
+      "schedule"
+    ]
+  },
+  "ci_score": {
+    "spec_version": "ci-score-v0.1.3",
+    "scope_statement": "CI Score gauges best-practice adherence on CI speed and gate hygiene: a straightforward pass/fail rubric of best-practice checks computed from a repo's workflow configuration.",
+    "value": 33,
+    "grade": "F",
+    "refusal": null,
+    "checks": [
+      {
+        "check_id": "ci.cache.dependency-cache",
+        "label": "Dependency caching",
+        "state": "fail",
+        "evidence": "no cache action and no setup-* cache input in any workflow or local composite action",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.cache.build-cache",
+        "label": "Build caching",
+        "state": "not_applicable",
+        "evidence": "no build tool with a cache detected in the repo tree",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.checkout.shallow-clone",
+        "label": "Shallow checkout",
+        "state": "pass",
+        "evidence": "no PR-gating workflow checks out full history (post-merge automation like backport/changelog jobs is exempt - it needs history and gates nobody)",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.parallel.test-sharding",
+        "label": "Test sharding / matrix",
+        "state": "pass",
+        "evidence": "shard/matrix strategy on test job(s) in 3 workflow(s)",
+        "files": [
+          ".github/workflows/ci.yml",
+          ".github/workflows/release-please.yml",
+          ".github/workflows/tests-daily.yml"
+        ],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.build.change-scoped",
+        "label": "Change-scoped builds",
+        "state": "not_applicable",
+        "evidence": "no turbo/nx task graph detected (change-scoping is not checkable here)",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.trigger.concurrency-groups",
+        "label": "Concurrency groups",
+        "state": "fail",
+        "evidence": "concurrency group declared on 0 of 1 PR workflow(s)",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.trigger.cancel-superseded",
+        "label": "Superseded runs cancelled",
+        "state": "fail",
+        "evidence": "concurrency + cancel-in-progress on 0 of 1 PR workflow(s)",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.trigger.path-filter",
+        "label": "Path filters",
+        "state": "fail",
+        "evidence": "paths filters on 0 of 1 PR workflow(s)",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.hygiene.job-timeouts",
+        "label": "Job timeouts",
+        "state": "fail",
+        "evidence": "no job sets timeout-minutes (GitHub's default is 360 minutes)",
+        "files": [],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.security.scoped-id-token",
+        "label": "Scoped OIDC id-token",
+        "state": "pass",
+        "evidence": "id-token: write scoped at job level in 1 workflow(s)",
+        "files": [
+          ".github/workflows/ci.yml"
+        ],
+        "measured_note": null
+      },
+      {
+        "check_id": "ci.security.pinned-action-shas",
+        "label": "Pinned action SHAs",
+        "state": "fail",
+        "evidence": "0 of 22 remote action references SHA-pinned (workflow + local composite action files; passes at >=95%)",
+        "files": [
+          ".github/workflows/ci.yml",
+          ".github/workflows/context7.yml",
+          ".github/workflows/release-please.yml"
+        ],
+        "measured_note": null
+      }
+    ],
+    "checks_passed": 3,
+    "checks_applicable": 9
+  }
+}
