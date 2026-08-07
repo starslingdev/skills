@@ -173,20 +173,28 @@ def _codeowners_covers_workflows(root: Path) -> tuple[bool, str]:
     except OSError as exc:
         return False, f"{found.name} unreadable: {exc}"
     rel = str(found.relative_to(root))
-    ownerless = False
+    # GitHub applies the LAST matching rule, not the first, so the file must be
+    # read to the end. Returning on the first match graded
+    # `* @team` followed by a bare `.github/workflows/` as covered, when the
+    # later ownerless rule is the one GitHub applies and it assigns nobody.
+    # Only lines matching a directory-coverage pattern above are considered —
+    # a narrower rule (`.github/workflows/release.yml`) reassigns that one file
+    # and does not change whether the directory has an owner.
+    last_match_has_owner: bool | None = None
     for raw_line in text.splitlines():
         line = raw_line.split("#", 1)[0]
         for pat in _WORKFLOWS_CODEOWNER_PATTERNS:
             m = re.match(pat, line)
-            if not m:
+            if m is None:
                 continue
-            if _CODEOWNERS_OWNER.search(line[m.end():]):
-                return True, f"`{rel}` covers `.github/workflows/`"
-            # Keep scanning: a later line may carry a real owner. Remember the
-            # near-miss so the failure names it rather than reading as "you
-            # wrote nothing", which sends the reader looking in the wrong place.
-            ownerless = True
-    if ownerless:
+            last_match_has_owner = bool(
+                _CODEOWNERS_OWNER.search(line[m.end():]))
+            break
+    if last_match_has_owner:
+        return True, f"`{rel}` covers `.github/workflows/`"
+    if last_match_has_owner is False:
+        # Name the near-miss: "no entry" would send the reader looking in the
+        # wrong place when the entry is there and simply owns nothing.
         return False, (f"`{rel}` matches `.github/workflows/` but names no "
                        "owner, so the rule assigns no reviewer")
     return False, (f"`{rel}` has no entry covering `.github/workflows/`")

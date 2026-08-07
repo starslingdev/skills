@@ -235,6 +235,25 @@ def test_codeowners_rule_without_an_owner_does_not_cover_workflows(tmp_path):
     assert "names no owner" in f["evidence"] + f.get("fact", ""), f
 
 
+def test_codeowners_last_matching_rule_wins(tmp_path):
+    """GitHub applies the LAST matching rule. A broad owned rule followed by an
+    ownerless workflows rule leaves workflow changes with no assigned owner —
+    stopping at the first match reported the opposite."""
+    root, files = _repo(tmp_path / "override", {"ci.yml": _SAFE_WF},
+                        codeowners="* @team\n.github/workflows/\n")
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert f["outcome"] == "fail", (
+        "the later ownerless rule is the one GitHub applies")
+    # And the other direction: a broad OWNED rule after an ownerless one is
+    # what GitHub applies, so it covers.
+    root, files = _repo(tmp_path / "override2", {"ci.yml": _SAFE_WF},
+                        codeowners=".github/workflows/\n* @team\n")
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert f["outcome"] == "pass", "the later owned rule is the one applied"
+
+
 def test_codeowners_owner_forms_are_recognized(tmp_path):
     """Teams and email owners count, and a later owned line rescues an earlier
     ownerless one."""

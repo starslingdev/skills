@@ -48,6 +48,11 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-07** — **The CODEOWNERS check applies the last matching rule, as
+  GitHub does.** It stopped at the first match, so `* @team` followed by a bare
+  `.github/workflows/` graded as covered — when the later, ownerless rule is
+  the one GitHub applies and it assigns nobody. The file is now read to the
+  end and the last directory-coverage rule decides.
 - **2026-08-07** — **A CODEOWNERS path with no owner no longer counts as
   coverage.** `.github/workflows/` written on its own matched the path rule and
   graded as covered, but a pattern with no owners assigns no reviewer — in
