@@ -3781,14 +3781,14 @@ def scan(
         # the report names the step count and the file count honestly.
         "dropped_matches": dropped_matches,
         # The config facts + the security component of the CI Score
-        # (OD-A26 / OD-A21: ci-secure owns this number; the ten vectors above
-        # stay findings-only and never enter it). Unscannable workflows force
+        # (ci-secure owns this number; the ten vectors above stay
+        # findings-only and never enter it). Unscannable workflows force
         # every workflow-scoped fact to UNMEASURED, never a silent pass — but
         # a merely unanchored `run:` step does not: the file parsed, so the
         # facts about it are real.
         #
         # **The AGGREGATE here is machine-only and is deliberately never
-        # rendered to a reader** (owner ruling, 2026-08-07). The block's
+        # rendered to a reader** — a deliberate design choice. The block's
         # CONTRACT is unchanged because ci-advisor blends from it: same keys,
         # same `fact_id`s, same `outcome`s, same `score`/`passed`/
         # `scored_count`/`applicable_count`/`unmeasured`/`constants`/
@@ -3800,7 +3800,7 @@ def scan(
         # renders the FACTS as a `## 🧰 Config hygiene checks — pass/fail`
         # table and no number at all. A hygiene aggregate labelled "Security
         # score" overclaims what six config observations can say and collides
-        # with the vector scan printed beside it — live dogfood read "5 of 6
+        # with the vector scan printed beside it — an early run read "5 of 6
         # facts pass" above ten green rows as a contradiction.
         #
         # This exact back-and-forth has already happened ONCE, in the other
@@ -3838,8 +3838,7 @@ def _compute_security_score(
                 # `reason` is READER-VISIBLE: report.py prints it in the
                 # "Nothing here was checked" headline whenever `facts` is
                 # empty, which is exactly this path. So it must not talk about
-                # a score — the report renders none (owner ruling 2026-08-07),
-                # and "this is NOT a score of 100" in a report with no score
+                # a score — the report renders none by design, and "this is NOT a score of 100" in a report with no score
                 # is the removed contract leaking back at the reader.
                 "reason": f"config-facts layer failed: {exc!r} — no config "
                           "fact could be checked", "registered": None}

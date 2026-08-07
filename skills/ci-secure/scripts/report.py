@@ -1602,7 +1602,7 @@ def _security_score_block(security_score: dict[str, Any] | None) -> str:
     """``## 🧰 Config hygiene checks`` — the config facts, pass/fail, NO number.
 
     **The aggregate is deliberately not rendered anywhere in this report**
-    (owner ruling, 2026-08-07). It used to render as `Security score: N/100 —
+    by design. It used to render as `Security score: N/100 —
     X of Y scored facts pass`, both in the report and in the close — and it
     read as a contradiction: "5 of 6 facts pass" sat directly above ten green
     vector rows, so a reader saw a grade that appeared to disagree with the
@@ -1914,7 +1914,7 @@ def _data_sources_block(
     if repo:
         rows.append(
             (
-                f"GitHub API ({repo})",
+                f"GitHub API — run activity ({repo})",
                 f"Per-workflow run counts + last-run timestamp (last 30 days)",
                 "Workflow-activity enrichment (active vs dormant)",
             )
@@ -1922,8 +1922,12 @@ def _data_sources_block(
     else:
         rows.append(
             (
-                "GitHub API",
-                "not queried",
+                # Scoped to run-activity enrichment ONLY. An unqualified
+                # "GitHub API / not queried" contradicted the network-gated
+                # status line above it, which can report the P14.11
+                # impostor-SHA check as having run against the same API.
+                "GitHub API — run activity",
+                "not queried (no `--repo`)",
                 "Pass `--repo owner/repo` to enrich findings with workflow activity",
             )
         )

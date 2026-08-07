@@ -848,10 +848,10 @@ def _cell_text(value: object) -> str:
 def check_no_rendered_security_score(report: str) -> Check:
     """The report renders NO aggregate score — no number, no ratio, no /100.
 
-    Flipped deliberately (owner ruling, 2026-08-07). The predecessor of this
+    Flipped deliberately, by design. The predecessor of this
     check REQUIRED a rendered `Security score: N/100 — X of Y scored facts
     pass` line, on the argument that a computed-but-unshown number is one the
-    reader cannot check. Live dogfood answered it: the line sat above ten green
+    reader cannot check. An early run answered it: the line sat above ten green
     vector rows and read as a contradiction, because a hygiene aggregate and a
     vector scan measure different things. The aggregate is now machine-only —
     it stays in the findings JSON for ci-advisor and is never rendered here.

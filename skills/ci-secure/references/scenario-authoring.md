@@ -76,4 +76,5 @@ request) → what actually runs (commands in the checked-out branch) → what
 that reaches (the token and secrets). No jargon, no restating the TL;DR.
 
 More worked examples in this style: the `attacker_scenario` fields in
-the `findings.json` a scan writes (the worked examples live in the maintainers' archive, not in the installed skill — live third-party findings never ship).
+the `findings.json` a scan writes (worked examples are not shipped with the
+skill — live third-party findings never ship).

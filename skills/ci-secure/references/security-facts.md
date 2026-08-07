@@ -8,11 +8,10 @@ are lexical rather than confirmed exploit proofs, and a public number must not
 grade a stranger's repo down on an unconfirmed match.
 
 **The aggregate is machine-only.** ci-secure's own report and close render
-these six facts as a pass/fail table and **no number** (owner ruling,
-2026-08-07): a hygiene aggregate labelled "Security score" overclaims what six
-config observations can say, and printed beside a ten-vector scan it read as a
-contradiction. The `security_score` block in the findings JSON keeps its shape
-— same keys, same `fact_id`s, same outcomes, same aggregate; only prose the
+these six facts as a pass/fail table and **no number** by design: a hygiene
+aggregate labelled "Security score" overclaims what six config observations can
+say, and printed beside a ten-vector scan it read as a contradiction. The
+`security_score` block in the findings JSON keeps its shape — same keys, same `fact_id`s, same outcomes, same aggregate; only prose the
 report prints was reworded so it stops naming a score the reader never sees.
 Consumers bind to the ids, not to the sentences. ci-advisor blends from that
 block, and quantification belongs there, where the blend context carries the
@@ -36,11 +35,11 @@ instead of shipping.
 | `sec.permissions.workflow-declares` | `ci.security.scoped-id-token` | Adding a `permissions:` block is a different edit from relocating an `id-token: write` grant. A workflow can declare permissions and still fail scoped-id-token, and vice versa. |
 | `sec.permissions.write-scoped` | `ci.security.scoped-id-token` | **Disjoint by construction:** `id-token` is excluded from this fact's scope set, so the one edit scoped-id-token asks for (move `id-token: write` to a job) cannot change this fact. `write-all` fails here on its own; unwinding it into per-job grants is not the id-token relocation. |
 | `sec.codeowners.workflows` | — none | CODEOWNERS is not workflow YAML; no ci-score check reads it. |
-| `sec.trigger.fork-code-uncleared` | `ci.trigger.*` (concurrency, cancel, path-filter) | Those checks read `concurrency:` and `paths:` blocks; this fact reads the trigger list plus checkout `ref:`/`repository:` values. No shared YAML key. Also tiered against ci-secure's own P14.9 finding: a bare untrusted trigger passes (the true-of-84% defect OD-A26 removed), trigger + attacker-head checkout fails this FACT, and only the full trigger + checkout + execution chain is the P14.9 finding — so the fact and the finding cannot fire on the same edit either. |
+| `sec.trigger.fork-code-uncleared` | `ci.trigger.*` (concurrency, cancel, path-filter) | Those checks read `concurrency:` and `paths:` blocks; this fact reads the trigger list plus checkout `ref:`/`repository:` values. No shared YAML key. Also tiered against ci-secure's own P14.9 finding: a bare untrusted trigger passes (the true-of-84% defect, deliberately removed), trigger + attacker-head checkout fails this FACT, and only the full trigger + checkout + execution chain is the P14.9 finding — so the fact and the finding cannot fire on the same edit either. |
 | `sec.secrets.no-blanket-inherit` | — none | No ci-score check reads `secrets:` on reusable-workflow calls. |
 | `sec.checkout.credentials-scoped` | `ci.checkout.shallow-clone` | Both read checkout steps, but different keys: `fetch-depth` there, `persist-credentials` here — two `with:` entries, two edits. This fact also applies only on untrusted-trigger workflows; shallow-clone applies on PR-gating ones. |
 
-**Residual correlation, disclosed (OD-A28's frame):** a repo with careless
+**Residual correlation, disclosed:** a repo with careless
 workflow hygiene will tend to fail checks in both tools — that is the
 configuration-vs-consequence pairing the CI Score's axes are built on, and it
 is disclosed there. What the census rules out is the sharper defect: one edit,

@@ -1,4 +1,4 @@
-"""Oracle tests for the scored security config facts (OD-A26).
+"""Oracle tests for the scored security config facts.
 
 This number is a third of a published CI Score, so every test pins a property a
 graded maintainer could dispute: what each fact counts, what clears it, what
@@ -134,7 +134,7 @@ def test_per_job_permissions_satisfy_the_declares_fact(tmp_path):
 
 
 def test_workflow_level_write_fails_but_id_token_is_excluded_by_construction(tmp_path):
-    """THE disjointness constraint (OD-A21). ci-score's scoped-id-token owns
+    """THE disjointness constraint. ci-score's scoped-id-token owns
     `id-token:` placement; if this fact also counted it, one YAML edit would
     move a ci-score check and a ci-secure fact at once."""
     idt = ("on: [push]\npermissions:\n  id-token: write\n  contents: read\n"
@@ -221,7 +221,7 @@ def test_codeowners_global_star_and_double_star_cover_workflows(tmp_path):
         assert f["outcome"] == "pass", f"{pattern!r} should cover workflows"
 
 
-# --- F4: the OD-A26 sharpened trigger fact -----------------------------------
+# --- F4: the sharpened trigger fact -----------------------------------
 
 def test_bare_untrusted_trigger_passes_the_fact():
     """The 84% problem: 'has a dangerous trigger' is true of nearly every
@@ -237,7 +237,7 @@ def test_bare_untrusted_trigger_passes_the_fact():
                      "sec.trigger.fork-code-uncleared")
         assert f["outcome"] == "pass", (
             "a bare untrusted trigger failed the fact — that is the "
-            "discriminates-nobody defect OD-A26 removed"
+            "discriminates-nobody defect this fact was sharpened to avoid"
         )
 
 
@@ -327,7 +327,7 @@ def test_score_is_none_when_nothing_measured_never_100():
     assert out["score"] is None
     # The reason is READER-VISIBLE (report.py prints it when `facts` is empty),
     # so it must say "coverage gap" WITHOUT reaching for a score the report no
-    # longer renders — owner ruling 2026-08-07.
+    # longer renders — by design.
     assert "coverage gap, not a clean result" in out["reason"]
     assert "/100" not in out["reason"] and "score of 100" not in out["reason"]
 

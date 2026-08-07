@@ -1,7 +1,7 @@
 """The why-these-ten doc and the scanner's active catalog cannot drift apart.
 
 The critical-only contract ships its selection reasoning in
-references/why-these-ten.md (owner requirement, ci-advisor umbrella spec §3).
+references/why-these-ten.md, as the catalog's admission contract requires.
 That document is only trustworthy if it describes the catalog that actually
 scans — so this census binds them: the doc's numbered vector list, the
 catalog's pattern set, and the expected ten are asserted identical. Adding or
@@ -43,7 +43,7 @@ def test_catalog_is_exactly_the_ten():
     entries = load_catalog(_CATALOG)
     assert {e.pattern for e in entries} == THE_TEN, (
         "the shipped catalog drifted from the approved keep-list — "
-        "re-admitting or dropping a vector is an owner decision, and "
+        "re-admitting or dropping a vector is a deliberate decision, and "
         "why-these-ten.md must change in the same PR"
     )
 

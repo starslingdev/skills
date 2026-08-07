@@ -4,7 +4,7 @@ description: >-
   Scans a repo's GitHub Actions workflows for the ten critical CI/CD
   attack vectors — template injection, fork code executed with privileges
   (pwn requests), cache poisoning, impostor action SHAs, secrets dumps,
-  GITHUB_ENV hijack, write-token fork triggers, credentials in
+  GITHUB_ENV hijack, write-token untrusted triggers, credentials in
   caches/artifacts, unverified curl|bash, and dependency install scripts
   running in a job that holds secrets — reports every finding
   with a plain-English attacker scenario, reports pass/fail config
@@ -73,7 +73,7 @@ By default the skill operates on the current working directory.
 # own shell, so a re-derivable path lets each phase reference the same file
 # with no pointer file — and scoping it to the repo root means two ci-secure
 # sessions on DIFFERENT repos can never clobber each other's findings
-# mid-flight (a live dogfood run rendered another repo's report before this
+# mid-flight (an early run rendered another repo's report before this
 # was scoped; the wrong-repo report is the false-clean class the NEVER rules
 # ban). Same repo + same phase in a later shell re-derives the same path.
 ROOT="$(git rev-parse --show-toplevel)"
@@ -203,8 +203,8 @@ Contract lines, all mandatory:
   drawn from the same render. A hand-drawn banner once mis-counted its
   blocks; the pre-drawn line cannot.
 - **Then the config hygiene checks, in plain words — never a number.**
-  ci-secure renders **no security score anywhere a reader sees** (owner
-  ruling, 2026-08-07): a hygiene aggregate printed above ten green vector
+  ci-secure renders **no security score anywhere a reader sees** by
+  design: a hygiene aggregate printed above ten green vector
   rows read as a contradiction, because a grade and a scan measure
   different things. So there is no `Security score:` line to grep and
   none to paste — do not compose one, do not state a ratio, a
@@ -217,7 +217,7 @@ Contract lines, all mandatory:
 - **Then the vector map** — the line-item receipt: every vector named with
   what it found, so the user sees what they are good on — and what did
   not run — without opening the file. A close that shows only the banner
-  made a first dogfood user ask "what did you actually check?"; the
+  made an early user ask "what did you actually check?"; the
   counted summary is not the receipt. Head it exactly
   `Vector scan — 10 attack vectors checked, N hit:` (N from the banner),
   so the receipt names what it is and cannot be read as a grade. Derive
@@ -232,7 +232,7 @@ Contract lines, all mandatory:
   never promoted to ✅. Plain text only — no `**bold**`, no headings, no
   code fences anywhere in the receipt or the question text; the question
   UI supplies its own emphasis, and bolding the whole block made a
-  dogfood close unreadable.
+  close unreadable.
   **Delivery caveat — this is the bug that shipped once already:** prose
   printed in the same turn as a structured question is PREEMPTED by the
   question UI and the user never sees it. So whenever the very next act
@@ -314,7 +314,7 @@ already on screen and the third option is the door to every row:
    group; omit this slot when only one group exists and let the remaining
    options move up)
 3. The overflow slot, sized to what actually remains — offering choices
-   that exist, never a generic door (a first dogfood user asked why "a
+   that exist, never a generic door (an early user asked why "a
    different selection" was offered when the two named options already
    covered everything):
    - three or more groups: **A different selection** — reply with row
@@ -442,10 +442,10 @@ the question to the user before moving on.
    the clean-run options ("Save the report (.md)" / "Don't save"): an
    all-fixed close that says "None, just save" re-shipped the
    answers-nothing bug the zero-findings close already fixed (caught in
-   the first fix-dispatch dogfood). **On a ZERO-FINDINGS run the "None,"
+   testing of the first fix dispatch). **On a ZERO-FINDINGS run the "None,"
    prefix is likewise a bug** — the user was never offered any
    fixes, so "None," answers a question that was not asked (shipped once;
-   a dogfood user read it cold). The clean-run close question instead:
+   a user read it cold). The clean-run close question instead:
    its question TEXT carries the banner line, the plain-words hygiene
    line (no number — Phase 3), the bridging sentence, and the per-vector
    receipt lines (see Phase 3's delivery caveat — prose before the question is
@@ -455,7 +455,7 @@ the question to the user before moving on.
    working tree). The close is UNFINISHED until the question has actually
    been asked; prose that mentions the options and then ends the turn is
    not a question.
-5. Stop. **Do not** commit, push, or open a PR. The user owns review.
+5. Stop. **Do not** commit, push, or open a PR unasked. The user owns review.
    When the user HAS asked for commits/a PR, that authorization is
    per-scope, not standing: if a later fix lands while an earlier fix's
    branch or PR already exists, **ask before bundling** — one structured
@@ -463,8 +463,8 @@ the question to the user before moving on.
    default onto the existing branch. Different findings carry different
    fix risks and revert stories (a confirm-gate edit and an installer
    pin fail in unrelated ways); silently bundling couples their review
-   and their rollback without the user choosing that (first fix-dispatch
-   dogfood pushed Finding 2 onto Finding 1's PR unasked). Any PR the
+   and their rollback without the user choosing that (an early fix
+   dispatch pushed Finding 2 onto Finding 1's PR unasked). Any PR the
    skill drafts leads with a **`## TL;DR` in plain English** — two to
    four sentences a reviewer who never saw the report can act on: what
    the workflow did before, what it does now, and what (if anything)
@@ -485,9 +485,10 @@ actually changed its file.
   `workflow_file` during subagent fixes.** One subagent = one group; the
   orchestrator itself owns the report-file edits (and only those)
   between dispatches.
-- **Never push, commit, or open a PR from inside the skill.** The user
-  reviews the working tree themselves. (Corollary: if the user later
-  asks you to open a PR for the fixes, the PR body must not name the
+- **Never push, commit, or open a PR from inside the skill unless the user
+  explicitly asks.** By default the user reviews the working tree
+  themselves. (Corollary: if the user does
+  ask you to open a PR for the fixes, the PR body must not name the
   vulnerability class being closed or narrate the attack — a public PR
   describing an unfixed-until-now hole is a disclosure. Describe the
   change neutrally: "harden workflow triggers and permissions".)
@@ -522,8 +523,9 @@ actually changed its file.
 The catalog is a **closed set with a written admission test** — the
 outsider-chain filter, incident grounding, and same-day-fix test in
 [references/why-these-ten.md](references/why-these-ten.md). A candidate
-that passes all three is an owner decision, not a drift; the census test
-(`tests/test_census_why_these_ten.py`) fails any catalog/doc mismatch.
+that passes all three is a deliberate catalog change, not a drift; the
+census test (`tests/test_census_why_these_ten.py`) fails any catalog/doc
+mismatch.
 Mechanically: append a `### Pxx.y` section with a METADATA block (schema
 at the top of the catalog), the four prose markers, a fixture the
 detector fires on, AND update why-these-ten.md in the same change.

@@ -1,8 +1,6 @@
 """Shared configuration for ci-secure.
 
-Centralizes constants used by gh_utils, scan, and report. Pulled from the
-sibling starsling-runners-migration skill, trimmed to the subset ci-secure
-actually consumes.
+Centralizes the constants used by gh_utils, scan, and report.
 """
 
 import logging

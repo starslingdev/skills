@@ -594,7 +594,7 @@ _RENDERED_SCORE = (
 
 
 def test_a_rendered_aggregate_score_now_FAILS_the_verifier() -> None:
-    """Flipped invariant (owner ruling 2026-08-07). The old check demanded this
+    """Flipped invariant, by design. The old check demanded this
     exact block; it must now be red, or a future review restores the line that
     read as a contradiction over ten green vector rows."""
     res = vr.check_no_rendered_security_score(_GOOD_HEADER + _RENDERED_SCORE)

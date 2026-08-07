@@ -1,5 +1,5 @@
 
-# --- fixture cloak materialization (panel finding: 43 intentionally-vulnerable
+# --- fixture cloak materialization (43 intentionally-vulnerable
 # workflow files shipped under .github/workflows/ paths, which registry
 # scanners attribute to THIS repo as live automation — the class that once
 # rated ci-score CRITICAL). The TRACKED tree stores them cloaked

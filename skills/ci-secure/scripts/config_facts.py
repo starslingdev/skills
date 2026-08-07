@@ -1,12 +1,12 @@
-"""The scored security config facts (OD-A26) and the security score.
+"""The scored security config facts and the security score.
 
 ci-secure owns the security component of the CI Score. The ten attack vectors
-stay findings-only and never enter this number (OD-A11: several detectors are
-lexical, a public penalty would grade strangers down on unconfirmed matches).
+stay findings-only and never enter this number (several detectors are lexical,
+and a public penalty would grade strangers down on unconfirmed matches).
 What IS scored are deterministic, self-verifiable configuration facts — the
 same "config facts, pass/fail, no judgment calls" shape ci-score uses.
 
-DISJOINTNESS IS A CONSTRAINT TO ENFORCE, NOT ASSUME (OD-A21). Every fact here
+DISJOINTNESS IS A CONSTRAINT TO ENFORCE, NOT ASSUME. Every fact here
 must be disjoint from ci-score's shipped registry: one YAML edit must never
 move a ci-score check and a fact here at the same time. The census lives in
 `references/security-facts.md` and is pinned by test against a frozen manifest
@@ -31,10 +31,10 @@ THE SIX FACTS
                                           checkout sets persist-credentials:
                                           false
 
-F4 is the OD-A26 replacement for "has a dangerous trigger", which is true of
-84% of corpus repos and so discriminates nobody. The tiering is deliberate and
-keeps OD-A11 intact: a bare untrusted trigger is ignored (too common to mean
-anything); a trigger plus a checkout of the attacker's head FAILS THIS FACT
+F4 replaces "has a dangerous trigger", which is true of 84% of corpus repos
+and so discriminates nobody. The tiering is deliberate and keeps the
+findings-only rule intact: a bare untrusted trigger is ignored (too common to
+mean anything); a trigger plus a checkout of the attacker's head FAILS THIS FACT
 (the fork-code detector cannot clear the trigger as inert); the full chain —
 trigger + head checkout + execution — is the P14.9 FINDING, which stays out of
 this number. P14.9's own docstring reserves the middle tier for exactly this
@@ -99,8 +99,10 @@ def _scan() -> ModuleType:
                 sys.modules.pop(n, None)
 
 
-# --- CODEOWNERS (F3) — ported verbatim from the pre-descope tree -------------
-# (deleted in the critical-only descope; restored per the Phase-B contract).
+# --- CODEOWNERS (F3) ---------------------------------------------------------
+# (dropped from the vector catalog in the critical-only descope — a missing
+# CODEOWNERS rule is a presence fact, not an attack chain — and restored here
+# as a scored config fact, which is the honest weight for it.)
 # GitHub's documented precedence: `.github/CODEOWNERS`, then root, then docs/.
 _CODEOWNERS_CANDIDATES = (
     Path(".github/CODEOWNERS"),
@@ -165,7 +167,7 @@ def _write_scopes_at_workflow_level(doc: dict) -> list[str]:
 
     `id-token` is excluded BY CONSTRUCTION: ci-score's
     `ci.security.scoped-id-token` owns that scope, and including it here would
-    let one YAML edit move both numbers — the disjointness OD-A21 forbids.
+    let one YAML edit move both numbers — the disjointness this module forbids.
     `write-all` fails on its own (it grants every scope, id-token included,
     but the edit that fixes it is not the edit scoped-id-token asks for).
     """
@@ -465,8 +467,8 @@ def facts_to_score(facts: list[dict[str, Any]]) -> dict[str, Any]:
     if not scored:
         # Reader-visible: report.py prints this in the "Nothing here was
         # checked" headline when `facts` is empty. Score-free wording on
-        # purpose — the report renders no aggregate at all (owner ruling
-        # 2026-08-07), so "this is NOT a score of 100" would reintroduce the
+        # purpose — the report renders no aggregate at all by design, so
+        # "this is NOT a score of 100" would reintroduce the
         # very framing that was removed. It still says the loud part: an
         # unmeasured block is a coverage gap, never a clean result.
         out["reason"] = ("no config fact could be checked — a coverage gap, "

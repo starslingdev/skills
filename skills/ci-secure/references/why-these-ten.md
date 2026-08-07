@@ -107,9 +107,8 @@ detector) and `curl | bash` (P14.24 — the Codecov chain is real; its potency
 depends on a live condition, which is why its catalog severity stays MEDIUM
 while it remains a critical finding by membership).
 
-The full pre-descope catalog is archived in the maintainer tree (never
-shipped); re-admitting any entry means passing this document's three tests
-and updating the census.
+The removed patterns are not shipped with the skill; re-admitting any entry
+means passing this document's three tests and updating the census.
 
 ## What "critical" means here
 

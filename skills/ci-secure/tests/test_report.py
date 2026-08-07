@@ -28,13 +28,14 @@ from pathlib import Path
 _SKILL_DIR = Path(__file__).resolve().parents[1]
 _SCRIPTS = str(_SKILL_DIR / "scripts")
 
-# pyproject puts BOTH skills' scripts/ dirs on pythonpath, and both define
-# a `config` module — the starsling-runners-migration one resolves first,
-# so a prior test in the suite caches `config` as that module. report.py
-# does `from config import ACTIVITY_RUN_LIMIT` (a ci-secure-only constant),
-# which then fails against the migration config. Import report with this
-# skill's scripts dir first and the sibling `config` evicted, then restore
-# the previous state so later tests in the shared session aren't affected.
+# pyproject puts several skills' scripts/ dirs on pythonpath, and module names
+# collide across them (`scan`, `run`, `record_timing`), with a sibling skill's
+# dir listed first — so a prior test in the suite can leave a same-named module
+# cached in sys.modules. report.py does `from config import ACTIVITY_RUN_LIMIT`
+# (a ci-secure-only constant), which then fails against that module. Import
+# report with this skill's scripts dir first and the cached modules evicted,
+# then restore the previous state so later tests in the shared session aren't
+# affected.
 _saved_config = sys.modules.pop("config", None)
 sys.modules.pop("report", None)
 sys.path.insert(0, _SCRIPTS)
@@ -57,7 +58,7 @@ _RAW_SECTIONS = report._split_catalog_sections(_CATALOG_TEXT)
 _FIX_RECIPE_MARKER = re.compile(r"\*\*Fix recipe\*\*", re.IGNORECASE)
 
 
-# The critical-only catalog (ci-advisor umbrella spec §3). Every one of
+# The critical-only catalog (the catalog's admission contract). Every one of
 # these must be parseable, and nothing outside the set may appear — a
 # re-widened catalog is a scope regression, not a passing test.
 _CRITICAL_PATTERNS = {
@@ -654,7 +655,7 @@ def test_render_plan_cli_prints_json_and_exits_zero(tmp_path, capsys) -> None:
 
 
 # =============================================================================
-# Critical-only contract (ci-advisor umbrella spec §3)
+# Critical-only contract (the catalog's admission contract)
 #
 # Four properties the descoped report must always hold, each of which fails
 # SILENTLY if it regresses: the scope disclaimer, the loud rendering of a
@@ -1544,7 +1545,7 @@ _SCORE_JSON = {
 
 def test_the_config_facts_render_as_a_pass_fail_table_with_NO_aggregate(
 ) -> None:
-    """Owner ruling, 2026-08-07: ci-secure renders no security score anywhere a
+    """By design, ci-secure renders no security score anywhere a
     reader sees. "5 of 6 facts pass" printed above ten green vector rows read
     as a contradiction — the two measure different things. The FACTS stay
     (armor the reader can act on); the number is machine-only, kept in the
@@ -1766,8 +1767,7 @@ def test_catalog_links_use_the_published_url_by_default() -> None:
     public-repo commit) and bare relative paths resolved nowhere (the report
     is not written next to the catalog). The default is the published
     main-branch URL: stable path, stable pattern-id anchors, openable from a
-    report saved anywhere (owner ruling: the public repo ships before this
-    merges)."""
+    report saved anywhere."""
     md = report.render({"findings": [_mk()], "repo": "x/y",
                         "scanned_workflows": 1})
     assert ("https://github.com/starslingdev/skills/blob/main/"

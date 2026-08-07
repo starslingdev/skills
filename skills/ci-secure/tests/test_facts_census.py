@@ -1,4 +1,4 @@
-"""The disjointness census, as a PASS/FAIL guard (OD-A21).
+"""The disjointness census, as a PASS/FAIL guard.
 
 Rule: no single YAML edit may move a ci-score check and a ci-secure fact at
 once. The census is only as good as its coverage (a rule ABOUT data needs a

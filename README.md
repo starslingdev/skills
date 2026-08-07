@@ -62,15 +62,15 @@ is a different question — use `ci-speedup`.
 CI/CD attack vectors** — template injection in `run:` blocks, fork code executed
 with privileges (pwn requests), `pull_request_target` jobs that poison the shared
 cache, impostor action SHAs, whole-context secret dumps, `$GITHUB_ENV` /
-`$GITHUB_PATH` hijack, write tokens granted to untrusted triggers, credential
-files swept into caches and artifacts, unverified `curl | bash`, and dependency
-install scripts running in a job that holds secrets. Every finding comes with the
-exact file and line, the evidence quoted from your own workflow, and a
-plain-English **"what an attacker could do"** scenario — then the skill offers to
-fix the ones you pick, dispatching a subagent per finding group that applies the
-[catalog](skills/ci-secure/references/security-patterns.md) recipe and leaves the
-diff in your working tree to review. It never commits, pushes, or opens a PR.
-Alongside the findings it reports a short set of pass/fail **config hygiene
+`$GITHUB_PATH` hijack, `pull-requests: write` granted to untrusted triggers,
+credential files swept into caches and artifacts, unverified `curl | bash`, and
+dependency install scripts running in a job that holds secrets. Every finding
+comes with the exact file and line, the evidence taken from your own workflow,
+and a plain-English **"what an attacker could do"** scenario — then the skill
+offers to fix the ones you pick, dispatching a subagent per finding group that
+applies the [catalog](skills/ci-secure/references/security-patterns.md) recipe
+and leaves the diff in your working tree to review. It never commits, pushes, or
+opens a PR on its own. Alongside the findings it reports a short set of pass/fail **config hygiene
 checks** (declared `permissions:`, CODEOWNERS coverage of `.github/workflows/`,
 `secrets: inherit`, credential-persisting checkouts, and more).
 
@@ -113,16 +113,20 @@ $ci-speedup      # or $ci-score, $ci-secure
 
 **Requirements:**
 
-- An authenticated **GitHub CLI** (`gh auth login`): the run-history data pass
-  reads the audited repo's Actions run/job/log data through read-only `gh` API
-  calls. A token with read access to the repo's Actions is enough.
+- An authenticated **GitHub CLI** (`gh auth login`) — **required by `ci-speedup`
+  only.** Its run-history data pass reads the audited repo's Actions
+  run/job/log data through read-only `gh` API calls; a token with read access to
+  the repo's Actions is enough. `ci-score` never uses the network at all, and
+  `ci-secure` treats `gh` as optional: with it, the impostor-SHA check and the
+  dormancy notes run; without it, the scan still runs and the report says which
+  check was skipped.
 - **`python3` (3.9 or newer)** and **PyYAML**: the bundled scripts are
   stdlib-only apart from one third-party dependency, **PyYAML**, which the
   scanner uses to parse your workflow YAML. Install it with `pip install pyyaml`
   (or `python3 -m pip install pyyaml`).
 
-**What it does:** it defaults to the repo you're in (and confirms the target with
-you first), samples your recent CI runs over the `gh` API, and closes by leading
+**What `ci-speedup` does:** it defaults to the repo you're in (and confirms the
+target with you first), samples your recent CI runs over the `gh` API, and closes by leading
 with the biggest measured lever, the slowest check gating your merge and how much
 developer wait it costs, then lets you pick what to fix. The full markdown report
 is **opt-in**: it is rendered and integrity-checked internally on every run, and

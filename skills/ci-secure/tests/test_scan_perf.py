@@ -13,9 +13,9 @@ import pytest
 _SKILL_DIR = Path(__file__).resolve().parents[1]
 _SCRIPTS = str(_SKILL_DIR / "scripts")
 
-# scan.py does `from config import ...`; the sibling migration skill also ships
-# a `config`, so evict cached modules and import with THIS skill's scripts/
-# first (mirrors test_report.py).
+# scan.py does `from config import ...`; a sibling skill also ships a `scan`
+# module on the shared pythonpath, so evict cached modules and import with
+# THIS skill's scripts/ first (mirrors test_report.py).
 _saved = {m: sys.modules.pop(m, None) for m in ("config", "scan")}
 sys.path.insert(0, _SCRIPTS)
 try:

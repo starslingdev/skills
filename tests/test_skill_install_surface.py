@@ -15,8 +15,11 @@ added loop tests/scripts (``dogfood-retry.test.mjs``, ``aggregate_lessons.py``, 
 straight back into ``skills/ci-speedup/``. A name-pattern catch-all below trips on the
 *next* such file even if it isn't in the explicit list yet.
 
-Scope: ci-speedup only. ``ci-secure``'s ``MAINTAINERS.md`` / ``references/loop-*`` leak
-the same way and are a documented follow-up (not relocated in this change).
+Scope: ci-speedup only. Each sibling skill carries its own purpose-built guard,
+because each one's leak shape differs — ``test_ci_score_install_surface.py`` (the
+graded third-party calibration corpus) and ``test_ci_secure_install_surface.py``
+(loop infra, runtime captures, and workflow-shaped fixtures tracked at real
+``.github/`` paths). This file is deliberately not parametrized over them.
 """
 from __future__ import annotations
 

