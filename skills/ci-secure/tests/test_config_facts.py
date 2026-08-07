@@ -80,6 +80,13 @@ def _repo(tmp_path: Path, workflows: dict[str, str],
     files = []
     for name, body in workflows.items():
         f = wf_dir / name
+        # Fixture WORKFLOW YAML — trigger names, `permissions:` blocks, `uses:`
+        # refs. Never a credential; there is nothing here to encrypt. Name the
+        # variables that hold these bodies for what they are (a trigger, a
+        # workflow) and not for their trust level: a static analyzer classifies
+        # data by the name of the variable carrying it, so a fixture called
+        # `trusted` reads to CodeQL as a stored secret written to disk in the
+        # clear, and the shipped tree collects a high-severity false positive.
         f.write_text(body)
         files.append(f)
     if codeowners is not None:
@@ -241,15 +248,16 @@ def test_persisted_credentials_fail_only_on_untrusted_triggers(tmp_path):
     """A plain pull_request checkout that persists credentials is GitHub's
     default and is not this fact's business — the exposure needs an untrusted
     trigger carrying the base repo's token."""
-    trusted = ("on: [pull_request]\npermissions: {contents: read}\n"
-               "jobs:\n  t:\n    runs-on: ubuntu-latest\n"
-               "    steps: [{uses: actions/checkout@v4}, {run: make}]\n")
-    root, files = _repo(tmp_path, {"ci.yml": trusted})
+    on_pull_request = ("on: [pull_request]\npermissions: {contents: read}\n"
+                       "jobs:\n  t:\n    runs-on: ubuntu-latest\n"
+                       "    steps: [{uses: actions/checkout@v4}, {run: make}]\n")
+    root, files = _repo(tmp_path, {"ci.yml": on_pull_request})
     assert _outcome(cf.compute_config_facts(root, files, []),
                     "sec.checkout.credentials-scoped")["outcome"] == "pass"
 
-    untrusted = trusted.replace("[pull_request]", "[pull_request_target]")
-    root2, files2 = _repo(tmp_path / "b", {"ci.yml": untrusted})
+    on_pr_target = on_pull_request.replace("[pull_request]",
+                                           "[pull_request_target]")
+    root2, files2 = _repo(tmp_path / "b", {"ci.yml": on_pr_target})
     assert _outcome(cf.compute_config_facts(root2, files2, []),
                     "sec.checkout.credentials-scoped")["outcome"] == "fail"
 
