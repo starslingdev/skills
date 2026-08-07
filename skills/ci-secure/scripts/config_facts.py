@@ -143,6 +143,20 @@ _WORKFLOWS_CODEOWNER_PATTERNS = (
     r"^\s*\*(?:\s|$)",
 )
 
+# A matching path is only half a rule. A CODEOWNERS line that names a path and
+# NO owner (`.github/workflows/` on its own) does not assign a reviewer — in
+# GitHub's semantics an ownerless pattern removes ownership for those paths, so
+# it is the opposite of what this row claims. Matching the path alone reported
+# such a repo as covered.
+#
+# An owner is a `@user`, a `@org/team`, or an email address. Anchored on a word
+# boundary at each end so a stray `@` inside a path fragment is not read as an
+# owner.
+_CODEOWNERS_OWNER = re.compile(
+    r"(?:^|\s)(?:@[A-Za-z0-9][A-Za-z0-9._/-]*"
+    r"|[^@\s]+@[^@\s]+\.[A-Za-z]{2,})(?=\s|$)"
+)
+
 
 def _codeowners_covers_workflows(root: Path) -> tuple[bool, str]:
     found: Path | None = None
@@ -158,13 +172,23 @@ def _codeowners_covers_workflows(root: Path) -> tuple[bool, str]:
         text = found.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return False, f"{found.name} unreadable: {exc}"
+    rel = str(found.relative_to(root))
+    ownerless = False
     for raw_line in text.splitlines():
         line = raw_line.split("#", 1)[0]
         for pat in _WORKFLOWS_CODEOWNER_PATTERNS:
-            if re.match(pat, line):
-                rel = str(found.relative_to(root))
+            m = re.match(pat, line)
+            if not m:
+                continue
+            if _CODEOWNERS_OWNER.search(line[m.end():]):
                 return True, f"`{rel}` covers `.github/workflows/`"
-    rel = str(found.relative_to(root))
+            # Keep scanning: a later line may carry a real owner. Remember the
+            # near-miss so the failure names it rather than reading as "you
+            # wrote nothing", which sends the reader looking in the wrong place.
+            ownerless = True
+    if ownerless:
+        return False, (f"`{rel}` matches `.github/workflows/` but names no "
+                       "owner, so the rule assigns no reviewer")
     return False, (f"`{rel}` has no entry covering `.github/workflows/`")
 
 

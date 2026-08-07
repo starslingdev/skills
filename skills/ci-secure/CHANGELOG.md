@@ -48,6 +48,14 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-07** — **A CODEOWNERS path with no owner no longer counts as
+  coverage.** `.github/workflows/` written on its own matched the path rule and
+  graded as covered, but a pattern with no owners assigns no reviewer — in
+  GitHub's semantics it removes ownership for those paths, the opposite of what
+  the row claims. A matching line must now also name an owner (`@user`,
+  `@org/team`, or an email); when one matches and names none, the failure says
+  so rather than reading as "no entry", which sent the reader looking in the
+  wrong place.
 - **2026-08-07** — **A CODEOWNERS rule that owns only some workflows no longer
   counts as covering the directory.** A restricted glob such as
   `.github/workflows/*release*.yml` owns the release workflows and leaves every

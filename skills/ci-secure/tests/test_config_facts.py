@@ -213,6 +213,41 @@ def test_codeowners_restricted_glob_does_not_cover_the_directory(tmp_path):
             f"{rule!r} owns some workflows, not the directory")
 
 
+def test_codeowners_rule_without_an_owner_does_not_cover_workflows(tmp_path):
+    """A path with no owner assigns no reviewer — in GitHub's semantics an
+    ownerless pattern REMOVES ownership for those paths. Matching the path
+    alone reported the opposite of what the row claims."""
+    for i, rule in enumerate((".github/workflows/\n",
+                              "/.github/workflows/*\n",
+                              ".github/**\n",
+                              "*\n")):
+        root, files = _repo(tmp_path / f"o{i}", {"ci.yml": _SAFE_WF},
+                            codeowners=rule)
+        f = _outcome(cf.compute_config_facts(root, files, []),
+                     "sec.codeowners.workflows")
+        assert f["outcome"] == "fail", f"{rule!r} names no owner"
+    # The failure names the near-miss rather than reading as "you wrote
+    # nothing" — otherwise the reader looks in the wrong place.
+    root, files = _repo(tmp_path / "msg", {"ci.yml": _SAFE_WF},
+                        codeowners=".github/workflows/\n")
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert "names no owner" in f["evidence"] + f.get("fact", ""), f
+
+
+def test_codeowners_owner_forms_are_recognized(tmp_path):
+    """Teams and email owners count, and a later owned line rescues an earlier
+    ownerless one."""
+    for i, rule in enumerate((".github/workflows/ @org/sec-team\n",
+                              ".github/workflows/ sec@example.com\n",
+                              ".github/workflows/\n.github/workflows/ @sec\n")):
+        root, files = _repo(tmp_path / f"w{i}", {"ci.yml": _SAFE_WF},
+                            codeowners=rule)
+        f = _outcome(cf.compute_config_facts(root, files, []),
+                     "sec.codeowners.workflows")
+        assert f["outcome"] == "pass", f"{rule!r} names an owner"
+
+
 def test_codeowners_directory_and_glob_forms_cover_workflows(tmp_path):
     """The forms that DO cover the directory keep passing — the tightened rule
     must not start failing correctly-configured repos."""
