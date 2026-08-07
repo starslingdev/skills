@@ -115,11 +115,19 @@ _WORKFLOWS_CODEOWNER_PATTERNS = (
     # `.github/workflows/** @team`. A rule naming ONE file
     # (`.github/workflows/release.yml @team`) protects that file and nothing
     # else; matching on the bare prefix graded such a repo as covered, which is
-    # a false clean on the exact claim this fact makes. A partial glob
+    # a false clean on the exact claim this fact makes. An extension glob
     # (`*.yml`) is still accepted as directory-wide intent, even though a
     # `.yaml` workflow would slip it — failing a correctly-configured repo over
     # that costs more than it catches.
-    r"^\s*/?\.github/workflows/(?:\*\S*)?(?:\s|$)",
+    #
+    # A RESTRICTED glob is the same false clean as the single-file rule, one
+    # step removed: `.github/workflows/*release*.yml` owns the release
+    # workflows and leaves every other workflow in the directory unowned. So
+    # the accepted glob shapes are enumerated rather than left to `\S*` —
+    # `*`, `**`, `**/*`, and an extension suffix on any of those — and a glob
+    # carrying any other literal text in the filename fails.
+    r"^\s*/?\.github/workflows/"
+    r"(?:\*{1,2}(?:/\*{1,2})?(?:\.[A-Za-z0-9_-]+)?)?(?:\s|$)",
     # `.github/**` recurses and covers workflows; single-star `.github/*` does
     # NOT (gitignore semantics: `*` doesn't cross `/`) and is deliberately
     # absent — including it produced false negatives.

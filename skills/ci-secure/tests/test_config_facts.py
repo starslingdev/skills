@@ -197,6 +197,22 @@ def test_codeowners_rule_for_one_workflow_file_does_not_cover_the_directory(tmp_
         assert f["outcome"] == "fail", f"{rule!r} covers one file, not the dir"
 
 
+def test_codeowners_restricted_glob_does_not_cover_the_directory(tmp_path):
+    """A glob that names part of a filename owns only the workflows matching
+    it. `.github/workflows/*release*.yml` leaves ci.yml, test.yml and every
+    other sibling merging on the same approvals as any other change — the same
+    false clean as the single-file rule, one step removed."""
+    for i, rule in enumerate((".github/workflows/*release*.yml @sec\n",
+                              "/.github/workflows/*-deploy.yml @sec\n",
+                              ".github/workflows/**/*release*.yml @sec\n")):
+        root, files = _repo(tmp_path / f"g{i}", {"ci.yml": _SAFE_WF},
+                            codeowners=rule)
+        f = _outcome(cf.compute_config_facts(root, files, []),
+                     "sec.codeowners.workflows")
+        assert f["outcome"] == "fail", (
+            f"{rule!r} owns some workflows, not the directory")
+
+
 def test_codeowners_directory_and_glob_forms_cover_workflows(tmp_path):
     """The forms that DO cover the directory keep passing — the tightened rule
     must not start failing correctly-configured repos."""
@@ -204,7 +220,9 @@ def test_codeowners_directory_and_glob_forms_cover_workflows(tmp_path):
                               "/.github/workflows/ @sec\n",
                               ".github/workflows/* @sec\n",
                               ".github/workflows/** @sec\n",
-                              ".github/workflows/*.yml @sec\n")):
+                              ".github/workflows/*.yml @sec\n",
+                              ".github/workflows/**/* @sec\n",
+                              ".github/workflows/**/*.yaml @sec\n")):
         root, files = _repo(tmp_path / f"r{i}", {"ci.yml": _SAFE_WF},
                             codeowners=rule)
         f = _outcome(cf.compute_config_facts(root, files, []),
