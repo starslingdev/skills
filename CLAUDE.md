@@ -1,13 +1,17 @@
 # starslingdev/skills
 
-Public Claude Code skills from StarSling. Today the repo ships one skill,
-`ci-speedup`, in its own self-contained directory under `skills/`.
+Public Claude Code skills from StarSling. The repo ships three skills, each in
+its own self-contained directory under `skills/`: `ci-speedup` (measured
+speed / runner-minute waste), `ci-score` (configuration best practices), and
+`ci-secure` (the ten critical CI/CD attack vectors).
 
 ## Repository layout
 
 ```
 skills/
-  ci-speedup/                       # the installable skill (self-contained)
+  ci-score/                         # skill: configuration best practices (the CI Score)
+  ci-secure/                        # skill: the ten critical CI/CD attack vectors
+  ci-speedup/                       # skill: measured speed waste (self-contained)
     SKILL.md                        # the skill's canonical contract — read it first
     CHANGELOG.md                    # dated, PR-referenced change history (keep updated)
     ARCHITECTURE.md                 # how the pipeline fits together

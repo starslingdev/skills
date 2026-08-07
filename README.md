@@ -3,8 +3,9 @@
 Public agent skills from StarSling. Each skill lives in its own self-contained
 directory under `skills/<name>/` and installs individually.
 
-This repo ships two skills: **`ci-speedup`**
-([overview](https://starsling.dev/ci-speedup)) and **`ci-score`**.
+This repo ships three skills: **`ci-speedup`**
+([overview](https://starsling.dev/ci-speedup)), **`ci-score`**, and
+**`ci-secure`**.
 
 ## ci-speedup: measured CI audits for GitHub Actions
 
@@ -55,6 +56,39 @@ nothing further. Everything runs locally from a checkout — **no network access
 nothing sent anywhere.** For measured wall-clock and runner-minute audits, that
 is a different question — use `ci-speedup`.
 
+## ci-secure: the ten critical CI/CD attack vectors
+
+`ci-secure` scans a repository's GitHub Actions workflows for the **ten critical
+CI/CD attack vectors** — template injection in `run:` blocks, fork code executed
+with privileges (pwn requests), `pull_request_target` jobs that poison the shared
+cache, impostor action SHAs, whole-context secret dumps, `$GITHUB_ENV` /
+`$GITHUB_PATH` hijack, write tokens granted to untrusted triggers, credential
+files swept into caches and artifacts, unverified `curl | bash`, and dependency
+install scripts running in a job that holds secrets. Every finding comes with the
+exact file and line, the evidence quoted from your own workflow, and a
+plain-English **"what an attacker could do"** scenario — then the skill offers to
+fix the ones you pick, dispatching a subagent per finding group that applies the
+[catalog](skills/ci-secure/references/security-patterns.md) recipe and leaves the
+diff in your working tree to review. It never commits, pushes, or opens a PR.
+Alongside the findings it reports a short set of pass/fail **config hygiene
+checks** (declared `permissions:`, CODEOWNERS coverage of `.github/workflows/`,
+`secrets: inherit`, credential-persisting checkouts, and more).
+
+**It is deliberately not comprehensive, and it renders no security score.** The
+catalog is a closed set of ten vectors, each a complete outsider → compromise
+chain with a real incident behind it (the admission test and the rejection record
+are in
+[references/why-these-ten.md](skills/ci-secure/references/why-these-ten.md));
+every report repeats *"critical exploit-chain checks only — this is not a
+comprehensive audit."* There is no grade, ratio, or `N/100` anywhere a reader
+sees: findings are open doors and hygiene checks are armor, they move
+independently, and neither is a score. **Zero findings is a first-class result**
+— a clean run says so plainly instead of padding with lesser observations, and a
+check that could not run is always reported as *did not run*, never as a pass.
+The scan runs locally in seconds from your checkout; `gh` is optional and used
+only for the impostor-SHA check and for noting which findings sit in dormant
+workflows.
+
 ## Install
 
 ```bash
@@ -69,10 +103,10 @@ Then invoke it with your agent:
 
 ```bash
 # Claude Code
-/ci-speedup
+/ci-speedup      # or /ci-score, /ci-secure
 
 # Codex
-$ci-speedup
+$ci-speedup      # or $ci-score, $ci-secure
 ```
 
 ## First run
@@ -106,6 +140,16 @@ adaptive two-pass job-list sample). It sends **nothing** to StarSling or any
 third party. See [SECURITY.md](SECURITY.md) for the data-handling model.
 
 ## Learn more
+
+**ci-secure:**
+
+- [`skills/ci-secure/SKILL.md`](skills/ci-secure/SKILL.md): the full skill
+  contract.
+- [`skills/ci-secure/references/security-patterns.md`](skills/ci-secure/references/security-patterns.md):
+  the ten-vector catalog — what each vector is, how it is detected, and its fix
+  recipe. Every finding in a report links back into it.
+- [`skills/ci-secure/references/why-these-ten.md`](skills/ci-secure/references/why-these-ten.md):
+  the admission test for the catalog, and the record of what was rejected.
 
 **ci-score:**
 
