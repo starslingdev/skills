@@ -1,0 +1,19 @@
+# Fixture for P14.14 — whole-context dump via toJSON.
+# Three dump shapes: secrets, github, env. Should fire once each.
+
+name: leak
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  leak:
+    runs-on: ubuntu-latest
+    env:
+      ALL_SECRETS: ${{ toJSON(secrets) }}
+      EVERYTHING: ${{ toJson(github) }}
+    steps:
+      - run: echo "${{ toJSON(env) }}"

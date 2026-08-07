@@ -1,0 +1,24 @@
+# Positive-coverage fixture for P14.1 — bare-string `on:` shape.
+#
+# `_on_trigger_names` supports three legal shapes for the `on:` key:
+# bare string, list, and mapping. The existing P14.1 fixtures cover
+# the mapping shape; this file exercises the string shape. A
+# regression that broke `isinstance(on_node, str)` handling would go
+# undetected without it.
+#
+# Scanner expectation: exactly 1 P14.1 finding on this file
+# (pull_request_target).
+
+name: pr-target
+
+on: pull_request_target
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - run: echo hi

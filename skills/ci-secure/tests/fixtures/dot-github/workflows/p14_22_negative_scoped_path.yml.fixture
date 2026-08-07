@@ -1,0 +1,26 @@
+# Negative-lookalike fixture for P14.22 — the SAME upload-artifact action,
+# scoped to a specific output directory (`path: dist/`). A scoped path
+# does not sweep in credential files, so the finding must not fire.
+#
+# Scanner expectation: zero P14.22 findings on this file.
+
+name: build
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29
+        with:
+          persist-credentials: false  # isolates P14.22 from P14.16
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        with:
+          name: build
+          path: dist/

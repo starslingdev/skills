@@ -1,0 +1,27 @@
+# Negative-lookalike fixture for P14.23 — the gate written correctly,
+# two ways that must BOTH stay silent:
+#   1. one bare unwrapped boolean expression (GitHub evaluates a bare
+#      if: value as an expression automatically), and
+#   2. one fully-wrapped single `${{ ... }}` expression — the dangerous
+#      near-miss, one char away from the embedded-text always-true form.
+# Neither has a literal-text/${{ }} mix or a double ${{ }}.
+#
+# Scanner expectation: zero P14.23 findings on this file.
+
+name: gated
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - if: github.actor == 'maintainer' && github.ref == 'refs/heads/main'
+        run: ./deploy.sh
+      - if: ${{ github.ref == 'refs/heads/main' }}
+        run: ./notify.sh

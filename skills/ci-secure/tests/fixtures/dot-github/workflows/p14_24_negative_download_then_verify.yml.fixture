@@ -1,0 +1,23 @@
+# Negative-lookalike fixture for P14.24 — the SAME installer, fetched the
+# safe way: download to a file, verify a known checksum, then run the
+# local copy. No fetch-and-pipe-to-shell, so the finding must not fire.
+#
+# Scanner expectation: zero P14.24 findings on this file.
+
+name: setup
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: |
+          curl -fsSL -o install.sh https://get.example.com/install.sh
+          echo "0000000000000000000000000000000000000000000000000000000000000000  install.sh" | sha256sum -c -
+          bash install.sh

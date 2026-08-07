@@ -1,0 +1,27 @@
+# Regression fixture for the yaml-run-injection line-attribution fix
+# (2026-05-13). The same template expression appears twice in the file:
+# first in an env: block (safe, must not be the reported location),
+# then in a run: block (the actual shell sink).
+#
+# Scanner expectation: one P14.10 finding, line points at the run:
+# expansion (line 27), not the env: expansion (line 22).
+
+name: deploy
+
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    env:
+      PR_TITLE_SAFE: ${{ github.event.pull_request.title }}
+    steps:
+      - run: |
+          echo "title via env: $PR_TITLE_SAFE"
+      - run: |
+          echo "title via run: ${{ github.event.pull_request.title }}"

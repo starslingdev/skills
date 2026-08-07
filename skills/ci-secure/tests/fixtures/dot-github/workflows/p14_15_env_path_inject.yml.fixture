@@ -1,0 +1,22 @@
+# Fixture for P14.15 — attacker-controlled write to $GITHUB_ENV / $GITHUB_PATH.
+# Both PATH (via $GITHUB_ENV) and a direct $GITHUB_PATH append use PR-supplied text.
+
+name: env-inject
+
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  poison:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Poison PATH via $GITHUB_ENV
+        run: |
+          echo "PATH=${{ github.event.pull_request.title }}:$PATH" >> "$GITHUB_ENV"
+
+      - name: Poison $GITHUB_PATH directly
+        run: echo "${{ github.head_ref }}" >> "$GITHUB_PATH"

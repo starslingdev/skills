@@ -1,0 +1,26 @@
+# Negative-coverage fixture for P14.8 — a hardened workflow that
+# explicitly sets `id-token: none` at workflow scope.
+#
+# Scanner expectation: zero P14.8 findings on this file. The detector's
+# `yaml_value: write` filter (added 2026-05-13) is what makes this safe.
+# Without the filter, the scanner used to direct the user to undo a
+# mitigation they had correctly applied.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: none
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29
+      - run: pytest -v

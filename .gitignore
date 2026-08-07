@@ -70,3 +70,11 @@ uv.lock
 # and may carry repo internals or tokens. NEVER commit this directory; git cannot
 # restore it if deleted. See maintainers/ci-speedup/MAINTAINERS.md.
 .ci-speedup-dogfood/
+
+# ci-secure test/eval fixtures are stored CLOAKED (as `dot-github/*.fixture`
+# sources) and materialized into real `.github/` dirs at test time by the
+# ci-secure conftest. The materialized copies are runtime output — never
+# tracked, so registry/marketplace scanners never see workflow-shaped attack
+# strings in the repo tree.
+skills/ci-secure/tests/fixtures/.github/
+skills/ci-secure/evals/files/*/.github/

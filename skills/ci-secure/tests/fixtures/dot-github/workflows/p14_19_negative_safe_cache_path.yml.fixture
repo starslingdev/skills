@@ -1,0 +1,24 @@
+# Negative-lookalike for P14.19 — the same cache action, caching a build
+# directory (~/.npm), not a credential file. `.npm` is the npm cache dir;
+# `.npmrc` (with `r-c`) would be the credential file. The detector must
+# distinguish them.
+#
+# Scanner expectation: zero P14.19 findings.
+
+name: ci
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}

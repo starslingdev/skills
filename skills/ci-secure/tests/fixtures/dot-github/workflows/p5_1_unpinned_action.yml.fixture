@@ -1,0 +1,21 @@
+# Fixture for P5.1 — unpinned action references.
+# Mixes branch-floating (@main), tag-pinned (@v4), and SHA-pinned uses.
+# Only the first two should fire P5.1.
+# Also has no top-level `permissions:` block — fires P5.5.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: some-org/setup@main                                            # P5.1 HIGH (branch)
+      - uses: actions/checkout@v4                                             # P5.1 MEDIUM (tag)
+      - uses: actions/setup-node@v4.0.2                                       # P5.1 MEDIUM (tag)
+      - uses: actions/cache@a5ac7e51b41094c92402da3b24376905380afc29          # SHA — not flagged
+      - run: npm ci && npm test

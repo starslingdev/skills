@@ -1,0 +1,34 @@
+# Negative-coverage fixture for P14.1.
+#
+# Confirms the yaml-on-trigger detector does NOT fire on:
+#   - `permissions: { issues: write, pull-requests: write }` — same word, wrong scope
+#   - step `with: { issues: ... }` action inputs
+#   - environment names matching trigger keywords
+#
+# Scanner expectation: zero P14.1 findings on this file. Other detectors
+# may still fire (e.g. P14.18 stays manual). If a future refactor of the
+# detector lets `permissions:` or `with:` blocks bleed back into P14.1,
+# the oracle test in tests/test_scan.py will catch it.
+
+name: triage
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  discussion: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    environment: fork
+    steps:
+      - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29
+      - uses: some-bot/action@a5ac7e51b41094c92402da3b24376905380afc29
+        with:
+          issues: "${{ github.event.issue.number }}"
+          watch: "all"

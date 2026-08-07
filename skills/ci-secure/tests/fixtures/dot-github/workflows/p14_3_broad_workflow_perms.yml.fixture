@@ -1,0 +1,19 @@
+# Positive fixture for P14.3 — top-level permissions grant `contents: write`
+# to the whole workflow; the `build` job has no permissions block of its
+# own, so it silently inherits write access it doesn't need.
+#
+# Scanner expectation: one P14.3 finding.
+
+name: ci
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build

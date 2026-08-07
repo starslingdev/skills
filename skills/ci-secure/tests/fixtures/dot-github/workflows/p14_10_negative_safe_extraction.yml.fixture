@@ -1,0 +1,31 @@
+# Negative-coverage fixture for P14.10.
+#
+# Confirms the yaml-run-injection detector does NOT fire when
+# `${{ github.event.* }}` expressions appear only in `env:` and `with:`
+# blocks, never in a `run:` scalar. This is the catalog's documented
+# safe extraction pattern: hoist the untrusted value into an env var
+# at template-render time, then dereference the env var (as a shell
+# variable) inside `run:`.
+#
+# Scanner expectation: zero P14.10 findings on this file.
+
+name: safe-extraction
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      ISSUE_TITLE: ${{ github.event.issue.title }}
+      HEAD_REF: ${{ github.head_ref }}
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: echo "title=$ISSUE_TITLE ref=$HEAD_REF"

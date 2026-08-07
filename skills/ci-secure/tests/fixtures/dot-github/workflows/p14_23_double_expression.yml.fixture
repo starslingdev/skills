@@ -1,0 +1,23 @@
+# Positive fixture for P14.23, second form — two separate `${{ }}`
+# expressions chained in one `if:`. GitHub string-interpolates the pair
+# into a non-empty (truthy) string, so the gate is always true. Distinct
+# from the embedded-text form in p14_23_if_always_true.yml.
+#
+# Scanner expectation: one P14.23 finding on the malformed if: line.
+
+name: gated
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # WRONG: two ${{ }} blocks → string interpolation → always truthy.
+      - if: ${{ github.event_name == 'push' }} && ${{ github.ref == 'refs/heads/main' }}
+        run: ./deploy.sh

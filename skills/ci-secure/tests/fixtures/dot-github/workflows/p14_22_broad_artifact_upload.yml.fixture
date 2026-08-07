@@ -1,0 +1,26 @@
+# Positive fixture for P14.22 — an upload-artifact step that uploads the
+# entire workspace (`path: .`), which would sweep in any .env / *.pem /
+# credential file present at upload time.
+#
+# Scanner expectation: one P14.22 finding on the build job.
+
+name: build
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29
+        with:
+          persist-credentials: false  # isolates P14.22 from P14.16
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        with:
+          name: build
+          path: .

@@ -1,0 +1,30 @@
+# Positive fixture for P14.16 (yaml-job-correlated:
+# checkout-persist-and-upload). The `build` job checks out with the
+# default `persist-credentials: true` AND uploads an artifact in the
+# same job — `GITHUB_TOKEN` ships out inside `.git/config` for the
+# artifact's retention window.
+#
+# Scanner expectation: one P14.16 finding on the `build` job.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        # No `persist-credentials: false` here — token gets embedded
+        # into .git/config inside the workspace.
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          name: build-output
+          path: .   # includes .git/ and the embedded GITHUB_TOKEN

@@ -1,0 +1,971 @@
+# Changelog
+
+All notable changes to the **ci-secure** skill. The skill is unversioned;
+entries are dated (UTC) and reference the PRs that landed them. Format loosely
+follows [Keep a Changelog](https://keepachangelog.com). Backfilled from git
+history.
+
+> **Note on PR/issue numbers.** Entries below reference the pull requests and
+> issues of the skill's pre-public development archive, which is not part of
+> this repository's history. The numbers are kept for the maintainers' audit
+> trail; they are not links you can follow here.
+
+
+## [Unreleased]
+
+### Changed
+
+- **2026-08-07** — **No security score is rendered anywhere a reader sees.**
+  The report used to print `Security score: N/100 — X of Y scored facts pass`,
+  and the close pasted that line. Live dogfood read it as a contradiction:
+  "5 of 6 facts pass" sat directly above ten green vector rows, and the two
+  measure different things — the vectors are open doors, the facts are armor.
+  A hygiene aggregate labelled "Security score" also overclaims what six
+  configuration observations can say. The six facts now render as a
+  `## 🧰 Config hygiene checks — pass/fail` table with a preamble stating that
+  they are not attack vectors and are scored nowhere in this report, and the
+  close names failing checks in plain words ("one hygiene gap: no reviewer
+  rule covers your workflow files") or says all pass. **The findings JSON
+  keeps its shape** — `security_score` has the same keys, `fact_id`s,
+  outcomes and aggregate, so ci-advisor still blends from it; only prose the
+  report prints changed (one `fact` sentence and the crash-path `reason`,
+  which had to stop naming a score the report no longer renders), so bind to
+  the ids, not the sentences. Quantification is deferred to ci-advisor, where
+  the blend context carries the denominators. The verifier invariant is FLIPPED:
+  it now prohibits any rendered aggregate and requires the pass/fail table.
+  This reverses a rendering added on 2026-08-05; the reasoning for that change
+  ("a score computed but not shown is a number the reader cannot check") is
+  answered rather than overlooked — the number is not for the reader — and
+  both the computation site and the verifier now say so, so the round trip is
+  not run a third time.
+
+### Fixed
+
+- **2026-08-07** — **Five report-accuracy and readability fixes.** (1) The
+  P14.25 platform paragraph pointed at "the evidence above" and "the
+  per-manager list above"; in report position the evidence renders BELOW it
+  and the per-manager list is not rendered at all — both now read
+  position-neutrally ("the install command quoted in this finding's
+  evidence", "the catalog entry's per-manager list"). (2) The methodology
+  table gains a **What is not scanned** row: a composite action the workflow
+  calls (`uses: ./.github/actions/…`) is a separate file this scan does not
+  open, so an install or a secret dump inside one is invisible while the
+  calling line looks clean — the shape cal.com and grafana both ship.
+  (3) The pnpm build allowlist is now also read from `package.json`'s
+  `pnpm.onlyBuiltDependencies`, where adobe/leonardo declares it; the note
+  said "not declared" on a repo that declares it. Note specificity only — no
+  suppression changes. (4) The copy-paste agent prompts name the findings
+  JSON by FULL path instead of basename: the file lives under `$TMPDIR`, so a
+  dispatched subagent was left guessing a directory. The surrounding PROSE
+  still uses the basename — a saved report outlives its tmp dir, and the
+  no-scratch-path report invariant is unchanged.
+  (5) Cosmetics: the config-hygiene table heading is 🧰, not 🔢 — a numeral
+  glyph over a preamble that says the rows are scored nowhere; and the
+  methodology's catalog row links the public main-branch URL instead of
+  quoting an in-repo path the reader cannot open.
+
+- **2026-08-07** — **A reusable workflow that runs on every pull request is
+  no longer called dormant.** GitHub attributes a `workflow_call` run to the
+  CALLING workflow, so `/actions/workflows/<file>/runs` answers 200 with
+  `total_count: 0` for a reusable workflow that executes constantly.
+  vercel/next.js's `pr_stack_optimizer.yml` and microsoft/playwright's
+  `tests_docker.yml` were both marked dormant on that empty history — which
+  printed "Every affected workflow is dormant … verify before prioritizing"
+  over live HIGH findings and, worse, set `dormant: true` in the render plan,
+  which DROPS the group from the `all` fix selection (next.js's only HIGH was
+  silently skipped). A workflow whose `on:` declares nothing but
+  `workflow_call` and has zero registered runs is now reported as UNKNOWN
+  activity — the existing `unavailable` semantics: not counted dormant, not
+  excluded from `all`, and the activity row and header say the runs are
+  attributed to the calling workflow. A reusable workflow that DOES have
+  registered runs keeps its real data, and a normal workflow with no runs is
+  dormant exactly as before.
+
+- **2026-08-07** — **The scanner no longer invents a Yarn install out of a
+  flag value.** The bare-Yarn arm of the install matcher was bounded only by
+  "not preceded by a word character", which says nothing about `,` or `=`, so
+  vitejs/vite's `pnpm dlx pkg-pr-new@0.0 publish …
+  --packageManager=pnpm,npm,yarn --commentWithDev` matched on the `yarn`
+  inside that comma-separated flag VALUE. Everything downstream followed the
+  wrong manager: the repo's own pnpm `allowBuilds` mitigation stopped applying
+  (manager mismatch), a Yarn advisory rendered on a repo with no Yarn in it,
+  and the fix prompt prescribed destructive Yarn edits to a release workflow.
+  All four arms now require COMMAND POSITION — the start of the string or line
+  (optionally after a one-line step's `run:` key), or immediately after `;`,
+  `&`, `|` or `(` — with the shell prefixes that legally precede a command
+  (`sudo`, `env`, `time`, `then`, a leading `VAR=value`) still allowed, so
+  `sudo npm ci` and `cd web && yarn install` are unaffected. That prefix list
+  is deliberately CLOSED — a word is a wrapper only if it execs the next
+  command in the same environment, with the same filesystem and the same
+  secrets, which is why `docker exec` / `docker run` are not members — and it
+  is now spelled as data (`_CMD_WRAPPERS`) and pinned by a test, so widening
+  it takes a deliberate edit rather than slipping through unnoticed.
+
+- **2026-08-07** — **An option the install parser did not recognise no longer
+  hides the install.** The list of options that consume the next token was a
+  closed allowlist, so any option missing from it left its value sitting as a
+  bare positional, the package-spec regex read that value as a package name,
+  and the whole finding vanished — with no `dropped_matches` entry, so the
+  report showed a clean job. `npm ci --maxsockets 3`,
+  `pnpm install --fetch-timeout 60000` and `npm ci --before 2024-01-01` were
+  each an un-reported privileged install. An unrecognised option is now assumed
+  to consume its value; `npm ci <anything>` and an install whose arguments come
+  from a `${{ … }}` expression can no longer be excluded by a positional at
+  all. A quoted `run` key (`- "run": npm ci`) is recognised as a shell step
+  again.
+- **2026-08-07** — **Inert text no longer counts as a mitigation.** The one
+  signal that suppresses a P14.25 finding outright — a step that empties the
+  build allowlist before the install — matched a shell comment
+  (`# allowBuilds=false`) and an echoed string with nowhere to go
+  (`echo 'allowBuilds: false'`), and a read-only `yq
+  '.allowBuilds[]=false' pnpm-workspace.yaml` with no `-i`, which prints the
+  edited document and leaves the file alone. Each silenced a genuine
+  privileged install. The line must now survive comment-stripping, name the
+  config, and actually write it (in-place edit, redirect, `tee`, or
+  `pnpm config set`).
+- **2026-08-07** — **A `${{ A || B }}` fallback is judged on every operand,
+  not just the first.** Judging only the first assumed it is always truthy; an
+  event field absent on *this* event is empty, so
+  `${{ github.event.pull_request.number || github.event.issue.title }}` hands
+  the issue title to the shell on an `issues` trigger and was suppressed as
+  shape-safe. Every operand must now be shape-safe (or an author-written
+  literal), which keeps the `github.head_ref || github.ref_name` fix.
+- **2026-08-07** — **P14.25: a global or single-package install is no longer
+  reported as a dependency-tree install.** `npm i -g corepack@0.31`,
+  `npm install --global @github/copilot` and `npm install @playwright/test@next`
+  all matched the install leg. None of them is this vector: the anti-pattern is
+  a compromised package *in the resolved dependency tree* executing during a
+  bulk install, and a global bootstrap resolves nothing from the lockfile while
+  a named install runs exactly what the author typed. `vercel/next.js` alone
+  reported seventeen `corepack` bootstraps this way. The catalog now states the
+  exclusion, and says explicitly that the named-single-package shape is a
+  different risk this pattern does not silently widen to cover.
+- **2026-08-07** — **P14.25 stops asserting that lifecycle scripts are
+  enabled.** The finding claimed the job "runs this install with dependency
+  lifecycle scripts enabled" — not knowable from workflow YAML, and for pnpm
+  usually false: **pnpm 10 and later block dependency lifecycle scripts by
+  default**, which the catalog's "their own defaults are unchanged" claim had
+  backwards. The note now says what is knowable — scripts execute *unless* the
+  manager's version or configuration disables them — and names the per-manager
+  condition (npm default-on through 11, off in v12; pnpm ≥ 10 off with an
+  allowlist; Yarn Classic on, Berry via `enableScripts`), quoting the repo's
+  `packageManager` pin where there is one. In-repo mitigations are read at two
+  honest tiers: a step in the SAME job that empties the build allowlist before
+  the install, on a pnpm ≥ 10 pin, means **no finding** (`vitejs/vite`'s
+  `yq '.allowBuilds[]=false'` — two false positives); a committed allowlist or
+  a bare pin leaves the finding standing with the mitigation **named in its
+  evidence**, because suppressing on a partial signal is a silent false
+  negative.
+- **2026-08-07** — **The npm v12 caveat renders only on npm matches**, and
+  names a major the job itself pins (`npm install -g npm@11`) instead of saying
+  the version "is not visible in this YAML". Three QA batches flagged the same
+  self-contradiction under `pnpm` and `yarn` findings.
+- **2026-08-07** — **P14.25's payoff leg reads workflow-level `env:`.** GitHub
+  merges the workflow's `env:` map into every job's environment, so a
+  `NPM_TOKEN: ${{ secrets.NPM_TOKEN }}` declared at the top of the file is in
+  the install step's process — but the job's own subtree does not contain it
+  and the payoff read as absent. `facebook/react`'s `compiler_prereleases.yml`
+  publish job was unflagged for exactly this. Mirrors how the write-scope leg
+  already consults workflow-level `permissions:`.
+- **2026-08-07** — **P14.25's evidence quotes the real install line.** It
+  anchored on any line in the job's range, so `- name: Run pnpm install` — a
+  YAML step NAME — was quoted as the command (immich, three findings), and the
+  first regex hit won even when it was a `npm install -g npm@11` bootstrap the
+  fix recipe does not apply to (leonardo). Evidence now comes only from `run:`
+  scalar content, and names the first command that actually qualifies.
+- **2026-08-07** — **Job line numbers no longer land on the blank line above
+  the job key.** `_job_line_in_text` used `^\s+` under `re.MULTILINE`, and
+  `\s` matches a newline, so the match could start on the separating blank
+  line and run into the next line's indentation. On `cal.com`'s `pr.yml` a
+  finding cited `jobs.trust-check` at line 160 while its own evidence named
+  `jobs.prepare`. The indent class is now horizontal-only.
+- **2026-08-07** — **P14.10 matches `${{ X || Y }}` fallbacks.** `||` returns
+  its FIRST operand when truthy, so `${{ github.head_ref || github.ref_name }}`
+  puts an attacker-chosen branch name in the shell and the safe-looking
+  fallback never evaluates. cal.com's `production-build-without-database.yml:72`
+  wrote exactly that into a `run:` block holding roughly a dozen secrets and
+  went unreported. The value-shape exclusion is judged on the first operand
+  only, so a safe-shaped fallback cannot launder a text-shaped primary.
+- **2026-08-07** — **`.commits` is shape-safe.** On a `pull_request` payload it
+  is the commit COUNT — the same GitHub-generated integer shape as `.number`.
+  grafana's `trufflehog.yml:27` does shell ARITHMETIC on it and rendered HIGH.
+- **2026-08-07** — **`author_association` is shape-safe (reverses a declared
+  class).** The catalog listed "author associations" among the text-shaped
+  fields that stay in scope. It is a GitHub-generated CLOSED ENUM — `OWNER`,
+  `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`,
+  `FIRST_TIMER`, `MANNEQUIN`, `NONE` — no member carries a shell metacharacter
+  and no outsider can add one, so it is not an injection sink. Four
+  `facebook/react` findings were this shape. The catalog now carries the enum
+  and the reasoning rather than the old claim.
+- **2026-08-07** — **The findings summary states the findings' own spread.**
+  "N occurrence(s) … across {scanned} workflow file(s)" used the number of
+  files SCANNED in a clause whose subject was the findings, so three findings
+  in one file read as findings "across 12 workflow file(s)". Both numbers are
+  now named as what they are.
+- **2026-08-07** — **The occurrence cap says what it caps.** `_Showing 3 of N
+  occurrences_` sat under a vector-map claim that "nothing is trimmed" — true
+  of vectors, not of an inline sample. Both lines now say which they mean.
+- **2026-08-07** — **The provenance path keeps its meaning and drops the
+  account name.** Four corpus-QA batches flagged the absolute checkout path in
+  the Repository row. Ruling: it stays — it is the audited tree the file:line
+  references are true of, and on a user's own run it is their own path — with
+  `$HOME` abbreviated to `~`. The verifier exemption and the methodology table
+  now say this is deliberate.
+- **2026-08-07** — **The close names its receipt and lines up its numbers.**
+  The vector receipt is headed `Vector scan — 10 attack vectors checked, N
+  hit:` so it cannot be read as a grade, rows 1–9 are padded to align under
+  `10.`, and a clean run carries one bridging sentence (findings are open
+  doors, the hygiene checks are armor, neither is a grade). SKILL.md's Phase-3
+  terminal summary now states, per line, which is pre-drawn and copied and
+  which is assembled from which named report row.
+
+### Added
+
+- **2026-08-06** — **P14.11 states its fork gap.** Both endpoints the impostor
+  check can use answer about the fork NETWORK, not the repository: measured,
+  `repos/octocat/Hello-World/commits/c5a5e513…` returns 200 for a commit living
+  only in a fork and reachable from no upstream branch (re-confirmed on
+  `github/gitignore`). A pin to an object pushed to a fork of the action's own
+  repo therefore reads clean — which is this pattern's own attacker story. The
+  catalog now carries the limitation, and the code says what a 200 does and
+  does not prove, instead of claiming reachability it never tested. Behaviour
+  is unchanged; what the check catches — the object that resolves nowhere in
+  the network, the tj-actions shape — it still catches. (#272)
+- **2026-08-06** — **A tenth attack vector: dependency install scripts
+  running in a privileged job (P14.25).** A compromised upstream package —
+  account takeover, typosquat, poisoned transitive dep — executes its
+  `preinstall`/`install`/`postinstall` script the next time CI installs
+  dependencies. The detector is conditioned like the other chain detectors,
+  not like a hygiene check: it fires only when a job runs a script-executing
+  install (`npm ci|install|i`, `pnpm install|i`, `yarn install`, bare `yarn`
+  — without `--ignore-scripts`) **and** that same job holds a live payoff
+  (a `secrets.*` reference beyond `github.token`, `secrets: inherit`, or a
+  write scope effective for the job; a job's own `permissions:` block
+  replaces the workflow's rather than merging). Severity MEDIUM for the same
+  documented reason as P14.24 — potency depends on a live condition outside
+  the repo. Evidence quotes the install line verbatim and carries a separate,
+  labelled derived note naming the secrets / write scopes that make the job
+  privileged. Admission is recorded against the three membership tests in
+  `references/why-these-ten.md`.
+- **2026-08-06** — **Dated platform-mitigation notes on the vectors GitHub
+  narrowed in mid-2026, rendered with the finding.** P14.7 (read-only cache
+  tokens for untrusted triggers, June 26 2026 — still live on GitHub
+  Enterprise Server and third-party cache backends; trusted-trigger cache
+  poisoning survives the change too but is outside this detector, and the
+  note says so rather than listing it as a residual of the finding), P14.9 (checkout refuses fork head/merge checkouts under
+  `pull_request_target` / `workflow_run`, June 18 2026, backported July 16
+  2026 — with GitHub's enumerated residuals and the adoption hole that a
+  SHA- or patch-pinned checkout never receives the backport; "upgrade to v7
+  and re-pin" added to the fix recipe), P14.18 (workflow-trigger policies
+  shipped June 18 2026 but opt-in and evaluate-mode — nothing changes on
+  default config), and P14.25 (npm v12 defaults). Each note carries its date
+  and its residuals; no detector or severity changed. A `Platform
+  mitigation` row now renders under the attacker line, so a github.com
+  maintainer never reads an unconditioned claim.
+
+- **2026-08-06** — **The close states the security score, with its
+  denominator.** The report emits one greppable line —
+  `Security score: 50.0/100 — 1 of 2 scored facts pass, of 3 applicable;
+  unmeasured: sec.secrets.no-blanket-inherit` — and the close pastes it
+  verbatim (`grep '^Security score:'`), exactly as it pastes the banner,
+  so a user told "clean" also learns the grade and nobody re-words the
+  number (owner ruling after the corpus QA).
+- **2026-08-06** — **Catalog links point at the published catalog.** Every
+  "See [catalog §P14.x]" now resolves to the public skills repo's main-branch
+  URL — stable path, stable pattern-id anchors — and `--catalog-url`
+  overrides it. `verify_report.py` fails any catalog link that is not on that
+  path, and separately fails an `#anchor` that matches no heading in the
+  shipped catalog (the other half of the 404). _History: these links were
+  originally commit-pinned permalinks to the skill checkout's own HEAD — a
+  sha the public repo never had, so every one 404'd — and were briefly
+  changed to a relative path, which resolves nowhere because the report is
+  not written beside the catalog. Commit-pinned permalinks stay banned._
+- **2026-08-05** — **The report renders the security score it computes.** The
+  security component of the CI Score was written only to the findings JSON, so
+  a reader of the standalone report got a number they could not see over facts
+  they could not check. A `Security score` section now follows the chain map:
+  the score line (with the scored-vs-applicable split and any unmeasured facts
+  named), one row per fact with its evidence, and the scoring rule.
+  `verify_report.py` fails a report that drops a score the JSON carries. The
+  JSON shape is unchanged. (#272)
+- **2026-08-06** — **The catalog-link check sees both ways it has broken.**
+  It read only `https?://…`, so a return to the bare relative path — which
+  resolves nowhere, the report not being written beside the catalog — passed
+  silently. It now checks every markdown link destination, in any spelling,
+  while leaving the data-sources table's backticked mention of the catalog
+  path alone. (#272)
+- **2026-08-05** — **A gated job's `if:` condition is quoted in the
+  evidence.** A cache-writing job behind a trust check rendered as an
+  unqualified fork-PR compromise. The gate is now shown — not treated as a
+  fix, because gates get bypassed. (#272)
+- **2026-08-06** — **The self-check has more teeth.** A report with findings
+  and not one repo-grounded attacker scenario now fails (it used to fall back
+  to counting the bare phrase anywhere on the page); every catalog `#anchor`
+  is checked against a real heading in the shipped catalog, closing the half
+  of the 404 the URL check cannot see; and a score block that carries no facts
+  fails unless the report says so. (#272)
+
+### Fixed
+
+- **2026-08-06** — **Phase 5 can find the heading it is told to mark.** The
+  fix loop was told to locate `## Finding N: …`, but the report has emitted
+  `## {severity emoji} Finding N: …` since the critical-only descope, so a
+  literal match found nothing and a fixed finding could go unmarked. The
+  instruction now describes the real heading and says to insert the
+  `FIXED — ` prefix before the emoji, which is what the verifier's regex has
+  always expected. The close also now covers the `Security score: none —
+  {reason}` variant instead of assuming a number is always present.
+  (#273)
+- **2026-08-06** — **Three P14.25 false negatives: a hardened install no
+  longer covers for an unhardened one, and `yarn --frozen-lockfile` is an
+  install.** The job-level gate searched a whole `run:` scalar for
+  `--ignore-scripts` while the evidence lookup read individual
+  comment-stripped lines, so the two disagreed: a scalar carrying
+  `npm ci --ignore-scripts` on one line and a plain `npm install` on the next
+  read as hardened and the job was dropped, and an `--ignore-scripts` written
+  in a shell COMMENT suppressed the real install below it. Both now go
+  through one definition, applied per shell command. Separately, the bare-Yarn arm only
+  accepted `yarn` at end-of-command, so `yarn --frozen-lockfile` — a Yarn
+  Classic install, options and all — was missed; it now accepts options while
+  still ignoring a trailing subcommand (`yarn build`) and the informational
+  invocations (`yarn -v`, `yarn --version`, `yarn --help`) — and it now
+  consumes an option's separate VALUE, quoted or not, so
+  `yarn --cwd packages/app`, `yarn --network-timeout 600000` and
+  `yarn --cwd "packages/app with spaces"` stop dying on the space. `--ignore-scripts`
+  is judged against the shell SEGMENT it is written on, not the line: in
+  `npm ci --ignore-scripts && npm install` it covers the first install and
+  not the second. A backslash-continued command is joined before any of this
+  is asked, so `npm install \\` + `--ignore-scripts` on the next line is one
+  hardened install and not a false positive. Comment-stripping and segment
+  splitting are both QUOTE-AWARE, so a `#` or a `|` inside an argument —
+  `npm install "github:acme/lib#v1.2.3" --ignore-scripts` — is data, not a
+  comment or a separator, and the flag is not parsed away from the install it
+  protects. Both read quoting through one shared scanner that resolves
+  backslash escapes the way the shell does, so the two can no longer disagree
+  about what is syntax and what is data. Every case is pinned by a truth-table test. (#273)
+- **2026-08-06** — **One folded `run: >` scalar no longer grades a correct
+  repo 0.0/100.** A `run:` step whose shell text could not be anchored to a
+  raw line was recorded as "this workflow file could not be scanned", which
+  made every workflow-scoped config fact unmeasurable — so a repo whose
+  configuration was entirely correct scored zero, and the banner counted
+  matches while calling them files (two drops in one file read as "2 workflow
+  files"). Unanchored steps are now their own coverage gap, counted per step
+  and per workflow, with the file's facts left measurable. Coverage still
+  degrades to PARTIAL. (#272)
+- **2026-08-06** — **Alias-expanded `run:` steps are no longer silently
+  unscanned.** A workflow using a YAML anchor (`steps: *common`) has more
+  parsed steps than raw `run:` tokens; once the scanner's cursor passed the
+  last token, every remaining step was skipped with no record and the report
+  claimed complete coverage over steps nothing had looked at. Those steps are
+  now named as a coverage gap. (#272)
+- **2026-08-06** — **A crashed config-facts layer is visible.** When the facts
+  layer threw, the report dropped its whole score section — and the self-check
+  skipped rather than failed — so the one failure mode the "this is NOT a
+  score of 100" headline was written for produced a silent, green, score-free
+  report. The section renders whenever a score exists; only the fact table is
+  gated on facts. (#272)
+- **2026-08-06** — **A served tag object is not proof of containment.** GitHub
+  shares one object store across a fork network, so `git/tags/{sha}` will
+  serve a tag an attacker created in a fork — only the reachability-checked
+  commit probe proves the canonical repo has the object. A peel whose commit
+  re-probe cannot answer is now UNVERIFIED, not verified; a peel whose commit
+  is genuinely absent is still flagged. A detected cycle, an exhausted depth
+  limit, a malformed response and a tag pointing at a tree are all "could not
+  resolve" rather than "absent", so none of them can produce an accusation.
+  (#272)
+- **2026-08-06** — **Two different injection sinks on one line are both
+  named.** Occurrences collapse by (pattern, file, line) — one line is one fix
+  — but the kept finding named only the first expression, so a reader who
+  fixed what it named left a live sink on the same line. Every distinct
+  expression is now named on the evidence marker. (#272)
+- **2026-08-06** — **A finding says when its job list is a guess.** A workflow
+  whose YAML would not compose produced findings stamped with the whole job
+  list, indistinguishable from a genuine "this affects every job" claim; and
+  a workflow-level key written after `jobs:` fell inside the last job. Both
+  are fixed, and an unattributable finding says so. (#272)
+- **2026-08-05** — **A safe-looking field name does not excuse a
+  caller-filled one.** The value-shape exclusion holds only where GitHub fills
+  the field in. `github.event.client_payload.*` (the arbitrary JSON body of a
+  `repository_dispatch`) and `github.event.inputs.*` (`workflow_dispatch`
+  inputs) are filled in by whoever fired the event, so an input spelled `sha`,
+  `id` or `number` there is a reassuring name over a free-form string —
+  `git checkout ${{ github.event.client_payload.sha }}` is remote code
+  execution and was being suppressed. Those two namespaces are never excluded.
+  (#272)
+- **2026-08-05** — **A failed tag probe is unverified, not an accusation.**
+  The tag peel runs only on the about-to-be-flagged path, so a rate limit or a
+  dropped connection there manufactured the exact false accusation the peel
+  was added to prevent. Only an explicit 404/422 — "no such tag object here" —
+  now counts as an answer; anything else degrades the pin to unverified.
+  (#272)
+- **2026-08-05** — **A pin to an annotated release tag is not an impostor
+  SHA.** Actions such as `astral-sh/setup-uv` and `pnpm/action-setup` publish
+  annotated tag objects, and repos pin to them; `repos/{repo}/commits/{sha}`
+  answers 404 for a tag object, so 20 legitimate pins across three large repos
+  were reported as fork-only or dangling. The check now peels the sha as a tag
+  object (following nested tags) and re-probes the commit it names.
+  (#272)
+- **2026-08-05** — **Template injection ignores GitHub-generated values.**
+  `github.event.pull_request.number`, the `.sha` family, `.repo.fork` and
+  `.merged` cannot carry a shell metacharacter; flagging them made whole
+  reports false HIGHs. Text-shaped fields (titles, bodies, branch names,
+  labels, comments, `client_payload`) still fire. The exclusion applies only
+  to fully-qualified `github.*` context paths, and only to `${{ … }}`
+  expressions — never to the shell-command patterns the same detector
+  carries. (#272)
+- **2026-08-05** — **Three coverage claims the scanner could not back.** A
+  dot-prefixed workflow (`.test.yml`) was invisible to discovery but visible
+  to the coverage tripwire, refusing the whole repo; a template match inside a
+  folded (`run: >`) scalar was dropped to stderr while the report said
+  coverage was complete; and a repo with zero workflows scored 83.3/100 with
+  nine green rows. All three are now discovered, degraded, or refused
+  honestly. (#272)
+- **2026-08-05** — **A finding names the job it is in, once.** `affected_jobs`
+  was the whole file's job list stamped on every occurrence, and two
+  injectable expressions on one line produced two identical findings in the
+  JSON. Line-anchored hits name their containing job; workflow-scope hits
+  still name every job; occurrences dedupe by (pattern, file, line) at scan
+  time. (#272)
+- **2026-08-05** — **Failed config facts say what is actually wrong.** The
+  evidence read "no `permissions:` block in: X" for files that have one (null
+  value, invalid scalar, or a grant on only some jobs); each file now states
+  its own reason. `write-all` renders as a shorthand rather than the nonsense
+  "write-all: write", and truncated offender lists end with the real remainder
+  ("and 4 more") instead of a bare ellipsis. (#272)
+- **2026-08-05** — **The fix a report hands you is described accurately.** The
+  agent prompt inferred the fix surface from whether the catalog recipe had a
+  fenced yaml block, announcing P14.18's and P14.7's workflow restructures as
+  "non-YAML org-level settings"; each catalog entry now declares
+  `fix-surface: yaml|non-yaml`. Fix summaries carry the numbered options they
+  introduce rather than a dangling lead-in, and `verify_report.py` fails a
+  lead-in-only summary. (#272)
+- **2026-08-05** — **Derived claims are no longer dressed as quoted source.**
+  The correlated chain detectors synthesize their evidence; it was rendered in
+  a yaml code fence with a line-number gutter, so readers looked in their
+  workflow for text that was not there. Findings carry `evidence_kind`, and
+  derived claims render as a labelled blockquote. (#272)
+- **2026-08-05** — **The report says when its attacker prose is generic, and
+  which workflows are dormant.** With the repo-specific scenario phase
+  skipped, the catalog's capability line stood in silently and printed twice;
+  it is now marked as the catalog description and the duplicate lead is
+  suppressed. A partially dormant group names its dormant workflows instead of
+  reporting a bare count. (#272)
+- **2026-08-05** — **Timings state what actually happened.**
+  `risk_scenario_s` billed idle wall-clock as scenario-writing time on runs
+  where no scenario was written, and `total_run_s` could come out smaller than
+  the scripted phase it contains. The scenario timing is stamped only when a
+  scenario merged, and the total is derived from its own components.
+  (#272)
+- **2026-08-05** — **Cosmetics.** The data-sources row names what is really
+  scanned (`.yml`, `.yaml`, dot-prefixed); the methodology names the
+  `## Finding N` headings the report emits; an unparseable workflow is
+  reported once rather than once per detector; and the methodology documents
+  both the fixed `/9` chain denominator and why a fully commented-out workflow
+  still counts as scanned. (#272)
+- **2026-08-06** — **Render honesty, small edges.** A table cell no longer
+  renders `0` or `False` as blank; a derived-evidence block that strips to
+  nothing shows the original text labelled rather than rendering an occurrence
+  with no evidence; a score block whose `unmeasured` or `constants` key is the
+  wrong type is called out as damaged instead of read as empty; re-rendering
+  the same findings file no longer inflates `total_run_s` or leaves a stale
+  `risk_scenario_s` behind; and dropped-match paths are never absolute.
+  (#272)
+
+- **2026-08-05** — **A job's empty `permissions:` key no longer buys the
+  permissions fact.** GitHub treats a `permissions:` key with no value as
+  omitted — the job keeps the broad default token — and the fact already
+  enforced that at the workflow level. The per-job leg still asked only
+  whether the key was present, so a workflow with no top-level block and
+  valueless `permissions:` on every job passed `sec.permissions.workflow-declares`
+  and reported a security score higher than the repo had earned. Both levels
+  now require a real grant — a mapping, or one of the two shorthand strings
+  GitHub actually accepts. A typo'd scalar like `permissions: raed-all` is a
+  value the workflow schema rejects outright, and no longer earns the fact
+  either. (#271)
+
+### Changed
+
+- **2026-08-06** — **The countable unit is an attack VECTOR, and there are
+  ten of them.** Every reader-facing count and label moved from "nine
+  chains" to "ten vectors": the skill description, the banner
+  (`▏N of 10 vectors hit▕`), the report's `🔗 Vector map — all ten` and
+  `📖 What each vector checks` sections, the headline and its counting
+  sentence, the methodology rows, the close receipt (numbered 1–10), and
+  `references/why-these-nine.md` → `references/why-these-ten.md` (with
+  `tests/test_census_why_these_nine.py` → `…_ten.py` and
+  `verify_report.py`'s `THE_NINE` → `THE_TEN`). The scope-honesty line
+  ("Critical exploit-chain checks only — this is not a comprehensive
+  audit.") is unchanged, verbatim, as is the membership filter's
+  "outsider → compromise chain" wording, which describes a sequence rather
+  than the countable product noun. `#chain-*` anchors and internal function
+  names were left alone — renaming them adds churn and link risk with no
+  reader value.
+
+- **2026-08-05** — **The close shows the chain-by-chain receipt, inside
+  the question.** The close now delivers the banner plus a per-chain
+  receipt line for each of the nine chains (⚠️ not-run rows included) —
+  and because prose printed in the same turn as a structured question is
+  preempted by the question UI and never seen, the receipt rides inside
+  the close question's own text whenever a question immediately follows.
+  Previously a clean run's close was one banner line plus the save offer,
+  which told the user nothing about what had been checked (first-dogfood
+  feedback; the prose-then-ask variant shipped first and was invisible in
+  practice — second dogfood run). Receipt lines are numbered 1–9 and plain
+  text — no bold/headings/fences in the question text; a fully-bold close
+  was the third dogfood run's feedback. Receipt lines carry the catalog
+  id, and severity squares are enforced: a hit chain renders 🟥 (HIGH) or
+  🟧 (MEDIUM) with its site count, ✅ only for evaluated-clean, ⚠️ for
+  did-not-run (owner-approved from the first findings-run dogfood).
+- **2026-08-05** — **Findings selection maps by eye and never offers a
+  door to nowhere.** Fix options carry their chain id (e.g. `P14.10`) and
+  receipt hit rows are tagged `→ Finding N`, bridging the receipt's 1–9
+  chain numbering and the options' finding numbering. The third option is
+  sized to what remains: "A different selection" only with three or more
+  groups, "Fix both" with exactly two, omitted with one (first
+  findings-run dogfood: "a different selection" was offered when the two
+  named options already covered everything).
+- **2026-08-05** — **"None," is legal only beside fix options.** The
+  all-findings-fixed close re-shipped the "None, just save the report"
+  label with nothing offered beside it (first fix-dispatch dogfood);
+  a standalone save offer — zero found or all fixed — now always uses
+  "Save the report (.md)" / "Don't save".
+- **2026-08-05** — **A later fix never silently joins an earlier fix's
+  PR.** User authorization to commit/push is per-scope: when a branch or
+  PR from a prior fix exists, the skill asks "add to PR #N or open a
+  separate branch/PR?" before pushing (first fix-dispatch dogfood bundled
+  Finding 2 into Finding 1's PR unasked; different fixes carry different
+  risks and revert stories).
+- **2026-08-05** — **Drafted PRs lead with a plain-English TL;DR.** Two
+  to four sentences a reviewer who never saw the report can act on —
+  what the workflow did before, what it does now, what changes
+  day-to-day — with pattern ids and scanner mechanics strictly after it
+  (the first drafted PR led with catalog framing and its own repo owner
+  could not tell what it did).
+- **2026-08-05** — **Clean-run save offer no longer says "None,".** The
+  zero-findings close asked "Save the report?" with the fix-selection
+  option text "None, just save the report (.md)" — "None" answering a
+  fixes question the user was never asked. A clean run now offers exactly
+  "Save the report (.md)" / "Don't save"; the "None," wording remains
+  only where it belongs, after fixes were actually offered.
+
+### Fixed
+
+- **2026-08-04** — **Scored-fact wording written for the reader.** The
+  fork-code-uncleared fact described the full chain as "a P14.9 finding";
+  it now says the chain is reported separately as a fork-code-execution
+  finding. Em dashes removed from the emitted fact sentences, evidence,
+  coverage-gap caveat and no-facts reason (the claims are unchanged). These
+  strings render both in ci-secure's own output and, verbatim, in the
+  ci-advisor report.
+
+- **2026-08-04** — **Two config-fact defects that graded real repos wrong.**
+  (1) `sec.permissions.workflow-declares` tested for the KEY only, so a
+  workflow whose `permissions:` has a null value scored PASS — GitHub treats
+  that identically to omitting the key, leaving the broad default token in
+  place, which is exactly what the skill's own `p14_3_null_perms` fixture
+  warns about and what P14.3's chain detector was already hardened against.
+  The fact now requires a real grant (a mapping — an empty one IS an explicit
+  declaration — or a `read-all`/`write-all` string). (2)
+  `sec.codeowners.workflows` did not recognize the standard recursive
+  DIRECTORY form (`.github/ @team`), so a correctly configured repo lost a
+  sixth of its score for a rule GitHub's own docs use as the example.
+
+### Changed
+
+- **2026-08-04** — **The intentionally-vulnerable fixture workflows ship
+  cloaked.** 43 test/eval fixtures (pwn-request, template injection,
+  `curl | bash`) sat at literal `.github/workflows/` paths, where registry
+  security scanners read them as this repo's own live automation. They now
+  ship under `dot-github/` with a `.fixture` suffix, byte-identical and
+  covered by a sha256 manifest; the test suite materializes the original
+  (gitignored) paths at collection time, so every test and eval reads exactly
+  what it read before. A repo guard fails on any tracked workflow-parseable
+  file under a skill's fixture `.github` dir.
+
+- **2026-08-03** — **ci-secure ships in the public skills repo, carrying the
+  OD-A30 routing contract.** Its description now states that the skill is
+  reached by NAMING it and that topic-word asks ("is my CI secure") belong to
+  `ci-advisor`, the door, which runs this engine among all three. Maintainer-only
+  infra (`MAINTAINERS.md`, the loop prompt + summary schema, the full pattern
+  archive) lives in the `maintainers/ci-secure/` sibling tree, outside the
+  installable skill; the repo's install-surface guard now covers ci-secure so
+  that boundary is PASS/FAIL rather than convention. Worked-example reports are
+  no longer carried in-tree, and the e2e runbook writes its copies to a scratch
+  directory outside the repo.
+
+### Added
+
+- **2026-08-03** — **ci-secure scores six security config facts and emits the
+  security component of the CI Score** (`security_score` in the scan JSON; new
+  `scripts/config_facts.py`, methodology in `references/security-facts.md`).
+  The nine exploit chains stay findings-only and never enter this number —
+  several chain detectors are lexical, and a public score must not grade a
+  stranger's repo down on an unconfirmed match. What is scored are
+  deterministic pass/fail facts: permissions declared per workflow;
+  workflow-level writes scoped to jobs (**id-token excluded by construction**
+  — ci-score's `scoped-id-token` owns that scope, and one YAML edit must never
+  move both tools' numbers; a census test pins the full disjointness table
+  against a frozen manifest of ci-score's registry); CODEOWNERS covering
+  `.github/workflows/` (detector restored from the pre-descope tree); **the
+  OD-A26 sharpened trigger fact** — a bare untrusted trigger passes (it is
+  true of 84% of repos and discriminates nobody), the fact fails on trigger +
+  attacker-head checkout, and only the full chain with execution remains the
+  P14.9 finding, so fact and finding cannot fire on the same edit; no blanket
+  `secrets: inherit`; and `persist-credentials: false` on untrusted-trigger
+  checkouts. **Registered rule: 100 × passed / scored, no weights.** An
+  unscannable workflow forces every workflow-scoped fact to UNMEASURED — no
+  pass, no fail, the gap named, kept in the applicable count — because a
+  universal claim cannot be asserted over files that could not be read; a repo
+  where nothing measured yields `score: null` with a reason, never 100. The
+  facts layer is isolated so its failure degrades to an honest unmeasured
+  block rather than killing the scan, and that degraded block carries the
+  **same key set as a real one** (a consumer reading `constants` must not
+  KeyError on the one path where the block is supposed to be least
+  surprising) — pinned by test. Data-only: report.py renders nothing
+  from this block yet. Nine mutation red-proofs, including the disjointness
+  exclusion and the silent-pass-over-a-coverage-hole case.
+
+## 2026-08-02 — Parity census: two render bugs fixed, ten mismatches closed
+
+A surface-by-surface comparison against ci-score and ci-speedup. Two of the
+gaps were real bugs; the rest were places ci-secure said the same thing in a
+third format.
+
+### Fixed
+- **A multi-line catalog TL;DR no longer breaks the report.** Each finding's
+  detail body was a `| Field | Value |` table, and a GFM table cell cannot
+  hold a newline — P14.9's TL;DR is a wrapped nine-line paragraph, so its row
+  terminated mid-cell and every row after it spilled out of the table as
+  loose prose (visible in the committed mastra example). The body is now the
+  siblings' bulleted definition list (`- **TL;DR:** …`, `- **Severity:** …`),
+  with every value flattened to one line. Same data, one fewer format, and
+  the class of bug is gone rather than papered over.
+- **The workflow count no longer disagrees with itself on an offline run.**
+  The body deduped affected workflows against the activity map, which is only
+  populated when `--repo` supplied activity data — so without it, two
+  occurrences in ONE workflow rendered as "1 workflow" in the heading and
+  "2 workflows" in the body. It dedupes on the workflow list itself now.
+
+### Changed
+- **The title names the repository, never the skill.** A report with no
+  GitHub remote was titled `ci-secure — …`; it now follows ci-score's rule:
+  the slug, else the audited checkout's basename, else an explicit unknown
+  marker.
+- **The saved report has one stable name, `./ci-secure-report.md`** (both
+  siblings do), so a re-run overwrites the previous report instead of
+  accreting dated copies. `verify_report.py`'s date check moved off the
+  filename onto the `Scanned` provenance row.
+- **The close re-offers the work that is still open.** Phase 6 asked a
+  two-option save question and dropped the user after one fixed group. It now
+  asks ONE structured question that names the remaining findings and carries
+  the verbatim `None, just save the report (.md)` option last — the pick that
+  saves, and the only terminal one.
+- **The terminal summary states the result and stops.** It no longer narrates
+  `Report rendered (not saved…)` or `Next: select which findings to fix` —
+  ci-score's close contract bans forward-narrating the menu, and the
+  structured question carries the save option.
+- **Restatement cut.** The finding count appeared four times and the
+  scope-honesty line five; the `Findings` and `Scope` provenance rows are
+  gone (the banner, headline, Catalog row and Methodology table still carry
+  both), and the standalone `**Network-gated checks.**` bullet list no longer
+  reprints the `[!WARNING]` callout's own bullets byte-for-byte.
+- **The Fix heading is `#### 🛠️ Fix`, not `#### 🟢 Fix`** — 🟢 means
+  "runner-minute saving" in ci-speedup, and one glyph must not carry two
+  meanings across two reports.
+- **Each finding's anchor precedes its heading** (ci-speedup's placement), so
+  a `#finding-N` jump lands on the title instead of scrolling it out of view.
+- **The copy-prompt block is `🤖 Prompt for your coding agent`** (ci-speedup's
+  name), still collapsed (ci-score's treatment).
+- **Every fix prompt ends with a verification oracle** — re-run the scan and
+  confirm the chain no longer fires — as both siblings' prompts do.
+- **Cosmetics toward the siblings:** `## 🗄️ Data sources` and its `Used for`
+  column are sentence-case; the audited-commit row carries ci-speedup's
+  "file & line references are anchored to this tree" clause (ci-secure is the
+  only one of the three emitting file:line permalinks); the per-bullet
+  `(commit abc1234)` suffix is gone (the header and the permalink already say
+  it); and the chain map's ✅ rows link to their appendix entries.
+
+### Removed
+- **Absolute scratch paths in the saved report.** The `_Showing 3 of 13…_`
+  note pointed at `/private/tmp/…/ci-secure-findings-<slug>.json`, a file the
+  OS garbage-collects; it names the findings JSON by role and basename now.
+  The "render every occurrence" prompt is suppressed entirely when every
+  occurrence is already shown.
+
+### Added
+- **Five `verify_report.py` invariants** for the above: chain anchors resolve,
+  every finding anchor precedes its heading, no detail bullet spills a bare
+  continuation line, no absolute scratch path in the report's prose, and the
+  `Scanned` row carries a well-formed date.
+
+## 2026-08-01 — Report adopts the sibling house format
+
+The report now reads like its siblings (ci-score, ci-speedup) rather than a
+third format: same section skeleton, same title shape, same provenance table,
+same pre-drawn banner, same stakes-first recommendation opening. The skeleton
+is `headline → chain map → one section per finding → what each chain checks →
+reference appendices`.
+
+### Removed
+- **The `## ✅ Action plan` and `## 📊 Executive summary` sections.** Neither
+  sibling has either — the severity-ranked order of the finding sections IS
+  the action plan, and a duplicate ranked list up top is a second place for
+  that ordering to drift from the body. The load-bearing sentences moved
+  rather than vanished: the counting sentence (occurrences vs. distinct
+  chains) rides under the headline, the "every finding renders, nothing is
+  trimmed" contract sits under the chain map, and each finding's curated
+  action verb opens its Fix block as `**Do this:** …`.
+
+### Added
+- **A `## Critical findings: **N** — M of 9 chains hit` headline** (ci-score's
+  `## CI Score: **75/100** — …` shape). Zero findings reads
+  `**0** — no chain matched` and folds the positive verdict under the same
+  headline instead of a separate section.
+- **A `## 📖 What each chain checks` appendix** — one line per chain, from
+  each catalog entry's own TL;DR, so a ✅ chain-map row is a falsifiable
+  claim rather than an assertion (ci-score's "What each check means").
+- **A pre-drawn banner** under the provenance table — e.g.
+  `CI Secure   4 critical findings  ▏2 of 9 chains hit▕  31 workflows ·
+  impostor check ran`. `report.py` draws it; the orchestrator copies it
+  verbatim as the first line of the terminal summary and never redraws it. It
+  reflects the impostor check's real state (`ran` / `partial` / `SKIPPED` /
+  `not recorded`), so the one line most readers see cannot dress a skip up as
+  a pass. `verify_report.py` binds its numbers to the header and the chain
+  table.
+- **A `## 🔗 Chain map — all nine` table**, including the chains that
+  came back clean — a findings table alone cannot distinguish "checked and
+  clean" from "never checked". A hit row links its finding; the network-gated
+  chain renders ⚠️ and says it is not a pass when it did not run.
+- **A `Risk of the change:` line on every fix**, authored per pattern in the
+  catalog as a new required `**Risk of the change.**` marker (five markers
+  now, censused). It renders under the Fix block and rides along in the
+  copy-prompt constraints so a fix subagent sees what the change could break.
+- **A stakes-first one-liner** opening each finding, derived from that
+  finding's own attacker text.
+- **A dirty-tree caveat on the audited commit.** `scan.py` records
+  `repo_tree_dirty`; when the audited checkout had uncommitted changes, the
+  commit row says the scanned bytes may not match the linked commit.
+
+### Changed
+- **The title is a question** — `# {owner/repo} — any critical exploit chains
+  in your CI?`
+- **The provenance table is label-style** (no `| Field | Value |` header row),
+  with `Audited commit` / `Workflows scanned` / `Catalog` / `Scanned` rows; the
+  scope line renders as the headline blockquote as well as a table row.
+- **Findings are top-level sections carrying their magnitude** —
+  `## 🟥 Finding 1: Template injection in run: blocks — 2 sites / 2 workflows`
+  (was `### Finding 1: …`), so headings alone size the work. SKILL.md's
+  Phase 5 `FIXED — ` marking now targets the `## ` heading.
+- Worked examples under `reports/` re-rendered in the new format.
+
+## 2026-08-01 — Review-batch hardening: fail-closed coverage, honest degradation
+
+Consolidates four review reports against the critical-only descope. Two of the
+fixes below closed reproduced false negatives — scans that reported clean while
+a check had not run.
+
+### Fixed
+- **A broken catalog entry is now a loud exit, not a deleted chain.** A typo in
+  a METADATA block, a `correlation:` id, or a `file_check:` id used to log a
+  warning and `continue` — the chain then never ran, produced no findings, and
+  the report said the repo was clean of a pattern nobody evaluated. The loader
+  is strict and `scan.py` exits 1 telling the user to reinstall. The scan output
+  also stamps `catalog_patterns_evaluated`, which `verify_report.py` compares
+  against the nine-chain manifest so a silently-shrunk catalog goes red.
+- **A glob metacharacter in the repo's path no longer hides every workflow.** A
+  checkout under a directory named e.g. `repo[1]` was interpolated straight into
+  the discovery glob, read as a character class, and matched nothing: zero files
+  scanned, no error, a clean report. The root is escaped, and discovery finding
+  nothing while `.github/workflows/` plainly holds YAML is now a coverage
+  failure (exit 1) rather than a clean result.
+- **A partial impostor-SHA run no longer renders as a passed check.** When some
+  pins could not be resolved (network, rate limit, a repo this identity cannot
+  see), the status still began `ran:` and rendered with a ✅ — "verified"
+  asserted of pins nobody checked. Unresolved pins produce a `partial:` status,
+  render inside the same `[!WARNING]` callout as a skip, and each unverified pin
+  is named with its `file:line`.
+- **A failed run can no longer leave stale findings at the fixed path.**
+  `run.py` clears `--out` before scanning, so the file SKILL.md promises is
+  absent after a failure really is — previously a prior run's findings sat
+  there, ready to be rendered as this repo's.
+- **`--gh-impostor off` is no longer reported as "gh unavailable".** The two
+  skip reasons are distinct, and the report only suggests `gh auth login` for
+  the unauthenticated one.
+- **The last catalog pattern no longer swallows `## Reference incidents`.** A
+  pattern section ends at the next `### P` *or* the next `## ` heading, so
+  P14.24's rendered finding stops citing eight incidents belonging to other
+  chains.
+- **Catalog prose that fails to parse says so.** A missing `**TL;DR.**` used to
+  render the section's anti-pattern text under the TL;DR label — mislabeled
+  content a reader cannot distinguish from the real thing. Missing markers now
+  log a warning and render an explicit parse-failure note; a missing fix recipe
+  is no longer described as a non-YAML org setting.
+- **A failed workflow-activity lookup is recorded as unavailable, not `{}`.**
+  `{}` means "never attempted", which the report reads as no-data — so a
+  rate-limited workflow looked no different from an unenriched one.
+
+### Changed
+- **P14.10 no longer matches bare `inputs.*`.** It resolves to a
+  `workflow_call` input, which only someone with write access to a workflow
+  file can set — an insider, outside the catalog's outsider-chain admission
+  test. `workflow_dispatch` inputs stay in scope via `github.event.inputs.*`.
+- `report.py --render-plan` emits `[{"pattern", "dormant"}]` in render order;
+  list position is the group's report ordinal, and SKILL.md Phase 4 builds the
+  selection table from it so its numbering cannot drift from the report's.
+  `run.py`'s stdout is documented as an unordered presence list.
+- P14.7 and P14.18 titles drop the stale "Manual review:" prefix and name the
+  workflow file.
+- Catalog accuracy pass: severity-scale prose matches the catalog (8 HIGH, 1
+  MEDIUM), the untrusted-trigger set and `pull-requests: write` scope rule match
+  the detector, P14.19's path limitations and P14.7's composite-action blind
+  spot are stated rather than implied, and conditional "Severity" blocks are
+  relabelled **Prioritization** so they never contradict the rendered Severity.
+  Every reference to a pattern the descope removed is gone, and two dangling
+  table-of-contents anchors are fixed.
+- The worked examples under `reports/` are regenerated under the nine-chain
+  contract (they were pre-descope artifacts carrying zizmor findings and removed
+  patterns), each with authored attacker scenarios and `verify_report.py` green.
+- Dead renderer code removed: the manual-review appendix (no shipped pattern is
+  `detector: manual`) and four unreferenced activity/anchor helpers.
+
+### Added
+- Census tests binding prose to code: `verify_report.py`'s manifest to the
+  catalog's, the catalog's severity distribution to its own prose, every
+  in-catalog anchor link to a real heading, and every pattern id in a shipped
+  doc to a live pattern.
+- The install-surface dangling-link guard runs over ci-secure as well as
+  ci-speedup, each with its own relocated-infra name set.
+
+## 2026-08-01 — Critical-only descope: the nine attack chains
+
+Executes the owner's scope ruling (ci-advisor umbrella spec §3, OD-A5/OD-A6):
+bare-minimum critical findings over comprehensiveness.
+
+### Changed
+- **The catalog is now exactly nine outsider → compromise chains** (P14.7,
+  P14.9, P14.10, P14.11, P14.14, P14.15, P14.18, P14.19, P14.24). Every
+  finding renders, every one carries its attacker scenario, zero findings is
+  a first-class result — no tiers, no topping-up, no render cut. The
+  selection criterion, per-chain incident grounding, and rejection record
+  ship in `references/why-these-nine.md`, census-test-bound to the scanner.
+- **P14.9 rebuilt as a real chain detector** ("fork code executed with
+  privileges", HIGH): untrusted trigger + checkout of the attacker's head
+  ref + execution from the tree, per job — replacing the advisory multi-job
+  structural shell. Fixture-proven in both directions.
+- **P14.11 gets a first-party, network-gated detector**: every unique
+  `owner/repo@sha` pin is verified against the GitHub API (one cached call
+  per pin). Runs iff gh is authenticated; the scan output's `gh_checks`
+  block and the report state ran/skipped explicitly — a skipped check is
+  never a silent pass. Inconclusive (network/rate-limit) is never clean.
+- **The report enters the repo only on the user's save pick** (rendered to
+  tmp first) — an unasked-for working-tree file poisoned clean-checkout
+  provenance downstream.
+- Dormant workflows' findings render with a note but are never dropped.
+- `run.py` is now a scan-only driver (atomic publish, group-list stdout).
+- The findings/report tmp paths are **repo-scoped** (a hash of the repo root
+  in the filename): two concurrent ci-secure sessions on different repos can
+  no longer clobber each other's findings mid-flight and render the wrong
+  repo's report — caught live in owner dogfooding.
+- The close adopts the ci-speedup/ci-score **interaction contract**
+  (owner dogfood feedback): full findings table in prose, then ONE
+  structured question — top fix slots, "a different selection" as the
+  door to every row, the verbatim save option last; the save offer is a
+  structured two-option question. Free-text replies still work.
+- **Apply-risk is communicated, not just attack severity** (owner dogfood
+  feedback): every fix option states what the edit could break if wrong
+  and how it will be verified; fixes touching deploy/release/publish
+  workflows (or production credentials) are called out in plain words
+  with a dry-run recommendation, and fix subagents must state how the
+  workflow's intent was preserved. Severity describes the attack; apply
+  risk describes the edit.
+
+### Fixed
+- **The impostor-SHA check no longer flags what it cannot see.** GitHub
+  answers `404` — not `403` — for a repository the caller lacks access to, so
+  a private/internal shared-action pin was reported as a CRITICAL impostor
+  finding. A cached repo-visibility probe now runs before any flag; an
+  invisible repo is inconclusive, never a finding.
+- **Pin collection now reads the parsed workflow, not a line scan** — both
+  failure directions mattered. A commented-out `# - uses: old/action@<sha>`
+  and a `uses:` string quoted inside a `run:` block were sent to the GitHub
+  API, where a 404 rendered as a critical finding on a line that pins
+  nothing; and a reference not written on one line — a folded scalar, or
+  flow style `- {uses: …}` — was never checked at all, which reads as clean.
+  Line numbers stay exact by locating the sha itself; an unparseable
+  workflow falls back to the line scan rather than dropping its pins.
+- **`verify_report.py`'s "every group rendered" check can now go red on a
+  trimmed P14.11 group.** It searched the whole report for the pattern id,
+  and every report names `P14.11` in its impostor-SHA status line — so the
+  one network-gated group was structurally exempt from the no-trimming
+  guard. The search is now scoped to the rendered finding sections.
+- Rendered reports no longer describe LOW / MANUAL severity tiers the
+  nine-chain catalog does not have; the methodology row now states that
+  criticality is membership and that nothing is tiered or truncated.
+- The catalog's Reference incidents section no longer attributes incidents to
+  removed patterns (P14.1, P14.2, P14.6, P5.1, P8.3) that a reader cannot
+  resolve, and now carries the Codecov, Chainguard imposter-commit, and
+  GitHub Security Lab citations `why-these-nine.md` refers to it for. A
+  census test keeps every attribution pointing at a live pattern.
+- The scenario-authoring guide no longer tells the orchestrator to write
+  "there's no real attack here" scenarios (impossible under the critical-only
+  catalog) or to generate scenarios for zizmor groups (removed).
+- SKILL.md states the zero-findings path explicitly: no empty selection table
+  and no "which findings do you want fixed?" prompt when there are none.
+- A stale scan test asserted P14.11 was documentation-only and could never
+  fire — the opposite of the shipped contract — and asserted on P14.6, a
+  removed pattern. Replaced with the honest invariant.
+
+### Removed
+- The 18 presence-shaped/blast-radius patterns (unpinned versions, missing
+  permissions blocks, OIDC scoping, CODEOWNERS, scanner-installed, release
+  hygiene, …): several become scored config facts in the CI Score registry
+  (v0.2); the rest are archived in the maintainer tree, never shipped.
+  Re-admission requires passing why-these-nine.md's three tests — an owner
+  decision, guarded by the census test.
+- zizmor integration (blending, opt-in flow, installer) and fix-complexity
+  risk scoring, wholesale.
+- `MAINTAINERS.md` + loop infra moved out of the installable tree
+  (install-surface invariant now guards ci-secure too).
+
+## 2026-05-27 — Report bug fixes (#15)
+
+- Fixed defects in the rendered security report (severity/scoping and evidence
+  presentation), found by review of real runs.
+
+## 2026-05-25 — Maintainer self-improvement loop (#12, #14)
+
+### Added
+- The **maintainer-only self-improvement loop**: read transcripts of real
+  ci-secure runs, extract the operator steering events, and propose matched
+  `SKILL.md` + `evals/evals.json` edits. Runs locally via Claude Code, **never as
+  a GitHub Action** — committed infra is the analysis prompt + summary schema
+  (`references/loop-*`); all run data stays in the gitignored `.ci-secure-loop/`
+  and is never committed (it can hold third-party findings / secrets).
+
+### Changed
+- The loop must **verify a claimed failure mode against the current code before
+  encoding it** — don't re-fix what a stale transcript describes (#14).
+
+## 2026-05-24 — Loop coverage and selection (#13)
+
+- Hardened how the loop selects and covers transcripts, so a clean run with no
+  steering is a valid (empty) result rather than a forced edit.
+
+## 2026-05-23 — Initial skill + coverage-gap surfacing (#10, #11)
+
+### Added
+- The **ci-secure** skill: a deterministic GitHub Actions security audit
+  (`scan.py` over the pattern catalog → `report.py`), RCA-style report, no
+  commit/push from inside the skill.
+
+### Changed
+- **No silent drops:** a workflow dropped from the scan (timeout, parse error)
+  must be surfaced loudly as a coverage gap, never reported as "clean" — a
+  skipped file shown as clean is a false negative (#11).
+
+## Shared utilities
+
+`gh_utils.py` is an intentional verbatim copy shared with
+`starsling-runners-migration`; `config.py` overlaps on the keys ci-secure
+consumes. Edits that touch those land in lockstep with the sibling skill (see its
+changelog for the same-dated entries).

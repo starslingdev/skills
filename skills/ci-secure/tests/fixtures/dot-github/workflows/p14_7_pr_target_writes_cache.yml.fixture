@@ -1,0 +1,31 @@
+# Positive fixture for P14.7 (yaml-workflow-correlated:
+# untrusted-trigger-writes-cache). `pull_request_target` trigger
+# combined with a job that writes the shared cache via
+# `actions/setup-node`'s `cache: npm` input — the TanStack 2026-05-11
+# entry vector in miniature.
+#
+# Scanner expectation: one P14.7 finding (workflow scope).
+
+name: bundle-size
+
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run bundle-size

@@ -1,0 +1,29 @@
+# Lock-in fixture for the P14.5 _SCANNER_RUN_RE fix (2026-05-19).
+#
+# A workflow that mentions `zizmor` in a `run:` block as plain prose
+# but does NOT actually invoke a scanner. The previous regex allowed
+# any \w (word) char after `zizmor`, so `zizmor was replaced` would
+# satisfy `\bzizmor\b(?:\s+[-./\w]|\s*$)` and `_workflow_step_invokes_scanner`
+# would return True — silently suppressing P14.5 for the whole repo.
+#
+# Scanner expectation: this file must not flip P14.5 to "scanner
+# already runs" — P14.5 still fires once for the fixtures dir. With
+# the bug present, the EXPECTED_COUNTS manifest would drop P14.5 from
+# 1 to 0 and the test fails.
+
+name: lint
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  notes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: |
+          # zizmor was replaced by an internal linter last quarter
+          echo "no scanning happens in this workflow"

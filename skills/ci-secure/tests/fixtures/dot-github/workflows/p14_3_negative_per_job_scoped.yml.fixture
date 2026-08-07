@@ -1,0 +1,28 @@
+# Negative-lookalike for P14.3 — top-level `contents: write`, but EVERY
+# job declares its own permissions block, so no job silently inherits the
+# broad scope. The top-level write is the default the per-job blocks
+# override; this is a scoped, intentional setup.
+#
+# Scanner expectation: zero P14.3 findings.
+
+name: ci
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: make build
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - run: make release

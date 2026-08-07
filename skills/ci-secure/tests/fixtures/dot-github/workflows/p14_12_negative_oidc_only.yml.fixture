@@ -1,0 +1,37 @@
+# Negative-coverage fixture for P14.12.
+#
+# Confirms the long-lived-credentials regex does NOT fire on a workflow
+# that publishes via OIDC (`id-token: write` at job scope plus
+# `role-to-assume`), so none of the configured AWS_*/GCP_*/NPM_TOKEN
+# secret names appear in the file. The detector is purely
+# secret-name-driven, so the absence of those names is the contract.
+#
+# id-token is set at the JOB level (not workflow), so P14.8 — which
+# scopes itself to `.permissions.id-token` at workflow scope — also
+# stays silent on this file.
+#
+# Scanner expectation: zero P14.12 findings (and zero P14.8 findings)
+# on this file.
+
+name: oidc-publish
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/publish
+          aws-region: us-east-1
+      - run: aws sts get-caller-identity

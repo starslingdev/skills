@@ -1,0 +1,23 @@
+# Lock-in fixture for the P14.3 `permissions: null` fix.
+# Top-level grants `contents: write`; the `build` job sets
+# `permissions: null` (the key is present but parses to None). GitHub
+# treats null identically to omitting the key, so the job STILL inherits
+# the broad top-level write grant and the finding must fire — the naive
+# `"permissions" not in job` check would wrongly treat null as a scope.
+#
+# Scanner expectation: one P14.3 finding.
+
+name: ci
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions: null
+    steps:
+      - run: make build

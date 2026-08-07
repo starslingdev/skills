@@ -1,0 +1,132 @@
+# Why these ten — the selection criterion behind the critical-only catalog
+
+ci-secure deliberately detects **ten** attack vectors, not the ~27 patterns
+its catalog once held. This document is the reasoning, shipped with the skill
+so every finding can answer "why is this one of only ten?" — and so every
+future "shouldn't we add pattern X?" is tested against a written criterion
+instead of instinct. A census test binds the list below to the scanner's
+active pattern set: they cannot drift apart.
+
+## The filter
+
+A pattern is in the catalog **only if it describes a complete outsider →
+compromise chain**, judged by three tests, all required:
+
+1. **The outsider-chain test.** Someone with **no access to the repo** — an
+   account that can open a fork PR, craft a branch/title, or publish an
+   upstream artifact — can reach a concrete compromise: code execution
+   holding a write token, secret theft, or poisoning of what the repo ships.
+   Not "this makes a breach worse if one happens" (blast radius); the chain
+   itself must start at outsider and end at compromise.
+2. **The incident test.** The vector class has actually happened in public —
+   each entry below names its incidents. Nothing on the list is theoretical.
+3. **The same-day-fix test.** A maintainer can close the finding the day
+   they read it — change a trigger, remove an interpolation, re-pin a SHA,
+   drop a permission line. Nothing that requires a hardening program.
+
+Notably, the filter is NOT "keep everything labeled HIGH": three catalog-HIGH
+patterns failed it, and two catalog-MEDIUM patterns passed it (see the
+rejection record).
+
+## The ten, with their incident grounding
+
+| # | Pattern | Chain | Public incidents |
+|---|---------|-------|------------------|
+| 1 | P14.10 | Template injection in `run:` — attacker text (PR title, branch name) pasted into a shell | nx / s1ngularity (2025); elementary-data (2026); Ultralytics (2024) |
+| 2 | P14.9 | Fork code executed with privileges — untrusted trigger + head checkout + execution | GitHub Security Lab "pwn request" writeups; Trivy round 1 (2026) |
+| 3 | P14.7 | Fork-writable shared cache — poisoned cache consumed by trusted runs | TanStack (2026); Ultralytics (2024) |
+| 4 | P14.11 | Impostor / unreachable action SHA — a pin the canonical repo never contained | tj-actions/changed-files (2025); Chainguard "imposter commits" research |
+| 5 | P14.14 | Whole-context secrets dump — `toJSON(secrets)` into logs/env | tj-actions payload behavior (memory scraping, 2025) |
+| 6 | P14.15 | Attacker-controlled `$GITHUB_ENV` / `$GITHUB_PATH` write — hijacks later steps | GitHub Security Lab environment-injection writeups |
+| 7 | P14.18 | `pull-requests: write` on an untrusted trigger — outsider's event holds a write token | elementary-data (2026) — forged release via default-write token |
+| 8 | P14.19 | Credential files in caches/artifacts — keys fetchable by other jobs or the public | cache-pivot class documented in Trivy round 2 analysis (2026) |
+| 9 | P14.24 | Unverified `curl \| bash` with secrets present — remote host compromise becomes yours | Codecov bash-uploader breach (2021) |
+| 10 | P14.25 | Dependency install scripts executing in a privileged job — a compromised upstream package runs code where the secrets are | nx / s1ngularity install-script payload (2025); Miasma / `@redhat-cloud-services` (2026); GitHub's July 28 2026 supply-chain post |
+
+Full incident citations live in the catalog's
+[Reference incidents](security-patterns.md#reference-incidents) section.
+
+### The tenth vector, evaluated against the three tests
+
+P14.25 (dependency install scripts executed in a privileged job) was admitted
+2026-08-06. Its evaluation, stated in full so the admission is auditable:
+
+1. **Outsider-chain test — passes.** The outsider capability the filter names
+   explicitly is "publish an upstream artifact". An attacker who takes over a
+   maintainer's npm account, lands a typosquat, or compromises a transitive
+   dependency publishes a version whose `preinstall`/`install`/`postinstall`
+   script runs automatically the next time CI installs dependencies. No repo
+   access is needed at any point. The chain ends at compromise **only when
+   the job the install runs in holds something to steal** — repo secrets or a
+   write-scoped token — which is why the detector requires that payoff rather
+   than flagging every install (see below).
+2. **Incident test — passes.** The s1ngularity-class payloads (2025) executed
+   from install scripts and harvested credentials from the machines that ran
+   them; the June 2026 Miasma compromise of the `@redhat-cloud-services`
+   namespace, and its `binding.gyp`-based follow-up, used the same execution
+   point. GitHub's [July 28 2026 post](https://github.blog/security/supply-chain-security/disrupting-supply-chain-attacks-on-npm-and-github-actions/)
+   describes the class as the one it changed npm's defaults to disrupt.
+3. **Same-day-fix test — passes.** Adding `--ignore-scripts` to the install
+   command is a one-line edit a maintainer can make the day they read the
+   finding. Where a legitimate build step depends on a lifecycle script, the
+   same-day move is to re-enable it explicitly for the packages that need it
+   (npm v12's approval list) or to run the script-bearing install in a
+   separate job that carries no secrets — still a workflow edit, not a
+   hardening program.
+
+The severity is MEDIUM for the same documented reason as P14.24: the vector's
+potency depends on a live condition outside the repo (whether a dependency in
+the tree is or becomes malicious), not on an in-repo defect. Criticality is
+membership, so it renders as a finding all the same.
+
+## The rejection record — what the filter removed, and why
+
+The old catalog's other patterns fell into two classes:
+
+**Blast-radius patterns (including three catalog-HIGHs).** Real weaknesses
+that make a breach worse *if an attacker is already in*, with no chain that
+starts at outsider: workflow-scoped OIDC tokens (P14.8), long-lived cloud
+credentials where OIDC exists (P14.12), cache steps in release jobs (P8.3).
+These are exactly the findings a maintainer reads and cannot act on that
+day — the noise the descope removed. Two of them are already pass/fail facts
+in the CI Score.
+
+**Presence-shaped hygiene observations.** A defense being absent is not an
+attack being possible: missing `permissions:` blocks (P5.5), unpinned
+versions (P5.1), workflow-level permission scoping (P14.3), no CODEOWNERS on
+workflows (P14.20), no scanner installed (P14.5), tag-pin audit hygiene
+(P14.2), release-environment gating (P8.4), checkout credential persistence
+(P14.16), `secrets: inherit` (P14.17), broad artifact upload (P14.22),
+malformed `if:` (P14.23), and the manual-review checklist entries (P14.6).
+These either became scored config facts (registry v0.2) — where a one-line
+pass/fail is the honest weight for a presence fact — or were dropped.
+
+Two catalog-MEDIUM patterns **passed** the filter and stayed: the fork-code
+trust chain (P14.9 — its severity was raised to HIGH with the rebuilt
+detector) and `curl | bash` (P14.24 — the Codecov chain is real; its potency
+depends on a live condition, which is why its catalog severity stays MEDIUM
+while it remains a critical finding by membership).
+
+The full pre-descope catalog is archived in the maintainer tree (never
+shipped); re-admitting any entry means passing this document's three tests
+and updating the census.
+
+## What "critical" means here
+
+**Criticality is membership in this list.** The catalog's `severity` field
+still records each unfixed attack's potency (HIGH/MEDIUM), but the report
+does not tier, top up, or truncate: every finding from these ten renders,
+every one carries its attacker scenario, and zero findings is a first-class
+result. One of the ten (P14.11) needs the GitHub API; when it cannot run,
+the report says so explicitly — a skipped check is never a silent pass.
+
+## Platform mitigations — dated, and scoped to what they actually close
+
+Several of these vectors were partly mitigated by GitHub platform changes in
+mid-2026. The catalog records each change with its date and the residuals
+GitHub itself enumerates, on the entry it affects (P14.7, P14.9, P14.18,
+P14.25). A platform default that closes the classic entry on github.com does
+not retire the vector — Enterprise Server, third-party backends, opt-outs and
+pinned action versions keep it live — so the detectors and severities are
+unchanged, and the finding says which of those residuals applies to the
+reader.

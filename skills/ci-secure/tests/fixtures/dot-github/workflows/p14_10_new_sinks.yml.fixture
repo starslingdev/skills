@@ -1,0 +1,36 @@
+# Fixture for P14.10 — sinks added 2026-05-13.
+# Four template-injection lines, each from a different sink:
+#   1. github.event.head_commit.message     — push-trigger canonical
+#   2. github.event.inputs.target_branch    — workflow_dispatch via event.inputs
+#   3. inputs.deploy_env                    — workflow_dispatch via bare inputs
+#   4. github.event.client_payload.command  — repository_dispatch payload
+
+name: deploy-from-input
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        required: true
+      deploy_env:
+        required: true
+  repository_dispatch:
+    types: [deploy]
+
+permissions:
+  contents: read
+
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "head commit: ${{ github.event.head_commit.message }}"
+      - run: |
+          echo "branch: ${{ github.event.inputs.target_branch }}"
+      - run: |
+          echo "env: ${{ inputs.deploy_env }}"
+      - run: |
+          echo "cmd: ${{ github.event.client_payload.command }}"

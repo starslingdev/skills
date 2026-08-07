@@ -1,0 +1,22 @@
+# Positive-coverage fixture for P14.1 — list `on:` shape.
+#
+# Exercises `isinstance(on_node, list)` inside `_on_trigger_names`.
+# `push` is not a dangerous trigger so it must not contribute; the
+# two dangerous triggers in the list (`issues`, `fork`) must each
+# produce exactly one finding.
+#
+# Scanner expectation: exactly 2 P14.1 findings on this file.
+
+name: many-triggers
+
+on: [push, issues, fork]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - run: echo hi

@@ -1,0 +1,16 @@
+# Lock-in fixture for the P14.20 CODEOWNERS regex fix (2026-05-19).
+#
+# This file contains ONLY extension-specific rules (`*.go`, `*.rs`).
+# None of them cover `.github/workflows/*.yml`. With the previous
+# `^\s*\*` pattern, the scanner would see the `*.go` line, treat
+# its leading `*` as a global catch-all owner, and conclude that
+# workflows ARE covered — silently suppressing P14.20 across the
+# whole fixtures dir.
+#
+# Scanner expectation: P14.20 still fires once (the fixtures dir has
+# no entry that actually covers `.github/workflows/`). With the bug
+# present, the EXPECTED_COUNTS manifest would drop P14.20 from 1 to 0
+# and the test fails.
+
+*.go @sec-team
+*.rs @sec-team

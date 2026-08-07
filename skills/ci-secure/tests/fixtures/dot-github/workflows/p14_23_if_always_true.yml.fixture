@@ -1,0 +1,24 @@
+# Positive fixture for P14.23 — an `if:` that mixes literal text with a
+# `${{ }}` expression. GitHub string-interpolates this into a non-empty
+# (truthy) string, so the gate is always true and the step always runs.
+# Uses a `push` trigger so this fixture isolates P14.23 (no P14.1).
+#
+# Scanner expectation: one P14.23 finding on the malformed if: line.
+
+name: gated
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # WRONG: the literal text + ${{ }} interpolate to a truthy string,
+      # so this "branch gate" runs on every push, not just main.
+      - if: github.actor == 'maintainer' && ${{ github.ref == 'refs/heads/main' }}
+        run: ./deploy.sh

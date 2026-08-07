@@ -1,0 +1,29 @@
+# Negative-coverage fixture for P14.15.
+#
+# Confirms the env/path-injection regex does NOT fire on a `>> $GITHUB_ENV`
+# write whose source is derived locally (a shell command), not from a
+# `${{ github.event.* }}` / `inputs.*` / `head_ref` expression on the
+# same line. The catalog regex requires the untrusted expression and
+# the env-file redirect to co-occur on a single line.
+#
+# Scanner expectation: zero P14.15 findings on this file.
+
+name: safe-env-write
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  write:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - name: derive version from package.json
+        run: |
+          VERSION=$(jq -r .version package.json)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"

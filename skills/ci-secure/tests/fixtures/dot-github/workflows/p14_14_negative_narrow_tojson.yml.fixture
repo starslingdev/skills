@@ -1,0 +1,32 @@
+# Negative-coverage fixture for P14.14.
+#
+# Confirms the whole-context-dump regex does NOT fire on narrow uses
+# of toJSON. The catalog regex is anchored so the closing paren must
+# follow `secrets`, `github`, or `env` directly:
+#   toJSON\s*\(\s*(secrets|github|env)\s*\)
+# A call like `toJSON(github.event.issue)` has `.event.issue` between
+# `github` and `)`, so it must not match. Likewise `toJSON(env.FOO)`.
+#
+# The expression is placed in an `env:` block (not `run:`) so the
+# nested `github.event.*` also avoids tripping P14.10.
+#
+# Scanner expectation: zero P14.14 findings on this file.
+
+name: narrow-tojson
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    env:
+      ISSUE_PAYLOAD: ${{ toJSON(github.event.issue) }}
+      FOO_PAYLOAD: ${{ toJSON(env.FOO) }}
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - run: echo "$ISSUE_PAYLOAD" | wc -c

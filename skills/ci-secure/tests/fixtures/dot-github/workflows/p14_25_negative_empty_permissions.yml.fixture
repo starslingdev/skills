@@ -1,0 +1,10 @@
+name: lint
+on: push
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - uses: actions/checkout@v4
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
