@@ -41,6 +41,16 @@ history.
 
 ### Fixed
 
+- **2026-08-07** — **A CODEOWNERS rule for one workflow file no longer counts
+  as covering the directory.** The hygiene row asserts that workflow changes
+  need a named reviewer; the match was a bare `.github/workflows/` prefix, so
+  `.github/workflows/release.yml @team` — a rule protecting exactly one file —
+  graded the whole directory as covered while every sibling workflow kept
+  merging on the same approvals as any other change. A false pass on the only
+  thing the row claims. The rule must now BE the directory (`.github/workflows/`)
+  or carry a glob (`*`, `**`, `*.yml`); a concrete filename fails. The
+  directory, global-star and `.github/**` forms are unchanged.
+
 - **2026-08-07** — **Five report-accuracy and readability fixes.** (1) The
   P14.25 platform paragraph pointed at "the evidence above" and "the
   per-manager list above"; in report position the evidence renders BELOW it

@@ -183,6 +183,35 @@ def test_codeowners_missing_and_noncovering_both_fail(tmp_path):
     )
 
 
+def test_codeowners_rule_for_one_workflow_file_does_not_cover_the_directory(tmp_path):
+    """The fact claims the DIRECTORY is covered. A rule naming a single
+    workflow protects that file and leaves every sibling merging on the same
+    approvals as any other change — reporting it as covered is a false clean
+    on the only thing this row asserts."""
+    for rule in (".github/workflows/release.yml @sec\n",
+                 "/.github/workflows/deploy.yaml @sec\n"):
+        root, files = _repo(tmp_path / rule.split("/")[-1].split(".")[0],
+                            {"ci.yml": _SAFE_WF}, codeowners=rule)
+        f = _outcome(cf.compute_config_facts(root, files, []),
+                     "sec.codeowners.workflows")
+        assert f["outcome"] == "fail", f"{rule!r} covers one file, not the dir"
+
+
+def test_codeowners_directory_and_glob_forms_cover_workflows(tmp_path):
+    """The forms that DO cover the directory keep passing — the tightened rule
+    must not start failing correctly-configured repos."""
+    for i, rule in enumerate((".github/workflows/ @sec\n",
+                              "/.github/workflows/ @sec\n",
+                              ".github/workflows/* @sec\n",
+                              ".github/workflows/** @sec\n",
+                              ".github/workflows/*.yml @sec\n")):
+        root, files = _repo(tmp_path / f"r{i}", {"ci.yml": _SAFE_WF},
+                            codeowners=rule)
+        f = _outcome(cf.compute_config_facts(root, files, []),
+                     "sec.codeowners.workflows")
+        assert f["outcome"] == "pass", f"{rule!r} should cover workflows"
+
+
 def test_codeowners_global_star_and_double_star_cover_workflows(tmp_path):
     for pattern in ("* @owners\n", ".github/** @sec\n"):
         root, files = _repo(tmp_path / pattern[:3].strip("*/. ") or "x",

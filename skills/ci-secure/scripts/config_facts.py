@@ -108,7 +108,16 @@ _CODEOWNERS_CANDIDATES = (
     Path("docs/CODEOWNERS"),
 )
 _WORKFLOWS_CODEOWNER_PATTERNS = (
-    r"^\s*/?\.github/workflows/",
+    # `.github/workflows/` must BE the rule (directory form) or carry a glob —
+    # `.github/workflows/ @team`, `/.github/workflows/* @team`,
+    # `.github/workflows/** @team`. A rule naming ONE file
+    # (`.github/workflows/release.yml @team`) protects that file and nothing
+    # else; matching on the bare prefix graded such a repo as covered, which is
+    # a false clean on the exact claim this fact makes. A partial glob
+    # (`*.yml`) is still accepted as directory-wide intent, even though a
+    # `.yaml` workflow would slip it — failing a correctly-configured repo over
+    # that costs more than it catches.
+    r"^\s*/?\.github/workflows/(?:\*\S*)?(?:\s|$)",
     # `.github/**` recurses and covers workflows; single-star `.github/*` does
     # NOT (gitignore semantics: `*` doesn't cross `/`) and is deliberately
     # absent — including it produced false negatives.
