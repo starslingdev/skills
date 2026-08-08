@@ -194,6 +194,17 @@ def test_pipeline_scan_render_verify_passes(tmp_path: Path) -> None:
     if subprocess.run([sys.executable, "-c", "import yaml"],
                       capture_output=True).returncode != 0:
         pytest.skip("PyYAML not installed in the test runner")
+    # The report stamps a `skill commit` into its Scanners row from the git
+    # HEAD of the directory holding these scripts, and one of verify_report's
+    # checks reads it back. In a tree with no git metadata — a plain copy,
+    # which is how an end-user install arrives — there is no SHA to stamp, so
+    # the check fails on ABSENCE rather than on any report-integrity break.
+    # That is a false red on the one test whose whole job is catching real
+    # ones, so it skips with the reason stated instead.
+    if subprocess.run(["git", "-C", str(_SKILL_DIR), "rev-parse", "HEAD"],
+                      capture_output=True).returncode != 0:
+        pytest.skip("no git metadata for the skill checkout, so the report "
+                    "cannot stamp the `skill commit` this pipeline verifies")
     scan = _SKILL_DIR / "scripts" / "scan.py"
     report_py = _SKILL_DIR / "scripts" / "report.py"
     fixture = _SKILL_DIR / "evals" / "files" / "many-findings"

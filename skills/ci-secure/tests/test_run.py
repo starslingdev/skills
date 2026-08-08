@@ -38,6 +38,14 @@ _FIXTURES = _SKILL_DIR / "tests" / "fixtures"
 _RUN_SCRIPT = _SKILL_DIR / "scripts" / "run.py"
 
 
+def test_the_script_under_test_is_ci_secures_own() -> None:
+    """Which file won. `run.py` is a colliding name across the skills in this
+    repo — these tests invoke it by absolute path rather than by module name
+    for exactly that reason, and this pins the path they invoke."""
+    assert _RUN_SCRIPT.resolve().parents[1].name == "ci-secure"
+    assert _RUN_SCRIPT.is_file()
+
+
 def _skip_if_no_yaml() -> None:
     if subprocess.run(
         [sys.executable, "-c", "import yaml"], capture_output=True, text=True,

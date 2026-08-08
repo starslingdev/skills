@@ -9,14 +9,29 @@ the several phase calls a run makes.
 
 from __future__ import annotations
 
+import importlib.util
 import json
-import sys
 from pathlib import Path
 
-_SKILL_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+# `record_timing.py` is a COLLIDING module name — a sibling skill ships one
+# too, and the root pyproject puts both `scripts/` dirs on pythonpath. A bare
+# `import record_timing` after the sibling's copy is already cached is a no-op,
+# so these four tests asserted against the other skill's code and passed. Load
+# by file location instead, under a unique name, mutating nothing global.
+_TESTS = Path(__file__).resolve().parent
+_spec = importlib.util.spec_from_file_location(
+    "_ci_secure_scan_import", _TESTS / "_scan_import.py")
+_shim = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_shim)
 
-import record_timing  # noqa: E402
+record_timing = _shim.load_script("ci_secure_record_timing", "record_timing.py")
+
+
+def test_the_module_under_test_is_ci_secures_own() -> None:
+    """Which file won. Four tests below passed against a SIBLING skill's
+    `record_timing.py` whenever that copy was already cached — green, and
+    ci-secure's own script never executed."""
+    assert Path(record_timing.__file__).resolve().parents[1].name == "ci-secure"
 
 
 def _write(p: Path, obj: dict) -> None:

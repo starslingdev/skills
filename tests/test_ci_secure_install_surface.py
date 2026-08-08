@@ -8,16 +8,20 @@ no ``.skillignore`` / frontmatter allowlist / dotfile exclusion. So the ONLY way
 to keep maintainer-only files out of an end-user install is to keep them out of
 ``skills/ci-secure/`` entirely.
 
-ci-secure's leak shape is the same family as ci-speedup's: self-improvement loop
-infra (loop prompts, a summary schema, drafting scripts) plus the runtime
-capture directories those loops write into, which on a maintainer's machine hold
-third-party job logs and session transcripts. Rooted under the skill, every one
-of them would ship.
+This guard is FORWARD-LOOKING. ci-secure has no maintainer-loop tree in this
+repo today, so nothing here is currently leaking; the point is that the day one
+is added it lands under ``maintainers/ci-secure/`` and not under the skill. The
+leak shape to expect is ci-speedup's: self-improvement loop infra (loop prompts,
+a summary schema, drafting scripts) plus the runtime capture directories those
+loops write into, which on a maintainer's machine hold third-party job logs and
+session transcripts. Rooted under the skill, every one of them would ship.
 
 Independent checks (each its own test function, so a broken assertion in one
-never silently disables the others), plus a positive control — the forbidden
-infra is maintainer-local and absent from this repo, so every "nothing matched"
-assertion would pass vacuously if a detector were mangled.
+never silently disables the others), plus a positive control. Every other
+assertion here is a "nothing matched", and the forbidden infra is absent — so
+they would ALSO pass if a detector were mangled, or if ``_SKILL`` pointed at a
+directory that does not exist (``rglob`` on a missing path yields nothing and
+the whole file goes green against an empty world).
 
 Deliberate NON-target: the fixture ``.github/`` directories that
 ``skills/ci-secure/tests/conftest.py`` materializes from the tracked, cloaked
@@ -25,8 +29,9 @@ Deliberate NON-target: the fixture ``.github/`` directories that
 run, never tracked, and the same carve-out ``test_ci_score_install_surface.py``
 makes for its checkout fixtures. What keeps attack-shaped workflow YAML out of
 the *published repository* — the surface a registry scanner reads — is the
-cloak itself, which ``skills/ci-secure/tests/test_fixture_cloak``-style
-round-trip asserts in that conftest keep honest.
+cloak itself, which that conftest keeps honest with a manifest census over
+every cloaked fixture (hash round-trip in both directions, plus a prune of
+anything materialized without a manifest entry behind it).
 """
 from __future__ import annotations
 
@@ -36,7 +41,11 @@ _REPO = Path(__file__).resolve().parents[1]
 _SKILL = _REPO / "skills" / "ci-secure"
 
 # Basenames that mark maintainer-only loop infrastructure. A file with one of
-# these names anywhere under the installable skill is a leak.
+# these names anywhere under the installable skill is a leak. Compared
+# case-INSENSITIVELY, like the directory names below: macOS and Windows
+# checkouts are case-insensitive, so `Draft_Detector.py` is the same file to the
+# installer and matching it exactly was a rename-shaped hole on one side of the
+# guard only.
 _FORBIDDEN_FILE_NAMES = {
     "MAINTAINERS.md",
     "loop-analysis-prompt.md",
@@ -66,7 +75,15 @@ _CAPTURE_DOTDIR_PREFIX = ".ci-secure-"
 
 
 def _is_capture_dotdir(name: str) -> bool:
-    return name.startswith(_CAPTURE_DOTDIR_PREFIX)
+    return name.lower().startswith(_CAPTURE_DOTDIR_PREFIX)
+
+
+def _is_forbidden_file(name: str) -> bool:
+    return name.lower() in {n.lower() for n in _FORBIDDEN_FILE_NAMES}
+
+
+def _is_forbidden_dir(name: str) -> bool:
+    return name.lower() in {n.lower() for n in _FORBIDDEN_DIR_NAMES}
 
 
 def _iter_skill_files():
@@ -80,7 +97,7 @@ def test_no_maintainer_only_files_under_skill():
     leaked = sorted(
         p.relative_to(_REPO).as_posix()
         for p in _iter_skill_files()
-        if p.name in _FORBIDDEN_FILE_NAMES
+        if _is_forbidden_file(p.name)
     )
     assert not leaked, (
         "maintainer-only infrastructure leaked into the installable skill "
@@ -93,7 +110,7 @@ def test_no_maintainer_only_dirs_under_skill():
     leaked = sorted(
         p.relative_to(_REPO).as_posix()
         for p in _SKILL.rglob("*")
-        if p.is_dir() and p.name.lower() in _FORBIDDEN_DIR_NAMES
+        if p.is_dir() and _is_forbidden_dir(p.name)
     )
     assert not leaked, (
         "maintainer-only directory leaked into the installable skill "
@@ -146,8 +163,24 @@ def test_detectors_actually_fire():
     """Positive control against vacuous passing. Every other assertion in this
     file is a "nothing matched" — and the forbidden infra is maintainer-local
     and absent from this repo, so they would ALSO pass if a detector were
-    silently mangled (name set emptied, prefix broken)."""
+    silently mangled (name set emptied, prefix broken) — or if `_SKILL` stopped
+    pointing at a real directory, because `rglob` on a missing path yields
+    nothing and every check goes green against an empty world."""
+    assert _SKILL.is_dir(), (
+        f"{_SKILL} is not a directory — the skill was renamed or moved and "
+        "every check in this file is now scanning nothing")
+    scanned = sum(1 for _ in _iter_skill_files())
+    assert scanned > 50, (
+        f"only {scanned} file(s) under {_SKILL}; the skill ships a SKILL.md, "
+        "scripts, references, evals and tests, so a count this low means the "
+        "walker is broken and the 'nothing matched' assertions are vacuous")
     assert _is_capture_dotdir(".ci-secure-loop")
+    assert _is_capture_dotdir(".CI-Secure-Loop")     # case-insensitive
+    assert _is_forbidden_file("MAINTAINERS.md")
+    assert _is_forbidden_file("maintainers.md")      # case-insensitive
+    assert not _is_forbidden_file("SKILL.md")
+    assert _is_forbidden_dir("loops") and _is_forbidden_dir("Loops")
+    assert not _is_forbidden_dir("references")
     assert _is_capture_dotdir(".ci-secure-gaps")
     assert _is_capture_dotdir(".ci-secure-runs")     # the rename gap
     assert not _is_capture_dotdir(".github")         # materialized fixtures

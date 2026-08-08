@@ -26,12 +26,31 @@ from pathlib import Path
 import pytest
 
 _SKILL_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _scan_import import load_scan  # noqa: E402
+# Put THIS tests dir on the path only for the duration of the shim import. A
+# bare insert with no matching removal leaves ci-secure's tests dir shadowing
+# same-named modules for the rest of the session — the global-state class the
+# shim exists to avoid.
+_TESTS_DIR = str(Path(__file__).resolve().parent)
+sys.path.insert(0, _TESTS_DIR)
+try:
+    from _scan_import import assert_is_ci_secure, load_scan  # noqa: E402
+finally:
+    try:
+        sys.path.remove(_TESTS_DIR)
+    except ValueError:                          # pragma: no cover - defensive
+        pass
 
 scan = load_scan()
 _FIXTURES = _SKILL_DIR / "tests" / "fixtures"
 _SCAN_SCRIPT = _SKILL_DIR / "scripts" / "scan.py"
+
+
+def test_the_scan_module_under_test_is_ci_secures_own() -> None:
+    """Which file won. `scan.py` is a colliding module name across the skills
+    in this repo; every assertion below is worthless if a sibling's copy is the
+    one that got loaded."""
+    assert Path(scan.__file__).resolve().parents[1].name == "ci-secure"
+    assert_is_ci_secure(scan)
 
 
 def _scan_dir(root: Path) -> dict:
@@ -913,9 +932,6 @@ def test_undiscovered_workflows_are_a_coverage_failure(
     """Belt-and-braces for the class C2 belongs to: if discovery ever returns
     nothing while `.github/workflows/` plainly holds YAML, that is a broken
     scan, not an empty repo — exit 1, not a clean report."""
-    sys.path.insert(0, str(_SKILL_DIR / "tests"))
-    from _scan_import import load_scan
-
     scan_mod = load_scan()
     _write_workflow(tmp_path, "ci.yml", "on: push\njobs:\n  b:\n    runs-on: x\n")
     monkeypatch.setattr(scan_mod, "all_workflow_files", lambda root: [])

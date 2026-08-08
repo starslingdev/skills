@@ -28,12 +28,41 @@ def _load(name: str, path: Path) -> ModuleType:
     return mod
 
 
+def assert_is_ci_secure(mod: ModuleType) -> ModuleType:
+    """Fail loudly if `mod` is a SIBLING skill's file of the same name.
+
+    A bare `import record_timing` (or `scan`, or `run`) binds whichever
+    same-named module won the path race. When the sibling's copy is already in
+    `sys.modules` — the normal state under the repo-wide run — the import is a
+    no-op and the tests below happily assert against the WRONG skill's code,
+    passing while ci-secure's own script is never executed. So every module
+    load states which file won.
+    """
+    src = Path(mod.__file__).resolve()          # type: ignore[arg-type]
+    assert src.parents[1].name == "ci-secure", (
+        f"{mod.__name__} resolved to {src} — that is a sibling skill's file, "
+        "not ci-secure's; these assertions would be testing the wrong code")
+    return mod
+
+
+def load_script(module_name: str, filename: str) -> ModuleType:
+    """Load one of ci-secure's scripts by file location, under a unique name.
+
+    No `sys.path` mutation and no reliance on import order, so nothing global
+    is left changed for whatever test module runs next.
+    """
+    if module_name in sys.modules:
+        return assert_is_ci_secure(sys.modules[module_name])
+    return assert_is_ci_secure(_load(module_name, _SCRIPTS / filename))
+
+
 def load_scan() -> ModuleType:
     saved = {n: sys.modules.get(n) for n in ("config", "gh_utils")}
     try:
         _load("config", _SCRIPTS / "config.py")
         _load("gh_utils", _SCRIPTS / "gh_utils.py")
-        return _load("ci_secure_scan", _SCRIPTS / "scan.py")
+        return assert_is_ci_secure(
+            _load("ci_secure_scan", _SCRIPTS / "scan.py"))
     finally:
         for n, mod in saved.items():
             if mod is not None:

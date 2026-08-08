@@ -70,6 +70,25 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-08** — **The fixture-cloak manifest is a census, not a lookup.**
+  The test hook that un-cloaks the intentionally-vulnerable workflow fixtures
+  consulted the manifest only for files it happened to find, so it was silent in
+  both directions: DELETING a cloaked fixture left the suite 100% green (eleven
+  of the negative controls are named in no test, so nothing else noticed), and a
+  manifest entry for a file that no longer exists was never read. Both are hard
+  errors now, raised rather than asserted so `python -O` cannot strip them, and
+  the manifest covers the four eval trees too — those materialize the same way
+  and had no coverage at all. Materialization also PRUNES: anything sitting at a
+  destination path with no manifest entry behind it is deleted, so a renamed
+  fixture cannot leave a stale uncloaked workflow file loitering in a working
+  tree (the same residue an install into an already-used checkout would leave).
+- **2026-08-08** — **The timing-recorder tests test ci-secure's own script.**
+  `record_timing.py` is a colliding module name — a sibling skill ships one, and
+  both `scripts/` dirs are on the path — so under the repo-wide run a bare
+  `import record_timing` was a no-op against the already-cached sibling and four
+  tests asserted, green, against the wrong skill's code. It loads by file
+  location now, and every ci-secure test module that touches a collision-named
+  script (`scan`, `run`, `record_timing`) states which file won.
 - **2026-08-07** — **The CODEOWNERS check applies the last matching rule, as
   GitHub does.** It stopped at the first match, so `* @team` followed by a bare
   `.github/workflows/` graded as covered — when the later, ownerless rule is
