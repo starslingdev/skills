@@ -1847,9 +1847,9 @@ def _job_effective_write_scopes(doc: dict[str, Any], job: dict[str, Any]) -> lis
     rejects for this pattern. (The asymmetry with the npm-v12 ruling above is
     the point: there the unknown default is the DANGEROUS one, so not firing
     would hide a live finding; here it is the safe one.) A permissive default
-    token is not unreported — it is what the `sec.permissions.present` config
-    fact scores, and P14.18 flags where a write scope meets an untrusted
-    trigger.
+    token is not unreported — the `sec.permissions.workflow-declares` and
+    `sec.permissions.write-scoped` config facts score exactly that, and P14.18
+    flags where a write scope meets an untrusted trigger.
     """
     if "permissions" in job:
         return _write_scopes(job.get("permissions"))
@@ -2930,7 +2930,7 @@ _WORKFLOW_CORRELATIONS: dict[str, _Correlation] = {
 _FILE_CHECKS: dict[str, _Correlation] = {
     # Empty since the critical-only descope: the presence-shaped repo-file
     # checks (scanner-installed, tag-pin audit, CODEOWNERS) left the catalog —
-    # promoted to scored config facts (registry v0.2) or dropped. The
+    # promoted to scored config facts or dropped. The
     # repo-file-check detector machinery stays for future catalog entries.
 }
 

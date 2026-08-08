@@ -1,7 +1,8 @@
 # Why these ten — the selection criterion behind the critical-only catalog
 
-ci-secure deliberately detects **ten** attack vectors, not the ~27 patterns
-its catalog once held. This document is the reasoning, shipped with the skill
+ci-secure deliberately detects **ten** attack vectors, not the 25 patterns
+its catalog once held — the ten kept, and the 15 the rejection record below
+names and accounts for. This document is the reasoning, shipped with the skill
 so every finding can answer "why is this one of only ten?" — and so every
 future "shouldn't we add pattern X?" is tested against a written criterion
 instead of instinct. A census test binds the list below to the scanner's
@@ -88,8 +89,9 @@ that make a breach worse *if an attacker is already in*, with no chain that
 starts at outsider: workflow-scoped OIDC tokens (P14.8), long-lived cloud
 credentials where OIDC exists (P14.12), cache steps in release jobs (P8.3).
 These are exactly the findings a maintainer reads and cannot act on that
-day — the noise the descope removed. Two of them are already pass/fail facts
-in the CI Score.
+day — the noise the descope removed. ONE of them is already a pass/fail fact
+in the CI Score: workflow-scoped OIDC tokens (P14.8) is ci-score's
+`ci.security.scoped-id-token`. The other two are scored nowhere.
 
 **Presence-shaped hygiene observations.** A defense being absent is not an
 attack being possible: missing `permissions:` blocks (P5.5), unpinned
@@ -98,7 +100,7 @@ workflows (P14.20), no scanner installed (P14.5), tag-pin audit hygiene
 (P14.2), release-environment gating (P8.4), checkout credential persistence
 (P14.16), `secrets: inherit` (P14.17), broad artifact upload (P14.22),
 malformed `if:` (P14.23), and the manual-review checklist entries (P14.6).
-These either became scored config facts (registry v0.2) — where a one-line
+These either became scored config facts — where a one-line
 pass/fail is the honest weight for a presence fact — or were dropped.
 
 Two catalog-MEDIUM patterns **passed** the filter and stayed: the fork-code

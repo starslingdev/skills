@@ -26,10 +26,10 @@ import pytest
 
 _SKILL = Path(__file__).resolve().parents[1]
 
-# ci-score's registry AS OF THE CENSUS RULING (2026-08-03). Frozen here on
-# purpose: the census table in security-facts.md was written against exactly
-# this set, so the guard must compare against what was RULED, then separately
-# detect live drift.
+# ci-score's registry AS OF THE 2026-08-03 CENSUS. Frozen here on purpose:
+# the census table in security-facts.md was written against exactly this set,
+# so the guard must compare against the set that was censused on that date,
+# then separately detect live drift.
 _CI_SCORE_CHECKS_AT_CENSUS = frozenset({
     "ci.cache.dependency-cache",
     "ci.cache.build-cache",
@@ -77,7 +77,7 @@ def _shipped_fact_ids(tmp_path) -> set[str]:
 
 
 def test_shipped_facts_match_the_censused_set(tmp_path):
-    """A fact added to the code without a census ruling — or removed without
+    """A fact added to the code without a census row — or removed without
     updating the census — goes red here, not silently live."""
     assert _shipped_fact_ids(tmp_path) == _EXPECTED_FACTS
 

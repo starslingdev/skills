@@ -17,7 +17,7 @@ fix recipe consumed by per-finding fix subagents.
 - [P14.10 — Template Injection in `run:` Blocks](#p1410--template-injection-in-run-blocks)
 - [P14.9 — Fork Code Executed With Privileges](#p149--fork-code-executed-with-privileges)
 - [P14.7 — `pull_request_target` Jobs That Write the Shared Cache](#p147--pull_request_target-jobs-that-write-the-shared-cache)
-- [P14.11 — Imposter / Unreachable SHA on Action Reference](#p1411--imposter--unreachable-sha-on-action-reference)
+- [P14.11 — Impostor / Unreachable SHA on Action Reference](#p1411--impostor--unreachable-sha-on-action-reference)
 - [P14.14 — Whole-Context Dump via `toJSON(secrets|github|env)`](#p1414--whole-context-dump-via-tojsonsecretsgithubenv)
 - [P14.15 — Attacker-Controlled Write to `$GITHUB_ENV` or `$GITHUB_PATH`](#p1415--attacker-controlled-write-to-github_env-or-github_path)
 - [P14.18 — `pull-requests: write` Granted to Workflow With Untrusted Trigger](#p1418--pull-requests-write-granted-to-workflow-with-untrusted-trigger)
@@ -300,7 +300,7 @@ For composite / reusable actions whose body the audit can't read (e.g., `TanStac
 
 ---
 
-### P14.11 — Imposter / Unreachable SHA on Action Reference
+### P14.11 — Impostor / Unreachable SHA on Action Reference
 
 <!-- METADATA
 pattern: P14.11

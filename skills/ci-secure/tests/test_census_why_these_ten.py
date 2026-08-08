@@ -126,7 +126,7 @@ def _catalog_pattern_ids(text: str) -> set[str]:
 def test_no_shipped_doc_cites_a_removed_pattern():
     """A whole-catalog + SKILL.md sweep, not a section-scoped one.
 
-    The descope removed 19 patterns. A reader who meets `P8.3` or `P14.22` in
+    The descope removed 15 patterns. A reader who meets `P8.3` or `P14.22` in
     shipped prose has no way to resolve it — the id exists nowhere in the
     installed skill. why-these-ten.md is exempt: naming the removed ids IS
     its rejection record.
@@ -230,3 +230,25 @@ def test_every_platform_note_carries_a_date_and_a_residual():
             r"does NOT receive|opt-in|residual",
             note,
         ), f"{pid}: platform note states no residual — it reads as a retirement"
+
+
+def test_the_rejection_record_accounts_for_the_catalog_size_it_claims():
+    """The opening line states how big the old catalog was; the rejection
+    record below it is the ONLY evidence for that number, and the two disagreed
+    three ways — the prose said "~27 patterns", a sibling test said "removed
+    19", and the record itself names 15. A claim ABOUT the data has to be
+    checked AGAINST the data, so count the record instead of trusting prose.
+    """
+    text = _WHY.read_text()
+    named = _catalog_pattern_ids(text)
+    removed = named - THE_TEN
+    assert THE_TEN <= named, (
+        "why-these-ten.md must name every kept pattern: "
+        f"missing {sorted(THE_TEN - named)}")
+    assert len(removed) == 15, (
+        "the rejection record names a different number of removed patterns "
+        f"than the prose claims: {len(removed)} — {sorted(removed)}")
+    assert f"not the {len(named)} patterns" in text, (
+        f"the opening line must say {len(named)} — ten kept plus the "
+        f"{len(removed)} the record accounts for")
+    assert f"the {len(removed)} the rejection record below" in text

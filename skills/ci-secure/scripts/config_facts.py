@@ -31,8 +31,8 @@ THE SIX FACTS
                                           checkout sets persist-credentials:
                                           false
 
-F4 replaces "has a dangerous trigger", which is true of 84% of corpus repos
-and so discriminates nobody. The tiering is deliberate and keeps the
+F4 replaces "has a dangerous trigger", which is true of 84% of the repos
+measured during development and so discriminates nobody. The tiering is deliberate and keeps the
 findings-only rule intact: a bare untrusted trigger is ignored (too common to
 mean anything); a trigger plus a checkout of the attacker's head FAILS THIS FACT
 (the fork-code detector cannot clear the trigger as inert); the full chain —
@@ -47,8 +47,11 @@ them to UNMEASURED — no pass, no fail, a stated reason, and they stay in the
 applicable count as a visible coverage gap (the same shape ci-speedup's
 speed_score uses). F3 reads repo files, not workflow YAML, and is unaffected.
 
-THE REGISTERED SCORE. `security_score = 100 x passed / scored`, no weights, no
-partial credit — registered before any calibration run (never-tune), with the
+THE REGISTERED SCORE — MACHINE-ONLY. This aggregate is NEVER rendered in the
+report (report.py prohibits it and tests/verify_report.py fails a report that
+shows one); it exists so ci-advisor can blend the three engines. Readers get
+the pass/fail fact rows instead. `security_score = 100 x passed / scored`, no
+weights, no partial credit — registered before any calibration run (never-tune), with the
 constants emitted alongside the number so a disputed score is checkable
 without reading this source.
 """
@@ -307,7 +310,7 @@ def _declares_permissions(doc: dict) -> bool:
 def _permissions_gap(doc: dict) -> str | None:
     """Why this workflow does not declare permissions, or None if it does.
 
-    GAP-48: `permissions:` with a NULL value is treated by GitHub as omitted —
+    `permissions:` with a NULL value is treated by GitHub as omitted —
     the workflow keeps the broad default token. Key-presence alone is the naive
     check the skill's own p14_3_null_perms fixture warns about. The rule is the
     same at BOTH levels: a job whose `permissions:` key carries no real grant is

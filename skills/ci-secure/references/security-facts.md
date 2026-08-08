@@ -41,8 +41,10 @@ instead of shipping.
 
 **Residual correlation, disclosed:** a repo with careless
 workflow hygiene will tend to fail checks in both tools — that is the
-configuration-vs-consequence pairing the CI Score's axes are built on, and it
-is disclosed there. What the census rules out is the sharper defect: one edit,
+configuration-vs-consequence pairing the CI Score's axes are built on. It is
+disclosed in the census table above, which names every near-neighbour check in
+ci-score's registry alongside the fact here that resembles it, and says what
+separates the two. What the census rules out is the sharper defect: one edit,
 two moved numbers.
 
 ## What each fact asks, exactly

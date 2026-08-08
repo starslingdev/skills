@@ -1901,8 +1901,8 @@ def test_a_pattern_without_a_platform_note_renders_no_empty_row() -> None:
 
 def test_the_checkout_path_keeps_its_provenance_but_drops_the_account_name(
 ) -> None:
-    """Four corpus-QA batches flagged the absolute checkout path. Ruling: it
-    STAYS — it is the audited tree the file:line references are true of, and
+    """The absolute checkout path was flagged repeatedly during development.
+    It STAYS — it is the audited tree the file:line references are true of, and
     on a user's own run it is their own path. Only `$HOME` is abbreviated."""
     home = str(Path.home())
     md = report.render({

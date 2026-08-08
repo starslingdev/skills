@@ -1568,8 +1568,8 @@ _OUTCOME_MARKS = {"pass": "✅ pass", "fail": "❌ fail", "unmeasured": "⚠️ 
 def _abbreviate_home(path: str) -> str:
     """`/Users/me/src/repo` → `~/src/repo` when it sits under $HOME.
 
-    DELIBERATE, and settled rather than left flagged (four corpus-QA batches
-    raised it): the audited checkout path is GENUINE PROVENANCE — it records
+    DELIBERATE, and settled rather than left open (it was raised repeatedly
+    during development): the audited checkout path is GENUINE PROVENANCE — it records
     which tree the file:line references are true of — so it stays in the
     Repository row rather than being stripped. On a user's own run it is their
     own path, and the report is theirs. Abbreviating $HOME is the one change:
@@ -2457,10 +2457,12 @@ def render(
     ))
     out.append("")
 
-    # The scored config facts — the security third of the CI Score. It sits
-    # right after the vector map because it answers the other half of "how is
-    # this repo doing": the vectors are what was found, the score is what the
-    # configuration itself gets graded on.
+    # The config hygiene facts. They sit right after the vector map because
+    # they answer the other half of "how is this repo doing": the vectors are
+    # open doors that were found, the facts are armor that is present or
+    # absent. Rendered as pass/fail rows only — no aggregate is shown here (the
+    # score exists for ci-advisor's blend; verify_report fails a report that
+    # renders one).
     score_block = _security_score_block(findings_json.get("security_score"))
     if score_block:
         out.append(score_block)

@@ -243,8 +243,8 @@ def check_no_absolute_scratch_paths(report: str) -> Check:
     - The ``Repository`` provenance row records WHERE the audited checkout
       was (the sibling convention: "local checkout at `<root>`"). That is a
       statement about the scan, not a link the reader is meant to follow.
-      **This exemption is deliberate and settled** (raised by four corpus-QA
-      batches, ruled on rather than left flagged): the checkout path is
+      **This exemption is deliberate and settled** (raised repeatedly during
+      development, and decided rather than left open): the checkout path is
       genuine provenance — it says which tree the report's file:line
       references are true of — and on a user's own run it is their own path in
       their own report. ``report.py`` abbreviates ``$HOME`` to ``~`` where it
@@ -455,9 +455,10 @@ def check_banner_present_and_consistent(report: str) -> Check:
     (SKILL.md phase 3), so it is the ONE line most readers see. A banner drawn
     by hand — or left stale after a re-render — states a finding count nobody
     can trace, which is exactly the failure the pre-drawn line exists to
-    prevent. Three bindings: the finding count IS the header's `Findings`, the
-    vectors-hit count IS the number of non-clean rows in the vector-status
-    table, and the impostor word IS one of the four honest states.
+    prevent. Three bindings: the finding count IS the one in the
+    `## Critical findings: **N**` headline, the vectors-hit count IS the number
+    of non-clean rows in the vector-status table, and the impostor word IS one
+    of the four honest states.
     """
     name = "banner present and consistent (findings, vectors hit, impostor state)"
     m = _BANNER_RE.search(report)
@@ -875,7 +876,7 @@ def check_config_hygiene_facts_rendered(
     """Every config fact in the JSON is rendered as a pass/fail row.
 
     The aggregate goes; the FACTS stay. Dropping both would leave the reader
-    with no hygiene information at all, which is the opposite of the ruling.
+    with no hygiene information at all, which is the opposite of the point.
     """
     name = "every config hygiene fact in the findings JSON is rendered"
     if findings_path is None:

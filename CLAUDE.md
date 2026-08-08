@@ -22,6 +22,7 @@ skills/
 docs/methodology.md                 # public front-door methodology (links into the skill)
 examples/                           # sanitized sample report(s)
 maintainers/                        # maintainer-only loop infra, OUTSIDE the installable tree
+  ci-score/                         #   (ci-score's maintainer-only material)
   ci-speedup/                       #   (the `skills` CLI copies skills/<name>/ recursively, so
     MAINTAINERS.md                  #    keeping this here is the only way to keep it out of installs)
     loops/                          # loop prompts + summary schema (gap→catalog, transcript)
@@ -35,18 +36,23 @@ pyproject.toml                      # pytest config; testpaths span the skill + 
 
 ## Working in this repo
 
-- **`skills/ci-speedup/SKILL.md` is the authoritative spec.** Read it before
-  editing anything else under the skill.
-- **The installable skill ships zero maintainer-loop infra.** The `skills` CLI
-  copies `skills/<name>/` recursively, excluding only `{.git, __pycache__,
+These rules apply to EVERY shipped skill — `ci-speedup`, `ci-score`,
+`ci-secure` — not just the one they were first written for.
+
+- **`skills/<skill>/SKILL.md` is that skill's authoritative spec.** Read it
+  before editing anything else under the skill.
+- **Every installable skill ships zero maintainer-loop infra.** The `skills`
+  CLI copies `skills/<name>/` recursively, excluding only `{.git, __pycache__,
   __pypackages__}` — there is no dotfile/ignore exclusion. So anything that must
   NOT ship to end users (loop prompts, drafting scripts, the dogfood workflow,
-  runtime capture dirs) lives under `maintainers/ci-speedup/`, never under
-  `skills/ci-speedup/`. `tests/test_skill_install_surface.py` makes this a
-  PASS/FAIL invariant — it fails if loop infra leaks back into the skill dir.
-- **Keep the changelog current.** Every change that alters skill behavior adds a
-  dated (UTC) bullet to `skills/ci-speedup/CHANGELOG.md` under the right
-  Added / Changed / Fixed heading, *in the same PR*. If you changed the skill and
+  runtime capture dirs) lives under `maintainers/<skill>/`, never under
+  `skills/<skill>/`. One install-surface guard per skill under `tests/`
+  (`test_skill_install_surface.py` for ci-speedup, `test_ci_score_…` and
+  `test_ci_secure_install_surface.py` for the others) makes this a PASS/FAIL
+  invariant — each fails if maintainer infra leaks back into its skill dir.
+- **Keep the changelog current.** Every change that alters a skill's behavior
+  adds a dated (UTC) bullet to THAT skill's `CHANGELOG.md` under the right
+  Added / Changed / Fixed heading, *in the same PR*. If you changed a skill and
   didn't touch its changelog, the PR is incomplete. Pure-docs / test-only
   refactors that don't change behavior can be noted briefly or skipped.
 - **Tests.** From the repo root, `python3 -m pytest -v` runs every suite (the

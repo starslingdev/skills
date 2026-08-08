@@ -468,7 +468,7 @@ def test_codeowners_unreadable_directory_is_one_unmeasured_row(tmp_path):
 
 def test_bare_untrusted_trigger_passes_the_fact():
     """The 84% problem: 'has a dangerous trigger' is true of nearly every
-    corpus repo and discriminates nobody. A bare pull_request_target with no
+    repo measured during development and discriminates nobody. A bare pull_request_target with no
     attacker-head checkout must PASS."""
     wf = ("on: [pull_request_target]\npermissions: {contents: read}\n"
           "jobs:\n  label:\n    runs-on: ubuntu-latest\n"
@@ -637,7 +637,7 @@ def test_degraded_block_has_the_same_keys_as_a_real_one(tmp_path, monkeypatch):
 
 
 def test_null_permissions_is_not_a_declaration(tmp_path):
-    """GAP-48: `permissions:` with a null value is omitted per GitHub — the
+    """`permissions:` with a null value is omitted per GitHub — the
     workflow keeps the broad default token. The skill's own p14_3 fixture
     calls key-presence 'naive'; the fact must agree with the chain detector."""
     wf = ("on: [push]\npermissions:\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
@@ -653,7 +653,7 @@ def test_null_permissions_is_not_a_declaration(tmp_path):
 
 
 def test_null_permissions_is_not_a_declaration_at_job_level_either(tmp_path):
-    """GAP-48's rule is level-agnostic. A job carrying a valueless
+    """The null-value rule is level-agnostic. A job carrying a valueless
     `permissions:` key keeps the broad default token exactly as a workflow with
     one does, so the per-job leg has to test the VALUE too — key presence alone
     let a one-character edit buy the fact, and inflate the security score."""
@@ -687,7 +687,7 @@ def test_only_the_two_shorthand_permission_strings_are_declarations(tmp_path):
 
 
 def test_codeowners_directory_form_covers_workflows(tmp_path):
-    """GAP-49: `.github/ @team` is the standard recursive directory rule and
+    """`.github/ @team` is the standard recursive directory rule and
     covers workflows — its absence graded correct repos down."""
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF},
                         codeowners=".github/ @sec-team\n")

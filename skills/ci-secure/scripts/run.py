@@ -28,10 +28,16 @@ Usage:
 The output path is cleared before the scan runs, so a failed run never
 leaves a previous run's findings at the fixed path SKILL.md reuses.
 
-Exit codes: 0 ok; 2 invalid --repo value (scan.py's code); 1 any other
-failure — scan non-zero (including no .github/workflows dir) or
-unparseable/empty findings output — a coverage failure the orchestrator must
-surface and stop on, never render over.
+Exit codes, all of them:
+  0  ok.
+  2  scan.py's own invalid-argument code, propagated unchanged. scan.py
+     exits 2 for a malformed `--repo` AND for `--gh-impostor on` when gh is
+     not authenticated (the flag demands the network-gated check, so a skip
+     would be a silent downgrade). Either way the argument, not the repo,
+     is what needs fixing.
+  1  any other failure — scan non-zero (including no .github/workflows dir)
+     or unparseable/empty findings output. A coverage failure the
+     orchestrator must surface and stop on, never render over.
 """
 from __future__ import annotations
 
