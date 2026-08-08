@@ -20,6 +20,21 @@ user's working tree). Substitute `{pattern}`, `{severity}`, the
 next `### P` heading in `security-patterns.md` — or the next `## `
 heading, whichever comes first).
 
+Also substitute `{gh_impostor_flag}`, which is **`--gh-impostor on` for the
+`P14.11` dispatch and the empty string for every other pattern**. P14.11 is
+the one network-gated detector: on `auto` (the default) an unauthenticated
+gh makes the scan SKIP it, the finding is then absent for that reason alone,
+and the subagent's own oracle — "the finding is gone" — passes without the
+fix ever being tested. `on` makes `run.py` exit 2 in that situation instead
+of skipping, so a fix that cannot be verified fails loudly.
+
+The re-scan the oracle runs writes ONE file, `ci-secure-recheck-<slug>.json`
+in tmp, scoped by the same per-repo slug SKILL.md Phase 1 derives. That is
+the documented exception to SKILL.md's two-file budget (it cannot overwrite
+`$FINDINGS`, which the orchestrator still needs), and it is per-repo for the
+same reason the findings path is: a fixed `/tmp/ci-secure-recheck.json` is a
+collision between two audits running at once.
+
 ```
 You are fixing every occurrence of one security finding (one rule,
 one fix recipe, applied across every affected workflow file).
@@ -74,13 +89,27 @@ Rules:
   re-pinned action SHA against the canonical repo).
 
 Verify (the oracle — you are done only when it passes): re-run the
-ci-secure scan over this repo —
-`python3 <ci-secure>/scripts/run.py --root . --out /tmp/ci-secure-recheck.json`
-— and confirm the chain no longer fires: no finding carrying
+ci-secure scan over this repo, writing to a path scoped to THIS repo so
+two audits in flight at once cannot read each other's results:
+
+ROOT="$(git rev-parse --show-toplevel)"
+SLUG="$(printf '%s' "$ROOT" | shasum | cut -c1-12)"
+RECHECK="${TMPDIR:-/tmp}/ci-secure-recheck-${SLUG}.json"
+python3 <ci-secure>/scripts/run.py --root . --out "$RECHECK" {gh_impostor_flag}
+
+Confirm the chain no longer fires: no finding carrying
 `"pattern": "{pattern}"` may remain in that JSON. If one does, occurrences
 are still open — fix them and re-run. Report the re-scan result in your
 summary; a fix you could not verify this way is reported as unverified,
 never as done.
+
+Absence is only evidence if the check actually RAN. The P14.11 detector
+(impostor / unreachable SHA) is network-gated: with gh unauthenticated it
+is skipped, the finding is absent for that reason alone, and "the finding
+is gone" is a vacuous pass over a fix nothing tested. So read
+`gh_checks["P14.11"]` out of "$RECHECK" before concluding anything — if it
+is `skipped`, `partial`, or absent, report the fix as UNVERIFIED with that
+status quoted. Only a recorded `ran` alongside an absent finding is a pass.
 
 If the recipe is ambiguous, stop and ask. Do not guess.
 ```

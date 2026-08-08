@@ -70,6 +70,25 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-08** — **The fix subagent's P14.11 oracle can no longer pass
+  vacuously.** A fix subagent proves its work by re-running the scan and
+  showing the finding is gone. For P14.11 — the one network-gated detector —
+  an unauthenticated `gh` makes the check SKIP, so the finding is absent for
+  that reason alone and every fix "verified" clean without being tested. The
+  P14.11 dispatch now forces `--gh-impostor on` (which exits 2 rather than
+  skipping) and must read `gh_checks["P14.11"]` back: anything but a recorded
+  `ran` is reported UNVERIFIED. The recheck also writes to a per-repo
+  `ci-secure-recheck-<slug>.json` instead of a fixed `/tmp` path two
+  concurrent audits would share, and SKILL.md's file budget names it.
+- **2026-08-08** — **The terminal-summary extraction recipes actually
+  extract.** The documented `grep '^| .* P14.11'` returned ZERO matches on
+  every real report (the id renders in backticks, with no space ahead of it),
+  so the impostor-check line was silently dropped from the summary. And
+  `Coverage` was described as a sentence under the banner; it is a ROW of the
+  provenance table ABOVE it, with the what-was-missed detail living in a
+  separate incomplete-coverage warning further down. Both recipes are fixed,
+  and a test now runs SKILL.md's own commands, with real `grep`, against a
+  rendered report.
 - **2026-08-08** — **The fixture-cloak manifest is a census, not a lookup.**
   The test hook that un-cloaks the intentionally-vulnerable workflow fixtures
   consulted the manifest only for files it happened to find, so it was silent in

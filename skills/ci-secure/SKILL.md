@@ -17,7 +17,7 @@ description: >-
   among all three and leads with security. Do not trigger for: CI
   speed/cost audits (name ci-speedup) or CI best-practices grading
   (name ci-score).
-license: MIT. See LICENSE at repo root
+license: MIT
 ---
 
 # CI Secure
@@ -30,7 +30,8 @@ each a complete outsider → compromise path with real incidents behind it
 finding renders with a "what an attacker could do" scenario; **zero
 findings is a first-class result**. The skill asks which findings to fix
 and dispatches one subagent per finding group. It never commits, pushes,
-or opens a PR — the user reviews the working-tree diff themselves.
+or opens a PR **unasked** — by default the user reviews the working-tree
+diff themselves.
 
 **Scope honesty (verbatim, appears in every report):** *Critical
 exploit-chain checks only — this is not a comprehensive audit.*
@@ -79,22 +80,28 @@ By default the skill operates on the current working directory.
 ROOT="$(git rev-parse --show-toplevel)"
 SLUG="$(printf '%s' "$ROOT" | shasum | cut -c1-12)"
 FINDINGS="${TMPDIR:-/tmp}/ci-secure-findings-${SLUG}.json"
-./scripts/run.py --root "$ROOT" ${REPO:+--repo "$REPO"} --out "$FINDINGS"
+<ci-secure>/scripts/run.py --root "$ROOT" ${REPO:+--repo "$REPO"} --out "$FINDINGS"
 ```
 
 `run.py` runs the scan, stamps timing, and prints the **group list** — a
-JSON array of the pattern ids present (e.g. `["P14.9", "P14.10"]`). Every
+JSON array of the pattern ids present, **sorted by id** and unordered with
+respect to the report (e.g. `["P14.10", "P14.9"]`). Every
 group needs an attacker scenario in Phase 2.5, because **every group
 renders** — there is no render cut, no tiering, no topping-up.
 
-The impostor-SHA check defaults to `--gh-impostor auto`: it runs iff gh is
-authenticated, and either way the findings JSON's `gh_checks` block records
-ran/skipped. **A skipped network-gated check is never a pass** — the report
+The impostor-SHA check takes `--gh-impostor auto|on|off` and defaults to
+`auto`: it runs iff gh is authenticated. `on` demands it (scan.py exits 2 if
+gh is not authenticated, rather than quietly skipping); `off` disables it.
+Either way the findings JSON's `gh_checks` block records the status. **A skipped network-gated check is never a pass** — the report
 and terminal summary must both say it explicitly.
 
 **Use the literal `$FINDINGS` path in every later phase; write NO scratch
 or pointer files.** A run should leave at most two files: the findings JSON
-(in tmp) and — only on the user's save pick — the report.
+(in tmp) and — only on the user's save pick — the report. One exception,
+which is not a scratch file: a Phase 5 fix subagent writes its own
+verification re-scan to `${TMPDIR:-/tmp}/ci-secure-recheck-${SLUG}.json`
+(same per-repo slug), because the oracle it must pass is "re-run the scan
+and show the finding is gone" and that cannot overwrite `$FINDINGS`.
 
 If `run.py` exits non-zero — OR exits zero but `$FINDINGS` is missing or
 unparseable — that is a **coverage failure, not a clean result**: surface
@@ -161,7 +168,7 @@ examples. Merge each scenario onto **every member** of its group in
 # (an unasked-for file in the working tree poisons clean-checkout
 # provenance for downstream tooling and shows up in their git status).
 REPORT="${TMPDIR:-/tmp}/ci-secure-report-${SLUG}.md"
-./scripts/report.py --in "$FINDINGS" --out "$REPORT"
+<ci-secure>/scripts/report.py --in "$FINDINGS" --out "$REPORT"
 ```
 
 Print the terminal summary so the user has the headline without opening
@@ -180,8 +187,19 @@ CI Secure   3 critical findings  ▏2 of 10 vectors hit▕  12 workflows · impo
 | Line | Where it comes from |
 | --- | --- |
 | `CI Secure …` | **Pre-drawn — copy, never compose.** `grep '^CI Secure' "$REPORT"`. It is rendered inside a fenced block under the provenance table with its counts already computed. |
-| `Impostor-SHA check (P14.11): …` | **Assembled** from the report's `P14.11` row in the `## 🔗 Vector map — all ten` table — `grep '^| .* P14.11' "$REPORT"` — and stated in that row's own three states (`ran` / `PARTIAL … NOT a pass` / `SKIPPED … this check did NOT run`). |
-| `Coverage: …` | **Assembled** from the coverage sentence the report renders under the banner (`grep -n 'Coverage' "$REPORT"`): `complete` only when every workflow file was scanned, otherwise `PARTIAL —` plus what was not checked. |
+| `Impostor-SHA check (P14.11): …` | **Assembled** from the report's `P14.11` row in the `## 🔗 Vector map — all ten` table. State it in that row's own words: `ran` / `PARTIAL … NOT a pass` / `SKIPPED … this check did NOT run` / `not recorded`. |
+| `Coverage: …` | **Assembled** from the **Coverage** ROW of the provenance table at the top of the report — NOT from any sentence under the banner, where nothing of the kind is rendered. The row reads `✅ complete — every workflow file was scanned` or `⚠️ **PARTIAL** — not every workflow was fully scanned`, and on PARTIAL it does **not** say what was missed: that lives in the separate `> [!WARNING] **Incomplete coverage — …**` blockquote further down, and your line must carry it. |
+
+Extract the two assembled lines with these exact commands (the P14.11 id is
+rendered in backticks with **no space before it**, so a pattern expecting
+`| ` immediately ahead of the id matches nothing and silently drops the
+line — which is what the earlier recipe here did):
+
+```bash
+grep '^| .*P14\.11' "$REPORT"              # the vector-map row
+grep '^| \*\*Coverage\*\* |' "$REPORT"        # the provenance row
+grep -A4 'Incomplete coverage' "$REPORT"   # only when Coverage says PARTIAL
+```
 
 Only the first line is pre-drawn. The other two are yours to assemble
 from the named rows — which is why each says where to read it. Do not
@@ -250,8 +268,12 @@ Contract lines, all mandatory:
     pins verified, 2 UNVERIFIED (network/rate-limit); this is NOT a pass`.
     Never report a partial run as `ran`.
   - `skipped:` — say so in words, with the reason scan.py recorded
-    (`disabled via --gh-impostor=off` vs `gh not authenticated`), plus
+    (`disabled via `--gh-impostor off`` vs `gh not authenticated`), plus
     "this check did NOT run".
+  - **`not recorded`** — the scan wrote no status for P14.11 at all
+    (`report.py`'s fourth banner state). Say `not recorded — this check
+    did NOT run`. An absent status is a coverage hole, never a pass, and
+    it is the one state that cannot be read off `gh_checks`.
 - **Zero findings**: lead with it plainly and positively — "No critical
   attack vectors detected across N workflows." Do not hedge, apologize,
   or pad with lesser observations; the scope-honesty line and the
@@ -279,7 +301,7 @@ structured question. Build the table from the render plan, which carries
 the report's own ordering and the per-group dormancy flag:
 
 ```bash
-./scripts/report.py --render-plan --in "$FINDINGS"
+<ci-secure>/scripts/report.py --render-plan --in "$FINDINGS"
 # [{"pattern": "P14.9", "dormant": false}, {"pattern": "P14.10", "dormant": false}, ...]
 ```
 
@@ -409,7 +431,7 @@ the question to the user before moving on.
    unaccounted change is a bug to surface, not hide.
 3. Print the `Timing:` line from `$FINDINGS`'s script-owned `timings`
    block (`total_run_s` leads). If you ran Phase 5, record its span first:
-   `./scripts/record_timing.py --findings "$FINDINGS" --phase fixes_s
+   `<ci-secure>/scripts/record_timing.py --findings "$FINDINGS" --phase fixes_s
    --seconds "$FIXES"`. If total ≫ the scripted spans, the remainder is
    orchestrator thinking time — say so rather than hiding it.
 4. **Close BY ASKING ONE structured question** — the same convention as the
@@ -527,7 +549,10 @@ that passes all three is a deliberate catalog change, not a drift; the
 census test (`tests/test_census_why_these_ten.py`) fails any catalog/doc
 mismatch.
 Mechanically: append a `### Pxx.y` section with a METADATA block (schema
-at the top of the catalog), the four prose markers, a fixture the
+at the top of the catalog), the five prose markers (`**TL;DR.**`,
+`**What an attacker can do.**`, `**Anti-pattern**`, `**Fix recipe**`,
+`**Risk of the change.**` — `tests/test_census_why_these_ten.py` pins all
+five), a fixture the
 detector fires on, AND update why-these-ten.md in the same change.
 
 ## Common Issues

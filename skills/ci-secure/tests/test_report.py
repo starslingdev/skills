@@ -2018,3 +2018,83 @@ def test_fix_prompt_shell_quotes_the_findings_path() -> None:
     )
     assert "--findings '/private/tmp/ci secure/findings.json'" in md
     assert "--findings /private/tmp/ci secure/findings.json" not in md
+
+
+# --- the terminal-summary extraction recipes SKILL.md tells the agent to run --
+
+import pytest  # noqa: E402
+
+_SKILL_MD_TEXT = (_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+
+def _skill_md_grep_recipes() -> list[str]:
+    """The `grep '<pattern>' "$REPORT"` commands SKILL.md hands the agent.
+
+    Read out of SKILL.md verbatim, so the DOCUMENT is what is under test —
+    these are orchestrator-executed instructions, and a recipe that matches
+    nothing is a line silently dropped from the terminal summary rather than
+    an error anyone sees. The published recipe was `'^| .* P14.11'`, which
+    returns zero matches on every real report: the id renders in backticks
+    with no space ahead of it.
+    """
+    return re.findall(r"^grep (?:-A4 )?'([^']+)' \"\$REPORT\"",
+                      _SKILL_MD_TEXT, re.MULTILINE)
+
+
+def _render_many_vector_report() -> str:
+    return report.render({
+        "findings": [_mk(fid="f1", pattern="P14.10", wf="a.yml")],
+        "repo": "x/y",
+        "scanned_workflows": 2,
+        "gh_checks": {"P14.11": "ran"},
+    })
+
+
+@pytest.mark.parametrize("needle", ["P14", "Coverage", "Incomplete coverage"])
+def test_skill_md_extraction_recipes_match_a_rendered_report(
+    tmp_path: Path, needle: str,
+) -> None:
+    """Run SKILL.md's own grep recipes, with real grep, against a real report.
+
+    Real `grep` and not Python's `re`: the recipes are POSIX basic regexes
+    executed by a shell, where `|` is a literal and `\\|` is not — translating
+    them into Python would test a different language than the agent runs.
+    """
+    import subprocess
+
+    md = _render_many_vector_report()
+    # PARTIAL coverage, so the incomplete-coverage blockquote is present too.
+    md_partial = report.render({
+        "findings": [_mk()], "repo": "x/y", "scanned_workflows": 2,
+        "scan_incomplete": [{"workflow_file": "b.yml", "reason": "unreadable"}],
+    })
+    recipes = _skill_md_grep_recipes()
+    matching = [r for r in recipes if needle.split()[0] in r or needle in r]
+    assert matching, f"SKILL.md no longer documents a recipe for {needle!r}"
+    for pat in matching:
+        for label, text in (("complete", md), ("partial", md_partial)):
+            path = tmp_path / f"{label}.md"
+            path.write_text(text, encoding="utf-8")
+            out = subprocess.run(["grep", pat, str(path)],
+                                 capture_output=True, text=True)
+            if needle == "Incomplete coverage" and label == "complete":
+                continue        # the blockquote only exists on a PARTIAL run
+            assert out.returncode == 0 and out.stdout.strip(), (
+                f"SKILL.md recipe {pat!r} matched NOTHING in the {label} "
+                "report — the agent would silently drop that summary line")
+
+
+def test_skill_md_coverage_recipe_reads_the_provenance_row() -> None:
+    """SKILL.md used to say Coverage is a sentence rendered UNDER the banner.
+    It is a ROW of the provenance table above it, and on PARTIAL the row does
+    not say what was missed — that is the separate warning blockquote."""
+    md = report.render({
+        "findings": [_mk()], "repo": "x/y", "scanned_workflows": 2,
+        "scan_incomplete": [{"workflow_file": "b.yml", "reason": "unreadable"}],
+    })
+    lines = md.splitlines()
+    row = next(ln for ln in lines if ln.startswith("| **Coverage** |"))
+    banner = next(i for i, ln in enumerate(lines) if ln.startswith("CI Secure"))
+    assert lines.index(row) < banner, "Coverage is above the banner, not under it"
+    assert "PARTIAL" in row and "b.yml" not in row
+    assert any("Incomplete coverage" in ln and "b.yml" in md for ln in lines)
