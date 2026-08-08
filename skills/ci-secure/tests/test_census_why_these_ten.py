@@ -252,3 +252,52 @@ def test_the_rejection_record_accounts_for_the_catalog_size_it_claims():
         f"the opening line must say {len(named)} — ten kept plus the "
         f"{len(removed)} the record accounts for")
     assert f"the {len(removed)} the rejection record below" in text
+
+
+# Every incident why-these-ten.md names, as the token that identifies it. A
+# FROZEN manifest, not a parse of the prose: the point is to catch an incident
+# that gets cited in one document and never recorded in the other, and a
+# regex over free text would drift with the wording it is supposed to police.
+# Adding an incident citation means adding it here AND to the catalog's
+# Reference incidents section, in the same change.
+_CITED_INCIDENTS = (
+    "s1ngularity",
+    "elementary-data",
+    "Ultralytics",
+    "Security Lab",
+    "Trivy",
+    "TanStack",
+    "tj-actions",
+    "Chainguard",
+    "Codecov",
+    "Miasma",
+    "July 28 2026",
+)
+
+
+def test_every_incident_why_these_ten_cites_is_recorded_in_the_catalog():
+    """The catalog states the invariant — "Every vector in why-these-ten.md
+    cites its incidents from this list" — and it was false: the Miasma /
+    `@redhat-cloud-services` compromise was cited twice in why-these-ten.md
+    and appeared in Reference incidents only inside another entry's prose,
+    behind a URL that documents npm's defaults change rather than the
+    compromise. A skill that cites an incident it does not record cannot show
+    the reader where the claim came from.
+    """
+    why = _WHY.read_text()
+    section = _CATALOG.read_text().split("## Reference incidents", 1)
+    assert len(section) == 2, "the catalog lost its Reference incidents section"
+    # Match against the ENTRY TITLES (`- **Name (date)** — …`), not the whole
+    # section: a passing mention inside another entry's prose is exactly the
+    # shape the Miasma gap had, and would satisfy a substring check over the
+    # section while leaving the reader with no source for the incident.
+    titles = "\n".join(re.findall(r"^- \*\*(.+?)\*\*", section[1], re.M))
+    assert titles.count("\n") >= 10, "Reference incidents entry format changed"
+    for token in _CITED_INCIDENTS:
+        assert token in why, (
+            f"{token!r} is in the manifest but why-these-ten.md no longer "
+            "cites it — drop it from the manifest in the same change")
+        assert token in titles, (
+            f"why-these-ten.md cites {token!r}, but no entry in the catalog's "
+            "Reference incidents section is ABOUT it — the reader has no source "
+            "to follow (a mention inside another entry's prose is not one)")

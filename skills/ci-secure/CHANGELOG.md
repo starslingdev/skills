@@ -295,6 +295,19 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-08** — **The skill records the Miasma compromise it cites.** The
+  catalog states an invariant about itself — "Every vector in why-these-ten.md
+  cites its incidents from this list" — and it was false. why-these-ten.md
+  cites the June 2026 Miasma / `@redhat-cloud-services` npm compromise twice
+  as incident grounding for P14.25, but the catalog's Reference incidents
+  section had no entry for it; the compromise was mentioned only inside the
+  prose of the "npm install-script defaults" entry, behind a URL that
+  documents npm's defaults change rather than the compromise itself. A Miasma
+  entry now records what happened, with Microsoft Security's June 2 2026
+  writeup as the source, and the install-script-defaults entry
+  cross-references it instead of re-describing it. A census test pins the
+  invariant against the Reference incidents ENTRY TITLES, so a passing mention
+  in someone else's prose no longer satisfies it.
 - **2026-08-08** — **The fix subagent's P14.11 oracle can no longer pass
   vacuously.** A fix subagent proves its work by re-running the scan and
   showing the finding is gone. For P14.11 — the one network-gated detector —
