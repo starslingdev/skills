@@ -126,17 +126,26 @@ _WORKFLOWS_CODEOWNER_PATTERNS = (
     # the accepted glob shapes are enumerated rather than left to `\S*` —
     # `*`, `**`, `**/*`, and an extension suffix on any of those — and a glob
     # carrying any other literal text in the filename fails.
-    r"^\s*/?\.github/workflows/"
-    r"(?:\*{1,2}(?:/\*{1,2})?(?:\.[A-Za-z0-9_-]+)?)?(?:\s|$)",
+    #
+    # The trailing slash is OPTIONAL on the directory itself: CODEOWNERS uses
+    # gitignore semantics, where a directory pattern with no trailing slash
+    # matches the directory AND everything under it. `.github/workflows @team`
+    # is exactly as covering as `.github/workflows/ @team`.
+    r"^\s*/?\.github/workflows"
+    r"(?:/(?:\*{1,2}(?:/\*{1,2})?(?:\.[A-Za-z0-9_-]+)?)?)?(?:\s|$)",
     # `.github/**` recurses and covers workflows; single-star `.github/*` does
     # NOT (gitignore semantics: `*` doesn't cross `/`) and is deliberately
     # absent — including it produced false negatives.
-    r"^\s*/?\.github/\*\*",
-    # GAP-49: the standard recursive DIRECTORY form `.github/ @team` covers
-    # everything under .github/, workflows included (CODEOWNERS paths are
-    # prefix rules; a trailing slash names the tree). Its absence graded
-    # correctly-configured repos down 1/6.
-    r"^\s*/?\.github/\s",
+    r"^\s*/?\.github/\*\*(?:\s|$)",
+    # The standard recursive DIRECTORY form `.github/ @team` covers everything
+    # under .github/, workflows included (CODEOWNERS paths are prefix rules; a
+    # trailing slash names the tree). Its absence graded correctly-configured
+    # repos down 1/6. The slash is optional here for the same gitignore reason
+    # as above, and the alternation ends `(?:\s|$)` so a BARE `.github/` at end
+    # of line — the exact ownerless form — matches too. Requiring trailing
+    # whitespace let that line fall through every pattern, so an earlier
+    # `* @team` was the last match and graded the repo covered.
+    r"^\s*/?\.github/?(?:\s|$)",
     # Bare `*` global owner, followed by whitespace or EOL — a bare `^\s*\*`
     # would also match extension rules like `*.go @team`, which do not cover
     # workflow files.
@@ -158,21 +167,43 @@ _CODEOWNERS_OWNER = re.compile(
 )
 
 
-def _codeowners_covers_workflows(root: Path) -> tuple[bool, str]:
+def _codeowners_covers_workflows(root: Path) -> tuple[str, str]:
+    """(outcome, evidence) where outcome is pass / fail / unmeasured.
+
+    THREE states, not two. "I could not read the file" is not the same claim as
+    "this repo has no rule covering workflows", and returning a bare False for
+    it scored a repo down for an unreadable directory or a mis-encoded file.
+    Anything that stops the check from resolving comes back UNMEASURED — the
+    same semantics the workflow-scoped facts use for a scan gap.
+    """
     found: Path | None = None
-    for candidate in _CODEOWNERS_CANDIDATES:
-        if (root / candidate).is_file():
-            found = root / candidate
-            break
-    if found is None:
-        return False, ("no CODEOWNERS file at .github/CODEOWNERS, CODEOWNERS, "
-                       "or docs/CODEOWNERS, so workflow changes merge with "
-                       "the same approvals as any other change")
     try:
-        text = found.read_text(encoding="utf-8", errors="replace")
+        # `is_file()` re-raises EACCES on an unreadable parent directory, so
+        # the probe belongs INSIDE the guard: one unreadable dir used to
+        # escape to scan.py's broad backstop and take all twelve facts down.
+        for candidate in _CODEOWNERS_CANDIDATES:
+            if (root / candidate).is_file():
+                found = root / candidate
+                break
     except OSError as exc:
-        return False, f"{found.name} unreadable: {exc}"
+        return "unmeasured", ("unmeasured: could not look for a CODEOWNERS "
+                              f"file ({exc})")
+    if found is None:
+        return "fail", ("no CODEOWNERS file at .github/CODEOWNERS, CODEOWNERS, "
+                        "or docs/CODEOWNERS, so workflow changes merge with "
+                        "the same approvals as any other change")
     rel = str(found.relative_to(root))
+    try:
+        # utf-8-SIG: a UTF-8 BOM lands in front of the first line and defeats
+        # the `^` anchor, so a repo whose first rule covers workflows was
+        # reported as having no entry at all. Decoding is STRICT on purpose —
+        # `errors="replace"` laundered an undecodable file into a confident
+        # "no entry covering workflows", which is a fabricated fail.
+        text = found.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        return "unmeasured", (f"unmeasured: `{rel}` could not be read as "
+                              f"UTF-8 text ({exc}), so whether it covers "
+                              "`.github/workflows/` is unknown")
     # GitHub applies the LAST matching rule, not the first, so the file must be
     # read to the end. Returning on the first match graded
     # `* @team` followed by a bare `.github/workflows/` as covered, when the
@@ -191,13 +222,13 @@ def _codeowners_covers_workflows(root: Path) -> tuple[bool, str]:
                 _CODEOWNERS_OWNER.search(line[m.end():]))
             break
     if last_match_has_owner:
-        return True, f"`{rel}` covers `.github/workflows/`"
+        return "pass", f"`{rel}` covers `.github/workflows/`"
     if last_match_has_owner is False:
         # Name the near-miss: "no entry" would send the reader looking in the
         # wrong place when the entry is there and simply owns nothing.
-        return False, (f"`{rel}` matches `.github/workflows/` but names no "
-                       "owner, so the rule assigns no reviewer")
-    return False, (f"`{rel}` has no entry covering `.github/workflows/`")
+        return "fail", (f"`{rel}` matches `.github/workflows/` but names no "
+                        "owner, so the rule assigns no reviewer")
+    return "fail", (f"`{rel}` has no entry covering `.github/workflows/`")
 
 
 # --- workflow-YAML predicates ------------------------------------------------
@@ -398,13 +429,17 @@ def compute_config_facts(
     facts: list[dict[str, Any]] = []
 
     def add(fact_id: str, fact: str, workflow_scoped: bool,
-            passed: bool, evidence: str) -> None:
+            passed: bool, evidence: str, outcome: str | None = None) -> None:
         if workflow_scoped and gap:
             facts.append({"fact_id": fact_id, "fact": fact,
                           "outcome": "unmeasured", "evidence": gap_reason})
             return
+        # `outcome` lets a fact that computes its OWN three-state result (the
+        # CODEOWNERS fact, which can be unmeasured for reasons unrelated to a
+        # workflow scan gap) carry it through instead of being flattened to
+        # pass/fail here.
         facts.append({"fact_id": fact_id, "fact": fact,
-                      "outcome": "pass" if passed else "fail",
+                      "outcome": outcome or ("pass" if passed else "fail"),
                       "evidence": evidence})
 
     undeclared = [(rel, gap_why) for rel, doc in docs
@@ -431,10 +466,10 @@ def compute_config_facts(
         # rendering it through the scope formatter produced "write-all: write".
         else _capped([f"{rel}: {_write_grant_phrase(s)}" for rel, s in wide], 4))
 
-    covered, co_evidence = _codeowners_covers_workflows(root)
+    co_outcome, co_evidence = _codeowners_covers_workflows(root)
     add("sec.codeowners.workflows",
         "a CODEOWNERS entry covers `.github/workflows/`",
-        False, covered, co_evidence)
+        False, co_outcome == "pass", co_evidence, outcome=co_outcome)
 
     uncleared = []
     for rel, doc in docs:

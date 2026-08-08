@@ -8,6 +8,28 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
+- **2026-08-08** — **The CODEOWNERS hygiene check reads the file the way
+  GitHub does, and says "unmeasured" when it cannot read it at all.** Four
+  fixes to `sec.codeowners.workflows`. (1) The slashless directory forms
+  `.github/workflows @team` and `.github @team` now cover — CODEOWNERS uses
+  gitignore semantics, where a directory pattern without a trailing slash
+  matches the directory and everything under it, so correctly-configured repos
+  were graded down. (2) A bare `.github/` (or `.github`) at END of line matched
+  no pattern, because every directory pattern required trailing whitespace — so
+  the exact ownerless form fell through and an earlier `* @team` was taken as
+  the last matching rule, grading the repo covered when GitHub assigns nobody.
+  All patterns now end `(?:\s|$)`, which also tightens `.github/**` so a
+  restricted glob under it (`.github/**/*release*.yml`) no longer reads as
+  directory-wide coverage. (3) The file is read as `utf-8-sig` — a UTF-8 BOM
+  used to sit in front of the first line and defeat the `^` anchor, inventing
+  "no entry covering workflows" for a repo whose only rule was the covering
+  one — and decoded STRICTLY, because `errors="replace"` laundered undecodable
+  bytes into that same confident fail. (4) The check is now three-state: a file
+  it cannot read or decode comes back **unmeasured** with the reason stated,
+  instead of being scored as a fail. The unreadable-directory case is contained
+  too — the `Path.is_file()` probe sat outside the `OSError` guard, so one
+  EACCES escaped to the scanner's broad backstop and took all twelve facts down
+  with it; it degrades to a single unmeasured row now.
 - **2026-08-07** — **The `pull-requests: write` vector is described by what it
   detects.** The skill's own summary called it "write-token fork triggers",
   which is narrower than the detector (eleven untrusted trigger events, not

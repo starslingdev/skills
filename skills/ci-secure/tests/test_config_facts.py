@@ -232,7 +232,12 @@ def test_codeowners_rule_without_an_owner_does_not_cover_workflows(tmp_path):
                         codeowners=".github/workflows/\n")
     f = _outcome(cf.compute_config_facts(root, files, []),
                  "sec.codeowners.workflows")
-    assert "names no owner" in f["evidence"] + f.get("fact", ""), f
+    # Pinned on `evidence` SPECIFICALLY. Concatenating evidence and fact before
+    # the substring check meant either field could carry the message and the
+    # test could not say which — the fact text is a fixed row label, so the
+    # near-miss explanation has to land in the evidence or no reader sees it.
+    assert "names no owner" in f["evidence"], f
+    assert "names no owner" not in f["fact"], f
 
 
 def test_codeowners_last_matching_rule_wins(tmp_path):
@@ -291,6 +296,172 @@ def test_codeowners_global_star_and_double_star_cover_workflows(tmp_path):
         f = _outcome(cf.compute_config_facts(root, files, []),
                      "sec.codeowners.workflows")
         assert f["outcome"] == "pass", f"{pattern!r} should cover workflows"
+
+
+# --- F3: the CODEOWNERS matrix ----------------------------------------------
+# One table over the whole rule surface. Each row is a mutant that survived the
+# per-shape tests above: the reviewer could delete a pattern, loosen the owner
+# regex to `"@" in line`, drop comment stripping, or forget a candidate
+# location, and every existing CODEOWNERS test still passed.
+
+_CODEOWNERS_MATRIX = [
+    # (label, CODEOWNERS body, expected outcome)
+    # --- single-star does not cross a slash (gitignore semantics) -----------
+    ("single-star-under-github", ".github/* @team\n", "fail"),
+    ("single-star-is-not-double", ".github/*\n", "fail"),
+    # `.github/**` covers the tree; `.github/**/<restricted glob>` owns only
+    # the files matching it, exactly like the restricted workflows globs.
+    ("double-star-restricted-glob", ".github/**/*release*.yml @team\n",
+     "fail"),
+    # --- the slashless directory forms -------------------------------------
+    ("slashless-workflows-dir", ".github/workflows @team\n", "pass"),
+    ("slashless-github-dir", ".github @team\n", "pass"),
+    ("slashless-rooted-workflows", "/.github/workflows @team\n", "pass"),
+    # --- ownerless AT END OF LINE (no trailing whitespace) ------------------
+    # The bug: the directory patterns required trailing whitespace, so a bare
+    # `.github/` on the last line matched nothing, the earlier `* @team` was
+    # the last match, and the repo graded covered — while GitHub applies the
+    # ownerless rule and assigns nobody.
+    ("eol-ownerless-github-slash", "* @team\n.github/\n", "fail"),
+    ("eol-ownerless-github-bare", "* @team\n.github\n", "fail"),
+    ("eol-ownerless-workflows", "* @team\n.github/workflows\n", "fail"),
+    ("eol-ownerless-workflows-slash", "* @team\n.github/workflows/\n", "fail"),
+    ("eol-ownerless-double-star", "* @team\n.github/**\n", "fail"),
+    ("eol-ownerless-global-star", ".github/ @team\n*\n", "fail"),
+    # --- comment stripping, both directions --------------------------------
+    ("commented-out-rule-is-dead",
+     "# .github/workflows/ @team\n", "fail"),
+    ("commented-out-rule-does-not-rescue",
+     ".github/workflows/\n# .github/workflows/ @team\n", "fail"),
+    ("trailing-comment-on-a-live-rule-still-covers",
+     ".github/workflows/ @team  # platform owns CI\n", "pass"),
+    ("trailing-comment-cannot-invent-an-owner",
+     ".github/workflows/  # @team\n", "fail"),
+    # --- owner-regex anchoring: `"@" in line` must die ---------------------
+    ("bare-at-is-not-an-owner", ".github/workflows/ @\n", "fail"),
+    ("at-without-a-tld-is-not-an-email", ".github/workflows/ ops@internal\n",
+     "fail"),
+    ("path-fragment-containing-an-at-is-not-an-owner",
+     ".github/workflows/ ./vendor/@scope\n", "fail"),
+    ("team-owner-is-an-owner", ".github/workflows/ @org/sec-team\n", "pass"),
+    ("email-owner-is-an-owner", ".github/workflows/ ops@example.com\n",
+     "pass"),
+]
+
+
+@pytest.mark.parametrize("label,body,expected",
+                         [(r[0], r[1], r[2]) for r in _CODEOWNERS_MATRIX],
+                         ids=[r[0] for r in _CODEOWNERS_MATRIX])
+def test_codeowners_matrix(tmp_path, label, body, expected):
+    root, files = _repo(tmp_path / label, {"ci.yml": _SAFE_WF},
+                        codeowners=body)
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert f["outcome"] == expected, f"{label}: {body!r} -> {f}"
+
+
+def _repo_with_codeowners_at(tmp_path, relpaths: dict[str, str]):
+    """A repo whose CODEOWNERS files live at arbitrary candidate locations."""
+    root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF}, codeowners=None)
+    for rel, body in relpaths.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+    return root, files
+
+
+@pytest.mark.parametrize("location", ["CODEOWNERS", "docs/CODEOWNERS"])
+def test_codeowners_is_read_from_every_candidate_location(tmp_path, location):
+    """Every existing test wrote `.github/CODEOWNERS`, so deleting either other
+    candidate from the tuple changed nothing — and a repo that keeps its
+    CODEOWNERS at the root (the most common placement outside `.github/`) would
+    have been graded as having no CODEOWNERS at all."""
+    root, files = _repo_with_codeowners_at(
+        tmp_path / location.replace("/", "_"),
+        {location: ".github/workflows/ @sec\n"})
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert f["outcome"] == "pass", f
+    assert location in f["evidence"], f
+
+
+def test_codeowners_candidate_precedence_is_github_then_root_then_docs(tmp_path):
+    """GitHub reads exactly ONE CODEOWNERS: `.github/`, else root, else
+    `docs/`. The others are inert, so a covering rule in a shadowed file must
+    not rescue the repo."""
+    # `.github/` shadows both: its ownerless rule is what GitHub applies.
+    root, files = _repo_with_codeowners_at(tmp_path / "a", {
+        ".github/CODEOWNERS": ".github/workflows/\n",
+        "CODEOWNERS": "* @team\n",
+        "docs/CODEOWNERS": "* @team\n",
+    })
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert f["outcome"] == "fail", f
+    assert ".github/CODEOWNERS" in f["evidence"].replace("\\", "/"), f
+    # Root shadows docs/.
+    root, files = _repo_with_codeowners_at(tmp_path / "b", {
+        "CODEOWNERS": "*\n",
+        "docs/CODEOWNERS": "* @team\n",
+    })
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert f["outcome"] == "fail", f
+
+
+def test_codeowners_utf8_bom_does_not_hide_the_first_rule(tmp_path):
+    """A UTF-8 BOM sits in front of the first line and defeats the `^` anchor,
+    so a repo whose ONLY rule is the covering one was reported as having no
+    entry at all — a confident fail invented by the decoder."""
+    root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF}, codeowners=None)
+    (root / ".github" / "CODEOWNERS").write_bytes(
+        b"\xef\xbb\xbf.github/workflows/ @sec-team\n")
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert f["outcome"] == "pass", f
+
+
+def test_codeowners_undecodable_file_is_unmeasured_not_a_fail(tmp_path):
+    """`errors="replace"` turned bytes that are not UTF-8 into a confident
+    "no entry covering workflows". We do not know what that file says, so the
+    honest outcome is unmeasured — and unmeasured never scores."""
+    root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF}, codeowners=None)
+    (root / ".github" / "CODEOWNERS").write_bytes(
+        b"\xff\xfe.\x00g\x00i\x00t\x00h\x00u\x00b\x00")
+    out = cf.compute_config_facts(root, files, [])
+    f = _outcome(out, "sec.codeowners.workflows")
+    assert f["outcome"] == "unmeasured", f
+    assert "unmeasured" in f["evidence"], f
+    assert "sec.codeowners.workflows" in out["unmeasured"]
+    # ...and it is a coverage gap, not a silent 5/6.
+    assert out["scored_count"] == 5 and out["applicable_count"] == 6
+    assert "COVERAGE GAP" in out["caveat"]
+
+
+def test_codeowners_unreadable_directory_is_one_unmeasured_row(tmp_path):
+    """`Path.is_file()` re-raises EACCES, and the probe sat one line ABOVE the
+    try — so a single unreadable directory escaped to scan.py's broad backstop
+    and took all twelve facts down with it. It degrades to one row now."""
+    import os
+    root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF}, codeowners=None)
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "CODEOWNERS").write_text("* @team\n")
+    os.chmod(docs, 0o000)
+    try:
+        try:
+            (docs / "CODEOWNERS").is_file()
+        except OSError:
+            pass
+        else:
+            pytest.skip("this filesystem/user does not enforce directory mode")
+        out = cf.compute_config_facts(root, files, [])
+    finally:
+        os.chmod(docs, 0o755)
+    f = _outcome(out, "sec.codeowners.workflows")
+    assert f["outcome"] == "unmeasured", f
+    # The OTHER facts still resolved — the failure is contained to this row.
+    assert out["scored_count"] == 5, out
 
 
 # --- F4: the sharpened trigger fact -----------------------------------
