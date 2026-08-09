@@ -167,6 +167,17 @@ _CODEOWNERS_OWNER = re.compile(
     r"|[^@\s]+@[^@\s]+\.[A-Za-z]{2,})(?=\s|$)"
 )
 
+# A rule that names a SPECIFIC path UNDER `.github/workflows/` — a single file
+# (`.github/workflows/release.yml`) or a restricted glob
+# (`.github/workflows/*release*.yml`). These never match a directory-coverage
+# pattern above (that is what makes them narrow), so the coverage loop sees them
+# only here. They matter for one reason: GitHub applies the LAST matching rule
+# PER FILE, so a broad owner (`* @team`) followed by a narrow OWNERLESS rule
+# leaves that one workflow with no reviewer, even though the directory as a whole
+# still has an owner. The path token is captured so a later broad rule — which is
+# the last match for that file and re-owns it — can cancel the exemption.
+_WORKFLOWS_NARROW = re.compile(r"^\s*/?\.github/workflows/(\S+)")
+
 
 def _codeowners_covers_workflows(root: Path) -> tuple[str, str]:
     """(outcome, evidence) where outcome is pass / fail / unmeasured.
@@ -209,22 +220,46 @@ def _codeowners_covers_workflows(root: Path) -> tuple[str, str]:
     # read to the end. Returning on the first match graded
     # `* @team` followed by a bare `.github/workflows/` as covered, when the
     # later ownerless rule is the one GitHub applies and it assigns nobody.
-    # Only lines matching a directory-coverage pattern above are considered —
-    # a narrower rule (`.github/workflows/release.yml`) reassigns that one file
-    # and does not change whether the directory has an owner.
-    last_match_has_owner: bool | None = None
+    #
+    # TWO things are tracked, because "the directory has a default owner" and
+    # "every workflow file has an owner" are different claims. `covered_by_dir`
+    # is the last directory-level rule's owner status — the default that applies
+    # to any workflow file no more-specific rule names. `exempted` holds workflow
+    # files a later NARROW ownerless rule stripped of an owner: `* @team` then
+    # `.github/workflows/release.yml` (no owner) leaves release.yml merging with
+    # no reviewer, so the directory is not uniformly covered even though its
+    # default owner is set. A later directory-level rule is the last match for
+    # every file under it, re-owning them, so it clears the exemption set.
+    covered_by_dir: bool | None = None
+    exempted: set[str] = set()
     for raw_line in text.splitlines():
         line = raw_line.split("#", 1)[0]
+        dir_match = None
         for pat in _WORKFLOWS_CODEOWNER_PATTERNS:
-            m = re.match(pat, line)
-            if m is None:
-                continue
-            last_match_has_owner = bool(
-                _CODEOWNERS_OWNER.search(line[m.end():]))
-            break
-    if last_match_has_owner:
+            dir_match = re.match(pat, line)
+            if dir_match is not None:
+                break
+        if dir_match is not None:
+            covered_by_dir = bool(_CODEOWNERS_OWNER.search(line[dir_match.end():]))
+            exempted.clear()
+            continue
+        narrow = _WORKFLOWS_NARROW.match(line)
+        if narrow is not None:
+            path = narrow.group(1)
+            if _CODEOWNERS_OWNER.search(line[narrow.end():]):
+                exempted.discard(path)
+            else:
+                exempted.add(path)
+    if covered_by_dir and exempted:
+        sample = sorted(exempted)[0]
+        return "fail", (
+            f"`{rel}` names a default owner for `.github/workflows/`, but a "
+            f"later ownerless rule strips the owner from "
+            f"`.github/workflows/{sample}`, so that workflow merges with no "
+            "assigned reviewer")
+    if covered_by_dir:
         return "pass", f"`{rel}` covers `.github/workflows/`"
-    if last_match_has_owner is False:
+    if covered_by_dir is False:
         # Name the near-miss: "no entry" would send the reader looking in the
         # wrong place when the entry is there and simply owns nothing.
         return "fail", (f"`{rel}` matches `.github/workflows/` but names no "
@@ -273,6 +308,24 @@ def _write_grant_phrase(scopes: list[str]) -> str:
     if scopes == ["write-all"]:
         return "`write-all` (every scope)"
     return ", ".join(f"{s}: write" for s in scopes)
+
+
+def _safe_path(rel: str) -> str:
+    """Neutralize an attacker-controlled scanned FILENAME before it is embedded
+    in an evidence string.
+
+    Workflow files live at repo-controlled paths, and a filename may legally
+    carry backticks or (pathologically) whitespace. These evidence strings land
+    in a markdown table cell whose renderer (`report.py:_cell`) collapses
+    whitespace and escapes pipes but — by design — leaves backticks alone, since
+    the fact-description column uses them for inline code. A raw backtick from a
+    filename would unbalance that cell's inline-code spans. Collapsing whitespace
+    and swapping the backtick keeps a hostile filename from disturbing the cell,
+    the same neutralization the finding bullets apply via `report.py`'s
+    `_flatten_scanned`. Structural forgery is already blocked by `_cell`; this
+    closes the cosmetic residual so the invariant holds end to end.
+    """
+    return " ".join(rel.split()).replace("`", "'")
 
 
 def _capped(items: list[str], cap: int, sep: str = "; ") -> str:
@@ -416,7 +469,7 @@ def compute_config_facts(
         # gap) every file that will not parse.
         doc = scan._parse_yaml_text(text, wf, quiet=True) if text else None
         if isinstance(doc, dict):
-            docs.append((str(wf.relative_to(root)), doc))
+            docs.append((_safe_path(str(wf.relative_to(root))), doc))
 
     # Universal facts cannot be asserted over a partially readable set: a
     # workflow we could not parse could be the one that fails them.
@@ -424,7 +477,8 @@ def compute_config_facts(
     gap_reason = ("unmeasured: %d workflow file(s) could not be scanned "
                   "(%s), and this fact is a claim about every workflow"
                   % (len(scan_incomplete),
-                     _capped([g["workflow_file"] for g in scan_incomplete],
+                     _capped([_safe_path(g["workflow_file"])
+                              for g in scan_incomplete],
                              3, ", "))) if gap else ""
 
     facts: list[dict[str, Any]] = []

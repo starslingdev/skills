@@ -169,6 +169,21 @@ def test_write_all_string_fails_the_scoping_fact(tmp_path):
 
 # --- F3: CODEOWNERS ----------------------------------------------------------
 
+def test_hostile_workflow_filename_is_neutralized_in_evidence(tmp_path):
+    """A workflow FILENAME is a repo-controlled scanned string and may legally
+    carry backticks. When such a file lands in a hygiene evidence cell, the raw
+    backtick would unbalance that markdown cell's inline-code spans. The evidence
+    must carry the filename with backticks neutralized — the same treatment the
+    finding bullets give scanned strings. Structural forgery is blocked upstream
+    by the cell renderer; this pins the cosmetic residual closed."""
+    no_perms = "on: [pull_request]\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n"
+    root, files = _repo(tmp_path, {"na`me`.yml": no_perms}, codeowners=None)
+    result = cf.compute_config_facts(root, files, [])
+    ev = _outcome(result, "sec.permissions.workflow-declares")["evidence"]
+    assert "`me`" not in ev, ev
+    assert "na'me'.yml" in ev, ev
+
+
 def test_codeowners_missing_and_noncovering_both_fail(tmp_path):
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF}, codeowners=None)
     assert _outcome(cf.compute_config_facts(root, files, []),
@@ -257,6 +272,41 @@ def test_codeowners_last_matching_rule_wins(tmp_path):
     f = _outcome(cf.compute_config_facts(root, files, []),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "pass", "the later owned rule is the one applied"
+
+
+def test_codeowners_narrow_ownerless_override_strips_a_workflow(tmp_path):
+    """GitHub applies the LAST matching rule PER FILE. A broad owned rule
+    followed by a NARROW ownerless rule leaves that one workflow with no
+    reviewer — the directory has a default owner but is not uniformly covered.
+    Reporting it as covered is a false clean on a deliberately-exempted (often
+    the most sensitive) workflow."""
+    # Single-file ownerless override after a broad owner.
+    root, files = _repo(tmp_path / "one", {"ci.yml": _SAFE_WF},
+                        codeowners="* @team\n.github/workflows/release.yml\n")
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert f["outcome"] == "fail", f
+    assert "release.yml" in f["evidence"], f
+    # Restricted ownerless glob override — the same hole, one step removed.
+    root, files = _repo(tmp_path / "glob", {"ci.yml": _SAFE_WF},
+                        codeowners="* @team\n.github/workflows/*deploy*.yml\n")
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert f["outcome"] == "fail", f
+    # A narrow rule that NAMES an owner is fine — the file is still owned.
+    root, files = _repo(tmp_path / "owned", {"ci.yml": _SAFE_WF},
+                        codeowners="* @team\n.github/workflows/release.yml @sec\n")
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert f["outcome"] == "pass", f
+    # And a later directory rule re-owns every file under it, cancelling an
+    # earlier narrow ownerless override.
+    root, files = _repo(tmp_path / "recover", {"ci.yml": _SAFE_WF},
+                        codeowners=".github/workflows/release.yml\n"
+                                   ".github/workflows/ @team\n")
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert f["outcome"] == "pass", f
 
 
 def test_codeowners_owner_forms_are_recognized(tmp_path):

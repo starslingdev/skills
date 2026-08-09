@@ -11,6 +11,27 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **2026-08-09** — **Hostile workflow filenames neutralized in hygiene
+  evidence.** A workflow filename carrying backticks reached a config-hygiene
+  table cell raw (that path renders through `_cell`, which escapes pipes and
+  collapses whitespace but leaves backticks for the fact-description column),
+  where it could unbalance the cell's inline-code spans. `config_facts` now
+  flattens the scanned filename (whitespace collapse + backtick swap) before
+  embedding it, the same neutralization the finding bullets apply. Structural
+  forgery was already blocked by the cell renderer; this closes the residual so
+  the "flatten every scanned string" invariant holds end to end.
+- **2026-08-09** — **CODEOWNERS coverage no longer passes a directory whose
+  most sensitive workflow was deliberately exempted.** A broad owner (`* @team`)
+  followed by a NARROW ownerless rule (`.github/workflows/release.yml`, or a
+  restricted glob like `.github/workflows/*deploy*.yml`) leaves that one
+  workflow with no reviewer under GitHub's last-match-per-file precedence, but
+  the check reported the directory covered. The coverage loop now tracks the
+  directory's default owner and any per-file ownerless overrides separately, so
+  such a repo fails and the evidence names the stripped workflow. A later
+  directory-level rule re-owns everything under it and cancels the exemption.
+
 ### Added
 
 - **2026-08-09** — **Scanned content is framed as untrusted data to the fix
