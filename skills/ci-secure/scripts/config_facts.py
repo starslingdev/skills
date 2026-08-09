@@ -179,6 +179,26 @@ _CODEOWNERS_OWNER = re.compile(
 _WORKFLOWS_NARROW = re.compile(r"^\s*/?\.github/workflows/(\S+)")
 
 
+def _names_existing_workflow(root: Path, subpath: str) -> bool:
+    """True only if a narrow rule fragment under `.github/workflows/` matches a
+    workflow file that ACTUALLY EXISTS — a literal filename or a restricted
+    glob (`*release*.yml`).
+
+    An ownerless narrow rule removes coverage only from a workflow that is
+    really there. A STALE entry for a since-deleted file (a common CODEOWNERS
+    residue) matches nothing, so it strips ownership from nothing and must not
+    be read as "a workflow merges with no reviewer" — that would fail a repo
+    whose every actual workflow is covered.
+    """
+    wf_dir = root / ".github" / "workflows"
+    try:
+        if any(ch in subpath for ch in "*?["):
+            return any(wf_dir.glob(subpath))
+        return (wf_dir / subpath).is_file()
+    except (OSError, ValueError):
+        return False
+
+
 def _codeowners_covers_workflows(root: Path) -> tuple[str, str]:
     """(outcome, evidence) where outcome is pass / fail / unmeasured.
 
@@ -248,7 +268,10 @@ def _codeowners_covers_workflows(root: Path) -> tuple[str, str]:
             path = narrow.group(1)
             if _CODEOWNERS_OWNER.search(line[narrow.end():]):
                 exempted.discard(path)
-            else:
+            elif _names_existing_workflow(root, path):
+                # Only strip coverage when the rule names a workflow that is
+                # really present; a stale rule for a deleted file removes
+                # ownership from nothing (see `_names_existing_workflow`).
                 exempted.add(path)
     if covered_by_dir and exempted:
         sample = sorted(exempted)[0]

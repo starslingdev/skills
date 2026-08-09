@@ -279,31 +279,60 @@ def test_codeowners_narrow_ownerless_override_strips_a_workflow(tmp_path):
     followed by a NARROW ownerless rule leaves that one workflow with no
     reviewer — the directory has a default owner but is not uniformly covered.
     Reporting it as covered is a false clean on a deliberately-exempted (often
-    the most sensitive) workflow."""
-    # Single-file ownerless override after a broad owner.
-    root, files = _repo(tmp_path / "one", {"ci.yml": _SAFE_WF},
+    the most sensitive) workflow. The stripped rule must name a workflow that
+    actually EXISTS — a stale entry for a deleted file removes coverage from
+    nothing."""
+    # Single-file ownerless override after a broad owner — release.yml IS a real
+    # workflow, so exempting it is a genuine coverage hole.
+    root, files = _repo(tmp_path / "one",
+                        {"ci.yml": _SAFE_WF, "release.yml": _SAFE_WF},
                         codeowners="* @team\n.github/workflows/release.yml\n")
     f = _outcome(cf.compute_config_facts(root, files, []),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "fail", f
     assert "release.yml" in f["evidence"], f
-    # Restricted ownerless glob override — the same hole, one step removed.
-    root, files = _repo(tmp_path / "glob", {"ci.yml": _SAFE_WF},
+    # Restricted ownerless glob override — the same hole, one step removed; the
+    # glob matches a workflow that exists.
+    root, files = _repo(tmp_path / "glob",
+                        {"ci.yml": _SAFE_WF, "deploy-prod.yml": _SAFE_WF},
                         codeowners="* @team\n.github/workflows/*deploy*.yml\n")
     f = _outcome(cf.compute_config_facts(root, files, []),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "fail", f
     # A narrow rule that NAMES an owner is fine — the file is still owned.
-    root, files = _repo(tmp_path / "owned", {"ci.yml": _SAFE_WF},
+    root, files = _repo(tmp_path / "owned",
+                        {"ci.yml": _SAFE_WF, "release.yml": _SAFE_WF},
                         codeowners="* @team\n.github/workflows/release.yml @sec\n")
     f = _outcome(cf.compute_config_facts(root, files, []),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "pass", f
     # And a later directory rule re-owns every file under it, cancelling an
     # earlier narrow ownerless override.
-    root, files = _repo(tmp_path / "recover", {"ci.yml": _SAFE_WF},
+    root, files = _repo(tmp_path / "recover",
+                        {"ci.yml": _SAFE_WF, "release.yml": _SAFE_WF},
                         codeowners=".github/workflows/release.yml\n"
                                    ".github/workflows/ @team\n")
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert f["outcome"] == "pass", f
+
+
+def test_codeowners_stale_ownerless_rule_for_a_deleted_workflow_still_passes(
+        tmp_path):
+    """A broad owner followed by an ownerless narrow rule for a file that no
+    longer exists is a STALE CODEOWNERS residue, not a coverage hole: every
+    workflow that is actually present is still owned by the broad rule.
+    Treating the stale path as an exemption would fail a correctly-covered
+    repo (a false positive)."""
+    # Stale single-file rule (no gone.yml in the tree).
+    root, files = _repo(tmp_path / "stale-file", {"ci.yml": _SAFE_WF},
+                        codeowners="* @team\n.github/workflows/gone.yml\n")
+    f = _outcome(cf.compute_config_facts(root, files, []),
+                 "sec.codeowners.workflows")
+    assert f["outcome"] == "pass", f
+    # Stale restricted glob that matches nothing present.
+    root, files = _repo(tmp_path / "stale-glob", {"ci.yml": _SAFE_WF},
+                        codeowners="* @team\n.github/workflows/*deploy*.yml\n")
     f = _outcome(cf.compute_config_facts(root, files, []),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "pass", f

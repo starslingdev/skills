@@ -31,6 +31,8 @@ entries are dated (UTC). Format loosely follows
   directory's default owner and any per-file ownerless overrides separately, so
   such a repo fails and the evidence names the stripped workflow. A later
   directory-level rule re-owns everything under it and cancels the exemption.
+  The stripped path must name a workflow that actually EXISTS — a stale rule
+  for a since-deleted file matches nothing and does not fail a covered repo.
 
 ### Added
 
