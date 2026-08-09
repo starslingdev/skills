@@ -121,6 +121,32 @@ def test_garbage_scan_output_is_a_coverage_failure(tmp_path, monkeypatch) -> Non
     assert "coverage failure" in proc.stderr
 
 
+def test_exit_2_is_reported_as_invalid_argument_not_coverage_failure(
+    tmp_path, monkeypatch
+) -> None:
+    """scan.py exit 2 is its INVALID-ARGUMENT code (malformed --repo, or
+    `--gh-impostor on` with gh unauthenticated) — the repo was never scanned,
+    so it must NOT be reported as a coverage failure. B10b.
+    """
+    _skip_if_no_yaml()
+    fake_dir = tmp_path / "scripts"
+    fake_dir.mkdir()
+    # A scan.py stand-in that exits 2 like an argparse error would.
+    (fake_dir / "scan.py").write_text("import sys; sys.exit(2)\n")
+    (fake_dir / "run.py").write_text(_RUN_SCRIPT.read_text())
+    out = tmp_path / "findings.json"
+    proc = subprocess.run(
+        [sys.executable, str(fake_dir / "run.py"),
+         "--root", str(_FIXTURES), "--out", str(out)],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 2
+    assert not out.exists()
+    assert "invalid argument" in proc.stderr.lower()
+    # It explicitly disclaims the coverage-failure framing rather than using it.
+    assert "not a coverage failure" in proc.stderr
+
+
 def test_failed_run_leaves_no_stale_findings_at_the_out_path(tmp_path: Path) -> None:
     """A failed run must not leave the PREVIOUS run's findings behind.
 

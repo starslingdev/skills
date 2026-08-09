@@ -89,6 +89,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.catalog:
         scan_cmd += ["--catalog", args.catalog]
     scan = subprocess.run(scan_cmd, stdout=subprocess.PIPE, text=True)
+    if scan.returncode == 2:
+        # Exit 2 is scan.py's invalid-ARGUMENT code (malformed --repo, or
+        # `--gh-impostor on` with gh unauthenticated) — NOT a coverage
+        # failure. The repo was never scanned; the flag is what needs fixing.
+        print(
+            f"ERROR: scan.py exited 2 — invalid argument, not a coverage "
+            f"failure. Fix the flag reported in the stderr above and re-run.",
+            file=sys.stderr,
+        )
+        return scan.returncode
     if scan.returncode != 0:
         print(
             f"ERROR: scan.py exited {scan.returncode} — coverage failure, not a "

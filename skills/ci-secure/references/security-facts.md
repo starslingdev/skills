@@ -1,11 +1,14 @@
-# The scored security facts — what they are, and why each is disjoint from ci-score
+# The security config facts — machine-only inputs, and why each is disjoint from ci-score
 
-ci-secure contributes the security component of the CI Score: six deterministic,
-pass/fail configuration facts, scored `100 × passed / scored` with no weights
-and no partial credit (registered 2026-08-03). The ten attack vectors this
-skill scans for are **findings, never score input** — several vector detectors
-are lexical rather than confirmed exploit proofs, and a public number must not
-grade a stranger's repo down on an unconfirmed match.
+ci-secure computes six deterministic, pass/fail configuration facts as
+MACHINE-ONLY inputs for a future blended score (the ci-advisor door, not yet
+public). They are aggregated `100 × passed / scored` with no weights and no
+partial credit (registered 2026-08-03) — but **that aggregate is never a number
+the user sees**, and it is NOT ci-score's CI Score (a separate skill's grade).
+ci-secure ships no security score anywhere a reader looks. The ten attack
+vectors this skill scans for are **findings, never score input** — several
+vector detectors are lexical rather than confirmed exploit proofs, and a public
+number must not grade a stranger's repo down on an unconfirmed match.
 
 **The aggregate is machine-only.** ci-secure's own report and close render
 these six facts as a pass/fail table and **no number** by design: a hygiene
