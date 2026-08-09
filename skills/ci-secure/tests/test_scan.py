@@ -341,6 +341,8 @@ def test_p1410_ignores_github_generated_value_shape_safe_fields(tmp_path: Path) 
         "          echo fork ${{ github.event.pull_request.head.repo.fork }}\n"
         "          echo merged ${{ github.event.pull_request.merged }}\n"
         "          echo run ${{ github.event.workflow_run.id }}\n"
+        "          echo who ${{ github.event.issue.user.login }}\n"
+        "          echo by ${{ github.event.sender.login }}\n"
     ))
     assert "P14.10" not in _patterns_for_file(_scan_dir(tmp_path), "safe_fields.yml")
 
@@ -395,12 +397,15 @@ def test_p1410_shape_safe_names_do_not_excuse_caller_filled_fields(
         "      - run: echo id ${{ github.event.client_payload.id }}\n"
         "      - run: echo num ${{ github.event.client_payload.number }}\n"
         "      - run: echo built ${{ github.event.inputs.sha }}\n"
+        # A `.login` under a caller-filled prefix is NOT the GitHub-enforced
+        # login charset — the caller invented the key — so it stays a sink.
+        "      - run: echo who ${{ github.event.client_payload.user.login }}\n"
     ))
     hits = [
         f for f in _scan_dir(tmp_path)["findings"]
         if f["pattern"] == "P14.10" and f["workflow_file"].endswith("dispatch.yml")
     ]
-    assert len(hits) == 4, (
+    assert len(hits) == 5, (
         "every caller-filled field is a sink whatever it is named; got "
         f"{[(h['line'], h['evidence']) for h in hits]}"
     )

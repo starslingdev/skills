@@ -159,20 +159,50 @@ def test_every_catalog_anchor_link_resolves():
     assert not broken, f"catalog anchor link(s) resolve to no heading: {broken}"
 
 
-def test_severity_census():
-    """The severity scale prose claims a specific distribution; assert it.
+# The frozen per-pattern severity manifest. A count-only census (`{HIGH: 8,
+# MEDIUM: 2}`) passes a swap that keeps the totals — flip one HIGH to MEDIUM and
+# one MEDIUM to HIGH and the counts are unchanged while two vectors are now
+# mis-graded. Pinning each id's severity by EQUALITY closes that.
+_SEVERITY_BY_PATTERN = {
+    "P14.7": "HIGH",
+    "P14.9": "HIGH",
+    "P14.10": "HIGH",
+    "P14.11": "HIGH",
+    "P14.14": "HIGH",
+    "P14.15": "HIGH",
+    "P14.18": "HIGH",
+    "P14.19": "HIGH",
+    "P14.24": "MEDIUM",
+    "P14.25": "MEDIUM",
+}
 
-    It said "two entries carry MEDIUM" after P14.9 had already been raised to
-    HIGH — prose describing a catalog it no longer matched.
+
+def test_severity_census():
+    """Every vector's severity is pinned by id, and any `**Severity**:` prose
+    line inside a catalog entry agrees with that entry's METADATA severity.
+
+    A count-only check ("two entries carry MEDIUM") once described a catalog it
+    no longer matched, and could not catch a severity SWAP that keeps the
+    totals. The per-pattern manifest and the prose/metadata agreement close
+    both gaps.
     """
     entries = load_catalog(_CATALOG)
-    counts: dict[str, int] = {}
-    for e in entries:
-        counts[e.severity] = counts.get(e.severity, 0) + 1
-    assert counts == {"HIGH": 8, "MEDIUM": 2}, (
-        f"catalog severity distribution changed to {counts} — update the "
-        f"Severity scale prose in the same change"
+    got = {e.pattern: e.severity for e in entries}
+    assert got == _SEVERITY_BY_PATTERN, (
+        f"per-pattern severity manifest drifted: {got} — a severity change is "
+        f"a deliberate catalog decision; update the manifest and the Severity "
+        f"scale prose in the same change"
     )
+    # Any `**Severity**: X` prose line in an entry must match its metadata.
+    meta = {e.pattern: e.severity for e in entries}
+    sev_re = re.compile(r"\*\*Severity\*\*:\s*([A-Z]+)")
+    for pid, section in _sections().items():
+        m = sev_re.search(section)
+        if m:
+            assert m.group(1) == meta[pid], (
+                f"{pid}: prose says Severity {m.group(1)} but METADATA says "
+                f"{meta[pid]} — the two must agree"
+            )
 
 
 def test_exactly_one_network_gated_detector():

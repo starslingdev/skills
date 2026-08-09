@@ -40,7 +40,7 @@ rejection record).
 | 5 | P14.14 | Whole-context secrets dump — `toJSON(secrets)` into logs/env | tj-actions payload behavior (memory scraping, 2025) |
 | 6 | P14.15 | Attacker-controlled `$GITHUB_ENV` / `$GITHUB_PATH` write — hijacks later steps | GitHub Security Lab environment-injection writeups |
 | 7 | P14.18 | `pull-requests: write` on an untrusted trigger — outsider's event holds a write token | elementary-data (2026) — forged release via default-write token |
-| 8 | P14.19 | Credential files in caches/artifacts — keys fetchable by other jobs or the public | cache-pivot class documented in Trivy round 2 analysis (2026) |
+| 8 | P14.19 | Credential files in caches/artifacts — keys fetchable by other jobs or the public | Trivy round 2 (2026) — attacker swept the runner for exactly these credential files (SSH keys, cloud creds, Kubernetes tokens); caching or uploading them extends that exposure |
 | 9 | P14.24 | Unverified `curl \| bash` with secrets present — remote host compromise becomes yours | Codecov bash-uploader breach (2021) |
 | 10 | P14.25 | Dependency install scripts executing in a privileged job — a compromised upstream package runs code where the secrets are | nx / s1ngularity install-script payload (2025); Miasma / `@redhat-cloud-services` (2026); GitHub's July 28 2026 supply-chain post |
 

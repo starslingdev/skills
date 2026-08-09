@@ -1090,6 +1090,11 @@ def test_p1425_a_continued_install_without_the_flag_still_fires(tmp_path):
     ('npm install "a|b" --ignore-scripts', False),
     ('npm install "foo\\"|bar" --ignore-scripts', False),
     ("npm install 'a|b'", True),
+    # --- a bare (UNQUOTED) pipe separates commands: --ignore-scripts protects
+    #     only the command it's written on, so the piped-to install is exposed
+    #     (issue #278 — a shared segmenter name once read this as protected) ---
+    ("npm ci --ignore-scripts | npm install", True),
+    ("npm install | npm ci --ignore-scripts", True),
 ])
 def test_p1425_install_matcher_truth_table(command, unprotected):
     """One table for the whole "is this an unprotected install?" question,

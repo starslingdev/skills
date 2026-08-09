@@ -66,8 +66,6 @@ from typing import Any, Iterator
 
 REGISTERED = "2026-08-03"
 
-_UNTRUSTED_TRIGGERS: frozenset[str] = frozenset()   # bound from scan at load
-
 
 def _load_sibling(name: str, path: Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, path)

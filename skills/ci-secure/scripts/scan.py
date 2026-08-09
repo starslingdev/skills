@@ -727,11 +727,21 @@ _RUN_KEY_RE = re.compile(r"^\s*-?\s*run\s*:", re.MULTILINE)
 # previously declared in scope ("author associations" was listed among the
 # text-shaped fields that stay) — react's four `shared_label_core_team_prs` /
 # `*_discord_notify` findings were all this shape and all false.
+# `.login` is a GitHub account/org LOGIN — `github.event.*.user.login`,
+# `.sender.login`, `.repo.owner.login`, etc. GitHub enforces the login charset
+# (alphanumerics and single, non-leading/trailing hyphens, ≤39 chars), so it
+# cannot carry a shell metacharacter — not even the login an attacker chose for
+# their own fork account. So `github.event.issue.user.login` in a `run:` block
+# is not an injection sink and must not fire P14.10 HIGH (astro's headline
+# finding was exactly this false positive). The `github.` prefix gate plus the
+# `_ATTACKER_FILLED_PREFIXES` carve-out still apply: a `.login` under
+# `client_payload.*` / `inputs.*` is caller-filled and stays in scope.
 _SAFE_EXPR_SUFFIXES = (
     ".number", ".id", ".commits",
     ".sha", ".head_sha", ".merge_commit_sha",
     ".fork", ".merged",
     ".author_association",
+    ".login",
 )
 
 # …but the value-shape argument only holds where GITHUB fills the field in.
@@ -1907,8 +1917,18 @@ def _shell_scan(text: str) -> Iterator[tuple[str, bool]]:
         i += 1
 
 
-def _shell_segments(command: str) -> list[str]:
+def _install_command_segments(command: str) -> list[str]:
     """`command` split on its unquoted `;` `&` `&&` `|` `||` separators.
+
+    Used by the P14.25 install detector, which must split on a bare `|` too:
+    `--ignore-scripts` protects the command it is WRITTEN on, so in
+    `npm ci --ignore-scripts | npm install` the flag covers the first command
+    and the piped-to `npm install` is still an unprotected install. (This is a
+    DIFFERENT question from `_pipeline_command_segments`, which keeps a pipeline
+    whole because a `… | tee file` pipeline is one logical write.) The name was
+    once shared between the two, and the pipeline-whole definition silently
+    overrode this one — issue #278 — so a bare-pipe install was read as
+    protected. They are two named functions now.
 
     Quote-aware for the same reason as the comment strip: splitting
     `npm install "a|b" --ignore-scripts` on the quoted pipe put the flag in a
@@ -1975,9 +1995,11 @@ def _is_unprotected_install(command: str) -> bool:
     install below it. One definition cannot disagree with itself that way.
 
     `--ignore-scripts` is matched against the SEGMENT it belongs to, not the
-    whole line: it protects the command it is written on, so in
-    `npm ci --ignore-scripts && npm install` the flag covers the first
-    install and not the second, and the line as a whole is a finding.
+    whole line: it protects the command it is written on. `command` is split by
+    `_install_command_segments`, which breaks on `;` `&` `&&` `||` AND a bare
+    `|`, so in both `npm ci --ignore-scripts && npm install` and
+    `npm ci --ignore-scripts | npm install` the flag covers only the first
+    command and the second install is a finding.
 
     A global or single-package install is not this vector and is excluded here
     too — see `_is_dependency_tree_install`.
@@ -1986,7 +2008,7 @@ def _is_unprotected_install(command: str) -> bool:
         _INSTALL_CMD_RE.search(seg)
         and not _IGNORE_SCRIPTS_RE.search(seg)
         and _is_dependency_tree_install(seg)
-        for seg in _shell_segments(command)
+        for seg in _install_command_segments(command)
     )
 
 
@@ -2311,7 +2333,7 @@ def _allowlist_writes(
         if idx not in shell_lines:
             continue
         raw = lines[idx - 1]
-        for whole in _shell_segments(_COMMENT_TAIL_RE.sub("", raw)):
+        for whole in _pipeline_command_segments(_COMMENT_TAIL_RE.sub("", raw)):
             # `NOTE="pnpm config set allowBuilds=false"` stores a string; it
             # runs nothing. Leading `VAR=value` assignments are stripped, and a
             # segment that is ONLY assignments is not a command at all.
@@ -2380,12 +2402,13 @@ def _command_after_assignments(segment: str) -> str:
     return out
 
 
-def _shell_segments(line: str) -> list[str]:
+def _pipeline_command_segments(line: str) -> list[str]:
     """One shell line split into the commands it actually runs.
 
     A bare `|` is NOT a separator here: a pipeline is one logical command, and
     `echo 'allowBuilds: false' | tee -a pnpm-workspace.yaml` really does write
-    the file.
+    the file. (The P14.25 install detector wants the opposite — see
+    `_install_command_segments` — which is why these are two named functions.)
 
     Quote-aware, because splitting blind cuts BOTH ways: `echo "note; pnpm
     config set allowBuilds=false"` is one `echo` of inert text, but a naive
