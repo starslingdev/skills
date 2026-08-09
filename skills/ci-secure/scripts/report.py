@@ -55,7 +55,12 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from config import ACTIVITY_RUN_LIMIT, DORMANT_DAYS, setup_logging  # noqa: E402
+from config import (  # noqa: E402
+    ACTIVITY_RUN_LIMIT,
+    DORMANT_DAYS,
+    __version__ as SKILL_VERSION,
+    setup_logging,
+)
 
 logger = setup_logging(__name__)
 
@@ -558,7 +563,7 @@ def _source_line(
     itself, so repeating it on every bullet is restatement, not provenance.
     """
     link = _permalink(repo, sha, workflow_file, line)
-    label = f"`{workflow_file}:{line}`"
+    label = f"`{_flatten_scanned(workflow_file)}:{line}`"
     if link:
         return f"[{label}]({link})"
     return label
@@ -618,10 +623,12 @@ def _occurrence_bullet_for_prompt(member: dict[str, Any]) -> str:
     Same shape as the report's evidence bullets but without permalinks
     or activity counts — the agent only needs file:line + jobs to act.
     """
-    wf = member.get("workflow_file", "")
+    wf = _flatten_scanned(member.get("workflow_file", ""))
     line_no = member.get("line", 0)
     jobs = member.get("affected_jobs") or []
-    suffix = f" — jobs: {', '.join(jobs)}" if jobs else ""
+    suffix = (
+        f" — jobs: {', '.join(_flatten_scanned(j) for j in jobs)}" if jobs else ""
+    )
     note = member.get("affected_jobs_note")
     if note:
         suffix += f" ({note})"
@@ -733,8 +740,32 @@ def _build_fix_prompt(
     # dispatched subagent cannot guess the directory from a placeholder. Shell-
     # quoted because it goes into a command line the agent RUNS — a `$TMPDIR`
     # with a space in it would otherwise split into two arguments.
-    findings_ref = (
-        shlex.quote(str(findings_path)) if findings_path else "<findings.json>"
+    # The recheck (the fix oracle) writes to a REPO-SCOPED path derived from the
+    # findings path's own slug — NOT a fixed `/tmp/ci-secure-recheck.json`, which
+    # two concurrent sessions on different repos would clobber. When there is no
+    # findings path (piped input) fall back to the SKILL.md-documented shape.
+    if findings_path:
+        recheck_path = findings_path.with_name(
+            findings_path.name.replace("findings", "recheck")
+        )
+        recheck_ref = shlex.quote(str(recheck_path))
+    else:
+        recheck_ref = "${TMPDIR:-/tmp}/ci-secure-recheck-${SLUG}.json"
+    # P14.11 is the ONE network-gated vector. Its recheck MUST force
+    # `--gh-impostor on` (default `auto` would silently SKIP the impostor check
+    # when gh is unauthenticated, and a skipped check re-read as "gone" is a
+    # VACUOUS pass) — the exact hole prompts.md was hardened against. Other
+    # vectors answer from YAML alone, so forcing `on` there would only make the
+    # oracle refuse to run without gh for no security gain.
+    is_impostor = pattern == "P14.11"
+    gh_flag = " --gh-impostor on" if is_impostor else ""
+    impostor_guard = (
+        "\n    Because this is the network-gated impostor-SHA vector, read "
+        f"`gh_checks[\"P14.11\"]` in {recheck_ref}: only `\"ran\"` verifies the "
+        "fix. `skipped` / `partial` / a missing status means the check did NOT "
+        "run — treat that as NOT verified, never as a pass (re-run with gh "
+        "authenticated)."
+        if is_impostor else ""
     )
     risk = _risk_of_change(pattern, cat)
     risk_constraint = f"- Risk of the change: {risk}\n" if risk else ""
@@ -802,14 +833,14 @@ def _build_fix_prompt(
         "manually.\n\n"
         "Verify (the oracle — you are done only when it passes): re-run "
         "the ci-secure scan over this repo — `python3 "
-        "<ci-secure>/scripts/run.py --root . --out "
-        "/tmp/ci-secure-recheck.json` — and confirm the chain no longer "
+        f"<ci-secure>/scripts/run.py --root .{gh_flag} --out "
+        f"{recheck_ref}` — and confirm the chain no longer "
         f"fires: no finding with `\"pattern\": \"{pattern}\"` may remain "
-        "in that JSON. If one does, occurrences are left — fix them and "
-        "re-run. If you also edited the rendered ci-secure report, "
-        "`python3 <ci-secure>/tests/verify_report.py --report "
-        f"<report.md> --findings {findings_ref}` must still print "
-        "`all checks passed`."
+        f"in that JSON.{impostor_guard} If one does, occurrences are left — "
+        "fix them and re-run. If you also edited the rendered ci-secure "
+        "report, `python3 <ci-secure>/tests/verify_report.py --report "
+        "<report.md> --findings <the ci-secure findings JSON from your run "
+        "(the Phase 2 --out path)>` must still print `all checks passed`."
     )
 
 
@@ -1110,7 +1141,8 @@ def _finding_group_section(
         line_no = m.get("line", 0)
         jobs = m.get("affected_jobs") or []
         jobs_suffix = (
-            f" — jobs: {', '.join(f'`{j}`' for j in jobs)}" if jobs else ""
+            f" — jobs: {', '.join(f'`{_flatten_scanned(j)}`' for j in jobs)}"
+            if jobs else ""
         )
         # Present only when the job list is a fallback rather than an
         # attribution — "every job, because we could not tell" must not read
@@ -1139,7 +1171,7 @@ def _finding_group_section(
                 out.append(_derived_evidence_block(evidence, "  "))
             else:
                 out.append("  ```yaml")
-                out.append(_indent_block(evidence, "  "))
+                out.append(_indent_block(_fence_safe(evidence), "  "))
                 out.append("  ```")
         # A second, always-derived claim under the verbatim quote: the
         # condition elsewhere in the job that makes the quoted line a finding
@@ -1388,11 +1420,18 @@ def _header_table(
     # edits at scan time, so the report is honest about which code ran (the
     # HEAD sha alone can lag the working-tree files).
     dirty_suffix = "-dirty" if skill_tree_dirty else ""
-    skill_label = f"`{skill_sha[:7]}{dirty_suffix}`" if skill_sha else "(unknown)"
+    # With a git checkout we stamp the commit sha; an INSTALLED skill has no
+    # .git, so instead of a bare "(unknown)" (doubled parens, and a provenance
+    # the self-check reads as a FAILURE) we stamp the shipped version. Both are
+    # valid, single-paren provenance states.
+    if skill_sha:
+        provenance = f"skill commit `{skill_sha[:7]}{dirty_suffix}`"
+    else:
+        provenance = f"skill v{SKILL_VERSION} — commit unknown, no git checkout"
     rows.append(("Scanned", f"{scanned_at[:10] if scanned_at else ''} (UTC)"))
     rows.append((
         "Scanner",
-        f"ci-secure (skill commit {skill_label}) — {len(findings)} finding(s)",
+        f"ci-secure ({provenance}) — {len(findings)} finding(s)",
     ))
 
     # First row doubles as the table header (sibling house style), so the
@@ -1412,7 +1451,13 @@ def _header_table(
 # (ci-score's score gauge) is that the agent copies the rendered line verbatim
 # into the terminal. A hand-drawn banner mis-counted its blocks once, which is
 # exactly the class of error a pre-drawn line cannot make.
-_CHAIN_TOTAL = 10
+#
+# The vector DENOMINATOR ("N of {total} vectors hit") is derived from the
+# loaded catalog at render time — see `render()`, which passes
+# `len(catalog_sections)` in as `n_vectors`. A hardcoded literal here would
+# silently drift the moment the catalog gains or loses a pattern: the banner
+# would say "of 10" while the vector-map table below listed 11, and
+# verify_report's banner==table check would fail against a green suite.
 
 
 def _impostor_banner_state(gh_checks: dict[str, Any] | None) -> str:
@@ -1439,17 +1484,22 @@ def _banner_line(
     n_chains_hit: int,
     scanned_workflows: int,
     gh_checks: dict[str, Any] | None,
+    n_vectors: int,
 ) -> str:
     """The one-line headline, pre-drawn for the orchestrator to copy verbatim.
 
     ``CI Secure   4 critical findings  ▏2 of 10 vectors hit▕  31 workflows ·
     impostor check ran``
+
+    ``n_vectors`` is the catalog size (``len(catalog_sections)``) — the
+    denominator, never a literal, so it can't diverge from the vector-map
+    table.
     """
     findings_word = "finding" if n_findings == 1 else "findings"
     wf_word = "workflow" if scanned_workflows == 1 else "workflows"
     return (
         f"CI Secure   {n_findings} critical {findings_word}  "
-        f"▏{n_chains_hit} of {_CHAIN_TOTAL} vectors hit▕  "
+        f"▏{n_chains_hit} of {n_vectors} vectors hit▕  "
         f"{scanned_workflows} {wf_word} · impostor check "
         f"{_impostor_banner_state(gh_checks)}"
     )
@@ -1583,6 +1633,36 @@ def _abbreviate_home(path: str) -> str:
     if home and home != "/" and (path == home or path.startswith(home + "/")):
         return "~" + path[len(home):]
     return path
+
+
+def _flatten_scanned(value: Any) -> str:
+    """Flatten-and-neutralize an ATTACKER-CONTROLLED scanned string before it is
+    interpolated into a bullet, an inline code span, or a copy-paste prompt.
+
+    Job names, workflow-file paths, and the like are scanned YAML the repo
+    under audit controls. A job name carrying backticks + newlines could forge
+    a ``## FIXED —`` heading (a false-clean signal), break out of a ```` ```text ````
+    fence into the copy-paste prompt, or corrupt verify_report.py's finding
+    count. Collapsing ALL whitespace to single spaces kills newline-based
+    heading/fence-break injection; replacing the backtick kills inline-code and
+    fence-character breakout. Pipes are escaped too, so the result is also
+    table-cell safe.
+    """
+    if value is None:
+        return ""
+    flat = " ".join(str(value).split())
+    return flat.replace("`", "'").replace("|", "\\|")
+
+
+def _fence_safe(text: str) -> str:
+    """Neutralize backticks in text bound for a ``` ``` ``` code fence.
+
+    Verbatim evidence quotes source lines the audited repo controls. A source
+    line that is a run of backticks would close the evidence fence early, so a
+    following ``## FIXED`` line would render as a real heading. Replacing the
+    backtick guarantees the fence holds; the rest of the source is untouched.
+    """
+    return text.replace("`", "'")
 
 
 def _cell(value: Any) -> str:
@@ -1820,7 +1900,7 @@ def _gh_checks_block(
     return "\n".join(out).rstrip("\n")
 
 
-def _methodology_block() -> str:
+def _methodology_block(n_vectors: int) -> str:
     return (
         "## ⚙️ Methodology\n\n"
         "| Term | Definition |\n"
@@ -1879,8 +1959,9 @@ def _methodology_block() -> str:
         "attributes its runs to the calling workflow, so that history is "
         "empty however often the file executes — its activity is reported "
         "as unknown. |\n"
-        "| **`N of 10 vectors hit`** | The denominator is always ten — the "
-        "whole catalog — never \"the vectors that ran\". A vector that could "
+        f"| **`N of {n_vectors} vectors hit`** | The denominator is always "
+        f"{n_vectors} — the whole catalog — never \"the vectors that ran\". "
+        "A vector that could "
         "not be evaluated (a network-gated check with no `gh`) shows ⚠️ in "
         "the vector map and is counted as neither hit nor clean; shrinking "
         "the denominator instead would quietly convert a check that did not "
@@ -1954,6 +2035,7 @@ def _data_sources_block(
 def _headline_block(
     all_groups: list[GroupEntry],
     scanned_workflows: int,
+    n_vectors: int,
     coverage_complete: bool = True,
 ) -> str:
     """The ci-score-style headline: one `## ` line stating the verdict.
@@ -1974,8 +2056,8 @@ def _headline_block(
             "",
             (
                 f"All {scanned_workflows} workflow file(s) were checked "
-                f"against ci-secure's ten critical attack-vector patterns "
-                f"and none matched."
+                f"against ci-secure's {n_vectors} critical attack-vector "
+                f"patterns and none matched."
                 if coverage_complete
                 else "No pattern matched the workflow files that could be "
                      "scanned — see the incomplete-coverage warning above; "
@@ -2006,7 +2088,7 @@ def _headline_block(
     return "\n".join([
         (
             f"## Critical findings: **{n_occurrences_total}** — "
-            f"{n_groups_total} of {_CHAIN_TOTAL} vectors hit"
+            f"{n_groups_total} of {n_vectors} vectors hit"
         ),
         "",
         (
@@ -2062,8 +2144,12 @@ def render_plan_keys(findings_json: dict[str, Any]) -> list[dict[str, Any]]:
     true only when EVERY occurrence sits on a dormant workflow, which is
     the definition of "all" the selection prompt uses.
     """
+    # Same filtered set as render(): an off-catalog pattern is off-contract and
+    # never becomes a render-plan row, so the selection table can't offer a
+    # finding the report won't show.
     findings, _malformed = _validate_findings(
-        list(findings_json.get("findings") or [])
+        list(findings_json.get("findings") or []),
+        catalog_patterns=set(_load_catalog_sections(None)),
     )
     findings, _n_dupes = _dedupe_findings(findings)
     findings.sort(key=_sort_key)
@@ -2141,8 +2227,16 @@ def _group_action_summary(members: list[dict[str, Any]]) -> str:
 
 def _validate_findings(
     findings: list[dict[str, Any]],
+    catalog_patterns: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], list[str]]]]:
     """Partition findings into (well-formed, malformed-with-reasons).
+
+    When ``catalog_patterns`` is supplied, a finding whose ``pattern`` is not
+    in the catalog is ALSO malformed: it can never map to a vector-map row, so
+    left in it would inflate the headline count while the banner (catalog-
+    filtered) and the vector map both omitted it — a silent divergence. Routing
+    it here surfaces it in the same loud banner as any other off-contract
+    finding, and keeps the headline, banner, and vector map on one filtered set.
 
     A finding missing a load-bearing key — or carrying a severity outside
     the catalog's tiers — would otherwise be rendered with silent defaults
@@ -2167,6 +2261,10 @@ def _validate_findings(
         sev = f.get("severity")
         if sev is not None and sev not in _VALID_SEVERITIES:
             problems.append(f"invalid severity {sev!r}")
+        if catalog_patterns is not None:
+            pat = f.get("pattern")
+            if pat not in catalog_patterns:
+                problems.append(f"pattern {pat!r} not in the catalog")
         if problems:
             malformed.append((f, problems))
         else:
@@ -2197,7 +2295,7 @@ def _malformed_findings_banner(
     for f, problems in malformed:
         fid = f.get("id") or "?"
         pat = f.get("pattern") or "?"
-        wf = f.get("workflow_file") or "?"
+        wf = _flatten_scanned(f.get("workflow_file") or "?")
         lines.append(f"> - `{fid}` ({pat}, {wf}): {'; '.join(problems)}")
     return "\n".join(lines)
 
@@ -2277,15 +2375,15 @@ def _coverage_gap_banner(
         lines += [">", "> _Static scan could not read/parse:_"]
         for entry in scan_incomplete:
             lines.append(
-                f"> - **{entry.get('workflow_file', '?')}**: "
-                f"{entry.get('reason', 'unknown')}"
+                f"> - **{_flatten_scanned(entry.get('workflow_file', '?'))}**: "
+                f"{_flatten_scanned(entry.get('reason', 'unknown'))}"
             )
     if dropped_matches:
         lines += [">", "> _Parsed, but a `run:` step went unscanned:_"]
         for entry in dropped_matches:
             lines.append(
-                f"> - **{entry.get('workflow_file', '?')}**: "
-                f"{entry.get('reason', 'unknown')}"
+                f"> - **{_flatten_scanned(entry.get('workflow_file', '?'))}**: "
+                f"{_flatten_scanned(entry.get('reason', 'unknown'))}"
             )
     return "\n".join(lines)
 
@@ -2331,11 +2429,16 @@ def render(
     catalog_url: str | None = None,
     findings_path: Path | None = None,
 ) -> str:
-    # Validate at the boundary: a finding missing a load-bearing key (or
-    # with an invalid severity) is pulled out and surfaced loudly rather
-    # than rendered with silent defaults that would bury it.
+    # Load the catalog first: its pattern set is a validation input (an
+    # off-catalog pattern is off-contract, surfaced like any malformed finding).
+    catalog_sections = _load_catalog_sections(catalog_path)
+    # Validate at the boundary: a finding missing a load-bearing key, carrying
+    # an invalid severity, or naming a pattern outside the catalog is pulled out
+    # and surfaced loudly rather than rendered with silent defaults that would
+    # bury it (or, for an off-catalog pattern, diverge the counts).
     findings, malformed_findings = _validate_findings(
-        list(findings_json.get("findings") or [])
+        list(findings_json.get("findings") or []),
+        catalog_patterns=set(catalog_sections),
     )
     findings, n_duplicates = _dedupe_findings(findings)
     if n_duplicates:
@@ -2364,7 +2467,9 @@ def render(
 
     if catalog_url is None:
         catalog_url = _build_catalog_url(skill_sha)
-    catalog_sections = _load_catalog_sections(catalog_path)
+    # The vector denominator everywhere — banner, headline, methodology — is
+    # the loaded catalog's size, never a literal, so the three can't diverge.
+    n_vectors = len(catalog_sections)
 
     # Group findings by pattern. EVERY group renders — the critical-only
     # catalog is small enough that trimming would only hide work. Dormancy
@@ -2404,7 +2509,8 @@ def render(
     chains_hit = len({key[1] for _o, key, _m in groups if key[1] in catalog_sections})
     out.append("```")
     out.append(
-        _banner_line(len(findings), chains_hit, scanned_workflows, gh_checks)
+        _banner_line(len(findings), chains_hit, scanned_workflows, gh_checks,
+                     n_vectors)
     )
     out.append("```")
     out.append("")
@@ -2446,7 +2552,8 @@ def render(
     # ranked finding order below IS the plan, exactly as in the siblings.
     # Zero findings is a first-class positive result and folds under the same
     # headline rather than a separate `## Result` section.
-    out.append(_headline_block(groups, scanned_workflows, coverage_complete))
+    out.append(_headline_block(groups, scanned_workflows, n_vectors,
+                               coverage_complete))
     out.append("")
 
     # The vector map — the analog of ci-score's check table and ci-speedup's
@@ -2491,7 +2598,7 @@ def render(
     out.append("")
     out.append("---")
     out.append("")
-    out.append(_methodology_block())
+    out.append(_methodology_block(n_vectors))
     out.append("")
     out.append("---")
     out.append("")

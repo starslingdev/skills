@@ -546,7 +546,18 @@ def check_skill_commit_provenance(report: str, skill_repo: Path | None) -> Check
     name = "report's skill commit matches the skill checkout (provenance)"
     m = re.search(r"skill commit `([0-9a-f]+)(-dirty)?`", report)
     if not m:
-        return Check(name, False, "no `skill commit` recorded in the Scanners row")
+        # An INSTALLED skill has no .git, so it stamps a version instead of a
+        # commit sha. That is a valid provenance state — SKIP, do not FAIL, or
+        # every real user's clean report would fail its own self-check.
+        vm = re.search(r"skill v([0-9]+\.[0-9]+\.[0-9]+) — commit unknown", report)
+        if vm:
+            return Check(
+                name, True,
+                f"installed skill v{vm.group(1)} — no git commit, version-stamped",
+                skipped=True,
+            )
+        return Check(name, False,
+                     "no `skill commit` or version stamp recorded in the Scanner row")
     recorded, dirty = m.group(1), bool(m.group(2))
     if skill_repo is None:
         note = "recorded " + recorded + ("-dirty" if dirty else "")
@@ -915,6 +926,52 @@ def check_config_hygiene_facts_rendered(
     return Check(name, True, f"{len(facts)} hygiene row(s) rendered")
 
 
+# The complete set of level-2 (`## `) headings the renderer + orchestrator
+# legitimately emit. Anything else at `^## ` outside a code fence is a FORGED
+# heading — the classic attack is a scanned job name carrying backticks +
+# newlines that breaks out of an evidence bullet/fence and forges a
+# `## FIXED — …` heading to fake a clean/fixed result.
+_ALLOWED_H2 = (
+    re.compile(r"^## Critical findings: \*\*\d+\*\*"),
+    re.compile(r"^## 🔗 Vector map"),
+    re.compile(r"^## 🧰 Config hygiene checks"),
+    re.compile(r"^## 📖 What each vector checks"),
+    re.compile(r"^## ⚙️ Methodology"),
+    re.compile(r"^## 🗄️ Data sources"),
+    re.compile(r"^## Fixes applied"),
+    # finding groups — optional orchestrator FIXED/PARTIALLY FIXED prefix,
+    # then a severity emoji, then `Finding N:`.
+    re.compile(
+        r"^## (?:FIXED — |PARTIALLY FIXED — )?(?:🟥|🟧|⬜|📄) ?Finding \d+:"
+    ),
+)
+
+
+def check_no_forged_headings(report: str) -> Check:
+    """Every `## ` heading (outside code fences) is one the renderer emits.
+
+    A scanned string the audited repo controls (a job name, a workflow path)
+    that carries backticks + newlines could break out of its bullet/fence and
+    render an arbitrary `## …` heading — e.g. a fake `## FIXED — Finding 1`
+    that reads as a false-clean. This invariant rejects any `^## ` line that
+    does not match the known-heading manifest.
+    """
+    name = "no forged `## ` headings outside the known-heading set"
+    bad: list[str] = []
+    in_fence = False
+    for line in report.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if line.startswith("## ") and not any(p.match(line) for p in _ALLOWED_H2):
+            bad.append(line[:70])
+    return Check(name, not bad,
+                 "all `## ` headings are renderer-emitted" if not bad
+                 else f"{len(bad)} forged heading(s): {bad[:3]}")
+
+
 def run_checks(
     report: str, report_path: Path | None,
     findings_path: Path | None, skill_repo: Path | None,
@@ -948,6 +1005,7 @@ def run_checks(
         check_vector_status_table_covers_the_ten(report),
         check_no_rendered_security_score(report),
         check_config_hygiene_facts_rendered(report, findings_path),
+        check_no_forged_headings(report),
     ]
 
 

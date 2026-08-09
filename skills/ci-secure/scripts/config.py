@@ -8,6 +8,11 @@ import os
 import re
 from typing import Final
 
+# Skill version. Stamped into the report's Scanner row so an INSTALLED skill
+# (no .git checkout, so no commit sha to record) still carries a provenance
+# marker instead of a bare "(unknown)". Bump this on every shipped change.
+__version__: Final[str] = "0.1.0"
+
 
 # Default log level resolved from STARSLING_LOG_LEVEL env var
 # (e.g. `STARSLING_LOG_LEVEL=DEBUG`). Falls back to INFO when unset
