@@ -12,6 +12,7 @@ description: >-
   CI changes. Do not trigger for: general CI setup help, writing new
   workflows from scratch, non-GitHub-Actions CI systems, or
   security/posture audits — use `ci-secure` for those.
+license: MIT
 ---
 
 # ci-speedup — CI Optimization Audit for GitHub Actions

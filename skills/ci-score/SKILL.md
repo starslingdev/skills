@@ -15,6 +15,7 @@ description: >-
   is not a security audit — exactly two rubric checks, action pinning
   and OIDC token scoping, happen to be security-related); writing new
   workflows from scratch; non-GitHub-Actions CI.
+license: MIT
 ---
 
 # ci-score
