@@ -160,6 +160,19 @@ def test_fork_prs_report_the_coverage_gap(workflow: dict):
     assert "DID NOT RUN" in _steps_text(fork_job)
 
 
+def test_fork_report_is_confined_to_pull_requests(workflow: dict):
+    """`github.event.pull_request` is null on pushes, schedules, and dispatches, so a
+    bare `head.repo.full_name != github.repository` is TRUE on every one of them. Without
+    the event-name clause this job posts a green 'fork PR — no scan coverage' check
+    beside a scan that actually ran — the misreading its name exists to prevent."""
+    guard = workflow["jobs"]["fork-not-scanned"]["if"]
+    assert "github.event_name == 'pull_request'" in guard, (
+        "the fork coverage-gap report must be gated on the pull_request event, or it "
+        "fires on pushes and scheduled runs too"
+    )
+    assert "github.event.pull_request.head.repo.full_name != github.repository" in guard
+
+
 def test_scanner_coverage_limits_are_documented(workflow_text: str):
     """Registries run more than one scanner; a green check here is not a clean bill
     of health from all of them."""

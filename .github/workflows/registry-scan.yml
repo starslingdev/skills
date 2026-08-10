@@ -142,7 +142,13 @@ jobs:
     # way to fix would be hostile, so this reports rather than blocks — but it reports loudly, and
     # a maintainer must re-run the scan on an internal branch before merging any change to
     # `skills/` that came from a fork.
-    if: github.event.pull_request.head.repo.full_name != github.repository
+    # Both halves are load-bearing. On a push, a schedule, or a manual dispatch there is no
+    # `github.event.pull_request`, so the second clause alone would be true (null != repo) and
+    # this job would post a green "fork PR — no scan coverage" check next to a real scan that
+    # did run — the exact misreading the job's name exists to prevent.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
       - name: Report the coverage gap
