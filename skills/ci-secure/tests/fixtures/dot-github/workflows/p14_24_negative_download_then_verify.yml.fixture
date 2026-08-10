@@ -18,6 +18,6 @@ jobs:
       contents: read
     steps:
       - run: |
-          curl -fsSL -o install.sh https://get.example.com/install.sh
+          curl -fsSL -o install.sh "$INSTALLER_URL"
           echo "0000000000000000000000000000000000000000000000000000000000000000  install.sh" | sha256sum -c -
           bash install.sh

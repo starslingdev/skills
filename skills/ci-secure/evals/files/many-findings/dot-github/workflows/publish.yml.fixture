@@ -12,7 +12,7 @@ jobs:
         env:
           ALL: ${{ toJSON(secrets) }}
         run: echo "context captured"
-      - run: curl -sSf https://get.example.com/install.sh | bash
+      - run: curl -sSf "$INSTALLER_URL" | bash
       - uses: actions/upload-artifact@v4
         with:
           name: release-bundle

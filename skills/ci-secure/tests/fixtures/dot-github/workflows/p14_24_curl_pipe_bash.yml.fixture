@@ -17,4 +17,4 @@ jobs:
     permissions:
       contents: read
     steps:
-      - run: curl -fsSL https://get.example.com/install.sh | bash
+      - run: curl -fsSL "$INSTALLER_URL" | bash

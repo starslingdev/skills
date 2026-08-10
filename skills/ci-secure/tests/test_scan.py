@@ -437,7 +437,7 @@ def test_shape_safe_allowlist_only_ever_touches_template_expressions() -> None:
     so anything that is not a template expression is never shape-safe.
     """
     assert not scan._is_shape_safe_expression(
-        "curl https://example.invalid/install.merged | bash")
+        'curl -fsSL "$INSTALLER_URL" | bash')
     assert not scan._is_shape_safe_expression("git rev-parse HEAD > out.sha")
     # The load-bearing case for the gate specifically: text that WOULD pass
     # every downstream rule — a fully-qualified `github.*` path with a
