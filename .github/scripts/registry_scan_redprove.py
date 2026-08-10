@@ -17,10 +17,14 @@ It fails in the other direction too. The scanner's rule catalog changes without
 any commit of ours; if the rule is renamed or retired, this step goes red on the
 next run and a human decides what the gate should now assert.
 
-The offending string is assembled from fragments at runtime and only ever exists
-inside a temp directory. Committing such a literal is precisely what this gate
-exists to prevent, so it appears nowhere in this repository — including here.
-The host is under `example.com`, reserved by RFC 2606 and not resolvable.
+The offending string is assembled from fragments at runtime, so no fetch-and-pipe
+command line exists on disk in this repository — committing such a literal is
+precisely what this gate exists to prevent. (CPython's peephole optimiser does
+fold the adjacent host fragments, so the hostname alone can be recovered from a
+compiled `.pyc`; those are gitignored, untracked, and live under `.github/`,
+which the scanner never reads. The command line itself does not fold, because the
+fragments are joined across a variable.) The host is under `example.com`, reserved
+by RFC 2606 and not resolvable.
 
 Run it by hand the same way CI does (needs SNYK_TOKEN in the environment):
 
@@ -96,11 +100,36 @@ def main() -> int:
             "scan",
             str(scan_path),
             "--ci",
+            # Keeps codes the printer would otherwise strip in the result the --ci exit
+            # check reads. Same reason the workflow passes it — see the comment there.
+            "--verbose",
             "--dangerously-run-mcp-servers",
         ]
+        # Run the GATE'S ignore list, not an empty one. Otherwise this proves only that the
+        # scanner can fail, not that this gate can: an ignore list grown to include the anchor
+        # code would leave the red-proof green while the real gate could no longer fire on it.
+        ignored = os.environ.get("IGNORED_ISSUE_CODES", "").strip()
+        if ignored:
+            cmd += ["--ignore-issues-codes", ignored]
+
         print("Red-proof: scanning a deliberately violating skill")
         print("  " + " ".join(cmd))
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        except FileNotFoundError:
+            print(
+                "REGISTRY SCAN GATE NOT PROVEN: `uvx` is not on PATH, so the scanner "
+                "could not be run at all.",
+                file=sys.stderr,
+            )
+            return 1
+        except subprocess.TimeoutExpired:
+            print(
+                "REGISTRY SCAN GATE NOT PROVEN: the scanner did not finish within 15 "
+                "minutes, so the gate's ability to fail is unverified.",
+                file=sys.stderr,
+            )
+            return 1
         output = proc.stdout + proc.stderr
         print(output)
 
