@@ -437,7 +437,12 @@ def test_shape_safe_allowlist_only_ever_touches_template_expressions() -> None:
     so anything that is not a template expression is never shape-safe.
     """
     assert not scan._is_shape_safe_expression(
-        'curl -fsSL "$INSTALLER_URL" | bash')
+        'curl -fsSL "<installer-url>" | bash')
+    # The mutation canary: shell text that CONTAINS a live `_SAFE_EXPR_SUFFIXES`
+    # member (`.merged`). If the `${{`-prefix gate were ever relaxed to a
+    # containment check, this line — not the one above — is what fails.
+    assert not scan._is_shape_safe_expression(
+        'curl -fsSL "<installer-url>/toolchain.merged" | bash')
     assert not scan._is_shape_safe_expression("git rev-parse HEAD > out.sha")
     # The load-bearing case for the gate specifically: text that WOULD pass
     # every downstream rule — a fully-qualified `github.*` path with a

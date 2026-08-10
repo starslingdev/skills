@@ -11,6 +11,21 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **2026-08-10** — **A repo guard for installer-shaped literals.** Two shapes
+  now fail the build if they appear in tracked text: a fetch of a literal
+  http(s) URL that is then executed (piped into a shell, run via process
+  substitution, or handed to `deno run`), and any literal http(s) URL whose
+  path ends in `.sh` / `.ps1` / `.bash` — executed or not, because that link
+  alone is what Snyk's E005 rule names. A fetch that only downloads is
+  deliberately allowed, so a workflow example may still show a plain
+  `curl -o`; prose that describes the class without an address is untouched.
+  Line continuations are folded before matching, so wrapping a command across
+  lines does not hide it. The guard also reads `.fixture` files for the first
+  time — four of the eight literal sites it was written for lived there, where
+  the previous suffix allowlist could not see them at all.
+
 ### Fixed
 
 - **2026-08-10** — **The catalog's own `curl | bash` examples no longer read as
@@ -21,13 +36,14 @@ entries are dated (UTC). Format loosely follows
   over a matching literal in a test assertion. Both strings already used
   RFC-reserved hosts, which is what the 2026-08-07 pass had moved them to; the
   rules key on the SHAPE of a fetch-and-run URL, so a reserved host does not
-  clear them. The examples now fetch through a placeholder variable, which
-  costs the reader nothing (the detector matches on the pipe into a shell, not
-  on the address) and costs the detector nothing — the positive fixture still
-  fires and the download-then-verify negative control still does not. A repo
-  guard now fails on any fetch-and-execute shaped literal in tracked text and
-  covers `.fixture` files for the first time: the previous guard looked only for
-  look-alike brand domains, so it watched this class regress without ever firing.
+  clear them. The examples now fetch through an `<installer-url>` placeholder,
+  matching the `<known-sha256>` placeholder already in the same fix recipe, so
+  the recipe an agent applies still reads as "fill this in". It costs the
+  reader nothing (the detector matches on the pipe into a shell, not on the
+  address) and costs the detector nothing — the positive fixture still fires
+  and the download-then-verify negative control still does not. The previous
+  guard could not have caught any of it: it looked only for look-alike brand
+  domains, so it watched this class regress without ever firing.
 - **2026-08-09** — **Hostile workflow filenames neutralized in hygiene
   evidence.** A workflow filename carrying backticks reached a config-hygiene
   table cell raw (that path renders through `_cell`, which escapes pipes and

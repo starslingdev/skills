@@ -595,12 +595,14 @@ title_template: "Unverified remote script execution in {basename}"
 
 ```yaml
 # WRONG — runs whatever the installer host serves at this moment
-- run: curl -fsSL "$INSTALLER_URL" | bash
+- run: curl -fsSL "<installer-url>" | bash
 ```
 
-(Real workflows usually write the vendor's URL inline rather than through a
-variable; the detector matches either way, because what makes this unsafe is
-the pipe into a shell, not the address being fetched.)
+(`<installer-url>` stands in for the vendor address a real workflow writes
+inline. For the `curl`/`wget` forms the detector matches either way, because
+what makes those unsafe is the pipe into a shell, not the address being
+fetched; the `deno run` form is the exception — it has no pipe, so that arm
+does key on a literal URL.)
 
 PowerShell `iex (New-Object Net.WebClient).DownloadString(...)` is the same class on Windows runners but is not matched here (casing / Windows-runner rarity); flag it in manual review if you run Windows jobs.
 
@@ -611,7 +613,7 @@ PowerShell `iex (New-Object Net.WebClient).DownloadString(...)` is the same clas
 ```yaml
 # RIGHT — fetch, verify a known-good digest, then run
 - run: |
-    curl -fsSL -o install.sh "$INSTALLER_URL"
+    curl -fsSL -o install.sh "<installer-url>"
     echo "<known-sha256>  install.sh" | sha256sum -c -
     bash install.sh
 ```
