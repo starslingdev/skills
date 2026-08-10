@@ -49,6 +49,38 @@ External contributions are welcome and follow the standard fork flow:
   `python3 -m pytest -v` runs in both places, so you can reproduce CI locally
   before you push.
 
+## Registry security scanning
+
+Skill registries publish third-party security audits of every skill they list, and
+a skill can fail one without failing anything in this repo — the text a skill ships
+is the thing being scanned, so an illustrative example can read to a scanner as the
+attack it describes. `.github/workflows/registry-scan.yml` runs one of those
+scanners (Snyk Agent Scan) over the installable trees under `skills/` on every
+internal push and pull request, weekly on a schedule, and on demand, so a violation
+fails our build instead of appearing as a public FAIL badge days after release.
+
+Two things about that gate are worth knowing before you rely on it.
+
+**It reproduces one scanner, not all of them.** Registries run several. This gate
+covers Snyk Agent Scan only. It says nothing about Gen Agent Trust Hub — which
+publishes no rule catalog and no CLI, and whose verdicts are LLM-generated and not
+reproducible from one run to the next — or about Socket. A green check means "Snyk
+Agent Scan finds nothing we have not accepted", not "every registry scanner will
+pass".
+
+**One finding is accepted and excluded from the build's exit status:** W011,
+"exposure to untrusted third-party content", which accurately describes skills that
+read a repository's own CI configuration and job logs. It is still printed in full
+in the scan log, and the reason is written beside the exclusion in the workflow.
+Nothing else is excluded; any other code turns the build red for a human to decide.
+
+The gate needs a `SNYK_TOKEN` repository secret (a free Snyk account). Without it
+the job fails loudly rather than passing quietly — a skipped security scan reported
+as green is the exact failure this gate exists to prevent. Fork pull requests cannot
+reach repository secrets, so they get a separate, clearly named check that reports
+the coverage gap; a maintainer re-runs the scan on an internal branch before merging
+fork changes under `skills/`.
+
 ## Adding or changing detection patterns
 
 The pattern catalog is
