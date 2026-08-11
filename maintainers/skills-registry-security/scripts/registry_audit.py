@@ -35,6 +35,11 @@ from pathlib import Path
 API_BASE = "https://www.skills.sh/api/v1/skills/audit"
 CLI_AUDIT = "https://add-skill.vercel.sh/audit"
 SITE_BASE = "https://www.skills.sh"
+# The stored snapshot the registry serves and the scanners read. Fetching this
+# turns "the flagged string is gone from our repo" into "the flagged string is
+# still in the bytes you are scanning", which is the difference between an
+# inference and an artifact a maintainer can verify with one request.
+SNAPSHOT_BASE = "https://www.skills.sh/api/download"
 UA = "skills-registry-security/1.0 (maintainer audit; read-only)"
 TIMEOUT = 20
 
@@ -156,6 +161,31 @@ def fetch_html_badges(owner: str, repo: str, skill: str) -> dict:
     return out
 
 
+def fetch_snapshot(owner: str, repo: str, skill: str) -> dict:
+    """Surface E - the stored snapshot the scanners actually read.
+
+    Returns the file contents the registry has on hand plus its
+    skillsComputedHash. When a finding's literal is still in here but gone from
+    the repository, the scanner is right about its input and the input is what
+    needs refreshing - which is a re-index, not a re-audit.
+    """
+    status, body = _get(f"{SNAPSHOT_BASE}/{owner}/{repo}/{skill}")
+    out = {"surface": "stored-snapshot", "http": status, "hash": None,
+           "files": {}, "error": None}
+    if status != 200:
+        out["error"] = f"HTTP {status}" if status else body[:200]
+        return out
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        out["error"] = f"unparseable: {exc}"
+        return out
+    out["hash"] = data.get("hash")
+    out["files"] = {f["path"]: f.get("contents", "")
+                    for f in data.get("files", []) if "path" in f}
+    return out
+
+
 def fetch_findings(owner: str, repo: str, skill: str, provider: str) -> dict:
     """Surface D - per-provider detail page. The ONLY place finding codes live.
 
@@ -238,18 +268,29 @@ def fresh_install(owner: str, repo: str, timeout: int = 300) -> dict:
 # phantom-finding verification
 # --------------------------------------------------------------------------
 
-def verify_literals(literals: list[str], repo_root: Path | None,
-                    ref: str, install_dir: str | None) -> dict:
-    """Decide whether a cited literal still exists in the shipped content.
+def verify_literals(literals: list[str], repo_root: Path | None, ref: str,
+                    install_dir: str | None, snapshot: dict) -> dict:
+    """Classify each cited literal by which corpora still contain it.
 
-    A finding whose quoted string is absent from both the git ref and the
-    freshly installed tree cannot be describing today's skill. That is the
-    single most useful signal this tool produces, because it separates "the
-    scanner is right and we must fix it" from "the scan input is stale".
+    Three corpora answer three different questions. The git ref and the
+    installed tree say what the skill is today. The stored snapshot says what
+    the scanner was handed. Comparing them separates the two cases that need
+    opposite responses:
+
+      REAL        - still in today's content; the finding stands, fix or accept.
+      STALE_INPUT - gone from today's content but still in the snapshot. The
+                    scanner is right about its input; the input is stale. This
+                    is a re-index request, and the snapshot is the evidence.
+      PHANTOM     - gone everywhere, including the snapshot. The scanner is
+                    reporting something no longer in any corpus we can see,
+                    which usually means it cached its own finding.
     """
     results = {}
+    snap_files = snapshot.get("files") or {}
     for lit in literals:
-        rec = {"in_git": None, "in_install": None}
+        rec = {"in_git": None, "in_install": None, "in_snapshot": None,
+               "snapshot_paths": []}
+
         if repo_root and (repo_root / ".git").exists():
             p = subprocess.run(["git", "grep", "-I", "-l", "-F", lit, ref],
                                cwd=repo_root, capture_output=True, text=True)
@@ -258,8 +299,24 @@ def verify_literals(literals: list[str], repo_root: Path | None,
             p = subprocess.run(["grep", "-rIlF", lit, install_dir],
                                capture_output=True, text=True)
             rec["in_install"] = bool(p.stdout.strip())
-        present = [v for v in (rec["in_git"], rec["in_install"]) if v is not None]
-        rec["phantom"] = bool(present) and not any(present)
+        if snap_files:
+            hits = sorted(path for path, body in snap_files.items() if lit in body)
+            rec["in_snapshot"] = bool(hits)
+            rec["snapshot_paths"] = hits
+
+        checked = [v for v in (rec["in_git"], rec["in_install"]) if v is not None]
+        live = any(checked)
+        if live:
+            rec["verdict"] = "REAL"
+        elif rec["in_snapshot"]:
+            rec["verdict"] = "STALE_INPUT"
+        elif checked and rec["in_snapshot"] is False:
+            rec["verdict"] = "PHANTOM"
+        else:
+            # Nothing to compare against - say so rather than guess.
+            rec["verdict"] = "UNVERIFIED"
+        # Retained for callers that only care about "not in today's content".
+        rec["phantom"] = rec["verdict"] in ("STALE_INPUT", "PHANTOM")
         results[lit] = rec
     return results
 
@@ -304,21 +361,24 @@ def audit(owner: str, repo: str, skill: str, do_install: bool,
         f_api = pool.submit(fetch_api, owner, repo, skill)
         f_cli = pool.submit(fetch_cli_audit, owner, repo, skill)
         f_html = pool.submit(fetch_html_badges, owner, repo, skill)
+        f_snap = pool.submit(fetch_snapshot, owner, repo, skill)
         f_find = {p: pool.submit(fetch_findings, owner, repo, skill, p)
                   for p in PROVIDER_SLUGS}
         f_inst = pool.submit(fresh_install, owner, repo) if do_install else None
 
         api, cli, html = f_api.result(), f_cli.result(), f_html.result()
+        snapshot = f_snap.result()
         findings = {p: f.result() for p, f in f_find.items()}
         install = f_inst.result() if f_inst else {"ran": False}
 
     literals = sorted({u for f in findings.values() for u in f.get("cited_urls", [])})
-    checked = verify_literals(literals, repo_root, ref, install.get("install_dir"))
+    checked = verify_literals(literals, repo_root, ref,
+                              install.get("install_dir"), snapshot)
 
     return {
         "target": f"{owner}/{repo}/{skill}",
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "api": api, "cli": cli, "html": html,
+        "api": api, "cli": cli, "html": html, "snapshot": snapshot,
         "findings": findings, "install": install,
         "literals": checked,
         "skew": reconcile(api, cli, html),
@@ -358,6 +418,21 @@ def render(r: dict) -> str:
     elif r["install"].get("error"):
         L.append(f"## Fresh install: SKIPPED - {r['install']['error']}\n")
 
+    snap = r.get("snapshot", {})
+    if snap.get("hash"):
+        L.append("## Stored snapshot (what the scanners read)")
+        L.append(f"  hash  {snap['hash']}")
+        L.append(f"  files {len(snap.get('files', {}))}")
+        L.append("")
+    elif snap.get("error"):
+        L.append(f"## Stored snapshot: unavailable - {snap['error']}\n")
+
+    TAG = {
+        "REAL": "present in current content - finding stands",
+        "STALE_INPUT": "STALE INPUT - gone from repo, still in stored snapshot",
+        "PHANTOM": "PHANTOM - gone from repo AND snapshot",
+        "UNVERIFIED": "unverified - no corpus to check against",
+    }
     L.append("## Findings (from per-provider pages - not in the API)")
     any_found = False
     for prov, f in r["findings"].items():
@@ -367,8 +442,10 @@ def render(r: dict) -> str:
         L.append(f"  {prov}: {f.get('verdict') or '?'} - {', '.join(f['codes'])}")
         for u in f.get("cited_urls", []):
             rec = r["literals"].get(u, {})
-            tag = "PHANTOM (absent from repo AND install)" if rec.get("phantom") else "present"
-            L.append(f"       cites {u}  ->  {tag}")
+            L.append(f"       cites {u}")
+            L.append(f"         -> {TAG.get(rec.get('verdict'), '?')}")
+            for path in rec.get("snapshot_paths", [])[:6]:
+                L.append(f"            still in snapshot: {path}")
     if not any_found:
         L.append("  (no finding codes parsed)")
     L.append("")
@@ -379,18 +456,33 @@ def render(r: dict) -> str:
             L.append(f"  ! {n}")
         L.append("")
 
-    phantoms = [k for k, v in r["literals"].items() if v.get("phantom")]
+    stale = [k for k, v in r["literals"].items() if v.get("verdict") == "STALE_INPUT"]
+    phantom = [k for k, v in r["literals"].items() if v.get("verdict") == "PHANTOM"]
+    real = [k for k, v in r["literals"].items() if v.get("verdict") == "REAL"]
+
     L.append("## Verdict")
-    if phantoms:
-        L.append("  STALE INPUT - a finding cites content that exists in neither the")
-        L.append("  git ref nor the freshly installed tree:")
-        for p in phantoms:
-            L.append(f"    - {p}")
-        L.append("  Re-auditing the same snapshot will reproduce it. Ask for a")
-        L.append("  RE-INDEX (refresh the stored snapshot), not just a re-audit.")
+    if stale:
+        L.append("  STALE INPUT, PROVEN. The registry is still serving content the")
+        L.append("  repository no longer has, and that is what the scanners read:")
+        for s in stale:
+            L.append(f"    - {s}")
+        L.append("")
+        L.append("  There is nothing to patch. Re-auditing this snapshot reproduces")
+        L.append("  the finding, so ask for a RE-INDEX. Quote in the request:")
+        L.append(f"    snapshot hash : {snap.get('hash') or '(unavailable)'}")
+        L.append("    stale paths   : " + ", ".join(
+            sorted({p for k in stale for p in r["literals"][k]["snapshot_paths"]})[:4])
+            or "    stale paths   : (none recorded)")
+    elif phantom:
+        L.append("  Findings cite content absent from the repository AND from the")
+        L.append("  stored snapshot, so the scanner is likely serving a cached")
+        L.append("  result of its own. A re-index alone may not clear it; say so.")
+    elif real:
+        L.append("  Flagged literals are present in current content. The findings")
+        L.append("  describe the skill as it is - fix them or accept them with a")
+        L.append("  written rationale. Staleness is not the explanation here.")
     else:
-        L.append("  No phantom literals detected. Findings that remain are most")
-        L.append("  likely describing content that is really there - fix or accept them.")
+        L.append("  No literals to verify. Judge the findings on their prose.")
     return "\n".join(L)
 
 

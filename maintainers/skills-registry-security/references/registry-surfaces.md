@@ -11,6 +11,7 @@ provider.
 - Surface B: the install-path audit endpoint
 - Surface C: the rendered skill page
 - Surface D: the per-provider detail page
+- Surface E: the stored snapshot (the scan input)
 - Finding-code classes
 - Provider slugs and display names
 - Why the surfaces disagree
@@ -112,6 +113,40 @@ pointing at the registry's own domain.
 The page carries **no file paths or line numbers**. A finding is therefore
 identified only by its code plus the literal it quotes, which is exactly why
 grepping that literal is the decisive test.
+
+## Surface E: the stored snapshot (the scan input)
+
+```
+GET https://www.skills.sh/api/download/{owner}/{repo}/{skill}
+```
+
+The single most useful surface, and the least obvious. Returns the pre-built
+snapshot the registry keeps for fast installs — and the same content the
+scanners read:
+
+```json
+{"files": [{"path": "SKILL.md", "contents": "..."}, ...],
+ "hash": "a2f6d76e…"}
+```
+
+`hash` is the `skillsComputedHash`. Note the bare `skills.sh` host may fail to
+connect from some networks; use `www.skills.sh`.
+
+Because this returns **actual file contents**, a finding's quoted literal can be
+searched directly in the bytes the scanner saw. That converts "the string is
+gone from our repository, so the scan must be stale" — an inference — into "the
+string is still in your snapshot, here is its hash and the four files that
+contain it", which a maintainer can verify against their own service without
+access to the repository.
+
+Dating a snapshot is easy when the skill keeps a dated changelog: read
+`CHANGELOG.md` out of the snapshot and compare its newest entry against the
+repository's. A snapshot whose newest entry predates the fix commit is
+conclusive.
+
+Installing does not necessarily consume this snapshot — the CLI may clone the
+default branch instead — so a clean installed tree and a stale snapshot coexist
+happily. Do not treat the install as evidence about the audit.
 
 ## Finding-code classes
 

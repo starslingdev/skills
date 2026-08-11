@@ -4,6 +4,22 @@ Maintainer-only. Not part of any installable skill tree.
 
 ## Added
 
+- **2026-08-11** — **The stored snapshot is now read directly, which turns the
+  central claim from an inference into an artifact.** `GET
+  /api/download/{owner}/{repo}/{skill}` returns the pre-built snapshot the
+  registry keeps and the scanners read, as real file contents plus a
+  `skillsComputedHash`. Searching a finding's quoted literal in those bytes
+  answers "what was the scanner actually handed?" instead of inferring it from
+  what the repository no longer contains. Literals are now classified three
+  ways — `REAL` (still in current content, the finding stands), `STALE_INPUT`
+  (gone from the repository but still in the snapshot, so the input needs
+  refreshing), and `PHANTOM` (gone from both, so the scanner is likely serving
+  its own cached result) — because those three cases have different remedies
+  and asking for the wrong one wastes days. A `STALE_INPUT` verdict prints the
+  snapshot hash and the offending paths, which is exactly what a maintainer
+  needs to confirm the claim against their own service without access to the
+  repository.
+
 - **2026-08-11** — **The skill exists.** `scripts/registry_audit.py` answers
   "is this registry security failure real?" in one command by reading all four
   cached surfaces concurrently, running a throwaway install to capture the risk

