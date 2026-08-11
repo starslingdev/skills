@@ -161,6 +161,14 @@ them look like a bug in your own reasoning when you hit them cold.
 
 ## Deeper reference
 
+`references/audit-pipeline.md` is the model behind all of this: an ASCII map of
+the two pipelines, what each timestamp does and does not mean, observed timings
+with an escalation threshold, two fully worked timelines, how to prevent the
+problem in CI, and an evidence log recording how every claim was established
+plus the overreaches that were ruled out. Read it when deciding whether to wait
+or escalate, when a timing question comes up, or before repeating any of the
+reverse-engineering.
+
 `references/registry-surfaces.md` documents each surface's exact URL shape and
 response schema, and the finding-code classes. Read it when the script's parsing
 breaks — for example after a registry redesign changes the page markup — or when
