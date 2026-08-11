@@ -3,70 +3,170 @@
 The mental model that makes registry audits legible, the timings observed for
 each stage, and — for every load-bearing claim — how it was established. Read
 this when an audit disagrees with the repository and you need to know whether
-to wait, fix, or escalate.
+to wait, act, or escalate.
 
-The short version: **there are two independent pipelines on two different
-slow cadences, and neither one is triggered by anything you do.** Almost every
-confusing symptom follows from that.
+## The whole thing in twenty seconds
+
+```
+  YOUR MERGE ──────────────X   nothing happens. ever.
+
+  SOMEONE INSTALLS (with working telemetry)
+        │
+        └─> beacon ──> INGEST ──> SNAPSHOT ──> AUDIT ──> badge
+                       "photocopy   frozen     runs
+                        of your     copy       later, on
+                        repo RIGHT             whatever the
+                        NOW"                   snapshot holds
+```
+
+**The snapshot is a photocopy.** Scanners read the photocopy, never the
+repository. The only thing that takes a new photocopy is an install whose
+telemetry beacon actually reaches the service.
+
+Three consequences follow, and they cover nearly every confusing symptom:
+
+1. **Merging a fix changes nothing.** No install, no new photocopy.
+2. **A fix that lands after the last photocopy is invisible** until the next
+   one, no matter how many times the audit re-runs.
+3. **Re-audits keep reporting the old finding with a fresh timestamp**, which
+   reads as "your fix did not work" when it actually means "the photocopy
+   predates your fix."
+
+The rest of this document is the detail behind that picture, the timings, and
+the evidence for each claim.
 
 ## Contents
 
+- The whole thing in twenty seconds
+- A real timeline, annotated
 - The pipeline
+- The precondition that invalidates most experiments
 - What each timestamp actually means
 - What the vendors say
 - Observed timings
-- Worked example: a complete, successful cycle (ci-speedup)
-- Worked example: a fix that has not landed yet (ci-secure)
+- Worked example: one repo-wide ingest, and a fix that missed it
+- Dating a snapshot exactly
 - Reading a disagreement
+- Dead ends, already tested
 - Preventing it: scan before you publish
 - Evidence log: how each claim was established
 - Claims deliberately NOT made
 
+## A real timeline, annotated
+
+The incident this skill was written from. Three skills in one repository; only
+one of them was new. All times UTC.
+
+```
+Aug 10
+ 14:04  commit 3f5df92 - a new skill is added to the repo
+ 17:13  commit 27d9ca9 - two SIBLING skills edited
+          |
+ 17:54  * someone installs the new skill  -->  INGEST FIRES
+          |    photocopy taken of the WHOLE REPO as of 27d9ca9
+          |    all three snapshots rebuilt at this instant
+          |
+ 19:09  commit f5c51a2 - THE FIX (removes the flagged URL)
+          |    ^^^ 75 minutes too late. Photocopy already taken.
+          |
+ 19:11  audits run against that photocopy - the two siblings pass
+ 19:49  commit 063d560 - no install, so nothing happens
+
+Aug 11
+ 19:44  the audit RE-RUNS, still against the 17:54 photocopy
+          |    -> the deterministic finding repeats, with a NEW timestamp
+          |    -> looks like "the fix did not work". It is not what happened.
+ 22:50  * a real install finally happens  -->  ingest expected
+   ?    photocopy rebuilds, finding clears on the next audit pass
+```
+
+Two things this makes obvious that prose does not:
+
+- **The fix missed the bus by 75 minutes.** Everything downstream follows from
+  that single gap, not from anything being broken.
+- **The two skills the fix did NOT touch look "fresh" while the one it DID
+  touch looks "stale."** That inversion is purely an artifact of when the one
+  ingest fired. It is not per-skill logic, and chasing it wastes hours.
+
 ## The pipeline
 
 ```
-   GitHub default branch  (your merge lands here, and nothing happens)
+   GitHub default branch   (merging a fix triggers NOTHING on its own)
              |
-             |   (1) INDEX — irregular. Observed ~2 days after a change.
-             |       Not triggered by: merging, pushing, or installing.
+             |  read by the indexer, but only when something asks it to
              v
-   +---------------------------------------------+
-   |  STORED SNAPSHOT                             |
-   |    { files: [{path, contents}], hash }       |   <-- inspect this
-   |  GET /api/download/{owner}/{repo}/{skill}    |
-   +---------------------------------------------+
+   +--------------------------------------------------------------+
+   |  INGEST                                                        |
+   |    triggered by an install that REACHES the telemetry service: |
+   |    GET add-skill.vercel.sh/t?event=install&source={o}/{r}      |
+   |        &skills=<names>&skillFiles={"name":"path/SKILL.md"}     |
+   |    skillFiles is the map an indexer needs to locate each skill |
+   |    Appears to be REPO-SCOPED: one install rebuilt all three    |
+   |    sibling snapshots at the same instant.                      |
+   +--------------------------------------------------------------+
              |
-             |   (2) AUDIT — separate cadence. Ran 11 days after the
-             |       index in the one fully observed case. Re-runs the
-             |       scanners over WHATEVER the snapshot holds.
              v
-   +---------------------------------------------+
-   |  PER-PROVIDER VERDICTS                       |
-   |    Gen Agent Trust Hub | Socket | Snyk       |
-   +---------------------------------------------+
+   +--------------------------------------------------------------+
+   |  STORED SNAPSHOT          <-- inspect this; it is the scan input
+   |    { files: [{path, contents}], hash }                         |
+   |  GET www.skills.sh/api/download/{owner}/{repo}/{skill}         |
+   |  NOT a faithful copy: files above ~500-600 KB are dropped.     |
+   +--------------------------------------------------------------+
+             |
+             |  (2) AUDIT — separate cadence, drains behind ingest.
+             |      Re-runs scanners over WHATEVER the snapshot holds.
+             v
+   +--------------------------------------------------------------+
+   |  PER-PROVIDER VERDICTS                                         |
+   |    Gen Agent Trust Hub | Socket | Snyk                         |
+   +--------------------------------------------------------------+
              |
              +--> GET /api/v1/skills/audit/{o}/{r}/{s}
              |      status + riskLevel + auditedAt. NO finding codes.
-             |
              +--> GET /{o}/{r}/{s}/security/{provider-slug}
              |      the codes (E005, W011) and the literals they quote.
-             |      HTML only. This is the only place findings exist.
-             |
              +--> GET add-skill.vercel.sh/audit?source=..&skills=..
-             |      the install-path cache. What users see. Lags.
-             |
-             +--> the rendered skill page badges (third cache)
+             |      install-path cache. What users see. Lags.
+             +--> rendered page badges (a third cache)
 
 
-   npx skills add  ── clones the CURRENT default branch ──> user's disk
-             |
-             +── fires a read-only GET at the audit cache for display
-                 (owner/repo + skill names only; no SHA, no trigger)
+   npx skills add ── clones the CURRENT default branch ──> user's disk
+        |             (unless the owner is on the blob allowlist)
+        +── fires the install beacon above, IF it is not suppressed
+        +── fires a read-only audit GET purely for display
 ```
 
-The install arrow is drawn separately on purpose. It touches neither stage.
-A clean freshly-installed tree and a failing audit are entirely compatible,
-and neither is evidence about the other.
+Installing delivers current content to the user while the audit reads the
+snapshot. A clean installed tree and a failing audit are therefore entirely
+compatible, and that gap is cosmetic-versus-real: **users are not receiving the
+flagged content; only the scanners are.** Establish which case you are in
+before escalating, because it changes the urgency completely.
+
+## The precondition that invalidates most experiments
+
+Before concluding anything from an install, verify the beacon could actually
+have been sent. It is dropped silently — no warning, no non-zero exit — when:
+
+- **`api.github.com/repos/{owner}/{repo}` does not answer 200.** The CLI calls
+  it unauthenticated to decide whether the repo is private, and returns `null`
+  on any non-OK response. The beacon is sent only when the result is exactly
+  `false`, so `null` suppresses it. This bites in sandboxes and CI containers
+  that proxy or block GitHub, and on any IP that has burned the 60-requests/hour
+  unauthenticated limit.
+- **`DISABLE_TELEMETRY` or `DO_NOT_TRACK` is set.**
+- **The repo is genuinely private.**
+
+Check before, not after:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' https://api.github.com/repos/OWNER/REPO   # need 200
+env | grep -iE 'DO_NOT_TRACK|DISABLE_TELEMETRY'                                     # need empty
+```
+
+This is not a footnote. An entire investigation concluded "installs never
+trigger indexing" from nine installs in an environment where that GitHub probe
+returned 403 — so the beacon never fired once, and the null result measured
+nothing. If the precondition fails, an install tells you nothing at all.
 
 ## What each timestamp actually means
 
@@ -77,15 +177,14 @@ and neither is evidence about the other.
 | `hash` | snapshot API | identity of the **stored content** | anything about scan time |
 | "First Seen" | skill page | when the skill was first indexed | last index |
 
-The single most expensive misreading in this whole system: **a fresh
-`auditedAt` on a stale snapshot.** It makes a finding about deleted content
-look current, which reads as "your fix did not work." The snapshot `hash` is
-the only field that tracks content, so it is the one to watch.
+The most expensive misreading here: **a fresh `auditedAt` on a stale
+snapshot.** It makes a finding about deleted content look current, which reads
+as "your fix did not work." The snapshot `hash` is the only field that tracks
+content, so it is the signal to watch. Note the `hash` is not reproducible from
+the served files by the CLI's own algorithm, so treat it as an opaque identity
+token, not a verifiable checksum.
 
 ## What the vendors say
-
-Two published statements corroborate the model and explain provider behavior
-that otherwise looks like a bug.
 
 On the trigger, from Snyk's write-up of the partnership:
 
@@ -94,195 +193,197 @@ On the trigger, from Snyk's write-up of the partnership:
 > API. This happens automatically, with no action required from the skill
 > author or the end user."
 
-Note the word *new*. This is the first-index trigger, not a per-install one,
-which is exactly what the observations show: repeat installs of an already
-known skill do nothing.
+And from the registry's own docs (`skills.sh/docs/customize`):
 
-On the engine:
+> "skills.sh picks up skills.sh.json **after the repository is seen by the
+> telemetry service**. In practice, that usually means **after someone installs
+> from the repo with the skills CLI**."
+
+Both name the install as the ingest trigger. On the engine:
 
 > "built on the **agent-scan** scanning engine (also known as mcp-scan), which
 > combines multiple customized **LLM-based judges with deterministic rules**."
 
-That hybrid is why one finding can reproduce byte-for-byte across two scans of
-the same content while another flips. A deterministic rule (a download-URL
-pattern like E005) returns the same answer every time it sees the same bytes;
-a judge can reach a different conclusion on identical input. So **a verdict
-changing is not evidence that the content changed** — and conversely, a
+That hybrid explains why one finding reproduces byte-for-byte across two scans
+of the same content while another flips. A deterministic rule returns the same
+answer on the same bytes; a judge can reach a different conclusion on identical
+input. So **a verdict changing is not evidence that content changed** — and a
 deterministic finding surviving a rescan after its literal was deleted is
-strong evidence the input did not change.
+strong evidence the input did not.
 
-Source: <https://snyk.io/blog/snyk-vercel-securing-agent-skill-ecosystem/>
-(the domain may be unreachable from restricted networks; the quotes above were
-recovered via search excerpts).
+Sources: <https://snyk.io/blog/snyk-vercel-securing-agent-skill-ecosystem/>,
+<https://www.skills.sh/docs/customize> (the snyk.io domain may be unreachable
+from restricted networks; that quote was recovered via search excerpts).
 
 ## Observed timings
 
-Ranges from directly observed cycles, not documentation. Treat as
-order-of-magnitude, and re-derive rather than trusting these numbers forever.
+From directly observed cycles, not documentation. Re-derive rather than
+trusting these numbers forever.
 
 | Stage | Observed | Notes |
 |---|---|---|
-| first index | at first install | "Audits are generated automatically after a skill is installed for the first time" |
-| re-index after a change | **~2 days** | one fully observed cycle |
-| re-audit after an index | **~11 days** | same cycle; the two are decoupled |
-| audit → all caches agree | up to **~1 day** | install-path cache lagged the JSON API by a day |
-| install → any effect | **none** | 9 installs over 6 hours produced no index and no audit |
+| install beacon → ingest | tens of minutes | first index landed ~50 min after the first plausible install |
+| ingest → audit | ~77 min in one case | the audit queue drains behind ingest |
+| audit → all caches agree | up to ~1 day | install-path cache lagged the JSON API by a day |
+| merge with no install | **never** | two pushes produced no ingest at all |
+| install with beacon suppressed | **never** | nine installs, zero effect — the beacon never fired |
 
-**Escalation threshold.** Below roughly 2–3 days after a fix, nothing is wrong
-— the re-index has not come due. Escalating early wastes your time and a
-maintainer's. Beyond that window, with the literal still in the snapshot, the
-case is real.
+**Before escalating**, confirm a beacon-capable install has actually happened
+since the fix. Most "stuck" reports in the wild are missing that step.
 
-## Worked example: a complete, successful cycle (ci-speedup)
+## Worked example: one repo-wide ingest, and a fix that missed it
 
-The whole loop, start to finish, with no intervention from anyone:
+All times UTC. Three skills in one repo; only one was new:
 
 ```
- Jul 22            Jul 28 01:12       ~Jul 30             Aug 10 19:11
- first seen        PR #15 merges      snapshot            Snyk re-audits
- + first audit     the W007 fix       RE-INDEXED          that snapshot
-     |                  |                  |                   |
-     v                  v                  v                   v
- FAIL / HIGH            +---- ~2 days -----+                   |
- W007 + W011                               |                   |
-                                           +---- ~11 days -----+
-                                           |                   |
-                              snapshot now contains       WARN / MEDIUM
-                              tests/test_secret_          W011 only
-                              redaction.py                (W007 CLEARED)
+ 14:04  3f5df92 adds ci-secure to the repo
+ 17:13  27d9ca9 edits ci-speedup + ci-score SKILL.md (adds `license: MIT`)
+ 17:54  first install of the new skill registers the repo
+          -> REPO-WIDE INGEST: all three snapshots rebuilt from the tree
+             as of 27d9ca9
+ 19:09  f5c51a2 removes the flagged URL from ci-secure
+          -> 75 minutes AFTER the ingest. Missed it.
+ 19:11  ci-speedup + ci-score audits run (queue draining behind ingest)
+ 19:49  another push. No install -> no ingest.
+ next day 19:44  ci-secure re-audited over the UNCHANGED snapshot
+          -> the deterministic finding repeats, with a fresh timestamp
 ```
 
-Two things this proves and one it strongly suggests:
+The lesson is the 75 minutes. The ingest captured the repository just before
+the fix, and every later audit re-ran over that capture. Nothing was stuck and
+nothing was broken — no beacon-capable install had happened since.
 
-- Re-indexing **does** happen, unprompted. The snapshot moved from Jul-22-era
-  content to Jul-30-era content on its own.
-- Findings **do** clear once the fix is in the snapshot. W007 disappeared.
-- It strongly suggests the scanners read the snapshot: W007 cleared precisely
-  when the fixing commit's file appeared there. Not proof — the scanners could
-  read the branch independently — but the correlation is exact.
+Note also that the two skills the push did *not* touch appear "fresh" while the
+one it did appears "stale." That inversion is an artifact of when the single
+ingest fired, not evidence of per-skill logic.
 
-## Worked example: a fix that has not landed yet (ci-secure)
+## Dating a snapshot exactly
 
-```
- Aug 10 17:54       Aug 10 19:09        Aug 11 19:44        Aug 11 22:12
- first index        f5c51a2 removes     audit re-runs on    snapshot still
- + first audit      the flagged URL     the OLD snapshot    holds Aug-09
-     |                   |                   |               content
-     v                   v                   v                   |
- FAIL / CRITICAL     fix lands 75 min    E005 REPEATS with       v
- E005 + W011         AFTER the index     a NEW timestamp    ~27h elapsed:
-                                         (Gen flips to      still inside
-                                          SAFE on the       the ~2-day
-                                          same input)       window
-```
+Comparing the newest date in the snapshot's `CHANGELOG.md` against the
+repository's is a fast approximation, but it is coarse: a commit that does not
+touch the changelog is invisible to it.
 
-The 75-minute gap is the whole story: the index captured the repository just
-before the fix, and the audit a day later re-ran over that capture. Nothing is
-stuck; the next index had not come due.
+The exact method is to byte-compare every snapshot file against each candidate
+commit's tree and find the one with zero differences. That pins the snapshot to
+a specific commit, which is what makes an escalation concrete: "your snapshot
+is commit X; the fix is commit Y; here are the N files that differ."
 
-Note Gen flipping fail→pass across those two audits **on unchanged input**.
-Model-based providers re-judge; rule-based ones reproduce. A verdict changing
-is therefore not evidence that content changed.
+Remember the indexer drops files above roughly 500–600 KB, so expect large
+files to be absent from the snapshot entirely rather than stale. Compare only
+the paths the snapshot actually contains.
 
 ## Reading a disagreement
 
 Work down this list; stop at the first match.
 
-1. **Is the quoted literal in the snapshot?** If yes and it is gone from the
-   repository, the input is stale. Check elapsed time before escalating.
-2. **Is it in the repository too?** Then the finding is real. Fix or accept it.
-3. **In neither?** The scanner is likely serving its own cached result; a
-   re-index may not clear it. Say so rather than requesting the wrong remedy.
-4. **Verdicts differ across surfaces?** Cache propagation. Re-run later.
+1. **Has a beacon-capable install happened since the fix?** If not, that is the
+   whole answer. Do it, then wait.
+2. **Is the quoted literal in the snapshot?** If yes and it is gone from the
+   repository, the input is stale — the scanner is right about what it was
+   handed.
+3. **Is it in the repository too?** The finding is real. Fix or accept it.
+4. **In neither?** The scanner is likely serving its own cached result; a fresh
+   ingest may not clear it. Say so rather than requesting the wrong remedy.
+5. **Verdicts differ across surfaces?** Cache propagation. Re-run later.
 
 Corroborate with the project's own scanner run if it has one: same scanner,
 current branch, opposite verdict isolates the input as the variable.
+
+## Dead ends, already tested
+
+Recorded so nobody spends a day re-deriving them.
+
+| Attempt | Result |
+|---|---|
+| Repeat installs from an environment where the GitHub probe 403s | Nothing. The beacon never fired; the experiment measured nothing. |
+| `POST add-skill.vercel.sh/check-updates` with `forceRefresh:true` | Route is live and self-documenting, and accepted a well-formed call — but returned `"No cached hash available (skill may need reinstall)"` and moved nothing. It compares against a **separate** update-check cache, and the CLI stopped sending hashes to the server, so that cache is never populated. A zombie endpoint. |
+| `POST www.skills.sh/api/revalidate` | `{"error":"Unauthorized"}`. Secret-gated. Do not attempt to bypass. |
+| Cache-busting `/api/download?x=1` | `x-vercel-cache: MISS, age: 0` — a genuine origin hit — returning a **byte-identical** body. The staleness is at origin; no edge trick can help. |
+| `?ref=`, `?sha=`, `?version=`, `?commit=` on the snapshot or audit endpoints | Silently ignored. Even a nonexistent branch returns the same snapshot. No client-controllable cache key exists. |
+| `npx skills use` | Sends no telemetry at all. Cannot be the ingest signal. |
+| Installing with `@ref` / `@sha` | The ref is stripped before anything reaches the registry. |
+| The documented v1 API | Read-only, all five routes are GETs. No publish, refresh, or index endpoint. |
 
 ## Preventing it: scan before you publish
 
 Everything above is remediation. The cheap fix is upstream: run the registry's
 own scanner in CI so a violation fails your build instead of surfacing as a
-public FAIL badge days later, on a snapshot you cannot refresh. This repo's
-`.github/workflows/registry-scan.yml` is a working implementation; the design
-points that matter are portable.
+public FAIL badge days later, on a snapshot you cannot refresh on demand. The
+scanner is publicly available — `uvx snyk-agent-scan@latest scan <path>` — and
+needs a `SNYK_TOKEN`.
 
 **Gate on the critical class only.** The scanner has no severity threshold, so
 the rule is expressed by enumerating the warning class into
 `--ignore-issues-codes`. Warning-class findings are usually accurate
 descriptions of what a repository-auditing skill legitimately does; blocking on
-them trains people to suppress findings. Surface them (annotations, job
-summary, uploaded artifact) and let a human judge.
+them trains people to suppress findings. Surface them and let a human judge.
 
 **Never let an E-code into the ignore list.** One there silently disarms the
-gate, and nothing else in the system would tell you. Pin it with a test that
-asserts every ignored code starts with `W`, and a second that pins the list to
-exactly the published warning class — short of it, a warning reddens the build
-and someone "fixes" it by guessing; beyond it, a code nobody read is being
-suppressed.
+gate and nothing else would tell you. Pin it with a test asserting every ignored
+code starts with `W`, and another pinning the list to exactly the published
+warning class.
 
 **Prove the gate can go red, on every run.** A check that cannot fail is not a
-check, and a scanner's rule catalog changes with no commit of yours. Before the
-real scan, build a throwaway skill carrying the exact violation class you care
-about, scan it **with the gate's real ignore list**, and fail unless the
-scanner both reports the anchor code and exits non-zero. Running it with the
-real ignore list is the subtle part: with an empty one you would only prove the
-scanner can fail, not that *this gate* can. This also fails upward — if the
-anchor rule is renamed or retired, the step goes red and a human re-anchors it
-rather than the gate quietly protecting nothing.
+check, and the rule catalog changes with no commit of yours. Before the real
+scan, build a throwaway skill carrying the exact violation class, scan it **with
+the gate's real ignore list**, and fail unless the scanner both reports the
+anchor code and exits non-zero. With an empty ignore list you would only prove
+the scanner can fail, not that *this gate* can. It fails upward too: if the
+anchor rule is renamed, the step goes red and a human re-anchors it.
 
-**Add a cheap offline guard for the shape you already got burned by.** The
-scanner needs a token, network, and minutes. A plain text rule needs none and
-runs in the normal test suite, so it blocks the commit rather than the merge.
-Assemble any test fixture that must contain the offending shape at runtime, or
-the guard will correctly reject your own tests.
+**Add a cheap offline guard for the shape that burned you.** The scanner needs a
+token, network, and minutes; a text rule needs none and blocks the commit rather
+than the merge. Assemble test fixtures containing the offending shape at
+runtime, or the guard will correctly reject your own tests.
 
-**Schedule it.** A weekly run is what notices a catalog change that needed no
-commit of yours.
-
-**Make it a required status check.** A gate that can be merged past is
-advisory. Confirm it is required in branch protection, not merely present.
-
-Two layers is the goal: a text guard that fails in seconds with no
-dependencies, and the real scanner as the authoritative check. The first
-catches the mistake while you are typing; the second catches everything you did
-not anticipate.
+**Schedule it**, so a catalog change that needed no commit of yours is noticed.
+**And make it a required status check** — a gate that can be merged past is
+advisory.
 
 ## Evidence log: how each claim was established
 
-Nothing here is from documentation; the registry documents almost none of it.
-Re-derive any claim that stops matching reality.
+The registry documents almost none of this. Re-derive any claim that stops
+matching reality.
 
 | Claim | How it was established |
 |---|---|
-| Install never triggers an index or audit | Read the CLI source: the audit call is a `GET` keyed on owner/repo + skill display names, gated only on the repo being public, with `blobResult` absent from the expression. Confirmed empirically: 9 installs over 6 hours moved nothing. |
-| The audit key carries no commit SHA | Same source read; the request carries owner/repo and names only. |
-| The JSON API has no finding codes | Its `summary` is prose plus a count. Codes appear only on the per-provider HTML pages. |
-| A stored snapshot exists and is fetchable | Found `/api/download/...` referenced in the CLI's blob module; fetched it directly and got `{files[], hash}`. |
-| The snapshot can be stale | Fetched ci-secure's: 80 files, hash `a2f6d76e…`, containing the removed URL in 4 files and zero occurrences of the placeholder that replaced it. |
-| The snapshot can be dated | Read `CHANGELOG.md` out of the snapshot: newest entry 2026-08-09 versus 2026-08-10 on the default branch. |
-| Re-indexing happens | ci-speedup was first seen Jul 22 but its snapshot contains `tests/test_secret_redaction.py`, added by PR #15 on Jul 28. Content postdating the first index can only arrive by re-indexing. |
-| Findings clear once the fix is in the snapshot | ci-speedup went FAIL/HIGH with W007+W011 (issue #12, scanned Jul 22) to WARN/MEDIUM with W011 only, after the fix appeared in the snapshot. |
-| Audits re-run over an unchanged snapshot | ci-secure's audit timestamps advanced ~24h while its snapshot hash stayed `a2f6d76e…` and the finding text stayed byte-identical. |
-| Caches disagree | The install-path endpoint served 2026-08-10 values while the JSON API served 2026-08-11 for the same skill. |
-| Model-based providers re-judge unchanged input | Gen went HIGH/fail to SAFE/pass across two audits of the same snapshot, and its category list grew rather than shrank. |
-| The pages expose no other API | A browser network capture was blocked by egress policy, but the page source is an RSC payload plus Vercel Web Analytics (`/_vercel/insights/*`); no audit or index endpoint is called client-side. |
+| The install beacon carries what an indexer needs | Read the CLI source: the install event sends `skillFiles`, a JSON map of skill name to repo-relative `SKILL.md` path. A pure install counter would not need paths. |
+| The beacon is suppressed on a non-200 GitHub probe | Read the source (`isRepoPrivate()` returns `null` on any non-OK; the send is gated on `=== false`), then confirmed the probe returns 403 in the environment where the null result was produced. |
+| Ingest is repo-scoped | One install of a newly added skill coincided with all three sibling snapshots being rebuilt at the same instant. |
+| The audit call is read-only and carries no SHA | Source read: a GET keyed on owner/repo plus display names, gated only on the repo being public. |
+| The JSON API has no finding codes | Its `summary` is prose plus a count; codes appear only on the per-provider HTML pages. |
+| A stored snapshot exists and is fetchable | Found `/api/download/...` in the CLI's blob module; fetched it directly. |
+| The snapshot can be stale | Fetched it: 80 files containing the removed URL in 4 of them, and zero occurrences of the placeholder that replaced it. |
+| The snapshot pins to an exact commit | Byte-compared every snapshot file against candidate commit trees; one matched with zero differences. |
+| Audits re-run over an unchanged snapshot | Audit timestamps advanced ~24h while the snapshot hash and the finding text stayed byte-identical. |
+| Findings clear once the fix is in the snapshot | A sibling skill went FAIL/HIGH with two findings to WARN/MEDIUM with one, after the fixing commit's file appeared in its snapshot. |
+| Caches disagree | The install-path endpoint served day-old values while the JSON API served current ones for the same skill. |
+| Model-based providers re-judge unchanged input | One provider went fail to pass across two audits of the same snapshot, its category list growing rather than shrinking. |
+| The indexer drops large files | Two snapshots omit files of ~600 KB and ~900 KB; the largest included file is ~470 KB. |
+| The pages expose no other API | Page source is an RSC payload plus Vercel Web Analytics; no audit or index endpoint is called client-side. |
 
 ## Claims deliberately NOT made
 
-Recorded so nobody re-derives a dead end or repeats an overreach:
+Recorded so nobody repeats an overreach — several of these were made and
+retracted while investigating.
 
+- **"Installs never trigger indexing."** False, and the most costly error made
+  here. It came from nine installs in an environment where the beacon was
+  suppressed. Always verify the precondition first.
+- **"Indexing happens once and never repeats."** False. Snapshots demonstrably
+  rebuild.
 - **"The scanners read the snapshot."** Consistent with every observation and
-  strongly supported by the W007 timing, but never verified. The scanners could
-  read the branch through a separate path.
-- **"Indexing happens once and never repeats."** Tempting after watching one
-  skill sit still for a day. It is false — ci-speedup re-indexed.
+  strongly supported by a finding clearing exactly when the fix appeared in the
+  snapshot, but never directly verified.
+- **"Users are receiving the stale content."** False for repos not on the blob
+  allowlist: the CLI clones the current default branch, and the installed tree
+  was verified clean. Only the audit reads the snapshot.
 - **"Self-hosting the snapshot fixes the audit."** The CLI has an allowlist for
   repos serving their own snapshot, but the audit call does not consult it.
-  Being added would change installs, not audits.
 - **"Renaming the skill forces a fresh audit."** A new name means a new slug
   means a new identity with no cached audit — and it is not an acceptable
   remedy. It discards the skill's URL, install count, and recognition to work
-  around someone else's caching. Do not propose it.
+  around a cache. Do not propose it.
 - **"Filing an issue reliably works."** At the time of writing, a search for
   re-index and rescan requests returned a dozen matches, all open and
-  unanswered. It costs little, but do not present it as a fix.
+  unanswered, and no maintainer has publicly described the mechanism.

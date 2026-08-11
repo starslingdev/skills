@@ -45,3 +45,20 @@ Maintainer-only. Not part of any installable skill tree.
   the three artifacts that make such a request verifiable without access to the
   repository: the finding code with its quoted literal, the commit that removed
   that literal, and an `auditedAt` proving the scan ran afterwards.
+
+- **2026-08-11** — **Retracted "installs never trigger indexing", which was the
+  costliest wrong conclusion in the original investigation.** The nine-install
+  experiment behind it ran in an environment where `api.github.com` answers
+  403; the CLI reads a non-OK response there as "cannot determine visibility"
+  and silently drops the install beacon, so the experiment exercised a code
+  path that never fired. The beacon is what triggers content ingest, and ingest
+  appears repo-scoped. Documented the precondition check to run *before*
+  concluding anything from an install, since a suppressed beacon looks
+  identical to a registry that ignores installs. Added a twenty-second summary
+  and an annotated real timeline at the top of the pipeline reference — the
+  earlier draft was accurate but too dense to act on. Recorded the dead ends
+  with their evidence (a live but orphaned `check-updates` endpoint, an
+  auth-gated `revalidate` hook, origin-side rather than edge staleness, ignored
+  ref parameters) so they are not re-derived, and the fact that the indexer
+  drops files above roughly 500-600 KB, which means a snapshot is not a
+  faithful copy of the folder.
