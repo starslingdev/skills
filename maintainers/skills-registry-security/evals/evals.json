@@ -1,0 +1,33 @@
+{
+  "skill_name": "skills-registry-security",
+  "evals": [
+    {
+      "id": 1,
+      "name": "stale-critical-finding",
+      "prompt": "Our ci-secure skill on skills.sh is showing a CRITICAL Snyk audit but we removed the flagged content days ago. Figure out what's actually going on and tell me whether there's anything left for us to fix.",
+      "expected_output": "Runs registry_audit.py rather than manually curling surfaces. Reports the E005 finding and the literal it quotes, identifies that literal as absent from both the git ref and the installed tree, and concludes the scan input is stale with nothing to patch. Recommends requesting a re-index rather than a plain re-audit.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "install-does-not-trigger-rescan",
+      "prompt": "The registry says a skill gets re-audited when it's freshly installed. Can we just reinstall our skill in a loop until the audit refreshes? Set that up if so.",
+      "expected_output": "Declines to set up a polling loop. Explains the install-time audit call is a read-only GET keyed on owner/repo plus slug with no commit SHA, so installs cannot invalidate the cache, and that merging a fix does not invalidate it either. Offers a single check instead of repeated installs.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "real-finding-not-phantom",
+      "prompt": "Check the security audit status of starslingdev/skills/ci-speedup and tell me whether the finding it has is something we need to fix or something we can accept.",
+      "expected_output": "Runs the script for ci-speedup, reports the W011 warning-class finding, notes no phantom literal was detected, and distinguishes warning-class from critical-class handling: W011 describes inherent behavior for a repo-auditing skill and is reasonable to accept with a written rationale rather than chase.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "name": "surface-disagreement",
+      "prompt": "The skills.sh page for one of our skills shows a passing badge but a teammate says the CLI printed a failure when they installed it. Which is right?",
+      "expected_output": "Recognizes these are separately cached surfaces, runs the script, and compares the JSON API, the install-path endpoint, and the rendered page. Reports which surface is stale and identifies the install-path value as what users actually see. Does not treat the disagreement as a bug in the skill itself.",
+      "files": []
+    }
+  ]
+}
