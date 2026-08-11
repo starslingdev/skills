@@ -23,6 +23,7 @@ docs/methodology.md                 # public front-door methodology (links into 
 examples/                           # sanitized sample report(s)
 maintainers/                        # maintainer-only loop infra, OUTSIDE the installable tree
   ci-score/                         #   (ci-score's maintainer-only material)
+  skills-registry-security/         # skill: triage a registry audit verdict (see its README.md)
   ci-speedup/                       #   (the `skills` CLI copies skills/<name>/ recursively, so
     MAINTAINERS.md                  #    keeping this here is the only way to keep it out of installs)
     loops/                          # loop prompts + summary schema (gap→catalog, transcript)
@@ -72,6 +73,18 @@ of a run. The debug lines record **endpoints, response sizes, and
 pattern/workflow names — never gh response bodies**, so secrets returned by gh
 API calls won't appear. Workflow file paths and pattern names DO appear; review a
 captured log before sharing it externally if your workflow names are sensitive.
+
+## Registry audit triage (maintainers-only)
+
+When a published skill shows a failing security audit on skills.sh, do NOT
+start reverse-engineering it by hand — that path has already been walked and it
+costs hours. Run `maintainers/skills-registry-security/` instead; it answers
+"is this finding real, or is the registry auditing stale content?" in seconds
+and prints the evidence either way. Overview:
+`maintainers/skills-registry-security/README.md`. The model behind it —
+including why a fresh audit timestamp proves nothing, and the precondition to
+check before concluding an install did nothing — is in that skill's
+`references/audit-pipeline.md`.
 
 ## Maintainer self-improvement loops (local, maintainers-only)
 
