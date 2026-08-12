@@ -11,6 +11,20 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **2026-08-12** — **The `sec.checkout.credentials-scoped` fact no longer fails
+  workflows triggered only by `fork`/`watch`.** Those events fire when someone
+  forks or stars the repo; the workflow runs base code in the base context with
+  no attacker text, ref, or artifact entering the job, so a persisted checkout
+  token cannot be read by any attacker-influenced execution and
+  `persist-credentials: false` is not a defense there. Failing such a workflow
+  was a false positive on a config that is not actually exposed. The fact now
+  excludes `fork`/`watch` from its own applicability; a workflow that also
+  carries a real untrusted trigger (a PR head, comment/issue/discussion text, a
+  `workflow_run` artifact, a dispatch payload) still fails. The trigger set the
+  other checks use is unchanged.
+
 ### Added
 
 - **2026-08-10** — **A repo guard for installer-shaped literals.** Two shapes

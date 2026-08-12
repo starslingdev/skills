@@ -613,6 +613,30 @@ def test_persisted_credentials_fail_only_on_untrusted_triggers(tmp_path):
                     "sec.checkout.credentials-scoped")["outcome"] == "fail"
 
 
+def test_persisted_credentials_pass_on_payloadless_notification_triggers(tmp_path):
+    """`fork`/`watch` fire on a fork/star with no attacker text, ref, or
+    artifact entering the job, so a persisted checkout token is unreadable by any
+    attacker-influenced execution — persist-credentials is not a defense there
+    and the fact must PASS, not FAIL (a false positive that dragged the security
+    score, and the blend, down). But a workflow that ALSO carries a real
+    untrusted trigger still FAILs — the notification event must not launder it."""
+    persisting = ("jobs:\n  t:\n    runs-on: ubuntu-latest\n"
+                  "    steps: [{uses: actions/checkout@v4}, {run: make}]\n")
+    for trig in ("[fork]", "[watch]", "[fork, watch]"):
+        wf = f"on: {trig}\npermissions: {{contents: read}}\n" + persisting
+        root, files = _repo(tmp_path / trig.strip("[]"), {"ci.yml": wf})
+        assert _outcome(cf.compute_config_facts(root, files, []),
+                        "sec.checkout.credentials-scoped")["outcome"] == "pass", \
+            f"{trig}: a payload-less notification trigger was wrongly failed"
+
+    # fork PLUS a real untrusted trigger: still exposed, still fails.
+    combo = "on: [fork, pull_request_target]\npermissions: {contents: read}\n" + persisting
+    rootc, filesc = _repo(tmp_path / "combo", {"ci.yml": combo})
+    assert _outcome(cf.compute_config_facts(rootc, filesc, []),
+                    "sec.checkout.credentials-scoped")["outcome"] == "fail", \
+        "fork laundered a real untrusted trigger (pull_request_target)"
+
+
 # --- coverage gaps: never a silent pass --------------------------------------
 
 def test_unscannable_workflow_forces_workflow_facts_to_unmeasured(tmp_path):
