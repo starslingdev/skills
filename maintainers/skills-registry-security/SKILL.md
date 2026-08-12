@@ -94,6 +94,38 @@ If the project runs the same scanner in its own CI, a passing run on the current
 default branch is a strong supporting exhibit — same scanner, opposite verdict,
 which isolates the input as the variable.
 
+## Forcing a refresh when the input is stale
+
+Confirmed by experiment, not inference: **one install that reaches the telemetry
+service rebuilds the snapshot.** There is no button, no API, and no ticket
+required — but there is a precondition, and getting it wrong is what makes this
+look impossible.
+
+1. **Verify the beacon can actually fire.** On the machine doing the install:
+
+   ```bash
+   curl -sS -o /dev/null -w '%{http_code}\n' https://api.github.com/repos/OWNER/REPO   # need 200
+   env | grep -iE 'DO_NOT_TRACK|DISABLE_TELEMETRY'                                     # need empty
+   ```
+
+   The CLI decides whether the repo is private with an unauthenticated call to
+   that endpoint and treats any non-OK response as "cannot tell", which silently
+   suppresses the install event. Sandboxes, CI containers, and rate-limited IPs
+   routinely fail this. An install with a suppressed beacon is indistinguishable
+   from a registry that ignores installs, which is exactly the wrong conclusion
+   to reach.
+
+2. **Run one ordinary install** — `npx skills add OWNER/REPO`. Nothing special,
+   no flags. One is enough; repeating it does not speed anything up.
+
+3. **Watch the snapshot hash**, not the audit timestamps. Re-index for an
+   already-indexed skill took **~3 hours** in the observed case (a first index
+   of a brand-new skill was faster, ~50 minutes). The audit then re-runs behind
+   it on its own cadence and the finding clears.
+
+Do not escalate before doing this. Most "the registry is stuck" reports are
+really "no beacon-capable install has happened since the fix landed."
+
 ## Gotchas
 
 These are the traps that make this task take hours instead of a minute. Most of

@@ -62,3 +62,15 @@ Maintainer-only. Not part of any installable skill tree.
   ref parameters) so they are not re-derived, and the fact that the indexer
   drops files above roughly 500-600 KB, which means a snapshot is not a
   faithful copy of the folder.
+
+- **2026-08-12** — **The remedy is confirmed by experiment, so the skill now
+  states it as a procedure rather than a hypothesis.** One install whose
+  telemetry beacon actually reaches the service rebuilds the stored snapshot;
+  nine installs from an environment where the beacon was suppressed did
+  nothing. Same repository, same skill, the beacon the only difference — which
+  makes the precondition check the single most valuable line in the document,
+  since a suppressed beacon and an unresponsive registry look identical from
+  outside. Recorded the measured latency: re-indexing an already-known skill
+  took about three hours, against roughly fifty minutes to first-index a new
+  one, so a couple of quiet hours is not evidence of failure and the guidance
+  is to budget half a day before concluding an install did not work.

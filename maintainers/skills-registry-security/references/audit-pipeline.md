@@ -76,9 +76,19 @@ Aug 11
  19:44  the audit RE-RUNS, still against the 17:54 photocopy
           |    -> the deterministic finding repeats, with a NEW timestamp
           |    -> looks like "the fix did not work". It is not what happened.
- 22:50  * a real install finally happens  -->  ingest expected
-   ?    photocopy rebuilds, finding clears on the next audit pass
+ 22:50  * a real install finally happens (beacon NOT suppressed)
+          |
+Aug 12
+ ~02:00  --> RE-INDEX CONFIRMED. New photocopy, ~3h after the install.
+          |     hash changed; the flagged URL is gone from the scan input;
+          |     the post-fix placeholder is present.
+          |     Audit still stamped 19:44 - it drains behind ingest.
 ```
+
+That last step is the whole remedy, and it was confirmed by experiment rather
+than inferred: **one install whose beacon actually fires rebuilds the
+snapshot.** Nine installs with the beacon suppressed did nothing; one without
+the suppression did everything.
 
 Two things this makes obvious that prose does not:
 
@@ -222,11 +232,16 @@ trusting these numbers forever.
 
 | Stage | Observed | Notes |
 |---|---|---|
-| install beacon → ingest | tens of minutes | first index landed ~50 min after the first plausible install |
+| install beacon → **first** index | ~50 min | brand-new skill, never seen before |
+| install beacon → **re**-index | **~3 h** | measured end to end: install 22:50, snapshot changed by 02:07 |
 | ingest → audit | ~77 min in one case | the audit queue drains behind ingest |
 | audit → all caches agree | up to ~1 day | install-path cache lagged the JSON API by a day |
 | merge with no install | **never** | two pushes produced no ingest at all |
 | install with beacon suppressed | **never** | nine installs, zero effect — the beacon never fired |
+
+Re-indexing an existing skill is markedly slower than first-indexing a new one,
+so do not treat a couple of quiet hours as failure. Budget half a day before
+concluding an install did not work, and check the precondition again first.
 
 **Before escalating**, confirm a beacon-capable install has actually happened
 since the fix. Most "stuck" reports in the wild are missing that step.
@@ -349,6 +364,7 @@ matching reality.
 |---|---|
 | The install beacon carries what an indexer needs | Read the CLI source: the install event sends `skillFiles`, a JSON map of skill name to repo-relative `SKILL.md` path. A pure install counter would not need paths. |
 | The beacon is suppressed on a non-200 GitHub probe | Read the source (`isRepoPrivate()` returns `null` on any non-OK; the send is gated on `=== false`), then confirmed the probe returns 403 in the environment where the null result was produced. |
+| **An install with a live beacon rebuilds the snapshot** | Direct experiment. Nine installs from a beacon-suppressed environment over six hours: hash unchanged. One ordinary install from a normal machine: hash changed within ~3 h, the flagged literal dropped to zero occurrences, the post-fix placeholder appeared, and the snapshot's changelog advanced a day. Same repo, same skill, only the beacon differed. |
 | Ingest is repo-scoped | One install of a newly added skill coincided with all three sibling snapshots being rebuilt at the same instant. |
 | The audit call is read-only and carries no SHA | Source read: a GET keyed on owner/repo plus display names, gated only on the repo being public. |
 | The JSON API has no finding codes | Its `summary` is prose plus a count; codes appear only on the per-provider HTML pages. |
