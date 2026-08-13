@@ -143,6 +143,17 @@ def test_page_text_strips_upper_case_script_and_style_tags():
     assert "Warn" in txt
 
 
+def test_page_text_strips_scripts_with_attributes_and_spaced_end_tags():
+    """`<script type=...>` and `</script >` are both legal and both must go."""
+    txt = ra._page_text(
+        "<script type='text/javascript'>var c='E005'</script >"
+        "<style media='all'>b{}</style >Fail"
+    )
+    assert "E005" not in txt
+    assert "b{}" not in txt
+    assert "Fail" in txt
+
+
 # --------------------------------------------------------------------------
 # the phantom decision - the whole point of the tool
 # --------------------------------------------------------------------------
@@ -233,12 +244,27 @@ def test_install_corpus_narrows_to_the_audited_skill(tmp_path):
     assert ra._installed_skill_dir(str(root), "ci-secure").endswith("skills/ci-secure")
 
 
-def test_install_corpus_falls_back_to_the_whole_tree_when_layout_differs(tmp_path):
-    """A narrow corpus is better than none, but a missing one must not crash."""
+def test_install_corpus_is_dropped_rather_than_widened_to_siblings(tmp_path):
+    """An unrecognised layout must yield NO corpus, not the whole repo tree.
+
+    Falling back to the full install would let a sibling's literal produce a
+    confident `REAL` — worse than the honest "could not check", because it
+    sends a maintainer to edit a skill that is already clean.
+    """
     root = tmp_path / "inst"
     root.mkdir()
-    assert ra._installed_skill_dir(str(root), "ci-secure") == str(root)
+    assert ra._installed_skill_dir(str(root), "ci-secure") is None
     assert ra._installed_skill_dir(None, "ci-secure") is None
+
+
+def test_dropped_install_corpus_does_not_fabricate_a_real_verdict(tmp_path):
+    """With no install corpus and no git ref, the answer is UNVERIFIED."""
+    root = tmp_path / "inst"
+    (root / ".agents" / "skills" / "ci-speedup").mkdir(parents=True)
+    (root / ".agents" / "skills" / "ci-speedup" / "S.md").write_text(GONE_URL)
+    scoped = ra._installed_skill_dir(str(root), "ci-secure")
+    out = ra.verify_literals([GONE_URL], None, "HEAD", scoped, {"files": {}})
+    assert out[GONE_URL]["verdict"] == "UNVERIFIED"
 
 
 def test_sibling_only_literal_is_not_real_for_the_audited_skill(tmp_path):

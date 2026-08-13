@@ -76,8 +76,8 @@ def _page_text(raw: str) -> str:
     which is how a page's own JavaScript could invent an `E005` that no
     scanner ever reported.
     """
-    t = re.sub(r"<script.*?</script>", " ", raw, flags=re.S | re.I)
-    t = re.sub(r"<style.*?</style>", " ", t, flags=re.S | re.I)
+    t = re.sub(r"<script\b[^>]*>.*?</script\s*>", " ", raw, flags=re.S | re.I)
+    t = re.sub(r"<style\b[^>]*>.*?</style\s*>", " ", t, flags=re.S | re.I)
     t = re.sub(r"<[^>]+>", " ", t)
     return re.sub(r"\s+", " ", htmllib.unescape(t)).strip()
 
@@ -283,13 +283,20 @@ def _installed_skill_dir(install_dir: str | None, skill: str | None) -> str | No
     `.agents/skills/<name>/`. Grepping the whole tree would let a literal that
     only ever appeared in a sibling skill mark this skill's finding REAL — the
     one misclassification that sends a maintainer to edit code that is already
-    clean. Falls back to the full tree only when the per-skill directory is
-    absent, since a wrong-but-narrow corpus beats no corpus.
+    clean.
+
+    When the per-skill directory is absent, this returns None rather than
+    falling back to the whole tree. Dropping the corpus costs an `in_install`
+    of None, which the caller reports honestly as unverified; keeping the whole
+    tree would instead produce a confident wrong answer in the one direction
+    that wastes a maintainer's time. The git corpus is unaffected either way.
     """
-    if not install_dir or not skill:
+    if not install_dir:
+        return None
+    if not skill:
         return install_dir
     scoped = Path(install_dir) / ".agents" / "skills" / skill
-    return str(scoped) if scoped.is_dir() else install_dir
+    return str(scoped) if scoped.is_dir() else None
 
 
 def verify_literals(literals: list[str], repo_root: Path | None, ref: str,
