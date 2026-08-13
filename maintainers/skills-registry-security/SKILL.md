@@ -45,6 +45,22 @@ The script is read-only: HTTP GETs, a throwaway install into a temp directory,
 and greps over a local checkout. It never POSTs to the registry and never
 writes to the repository.
 
+### Invoking this skill
+
+**This skill has no automatic trigger.** It lives under `maintainers/`, which is
+excluded from every installable skill tree, so its frontmatter is never loaded
+and its description never fires on its own. It runs only when a maintainer asks
+for it by name, or through the bundled slash command:
+
+```bash
+ln -sf "$PWD/maintainers/skills-registry-security/commands/registry-security.md" \
+       .claude/commands/registry-security.md    # then: /registry-security <owner/repo/skill>
+```
+
+`.claude/` is gitignored, so that symlink is per-checkout; the command source is
+tracked under `commands/` here. The unattended loop below is armed the same way
+— by a maintainer session — and then runs server-side without one.
+
 ## What it reports, and how to read it
 
 The output has six parts. Read them in this order, because each one narrows
