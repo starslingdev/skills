@@ -1,0 +1,244 @@
+{
+  "claims": [
+    {
+      "kind": "tier2_section_lead",
+      "subject": "f114",
+      "fields": {
+        "raw_min": 73440.9,
+        "naive_min": 73440.9,
+        "count": 10,
+        "not_promoted_measured_no_source": 3,
+        "not_promoted_measured_cert_deferred": 0,
+        "not_promoted_modeled": 8,
+        "not_promoted_structural": 6,
+        "not_promoted_other": 0,
+        "derivation_basis": "jobs_api_timestamps"
+      },
+      "rendered": "These findings cut wall-clock-neutral runner spend without touching your merge gate; each R-numbered finding carries a machine-derived proof it cannot slow a PR."
+    },
+    {
+      "kind": "tier2_neutrality_line",
+      "subject": "f114",
+      "fields": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "derivation_basis": "jobs_api_timestamps",
+        "pattern": "OPT46"
+      },
+      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference)."
+    },
+    {
+      "kind": "tier2_neutrality_line",
+      "subject": "f48",
+      "fields": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "derivation_basis": "jobs_api_timestamps",
+        "pattern": "OPT46"
+      },
+      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference)."
+    },
+    {
+      "kind": "tier2_neutrality_line",
+      "subject": "f115",
+      "fields": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "derivation_basis": "jobs_api_timestamps",
+        "pattern": "OPT64"
+      },
+      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (4/4)` identifies the retry cause, so prior-attempt compute is post-completion waste)."
+    },
+    {
+      "kind": "tier2_neutrality_line",
+      "subject": "f42",
+      "fields": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "derivation_basis": "jobs_api_timestamps",
+        "pattern": "OPT46"
+      },
+      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference)."
+    },
+    {
+      "kind": "tier2_neutrality_line",
+      "subject": "f46",
+      "fields": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "derivation_basis": "jobs_api_timestamps",
+        "pattern": "OPT46"
+      },
+      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference)."
+    },
+    {
+      "kind": "tier2_neutrality_line",
+      "subject": "f116",
+      "fields": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "derivation_basis": "jobs_api_timestamps",
+        "pattern": "OPT64"
+      },
+      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (3/4)` identifies the retry cause, so prior-attempt compute is post-completion waste)."
+    },
+    {
+      "kind": "tier2_neutrality_line",
+      "subject": "f117",
+      "fields": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "derivation_basis": "jobs_api_timestamps",
+        "pattern": "OPT64"
+      },
+      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (2/4)` identifies the retry cause, so prior-attempt compute is post-completion waste)."
+    },
+    {
+      "kind": "tier2_neutrality_line",
+      "subject": "f44",
+      "fields": {
+        "proof": "non_pr_event",
+        "margin_s": null,
+        "derivation_basis": "jobs_api_timestamps",
+        "pattern": "OPT36"
+      },
+      "rendered": "machine-derived proof: `non_pr_event` - `schedule` runs do not gate a PR merge (event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event)."
+    },
+    {
+      "kind": "tier2_neutrality_line",
+      "subject": "f49",
+      "fields": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "derivation_basis": "jobs_api_timestamps",
+        "pattern": "OPT64"
+      },
+      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `test_linux_docker / Docker noble amd64` identifies the retry cause, so prior-attempt compute is post-completion waste)."
+    },
+    {
+      "kind": "tier2_neutrality_line",
+      "subject": "f43",
+      "fields": {
+        "proof": "post_completion_waste",
+        "margin_s": null,
+        "derivation_basis": "jobs_api_timestamps",
+        "pattern": "OPT64"
+      },
+      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `publish NPM and driver` identifies the retry cause, so prior-attempt compute is post-completion waste)."
+    },
+    {
+      "kind": "headline_slowest",
+      "subject": "Windows (firefox)",
+      "fields": {
+        "merge_dur": "41m 12s",
+        "slowest_dur": "72m 57s",
+        "floor_name": "Windows (firefox)",
+        "gate_check": "ubuntu-22.04 (webkit - Node.js 20)",
+        "present": 4,
+        "npop": 20
+      },
+      "rendered": "**41m 12s until all checks finish** - the slowest check a typical PR waits on is `Windows (firefox)` (~72m 57s), but it ran on only 4/20 sampled PRs, so a typical PR finishes in 41m 12s; `ubuntu-22.04 (webkit - Node.js 20)` is the check most PRs gate on (drilled below). "
+    },
+    {
+      "kind": "tier2_headline",
+      "subject": "f114",
+      "fields": {
+        "raw_min": 73440.9,
+        "count": 10,
+        "derivation_basis": "jobs_api_timestamps"
+      },
+      "rendered": "> **After the gate.** 73,441 min/mo of wall-clock-neutral runner minutes is recoverable (10 neutral findings; none can slow a merge)."
+    },
+    {
+      "kind": "pole_gate_prompt",
+      "subject": "ubuntu-22.04 (webkit - Node.js 20)",
+      "fields": {
+        "dur": "41m 21s",
+        "gate_count": 7,
+        "npop": 20,
+        "demoted": false
+      },
+      "rendered": "Slowest check a typical PR waits on: P50 41m 21s; its workflow `tests_primary.yml` gates 7/20 sampled PRs."
+    },
+    {
+      "kind": "pole_gate_prompt",
+      "subject": "Windows (firefox)",
+      "fields": {
+        "dur": "72m 57s",
+        "gate_count": 5,
+        "npop": 20,
+        "demoted": false
+      },
+      "rendered": "Slowest check a typical PR waits on: P50 72m 57s; its workflow `tests_secondary.yml` gates 5/20 sampled PRs."
+    },
+    {
+      "kind": "pole_role_line",
+      "subject": "Windows (firefox)",
+      "fields": {
+        "lead_floor": "72m 57s",
+        "dur": "40m 15s"
+      },
+      "rendered": "Runs concurrently behind `Windows (firefox)` (72m 57s); it becomes the gate only once every slower concurrent check drops below 40m 15s."
+    },
+    {
+      "kind": "pole_gate_prompt",
+      "subject": "windows-latest - firefox",
+      "fields": {
+        "dur": "40m 15s",
+        "gate_count": 6,
+        "npop": 20,
+        "demoted": false
+      },
+      "rendered": "Slowest check a typical PR waits on: P50 40m 15s; its workflow `tests_mcp.yml` gates 6/20 sampled PRs."
+    },
+    {
+      "kind": "pole_role_line",
+      "subject": "Test chrome on macos-latest",
+      "fields": {
+        "pole_n": 1,
+        "present": 5,
+        "npop": 20,
+        "dur": "59m 33s"
+      },
+      "rendered": "**Rarely the merge gate - the actual slowest check a PR waits on, on only 1/20 sampled PRs.** Present on 5/20 PRs, but a slower concurrent check almost always gates ahead of it, so its 59m 33s is throughput/cost, not merge-wait. Speeding it helps only the PRs where it IS the pole - it won't move typical merge-wait."
+    },
+    {
+      "kind": "pole_gate_prompt",
+      "subject": "Test chrome on macos-latest",
+      "fields": {
+        "dur": "59m 33s",
+        "gate_count": 5,
+        "npop": 20,
+        "demoted": true
+      },
+      "rendered": "Rarely the merge pole - the actual slowest check a PR waits on, on only 1/20 sampled PRs (present on 5/20): P50 59m 33s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait."
+    },
+    {
+      "kind": "pole_role_line",
+      "subject": "Test msedge on windows-latest",
+      "fields": {
+        "pole_n": 0,
+        "present": 5,
+        "npop": 20,
+        "dur": "46m 01s"
+      },
+      "rendered": "**Rarely the merge gate - the actual slowest check a PR waits on, on only 0/20 sampled PRs.** Present on 5/20 PRs, but a slower concurrent check almost always gates ahead of it, so its 46m 01s is throughput/cost, not merge-wait. Speeding it helps only the PRs where it IS the pole - it won't move typical merge-wait."
+    },
+    {
+      "kind": "pole_gate_prompt",
+      "subject": "Test msedge on windows-latest",
+      "fields": {
+        "dur": "46m 01s",
+        "gate_count": 5,
+        "npop": 20,
+        "demoted": true
+      },
+      "rendered": "Rarely the merge pole - the actual slowest check a PR waits on, on only 0/20 sampled PRs (present on 5/20): P50 46m 01s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait."
+    }
+  ],
+  "families_migrated": [
+    "headline",
+    "slowest_gate_framing",
+    "runner_minutes"
+  ]
+}

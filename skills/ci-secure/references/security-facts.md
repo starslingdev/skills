@@ -40,7 +40,7 @@ instead of shipping.
 | `sec.codeowners.workflows` | — none | CODEOWNERS is not workflow YAML; no ci-score check reads it. |
 | `sec.trigger.fork-code-uncleared` | `ci.trigger.*` (concurrency, cancel, path-filter) | Those checks read `concurrency:` and `paths:` blocks; this fact reads the trigger list plus checkout `ref:`/`repository:` values. No shared YAML key. Also tiered against ci-secure's own P14.9 finding: a bare untrusted trigger passes (the true-of-84% defect, deliberately removed), trigger + attacker-head checkout fails this FACT, and only the full trigger + checkout + execution chain is the P14.9 finding — so the fact and the finding cannot fire on the same edit either. |
 | `sec.secrets.no-blanket-inherit` | — none | No ci-score check reads `secrets:` on reusable-workflow calls. |
-| `sec.checkout.credentials-scoped` | `ci.checkout.shallow-clone` | Both read checkout steps, but different keys: `fetch-depth` there, `persist-credentials` here — two `with:` entries, two edits. This fact also applies only on untrusted-trigger workflows; shallow-clone applies on PR-gating ones. |
+| `sec.checkout.credentials-scoped` | `ci.checkout.shallow-clone` | Both read checkout steps, but different keys: `fetch-depth` there, `persist-credentials` here — two `with:` entries, two edits. This fact also applies only on untrusted-trigger workflows (excluding the payload-less `fork`/`watch` notification events); shallow-clone applies on PR-gating ones. |
 
 **Residual correlation, disclosed:** a repo with careless
 workflow hygiene will tend to fail checks in both tools — that is the
@@ -71,4 +71,6 @@ two moved numbers.
 - **`sec.checkout.credentials-scoped`** — on untrusted-trigger workflows,
   every `actions/checkout` sets `persist-credentials: false`. GitHub's default
   persists the token into `.git/config`, where attacker-influenced later steps
-  can read it. Trusted-trigger workflows are not this fact's business.
+  can read it. Trusted-trigger workflows are not this fact's business — nor are
+  the payload-less `fork`/`watch` notification events, which carry no
+  attacker-influenced execution that could read a persisted token.

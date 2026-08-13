@@ -71,9 +71,15 @@ jobs:
     # The scan talks to a network service. A stalled request would otherwise hold a self-hosted
     # runner for the six-hour GitHub default with no signal.
     timeout-minutes: 20
+    # Public repo only. On any private staging copy of this tree (e.g. a pre-launch mirror),
+    # running the scan would send UNRELEASED skill text to a third-party scanner API — for a new
+    # skill, the verdict minted on that first contact is the one it wears, so the scan is held
+    # until launch. The guard also keeps a mirror's missing/foreign SNYK_TOKEN from painting
+    # every staged PR red with a scan that was never supposed to run there.
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.repository == 'starslingdev/skills' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
     env:
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
     steps:
@@ -205,6 +211,7 @@ jobs:
     # this job would post a green "fork PR — no scan coverage" check next to a real scan that
     # did run — the exact misreading the job's name exists to prevent.
     if: >-
+      github.repository == 'starslingdev/skills' &&
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest

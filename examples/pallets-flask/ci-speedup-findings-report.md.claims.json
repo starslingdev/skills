@@ -1,0 +1,163 @@
+{
+  "claims": [
+    {
+      "kind": "tier2_section_lead",
+      "subject": "f4",
+      "fields": {
+        "raw_min": 3.0,
+        "naive_min": 3.0,
+        "count": 1,
+        "not_promoted_measured_no_source": 0,
+        "not_promoted_measured_cert_deferred": 0,
+        "not_promoted_modeled": 0,
+        "not_promoted_structural": 0,
+        "not_promoted_other": 0,
+        "derivation_basis": "jobs_api_timestamps"
+      },
+      "rendered": "These findings cut wall-clock-neutral runner spend without touching your merge gate; each R-numbered finding carries a machine-derived proof it cannot slow a PR."
+    },
+    {
+      "kind": "tier2_neutrality_line",
+      "subject": "f4",
+      "fields": {
+        "proof": "non_pr_event",
+        "margin_s": null,
+        "derivation_basis": "jobs_api_timestamps",
+        "pattern": "OPT36"
+      },
+      "rendered": "machine-derived proof: `non_pr_event` - `schedule` runs do not gate a PR merge (event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event)."
+    },
+    {
+      "kind": "headline_slowest",
+      "subject": "Windows",
+      "fields": {
+        "merge_dur": "34s",
+        "slowest_dur": "34s",
+        "gate_check": "Windows",
+        "floor_lowered": false
+      },
+      "rendered": "**34s until all checks finish** - `Windows` is the slowest check a typical PR waits on. "
+    },
+    {
+      "kind": "tier2_headline",
+      "subject": "f4",
+      "fields": {
+        "raw_min": 3.0,
+        "count": 1,
+        "derivation_basis": "jobs_api_timestamps"
+      },
+      "rendered": "> **After the gate.** 3 min/mo of wall-clock-neutral runner minutes is recoverable (1 neutral finding; none can slow a merge)."
+    },
+    {
+      "kind": "pole_role_line",
+      "subject": "Windows",
+      "fields": {
+        "dur": "34s",
+        "npop": 20
+      },
+      "rendered": "**The slowest check a typical PR waits on.**"
+    },
+    {
+      "kind": "pole_gate_prompt",
+      "subject": "Windows",
+      "fields": {
+        "dur": "34s",
+        "gate_count": 0,
+        "npop": 20,
+        "demoted": false
+      },
+      "rendered": "Slowest check a typical PR waits on: P50 34s."
+    },
+    {
+      "kind": "pole_role_line",
+      "subject": "Windows",
+      "fields": {
+        "lead_floor": "34s",
+        "dur": "19s"
+      },
+      "rendered": "Runs concurrently behind `Windows` (34s); it becomes the gate only once every slower concurrent check drops below 19s."
+    },
+    {
+      "kind": "pole_gate_prompt",
+      "subject": "main",
+      "fields": {
+        "dur": "19s",
+        "gate_count": 0,
+        "npop": 20,
+        "demoted": false
+      },
+      "rendered": "Slowest check a typical PR waits on: P50 19s."
+    },
+    {
+      "kind": "pole_role_line",
+      "subject": "PyPy",
+      "fields": {
+        "pole_n": 0,
+        "present": 18,
+        "npop": 20,
+        "dur": "26s"
+      },
+      "rendered": "**Rarely the merge gate - the actual slowest check a PR waits on, on only 0/20 sampled PRs.** Present on 18/20 PRs, but a slower concurrent check almost always gates ahead of it, so its 26s is throughput/cost, not merge-wait. Speeding it helps only the PRs where it IS the pole - it won't move typical merge-wait."
+    },
+    {
+      "kind": "pole_gate_prompt",
+      "subject": "PyPy",
+      "fields": {
+        "dur": "26s",
+        "gate_count": 0,
+        "npop": 20,
+        "demoted": true
+      },
+      "rendered": "Rarely the merge pole - the actual slowest check a PR waits on, on only 0/20 sampled PRs (present on 18/20): P50 26s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait."
+    },
+    {
+      "kind": "pole_role_line",
+      "subject": "3.14t",
+      "fields": {
+        "pole_n": 0,
+        "present": 18,
+        "npop": 20,
+        "dur": "25s"
+      },
+      "rendered": "**Rarely the merge gate - the actual slowest check a PR waits on, on only 0/20 sampled PRs.** Present on 18/20 PRs, but a slower concurrent check almost always gates ahead of it, so its 25s is throughput/cost, not merge-wait. Speeding it helps only the PRs where it IS the pole - it won't move typical merge-wait."
+    },
+    {
+      "kind": "pole_gate_prompt",
+      "subject": "3.14t",
+      "fields": {
+        "dur": "25s",
+        "gate_count": 0,
+        "npop": 20,
+        "demoted": true
+      },
+      "rendered": "Rarely the merge pole - the actual slowest check a PR waits on, on only 0/20 sampled PRs (present on 18/20): P50 25s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait."
+    },
+    {
+      "kind": "pole_role_line",
+      "subject": "3.9",
+      "fields": {
+        "pole_n": 0,
+        "present": 4,
+        "npop": 20,
+        "dur": "24s"
+      },
+      "rendered": "**Rarely the merge gate - the actual slowest check a PR waits on, on only 0/20 sampled PRs.** Present on 4/20 PRs, but a slower concurrent check almost always gates ahead of it, so its 24s is throughput/cost, not merge-wait. Speeding it helps only the PRs where it IS the pole - it won't move typical merge-wait."
+    },
+    {
+      "kind": "pole_gate_prompt",
+      "subject": "3.9",
+      "fields": {
+        "dur": "24s",
+        "gate_count": 0,
+        "npop": 20,
+        "demoted": true
+      },
+      "rendered": "Rarely the merge pole - the actual slowest check a PR waits on, on only 0/20 sampled PRs (present on 4/20): P50 24s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait."
+    }
+  ],
+  "families_migrated": [
+    "headline",
+    "slowest_gate_framing",
+    "runner_minutes"
+  ]
+}

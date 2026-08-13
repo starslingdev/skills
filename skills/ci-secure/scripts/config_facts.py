@@ -451,6 +451,23 @@ def _jobs_checking_out_attacker_head(scan: ModuleType, doc: dict) -> list[str]:
     return out
 
 
+# Untrusted triggers that carry NO attacker-controllable payload — pure activity
+# notifications. `fork`/`watch` fire when someone forks or stars the repo; the
+# workflow runs base code in the base context with no attacker text, ref, or
+# artifact entering the job. A persisted checkout token therefore cannot be read
+# by any attacker-influenced execution (there is none), so persist-credentials is
+# not a defense on these events and the credentials-scoped fact must not FAIL on
+# them (doing so penalised a config that is not actually exposed, and the reduced
+# score propagated into ci-advisor's blend). These stay in the GLOBAL
+# `_UNTRUSTED_TRIGGERS` — other checks (e.g. a write-token grant on an untrusted
+# trigger) still legitimately care about a fork/watch workflow — so the narrowing
+# is local to this one fact. Every other untrusted trigger carries attacker
+# content (a PR head, comment/issue/discussion text, a workflow_run artifact, a
+# dispatch payload) that, directly or via injection, can reach a persisted token,
+# so it stays in scope.
+_CREDS_SCOPED_INERT_TRIGGERS = frozenset({"fork", "watch"})
+
+
 def _unpersisted_checkout_violations(doc: dict) -> list[str]:
     """On an untrusted-trigger workflow, every checkout must set
     persist-credentials: false — GitHub's DEFAULT is to persist the token into
@@ -578,7 +595,11 @@ def compute_config_facts(
 
     persist = []
     for rel, doc in docs:
-        if not _untrusted_triggers_of(scan, doc):
+        # Scope to triggers that can actually expose a persisted token: exclude
+        # the payload-less notification events (`fork`/`watch`) that carry no
+        # attacker-influenced execution. A workflow with a real untrusted trigger
+        # AND fork/watch still applies (the subtraction leaves the real one).
+        if not (_untrusted_triggers_of(scan, doc) - _CREDS_SCOPED_INERT_TRIGGERS):
             continue
         jobs = _unpersisted_checkout_violations(doc)
         if jobs:

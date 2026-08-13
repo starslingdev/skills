@@ -1,0 +1,2529 @@
+{
+  "findings": [
+    {
+      "id": "f1",
+      "pattern": "OPT32",
+      "pattern_class": "static",
+      "severity": "HIGH",
+      "title": "Missing `paths`/`paths-ignore` on Expensive Workflows",
+      "workflow_file": ".github/workflows/pre-commit.yaml",
+      "line": 2,
+      "affected_jobs": [
+        "main"
+      ],
+      "workflow_activity": {
+        "runs_30d": 39,
+        "last_run": "2026-07-23T15:50:51Z",
+        "dormant": false
+      },
+      "evidence": "workflow triggers on pull_request/push but declares no `paths:`/`paths-ignore:` filter (the `on:` block below has no `paths:` key). NOTE: if this workflow is a REQUIRED status check, add a per-job `dorny/paths-filter` gate that returns a neutral pass — a workflow-level `paths:` filter would strand the required check on excluded PRs.",
+      "fix_strategy": "missing-paths-paths-ignore-on-expensive-workflows",
+      "fix_recipe_anchor": "opt32--missing-pathspaths-ignore-on-expensive-workflows",
+      "evidence_snippet": "on:\n  pull_request:\n  push:\n    branches: [main, stable]",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": null,
+      "size_note": "below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "runner_min_unrealizable_s": 3.7,
+      "runner_min_unrealizable": true,
+      "runner_min_note": "gross upper bound — assumes every irrelevant run runs the full job and a `paths:` filter skips it; realizable only where the workflow's jobs don't ALREADY self-skip (via `if:` guards or an internal change-gate) and the trigger can be narrowed safely — verify per workflow before crediting",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/tests.yaml",
+          "long_pole_p50_s": 33.5
+        },
+        {
+          "workflow": ".github/workflows/zizmor.yaml",
+          "long_pole_p50_s": 11.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 19.0,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 1.0,
+      "workflow_runs_30d": 39,
+      "pr_critical_path_s": 33.5,
+      "pr_critical_path_check": "Windows",
+      "sizing_basis": "modeled"
+    },
+    {
+      "id": "f2",
+      "pattern": "OPT32",
+      "pattern_class": "static",
+      "severity": "HIGH",
+      "title": "Missing `paths`/`paths-ignore` on Expensive Workflows",
+      "workflow_file": ".github/workflows/publish.yaml",
+      "line": 2,
+      "affected_jobs": [
+        "build",
+        "create-release",
+        "publish-pypi"
+      ],
+      "workflow_activity": {
+        "runs_30d": 0,
+        "last_run": "2026-02-19T05:01:02Z",
+        "dormant": true
+      },
+      "evidence": "workflow triggers on push but declares no `paths:`/`paths-ignore:` filter (the `on:` block below has no `paths:` key).",
+      "fix_strategy": "missing-paths-paths-ignore-on-expensive-workflows",
+      "fix_recipe_anchor": "opt32--missing-pathspaths-ignore-on-expensive-workflows",
+      "evidence_snippet": "on:\n  push:\n    tags: ['*']",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": null,
+      "size_note": "below the cluster floor — runner-minute (bill) only, no wall-clock",
+      "runner_min_unrealizable": true,
+      "runner_min_note": "gross upper bound — assumes every irrelevant run runs the full job and a `paths:` filter skips it; realizable only where the workflow's jobs don't ALREADY self-skip (via `if:` guards or an internal change-gate) and the trigger can be narrowed safely — verify per workflow before crediting",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/tests.yaml",
+          "long_pole_p50_s": 33.5
+        },
+        {
+          "workflow": ".github/workflows/zizmor.yaml",
+          "long_pole_p50_s": 11.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 20.0,
+      "workflow_long_pole_event": "all-events",
+      "workflow_long_pole_runner": "ubuntu-latest",
+      "workflow_run_share": 0.0,
+      "workflow_runs_30d": 0,
+      "pr_critical_path_s": 33.5,
+      "pr_critical_path_check": "Windows",
+      "sizing_basis": "modeled"
+    },
+    {
+      "id": "f3",
+      "pattern": "OPT33",
+      "pattern_class": "static",
+      "severity": "MEDIUM",
+      "title": "No Draft PR Gating on Expensive Jobs",
+      "workflow_file": ".github/workflows/tests.yaml",
+      "line": 13,
+      "affected_jobs": [
+        "tests"
+      ],
+      "workflow_activity": {
+        "runs_30d": 37,
+        "last_run": "2026-07-22T01:45:54Z",
+        "dormant": false
+      },
+      "evidence": "expensive job `tests` (matrix) runs on every PR that changes the workflow's filtered `paths:` including drafts — no `if: github.event.pull_request.draft == false` gate",
+      "fix_strategy": "no-draft-pr-gating-on-expensive-jobs",
+      "fix_recipe_anchor": "opt33--no-draft-pr-gating-on-expensive-jobs",
+      "evidence_snippet": "  tests:",
+      "wall_clock_p50_s": 0.0,
+      "tier": 2,
+      "realization": "none",
+      "runner_min_saving": null,
+      "size_note": "per-job runner-minutes not sized — this finding skips a single job, but that job's duration couldn't be resolved from sampled run timings (reusable-workflow caller or name-overridden job); saving ≈ the job's own minutes × skip-rate × volume",
+      "concurrent_workflows": [
+        {
+          "workflow": ".github/workflows/pre-commit.yaml",
+          "long_pole_p50_s": 19.0
+        },
+        {
+          "workflow": ".github/workflows/zizmor.yaml",
+          "long_pole_p50_s": 11.0
+        }
+      ],
+      "workflow_long_pole_p50_s": 33.5,
+      "workflow_long_pole_event": "pull_request",
+      "workflow_long_pole_runner": "windows-latest",
+      "workflow_run_share": 0.949,
+      "workflow_runs_30d": 37,
+      "pr_critical_path_s": 33.5,
+      "pr_critical_path_check": "Windows",
+      "sizing_basis": "modeled"
+    },
+    {
+      "id": "f4",
+      "pattern": "OPT36",
+      "pattern_class": "data-driven",
+      "severity": "LOW",
+      "title": "Cron Schedule Too Frequent",
+      "workflow_file": ".github/workflows/lock.yaml",
+      "line": 0,
+      "affected_jobs": [],
+      "workflow_activity": {
+        "runs_30d": 30,
+        "last_run": "2026-05-27T00:31:54Z",
+        "dormant": false
+      },
+      "evidence": "95 scheduled run(s) in 5 consecutive same-head_sha group(s) re-ran without a code change in the sampled schedule slice (95% of 100 schedule run(s)); ~3 runner-min/mo of schedule-event compute (mean over 20 timed run(s); ×0.30 to the 30d volume (30 runs); 100-run recent slice (not a full 30d census)).",
+      "measured_signal": "event=schedule total_count x mean job-minutes (30 schedule run(s)/30d; 95 same-head_sha redundant run(s); 20 timed run(s); scale 0.3)",
+      "fix_strategy": "cron-schedule-too-frequent",
+      "fix_recipe_anchor": "opt36--cron-schedule-too-frequent",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": 3.0,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "runner-minute (bill) only — schedule-event runs do not gate a PR; frequency change must preserve any operational cadence requirement.",
+      "measured_evidence": {
+        "summary": "95 scheduled run(s) in 5 consecutive same-head_sha group(s) re-ran without a code change in the sampled schedule slice (95% of 100 schedule run(s)); ~3 runner-min/mo of schedule-event compute (mean over 20 timed run(s); ×0.30 to the 30d volume (30 runs); 100-run recent slice (not a full 30d census)).",
+        "table": {
+          "headers": [
+            "Workflow",
+            "Consecutive same-head_sha schedule runs",
+            "Mean compute/run",
+            "Credited runner-min/mo"
+          ],
+          "rows": [
+            [
+              "`.github/workflows/lock.yaml`",
+              "95 redundant run(s) in 5 group(s)",
+              "0.1 job-min over 20 timed run(s)",
+              "~3"
+            ]
+          ]
+        },
+        "note": "Schedule burn is counted only on event=schedule runs whose head_sha repeats consecutively, so the detector proves the workflow ran again without a code change. Basis: the count is from the all-status schedule slice; the per-run price is the mean of 20 successful schedule-event timed run(s). GUARDRAIL: confirm the current cadence is not an operational SLA before increasing the cron interval."
+      },
+      "sizing_basis": "measured",
+      "tier2_neutrality": {
+        "proof": "non_pr_event",
+        "margin_s": null,
+        "ref": "event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event"
+      },
+      "tier2_run_subset_events": [
+        "schedule"
+      ],
+      "tier2_sample_run_ids": [
+        "24541015864",
+        "24592306303",
+        "24617087485",
+        "24642727041",
+        "24697300910",
+        "24753341892",
+        "24809677241",
+        "24865658308",
+        "24917789502",
+        "24944123664",
+        "24970801658",
+        "25026910546",
+        "25084705390",
+        "25140922575",
+        "25196183488",
+        "25238965749",
+        "25295158530",
+        "25351073683",
+        "25409754497",
+        "25468798091",
+        "25529561561",
+        "25586189188",
+        "25615500230",
+        "25644013646",
+        "25705512307",
+        "25770449591",
+        "25893435038",
+        "25947789674",
+        "25976885111",
+        "26007193815",
+        "26133824701",
+        "26198138288",
+        "26261260987",
+        "26318447235",
+        "26347485329",
+        "26377148821",
+        "26425496942",
+        "26483298143",
+        "26546987612",
+        "26610700414",
+        "26669247578",
+        "26698985650",
+        "26790945632",
+        "26856655739",
+        "26922505415",
+        "26988068060",
+        "27047343926",
+        "27078129359",
+        "27109651157",
+        "27175924883",
+        "27245095633",
+        "27315763692",
+        "27386720404",
+        "27451141421",
+        "27483652529",
+        "27517293641",
+        "27586172275",
+        "27657736179",
+        "27728986566",
+        "27798283346",
+        "27854783760",
+        "27888620353",
+        "27922698261",
+        "27993759889",
+        "28066557484",
+        "28138797087",
+        "28209446154",
+        "28272955213",
+        "28306452642",
+        "28341428592",
+        "28412007440",
+        "28485137092",
+        "28557114849",
+        "28630279102",
+        "28689261273",
+        "28724371864",
+        "28760262889",
+        "28832814595",
+        "28908247062",
+        "28985274787",
+        "29060056282",
+        "29132493479",
+        "29173648437",
+        "29215261868",
+        "29295693995",
+        "29378718677",
+        "29461270545",
+        "29544666902",
+        "29622917844",
+        "29666859388",
+        "29709467136",
+        "29790177567",
+        "29880041298",
+        "29968969311",
+        "30055986560"
+      ],
+      "guardrail": "Confirm the cron cadence is not an operational SLA; prefer widening the interval only for cleanup/triage/build jobs where delayed execution is acceptable.",
+      "workflow_run_share": 0.769,
+      "workflow_runs_30d": 30,
+      "pr_critical_path_s": 33.5,
+      "pr_critical_path_check": "Windows",
+      "runner_min_basis": "not_spine_derivable",
+      "runner_min_door_note": "modeled static estimate (default_s / hit_rate), disclosed as modeled in the report's sized-of-total ratio — not a spine-billable derivation"
+    },
+    {
+      "id": "f5",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `Windows`",
+      "workflow_file": ".github/workflows/tests.yaml",
+      "line": 0,
+      "affected_jobs": [
+        "Windows"
+      ],
+      "workflow_activity": {
+        "runs_30d": 37,
+        "last_run": "2026-07-22T01:45:54Z",
+        "dormant": false
+      },
+      "evidence": "critical-path check `Windows` (34s): dominant step `Run uv run --locked --no-default-groups --group dev tox run + 1 more other step` (other, 67% of job `Windows`)",
+      "measured_signal": "critical-path check `Windows` (34s): dominant step `Run uv run --locked --no-default-groups --group dev tox run + 1 more other step` (other, 67% of job `Windows`)",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": 7.0,
+      "runner_min_saving": null,
+      "tier": 1,
+      "realization": "direct",
+      "size_note": "other phase (2 steps) 28s above a ~20s warm/cached floor; wall-clock capped at the measured critical-path floor — `PyPy` (26s) is a slower concurrent check on a representative PR",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "decomposition": {
+        "dominant_step": "Run uv run --locked --no-default-groups --group dev tox run + 1 more other step",
+        "dominant_category": "other",
+        "dominant_p50_s": 28.0,
+        "dominant_share": 0.667,
+        "redundant_ratio": null,
+        "job_p50_s": 42.0
+      },
+      "measured_evidence": {
+        "summary": "check `Windows` (34s) maps to job `Windows`; dominant step `Run uv run --locked --no-default-groups --group dev tox run + 1 more other step` (other) is 67% of the job. Redundant-work ratio (setup+build / payload) = None.",
+        "table": {
+          "headers": [
+            "Step",
+            "Category",
+            "p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`Run uv run --locked --no-default-groups --group dev tox run`",
+              "other",
+              "14s",
+              "35%"
+            ],
+            [
+              "`Run astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39`",
+              "other",
+              "14s",
+              "32%"
+            ],
+            [
+              "`Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10`",
+              "checkout",
+              "8s",
+              "20%"
+            ],
+            [
+              "`Post Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10`",
+              "post",
+              "2s",
+              "6%"
+            ],
+            [
+              "`Set up job`",
+              "setup",
+              "1s",
+              "2%"
+            ],
+            [
+              "`Post Run astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39`",
+              "post",
+              "1s",
+              "2%"
+            ]
+          ]
+        },
+        "note": "Decomposed from the sampled job's per-step timings. The dominant step is the addressable cost — attack it by category, don't declare the whole check inherent."
+      },
+      "wall_clock_uncapped_p50_s": 8.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 8.0,
+          "to_s": 7.0,
+          "reason": "wall-clock capped at the measured critical-path floor — `PyPy` (26s) is a slower concurrent check on a representative PR"
+        }
+      ],
+      "workflow_run_share": 0.949,
+      "workflow_runs_30d": 37,
+      "pr_critical_path_s": 33.5,
+      "pr_critical_path_check": "Windows"
+    },
+    {
+      "id": "f6",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `main`",
+      "workflow_file": ".github/workflows/pre-commit.yaml",
+      "line": 0,
+      "affected_jobs": [
+        "main"
+      ],
+      "workflow_activity": {
+        "runs_30d": 39,
+        "last_run": "2026-07-23T15:50:51Z",
+        "dormant": false
+      },
+      "evidence": "critical-path check `main` (19s): dominant step `Run uv run --locked --no-default-groups --group pre-commit pre-commit run --show-diff-on-failure --color=always --all-files + 1 more other step` (other, 58% of job `main`)",
+      "measured_signal": "critical-path check `main` (19s): dominant step `Run uv run --locked --no-default-groups --group pre-commit pre-commit run --show-diff-on-failure --color=always --all-files + 1 more other step` (other, 58% of job `main`)",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": null,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "other phase (2 steps) 11s above a ~20s warm/cached floor",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "decomposition": {
+        "dominant_step": "Run uv run --locked --no-default-groups --group pre-commit pre-commit run --show-diff-on-failure --color=always --all-files + 1 more other step",
+        "dominant_category": "other",
+        "dominant_p50_s": 11.0,
+        "dominant_share": 0.579,
+        "redundant_ratio": null,
+        "job_p50_s": 19.0
+      },
+      "measured_evidence": {
+        "summary": "check `main` (19s) maps to job `main`; dominant step `Run uv run --locked --no-default-groups --group pre-commit pre-commit run --show-diff-on-failure --color=always --all-files + 1 more other step` (other) is 58% of the job. Redundant-work ratio (setup+build / payload) = None.",
+        "table": {
+          "headers": [
+            "Step",
+            "Category",
+            "p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`Run uv run --locked --no-default-groups --group pre-commit pre-commit run --show-diff-on-failure --color=always --all-files`",
+              "other",
+              "9s",
+              "47%"
+            ],
+            [
+              "`Run astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57`",
+              "other",
+              "2s",
+              "11%"
+            ],
+            [
+              "`Set up job`",
+              "setup",
+              "1s",
+              "5%"
+            ],
+            [
+              "`Run actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd`",
+              "checkout",
+              "1s",
+              "5%"
+            ],
+            [
+              "`Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405`",
+              "install",
+              "1s",
+              "5%"
+            ],
+            [
+              "`Run actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7`",
+              "install",
+              "1s",
+              "5%"
+            ]
+          ]
+        },
+        "note": "Decomposed from the sampled job's per-step timings. The dominant step is the addressable cost — attack it by category, don't declare the whole check inherent."
+      },
+      "workflow_run_share": 1.0,
+      "workflow_runs_30d": 39,
+      "pr_critical_path_s": 33.5,
+      "pr_critical_path_check": "Windows"
+    },
+    {
+      "id": "f7",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `PyPy`",
+      "workflow_file": ".github/workflows/tests.yaml",
+      "line": 0,
+      "affected_jobs": [
+        "PyPy"
+      ],
+      "workflow_activity": {
+        "runs_30d": 37,
+        "last_run": "2026-07-22T01:45:54Z",
+        "dormant": false
+      },
+      "evidence": "critical-path check `PyPy` (26s): dominant step `Run uv run --locked --no-default-groups --group dev tox run + 1 more other step` (other, 87% of job `PyPy`)",
+      "measured_signal": "critical-path check `PyPy` (26s): dominant step `Run uv run --locked --no-default-groups --group dev tox run + 1 more other step` (other, 87% of job `PyPy`)",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "other phase (2 steps) 30s above a ~20s warm/cached floor; no wall-clock saving — `Windows` (34s) is a slower concurrent check on a representative PR and gates the merge; this workflow's slowest check is only 26s, so shortening it doesn't move the developer's wait",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "decomposition": {
+        "dominant_step": "Run uv run --locked --no-default-groups --group dev tox run + 1 more other step",
+        "dominant_category": "other",
+        "dominant_p50_s": 30.5,
+        "dominant_share": 0.871,
+        "redundant_ratio": null,
+        "job_p50_s": 35.0
+      },
+      "measured_evidence": {
+        "summary": "check `PyPy` (26s) maps to job `PyPy`; dominant step `Run uv run --locked --no-default-groups --group dev tox run + 1 more other step` (other) is 87% of the job. Redundant-work ratio (setup+build / payload) = None.",
+        "table": {
+          "headers": [
+            "Step",
+            "Category",
+            "p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`Run uv run --locked --no-default-groups --group dev tox run`",
+              "other",
+              "17s",
+              "49%"
+            ],
+            [
+              "`Run astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39`",
+              "other",
+              "14s",
+              "39%"
+            ],
+            [
+              "`Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10`",
+              "checkout",
+              "2s",
+              "4%"
+            ],
+            [
+              "`Set up job`",
+              "setup",
+              "1s",
+              "3%"
+            ],
+            [
+              "`Post Run astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39`",
+              "post",
+              "1s",
+              "3%"
+            ],
+            [
+              "`Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405`",
+              "install",
+              "1s",
+              "3%"
+            ]
+          ]
+        },
+        "note": "Decomposed from the sampled job's per-step timings. The dominant step is the addressable cost — attack it by category, don't declare the whole check inherent."
+      },
+      "wall_clock_uncapped_p50_s": 10.5,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 10.5,
+          "to_s": 0.0,
+          "reason": "no wall-clock saving — `Windows` (34s) is a slower concurrent check on a representative PR and gates the merge; this workflow's slowest check is only 26s, so shortening it doesn't move the developer's wait"
+        }
+      ],
+      "workflow_run_share": 0.949,
+      "workflow_runs_30d": 37,
+      "pr_critical_path_s": 33.5,
+      "pr_critical_path_check": "Windows"
+    },
+    {
+      "id": "f8",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `3.14t`",
+      "workflow_file": ".github/workflows/tests.yaml",
+      "line": 0,
+      "affected_jobs": [
+        "3.14t"
+      ],
+      "workflow_activity": {
+        "runs_30d": 37,
+        "last_run": "2026-07-22T01:45:54Z",
+        "dormant": false
+      },
+      "evidence": "critical-path check `3.14t` (25s): dominant step `Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405` (install, 42% of job `3.14t`)",
+      "measured_signal": "critical-path check `3.14t` (25s): dominant step `Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405` (install, 42% of job `3.14t`)",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "install step 10s above a ~5s warm/cached floor; no wall-clock saving — `Windows` (34s) is a slower concurrent check on a representative PR and gates the merge; this workflow's slowest check is only 25s, so shortening it doesn't move the developer's wait",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "decomposition": {
+        "dominant_step": "Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+        "dominant_category": "install",
+        "dominant_p50_s": 10.0,
+        "dominant_share": 0.417,
+        "redundant_ratio": null,
+        "job_p50_s": 24.0
+      },
+      "measured_evidence": {
+        "summary": "check `3.14t` (25s) maps to job `3.14t`; dominant step `Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405` (install) is 42% of the job. Redundant-work ratio (setup+build / payload) = None.",
+        "table": {
+          "headers": [
+            "Step",
+            "Category",
+            "p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405`",
+              "install",
+              "10s",
+              "42%"
+            ],
+            [
+              "`Run uv run --locked --no-default-groups --group dev tox run`",
+              "other",
+              "6s",
+              "25%"
+            ],
+            [
+              "`Run astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39`",
+              "other",
+              "3s",
+              "12%"
+            ],
+            [
+              "`Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10`",
+              "checkout",
+              "2s",
+              "8%"
+            ],
+            [
+              "`Set up job`",
+              "setup",
+              "1s",
+              "4%"
+            ],
+            [
+              "`Post Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405`",
+              "post",
+              "1s",
+              "4%"
+            ]
+          ]
+        },
+        "note": "Decomposed from the sampled job's per-step timings. The dominant step is the addressable cost — attack it by category, don't declare the whole check inherent."
+      },
+      "wall_clock_uncapped_p50_s": 5.0,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 5.0,
+          "to_s": 0.0,
+          "reason": "no wall-clock saving — `Windows` (34s) is a slower concurrent check on a representative PR and gates the merge; this workflow's slowest check is only 25s, so shortening it doesn't move the developer's wait"
+        }
+      ],
+      "workflow_run_share": 0.949,
+      "workflow_runs_30d": 37,
+      "pr_critical_path_s": 33.5,
+      "pr_critical_path_check": "Windows"
+    },
+    {
+      "id": "f9",
+      "pattern": "OPT75",
+      "pattern_class": "structural",
+      "severity": "HIGH",
+      "title": "The long pole's time is one addressable step — speed it up or move it off the PR path — `3.9`",
+      "workflow_file": ".github/workflows/tests.yaml",
+      "line": 0,
+      "affected_jobs": [
+        "3.9"
+      ],
+      "workflow_activity": {
+        "runs_30d": 37,
+        "last_run": "2026-07-22T01:45:54Z",
+        "dormant": false
+      },
+      "evidence": "critical-path check `3.9` (24s): dominant step `Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405` (install, 55% of job `3.9`)",
+      "measured_signal": "critical-path check `3.9` (24s): dominant step `Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405` (install, 55% of job `3.9`)",
+      "fix_strategy": "decompose-inherent-cost-pole",
+      "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+      "wall_clock_p50_s": 0.0,
+      "runner_min_saving": null,
+      "tier": 2,
+      "realization": "none",
+      "size_note": "install step 12s above a ~5s warm/cached floor; no wall-clock saving — `Windows` (34s) is a slower concurrent check on a representative PR and gates the merge; this workflow's slowest check is only 24s, so shortening it doesn't move the developer's wait",
+      "structural": true,
+      "risk": "MEDIUM",
+      "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free",
+      "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked — the next-largest step becomes the target",
+      "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) — the candidate carries the risk of whichever specific lever its dominant category routes to",
+      "required_status": "unknown",
+      "decomposition": {
+        "dominant_step": "Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+        "dominant_category": "install",
+        "dominant_p50_s": 11.5,
+        "dominant_share": 0.548,
+        "redundant_ratio": null,
+        "job_p50_s": 21.0
+      },
+      "measured_evidence": {
+        "summary": "check `3.9` (24s) maps to job `3.9`; dominant step `Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405` (install) is 55% of the job. Redundant-work ratio (setup+build / payload) = None.",
+        "table": {
+          "headers": [
+            "Step",
+            "Category",
+            "p50",
+            "Share of job"
+          ],
+          "rows": [
+            [
+              "`Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405`",
+              "install",
+              "12s",
+              "55%"
+            ],
+            [
+              "`Run uv run --locked --no-default-groups --group dev tox run`",
+              "other",
+              "5s",
+              "24%"
+            ],
+            [
+              "`Run astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39`",
+              "other",
+              "2s",
+              "12%"
+            ],
+            [
+              "`Set up job`",
+              "setup",
+              "1s",
+              "5%"
+            ],
+            [
+              "`Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10`",
+              "checkout",
+              "1s",
+              "5%"
+            ]
+          ]
+        },
+        "note": "Decomposed from the sampled job's per-step timings. The dominant step is the addressable cost — attack it by category, don't declare the whole check inherent."
+      },
+      "wall_clock_uncapped_p50_s": 6.5,
+      "wall_clock_derivation": [
+        {
+          "bound": "measured-critical-path",
+          "from_s": 6.5,
+          "to_s": 0.0,
+          "reason": "no wall-clock saving — `Windows` (34s) is a slower concurrent check on a representative PR and gates the merge; this workflow's slowest check is only 24s, so shortening it doesn't move the developer's wait"
+        }
+      ],
+      "workflow_run_share": 0.949,
+      "workflow_runs_30d": 37,
+      "pr_critical_path_s": 33.5,
+      "pr_critical_path_check": "Windows"
+    }
+  ],
+  "scanned_workflows": 5,
+  "scan_incomplete": [],
+  "workflow_triggers": {
+    ".github/workflows/lock.yaml": [
+      "schedule"
+    ],
+    ".github/workflows/pre-commit.yaml": [
+      "pull_request",
+      "push"
+    ],
+    ".github/workflows/publish.yaml": [
+      "push"
+    ],
+    ".github/workflows/tests.yaml": [
+      "pull_request",
+      "push"
+    ],
+    ".github/workflows/zizmor.yaml": [
+      "pull_request",
+      "push"
+    ]
+  },
+  "workflow_trigger_conditionality": {
+    ".github/workflows/lock.yaml": "not_pr_triggered",
+    ".github/workflows/pre-commit.yaml": "unconditional",
+    ".github/workflows/publish.yaml": "not_pr_triggered",
+    ".github/workflows/tests.yaml": "path_scoped",
+    ".github/workflows/zizmor.yaml": "path_scoped"
+  },
+  "workflow_call_graph": {},
+  "workflow_job_graph": {
+    ".github/workflows/lock.yaml": {
+      "lock": {
+        "name": "lock",
+        "needs": [],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/pre-commit.yaml": {
+      "main": {
+        "name": "main",
+        "needs": [],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/publish.yaml": {
+      "build": {
+        "name": "build",
+        "needs": [],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      },
+      "create-release": {
+        "name": "create-release",
+        "needs": [
+          "build"
+        ],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      },
+      "publish-pypi": {
+        "name": "publish-pypi",
+        "needs": [
+          "build"
+        ],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/tests.yaml": {
+      "tests": {
+        "name": "${{ matrix.name || matrix.python }}",
+        "needs": [],
+        "reusable": false,
+        "matrix": true,
+        "timeout_minutes": false
+      },
+      "typing": {
+        "name": "typing",
+        "needs": [],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    },
+    ".github/workflows/zizmor.yaml": {
+      "zizmor": {
+        "name": "zizmor",
+        "needs": [],
+        "reusable": false,
+        "matrix": false,
+        "timeout_minutes": false
+      }
+    }
+  },
+  "catalog_patterns_total": 73,
+  "catalog_patterns_with_detector": 38,
+  "catalog_patterns_without_detector": [
+    "OPT11",
+    "OPT13",
+    "OPT15",
+    "OPT18",
+    "OPT22",
+    "OPT24",
+    "OPT30",
+    "OPT34",
+    "OPT38",
+    "OPT4",
+    "OPT44",
+    "OPT54",
+    "OPT56",
+    "OPT61",
+    "OPT68",
+    "OPT69",
+    "OPT8"
+  ],
+  "catalog_structural_patterns_without_detector": [
+    "OPT74"
+  ],
+  "timings": {
+    "static_scan_s": 0.08,
+    "run_start_epoch": 1784933855.6648054,
+    "gh_timing_s": 41.55,
+    "scripted_end_epoch": 1784933897.601,
+    "scripted_total_s": 42.04
+  },
+  "scanned_at": "2026-07-24T22:57:35.743876+00:00",
+  "skill_commit_sha": "2f048be",
+  "commit_sha": "36e4a824f340fdee7ed50937ba8e7f6bc7d17f81",
+  "repo": "pallets/flask",
+  "repo_visibility": "public",
+  "required_checks": null,
+  "required_checks_complete": false,
+  "pr_critical_path": {
+    "sampled_pr_count": 20,
+    "config_eras": [
+      {
+        "boundary": "2026-04-05T18:24:48Z",
+        "pre_count": 11,
+        "post_count": 9,
+        "sufficiency_min": 6,
+        "kept_era": "post",
+        "rule": "post_only",
+        "workflow_file": ".github/workflows/tests.yaml",
+        "content_era_by_sha": {
+          "29cc2a3e8ecdfbf9b8546a589e3a9acfbda08095": "post",
+          "4fdc3cb3d4020bd8c5afa250893a554b5ec39844": "post",
+          "0a3a12aec59d320336df1ea41afe86c903105708": "post",
+          "330fc072721f4b0e8bb9f10e268ea31a7e5b82d3": "post",
+          "5b9396a1977faf8f795c59f5ce7a0e91091a3c02": "post",
+          "ae3a8d218e326576078be420831878cfafb57f05": "post",
+          "258d68b6ff5e2244386540f48b48bab90d6ab827": "post"
+        },
+        "classification": {
+          "content": 7,
+          "timestamp": 13,
+          "boundary_blob_resolved": true
+        },
+        "kept_checks": [
+          "3.10",
+          "3.11",
+          "3.12",
+          "3.13",
+          "3.14",
+          "3.14t",
+          "3.9",
+          "Development Versions",
+          "Mac",
+          "Minimum Versions",
+          "PyPy",
+          "Windows",
+          "typing"
+        ],
+        "other_era_checks": [],
+        "developer_event": true,
+        "spine_relevant": true
+      },
+      {
+        "boundary": "2026-04-03T22:59:16Z",
+        "pre_count": 4,
+        "post_count": 6,
+        "sufficiency_min": 6,
+        "kept_era": "post",
+        "rule": "post_only",
+        "workflow_file": ".github/workflows/zizmor.yaml",
+        "content_era_by_sha": {
+          "954f5684e4841aad84a8eec7ace7b81a0d3f6831": "post",
+          "6f4e80d1efc160d173a9b613ce7f3fa4ec6e222c": "post",
+          "e4e4bf6543ac1f132afddb1ffd0bf02bea4c93f7": "post",
+          "b21425d6df207fec0c47e9563faa10a2819984ca": "post",
+          "83dbcb222a65a87741c9d96bb183f34528149269": "post",
+          "4cae5d8e411b1e69949d8fae669afeacbd3e5908": "pre",
+          "a197702e2cbcdd43c0d09296b3cea02efe16e407": "pre"
+        },
+        "classification": {
+          "content": 7,
+          "timestamp": 3,
+          "boundary_blob_resolved": true
+        },
+        "kept_checks": [],
+        "other_era_checks": [],
+        "developer_event": true,
+        "spine_relevant": false
+      }
+    ],
+    "sample_target": 20,
+    "sample_complete": true,
+    "sample_fetch_failures": 0,
+    "sample_fetched": 20,
+    "required_suite_scoped": false,
+    "required_suite_unsatisfiable": false,
+    "required_checks_unobservable": [],
+    "critical_path_check": "Windows",
+    "critical_path_s": 33.5,
+    "check_present_n_pr": 20,
+    "checks": [
+      {
+        "name": "Windows",
+        "p50_s": 33.5,
+        "present_on": 18,
+        "pole_n": 18,
+        "workflow_file": ".github/workflows/tests.yaml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "main",
+        "p50_s": 19.0,
+        "present_on": 20,
+        "pole_n": 2,
+        "workflow_file": ".github/workflows/pre-commit.yaml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "PyPy",
+        "p50_s": 26.5,
+        "present_on": 18,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/tests.yaml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "3.14t",
+        "p50_s": 25.0,
+        "present_on": 18,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/tests.yaml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "3.9",
+        "p50_s": 23.5,
+        "present_on": 4,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/tests.yaml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "Mac",
+        "p50_s": 20.0,
+        "present_on": 18,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/tests.yaml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "3.14",
+        "p50_s": 18.0,
+        "present_on": 18,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/tests.yaml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "Development Versions",
+        "p50_s": 17.5,
+        "present_on": 18,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/tests.yaml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "typing",
+        "p50_s": 17.5,
+        "present_on": 18,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/tests.yaml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "Minimum Versions",
+        "p50_s": 17.0,
+        "present_on": 18,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/tests.yaml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "3.13",
+        "p50_s": 17.0,
+        "present_on": 18,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/tests.yaml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "3.12",
+        "p50_s": 15.5,
+        "present_on": 18,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/tests.yaml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "3.10",
+        "p50_s": 15.0,
+        "present_on": 18,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/tests.yaml",
+        "timing_source": "workflow_jobs"
+      },
+      {
+        "name": "3.11",
+        "p50_s": 11.5,
+        "present_on": 18,
+        "pole_n": 0,
+        "workflow_file": ".github/workflows/tests.yaml",
+        "timing_source": "workflow_jobs"
+      }
+    ],
+    "population_weighted": false,
+    "populations_n": 0,
+    "chain_facts": [
+      {
+        "sha": "664cb2c437402683137dd7f50a31ae70e477e974",
+        "chain": [
+          "main"
+        ],
+        "member_spans_s": {
+          "main": 19.0
+        },
+        "chain_s": 19.0,
+        "co_longest_n": 1,
+        "runner_up_s": 0.0,
+        "chain_win_s": 19.0,
+        "fallback": null,
+        "makespan_s": 19.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "ef69acd76b592353eaa5ae3fef3a76da9b2c431a",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 34.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "ce2c53a2e6d39e3de2f0e9e2ba424535f91c7197",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 32.0
+        },
+        "chain_s": 32.0,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 5.5,
+        "fallback": null,
+        "makespan_s": 32.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "c61252cda7adf56230f4fe6de4a28a70e5fb3cf2",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 36.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "20286f018914643d27a54dddfdb1d3de99a07c04",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 34.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "6580ef922c92ec98c341850ddf392b7ef0e862e1",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 37.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "f1946be8e487d2029b39198fc2ee7e3046ce8a15",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 36.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "67d2e8f7e018dc7c64f6fccc1fb420b7f7dd0164",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 33.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "bcad8d2a467919c21b99eda27d862d1fd8db3b3a",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 31.0
+        },
+        "chain_s": 31.0,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 4.5,
+        "fallback": null,
+        "makespan_s": 32.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "049d1e8e3290e871700a5fd4de4a088533e05d80",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 34.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "a43b0e460fc268a569db3363792a5a1c191d3382",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 33.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "17cadf7e1d683a91e35d4d3c92b45cd848563c4f",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 34.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "c0c2bc26ded542b40a479487a9272c1ced66f2e0",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 33.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "8816f161cfe40e782a322f68821ff919e3faf695",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 34.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "60ec3ed3d7a573a8bfb39fb8d053b424bfcfee49",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 35.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "460364fd42b401676c52cc6f276b0bf901aa9738",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 34.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "1c317d21475ee82e56ae4813fb8a7c2c3f3c60b6",
+        "chain": [
+          "main"
+        ],
+        "member_spans_s": {
+          "main": 17.0
+        },
+        "chain_s": 17.0,
+        "co_longest_n": 1,
+        "runner_up_s": 0.0,
+        "chain_win_s": 17.0,
+        "fallback": null,
+        "makespan_s": 17.0,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "29cc2a3e8ecdfbf9b8546a589e3a9acfbda08095",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 34.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "36679652c130c4f3ea6590e9f216639eb981f7a6",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 34.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      },
+      {
+        "sha": "b77ac14eb9247f8ec8d5644b5ee57c180692134c",
+        "chain": [
+          "Windows"
+        ],
+        "member_spans_s": {
+          "Windows": 33.5
+        },
+        "chain_s": 33.5,
+        "co_longest_n": 1,
+        "runner_up_s": 26.5,
+        "chain_win_s": 7.0,
+        "fallback": null,
+        "makespan_s": 35.5,
+        "makespan_basis": "latest-attempt check-run intervals, span-capped per check"
+      }
+    ],
+    "chain_summary": {
+      "n": 20,
+      "chain_p50_s": 33.5,
+      "modal_chain": [
+        "Windows"
+      ],
+      "modal_n": 18,
+      "runner_up_p50_s": 26.5,
+      "chain_win_p50_s": 7.0,
+      "makespan_p50_s": 34.5,
+      "divergence_pct": -2.9
+    },
+    "populations": [],
+    "dropped_non_pr_checks": [],
+    "dropped_non_required_checks": [],
+    "spine_required_scoped": false,
+    "fileless_status_checks": [],
+    "all_checks_fileless": false,
+    "poles": [
+      {
+        "check": "Windows",
+        "p50_s": 33.5,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job": "Windows",
+        "dominant_step": "Run uv run --locked --no-default-groups --group dev tox run + 1 more other step",
+        "dominant_category": "other",
+        "dominant_p50_s": 28.0,
+        "dominant_share": 0.667,
+        "job_p50_s": 42.0,
+        "steps": [
+          {
+            "step": "Run uv run --locked --no-default-groups --group dev tox run",
+            "category": "other",
+            "p50_s": 14.5
+          },
+          {
+            "step": "Run astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39",
+            "category": "other",
+            "p50_s": 13.5
+          },
+          {
+            "step": "Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+            "category": "checkout",
+            "p50_s": 8.5
+          },
+          {
+            "step": "Post Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+            "category": "post",
+            "p50_s": 2.5
+          },
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Run astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39",
+            "category": "post",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+            "category": "install",
+            "p50_s": 1.0
+          }
+        ],
+        "repr_run_created_at": "2026-04-07T00:18:49Z",
+        "repr_run_head_sha": "ae3a8d218e326576078be420831878cfafb57f05",
+        "repr_run_era": "post",
+        "repr_run_era_basis": "content"
+      },
+      {
+        "check": "main",
+        "p50_s": 19.0,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/pre-commit.yaml",
+        "job": "main",
+        "dominant_step": "Run uv run --locked --no-default-groups --group pre-commit pre-commit run --show-diff-on-failure --color=always --all-files + 1 more other step",
+        "dominant_category": "other",
+        "dominant_p50_s": 11.0,
+        "dominant_share": 0.579,
+        "job_p50_s": 19.0,
+        "steps": [
+          {
+            "step": "Run uv run --locked --no-default-groups --group pre-commit pre-commit run --show-diff-on-failure --color=always --all-files",
+            "category": "other",
+            "p50_s": 9.0
+          },
+          {
+            "step": "Run astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57",
+            "category": "other",
+            "p50_s": 2.0
+          },
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Run actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+            "category": "checkout",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+            "category": "install",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Run actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7",
+            "category": "install",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+            "category": "post",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Run astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57",
+            "category": "post",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Run actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+            "category": "post",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Run actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7",
+            "category": "post",
+            "p50_s": 1.0
+          }
+        ]
+      },
+      {
+        "check": "PyPy",
+        "p50_s": 26.5,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job": "PyPy",
+        "dominant_step": "Run uv run --locked --no-default-groups --group dev tox run + 1 more other step",
+        "dominant_category": "other",
+        "dominant_p50_s": 30.5,
+        "dominant_share": 0.871,
+        "job_p50_s": 35.0,
+        "steps": [
+          {
+            "step": "Run uv run --locked --no-default-groups --group dev tox run",
+            "category": "other",
+            "p50_s": 17.0
+          },
+          {
+            "step": "Run astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39",
+            "category": "other",
+            "p50_s": 13.5
+          },
+          {
+            "step": "Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+            "category": "checkout",
+            "p50_s": 1.5
+          },
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Run astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39",
+            "category": "post",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+            "category": "install",
+            "p50_s": 1.0
+          }
+        ],
+        "repr_run_created_at": "2026-04-07T00:18:49Z",
+        "repr_run_head_sha": "ae3a8d218e326576078be420831878cfafb57f05",
+        "repr_run_era": "post",
+        "repr_run_era_basis": "content"
+      },
+      {
+        "check": "3.14t",
+        "p50_s": 25.0,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job": "3.14t",
+        "dominant_step": "Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+        "dominant_category": "install",
+        "dominant_p50_s": 10.0,
+        "dominant_share": 0.417,
+        "job_p50_s": 24.0,
+        "steps": [
+          {
+            "step": "Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+            "category": "install",
+            "p50_s": 10.0
+          },
+          {
+            "step": "Run uv run --locked --no-default-groups --group dev tox run",
+            "category": "other",
+            "p50_s": 6.0
+          },
+          {
+            "step": "Run astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39",
+            "category": "other",
+            "p50_s": 3.0
+          },
+          {
+            "step": "Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+            "category": "checkout",
+            "p50_s": 2.0
+          },
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+            "category": "post",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Post Run astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39",
+            "category": "post",
+            "p50_s": 1.0
+          }
+        ],
+        "repr_run_created_at": "2026-04-07T00:18:49Z",
+        "repr_run_head_sha": "ae3a8d218e326576078be420831878cfafb57f05",
+        "repr_run_era": "post",
+        "repr_run_era_basis": "content"
+      },
+      {
+        "check": "3.9",
+        "p50_s": 23.5,
+        "timing_source": "workflow_jobs",
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job": "3.9",
+        "dominant_step": "Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+        "dominant_category": "install",
+        "dominant_p50_s": 11.5,
+        "dominant_share": 0.548,
+        "job_p50_s": 21.0,
+        "steps": [
+          {
+            "step": "Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+            "category": "install",
+            "p50_s": 11.5
+          },
+          {
+            "step": "Run uv run --locked --no-default-groups --group dev tox run",
+            "category": "other",
+            "p50_s": 5.0
+          },
+          {
+            "step": "Run astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39",
+            "category": "other",
+            "p50_s": 2.5
+          },
+          {
+            "step": "Set up job",
+            "category": "setup",
+            "p50_s": 1.0
+          },
+          {
+            "step": "Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+            "category": "checkout",
+            "p50_s": 1.0
+          }
+        ],
+        "repr_run_created_at": "2026-07-22T01:39:00Z",
+        "repr_run_head_sha": "c61252cda7adf56230f4fe6de4a28a70e5fb3cf2",
+        "repr_run_era": "post",
+        "repr_run_era_basis": "timestamp"
+      }
+    ],
+    "provenance": "unresolved",
+    "required_check_conditionality": {}
+  },
+  "structural_analysis_top_n": 5,
+  "data_bundle": {
+    "logs_dir": "/tmp/claude-1000/-home-nathan/ffd165c6-004a-4ce4-87e4-97638c611c02/scratchpad/ci-speedup-run/flask-findings.data",
+    "logs": [
+      {
+        "job": "main",
+        "check": "main",
+        "job_id": 89258198911,
+        "file": "main-89258198911.log",
+        "steps_file": "main-89258198911.steps.json",
+        "mag_file": "main-89258198911.mag.json",
+        "html_url": "https://github.com/pallets/flask/actions/runs/30022388256/job/89258198911",
+        "workflow_file": ".github/workflows/pre-commit.yaml",
+        "duration_s": 19.0,
+        "selected": "nearest-p50",
+        "sample": [
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/29901992877/job/88864601383",
+            "duration_s": 15.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/29711531697/job/88256075312",
+            "duration_s": 16.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/29134187092/job/86495170522",
+            "duration_s": 16.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/29883963253/job/88810559808",
+            "duration_s": 17.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/29050162061/job/86228539568",
+            "duration_s": 17.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/28882148964/job/85672899278",
+            "duration_s": 17.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/28640068500/job/84934161940",
+            "duration_s": 17.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/28604851866/job/84822278703",
+            "duration_s": 17.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/28604075121/job/84819588889",
+            "duration_s": 18.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/30022388256/job/89258198911",
+            "duration_s": 19.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/29090241605/job/86353583686",
+            "duration_s": 19.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/28695644614/job/85104619695",
+            "duration_s": 19.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/29053114059/job/86238335745",
+            "duration_s": 21.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/28695563921/job/85104415397",
+            "duration_s": 21.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/28604968174/job/84822683996",
+            "duration_s": 21.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/29345657578/job/87128546089",
+            "duration_s": 23.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/29325059710/job/87059289148",
+            "duration_s": 23.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/29776273012/job/88466272852",
+            "duration_s": 24.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/28604659222/job/84821616397",
+            "duration_s": 24.0
+          },
+          {
+            "html_url": "https://github.com/pallets/flask/actions/runs/29881037107/job/88801756740",
+            "duration_s": 27.0
+          }
+        ]
+      }
+    ]
+  },
+  "data_sources": {
+    "tiers_run": [
+      "gh-timing",
+      "job-logs"
+    ],
+    "gh_available": true,
+    "workflows_analyzed": 5,
+    "runs_sampled": 47,
+    "jobs_sampled": 152,
+    "jobs_fetch_failures": 0,
+    "shallow_runs": 10,
+    "max_runs": 20,
+    "shallow_capped": true,
+    "capped_workflows": 2,
+    "pole_candidates": 3,
+    "deepened_workflows": 1,
+    "deepen_converged": true,
+    "triaged_fast_workflows": [],
+    "triaged_fast_count": 0,
+    "recovered_fast_workflows": [],
+    "recovered_fast_count": 0,
+    "cost_spine_triaged_workflows_included": [],
+    "cost_spine_triaged_workflow_count": 0,
+    "cost_spine_triaged_runs_sampled": 0,
+    "cost_spine_triaged_jobs_sampled": 0,
+    "logs_fetched": 1,
+    "workflow_yaml_source": {
+      "checkout": 5,
+      "api": 0
+    },
+    "workflow_yaml_skew": null,
+    "detectors_skipped": [],
+    "gh_query_count": 320,
+    "gh_error_count": 0,
+    "sampled_runs_created_before": null,
+    "run_list_fetch_failures": [],
+    "job_fetch_failures": [],
+    "partial_reason": null,
+    "partial_kind": null,
+    "cache_dist_probe": {
+      "cache_poles": 0,
+      "push_logs_fetched": 0,
+      "pr_logs_reused": 0
+    },
+    "cost_spine_job_fetch_failures": 0,
+    "cost_deepen_candidate_workflows": [
+      ".github/workflows/tests.yaml",
+      ".github/workflows/pre-commit.yaml",
+      ".github/workflows/lock.yaml"
+    ],
+    "cost_deepen_candidate_count": 3,
+    "cost_deepened_workflows": [
+      ".github/workflows/lock.yaml"
+    ],
+    "cost_deepened_workflow_count": 1,
+    "cost_deepen_runs_sampled": 20,
+    "cost_deepen_jobs_sampled": 130,
+    "full_depth_workflows": [
+      ".github/workflows/pre-commit.yaml"
+    ],
+    "full_depth_workflow_count": 1,
+    "shallow_remaining_workflows": [
+      ".github/workflows/lock.yaml"
+    ],
+    "shallow_remaining_workflow_count": 1,
+    "cost_spine_full_depth_workflows": [
+      ".github/workflows/lock.yaml",
+      ".github/workflows/pre-commit.yaml"
+    ],
+    "cost_spine_full_depth_workflow_count": 2,
+    "cost_spine_shallow_workflows": [
+      ".github/workflows/tests.yaml"
+    ],
+    "cost_spine_shallow_workflow_count": 1,
+    "prefetch_unconsumed": 0,
+    "attempt_stats": {
+      "scope": "pr-event runs of gating workflows (all-status slice)",
+      "gating_workflows": [
+        ".github/workflows/pre-commit.yaml",
+        ".github/workflows/tests.yaml"
+      ],
+      "workflows_missing": [],
+      "pr_event_runs": 176,
+      "pr_event_runs_multi_attempt": 0,
+      "prior_attempt_gating_minutes": 0.0,
+      "sampled_prs": 20
+    }
+  },
+  "per_workflow_timing": {
+    ".github/workflows/lock.yaml": {
+      "long_pole_job": "lock",
+      "long_pole_p50": 6.5,
+      "long_pole_p95": 7.0,
+      "floor_p50": 0.0,
+      "job_p50": {
+        "lock": 6.5
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "lock": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "all-events",
+      "events": [
+        "schedule"
+      ]
+    },
+    ".github/workflows/pre-commit.yaml": {
+      "long_pole_job": "main",
+      "long_pole_p50": 19.0,
+      "long_pole_p95": 24.150000000000002,
+      "floor_p50": 0.0,
+      "job_p50": {
+        "main": 19.0
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "main": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "pull_request",
+      "events": [
+        "pull_request"
+      ]
+    },
+    ".github/workflows/publish.yaml": {
+      "long_pole_job": "publish-pypi",
+      "long_pole_p50": 20.0,
+      "long_pole_p95": 20.9,
+      "floor_p50": 9.5,
+      "job_p50": {
+        "build": 9.5,
+        "publish-pypi": 20.0,
+        "create-release": 4.5
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "build": "ubuntu-latest",
+        "publish-pypi": "ubuntu-latest",
+        "create-release": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "all-events",
+      "events": [
+        "push"
+      ]
+    },
+    ".github/workflows/tests.yaml": {
+      "long_pole_job": "Windows",
+      "long_pole_p50": 33.5,
+      "long_pole_p95": 66.0,
+      "floor_p50": 26.5,
+      "job_p50": {
+        "typing": 17.5,
+        "PyPy": 26.5,
+        "3.14": 18.0,
+        "3.12": 15.5,
+        "Minimum Versions": 17.0,
+        "3.9": 23.5,
+        "3.13": 17.0,
+        "Windows": 33.5,
+        "3.11": 11.5,
+        "3.10": 15.0,
+        "Development Versions": 17.5,
+        "3.14t": 25.0,
+        "Mac": 20.0
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "typing": "ubuntu-latest",
+        "PyPy": "ubuntu-latest",
+        "3.14": "ubuntu-latest",
+        "3.12": "ubuntu-latest",
+        "Minimum Versions": "ubuntu-latest",
+        "3.9": "ubuntu-latest",
+        "3.13": "ubuntu-latest",
+        "Windows": "windows-latest",
+        "3.11": "ubuntu-latest",
+        "3.10": "ubuntu-latest",
+        "Development Versions": "ubuntu-latest",
+        "3.14t": "ubuntu-latest",
+        "Mac": "macos-latest"
+      },
+      "runner_scope": "windows-latest",
+      "event_scope": "pull_request",
+      "events": [
+        "pull_request",
+        "push"
+      ]
+    },
+    ".github/workflows/zizmor.yaml": {
+      "long_pole_job": "zizmor",
+      "long_pole_p50": 11.0,
+      "long_pole_p95": 11.0,
+      "floor_p50": 0.0,
+      "job_p50": {
+        "zizmor": 11.0
+      },
+      "job_bimodal": {},
+      "job_runner": {
+        "zizmor": "ubuntu-latest"
+      },
+      "runner_scope": "ubuntu-latest",
+      "event_scope": "pull_request",
+      "events": [
+        "pull_request",
+        "push"
+      ]
+    }
+  },
+  "runner_minute_spine": {
+    "schema_version": 1,
+    "source": "jobs_api_sampled_runs",
+    "coverage_scope": "sampled_workflows_in_play_with_job_data",
+    "complete_repo_coverage": true,
+    "render_ready": true,
+    "render_blocker": "",
+    "extrapolation_basis": "sampled_job_occurrence_fraction_x_all_status_30d_workflow_volume",
+    "attempt_coverage": "latest_and_prior",
+    "prior_attempts_included": false,
+    "latest_attempt_row_count": 19,
+    "prior_attempt_row_count": 0,
+    "repo_visibility": "public",
+    "workflow_coverage": {
+      "scope": "positive_30d_workflows_in_play",
+      "workflow_count": 3,
+      "row_workflow_count": 3,
+      "omitted_workflows": [],
+      "unknown_volume_workflows": [],
+      "triaged_workflows_included": [],
+      "job_fetch_failures": 0
+    },
+    "rows": [
+      {
+        "workflow_file": ".github/workflows/lock.yaml",
+        "job_name": "lock",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-05-08T00:26:09Z",
+        "sample_window_end": "2026-05-27T00:31:44Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "sampled_positive_duration_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 30,
+        "effective_monthly_job_volume": 30.0,
+        "mean_sampled_compute_seconds": 6.4,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 3.2,
+        "billable_equiv_min_per_month": 30.0,
+        "share_of_all_row_total": 0.057
+      },
+      {
+        "workflow_file": ".github/workflows/pre-commit.yaml",
+        "job_name": "main",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-07-02T16:03:09Z",
+        "sample_window_end": "2026-07-23T15:50:28Z",
+        "sampled_workflow_run_count": 20,
+        "sampled_job_occurrence_count": 20,
+        "sampled_positive_duration_occurrence_count": 20,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 39,
+        "effective_monthly_job_volume": 39.0,
+        "mean_sampled_compute_seconds": 19.55,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 12.708,
+        "billable_equiv_min_per_month": 39.0,
+        "share_of_all_row_total": 0.075
+      },
+      {
+        "workflow_file": ".github/workflows/publish.yaml",
+        "job_name": "build",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2025-08-19T20:58:05Z",
+        "sample_window_end": "2026-02-19T04:56:57Z",
+        "sampled_workflow_run_count": 2,
+        "sampled_job_occurrence_count": 2,
+        "sampled_positive_duration_occurrence_count": 2,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 0,
+        "effective_monthly_job_volume": 0.0,
+        "mean_sampled_compute_seconds": 9.5,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 0.0,
+        "billable_equiv_min_per_month": 0.0,
+        "share_of_all_row_total": 0.0
+      },
+      {
+        "workflow_file": ".github/workflows/publish.yaml",
+        "job_name": "create-release",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2025-08-19T20:58:05Z",
+        "sample_window_end": "2026-02-19T04:56:57Z",
+        "sampled_workflow_run_count": 2,
+        "sampled_job_occurrence_count": 2,
+        "sampled_positive_duration_occurrence_count": 2,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 0,
+        "effective_monthly_job_volume": 0.0,
+        "mean_sampled_compute_seconds": 4.5,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 0.0,
+        "billable_equiv_min_per_month": 0.0,
+        "share_of_all_row_total": 0.0
+      },
+      {
+        "workflow_file": ".github/workflows/publish.yaml",
+        "job_name": "publish-pypi",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2025-08-19T20:58:05Z",
+        "sample_window_end": "2026-02-19T04:56:57Z",
+        "sampled_workflow_run_count": 2,
+        "sampled_job_occurrence_count": 2,
+        "sampled_positive_duration_occurrence_count": 2,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 0,
+        "effective_monthly_job_volume": 0.0,
+        "mean_sampled_compute_seconds": 20.0,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 0.0,
+        "billable_equiv_min_per_month": 0.0,
+        "share_of_all_row_total": 0.0
+      },
+      {
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job_name": "3.10",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-18T11:24:01Z",
+        "sample_window_end": "2026-07-22T01:45:19Z",
+        "sampled_workflow_run_count": 19,
+        "sampled_job_occurrence_count": 19,
+        "sampled_positive_duration_occurrence_count": 19,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 37,
+        "effective_monthly_job_volume": 37.0,
+        "mean_sampled_compute_seconds": 15.105,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 9.315,
+        "billable_equiv_min_per_month": 37.0,
+        "share_of_all_row_total": 0.071
+      },
+      {
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job_name": "3.11",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-18T11:24:01Z",
+        "sample_window_end": "2026-07-22T01:45:19Z",
+        "sampled_workflow_run_count": 19,
+        "sampled_job_occurrence_count": 19,
+        "sampled_positive_duration_occurrence_count": 19,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 37,
+        "effective_monthly_job_volume": 37.0,
+        "mean_sampled_compute_seconds": 14.737,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 9.088,
+        "billable_equiv_min_per_month": 37.0,
+        "share_of_all_row_total": 0.071
+      },
+      {
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job_name": "3.12",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-18T11:24:01Z",
+        "sample_window_end": "2026-07-22T01:45:19Z",
+        "sampled_workflow_run_count": 19,
+        "sampled_job_occurrence_count": 19,
+        "sampled_positive_duration_occurrence_count": 19,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 37,
+        "effective_monthly_job_volume": 37.0,
+        "mean_sampled_compute_seconds": 16.053,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 9.899,
+        "billable_equiv_min_per_month": 37.0,
+        "share_of_all_row_total": 0.071
+      },
+      {
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job_name": "3.13",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-18T11:24:01Z",
+        "sample_window_end": "2026-07-22T01:45:19Z",
+        "sampled_workflow_run_count": 19,
+        "sampled_job_occurrence_count": 19,
+        "sampled_positive_duration_occurrence_count": 19,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 37,
+        "effective_monthly_job_volume": 37.0,
+        "mean_sampled_compute_seconds": 16.684,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 10.288,
+        "billable_equiv_min_per_month": 37.0,
+        "share_of_all_row_total": 0.071
+      },
+      {
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job_name": "3.14",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-18T11:24:01Z",
+        "sample_window_end": "2026-07-22T01:45:19Z",
+        "sampled_workflow_run_count": 19,
+        "sampled_job_occurrence_count": 19,
+        "sampled_positive_duration_occurrence_count": 19,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 37,
+        "effective_monthly_job_volume": 37.0,
+        "mean_sampled_compute_seconds": 17.158,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 10.581,
+        "billable_equiv_min_per_month": 37.0,
+        "share_of_all_row_total": 0.071
+      },
+      {
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job_name": "3.14t",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-18T11:24:01Z",
+        "sample_window_end": "2026-07-22T01:45:19Z",
+        "sampled_workflow_run_count": 19,
+        "sampled_job_occurrence_count": 19,
+        "sampled_positive_duration_occurrence_count": 19,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 37,
+        "effective_monthly_job_volume": 37.0,
+        "mean_sampled_compute_seconds": 24.895,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 15.352,
+        "billable_equiv_min_per_month": 37.0,
+        "share_of_all_row_total": 0.071
+      },
+      {
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job_name": "3.9",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-07-22T01:39:00Z",
+        "sample_window_end": "2026-07-22T01:45:19Z",
+        "sampled_workflow_run_count": 19,
+        "sampled_job_occurrence_count": 2,
+        "sampled_positive_duration_occurrence_count": 2,
+        "occurrence_fraction": 0.105,
+        "workflow_30d_volume": 37,
+        "effective_monthly_job_volume": 3.895,
+        "mean_sampled_compute_seconds": 23.5,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 1.525,
+        "billable_equiv_min_per_month": 3.895,
+        "share_of_all_row_total": 0.007
+      },
+      {
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job_name": "Development Versions",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-18T11:24:01Z",
+        "sample_window_end": "2026-07-22T01:45:19Z",
+        "sampled_workflow_run_count": 19,
+        "sampled_job_occurrence_count": 19,
+        "sampled_positive_duration_occurrence_count": 19,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 37,
+        "effective_monthly_job_volume": 37.0,
+        "mean_sampled_compute_seconds": 18.947,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 11.684,
+        "billable_equiv_min_per_month": 37.0,
+        "share_of_all_row_total": 0.071
+      },
+      {
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job_name": "Mac",
+        "runner_label": "macos-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-18T11:24:01Z",
+        "sample_window_end": "2026-07-22T01:45:19Z",
+        "sampled_workflow_run_count": 19,
+        "sampled_job_occurrence_count": 19,
+        "sampled_positive_duration_occurrence_count": 19,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 37,
+        "effective_monthly_job_volume": 37.0,
+        "mean_sampled_compute_seconds": 22.053,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 13.599,
+        "billable_equiv_min_per_month": 37.0,
+        "share_of_all_row_total": 0.071
+      },
+      {
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job_name": "Minimum Versions",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-18T11:24:01Z",
+        "sample_window_end": "2026-07-22T01:45:19Z",
+        "sampled_workflow_run_count": 19,
+        "sampled_job_occurrence_count": 19,
+        "sampled_positive_duration_occurrence_count": 19,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 37,
+        "effective_monthly_job_volume": 37.0,
+        "mean_sampled_compute_seconds": 19.263,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 11.879,
+        "billable_equiv_min_per_month": 37.0,
+        "share_of_all_row_total": 0.071
+      },
+      {
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job_name": "PyPy",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-18T11:24:01Z",
+        "sample_window_end": "2026-07-22T01:45:19Z",
+        "sampled_workflow_run_count": 19,
+        "sampled_job_occurrence_count": 19,
+        "sampled_positive_duration_occurrence_count": 19,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 37,
+        "effective_monthly_job_volume": 37.0,
+        "mean_sampled_compute_seconds": 33.211,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 20.48,
+        "billable_equiv_min_per_month": 37.0,
+        "share_of_all_row_total": 0.071
+      },
+      {
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job_name": "Windows",
+        "runner_label": "windows-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-18T11:24:01Z",
+        "sample_window_end": "2026-07-22T01:45:19Z",
+        "sampled_workflow_run_count": 19,
+        "sampled_job_occurrence_count": 19,
+        "sampled_positive_duration_occurrence_count": 19,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 37,
+        "effective_monthly_job_volume": 37.0,
+        "mean_sampled_compute_seconds": 43.211,
+        "mean_sampled_billable_equiv_minutes": 1.158,
+        "raw_compute_runner_min_per_month": 26.647,
+        "billable_equiv_min_per_month": 42.846,
+        "share_of_all_row_total": 0.082
+      },
+      {
+        "workflow_file": ".github/workflows/tests.yaml",
+        "job_name": "typing",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-02-18T11:24:01Z",
+        "sample_window_end": "2026-07-22T01:45:19Z",
+        "sampled_workflow_run_count": 19,
+        "sampled_job_occurrence_count": 19,
+        "sampled_positive_duration_occurrence_count": 19,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 37,
+        "effective_monthly_job_volume": 37.0,
+        "mean_sampled_compute_seconds": 21.0,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 12.95,
+        "billable_equiv_min_per_month": 37.0,
+        "share_of_all_row_total": 0.071
+      },
+      {
+        "workflow_file": ".github/workflows/zizmor.yaml",
+        "job_name": "zizmor",
+        "runner_label": "ubuntu-latest",
+        "event_scope": "all-events",
+        "status_filter": "success",
+        "attempt_filter": "latest",
+        "volume_filter": "all-status",
+        "sample_window_start": "2026-04-03T22:59:40Z",
+        "sample_window_end": "2026-06-10T18:03:33Z",
+        "sampled_workflow_run_count": 6,
+        "sampled_job_occurrence_count": 6,
+        "sampled_positive_duration_occurrence_count": 6,
+        "occurrence_fraction": 1.0,
+        "workflow_30d_volume": 0,
+        "effective_monthly_job_volume": 0.0,
+        "mean_sampled_compute_seconds": 8.833,
+        "mean_sampled_billable_equiv_minutes": 1.0,
+        "raw_compute_runner_min_per_month": 0.0,
+        "billable_equiv_min_per_month": 0.0,
+        "share_of_all_row_total": 0.0
+      }
+    ],
+    "totals": {
+      "row_count": 19,
+      "raw_compute_runner_min_per_month": 179.195,
+      "billable_equiv_min_per_month": 522.741,
+      "percentage_denominator": "all_rows_billable_equiv_min_per_month"
+    }
+  },
+  "per_workflow_monthly_volume": {
+    ".github/workflows/lock.yaml": 30,
+    ".github/workflows/pre-commit.yaml": 39,
+    ".github/workflows/publish.yaml": 0,
+    ".github/workflows/tests.yaml": 37,
+    ".github/workflows/zizmor.yaml": 0
+  },
+  "events_by_wf": {
+    ".github/workflows/lock.yaml": [
+      "schedule"
+    ],
+    ".github/workflows/pre-commit.yaml": [
+      "pull_request"
+    ],
+    ".github/workflows/publish.yaml": [
+      "push"
+    ],
+    ".github/workflows/tests.yaml": [
+      "pull_request",
+      "push"
+    ],
+    ".github/workflows/zizmor.yaml": [
+      "pull_request",
+      "push"
+    ]
+  }
+}
