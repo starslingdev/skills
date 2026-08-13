@@ -6,15 +6,15 @@
 | **Runs analyzed** | 47 runs / 152 jobs across 5 workflows |
 | **Runs window** | 2026-06-24 → 2026-07-24 (30-day window) |
 | **PR gate sample** | 20 / 20 PRs |
-| **Audit** | ran 2026-07-24 · ci-speedup skill commit [`1367394`](https://github.com/starslingdev/skills/commit/1367394) |
+| **Audit** | ran 2026-07-24 · ci-speedup skill commit [`2f048be`](https://github.com/starslingdev/skills/commit/2f048be) |
 
 > **Bottom line.** A typical PR waits **34s** for all checks to finish. The biggest single measured win is **~7s** off the slowest fixable check, `Windows` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
 >
 > **34s until all checks finish** - `Windows` is the slowest check a typical PR waits on. 
 >
-> **`.github/workflows/tests.yaml` changed ~128 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests.yaml` changed ~129 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/zizmor.yaml` changed ~130 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/zizmor.yaml` changed ~131 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **After the gate.** 3 min/mo of wall-clock-neutral runner minutes is recoverable (1 neutral finding; none can slow a merge).
 
@@ -89,7 +89,7 @@ A measured **structural** lever on the critical path (it IS this pole, so it's n
 - **Guardrail:** carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free
 - **Rollout:** the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked - the next-largest step becomes the target
 - **Failure mode:** the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) - the candidate carries the risk of whichever specific lever its dominant category routes to
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/1367394/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
 
 #### 🤖 Prompt for your coding agent
 
@@ -147,7 +147,7 @@ A measured **structural** lever on the critical path (it IS this pole, so it's n
 - **Guardrail:** carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free
 - **Rollout:** the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked - the next-largest step becomes the target
 - **Failure mode:** the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) - the candidate carries the risk of whichever specific lever its dominant category routes to
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/1367394/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
 
 #### 🤖 Prompt for your coding agent
 
@@ -201,7 +201,7 @@ A measured **structural** lever on the critical path (it IS this pole, so it's n
 - **Guardrail:** carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free
 - **Rollout:** the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked - the next-largest step becomes the target
 - **Failure mode:** the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) - the candidate carries the risk of whichever specific lever its dominant category routes to
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/1367394/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
 
 #### 🤖 Prompt for your coding agent
 
@@ -256,7 +256,7 @@ A measured **structural** lever on the critical path (it IS this pole, so it's n
 - **Guardrail:** carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free
 - **Rollout:** the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked - the next-largest step becomes the target
 - **Failure mode:** the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) - the candidate carries the risk of whichever specific lever its dominant category routes to
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/1367394/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
 
 #### 🤖 Prompt for your coding agent
 
@@ -309,7 +309,7 @@ A measured **structural** lever on the critical path (it IS this pole, so it's n
 - **Guardrail:** carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free
 - **Rollout:** the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked - the next-largest step becomes the target
 - **Failure mode:** the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) - the candidate carries the risk of whichever specific lever its dominant category routes to
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/1367394/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
 
 #### 🤖 Prompt for your coding agent
 
@@ -386,7 +386,7 @@ _Schedule burn is counted only on event=schedule runs whose head_sha repeats con
 - **Why this can't slow your merge:** machine-derived proof: `non_pr_event` - `schedule` runs do not gate a PR merge (event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event).
 - **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/lock.yaml`; current measured cost spine for those rows is 3.200 raw min/mo, 30.000 billable min/mo.
 - **Guardrail:** Confirm the cron cadence is not an operational SLA; prefer widening the interval only for cleanup/triage/build jobs where delayed execution is acceptable.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/1367394/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
 
 #### 🤖 Prompt for your coding agent
 
@@ -400,7 +400,7 @@ What ci-speedup saw: 95 scheduled run(s) in 5 consecutive same-head_sha group(s)
 Saving: 3 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `non_pr_event` - `schedule` runs do not gate a PR merge (event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event). GUARDRAIL: confirm the current cadence is not an operational SLA before increasing the cron interval.
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/1367394/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -422,7 +422,7 @@ failure mode and how you have guarded it before shipping.
 
 **Where:** `publish.yaml:2` (build)
 **Evidence:** workflow triggers on push but declares no `paths:`/`paths-ignore:` filter (the `on:` block below has no `paths:` key).
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/1367394/skills/ci-speedup/references/optimization-patterns.md#opt32--missing-pathspaths-ignore-on-expensive-workflows
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt32--missing-pathspaths-ignore-on-expensive-workflows
 
 #### 🤖 Prompt for your coding agent
 
@@ -436,7 +436,7 @@ What ci-speedup saw: workflow triggers on push but declares no `paths:`/`paths-i
 Saving: no measured runner-min saving - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/1367394/skills/ci-speedup/references/optimization-patterns.md#opt32--missing-pathspaths-ignore-on-expensive-workflows
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt32--missing-pathspaths-ignore-on-expensive-workflows
 
 CAVEAT - the required-status 'Pending' landmine: if ANY check this
 workflow produces is a required status check, do NOT skip it via
@@ -463,7 +463,7 @@ failure mode and how you have guarded it before shipping.
 
 **Where:** `tests.yaml:13` (tests)
 **Evidence:** expensive job `tests` (matrix) runs on every PR that changes the workflow's filtered `paths:` including drafts - no `if: github.event.pull_request.draft == false` gate
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/1367394/skills/ci-speedup/references/optimization-patterns.md#opt33--no-draft-pr-gating-on-expensive-jobs
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt33--no-draft-pr-gating-on-expensive-jobs
 
 #### 🤖 Prompt for your coding agent
 
@@ -477,7 +477,7 @@ What ci-speedup saw: expensive job `tests` (matrix) runs on every PR that change
 Saving: no measured runner-min saving - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/1367394/skills/ci-speedup/references/optimization-patterns.md#opt33--no-draft-pr-gating-on-expensive-jobs
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt33--no-draft-pr-gating-on-expensive-jobs
 
 CAVEAT - the required-status 'Pending' landmine: if ANY check this
 workflow produces is a required status check, do NOT skip it via
@@ -510,7 +510,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `1367394`, scripts tree `021bb07`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (OPT1-OPT69 catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `021bb07`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (OPT1-OPT69 catalog) |
 | gh runs/jobs API (timestamps) | 47 runs / 152 jobs sampled | Critical-path + per-step P50 |
 | job logs | 1 job log(s) sampled | Step internals + cross-run magnitude (deeper levels) |
 | workflow YAML | 5 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

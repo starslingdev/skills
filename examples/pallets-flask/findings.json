@@ -931,7 +931,7 @@
     "scripted_total_s": 42.04
   },
   "scanned_at": "2026-07-24T22:57:35.743876+00:00",
-  "skill_commit_sha": "1367394",
+  "skill_commit_sha": "2f048be",
   "commit_sha": "36e4a824f340fdee7ed50937ba8e7f6bc7d17f81",
   "repo": "pallets/flask",
   "repo_visibility": "public",

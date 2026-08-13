@@ -6,21 +6,21 @@
 | **Runs analyzed** | 161 runs / 1630 jobs across 18 workflows |
 | **Runs window** | 2026-06-25 → 2026-07-25 (30-day window) |
 | **PR gate sample** | 20 / 20 PRs |
-| **Audit** | ran 2026-07-25 · ci-speedup skill commit [`8694649`](https://github.com/starslingdev/skills/commit/8694649) |
+| **Audit** | ran 2026-07-25 · ci-speedup skill commit [`2f048be`](https://github.com/starslingdev/skills/commit/2f048be) |
 
 > **Bottom line.** A typical PR waits **41m 12s** for all checks to finish. The biggest single measured win is **~1m 06s** off the slowest fixable check, `ubuntu-22.04 (webkit - Node.js 2…` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
 >
 > **41m 12s until all checks finish** - the slowest check a typical PR waits on is `Windows (firefox)` (~72m 57s), but it ran on only 4/20 sampled PRs, so a typical PR finishes in 41m 12s; `ubuntu-22.04 (webkit - Node.js 20)` is the check most PRs gate on (drilled below). (`Test chrome on macos-latest` is slower (~59m 33s) but it ran on only 5/20 sampled PRs - it looks opt-in / conditional (e.g. label-gated), so a typical PR doesn't wait on it and its time is throughput/cost, not merge-wait; unless it's a *required* status check it isn't the gate here. See its long pole below.) 
 >
-> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~35 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
+> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~36 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
 >
-> **`.github/workflows/fix-flakes.yml` changed ~25 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/fix-flakes.yml` changed ~26 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/publish_release.yml` changed ~27 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/publish_release.yml` changed ~28 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_bidi.yml` changed ~32 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_bidi.yml` changed ~33 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_secondary.yml` changed ~39 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_secondary.yml` changed ~40 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **After the gate.** 73,441 min/mo of wall-clock-neutral runner minutes is recoverable (10 neutral findings; none can slow a merge).
 
@@ -110,7 +110,7 @@ A measured **structural** lever on the critical path (it IS this pole, so it's n
 - **Guardrail:** carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free
 - **Rollout:** the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked - the next-largest step becomes the target
 - **Failure mode:** the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) - the candidate carries the risk of whichever specific lever its dominant category routes to
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
 
 #### 🤖 Prompt for your coding agent
 
@@ -167,7 +167,7 @@ A measured **structural** lever on the critical path (it IS this pole, so it's n
 - **Guardrail:** carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free
 - **Rollout:** the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked - the next-largest step becomes the target
 - **Failure mode:** the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) - the candidate carries the risk of whichever specific lever its dominant category routes to
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
 
 #### 🤖 Prompt for your coding agent
 
@@ -224,7 +224,7 @@ A measured **structural** lever on the critical path (it IS this pole, so it's n
 - **Guardrail:** carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free
 - **Rollout:** the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked - the next-largest step becomes the target
 - **Failure mode:** the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) - the candidate carries the risk of whichever specific lever its dominant category routes to
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
 
 #### 🤖 Prompt for your coding agent
 
@@ -282,7 +282,7 @@ A measured **structural** lever on the critical path (it IS this pole, so it's n
 - **Guardrail:** carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free
 - **Rollout:** the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked - the next-largest step becomes the target
 - **Failure mode:** the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) - the candidate carries the risk of whichever specific lever its dominant category routes to
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
 
 #### 🤖 Prompt for your coding agent
 
@@ -340,7 +340,7 @@ A measured **structural** lever on the critical path (it IS this pole, so it's n
 - **Guardrail:** carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free
 - **Rollout:** the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked - the next-largest step becomes the target
 - **Failure mode:** the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) - the candidate carries the risk of whichever specific lever its dominant category routes to
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
 
 #### 🤖 Prompt for your coding agent
 
@@ -387,7 +387,7 @@ DELIVER & VERIFY
 
 **Where:** `tests_mcp.yml` (windows-latest - msedge), `tests_mcp.yml` (ubuntu-latest - firefox), `tests_mcp.yml` (macos-latest - chrome), `tests_mcp.yml` (macos-latest - chromium), `tests_mcp.yml` (ubuntu-latest - chromium), `tests_mcp.yml` (macos-latest - webkit), `tests_mcp.yml` (windows-latest - firefox), `tests_mcp.yml` (windows-latest - chromium), +33 more
 **Evidence:** job `windows-latest - msedge` P90 queue 4396s over 8 runs (threshold 60s for PR workflows)
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt43--excessive-queue-time
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt43--excessive-queue-time
 
 #### 🤖 Prompt for your coding agent
 
@@ -401,7 +401,7 @@ What ci-speedup saw: job `windows-latest - msedge` P90 queue 4396s over 8 runs (
 Cost: developer WALL-CLOCK wait before the job starts (queue / wait-to-start) - NOT a runner-bill saving and NOT off the critical path. For a `needs:`-gated job this span includes the gating job's own run time, so the savable part is bounded by the gating job's own fix.
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt43--excessive-queue-time
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt43--excessive-queue-time
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -459,7 +459,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 - **What ci-speedup measured:** 54 run(s) across 5 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~71644-167291 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 67% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 4 timed run(s); ×3.36 to the 30d volume (336 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 71,644 min/mo to 167,291 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
 - **Source block:** `runner_minute_spine` matched 29 rows for `.github/workflows/tests_secondary.yml`; current measured cost spine for those rows is 263103.875 raw min/mo, 267586.928 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
 
@@ -473,7 +473,7 @@ What ci-speedup saw: 54 run(s) across 5 branch(es) were superseded (a newer run 
 Saving: 71,644 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference). GUARDRAIL: verify this is NOT a deploy/release/publish workflow (a mid-flight run may be uploading artifacts / pushing a tag) before enabling cancellation - and take the predicate from the catalog recipe, which scopes cancellation with an expression; never a bare `cancel-in-progress: true`, which also kills in-flight runs on the default branch and on release tags. ROUTING: this workflow triggers on `pull_request`/`push` - with a `pull_request` trigger use the catalog's DEFAULT (PR-scoped) predicate; without one, the PR-scoped predicate is never true and saves nothing, so use the catalog's WIDENED predicate.
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -498,7 +498,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 - **What ci-speedup measured:** 7 run(s) across 3 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~1072-11922 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 73% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 4 timed run(s); ×7.78 to the 30d volume (778 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 1,072 min/mo to 11,922 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
 - **Source block:** `runner_minute_spine` matched 5 rows for `.github/workflows/tests_components.yml`; current measured cost spine for those rows is 21636.828 raw min/mo, 23534.500 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
 
@@ -512,7 +512,7 @@ What ci-speedup saw: 7 run(s) across 3 branch(es) were superseded (a newer run s
 Saving: 1,072 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference). GUARDRAIL: verify this is NOT a deploy/release/publish workflow (a mid-flight run may be uploading artifacts / pushing a tag) before enabling cancellation - and take the predicate from the catalog recipe, which scopes cancellation with an expression; never a bare `cancel-in-progress: true`, which also kills in-flight runs on the default branch and on release tags. ROUTING: this workflow triggers on `pull_request`/`push` - with a `pull_request` trigger use the catalog's DEFAULT (PR-scoped) predicate; without one, the PR-scoped predicate is never true and saves nothing, so use the catalog's WIDENED predicate.
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -542,7 +542,7 @@ _Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow r
 - **What ci-speedup measured:** 6 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (4/4)` (9 failed/timed-out prior-attempt job(s), 221.0 failed min) and it appeared again in the latest attempt. ~268 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (4/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
 - **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 #### 🤖 Prompt for your coding agent
 
@@ -556,7 +556,7 @@ What ci-speedup saw: 6 sampled run_attempt>1 workflow run(s) had prior-attempt j
 Saving: 268 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (4/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -581,7 +581,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 - **What ci-speedup measured:** 7 run(s) across 5 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~159-2378 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 56% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 6 timed run(s); ×8.75 to the 30d volume (875 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 159 min/mo to 2,378 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
 - **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/infra.yml`; current measured cost spine for those rows is 4086.979 raw min/mo, 5250.000 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
 
@@ -595,7 +595,7 @@ What ci-speedup saw: 7 run(s) across 5 branch(es) were superseded (a newer run s
 Saving: 159 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference). GUARDRAIL: verify this is NOT a deploy/release/publish workflow (a mid-flight run may be uploading artifacts / pushing a tag) before enabling cancellation - and take the predicate from the catalog recipe, which scopes cancellation with an expression; never a bare `cancel-in-progress: true`, which also kills in-flight runs on the default branch and on release tags. ROUTING: this workflow triggers on `pull_request`/`push` - with a `pull_request` trigger use the catalog's DEFAULT (PR-scoped) predicate; without one, the PR-scoped predicate is never true and saves nothing, so use the catalog's WIDENED predicate.
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -620,7 +620,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 - **What ci-speedup measured:** 9 run(s) across 4 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~141-1821 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 64% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 8 timed run(s); ×0.68 to the 30d volume (68 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 141 min/mo to 1,821 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
 - **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/tests_bidi.yml`; current measured cost spine for those rows is 2354.941 raw min/mo, 2391.356 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
 
@@ -634,7 +634,7 @@ What ci-speedup saw: 9 run(s) across 4 branch(es) were superseded (a newer run s
 Saving: 141 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference). GUARDRAIL: verify this is NOT a deploy/release/publish workflow (a mid-flight run may be uploading artifacts / pushing a tag) before enabling cancellation - and take the predicate from the catalog recipe, which scopes cancellation with an expression; never a bare `cancel-in-progress: true`, which also kills in-flight runs on the default branch and on release tags. ROUTING: this workflow triggers on `pull_request` - with a `pull_request` trigger use the catalog's DEFAULT (PR-scoped) predicate; without one, the PR-scoped predicate is never true and saves nothing, so use the catalog's WIDENED predicate.
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -661,7 +661,7 @@ _Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow r
 - **What ci-speedup measured:** 3 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (3/4)` (3 failed/timed-out prior-attempt job(s), 46.1 failed min) and it appeared again in the latest attempt. ~82 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (3/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
 - **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 #### 🤖 Prompt for your coding agent
 
@@ -675,7 +675,7 @@ What ci-speedup saw: 3 sampled run_attempt>1 workflow run(s) had prior-attempt j
 Saving: 82 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (3/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -701,7 +701,7 @@ _Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow r
 - **What ci-speedup measured:** 2 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (2/4)` (2 failed/timed-out prior-attempt job(s), 44.6 failed min) and it appeared again in the latest attempt. ~54 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (2/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
 - **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 #### 🤖 Prompt for your coding agent
 
@@ -715,7 +715,7 @@ What ci-speedup saw: 2 sampled run_attempt>1 workflow run(s) had prior-attempt j
 Saving: 54 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (2/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -741,7 +741,7 @@ _Schedule burn is counted only on event=schedule runs whose head_sha repeats con
 - **Why this can't slow your merge:** machine-derived proof: `non_pr_event` - `schedule` runs do not gate a PR merge (event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event).
 - **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/publish_release.yml`; current measured cost spine for those rows is 104.943 raw min/mo, 140.600 billable min/mo.
 - **Guardrail:** Confirm the cron cadence is not an operational SLA; prefer widening the interval only for cleanup/triage/build jobs where delayed execution is acceptable.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
 
 #### 🤖 Prompt for your coding agent
 
@@ -755,7 +755,7 @@ What ci-speedup saw: 18 scheduled run(s) in 12 consecutive same-head_sha group(s
 Saving: 13 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `non_pr_event` - `schedule` runs do not gate a PR merge (event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event). GUARDRAIL: confirm the current cadence is not an operational SLA before increasing the cron interval.
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -780,7 +780,7 @@ _Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow r
 - **What ci-speedup measured:** 1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `test_linux_docker / Docker noble amd64` (1 failed/timed-out prior-attempt job(s), 1.4 failed min) and it appeared again in the latest attempt. ~8 runner-min/mo of prior-attempt compute (11/30d ÷ 24 sampled all-status run(s)).
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `test_linux_docker / Docker noble amd64` identifies the retry cause, so prior-attempt compute is post-completion waste).
 - **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_docker_changes.yml`; current measured cost spine for those rows is 7.715 raw min/mo, 8.251 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 #### 🤖 Prompt for your coding agent
 
@@ -794,7 +794,7 @@ What ci-speedup saw: 1 sampled run_attempt>1 workflow run(s) had prior-attempt j
 Saving: 8 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `test_linux_docker / Docker noble amd64` identifies the retry cause, so prior-attempt compute is post-completion waste).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -819,7 +819,7 @@ _Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow r
 - **What ci-speedup measured:** 1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `publish NPM and driver` (1 failed/timed-out prior-attempt job(s), 1.0 failed min) and it appeared again in the latest attempt. ~1 runner-min/mo of prior-attempt compute (38/30d ÷ 100 sampled all-status run(s)).
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `publish NPM and driver` identifies the retry cause, so prior-attempt compute is post-completion waste).
 - **Source block:** `runner_minute_spine` matched 2 prior-attempt rows for `.github/workflows/publish_release.yml`; current measured cost spine for those rows is 0.729 raw min/mo, 1.140 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 #### 🤖 Prompt for your coding agent
 
@@ -833,7 +833,7 @@ What ci-speedup saw: 1 sampled run_attempt>1 workflow run(s) had prior-attempt j
 Saving: 0.7 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `publish NPM and driver` identifies the retry cause, so prior-attempt compute is post-completion waste).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -856,7 +856,7 @@ failure mode and how you have guarded it before shipping.
 **Where:** `tests_primary.yml` (Installation Test ubuntu-latest), `tests_primary.yml` (Installation Test windows-latest), `tests_primary.yml` (Installation Test macos-latest), `tests_secondary.yml` (time test runner - realtime), `tests_secondary.yml` (Test chrome on ubuntu-22.04), `tests_secondary.yml` (Test chrome-beta on ubuntu-22.04), `tests_secondary.yml` (time test runner - frozen), `tests_secondary.yml` (Test chrome on macos-latest), +1 more
 **Wall-clock:** this job carries a real wall-clock saving, but the spine demotes it as **opt-in / rare** - it runs on only a minority of sampled PRs, so a typical PR doesn't wait on it (see the spine's opt-in footnote above). Its fix cuts wall-clock on the PRs that DO run it, not on the typical merge path.
 **Evidence:** job `Test chrome on macos-latest` p50 3573s over 4 runs, no shard axis observed (job names lack a `shard` / `partition` matrix marker)
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt24--long-test-job-without-sharding
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt24--long-test-job-without-sharding
 
 #### 🤖 Prompt for your coding agent
 
@@ -870,7 +870,7 @@ What ci-speedup saw: job `Test chrome on macos-latest` p50 3573s over 4 runs, no
 Saving: developer WALL-CLOCK (~6m 51s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt24--long-test-job-without-sharding
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt24--long-test-job-without-sharding
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -885,7 +885,7 @@ failure mode and how you have guarded it before shipping.
 **Where:** `tests_components.yml` (- Node.js 20), `tests_secondary.yml` (Windows)
 **Wall-clock:** unlike the other findings in this section, this one **sits ON the merge-gating critical path** (a long pole) - its catalog fix **cuts developer wall-clock**, it is not a bill-only cleanup. See the spine above and this pattern's catalog recipe below for the remedy.
 **Evidence:** leg `Windows (firefox)` median 4377s vs `Windows (chromium)` 1598s - 2.7× imbalance over 3 sampled runs (heterogeneous legs - split the slow leg, don't rebalance)
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt25--shard-imbalance
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt25--shard-imbalance
 
 #### 🤖 Prompt for your coding agent
 
@@ -899,7 +899,7 @@ What ci-speedup saw: leg `Windows (firefox)` median 4377s vs `Windows (chromium)
 Saving: developer WALL-CLOCK (~3m 21s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt25--shard-imbalance
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt25--shard-imbalance
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -913,7 +913,7 @@ failure mode and how you have guarded it before shipping.
 
 **Where:** `tests_primary.yml` (ubuntu-22.04 (webkit - Node.js 20))
 **Evidence:** the `Run ./.github/actions/run-test` step is 100% of the slowest cluster job `ubuntu-22.04 (webkit - Node.js 20)` (2480s) and recurs across 5 concurrent jobs of `.github/workflows/tests_primary.yml` (~1693-2474s per job) - a cluster-floor lever
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
 #### 🤖 Prompt for your coding agent
 
@@ -927,7 +927,7 @@ What ci-speedup saw: the `Run ./.github/actions/run-test` step is 100% of the sl
 Saving: ~109,114 runner-min/mo - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -941,7 +941,7 @@ failure mode and how you have guarded it before shipping.
 
 **Where:** `tests_mcp.yml` (windows-latest - firefox)
 **Evidence:** the `Run ./.github/actions/run-test` step is 100% of the slowest cluster job `windows-latest - firefox` (2413s) and recurs across 5 concurrent jobs of `.github/workflows/tests_mcp.yml` (~1463-2404s per job) - a cluster-floor lever
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
 #### 🤖 Prompt for your coding agent
 
@@ -955,7 +955,7 @@ What ci-speedup saw: the `Run ./.github/actions/run-test` step is 100% of the sl
 Saving: ~101,710 runner-min/mo - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -969,7 +969,7 @@ failure mode and how you have guarded it before shipping.
 
 **Where:** `tests_secondary.yml` (Windows (firefox))
 **Evidence:** the `Run ./.github/actions/run-test` step is 100% of the slowest cluster job `Windows (firefox)` (4375s) and recurs across 4 concurrent jobs of `.github/workflows/tests_secondary.yml` (~2654-4366s per job) - a cluster-floor lever
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
 #### 🤖 Prompt for your coding agent
 
@@ -983,7 +983,7 @@ What ci-speedup saw: the `Run ./.github/actions/run-test` step is 100% of the sl
 Saving: ~59,226 runner-min/mo - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -998,7 +998,7 @@ failure mode and how you have guarded it before shipping.
 **Where:** `tests_primary.yml` (test_test_runner), `tests_webview_simulator.yml` (test_webview_simulator)
 **Tier-2 note:** measured wall-clock-neutral instance(s) of this pattern did not have matching render-ready `runner_minute_spine` source rows, so they are kept here instead of rendered as source-backed savings cards. Their computed neutrality certificate(s) (`post_completion_waste`) are stamped in findings.json and re-derived by verify_report.
 **Evidence:** 11 sampled failed matrix occurrence(s) left shard sibling jobs running after the first failed shard; ~5015 runner-min/mo of post-failure matrix compute (778/30d ÷ 100 sampled all-status run(s)).; 43 sampled failed matrix occurrence(s) left shard sibling jobs running after the first failed shard; ~215 runner-min/mo of post-failure matrix compute (43/30d ÷ 100 sampled all-status run(s)).
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt35--missing-fail-fast-on-non-diagnostic-matrix-dimensions
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt35--missing-fail-fast-on-non-diagnostic-matrix-dimensions
 
 #### 🤖 Prompt for your coding agent
 
@@ -1012,7 +1012,7 @@ What ci-speedup saw: 11 sampled failed matrix occurrence(s) left shard sibling j
 Saving: ~5,230 runner-min/mo - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt35--missing-fail-fast-on-non-diagnostic-matrix-dimensions
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt35--missing-fail-fast-on-non-diagnostic-matrix-dimensions
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1027,7 +1027,7 @@ failure mode and how you have guarded it before shipping.
 **Where:** `tests_mcp.yml`
 **Tier-2 note:** measured wall-clock-neutral instances of this same pattern are promoted above; this appendix row shows only the remaining modeled, uncertified, or source-unbacked instance(s).
 **Evidence:** 1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `ubuntu-latest - chrome` (1 failed/timed-out prior-attempt job(s), 15.8 failed min) and it appeared again in the latest attempt. ~2451 runner-min/mo of prior-attempt compute (840/30d ÷ 100 sampled all-status run(s)).
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 #### 🤖 Prompt for your coding agent
 
@@ -1041,7 +1041,7 @@ What ci-speedup saw: 1 sampled run_attempt>1 workflow run(s) had prior-attempt j
 Saving: ~2,451 runner-min/mo - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1055,7 +1055,7 @@ failure mode and how you have guarded it before shipping.
 
 **Where:** `infra.yml:24` (doc-and-lint), `tests_bidi.yml:54` (test_bidi), `tests_components.yml:46` (test_components), `tests_extension.yml:50` (test_extension), `tests_primary.yml:178` (test_vscode_extension)
 **Evidence:** job `doc-and-lint` runs `playwright install` with no preceding `actions/cache` step keyed on the Playwright version; job `test_bidi` runs `playwright install` with no preceding `actions/cache` step keyed on the Playwright version; job `test_components` runs `playwright install` with no preceding `actions/cache` step keyed on the Playwright version; job `test_extension` runs `playwright install` with no preceding `actions/cache` step keyed on the Playwright version; job `test_vscode_extension` runs `playwright install` with no preceding `actions/cache` step keyed on the Playwright version
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt2--uncached-large-downloads
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt2--uncached-large-downloads
 
 #### 🤖 Prompt for your coding agent
 
@@ -1069,7 +1069,7 @@ What ci-speedup saw: job `doc-and-lint` runs `playwright install` with no preced
 Saving: ~1,315 runner-min/mo - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt2--uncached-large-downloads
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt2--uncached-large-downloads
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1084,7 +1084,7 @@ failure mode and how you have guarded it before shipping.
 **Where:** `infra.yml:1` (doc-and-lint), `tests_primary.yml:1` (test_vscode_extension)
 **Wall-clock:** this saves runner-minutes but its fix is **wall-clock-negative** (build-once-then-fan-out adds a serial gate), so it lengthens the merge wait. Treat it as a bill saving, not a speed win.
 **Evidence:** 2 jobs each run checkout + dependency install with no `actions/upload-artifact` / `download-artifact` handoff: doc-and-lint, lint-snippets; 2 jobs each run checkout + dependency install with no `actions/upload-artifact` / `download-artifact` handoff: test_vscode_extension, test_package_installations
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt14--repeated-checkoutsetup-without-artifact-handoff-and-slow-tool-replacement
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt14--repeated-checkoutsetup-without-artifact-handoff-and-slow-tool-replacement
 
 #### 🤖 Prompt for your coding agent
 
@@ -1098,7 +1098,7 @@ What ci-speedup saw: 2 jobs each run checkout + dependency install with no `acti
 Saving: ~1,240 runner-min/mo - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt14--repeated-checkoutsetup-without-artifact-handoff-and-slow-tool-replacement
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt14--repeated-checkoutsetup-without-artifact-handoff-and-slow-tool-replacement
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1112,7 +1112,7 @@ failure mode and how you have guarded it before shipping.
 
 **Where:** `tests_webview_simulator.yml` (WebView on iOS Simulator (4/4))
 **Evidence:** the `Run WebView tests` step is 77% of the slowest cluster job `WebView on iOS Simulator (4/4)` (1310s) and recurs across 2 concurrent jobs of `.github/workflows/tests_webview_simulator.yml` (~776-1006s per job) - a cluster-floor lever
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
 #### 🤖 Prompt for your coding agent
 
@@ -1126,7 +1126,7 @@ What ci-speedup saw: the `Run WebView tests` step is 77% of the slowest cluster 
 Saving: ~1,098 runner-min/mo - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1140,7 +1140,7 @@ failure mode and how you have guarded it before shipping.
 
 **Where:** `tests_docker_changes.yml` (test_linux_docker / Docker noble arm64)
 **Evidence:** the `Run @smoke tests inside docker` step is 27% of the slowest cluster job `test_linux_docker / Docker noble arm64` (288s) and recurs across 6 concurrent jobs of `.github/workflows/tests_docker_changes.yml` (~75-112s per job) - a cluster-floor lever
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
 #### 🤖 Prompt for your coding agent
 
@@ -1154,7 +1154,7 @@ What ci-speedup saw: the `Run @smoke tests inside docker` step is 27% of the slo
 Saving: ~72 runner-min/mo - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1168,7 +1168,7 @@ failure mode and how you have guarded it before shipping.
 
 **Where:** `tests_docker_release.yml` (test_linux_docker / Docker jammy amd64)
 **Evidence:** the `Run @smoke tests inside docker` step is 37% of the slowest cluster job `test_linux_docker / Docker jammy amd64` (308s) and recurs across 6 concurrent jobs of `.github/workflows/tests_docker_release.yml` (~76-114s per job) - a cluster-floor lever
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
 #### 🤖 Prompt for your coding agent
 
@@ -1182,7 +1182,7 @@ What ci-speedup saw: the `Run @smoke tests inside docker` step is 37% of the slo
 Saving: ~33 runner-min/mo - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
 
 Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/8694649/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1205,7 +1205,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `8694649`, scripts tree `021bb07`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (OPT1-OPT69 catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `021bb07`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (OPT1-OPT69 catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

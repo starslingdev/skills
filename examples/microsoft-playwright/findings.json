@@ -13744,7 +13744,7 @@
     "scripted_total_s": 153.58
   },
   "scanned_at": "2026-07-25T19:05:00.444799+00:00",
-  "skill_commit_sha": "8694649",
+  "skill_commit_sha": "2f048be",
   "commit_sha": "3827650d171cc1b035cbefb7e00bf5948d6809df",
   "repo": "microsoft/playwright",
   "repo_visibility": "public",
