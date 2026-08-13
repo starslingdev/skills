@@ -21,8 +21,26 @@ Maintainer-only. Not part of any installable skill tree.
   escalation reframed as an optional long-shot draft (never auto-filed, never
   "the fix"), and rails — read-only research subagents by default, no
   rename/re-slug remediation, fetched-clock timing, and an evidence checklist
-  before concluding. Twelve tests pin `decide()`'s branches and
-  `beacon_precondition()`'s suppression paths.
+  before concluding. A `/registry-security` slash command runs the whole thing
+  against a target, since the skill lives in `maintainers/` and is therefore
+  never installed or auto-discovered. Tests pin `decide()`'s branches,
+  `beacon_precondition()`'s suppression paths, and the rendered NEXT ACTION.
+
+- **2026-08-13** — **An unread surface is no longer reported as a clean badge.**
+  Three defects found in review, all the same shape: `decide()` classified from
+  provider status and literal verdicts alone and never consulted the `error` /
+  `http` fields the fetchers already record, so it could not tell "verified
+  clean" from "never fetched". An unreachable provider API returned no
+  providers, which read as nothing-failing and resolved to `RESOLVED` — an
+  unattended watch stopping on a badge it never actually read. A failing
+  provider whose finding-detail page 503'd landed in the benign "keep watching"
+  branch instead of being flagged unclassifiable. Both now return `UNVERIFIED`
+  naming the unreachable surface. Separately, the risk half of the
+  failing-provider test read `riskLevel`, a key the fetchers never write (they
+  store `risk`), so it was dead code and a HIGH/CRITICAL provider whose status
+  read pass-or-blank scored as clean; the test fixtures carried the same typo,
+  so the suite confirmed the bug rather than catching it. Fixtures now use the
+  shape `fetch_api` really emits.
 
 - **2026-08-11** — **The stored snapshot is now read directly, which turns the
   central claim from an inference into an artifact.** `GET

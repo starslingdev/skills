@@ -383,30 +383,46 @@ def test_temp_install_is_removed_even_when_verification_raises(tmp_path, monkeyp
 
 # --- the operator layer: beacon precondition + next-action decision ----------
 
-def _result(providers, literals=None, skew=None):
-    return {"api": {"providers": providers}, "literals": literals or {},
-            "skew": skew or []}
+def _result(providers, literals=None, skew=None, findings=None, api=None):
+    """Fixtures use the shape `fetch_api` really emits - risk under "risk",
+    and an http/error pair - so a key drift fails here instead of shipping."""
+    base = {"http": 200, "error": None, "providers": providers}
+    base.update(api or {})
+    return {"api": base, "literals": literals or {}, "skew": skew or [],
+            "findings": findings or {}}
 
 
 def test_decide_resolved_when_all_pass_and_no_finding():
-    r = _result({"snyk": {"status": "pass", "riskLevel": "SAFE"},
-                 "socket": {"status": "pass", "riskLevel": "LOW"}})
+    r = _result({"snyk": {"status": "pass", "risk": "SAFE"},
+                 "socket": {"status": "pass", "risk": "LOW"}})
     assert ra.decide(r)["decision"] == "RESOLVED"
 
 
 def test_decide_action_required_when_a_literal_is_real():
-    r = _result({"snyk": {"status": "fail", "riskLevel": "CRITICAL"}},
+    r = _result({"snyk": {"status": "fail", "risk": "CRITICAL"}},
                 literals={"http://ex/pkg": {"verdict": "REAL"}})
     d = ra.decide(r)
     assert d["decision"] == "ACTION_REQUIRED"
     assert d["real_literals"] == ["http://ex/pkg"]
 
 
+def test_decide_action_required_wins_over_stale_in_mixed_set():
+    """One live literal among stale ones is still a real finding. Calling that
+    MONITOR would tell the operator there is nothing to fix."""
+    r = _result({"snyk": {"status": "fail", "risk": "CRITICAL"}},
+                literals={"http://ex/live": {"verdict": "REAL"},
+                          "http://ex/old": {"verdict": "STALE_INPUT"}})
+    d = ra.decide(r)
+    assert d["decision"] == "ACTION_REQUIRED"
+    assert d["real_literals"] == ["http://ex/live"]
+    assert d["stale_literals"] == ["http://ex/old"]
+
+
 def test_decide_monitor_when_failing_literal_is_gone_from_head():
     """The common case: provider still CRITICAL but the cited string is stale —
     nothing to fix, wait for the registry's own re-audit. Must NOT be
     ACTION_REQUIRED."""
-    r = _result({"snyk": {"status": "fail", "riskLevel": "CRITICAL"}},
+    r = _result({"snyk": {"status": "fail", "risk": "CRITICAL"}},
                 literals={"http://ex/pkg": {"verdict": "STALE_INPUT"}})
     d = ra.decide(r)
     assert d["decision"] == "MONITOR"
@@ -419,17 +435,83 @@ def test_decide_disagreement_when_surfaces_skew():
 
 
 def test_decide_monitor_warns_when_beacon_suppressed():
-    r = _result({"snyk": {"status": "fail", "riskLevel": "CRITICAL"}},
+    r = _result({"snyk": {"status": "fail", "risk": "CRITICAL"}},
                 literals={"http://x": {"verdict": "PHANTOM"}})
     d = ra.decide(r, precond={"ok": False, "github_http": 403})
     assert d["decision"] == "MONITOR"
     assert "do NOT loop installs" in d["note"]
 
 
+def test_decide_monitor_omits_note_when_beacon_can_fire():
+    """The suppression warning must not fire when an install WOULD work - that
+    would tell the operator to stop nudging exactly when nudging helps."""
+    r = _result({"snyk": {"status": "fail", "risk": "CRITICAL"}},
+                literals={"http://x": {"verdict": "PHANTOM"}})
+    d = ra.decide(r, precond={"ok": True, "github_http": 200})
+    assert d["decision"] == "MONITOR"
+    assert "note" not in d
+    assert d["beacon"]["ok"] is True
+
+
 def test_decide_high_risk_counts_as_failing_even_if_status_blank():
-    r = _result({"gen": {"status": "", "riskLevel": "HIGH"}},
+    r = _result({"gen": {"status": "", "risk": "HIGH"}},
                 literals={"http://x": {"verdict": "LAGGING"}})
     assert ra.decide(r)["decision"] == "MONITOR"
+
+
+def test_decide_unverified_when_literals_present_but_unclassifiable():
+    r = _result({"snyk": {"status": "fail", "risk": "CRITICAL"}},
+                literals={"http://x": {"verdict": None}})
+    d = ra.decide(r)
+    assert d["decision"] == "UNVERIFIED"
+    assert d["providers_failing"] == ["snyk"]
+
+
+def test_decide_monitor_when_detail_page_loaded_but_cited_nothing():
+    r = _result({"snyk": {"status": "fail", "risk": "CRITICAL"}},
+                findings={"snyk": {"http": 200, "error": None, "codes": []}})
+    d = ra.decide(r)
+    assert d["decision"] == "MONITOR"
+    assert d["real_literals"] == []
+
+
+def test_decide_unverified_when_finding_detail_page_unreachable():
+    """A failing provider whose detail page we could not read is zero
+    information, not a benign 'nothing to fix'."""
+    r = _result({"snyk": {"status": "fail", "risk": "CRITICAL"}},
+                findings={"snyk": {"http": 503, "error": "HTTP 503"}})
+    d = ra.decide(r)
+    assert d["decision"] == "UNVERIFIED"
+    assert "unreachable" in d["why"]
+
+
+def test_decide_unverified_when_provider_api_unreachable():
+    """An unread surface must never be reported as a clean badge - that would
+    stop the watch on a status nobody actually fetched."""
+    r = _result({}, api={"http": 0, "error": "__ERROR__ dns failure"})
+    d = ra.decide(r)
+    assert d["decision"] == "UNVERIFIED"
+    assert "unreachable" in d["why"]
+
+
+def test_decide_unreachable_api_still_reports_beacon():
+    r = _result({}, api={"http": 500, "error": "boom"})
+    d = ra.decide(r, precond={"ok": True, "github_http": 200})
+    assert d["decision"] == "UNVERIFIED"
+    assert d["beacon"]["github_http"] == 200
+
+
+def test_render_shows_next_action_and_beacon_state():
+    """The operator surface: the verdict has to actually reach the report."""
+    r = _result({"snyk": {"status": "fail", "risk": "CRITICAL",
+                          "auditedAt": "2026-08-13T00:01:00Z", "summary": ""}},
+                literals={"http://x": {"verdict": "PHANTOM"}})
+    r.update({"target": "o/r/s", "checked_at": "2026-08-13T00:00:00Z",
+              "cli": {"providers": {}}, "install": {}, "snapshot": {}})
+    r["decision"] = ra.decide(r, precond={"ok": False, "github_http": 403})
+    out = ra.render(r)
+    assert "NEXT ACTION: MONITOR" in out
+    assert "install beacon: SUPPRESSED" in out
 
 
 def test_beacon_suppressed_by_telemetry_env(monkeypatch):

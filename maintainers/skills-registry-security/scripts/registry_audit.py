@@ -536,6 +536,20 @@ def audit(owner: str, repo: str, skill: str, do_install: bool,
     }
 
 
+def _decided(decision: str, why: str, failing: list, real: list, stale: list,
+             precond: dict | None) -> dict:
+    """Assemble a verdict, attaching the beacon precondition when one was checked."""
+    out = {"decision": decision, "why": why, "providers_failing": failing,
+           "real_literals": real, "stale_literals": stale}
+    if precond is not None:
+        out["beacon"] = precond
+        if decision == "MONITOR" and not precond.get("ok"):
+            out["note"] = ("the install beacon is suppressed here, so do NOT loop "
+                           "installs — monitor the registry's own re-audit "
+                           "cadence instead")
+    return out
+
+
 def decide(result: dict, precond: dict | None = None) -> dict:
     """The operator's next-action verdict, so an unattended watch can act without
     a human reading the report. Exactly one of:
@@ -552,13 +566,31 @@ def decide(result: dict, precond: dict | None = None) -> dict:
                       re-index issue on vercel-labs/skills as an OPTIONAL long-shot
                       to DRAFT for the owner, never an auto-action or "the fix."
       DISAGREEMENT    the cached surfaces disagree — re-check before trusting.
-      UNVERIFIED      no local corpus to classify the cited literals against.
+      UNVERIFIED      a surface could not be read, or the cited literals could
+                      not be classified. Never confuse this with RESOLVED: a
+                      surface nobody fetched is not a surface that came back
+                      clean, and reporting one as the other stops the watch on
+                      an unread badge.
     """
-    providers = (result.get("api") or {}).get("providers") or {}
+    api = result.get("api") or {}
+    providers = api.get("providers") or {}
+    # `fetch_api` stores the registry's riskLevel under "risk"; reading
+    # "riskLevel" here made the whole risk clause dead code, so a HIGH/CRITICAL
+    # provider whose status happened to read pass/blank scored as RESOLVED.
     failing = sorted(
-        slug for slug, p in providers.items()
+        name for name, p in providers.items()
         if str(p.get("status", "")).lower() not in ("pass", "safe", "")
-        or str(p.get("riskLevel", "")).upper() in ("HIGH", "CRITICAL"))
+        or str(p.get("risk") or "").upper() in ("HIGH", "CRITICAL"))
+    # A surface we never read is not a surface that came back clean. Without
+    # this gate an unreachable API (network error, 500, rate-limit 403) yields
+    # zero providers, reads as "nothing failing", and STOPS the watch on a
+    # badge nobody looked at.
+    if api.get("error") or api.get("http") != 200:
+        return _decided("UNVERIFIED",
+                        "the provider status API was unreachable "
+                        f"(HTTP {api.get('http')}: {api.get('error')}) - cannot "
+                        "tell a clean badge from an unread one",
+                        [], [], [], precond)
     verdicts = {lit: rec.get("verdict")
                 for lit, rec in (result.get("literals") or {}).items()}
     real = sorted(l for l, v in verdicts.items() if v == "REAL")
@@ -587,19 +619,24 @@ def decide(result: dict, precond: dict | None = None) -> dict:
         why = (f"provider(s) {', '.join(failing)} fail but the cited literals "
                "could not be classified (no local corpus?)")
     else:
-        decision = "MONITOR"
-        why = (f"provider(s) {', '.join(failing)} fail; no cited literals were "
-               "extracted to classify — re-check the finding detail pages")
+        # No literals to classify splits two ways that need opposite responses:
+        # a detail page that loaded and cited nothing (benign, keep watching)
+        # versus one we could not fetch at all (zero information, not benign).
+        unread = sorted(p for p in failing
+                        if (result.get("findings") or {}).get(p, {}).get("error")
+                        or ((result.get("findings") or {}).get(p, {}).get("http")
+                            not in (200, None)))
+        if unread:
+            decision = "UNVERIFIED"
+            why = (f"provider(s) {', '.join(failing)} fail and the finding detail "
+                   f"page(s) for {', '.join(unread)} were unreachable - the "
+                   "finding could not be classified")
+        else:
+            decision = "MONITOR"
+            why = (f"provider(s) {', '.join(failing)} fail; no cited literals were "
+                   "extracted to classify — re-check the finding detail pages")
 
-    out = {"decision": decision, "why": why, "providers_failing": failing,
-           "real_literals": real, "stale_literals": stale}
-    if precond is not None:
-        out["beacon"] = precond
-        if decision == "MONITOR" and not precond.get("ok"):
-            out["note"] = ("the install beacon is suppressed here, so do NOT loop "
-                           "installs — monitor the registry's own re-audit "
-                           "cadence instead")
-    return out
+    return _decided(decision, why, failing, real, stale, precond)
 
 
 def render(r: dict) -> str:
