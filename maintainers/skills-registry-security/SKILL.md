@@ -2,21 +2,19 @@
 name: skills-registry-security
 description: >-
   Checks the third-party security audit status of a skill published to a skills
-  registry (skills.sh), across every cached surface at once, and decides whether
-  a failing finding is real or points at content that was already removed. Runs
-  a real install to capture what users actually see, reads the per-provider
-  finding codes the JSON API does not expose, and greps each flagged literal
-  against the repository and the shipped tree. Use when a published skill shows
-  a FAIL or CRITICAL security audit, when an audit looks stale or predates a fix,
-  when someone asks why a registry badge disagrees with a merged change, when
-  deciding whether to request a re-index, or before or after publishing a skill
-  that has been flagged. Also use when a Snyk, Socket, or Gen Agent Trust Hub
-  verdict on a published skill needs to be explained or disputed. Beyond
-  diagnosing, it drives a failing badge to green unattended: it emits a
-  next-action verdict, checks whether an install can even fire the re-index
-  beacon in this environment, and is meant to watch on a durable schedule until
-  the registry's own re-audit clears a stale finding — so no one has to babysit
-  a rescan by hand.
+  registry (skills.sh) across every cached surface, decides whether a failing
+  finding is real or points at content already removed, and drives a stale badge
+  to green unattended. Runs a real install to capture what users see, reads the
+  per-provider finding codes the JSON API omits, and greps each flagged literal
+  against the repository and shipped tree; emits a next-action verdict, checks
+  whether an install can even fire the re-index beacon in this environment, and
+  watches on a durable schedule until the registry's own re-audit clears a stale
+  finding. Use when a published skill shows a FAIL or CRITICAL audit, when an
+  audit looks stale or predates a fix, when a registry badge disagrees with a
+  merged change, when deciding whether to request a re-index, before or after
+  publishing a flagged skill, or when a Snyk, Socket, or Gen Agent Trust Hub
+  verdict needs to be explained or disputed — so no one has to babysit a rescan
+  by hand.
 ---
 
 # Registry security status for a published skill
