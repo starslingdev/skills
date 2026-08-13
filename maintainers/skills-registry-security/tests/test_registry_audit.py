@@ -131,6 +131,18 @@ def test_page_text_flattens_markup():
     assert "Full Analysis E005" in txt
 
 
+def test_page_text_strips_upper_case_script_and_style_tags():
+    """Tag names are case-insensitive, and a surviving script body gets scanned.
+
+    A page whose own JavaScript mentions a finding code would otherwise have
+    that code scraped as if a scanner had reported it.
+    """
+    txt = ra._page_text("<SCRIPT>var code='E005'</SCRIPT><STYLE>a{}</STYLE>Warn")
+    assert "E005" not in txt
+    assert "a{}" not in txt
+    assert "Warn" in txt
+
+
 # --------------------------------------------------------------------------
 # the phantom decision - the whole point of the tool
 # --------------------------------------------------------------------------

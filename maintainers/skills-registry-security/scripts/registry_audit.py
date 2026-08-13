@@ -69,9 +69,15 @@ def _get(url: str) -> tuple[int, str]:
 
 
 def _page_text(raw: str) -> str:
-    """Flatten rendered HTML to searchable text."""
-    t = re.sub(r"<script.*?</script>", " ", raw, flags=re.S)
-    t = re.sub(r"<style.*?</style>", " ", t, flags=re.S)
+    """Flatten rendered HTML to searchable text.
+
+    Tag matching is case-insensitive: HTML tag names are, and a surviving
+    `<SCRIPT>` body would be scanned for finding codes like any other text,
+    which is how a page's own JavaScript could invent an `E005` that no
+    scanner ever reported.
+    """
+    t = re.sub(r"<script.*?</script>", " ", raw, flags=re.S | re.I)
+    t = re.sub(r"<style.*?</style>", " ", t, flags=re.S | re.I)
     t = re.sub(r"<[^>]+>", " ", t)
     return re.sub(r"\s+", " ", htmllib.unescape(t)).strip()
 
