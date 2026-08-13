@@ -262,6 +262,36 @@ def fetch_findings(owner: str, repo: str, skill: str, provider: str) -> dict:
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
+def beacon_precondition(owner: str, repo: str) -> dict:
+    """Whether a fresh install would actually fire the telemetry beacon that
+    rebuilds the registry's snapshot — the ONLY self-serve nudge that exists.
+
+    The beacon is SILENTLY suppressed unless the GitHub repo probe returns 200
+    AND neither DO_NOT_TRACK nor DISABLE_TELEMETRY is set (references/
+    audit-pipeline.md). A suppressed beacon makes an install a no-op — the exact
+    trap that produced the false "installs never trigger a re-audit" conclusion
+    from nine beacon-suppressed installs. Check this BEFORE looping installs: if
+    the beacon can't fire, do not pretend an install probe means anything; just
+    monitor the registry's own re-audit cadence.
+    """
+    status, _ = _get(f"https://api.github.com/repos/{owner}/{repo}")
+    disabled = [v for v in ("DO_NOT_TRACK", "DISABLE_TELEMETRY")
+                if os.environ.get(v)]
+    ok = status == 200 and not disabled
+    if status != 200:
+        reason = (f"github repo probe returned {status}, not 200 — the install "
+                  "telemetry beacon is silently suppressed here, so an install "
+                  "cannot rebuild the snapshot. Do NOT loop installs; monitor the "
+                  "registry's own re-audit cadence instead.")
+    elif disabled:
+        reason = (f"telemetry disabled by {', '.join(disabled)} — the beacon is "
+                  "suppressed; an install is a no-op here.")
+    else:
+        reason = "beacon can fire: a fresh install will enqueue a re-index."
+    return {"ok": ok, "github_http": status,
+            "telemetry_disabled_by": disabled, "reason": reason}
+
+
 def fresh_install(owner: str, repo: str, timeout: int = 300) -> dict:
     """Run a real install and capture the risk table the user actually sees.
 
@@ -506,6 +536,72 @@ def audit(owner: str, repo: str, skill: str, do_install: bool,
     }
 
 
+def decide(result: dict, precond: dict | None = None) -> dict:
+    """The operator's next-action verdict, so an unattended watch can act without
+    a human reading the report. Exactly one of:
+
+      RESOLVED        every provider passes and no cited literal is outstanding —
+                      the badge is clean. STOP watching.
+      ACTION_REQUIRED a cited literal is REAL (still in HEAD) — the finding is
+                      legitimate. Fix the code or accept it. STOP watching.
+      MONITOR         a provider still fails, but every failing literal is gone
+                      from HEAD (stale/phantom/lagging) — nothing to fix. The
+                      registry re-audits on its own (~daily) and clears it; keep
+                      watching. This is the common, no-self-serve-fix case: do NOT
+                      loop installs when the beacon is suppressed, and treat a
+                      re-index issue on vercel-labs/skills as an OPTIONAL long-shot
+                      to DRAFT for the owner, never an auto-action or "the fix."
+      DISAGREEMENT    the cached surfaces disagree — re-check before trusting.
+      UNVERIFIED      no local corpus to classify the cited literals against.
+    """
+    providers = (result.get("api") or {}).get("providers") or {}
+    failing = sorted(
+        slug for slug, p in providers.items()
+        if str(p.get("status", "")).lower() not in ("pass", "safe", "")
+        or str(p.get("riskLevel", "")).upper() in ("HIGH", "CRITICAL"))
+    verdicts = {lit: rec.get("verdict")
+                for lit, rec in (result.get("literals") or {}).items()}
+    real = sorted(l for l, v in verdicts.items() if v == "REAL")
+    stale = sorted(l for l, v in verdicts.items()
+                   if v in ("STALE_INPUT", "PHANTOM", "LAGGING",
+                            "PHANTOM_OR_LAGGING"))
+
+    if result.get("skew"):
+        decision = "DISAGREEMENT"
+        why = "cached surfaces disagree: " + "; ".join(result["skew"])
+    elif real:
+        decision = "ACTION_REQUIRED"
+        why = (f"{len(real)} cited literal(s) still present in HEAD — a real "
+               f"finding, not staleness: {', '.join(real[:3])}")
+    elif not failing:
+        decision = "RESOLVED"
+        why = "all providers pass; no outstanding finding"
+    elif stale:
+        kinds = ", ".join(sorted({v for v in verdicts.values() if v}))
+        decision = "MONITOR"
+        why = (f"provider(s) {', '.join(failing)} still fail, but the cited "
+               f"literal(s) are gone from HEAD ({kinds}) — nothing to fix; wait "
+               "for the registry's own re-audit to clear it")
+    elif verdicts:
+        decision = "UNVERIFIED"
+        why = (f"provider(s) {', '.join(failing)} fail but the cited literals "
+               "could not be classified (no local corpus?)")
+    else:
+        decision = "MONITOR"
+        why = (f"provider(s) {', '.join(failing)} fail; no cited literals were "
+               "extracted to classify — re-check the finding detail pages")
+
+    out = {"decision": decision, "why": why, "providers_failing": failing,
+           "real_literals": real, "stale_literals": stale}
+    if precond is not None:
+        out["beacon"] = precond
+        if decision == "MONITOR" and not precond.get("ok"):
+            out["note"] = ("the install beacon is suppressed here, so do NOT loop "
+                           "installs — monitor the registry's own re-audit "
+                           "cadence instead")
+    return out
+
+
 def render(r: dict) -> str:
     L = []
     L.append(f"# registry security - {r['target']}")
@@ -624,6 +720,17 @@ def render(r: dict) -> str:
         L.append("  written rationale. Staleness is not the explanation here.")
     else:
         L.append("  No literals to verify. Judge the findings on their prose.")
+
+    d = r.get("decision")
+    if d:
+        L.append("")
+        L.append(f"NEXT ACTION: {d['decision']} — {d['why']}")
+        if d.get("note"):
+            L.append(f"  ({d['note']})")
+        b = d.get("beacon")
+        if b:
+            L.append(f"  install beacon: {'CAN FIRE' if b.get('ok') else 'SUPPRESSED'}"
+                     f" (github probe {b.get('github_http')})")
     return "\n".join(L)
 
 
@@ -662,6 +769,10 @@ def main(argv=None) -> int:
 
     result = audit(owner, repo, skill, not args.no_install, root, args.ref,
                    snapshot_changed_at=changed_at)
+    # The operator verdict: what an unattended watch should DO next, plus whether
+    # the install beacon can even fire here (so a suppressed-beacon environment
+    # is never mistaken for "installs don't trigger a re-audit").
+    result["decision"] = decide(result, beacon_precondition(owner, repo))
     print(json.dumps(result, indent=2) if args.json else render(result))
     return 0
 

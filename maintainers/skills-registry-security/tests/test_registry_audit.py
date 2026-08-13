@@ -379,3 +379,78 @@ def test_temp_install_is_removed_even_when_verification_raises(tmp_path, monkeyp
     with pytest.raises(FileNotFoundError):
         ra.audit("o", "r", "ci-secure", True, None, "HEAD")
     assert not inst.exists(), "temp install survived a raising verification"
+
+
+# --- the operator layer: beacon precondition + next-action decision ----------
+
+def _result(providers, literals=None, skew=None):
+    return {"api": {"providers": providers}, "literals": literals or {},
+            "skew": skew or []}
+
+
+def test_decide_resolved_when_all_pass_and_no_finding():
+    r = _result({"snyk": {"status": "pass", "riskLevel": "SAFE"},
+                 "socket": {"status": "pass", "riskLevel": "LOW"}})
+    assert ra.decide(r)["decision"] == "RESOLVED"
+
+
+def test_decide_action_required_when_a_literal_is_real():
+    r = _result({"snyk": {"status": "fail", "riskLevel": "CRITICAL"}},
+                literals={"http://x/install.sh": {"verdict": "REAL"}})
+    d = ra.decide(r)
+    assert d["decision"] == "ACTION_REQUIRED"
+    assert d["real_literals"] == ["http://x/install.sh"]
+
+
+def test_decide_monitor_when_failing_literal_is_gone_from_head():
+    """The common case: provider still CRITICAL but the cited string is stale —
+    nothing to fix, wait for the registry's own re-audit. Must NOT be
+    ACTION_REQUIRED."""
+    r = _result({"snyk": {"status": "fail", "riskLevel": "CRITICAL"}},
+                literals={"http://x/install.sh": {"verdict": "STALE_INPUT"}})
+    d = ra.decide(r)
+    assert d["decision"] == "MONITOR"
+    assert "re-audit" in d["why"]
+
+
+def test_decide_disagreement_when_surfaces_skew():
+    r = _result({"snyk": {"status": "pass"}}, skew=["api SAFE vs badge CRITICAL"])
+    assert ra.decide(r)["decision"] == "DISAGREEMENT"
+
+
+def test_decide_monitor_warns_when_beacon_suppressed():
+    r = _result({"snyk": {"status": "fail", "riskLevel": "CRITICAL"}},
+                literals={"http://x": {"verdict": "PHANTOM"}})
+    d = ra.decide(r, precond={"ok": False, "github_http": 403})
+    assert d["decision"] == "MONITOR"
+    assert "do NOT loop installs" in d["note"]
+
+
+def test_decide_high_risk_counts_as_failing_even_if_status_blank():
+    r = _result({"gen": {"status": "", "riskLevel": "HIGH"}},
+                literals={"http://x": {"verdict": "LAGGING"}})
+    assert ra.decide(r)["decision"] == "MONITOR"
+
+
+def test_beacon_suppressed_by_telemetry_env(monkeypatch):
+    monkeypatch.setattr(ra, "_get", lambda url: (200, ""))
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+    b = ra.beacon_precondition("o", "r")
+    assert b["ok"] is False and "DO_NOT_TRACK" in b["telemetry_disabled_by"]
+
+
+def test_beacon_suppressed_by_github_403(monkeypatch):
+    monkeypatch.setattr(ra, "_get", lambda url: (403, ""))
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("DISABLE_TELEMETRY", raising=False)
+    b = ra.beacon_precondition("o", "r")
+    assert b["ok"] is False and b["github_http"] == 403
+    assert "suppressed" in b["reason"]
+
+
+def test_beacon_can_fire_when_200_and_no_env(monkeypatch):
+    monkeypatch.setattr(ra, "_get", lambda url: (200, ""))
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("DISABLE_TELEMETRY", raising=False)
+    b = ra.beacon_precondition("o", "r")
+    assert b["ok"] is True and "will enqueue a re-index" in b["reason"]

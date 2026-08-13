@@ -11,7 +11,12 @@ description: >-
   when someone asks why a registry badge disagrees with a merged change, when
   deciding whether to request a re-index, or before or after publishing a skill
   that has been flagged. Also use when a Snyk, Socket, or Gen Agent Trust Hub
-  verdict on a published skill needs to be explained or disputed.
+  verdict on a published skill needs to be explained or disputed. Beyond
+  diagnosing, it drives a failing badge to green unattended: it emits a
+  next-action verdict, checks whether an install can even fire the re-index
+  beacon in this environment, and is meant to watch on a durable schedule until
+  the registry's own re-audit clears a stale finding — so no one has to babysit
+  a rescan by hand.
 ---
 
 # Registry security status for a published skill
@@ -144,6 +149,67 @@ look impossible.
 
 Do not escalate before doing this. Most "the registry is stuck" reports are
 really "no beacon-capable install has happened since the fix landed."
+
+## Drive it to green unattended (the operator loop)
+
+This is the point of the skill: **you own the outcome, not the human.** A stale
+badge takes hours-to-days to clear (re-index ~3h, re-audit ~22h behind it, and
+the registry's own sweep runs ~daily), so you must WATCH it yourself and surface
+only when something changes — never hand the human a timer to babysit.
+
+The script emits a **`NEXT ACTION` decision** (`--json` puts it under
+`decision`) so a watch loop can act without anyone reading the report:
+
+| decision | what it means | what you do |
+| --- | --- | --- |
+| `RESOLVED` | every provider passes, no outstanding literal | report green, **stop watching** |
+| `ACTION_REQUIRED` | a cited literal is still in HEAD — a real finding | surface it with the evidence; fix the code or accept it with a rationale; **stop watching** |
+| `MONITOR` | a provider still fails but every cited literal is gone from HEAD | **nothing to fix** — keep watching until the registry re-audits it away |
+| `DISAGREEMENT` | cached surfaces disagree | re-check shortly before trusting either |
+| `UNVERIFIED` | no local corpus to classify against | supply `--repo-root`/`--ref` and re-run |
+
+**The watch MUST run on a durable server-side Routine, never an in-session
+timer.** In a suspending session, `CronCreate`, `ScheduleWakeup`, and a
+background `sleep` loop do **not** fire while the turn is idle — the loop stalls
+until a human re-pings (this is the failure that turned one real run into ~31
+manual re-pings). Arm `mcp__Claude_Code_Remote__create_trigger` with a cron that
+matches the timings (every few hours is plenty) and a prompt that re-runs the
+script and acts on `decision`. **Surface to the owner only when the decision
+CHANGES** (to `RESOLVED` / `ACTION_REQUIRED` / `DISAGREEMENT`) or a max-elapsed
+cap is hit; on an unchanged `MONITOR`, re-arm silently. **Disable the Routine the
+moment it resolves.**
+
+On a `MONITOR`, branch on the beacon (the `decision.beacon` block):
+- **Beacon can fire AND no beacon-capable install has happened since the fix** →
+  run ONE ordinary install to nudge the re-index, then watch the snapshot hash.
+- **Beacon suppressed** (the common CI/sandbox case — the `github probe` isn't
+  200, e.g. a 403) → do **NOT** loop installs; an install is a no-op here. Just
+  watch the registry's own re-audit cadence, which clears a stale finding on its
+  own. Looping suppressed installs manufactures a false "installs do nothing"
+  record — the exact trap this skill exists to avoid.
+
+**Escalation is a last-resort nudge, not a fix — and it is optional.** A
+re-index issue on `vercel-labs/skills` (the registry's repo, not yours) is a
+long shot: recent re-scan requests sit open and unactioned, and in the run this
+skill came from the finding cleared on the registry's *own* cadence, not from
+any issue. So **draft** such an issue for the owner only if they ask, **never
+file it automatically**, and never present it as "the fix."
+
+**Rails (non-negotiable):**
+- **Any research subagent you spawn is READ-ONLY by default** — say verbatim in
+  its prompt: no `add_repo`/attach, no push, no comments, no issues; read via
+  public WebFetch/WebSearch for any repo outside scope (e.g. `vercel-labs/skills`).
+  Never add the constraint reactively after a push-access prompt appears.
+- **Never rename or re-slug a published skill to force a fresh scan.** It breaks
+  the skill's identity, installs, and marketing. The artifact's identity is not a
+  variable; exclude it from every remediation menu.
+- **Compute every elapsed-time and "when did X happen" from a fetched clock**
+  (the `auditedAt`/snapshot timestamps and the fix commit time), never a narrated
+  estimate.
+- **Before concluding, run the evidence checklist:** `git blame`/history on the
+  flagged lines, your own CI's scanner output on `main` (same scanner — strong
+  corroboration), the finding detail page, and the actual network calls. Don't
+  speculate about content you can read.
 
 ## Gotchas
 

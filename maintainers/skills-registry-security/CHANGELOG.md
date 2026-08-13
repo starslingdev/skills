@@ -4,6 +4,26 @@ Maintainer-only. Not part of any installable skill tree.
 
 ## Added
 
+- **2026-08-13** — **The skill moves from one-shot diagnostic to unattended
+  operator: it now emits a next-action verdict and checks whether an install can
+  even fire the re-index beacon.** `decide()` reduces a run to one of `RESOLVED`
+  / `ACTION_REQUIRED` (a cited literal is still in HEAD — a real finding) /
+  `MONITOR` (the finding is stale, nothing to fix, wait for the registry's own
+  re-audit) / `DISAGREEMENT` / `UNVERIFIED`, so a watch loop can act without a
+  human reading the report. `beacon_precondition()` checks the GitHub-repo probe
+  (must be 200) and the telemetry env vars up front, so a suppressed-beacon
+  environment (the 403 sandbox/CI case) is never mistaken for "installs don't
+  trigger a re-audit" — the false conclusion that turned a prior run into a
+  ~two-day manual drive. SKILL.md gains a "Drive it to green unattended" section:
+  a durable server-side Routine (never an in-session timer, which stalls when the
+  session suspends), surface-only-on-decision-change, the beacon-suppressed
+  branch (monitor the registry's own cadence rather than loop no-op installs),
+  escalation reframed as an optional long-shot draft (never auto-filed, never
+  "the fix"), and rails — read-only research subagents by default, no
+  rename/re-slug remediation, fetched-clock timing, and an evidence checklist
+  before concluding. Twelve tests pin `decide()`'s branches and
+  `beacon_precondition()`'s suppression paths.
+
 - **2026-08-11** — **The stored snapshot is now read directly, which turns the
   central claim from an inference into an artifact.** `GET
   /api/download/{owner}/{repo}/{skill}` returns the pre-built snapshot the
