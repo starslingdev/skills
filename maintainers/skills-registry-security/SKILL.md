@@ -82,9 +82,28 @@ hash and the stale file paths — quote both, since they let a maintainer confir
 the claim with a single request against their own service and without access to
 your repository.
 
-**`PHANTOM` — gone from the repository *and* the snapshot.** The scanner is
-likely serving a cached result of its own, so a re-index alone may not clear it.
-Say that explicitly rather than asking for the wrong remedy.
+**Gone from the repository *and* the snapshot — check which of two cases this
+is before saying anything.** They look identical and need opposite responses,
+and the discriminator is one comparison: **is the finding's `auditedAt` older
+than the time the snapshot hash last changed?**
+
+- **`LAGGING` — the audit predates the snapshot.** The ordinary post-fix state:
+  the fix landed, the snapshot caught up, the audit has not read it yet. The
+  literal is missing from the snapshot *because the fix worked*. Wait for the
+  next sweep — measured at ~22 h, unattended — and re-check. Do not escalate,
+  do not re-install, nothing is stuck.
+- **`PHANTOM` — the audit has run against this snapshot and still cites the
+  literal.** Only now is a scanner-side cache the explanation, and a re-index
+  alone may not clear it. Escalate with the evidence.
+- **`PHANTOM_OR_LAGGING` — you did not pass `--snapshot-changed-at`.** The
+  script refuses to guess. Supply the time the hash last changed; until then
+  assume the lagging case, which is far more common and costs only patience.
+
+Getting this backwards has already happened once here: a `PHANTOM` verdict sent
+an investigation toward an escalation packet four hours before the audit re-ran
+on its own and cleared the finding. Corroborate with the code split — warning
+codes reproducing while a critical code vanishes is the signature of stale
+input, not of a phantom.
 
 **Surfaces disagree.** The reconciliation section fires. The audit may be fine
 while users still see a stale badge. This resolves as caches catch up; confirm

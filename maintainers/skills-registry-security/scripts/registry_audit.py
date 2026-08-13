@@ -269,7 +269,9 @@ def fresh_install(owner: str, repo: str, timeout: int = 300) -> dict:
 # --------------------------------------------------------------------------
 
 def verify_literals(literals: list[str], repo_root: Path | None, ref: str,
-                    install_dir: str | None, snapshot: dict) -> dict:
+                    install_dir: str | None, snapshot: dict,
+                    audited_at: "datetime | None" = None,
+                    snapshot_changed_at: "datetime | None" = None) -> dict:
     """Classify each cited literal by which corpora still contain it.
 
     Three corpora answer three different questions. The git ref and the
@@ -281,9 +283,18 @@ def verify_literals(literals: list[str], repo_root: Path | None, ref: str,
       STALE_INPUT - gone from today's content but still in the snapshot. The
                     scanner is right about its input; the input is stale. This
                     is a re-index request, and the snapshot is the evidence.
-      PHANTOM     - gone everywhere, including the snapshot. The scanner is
-                    reporting something no longer in any corpus we can see,
-                    which usually means it cached its own finding.
+      PHANTOM     - gone everywhere, including the snapshot, AND the audit has
+                    demonstrably run since the snapshot was built. Only then is
+                    a scanner-side cache the explanation.
+      LAGGING     - gone everywhere, but the audit predates the current
+                    snapshot, so it has not read it yet. The ordinary case
+                    after a fix: wait for the next sweep, do not escalate.
+
+    The PHANTOM/LAGGING split matters more than it looks. Both present as "the
+    literal is nowhere", and treating the second as the first sends a
+    maintainer to escalate a finding that would clear on its own within a day.
+    Distinguishing them needs `snapshot_changed_at`; without it this refuses to
+    assert PHANTOM at all.
     """
     results = {}
     snap_files = snapshot.get("files") or {}
@@ -311,12 +322,22 @@ def verify_literals(literals: list[str], repo_root: Path | None, ref: str,
         elif rec["in_snapshot"]:
             rec["verdict"] = "STALE_INPUT"
         elif checked and rec["in_snapshot"] is False:
-            rec["verdict"] = "PHANTOM"
+            # Absent everywhere. Two very different causes look identical here:
+            # the scanner cached its own result, or the audit simply has not
+            # read the current snapshot yet. Only the timestamps separate them,
+            # and without both we decline to accuse the scanner.
+            if audited_at and snapshot_changed_at and audited_at < snapshot_changed_at:
+                rec["verdict"] = "LAGGING"
+            elif audited_at and snapshot_changed_at:
+                rec["verdict"] = "PHANTOM"
+            else:
+                rec["verdict"] = "PHANTOM_OR_LAGGING"
         else:
             # Nothing to compare against - say so rather than guess.
             rec["verdict"] = "UNVERIFIED"
         # Retained for callers that only care about "not in today's content".
-        rec["phantom"] = rec["verdict"] in ("STALE_INPUT", "PHANTOM")
+        rec["phantom"] = rec["verdict"] in (
+            "STALE_INPUT", "PHANTOM", "PHANTOM_OR_LAGGING", "LAGGING")
         results[lit] = rec
     return results
 
@@ -356,7 +377,8 @@ def reconcile(api: dict, cli: dict, html: dict) -> list[str]:
 # --------------------------------------------------------------------------
 
 def audit(owner: str, repo: str, skill: str, do_install: bool,
-          repo_root: Path | None, ref: str) -> dict:
+          repo_root: Path | None, ref: str,
+          snapshot_changed_at: "datetime | None" = None) -> dict:
     with ThreadPoolExecutor(max_workers=8) as pool:
         f_api = pool.submit(fetch_api, owner, repo, skill)
         f_cli = pool.submit(fetch_cli_audit, owner, repo, skill)
@@ -372,8 +394,14 @@ def audit(owner: str, repo: str, skill: str, do_install: bool,
         install = f_inst.result() if f_inst else {"ran": False}
 
     literals = sorted({u for f in findings.values() for u in f.get("cited_urls", [])})
+    # The OLDEST provider stamp is the honest one here: a literal is only
+    # phantom if every scanner that cites it has read the current snapshot.
+    stamps = [s for s in (parse_iso(p.get("auditedAt", ""))
+                          for p in (api.get("providers") or {}).values()) if s]
     checked = verify_literals(literals, repo_root, ref,
-                              install.get("install_dir"), snapshot)
+                              install.get("install_dir"), snapshot,
+                              audited_at=min(stamps) if stamps else None,
+                              snapshot_changed_at=snapshot_changed_at)
 
     return {
         "target": f"{owner}/{repo}/{skill}",
@@ -430,7 +458,10 @@ def render(r: dict) -> str:
     TAG = {
         "REAL": "present in current content - finding stands",
         "STALE_INPUT": "STALE INPUT - gone from repo, still in stored snapshot",
-        "PHANTOM": "PHANTOM - gone from repo AND snapshot",
+        "PHANTOM": "PHANTOM - gone everywhere, and the audit HAS read this snapshot",
+        "LAGGING": "LAGGING AUDIT - gone everywhere; audit predates this snapshot, so wait",
+        "PHANTOM_OR_LAGGING": ("gone from repo AND snapshot - cannot tell phantom from "
+                               "a not-yet-re-run audit without --snapshot-changed-at"),
         "UNVERIFIED": "unverified - no corpus to check against",
     }
     L.append("## Findings (from per-provider pages - not in the API)")
@@ -458,6 +489,9 @@ def render(r: dict) -> str:
 
     stale = [k for k, v in r["literals"].items() if v.get("verdict") == "STALE_INPUT"]
     phantom = [k for k, v in r["literals"].items() if v.get("verdict") == "PHANTOM"]
+    lagging = [k for k, v in r["literals"].items() if v.get("verdict") == "LAGGING"]
+    unknown_lag = [k for k, v in r["literals"].items()
+                   if v.get("verdict") == "PHANTOM_OR_LAGGING"]
     real = [k for k, v in r["literals"].items() if v.get("verdict") == "REAL"]
 
     L.append("## Verdict")
@@ -473,10 +507,24 @@ def render(r: dict) -> str:
         L.append("    stale paths   : " + ", ".join(
             sorted({p for k in stale for p in r["literals"][k]["snapshot_paths"]})[:4])
             or "    stale paths   : (none recorded)")
+    elif lagging:
+        L.append("  Findings cite content absent from the repository AND from the")
+        L.append("  stored snapshot, but the audit PREDATES this snapshot - it has")
+        L.append("  not read the fix yet. This is the ordinary post-fix state, not")
+        L.append("  a broken scanner. Wait for the next sweep (~a day) and re-check.")
+        L.append("  Do NOT escalate and do NOT re-install; nothing is stuck.")
+    elif unknown_lag:
+        L.append("  Findings cite content absent from the repository AND from the")
+        L.append("  stored snapshot. That is EITHER a scanner-side cache OR an audit")
+        L.append("  that has not re-run since the snapshot was rebuilt - and those")
+        L.append("  need opposite responses. Re-run with --snapshot-changed-at set to")
+        L.append("  when the hash last changed to tell them apart. Until then, assume")
+        L.append("  the lagging case: it is far more common, and waiting costs nothing.")
     elif phantom:
         L.append("  Findings cite content absent from the repository AND from the")
-        L.append("  stored snapshot, so the scanner is likely serving a cached")
-        L.append("  result of its own. A re-index alone may not clear it; say so.")
+        L.append("  stored snapshot, and the audit HAS run against this snapshot, so")
+        L.append("  the scanner is serving a cached result of its own. A re-index")
+        L.append("  alone will not clear it; escalate with the evidence above.")
     elif real:
         L.append("  Flagged literals are present in current content. The findings")
         L.append("  describe the skill as it is - fix them or accept them with a")
@@ -494,6 +542,11 @@ def main(argv=None) -> int:
     ap.add_argument("--repo-root", default=".", help="local checkout for literal verification")
     ap.add_argument("--ref", default="origin/main", help="git ref to verify against")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--snapshot-changed-at", metavar="TS", default=None,
+                    help="ISO time the snapshot hash last changed. Separates a "
+                         "scanner-side phantom from an audit that simply has not "
+                         "re-run since the fix was ingested; without it the two "
+                         "are reported as indistinguishable.")
     args = ap.parse_args(argv)
 
     parts = args.target.strip("/").split("/")
@@ -506,7 +559,16 @@ def main(argv=None) -> int:
     if not (root / ".git").exists():
         root = None
 
-    result = audit(owner, repo, skill, not args.no_install, root, args.ref)
+    changed_at = None
+    if args.snapshot_changed_at:
+        changed_at = parse_iso(args.snapshot_changed_at)
+        if changed_at is None:
+            print(f"unparseable --snapshot-changed-at: {args.snapshot_changed_at}",
+                  file=sys.stderr)
+            return 2
+
+    result = audit(owner, repo, skill, not args.no_install, root, args.ref,
+                   snapshot_changed_at=changed_at)
     print(json.dumps(result, indent=2) if args.json else render(result))
     return 0
 

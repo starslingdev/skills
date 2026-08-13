@@ -42,8 +42,14 @@ the registry.
    - `STALE_INPUT` — gone from the repository but still in the snapshot. Nothing
      to patch. Prints the snapshot hash and offending paths, which is what makes
      an escalation verifiable without access to your repository.
-   - `PHANTOM` — gone from both. The scanner is likely serving its own cached
-     result, so a re-index alone may not clear it.
+   - `LAGGING` — gone from both, and the audit predates the current snapshot.
+     The ordinary post-fix state: the fix worked and the badge has not caught
+     up. Wait ~a day; do not escalate.
+   - `PHANTOM` — gone from both, and the audit has already read this snapshot.
+     Only then is the scanner serving its own cached result, so a re-index
+     alone may not clear it.
+   - `PHANTOM_OR_LAGGING` — gone from both, with no `--snapshot-changed-at` to
+     tell those two apart. It declines to guess rather than accuse the scanner.
    - `UNVERIFIED` — no corpus to compare against, so it declines to guess.
 
 It also reports disagreement between surfaces, which is common and usually

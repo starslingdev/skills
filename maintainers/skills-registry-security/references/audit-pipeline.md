@@ -43,6 +43,7 @@ the evidence for each claim.
 - The precondition that invalidates most experiments
 - What each timestamp actually means
 - What the vendors say
+- When a re-audit happens
 - Observed timings
 - Worked example: one repo-wide ingest, and a fix that missed it
 - Dating a snapshot exactly
@@ -83,7 +84,20 @@ Aug 12
           |     hash changed; the flagged URL is gone from the scan input;
           |     the post-fix placeholder is present.
           |     Audit still stamped 19:44 - it drains behind ingest.
+          |
+          |   ... 22 hours of nothing. Audit still stamped Aug 11 19:44.
+          |       Polled ~20 times; byte-identical payload every time.
+Aug 13
+ 00:01  --> RE-AUDIT FIRES ON ITS OWN. No install, no push, no request.
+          |     Snyk  fail/CRITICAL/2 issues -> warn/MEDIUM/1 issue
+          |     E005 (the flagged URL) GONE; W011 remains.
+          |     Socket +22s, Gen Agent Trust Hub +38s - one batched sweep.
 ```
+
+That last line closes the loop the rest of this document only inferred:
+**install → ingest → audit → badge, all four links observed end to end on one
+skill.** The remedy is real, it is unattended, and the only thing it needed
+was time.
 
 That last step is the whole remedy, and it was confirmed by experiment rather
 than inferred: **one install whose beacon actually fires rebuilds the
@@ -225,6 +239,36 @@ Sources: <https://snyk.io/blog/snyk-vercel-securing-agent-skill-ecosystem/>,
 <https://www.skills.sh/docs/customize> (the snyk.io domain may be unreachable
 from restricted networks; that quote was recovered via search excerpts).
 
+## When a re-audit happens
+
+Ingest has a known trigger — the install beacon. The audit does not appear to
+have one you can pull. What has been observed:
+
+- **Audits re-run unattended.** A re-audit fired 22 h after a re-index with no
+  install, no push, and no request of any kind in between. Nothing needs to be
+  done to make the badge catch up with a fresh snapshot except wait.
+- **Ingest is the thing worth chasing; the audit follows.** Since scanners read
+  the snapshot, a re-audit is only useful once the snapshot already contains
+  the fix. Spending effort trying to trigger an audit before that just re-reads
+  the old photocopy — which is exactly how a fix that already landed keeps
+  reappearing as a live finding.
+- **All three providers move together.** Snyk, Socket and Gen Agent Trust Hub
+  re-stamped within 38 s of each other, so this is one batched per-skill sweep
+  rather than three independent schedules. A single provider with an old
+  `auditedAt` while its siblings are fresh would be the anomaly, not the norm.
+- **The cadence is loose.** Two consecutive audits of the same skill were
+  28.3 h apart, and an earlier pair ~24 h. Treat "roughly daily, but do not set
+  a watch by it" as the model. A gap of 28 h is not evidence of anything stuck.
+- **No client-controllable trigger exists.** Every attempt is in *Dead ends,
+  already tested* below. The remaining unknown is whether a re-index enqueues
+  the audit or whether the sweep is purely periodic; 22 h is consistent with
+  either, so the question is open.
+
+The practical consequence: after a beacon-capable install, budget **~3 h for
+the snapshot and up to another day for the badge**, and do not poll in between.
+Twenty polls over that window produced a byte-identical payload every time and
+told nobody anything. Check once, then check the next day.
+
 ## Observed timings
 
 From directly observed cycles, not documentation. Re-derive rather than
@@ -235,6 +279,9 @@ trusting these numbers forever.
 | install beacon → **first** index | ~50 min | brand-new skill, never seen before |
 | install beacon → **re**-index | **~3 h** | measured end to end: install 22:50, snapshot changed by 02:07 |
 | ingest → audit | ~77 min in one case | the audit queue drains behind ingest |
+| **re-index → re-audit** | **~22 h** | measured: snapshot 02:00, audit 00:01 next day. Unattended — no install or push in between |
+| audit → next audit | ~24 h, once 28.3 h | loose cadence; do not read a missed day as stuck |
+| provider spread within one sweep | **38 s** | Snyk 00:01:48, Socket 00:02:10, Gen ATH 00:02:26 — one batched sweep |
 | audit → all caches agree | up to ~1 day | install-path cache lagged the JSON API by a day |
 | merge with no install | **never** | two pushes produced no ingest at all |
 | install with beacon suppressed | **never** | nine installs, zero effect — the beacon never fired |
@@ -297,9 +344,25 @@ Work down this list; stop at the first match.
    repository, the input is stale — the scanner is right about what it was
    handed.
 3. **Is it in the repository too?** The finding is real. Fix or accept it.
-4. **In neither?** The scanner is likely serving its own cached result; a fresh
-   ingest may not clear it. Say so rather than requesting the wrong remedy.
+4. **In neither?** Do NOT jump to "the scanner cached its own result". First
+   ask the discriminating question: **is the finding's `auditedAt` older than
+   the snapshot's re-index?** If it is, this is an ordinary stale finding that
+   simply has not been re-audited yet — the literal is absent from the current
+   snapshot precisely *because* the fix landed, and the audit has not read it.
+   Wait for the next sweep (see *When a re-audit happens*). Only once an audit
+   has demonstrably run **against the current snapshot** and still cites a
+   literal present in neither corpus is a scanner-side cache the explanation.
 5. **Verdicts differ across surfaces?** Cache propagation. Re-run later.
+
+Step 4 is the trap this document exists to prevent, in a new costume. The
+original mistake was reading a fresh timestamp on stale content as "the fix
+did not work". The mirror-image mistake is reading fresh content under a stale
+timestamp as "the scanner is broken" — and it was made here, four hours before
+the audit re-ran on its own and cleared the finding. Both are the same error:
+comparing a timestamp and a hash without asking which one moved first. The
+corroborating signal is in `registry-surfaces.md`: warning codes reproducing
+while a critical code vanishes is the signature of stale input, not of a
+phantom.
 
 Corroborate with the project's own scanner run if it has one: same scanner,
 current branch, opposite verdict isolates the input as the variable.
@@ -373,6 +436,10 @@ matching reality.
 | The snapshot pins to an exact commit | Byte-compared every snapshot file against candidate commit trees; one matched with zero differences. |
 | Audits re-run over an unchanged snapshot | Audit timestamps advanced ~24h while the snapshot hash and the finding text stayed byte-identical. |
 | Findings clear once the fix is in the snapshot | A sibling skill went FAIL/HIGH with two findings to WARN/MEDIUM with one, after the fixing commit's file appeared in its snapshot. |
+| **The whole chain works end to end, unattended** | Watched on one skill across three days: beacon-capable install 22:50 → snapshot rebuilt ~02:00 (+3 h) → audit re-ran 00:01 next day (+22 h) → Snyk fail/CRITICAL/E005+W011 became warn/MEDIUM/W011. Nothing was requested at any step; the only input was one install. |
+| A re-audit needs no trigger from you | The re-audit above fired with no install, push, or API call in the preceding 22 h — the tree and every registry surface were untouched apart from read-only GETs. |
+| Audits are one batched sweep, not per-provider schedules | Three providers re-stamped within 38 s of each other, and the model-based one returned a freshly written summary naming code it had not previously described. |
+| Warning codes reproduce while stale critical codes vanish | Across four audits of the same skill, W011 appeared in every one; E005 disappeared the moment the audit read a snapshot without the literal. |
 | Caches disagree | The install-path endpoint served day-old values while the JSON API served current ones for the same skill. |
 | Model-based providers re-judge unchanged input | One provider went fail to pass across two audits of the same snapshot, its category list growing rather than shrinking. |
 | The indexer drops large files | Two snapshots omit files of ~600 KB and ~900 KB; the largest included file is ~470 KB. |
@@ -388,6 +455,18 @@ retracted while investigating.
   suppressed. Always verify the precondition first.
 - **"Indexing happens once and never repeats."** False. Snapshots demonstrably
   rebuild.
+- **"A literal absent from both the repository and the snapshot means the
+  scanner cached its own result."** Asserted here, with an escalation packet
+  drafted on the strength of it, and disproven four hours later when the audit
+  re-ran unattended and dropped the finding. Absence from both corpora is
+  equally consistent with the ordinary case — the fix landed, the snapshot
+  caught up, and the audit simply had not run yet. The verdict is only
+  supportable once an audit has run *against the current snapshot*; check
+  `auditedAt` against the re-index before claiming it.
+- **"A re-index is what causes the next audit."** Unknown. The one observed
+  re-audit came 22 h after a re-index, which fits both "the re-index enqueued
+  it" and "a periodic sweep happened to come round". Nothing distinguishes them
+  yet, so neither is claimed.
 - **"The scanners read the snapshot."** Consistent with every observation and
   strongly supported by a finding clearing exactly when the fix appeared in the
   snapshot, but never directly verified.

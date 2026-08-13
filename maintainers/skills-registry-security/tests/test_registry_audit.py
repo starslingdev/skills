@@ -8,7 +8,7 @@ integration use.
 
 import subprocess
 import sys
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -163,9 +163,34 @@ def test_literal_gone_from_repo_but_still_in_snapshot_is_stale_input(tree):
     assert rec["snapshot_paths"] == ["references/patterns.md"]
 
 
-def test_literal_gone_everywhere_including_snapshot_is_phantom(tree):
-    snap = {"hash": "x", "files": {"SKILL.md": "clean\n"}}
-    out = ra.verify_literals([GONE_URL], None, "HEAD", str(tree), snap)
+CLEAN_SNAP = {"hash": "x", "files": {"SKILL.md": "clean\n"}}
+BEFORE = datetime(2026, 8, 11, 19, 44, tzinfo=timezone.utc)
+REINDEX = datetime(2026, 8, 12, 2, 0, tzinfo=timezone.utc)
+AFTER = datetime(2026, 8, 13, 0, 1, tzinfo=timezone.utc)
+
+
+def test_gone_everywhere_is_ambiguous_without_the_reindex_time(tree):
+    """Absent-everywhere alone cannot distinguish the two causes.
+
+    Accusing the scanner of caching when the audit simply has not re-run yet
+    sends a maintainer to escalate a finding that clears itself within a day.
+    Refusing to pick is the honest answer when the timestamps are missing.
+    """
+    out = ra.verify_literals([GONE_URL], None, "HEAD", str(tree), CLEAN_SNAP)
+    assert out[GONE_URL]["verdict"] == "PHANTOM_OR_LAGGING"
+
+
+def test_audit_older_than_the_snapshot_is_lagging_not_phantom(tree):
+    """The real case this split exists for: fix landed, badge has not caught up."""
+    out = ra.verify_literals([GONE_URL], None, "HEAD", str(tree), CLEAN_SNAP,
+                             audited_at=BEFORE, snapshot_changed_at=REINDEX)
+    assert out[GONE_URL]["verdict"] == "LAGGING"
+
+
+def test_audit_newer_than_the_snapshot_is_a_real_phantom(tree):
+    """Only once a scanner has read the current snapshot is its cache to blame."""
+    out = ra.verify_literals([GONE_URL], None, "HEAD", str(tree), CLEAN_SNAP,
+                             audited_at=AFTER, snapshot_changed_at=REINDEX)
     assert out[GONE_URL]["verdict"] == "PHANTOM"
 
 

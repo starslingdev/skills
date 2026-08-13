@@ -39,6 +39,22 @@ Maintainer-only. Not part of any installable skill tree.
   that current code was read. `references/registry-surfaces.md` carries the URL
   shapes, response schemas, and the `E`/`W` finding-code split.
 
+- **2026-08-13** — **The chain is now observed end to end, so "wait" is a
+  procedure with a number on it rather than advice.** A watched cycle closed
+  every link on one skill: beacon-capable install → snapshot rebuilt ~3 h later
+  → **audit re-ran unattended ~22 h after that** → Snyk went fail/CRITICAL with
+  E005+W011 to warn/MEDIUM with W011 alone. Nothing was requested at any step
+  after the install. Added a *When a re-audit happens* section and three
+  measured rows: re-index → re-audit ~22 h, audit-to-audit 24–28 h (loose
+  enough that a missed day means nothing), and all three providers re-stamping
+  within 38 s, which shows audits are one batched per-skill sweep rather than
+  independent provider schedules. The practical rule that falls out: after an
+  install, budget ~3 h for the snapshot and up to another day for the badge,
+  and do not poll in between — twenty polls across that window returned a
+  byte-identical payload every time and established nothing. Left explicitly
+  open whether a re-index *enqueues* the audit or the sweep is purely
+  periodic; 22 h fits both.
+
 - **2026-08-11** — **The re-index versus re-audit distinction is load-bearing.**
   Asking for a plain re-audit of a stale snapshot reproduces the same finding,
   so the skill names re-indexing explicitly as the thing to request, and lists
@@ -62,6 +78,23 @@ Maintainer-only. Not part of any installable skill tree.
   ref parameters) so they are not re-derived, and the fact that the indexer
   drops files above roughly 500-600 KB, which means a snapshot is not a
   faithful copy of the folder.
+
+- **2026-08-13** — **Retracted "gone from repo and snapshot means the scanner
+  cached it", the mirror image of the original mistake.** `verify_literals`
+  classified any literal absent from both corpora as `PHANTOM` — scanner at
+  fault, re-index will not help, escalate. That verdict was produced for a real
+  finding and an escalation packet was drafted on it; four hours later the
+  audit re-ran on its own and cleared the finding. Absence from both is equally
+  consistent with the ordinary post-fix state: the fix landed, the snapshot
+  caught up, and the audit had not read it yet. The original error was reading
+  a fresh timestamp over stale content as "the fix did not work"; this is the
+  same error with the operands swapped. The verdict now splits three ways on
+  whether the audit predates the snapshot — `LAGGING` (wait, do not escalate),
+  `PHANTOM` (the scanner has read this snapshot and still cites the literal, so
+  escalate), and `PHANTOM_OR_LAGGING` when the new `--snapshot-changed-at` is
+  not supplied, which refuses to guess and names the flag that would decide it.
+  The oldest provider stamp is used, not the newest: a literal is only phantom
+  if *every* scanner citing it has read the current snapshot.
 
 - **2026-08-12** — **The remedy is confirmed by experiment, so the skill now
   states it as a procedure rather than a hypothesis.** One install whose
