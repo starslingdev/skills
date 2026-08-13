@@ -143,15 +143,27 @@ def test_page_text_strips_upper_case_script_and_style_tags():
     assert "Warn" in txt
 
 
-def test_page_text_strips_scripts_with_attributes_and_spaced_end_tags():
-    """`<script type=...>` and `</script >` are both legal and both must go."""
-    txt = ra._page_text(
-        "<script type='text/javascript'>var c='E005'</script >"
-        "<style media='all'>b{}</style >Fail"
-    )
+@pytest.mark.parametrize("end", ["</script>", "</script >", "</script\t\n bar>"])
+def test_page_text_strips_every_legal_script_end_tag_form(end):
+    """End tags may carry whitespace and ignored attributes; all are legal.
+
+    Three regexes each missed one of these in turn, which is why this is now
+    parsed rather than pattern-matched.
+    """
+    txt = ra._page_text(f"<script type='text/javascript'>var c='E005'{end}Fail")
     assert "E005" not in txt
-    assert "b{}" not in txt
     assert "Fail" in txt
+
+
+def test_page_text_strips_style_bodies_too():
+    txt = ra._page_text("<style media='all'>b{color:red}</style >Warn")
+    assert "color:red" not in txt
+    assert "Warn" in txt
+
+
+def test_page_text_survives_malformed_markup():
+    """A diagnostic tool must not crash on a half-broken page."""
+    assert "Analysis" in ra._page_text("<div><span>Analysis<script>x=1")
 
 
 # --------------------------------------------------------------------------
@@ -343,3 +355,27 @@ def test_help_names_the_no_install_fast_path():
                        capture_output=True, text=True)
     assert p.returncode == 0
     assert "--no-install" in p.stdout
+
+
+def test_temp_install_is_removed_even_when_verification_raises(tmp_path, monkeypatch):
+    """Cleanup lives in a finally: git/grep can be missing, and the leak would
+    then accumulate fastest on exactly the repeated-failure path."""
+    inst = tmp_path / "inst"
+    (inst / ".agents" / "skills" / "ci-secure").mkdir(parents=True)
+
+    monkeypatch.setattr(ra, "fetch_api", lambda *a: {"providers": {}})
+    monkeypatch.setattr(ra, "fetch_cli_audit", lambda *a: {"providers": {}})
+    monkeypatch.setattr(ra, "fetch_html_badges", lambda *a: {"badges": {}})
+    monkeypatch.setattr(ra, "fetch_snapshot", lambda *a: {"files": {}})
+    monkeypatch.setattr(ra, "fetch_findings",
+                        lambda *a: {"codes": ["E005"], "cited_urls": [GONE_URL]})
+    monkeypatch.setattr(ra, "fresh_install",
+                        lambda *a, **k: {"ran": True, "install_dir": str(inst)})
+
+    def boom(*a, **k):
+        raise FileNotFoundError("grep")
+    monkeypatch.setattr(ra, "verify_literals", boom)
+
+    with pytest.raises(FileNotFoundError):
+        ra.audit("o", "r", "ci-secure", True, None, "HEAD")
+    assert not inst.exists(), "temp install survived a raising verification"

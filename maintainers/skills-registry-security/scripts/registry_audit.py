@@ -18,7 +18,6 @@ stdlib only, to match the other engines in this repo.
 from __future__ import annotations
 
 import argparse
-import html as htmllib
 import json
 import os
 import re
@@ -28,6 +27,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,18 +68,54 @@ def _get(url: str) -> tuple[int, str]:
         return 0, f"__ERROR__ {type(exc).__name__}: {exc}"
 
 
-def _page_text(raw: str) -> str:
-    """Flatten rendered HTML to searchable text.
+class _TextExtractor(HTMLParser):
+    """Collect visible text, dropping `<script>` and `<style>` bodies entirely.
 
-    Tag matching is case-insensitive: HTML tag names are, and a surviving
-    `<SCRIPT>` body would be scanned for finding codes like any other text,
-    which is how a page's own JavaScript could invent an `E005` that no
-    scanner ever reported.
+    This was three successive regexes, and CodeQL found a hole in each: first
+    `<SCRIPT>`, then `</script >`, then `</script\t\n bar>` — all legal, since
+    an end tag may carry whitespace and even ignored attributes. That is the
+    rule's actual point: tag grammar is not a regular language, and each patch
+    only moves the hole. A parser closes the class instead of the instance.
+
+    It matters here because the flattened text is scanned for finding codes, so
+    a surviving script body lets a page's own JavaScript invent an `E005` that
+    no scanner ever reported.
     """
-    t = re.sub(r"<script\b[^>]*>.*?</script\s*>", " ", raw, flags=re.S | re.I)
-    t = re.sub(r"<style\b[^>]*>.*?</style\s*>", " ", t, flags=re.S | re.I)
-    t = re.sub(r"<[^>]+>", " ", t)
-    return re.sub(r"\s+", " ", htmllib.unescape(t)).strip()
+
+    _SKIP = {"script", "style"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._depth:
+            self._depth -= 1
+
+    def handle_data(self, data):
+        if not self._depth:
+            self.parts.append(data)
+
+
+def _page_text(raw: str) -> str:
+    """Flatten rendered HTML to searchable text."""
+    p = _TextExtractor()
+    try:
+        p.feed(raw)
+        p.close()
+    except Exception:
+        # Malformed markup: keep whatever was parsed rather than losing the
+        # page. Partial text still beats crashing a diagnostic tool.
+        pass
+    # Joined on a space, not "": the old tag-to-space substitution is what put
+    # a gap between text in adjacent elements, and the verdict scrape relies on
+    # it ("Warn" and "Audited by" are separate nodes).
+    return re.sub(r"\s+", " ", " ".join(p.parts)).strip()
 
 
 def parse_iso(ts: str):
@@ -445,17 +481,20 @@ def audit(owner: str, repo: str, skill: str, do_install: bool,
         if citing:
             per_literal[lit] = min(citing)
 
-    checked = verify_literals(literals, repo_root, ref,
-                              _installed_skill_dir(install.get("install_dir"), skill),
-                              snapshot,
-                              snapshot_changed_at=snapshot_changed_at,
-                              audited_at_by_literal=per_literal)
-
     # The install has served its only purpose (the risk table plus the corpus
-    # above). Leaving it behind means every run of a "read-only" tool deposits
-    # a full skill tree in the system temp dir.
-    if install.get("install_dir"):
-        shutil.rmtree(install["install_dir"], ignore_errors=True)
+    # below), so it is removed in a finally: verification shells out to git and
+    # grep, and if either is missing the raise would otherwise leave a full
+    # skill tree behind — on exactly the repeated-failure path where the leak
+    # accumulates fastest.
+    try:
+        checked = verify_literals(literals, repo_root, ref,
+                                  _installed_skill_dir(install.get("install_dir"), skill),
+                                  snapshot,
+                                  snapshot_changed_at=snapshot_changed_at,
+                                  audited_at_by_literal=per_literal)
+    finally:
+        if install.get("install_dir"):
+            shutil.rmtree(install["install_dir"], ignore_errors=True)
 
     return {
         "target": f"{owner}/{repo}/{skill}",
