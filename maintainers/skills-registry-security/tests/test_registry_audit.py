@@ -396,10 +396,10 @@ def test_decide_resolved_when_all_pass_and_no_finding():
 
 def test_decide_action_required_when_a_literal_is_real():
     r = _result({"snyk": {"status": "fail", "riskLevel": "CRITICAL"}},
-                literals={"http://x/install.sh": {"verdict": "REAL"}})
+                literals={"http://ex/pkg": {"verdict": "REAL"}})
     d = ra.decide(r)
     assert d["decision"] == "ACTION_REQUIRED"
-    assert d["real_literals"] == ["http://x/install.sh"]
+    assert d["real_literals"] == ["http://ex/pkg"]
 
 
 def test_decide_monitor_when_failing_literal_is_gone_from_head():
@@ -407,7 +407,7 @@ def test_decide_monitor_when_failing_literal_is_gone_from_head():
     nothing to fix, wait for the registry's own re-audit. Must NOT be
     ACTION_REQUIRED."""
     r = _result({"snyk": {"status": "fail", "riskLevel": "CRITICAL"}},
-                literals={"http://x/install.sh": {"verdict": "STALE_INPUT"}})
+                literals={"http://ex/pkg": {"verdict": "STALE_INPUT"}})
     d = ra.decide(r)
     assert d["decision"] == "MONITOR"
     assert "re-audit" in d["why"]
