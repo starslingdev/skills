@@ -2,6 +2,30 @@
 
 Maintainer-only. Not part of any installable skill tree.
 
+## Fixed
+
+- **2026-08-13** — **An unscanned skill is no longer reported as a passing one,
+  and the operator loop no longer contradicts itself about installs.** Three
+  defects found in adversarial review. (1) `decide()` gated on the status API's
+  `http`/`error` fields but not on its contents, so a 200 carrying an empty
+  `audits` list — nobody has scanned this skill yet, the normal state of a
+  just-published one, which is precisely when this skill gets run — produced
+  zero failing providers and resolved to `RESOLVED`, stopping an unattended
+  watch before the first scan ever landed. It now returns `UNVERIFIED` saying
+  no provider has reported. (2) The Gotchas claim "Installing never triggers a
+  re-scan … polling on a timer is wasted effort — check once, then act"
+  contradicted both *Forcing a refresh* (one beacon-capable install rebuilds the
+  snapshot) and the operator loop (watch on a durable Routine; on `MONITOR` with
+  a live beacon, run one install). It is the pre-beacon-experiment belief the
+  skill exists to refute, and an agent executing the loop would have hit it as
+  authoritative guidance. Reworded to split the install's cached audit *lookup*
+  (changes nothing) from its telemetry *beacon* (enqueues a re-index when it can
+  fire). (3) The decision table described `UNVERIFIED` as only the no-local-corpus
+  case and prescribed `--repo-root`, though `decide()` also emits it for an
+  unreachable API, an API with no records, and an unreachable finding-detail
+  page — for which that instruction is a no-op. The row now covers all four and
+  says never to treat the verdict as green.
+
 ## Added
 
 - **2026-08-13** — **The skill moves from one-shot diagnostic to unattended

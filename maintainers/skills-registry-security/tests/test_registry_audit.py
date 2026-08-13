@@ -494,6 +494,15 @@ def test_decide_unverified_when_provider_api_unreachable():
     assert "unreachable" in d["why"]
 
 
+def test_decide_unverified_when_the_api_carries_no_audit_records():
+    """A 200 with an empty `audits` list is an UNSCANNED skill, not a passing
+    one. It is the normal state of a just-published skill - the moment this gets
+    run - and RESOLVED would stop the watch before the first scan ever landed."""
+    d = ra.decide(_result({}))
+    assert d["decision"] == "UNVERIFIED"
+    assert "no audit records" in d["why"]
+
+
 def test_decide_unreachable_api_still_reports_beacon():
     r = _result({}, api={"http": 500, "error": "boom"})
     d = ra.decide(r, precond={"ok": True, "github_http": 200})

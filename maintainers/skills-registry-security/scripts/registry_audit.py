@@ -566,11 +566,13 @@ def decide(result: dict, precond: dict | None = None) -> dict:
                       re-index issue on vercel-labs/skills as an OPTIONAL long-shot
                       to DRAFT for the owner, never an auto-action or "the fix."
       DISAGREEMENT    the cached surfaces disagree — re-check before trusting.
-      UNVERIFIED      a surface could not be read, or the cited literals could
-                      not be classified. Never confuse this with RESOLVED: a
-                      surface nobody fetched is not a surface that came back
-                      clean, and reporting one as the other stops the watch on
-                      an unread badge.
+      UNVERIFIED      a surface could not be read, the API carries no audit
+                      records at all, or the cited literals could not be
+                      classified. Never confuse this with RESOLVED: a surface
+                      nobody fetched is not a surface that came back clean, and
+                      a skill nobody scanned is not a skill that passed —
+                      reporting either as green stops the watch on an unread
+                      badge.
     """
     api = result.get("api") or {}
     providers = api.get("providers") or {}
@@ -590,6 +592,16 @@ def decide(result: dict, precond: dict | None = None) -> dict:
                         "the provider status API was unreachable "
                         f"(HTTP {api.get('http')}: {api.get('error')}) - cannot "
                         "tell a clean badge from an unread one",
+                        [], [], [], precond)
+    # The same shape one layer in: a 200 carrying an empty `audits` list means
+    # nobody has scanned this skill, which is NOT every provider passing. It is
+    # the normal state of a just-published skill - exactly when this gets run -
+    # and calling it RESOLVED stops the watch before the first scan ever lands.
+    if not providers:
+        return _decided("UNVERIFIED",
+                        "the status API returned no audit records for this skill - "
+                        "no provider has scanned it yet, which is not the same as "
+                        "every provider passing; keep watching until one reports",
                         [], [], [], precond)
     verdicts = {lit: rec.get("verdict")
                 for lit, rec in (result.get("literals") or {}).items()}

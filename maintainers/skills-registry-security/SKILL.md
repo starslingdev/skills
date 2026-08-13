@@ -180,7 +180,7 @@ The script emits a **`NEXT ACTION` decision** (`--json` puts it under
 | `ACTION_REQUIRED` | a cited literal is still in HEAD — a real finding | surface it with the evidence; fix the code or accept it with a rationale; **stop watching** |
 | `MONITOR` | a provider still fails but every cited literal is gone from HEAD | **nothing to fix** — keep watching until the registry re-audits it away |
 | `DISAGREEMENT` | cached surfaces disagree | re-check shortly before trusting either |
-| `UNVERIFIED` | no local corpus to classify against | supply `--repo-root`/`--ref` and re-run |
+| `UNVERIFIED` | something could not be read, so nothing can be concluded — the status API was unreachable, it returned no audit records at all (nobody has scanned this skill yet), a finding detail page failed to load, or there is no local corpus to classify literals against | read `why`: supply `--repo-root`/`--ref` if it names the corpus, otherwise **keep watching** and re-run — never treat this as green |
 
 **The watch MUST run on a durable server-side Routine, never an in-session
 timer.** In a suspending session, `CronCreate`, `ScheduleWakeup`, and a
@@ -230,10 +230,15 @@ file it automatically**, and never present it as "the fix."
 These are the traps that make this task take hours instead of a minute. Most of
 them look like a bug in your own reasoning when you hit them cold.
 
-- **Installing never triggers a re-scan.** The CLI's audit call is a plain GET
-  keyed on `owner/repo` plus the skill slug, with no commit SHA anywhere in it.
-  Installing repeatedly, waiting, and re-installing accomplishes nothing.
-  Polling on a timer is wasted effort — check once, then act.
+- **The install's *audit lookup* never triggers a re-scan — the install's
+  *beacon* is what rebuilds the snapshot.** The CLI's audit call is a plain GET
+  keyed on `owner/repo` plus the skill slug, with no commit SHA anywhere in it,
+  so it reads a cache and changes nothing. The separate telemetry beacon does
+  enqueue a re-index — but only when it can fire (see *Forcing a refresh*).
+  Hence: one beacon-capable install is worth running once; re-installing after
+  it is worth nothing, and installing from a beacon-suppressed environment is
+  worth nothing at all. Nine suppressed installs over six hours moved the
+  snapshot hash zero times.
 
 - **Merging a fix does not invalidate anything.** Because the cache key carries
   no SHA, pushing the fix to the default branch leaves the audit untouched.
