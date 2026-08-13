@@ -264,9 +264,11 @@ def fresh_install(owner: str, repo: str, timeout: int = 300) -> dict:
         return out
     except subprocess.TimeoutExpired:
         out["error"] = f"install exceeded {timeout}s"
+        out["install_dir"] = tmp  # recorded so the caller can still clean it up
         return out
     except Exception as exc:
         out["error"] = f"{type(exc).__name__}: {exc}"
+        out["install_dir"] = tmp
         return out
 
 
@@ -274,10 +276,27 @@ def fresh_install(owner: str, repo: str, timeout: int = 300) -> dict:
 # phantom-finding verification
 # --------------------------------------------------------------------------
 
+def _installed_skill_dir(install_dir: str | None, skill: str | None) -> str | None:
+    """Narrow a repo-wide install to the one skill under audit.
+
+    `skills add owner/repo` installs EVERY skill in the repo, side by side under
+    `.agents/skills/<name>/`. Grepping the whole tree would let a literal that
+    only ever appeared in a sibling skill mark this skill's finding REAL — the
+    one misclassification that sends a maintainer to edit code that is already
+    clean. Falls back to the full tree only when the per-skill directory is
+    absent, since a wrong-but-narrow corpus beats no corpus.
+    """
+    if not install_dir or not skill:
+        return install_dir
+    scoped = Path(install_dir) / ".agents" / "skills" / skill
+    return str(scoped) if scoped.is_dir() else install_dir
+
+
 def verify_literals(literals: list[str], repo_root: Path | None, ref: str,
                     install_dir: str | None, snapshot: dict,
                     audited_at: "datetime | None" = None,
-                    snapshot_changed_at: "datetime | None" = None) -> dict:
+                    snapshot_changed_at: "datetime | None" = None,
+                    audited_at_by_literal: "dict | None" = None) -> dict:
     """Classify each cited literal by which corpora still contain it.
 
     Three corpora answer three different questions. The git ref and the
@@ -332,9 +351,14 @@ def verify_literals(literals: list[str], repo_root: Path | None, ref: str,
             # the scanner cached its own result, or the audit simply has not
             # read the current snapshot yet. Only the timestamps separate them,
             # and without both we decline to accuse the scanner.
-            if audited_at and snapshot_changed_at and audited_at < snapshot_changed_at:
+            # Only the providers that actually CITE this literal get a say. A
+            # provider citing nothing (Socket reporting "no alerts") carries an
+            # older stamp forever, and pooling it in would mask every phantom
+            # behind an unrelated scanner's lag.
+            stamp = (audited_at_by_literal or {}).get(lit, audited_at)
+            if stamp and snapshot_changed_at and stamp < snapshot_changed_at:
                 rec["verdict"] = "LAGGING"
-            elif audited_at and snapshot_changed_at:
+            elif stamp and snapshot_changed_at:
                 rec["verdict"] = "PHANTOM"
             else:
                 rec["verdict"] = "PHANTOM_OR_LAGGING"
@@ -400,14 +424,31 @@ def audit(owner: str, repo: str, skill: str, do_install: bool,
         install = f_inst.result() if f_inst else {"ran": False}
 
     literals = sorted({u for f in findings.values() for u in f.get("cited_urls", [])})
-    # The OLDEST provider stamp is the honest one here: a literal is only
-    # phantom if every scanner that cites it has read the current snapshot.
-    stamps = [s for s in (parse_iso(p.get("auditedAt", ""))
-                          for p in (api.get("providers") or {}).values()) if s]
+
+    # Attribute stamps per literal, not globally. A literal is only phantom
+    # once every scanner CITING IT has read the current snapshot, so take the
+    # oldest stamp among exactly those providers.
+    by_slug = {p.get("slug"): parse_iso(p.get("auditedAt", ""))
+               for p in (api.get("providers") or {}).values()}
+    per_literal = {}
+    for lit in literals:
+        citing = [by_slug.get(slug) for slug, f in findings.items()
+                  if lit in (f.get("cited_urls") or [])]
+        citing = [s for s in citing if s]
+        if citing:
+            per_literal[lit] = min(citing)
+
     checked = verify_literals(literals, repo_root, ref,
-                              install.get("install_dir"), snapshot,
-                              audited_at=min(stamps) if stamps else None,
-                              snapshot_changed_at=snapshot_changed_at)
+                              _installed_skill_dir(install.get("install_dir"), skill),
+                              snapshot,
+                              snapshot_changed_at=snapshot_changed_at,
+                              audited_at_by_literal=per_literal)
+
+    # The install has served its only purpose (the risk table plus the corpus
+    # above). Leaving it behind means every run of a "read-only" tool deposits
+    # a full skill tree in the system temp dir.
+    if install.get("install_dir"):
+        shutil.rmtree(install["install_dir"], ignore_errors=True)
 
     return {
         "target": f"{owner}/{repo}/{skill}",
