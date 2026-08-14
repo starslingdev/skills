@@ -8,13 +8,28 @@
 #     every one is surfaced as a ::warning:: annotation and in the job summary.
 #     "Does not block" must not decay into "does not appear".
 #
-# Reuse in any other repo: ci-secure is stdlib-only Python, so this file needs
-# nothing but a checkout and python3. This repo runs the in-tree engine; any
-# other repo replaces the "Run ci-secure" step's SCAN_ROOT setup with a
-# SHA-pinned fetch of the engine, e.g.:
-#   git clone --depth 1 https://github.com/starslingdev/skills /tmp/ci-secure-engine
-#   git -C /tmp/ci-secure-engine checkout <pinned-sha>
-#   python3 /tmp/ci-secure-engine/skills/ci-secure/scripts/scan.py --root .
+# Reuse in any other repo: copy this file and .github/scripts/ci_secure_gate.py
+# (the gate script must keep that exact location - it derives the scan root from
+# it). This repo runs the engine from its own tree; a repo that does not vendor
+# the engine fetches it and points CI_SECURE_ENGINE at the fetched scan.py,
+# replacing the "Run ci-secure" step with:
+#   - run: |
+#       git init /tmp/ci-secure-engine
+#       git -C /tmp/ci-secure-engine fetch --depth 1 \
+#         https://github.com/starslingdev/skills <pinned-sha>
+#       git -C /tmp/ci-secure-engine checkout FETCH_HEAD
+#     # `git clone --depth 1` cannot be followed by `checkout <sha>`: a depth-1
+#     # clone fetches only the default-branch tip, so the pin would never resolve.
+#   - run: python3 .github/scripts/ci_secure_gate.py
+#     env:
+#       CI_SECURE_ENGINE: /tmp/ci-secure-engine/skills/ci-secure/scripts/scan.py
+#
+# Run the GATE, never scan.py directly: scan.py prints its JSON and exits 0 no
+# matter what it found, so a step that calls it is a green-forever check. The
+# pass/fail rule above lives entirely in ci_secure_gate.py.
+#
+# Expect the first run on a new repo to be red on sec.codeowners.workflows until
+# a CODEOWNERS file exists - that is the gate working, not the gate broken.
 name: CI security
 
 on:
@@ -32,26 +47,40 @@ permissions:
   contents: read
 
 jobs:
-  ci-secure:
-    name: ci-secure
+  scan:
+    name: ci-secure (self-hosted)
     # Dogfoods StarSling runners like ci.yml; fork PRs are excluded from the
     # self-hosted runner and get the hosted twin below instead.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: starsling-ubuntu-24.04
     timeout-minutes: 10
     steps:
+      # fetch-depth: 1 — the scan only reads the tree at this commit; unlike
+      # ci.yml it verifies no ancestry, so history would be dead weight.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
           persist-credentials: false
+      # Pinned rather than inherited from the runner image: this is a security
+      # gate, and which interpreter it runs under should not drift with an image
+      # rebuild. The engine needs PyYAML — it is not a stdlib-only program.
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
       - name: Run ci-secure against this repo's workflows
         run: python3 .github/scripts/ci_secure_gate.py
 
-  # Fork PRs run the identical scan on a GitHub-hosted runner: the scan needs
-  # no secrets, so hosted execution of fork code is the standard ci-fork model.
-  ci-secure-fork:
+  # Fork PRs run the same scan on a GitHub-hosted runner: the scan needs no
+  # secrets, so hosted execution of fork code is the standard ci-fork model.
+  # It is the same command over the same tree, but it is NOT an equivalent
+  # assurance: on a fork PR the gate script and the engine both come from the
+  # head ref, so a fork can weaken its own scan in the same pull request. What
+  # stops that is human review of a `.github/` diff (CODEOWNERS routes it), not
+  # this job. Treat a green fork scan as "nothing obvious", not as cleared.
+  scan-fork:
     name: ci-secure (fork)
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -59,5 +88,48 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
       - name: Run ci-secure against this repo's workflows
         run: python3 .github/scripts/ci_secure_gate.py
+
+  # ONE check name carries the verdict for fork and non-fork alike. The two scan
+  # jobs are mutually exclusive, so a branch protection rule naming either of
+  # them directly would be satisfiable by never running it: a fork PR skips the
+  # self-hosted job, and a required check that is absent does not block a merge.
+  # This job always runs, so the required check is always reported, and it passes
+  # only when the one scan that was supposed to run actually ran and passed.
+  #
+  # GitHub-hosted on purpose: this job runs on fork PRs too, and its `run:` block
+  # travels with the head ref, so a self-hosted runner here would execute
+  # fork-authored shell on StarSling infrastructure. It checks out nothing.
+  verdict:
+    name: ci-secure
+    needs: [scan, scan-fork]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the scan that should have run to have passed
+        env:
+          SELF_HOSTED: ${{ needs.scan.result }}
+          FORK: ${{ needs.scan-fork.result }}
+        run: |
+          set -euo pipefail
+          echo "self-hosted scan: ${SELF_HOSTED}"
+          echo "fork scan:        ${FORK}"
+          # Exactly one of the two is meant to run; the other reports "skipped".
+          # Anything else - both skipped, either failed, either cancelled - is
+          # not a pass: a scan that did not run is not a scan that passed.
+          if [ "${SELF_HOSTED}" = "success" ] && [ "${FORK}" = "skipped" ]; then
+            echo "ci-secure passed (self-hosted scan)."
+            exit 0
+          fi
+          if [ "${FORK}" = "success" ] && [ "${SELF_HOSTED}" = "skipped" ]; then
+            echo "ci-secure passed (fork scan)."
+            exit 0
+          fi
+          echo "::error::ci-secure has no passing verdict (self-hosted=${SELF_HOSTED}, fork=${FORK}) - a scan that did not run, was cancelled, or failed is not a pass"
+          exit 1

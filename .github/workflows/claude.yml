@@ -58,7 +58,15 @@ jobs:
     # push as the app instead of as a maintainer. Removing it breaks the
     # workflow. Note that Claude's own write scope comes from that App token and
     # is fixed by the app, so trimming the grants below changes what this job's
-    # GITHUB_TOKEN can do, not what Claude can do.
+    # GITHUB_TOKEN can do, not what Claude can do. Verified against the pinned
+    # action: with no github_token input, its token setup takes the OIDC ->
+    # app-token-exchange path and hands that App token to every write-capable
+    # tool it installs; the job's own GITHUB_TOKEN reaches the action only as
+    # DEFAULT_WORKFLOW_TOKEN, consumed by the read-only CI-status tool that needs
+    # the `actions: read` below. Dropping the three write grants would therefore
+    # silence a scanner finding without taking one capability away from a run a
+    # maintainer has already started. These grants match upstream's own published
+    # example workflow for this action, at the same pinned version.
     permissions:
       contents: write
       pull-requests: write
