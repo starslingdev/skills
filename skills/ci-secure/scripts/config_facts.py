@@ -826,7 +826,12 @@ def _context_producers(
             shown = _display_name(key, job)
             if _EXPRESSION_RE.search(shown):
                 continue
-            if context == shown:
+            if context == shown and not _job_has_matrix(job):
+                # A MATRIX job never reports its bare name — GitHub appends the
+                # combination, so `test` becomes `test (3.11)`. Matching the
+                # exact display name first certified a required context that
+                # nothing emits, which read as a measured pass on a branch
+                # whose required check can never report.
                 out.append((rel, key, job, jobs, doc, ability))
             elif context.startswith(shown + " (") and _matrix_produces(
                     job, context[len(shown) + 2:].rstrip(")")):
@@ -835,6 +840,19 @@ def _context_producers(
 
 
 _MATRIX_META = {"include", "exclude"}
+
+
+def _job_has_matrix(job: dict) -> bool:
+    """Does this job expand into `name (combination)` check contexts?
+
+    True whenever a matrix is present at all — including one this scan cannot
+    enumerate (`include:`, a computed value). Enumerability decides which
+    EXPANSIONS match; it does not change the fact that the bare name is not one
+    of them.
+    """
+    strategy = job.get("strategy")
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    return bool(matrix) if not isinstance(matrix, (str, int, float)) else True
 
 
 def _matrix_expansions(job: dict) -> set[str] | None:
@@ -1067,6 +1085,30 @@ def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:
         f"read, so a check configured only there is not counted here)")
 
 
+def _matrix_near_miss(docs: list[tuple[str, dict]], context: str) -> str | None:
+    """A matrix job whose NAME is this context, or None.
+
+    Reported instead of the generic "no job reports it" so a reader is not sent
+    hunting for an external app that is not there: the job is right in front of
+    them, and the mismatch is that branch protection names the bare context
+    while the job only ever emits expansions of it.
+    """
+    for rel, doc in docs:
+        for key, job in _jobs(doc):
+            shown = _display_name(key, job)
+            if _EXPRESSION_RE.search(shown):
+                # A templated display name is not knowable, which is why the
+                # producer match skips it; the near miss has to skip it too or
+                # it would name a job as the cause on a guess.
+                continue
+            if shown == context and _job_has_matrix(job):
+                return (f"{rel}: the matrix job `{key}` produces "
+                        f"`{context} (…)` expansions, never the bare context, "
+                        f"so nothing reports `{context}` — require one of its "
+                        f"expansions, or a job without a matrix")
+    return None
+
+
 def _required_checks_skippable(
     docs: list[tuple[str, dict]],
     repo: str | None,
@@ -1103,7 +1145,9 @@ def _required_checks_skippable(
     for context in contexts:
         producers = _context_producers(docs, context)
         if not producers:
+            near = _matrix_near_miss(docs, context)
             unjudged.append(
+                f"`{context}` ({near})" if near else
                 f"`{context}` (no job in these workflows reports it — an "
                 f"external app check, a reusable-workflow job, a templated "
                 f"job name, or a stale entry)")

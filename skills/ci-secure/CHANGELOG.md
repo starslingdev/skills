@@ -22,6 +22,19 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **A matrix job no longer certifies the bare context it never
+  emits.** GitHub appends the combination to a matrix job's check name, so a
+  job named `test` reports `test (3.11)` and `test (3.12)` and never `test`.
+  Matching the exact display name before considering the expansion meant a
+  branch requiring the bare `test`, with only that matrix job to produce it,
+  read as a measured PASS — a green over a required check that can never
+  report at all. Such a context is unproduced now, and routes exactly where
+  every other unproduced context does. The evidence names the near miss rather
+  than the generic "no job reports it", so a reader is not sent hunting for an
+  external app that is not there: it says which matrix job is involved and that
+  requiring one of its expansions is the fix. A templated display name stays
+  generic, since the producer match cannot read it either.
+
 - **2026-08-14** — **A pin applied after an `actions/checkout` can suppress
   again — the fix recipe's own shape had stopped being recognised.** Giving
   checkout-arm fetches a suppression window (so a pin applied to a tree the

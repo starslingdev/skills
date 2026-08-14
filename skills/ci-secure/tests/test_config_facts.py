@@ -2653,3 +2653,95 @@ jobs:
     out = _facts_with(tmp_path / cond.strip("'${} ()!")[:10], {"ci.yml": body},
                       ["test"])
     assert _outcome(out, _FACT)["outcome"] == "pass", _outcome(out, _FACT)
+
+
+def test_a_matrix_job_does_not_produce_the_bare_context(tmp_path):
+    """A matrix job named `test` emits `test (3.11)` and `test (3.12)` — never
+    the bare `test`. Matching the exact display name before considering the
+    expansion certified a required context that NOTHING emits, so a branch
+    whose required check can never report read as a measured pass. It is
+    unproduced, and routes where every other unproduced context does."""
+    matrix_only = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        py: ['3.11', '3.12']
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": matrix_only}, ["test"]), _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    # The near miss is named, because "no job produces it" would send a reader
+    # hunting for an external app that is not there.
+    assert "matrix" in f["evidence"], f["evidence"]
+    assert "`test`" in f["evidence"], f["evidence"]
+
+
+def test_a_matrix_job_still_produces_its_expansions(tmp_path):
+    """The control on the other side: the contexts a matrix job really does
+    emit must keep being judged."""
+    matrix_only = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        py: ['3.11', '3.12']
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": matrix_only}, ["test (3.11)"]),
+                 _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_plain_job_still_produces_its_bare_context(tmp_path):
+    """And the control that keeps the exact-name match working for every job
+    that has no matrix — which is most of them."""
+    plain = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": plain}, ["test"]), _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_bare_context_with_a_skippable_matrix_job_is_not_a_fail(tmp_path):
+    """The near miss must not fabricate the opposite claim either: a matrix
+    job that CAN skip still does not produce the bare context, so the honest
+    answer stays "not judged", not "bypassable"."""
+    matrix_skippable = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        py: ['3.11']
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": matrix_skippable}, ["test"]),
+                 _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
