@@ -650,9 +650,17 @@ def _skip_path(jobs: dict[str, dict], key: str,
     # The producer has to carry `always()` / `!cancelled()` /
     # `success() || failure()` ITSELF — which is what the fix recipe says.
     if needs:
-        cycle = next((_skip_path(jobs, n, seen | {key}) for n in needs
-                      if isinstance(_skip_path(jobs, n, seen | {key}), _Unknown)),
-                     None)
+        # Each dependency is walked ONCE. Testing the result's type and then
+        # recomputing it doubled the work at every link, so a linear `needs:`
+        # chain ending in an unreadable job cost 2^depth — 3.4s at depth 22,
+        # a quarter of an hour by depth 30 — which is exactly the hang the
+        # cycle guard above promises cannot happen.
+        cycle = next(
+            (walked for walked in
+             (_skip_path(jobs, n, seen | {key}) for n in needs)
+             if isinstance(walked, _Unknown)),
+            None,
+        )
         if cycle is not None:
             return _Unknown(f"`{key}` needs {cycle}")
         return (f"`{key}` needs {_capped([f'`{n}`' for n in needs], 3, ', ')} "

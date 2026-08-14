@@ -992,9 +992,12 @@ def test_required_check_produced_only_by_a_conditional_job_fails(tmp_path):
                  _FACT)
     assert f["outcome"] == "fail"
     # Evidence names the required context, the workflow/job, and the condition.
-    assert "test" in f["evidence"]
+    # Backticked, because a bare `"test" in evidence` is satisfied by the
+    # sentence's own words ("required", "workflows") and proves nothing about
+    # whether the context was ever named.
+    assert "`test`" in f["evidence"], f["evidence"]
     assert "ci.yml" in f["evidence"]
-    assert "test-self" in f["evidence"]
+    assert "`test-self`" in f["evidence"], f["evidence"]
     assert "head.repo.full_name" in f["evidence"]
 
 
@@ -1062,7 +1065,9 @@ jobs:
 """
     f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
     assert f["outcome"] == "fail"
-    assert "build" in f["evidence"]
+    # Backticked: "build" as a bare substring would also be satisfied by a
+    # sentence that never names the upstream job at all.
+    assert "`build`" in f["evidence"], f["evidence"]
 
 
 def test_an_unmapped_required_context_is_disclosed_not_failed(tmp_path):
@@ -1899,3 +1904,323 @@ def test_a_pass_requires_every_required_check_to_have_been_traced(tmp_path):
     assert f["outcome"] == "unmeasured", f["evidence"]
     assert "codecov/project" in f["evidence"]
     assert _FACT in out["unmeasured"]
+
+
+# ---------------------------------------------------------------------------
+# The real API fetchers, on the paths where they SUCCEED.
+#
+# Everything above drives a fetcher's failure branch, or injects a recorded
+# answer past it. That leaves the two things a fetcher does when it works —
+# which endpoint it asks for, and which key of the answer it reads — pinned by
+# nothing. Both failure modes degrade the same quiet way: the call comes back
+# empty or 404, the fact renders `unmeasured: ... could not be read`, and that
+# row is indistinguishable from the ordinary unauthenticated scan. A fact that
+# was unmeasurable on every repository in the world would look exactly like
+# this and no test would go red.
+# ---------------------------------------------------------------------------
+
+def test_the_branch_protection_fetcher_asks_for_the_two_documented_endpoints():
+    """A mistyped endpoint path 404s for every repository, and this function
+    turns that into "branch protection could not be read" — so the required-
+    checks fact would never be measured anywhere, while looking like a missing
+    token. The stub answers ONLY the two documented paths and 404s anything
+    else, and the requested paths are asserted literally."""
+    paths = []
+
+    class _Gh:
+        @staticmethod
+        def check_prereqs():
+            return True
+
+        @staticmethod
+        def run_gh_api(path, **kw):
+            paths.append(path)
+            if path == "repos/owner/repo":
+                return json.dumps({"default_branch": "main"})
+            if path == "repos/owner/repo/rules/branches/main":
+                return json.dumps([{
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "required_status_checks": [{"context": "test"}]},
+                }])
+            if path == ("repos/owner/repo/branches/main/protection/"
+                        "required_status_checks"):
+                return json.dumps({"contexts": ["lint"]})
+            raise RuntimeError(f"HTTP 404: no such endpoint {path}")
+
+    with mock.patch.object(cf, "_gh_utils", lambda: _Gh):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+
+    assert contexts == ["lint", "test"], (contexts, detail)
+    assert paths == [
+        "repos/owner/repo",
+        "repos/owner/repo/rules/branches/main",
+        "repos/owner/repo/branches/main/protection/required_status_checks",
+    ], paths
+
+
+def test_the_fork_approval_fetcher_reads_the_documented_endpoint_and_key():
+    """GitHub returns the setting under `approval_policy`. Read under any other
+    key the body yields `None`, which this fetcher reports as "the endpoint
+    returned no `approval_policy` value" — an unmeasured row that looks like an
+    unreadable setting, so the weakest tier would never be failed on any
+    repository. The stub carries a DECOY `policy` key holding the opposite
+    verdict, so a fetcher reading the wrong key returns a passing value."""
+    paths = []
+
+    class _Gh:
+        @staticmethod
+        def check_prereqs():
+            return True
+
+        @staticmethod
+        def run_gh_api(path, **kw):
+            paths.append(path)
+            if path == ("repos/owner/repo/actions/permissions/"
+                        "fork-pr-contributor-approval"):
+                return json.dumps({
+                    "approval_policy": "first_time_contributors_new_to_github",
+                    "policy": "all_external_contributors"})
+            raise RuntimeError(f"HTTP 404: no such endpoint {path}")
+
+    with mock.patch.object(cf, "_gh_utils", lambda: _Gh):
+        policy, detail = cf._fork_approval_via_gh("owner/repo")
+
+    assert policy == "first_time_contributors_new_to_github", (policy, detail)
+    assert paths == ["repos/owner/repo/actions/permissions/"
+                     "fork-pr-contributor-approval"], paths
+
+
+# ---------------------------------------------------------------------------
+# A fetcher that RAISES. Both facts wrap the injected call in an `except`, and
+# nothing exercised it: a fetcher is allowed to fail the loud way (`gh` killed
+# mid-call, a body that will not decode), and an exception escaping here takes
+# the whole scan down — a scan that dies renders no report at all, which is a
+# worse outcome than the one unmeasured row this is supposed to become.
+# ---------------------------------------------------------------------------
+
+def test_a_branch_protection_fetcher_that_raises_becomes_one_unmeasured_row(
+    tmp_path,
+):
+    def exploding(repo):
+        raise RuntimeError("gh subprocess died")
+
+    root, files = _repo(tmp_path, {"ci.yml": _CONDITIONAL_ONLY})
+    out = cf.compute_config_facts(
+        root, files, [], repo="owner/repo",
+        required_contexts_fetcher=exploding,
+        fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
+    f = _outcome(out, _FACT)
+    assert f["outcome"] == "unmeasured", f
+    assert "gh subprocess died" in f["evidence"], f["evidence"]
+    assert _FACT in out["unmeasured"]
+    # The rest of the table still resolved — the failure is contained.
+    assert out["scored_count"] == 7 and out["applicable_count"] == 8
+
+
+def test_a_fork_approval_fetcher_that_raises_becomes_one_unmeasured_row(
+    tmp_path,
+):
+    def exploding(repo):
+        raise RuntimeError("gh subprocess died")
+
+    root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
+    out = cf.compute_config_facts(
+        root, files, [], repo="owner/repo",
+        required_contexts_fetcher=lambda repo: ([], "branch `main`"),
+        fork_approval_fetcher=exploding)
+    f = _outcome(out, _FORK_FACT)
+    assert f["outcome"] == "unmeasured", f
+    assert "gh subprocess died" in f["evidence"], f["evidence"]
+    assert _FORK_FACT in out["unmeasured"]
+    assert out["scored_count"] == 7 and out["applicable_count"] == 8
+
+
+# ---------------------------------------------------------------------------
+# The producer-matching guards that make an UNKNOWABLE job name produce no
+# match at all. Each is the same false green in a new spelling: an
+# always-running job stands in as the producer of a context that a skippable
+# job beside it is what really reports, and the fact renders "every required
+# check is produced by a job that always runs".
+# ---------------------------------------------------------------------------
+
+def test_a_matrix_carrying_include_produces_no_expansion_at_all(tmp_path):
+    """`include:` can add combinations, rename axes and extend existing ones,
+    so what the job renders is not knowable from the YAML. Enumerating the
+    plain axes anyway and ignoring `include:` lets an always-running job named
+    `test` alibi `test (windows)` — which the skippable job beside it is what
+    really reports."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  unit:
+    name: test
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu, windows]
+        include:
+          - os: windows
+            toolchain: msvc
+    steps:
+      - run: pytest -v
+  suite:
+    name: test (windows)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test (windows)"]),
+                 _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_matrix_whose_values_are_computed_produces_no_expansion(tmp_path):
+    """An axis value that is an expression renders to something the YAML does
+    not contain — `${{ vars.RUNNER }}` could be any label at all, and a whole
+    axis built by `fromJSON` could be any list. Treating the unexpanded text as
+    a value is the same alibi as above: an always-running job covers for the
+    skippable job that really reports the context."""
+    expression_value = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  unit:
+    name: test
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: ['${{ vars.RUNNER }}', windows]
+    steps:
+      - run: pytest -v
+  suite:
+    name: test (windows)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(
+        _facts_with(tmp_path / "expr", {"ci.yml": expression_value},
+                    ["test (windows)"]),
+        _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+    computed_axis = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  unit:
+    name: test
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: ${{ fromJSON(needs.setup.outputs.targets) }}
+    steps:
+      - run: pytest -v
+  suite:
+    name: test (windows)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f2 = _outcome(
+        _facts_with(tmp_path / "fromjson", {"ci.yml": computed_axis},
+                    ["test (windows)"]),
+        _FACT)
+    assert f2["outcome"] == "fail", f2["evidence"]
+
+
+def test_a_templated_job_name_is_never_matched_as_a_producer(tmp_path):
+    """What `name: test ${{ matrix.os }}` renders to is not knowable here, so
+    no context can be attributed to that job. A maintainer who typed the job's
+    own `name:` line into the required-checks box has a check nothing will ever
+    report; matching the literal templated text would answer that with "this
+    check has a producer that runs whatever happens" — a green claim about a
+    name that renders differently on every run."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  unit:
+    name: test ${{ matrix.os }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu, windows]
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"ci.yml": body}, ["test ${{ matrix.os }}"]),
+        _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "no job in these workflows reports it" in f["evidence"], f["evidence"]
+
+
+def test_a_needs_cycle_terminates_and_is_not_an_all_clear(tmp_path):
+    """Two jobs that `needs:` each other is a shape GitHub rejects but a
+    scanner still meets in a work-in-progress branch. The claim the code makes
+    about it is availability — the walk must not hang — and this test returning
+    at all is that claim's only proof. The second half is the verdict: a cycle
+    leaves the skip walk with no answer, so the honest outcome is "not judged".
+    Resolving it to "always runs" would render a green row about a job whose
+    runs nobody can predict."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - run: make
+  test:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "cycle" in f["evidence"], f["evidence"]
+
+
+def test_the_skip_walk_does_not_take_exponential_time(tmp_path):
+    """The cycle guard's docstring promises a malformed `needs:` graph "must
+    not hang the scan", and it did: the unknown-branch called the recursion
+    twice per level — once to test the result's type, once to use it — so the
+    work doubled with every link. Measured on a linear chain ending in a
+    missing job: depth 16 took 0.05s, depth 20 took 0.95s, depth 22 took 3.4s.
+    A ~30-deep chain with a typo'd root is a quarter of an hour, on a scanner
+    whose whole promise is that it is cheap and deterministic."""
+    import time
+
+    depth = 22
+    jobs = {f"j{i}": {"needs": [f"j{i + 1}"]} for i in range(depth)}
+    jobs[f"j{depth - 1}"] = {"needs": ["ghost"]}
+
+    started = time.monotonic()
+    answer = cf._skip_path(jobs, "j0")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0, f"the skip walk took {elapsed:.2f}s at depth {depth}"
+    # And it still answers correctly: the chain ends somewhere unreadable.
+    assert isinstance(answer, cf._Unknown), answer

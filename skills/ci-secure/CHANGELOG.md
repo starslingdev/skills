@@ -37,6 +37,14 @@ entries are dated (UTC). Format loosely follows
   actually traced, and a scan that traced none of them is unmeasured rather
   than green.
 
+- **2026-08-14** — **A malformed `needs:` graph no longer takes exponential
+  time to walk.** The unknown-dependency branch called the recursion twice per
+  level — once to test the result's type, once to use it — so the work doubled
+  with every link: a linear chain ending in a typo'd job name took 3.4 seconds
+  at depth 22 and about a quarter of an hour by depth 30. That is precisely the
+  hang the cycle guard's own docstring promises cannot happen. Each dependency
+  is walked once now.
+
 - **2026-08-14** — **P14.24 covers `actions/checkout` of another repository.**
   It is how most workflows fetch a second repository, and at a branch or tag it
   is the identical trust model — but the detector read `run:` shell only, so

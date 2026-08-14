@@ -2764,3 +2764,422 @@ def test_p1424_shell_that_cannot_be_parsed_is_recorded_as_a_gap(tmp_path):
     """)
     added = scan._DROPPED_MATCHES[before:]
     assert any("could not be parsed" in d["reason"] for d in added), added
+
+
+# ---------------------------------------------------------------------------
+# P14.24 — how the shell actually WRITES these lines: wrappers and assignments
+# in front of the command, the destination git derives from a literal URL, and
+# every spelling of the pin the entry recommends.
+# ---------------------------------------------------------------------------
+
+def test_p1424_a_wrapper_in_front_of_the_command_does_not_hide_it(tmp_path):
+    """`sudo git clone` and `env VAR=… python3 …` are how CI writes these lines
+    on a runner that needs a root install or a per-command environment. Reading
+    the WRAPPER as the command makes the clone invisible and the execution
+    unrecognised, so both halves of a live chain disappear at once."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  sudo git clone --branch main "$TOOLS_URL" tools
+                  env NODE_ENV=production python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+    assert "tools/setup.py" in (hits[0].derived_note or "")
+
+
+def test_p1424_a_leading_variable_assignment_does_not_hide_the_command(tmp_path):
+    """`CI=1 git clone …` runs `git`, not a command called `CI=1`. The same
+    blindness in the other direction is worse than a miss: a job that pins
+    correctly with `GIT_LFS_SKIP_SMUDGE=1 git -C tools checkout <40-hex>` would
+    have its pin go unread and be reported for a fix it already applied."""
+    sha = "f" * 40
+    hits = _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  CI=1 git clone --branch main "$TOOLS_URL" tools
+                  PYTHONPATH=. python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+    assert _remote_exec_hits(tmp_path / "pinned", f"""\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  CI=1 git clone "$TOOLS_URL" tools
+                  GIT_LFS_SKIP_SMUDGE=1 git -C tools checkout {sha}
+                  python3 tools/setup.py
+    """) == []
+
+
+def _literal_clone(tmp_path: Path, clone_line: str, exec_line: str) -> list:
+    """A checkout of `owner/repo` running `clone_line` then `exec_line`.
+
+    The `.git/config` is what makes a clone of a DIFFERENT repository below a
+    third party's code rather than the repository's own — the same convention
+    as the self-clone tests above.
+    """
+    (tmp_path / ".git").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = https://github.com/owner/repo.git\n')
+    wf = _wf(tmp_path, "wf.yml", f"""\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  {clone_line}
+                  {exec_line}
+    """)
+    return list(scan._correlation_unverified_remote_code_execution(wf))
+
+
+def test_p1424_a_literal_url_clone_derives_the_directory_git_writes(tmp_path):
+    """THE shape a real workflow writes: `git clone <url>` with no target
+    directory at all. git names the directory after the URL's last segment with
+    `.git` removed, and a scanner that cannot do the same sees a clone whose
+    destination is invisible — so it reports nothing, on the commonest
+    spelling of the vector there is."""
+    hits = _literal_clone(
+        tmp_path,
+        "git clone --branch main https://github.com/third-party/tools.git",
+        "python3 tools/setup.py")
+    assert len(hits) == 1
+    # `tools`, not `tools.git`: the directory git actually creates.
+    assert "`tools`" in (hits[0].derived_note or "")
+
+
+def test_p1424_an_scp_style_url_derives_the_same_directory(tmp_path):
+    """The other spelling of the same clone. `git@…:owner/repo.git` puts the
+    repository behind a colon rather than a scheme, and it lands in exactly the
+    same directory — so a workflow that writes it that way gets the same
+    finding, not silence."""
+    hits = _literal_clone(
+        tmp_path,
+        "git clone --branch main git@github.com:third-party/tools.git",
+        "python3 tools/setup.py")
+    assert len(hits) == 1
+    assert "`tools`" in (hits[0].derived_note or "")
+
+
+def test_p1424_a_derived_destination_still_honours_a_pin(tmp_path):
+    """…and the derived directory has to be the one the pin is read against.
+    Derive it differently in the two places and a correctly-pinned clone is
+    reported anyway."""
+    sha = "a" * 40
+    assert _literal_clone(
+        tmp_path,
+        f"git clone https://github.com/third-party/tools.git "
+        f"&& git -C tools checkout {sha}",
+        "python3 tools/setup.py") == []
+
+
+@pytest.mark.parametrize("pin_line", [
+    "git -C tools checkout {sha}",
+    "git -C tools reset --hard {sha}",
+    "git -C tools switch --detach {sha}",
+    "git -C tools merge {sha}",
+    "git -C tools rebase {sha}",
+])
+def test_p1424_every_spelling_of_a_full_sha_pin_suppresses(tmp_path, pin_line):
+    """A full 40-hex commit is immutable however the job arrives at it, and
+    `checkout` is only one of the five commands that get you there. Reading
+    just one of them reports a repository that already applied the fix this
+    entry recommends — the false positive that makes a scanner ignorable."""
+    sha = "b" * 40
+    assert _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone "$TOOLS_URL" tools
+                  %s
+                  python3 tools/setup.py
+    """ % pin_line.format(sha=sha)) == [], pin_line
+
+
+def test_p1424_a_full_sha_passed_to_clone_itself_is_a_pin(tmp_path):
+    """`git clone --branch <40-hex>` pins in one command, with no second line
+    to read. The pin is in the clone's own arguments or it is nowhere."""
+    sha = "c" * 40
+    assert _remote_exec_hits(tmp_path, f"""\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch {sha} "$TOOLS_URL" tools
+                  python3 tools/setup.py
+    """) == []
+
+
+def test_p1424_the_attached_branch_form_names_the_ref_that_was_fetched(tmp_path):
+    """`--branch=main` is the same option as `--branch main`. Reading only the
+    separated spelling leaves the ref unknown, and the finding then tells the
+    reader the job took the remote's default branch when it named one — a
+    statement about a reference the workflow never used."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch=main "$TOOLS_URL" tools
+                  python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+    assert "`main`" in (hits[0].derived_note or "")
+
+
+def test_p1424_the_attached_branch_form_carries_a_pin_too(tmp_path):
+    """…and the same blindness turns a correct pin into a finding:
+    `--branch=<40-hex>` is immutable, and the repository that wrote it that way
+    must not be told to go and do what it has already done."""
+    sha = "d" * 40
+    assert _remote_exec_hits(tmp_path, f"""\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch={sha} "$TOOLS_URL" tools
+                  python3 tools/setup.py
+    """) == []
+
+
+def test_p1424_a_sibling_directory_is_not_inside_the_fetched_tree(tmp_path):
+    """`tools` and `tools-old` share a name prefix and nothing else. Testing
+    containment by prefix alone pairs a fetched tree with the repository's own
+    directory sitting next to it, and the finding then quotes a clone that
+    never wrote the file it says was executed."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  python3 tools-old/setup.py
+    """) == []
+
+
+def test_p1424_a_job_that_cannot_be_located_in_the_file_is_disclosed(tmp_path):
+    """A job with no source range has its shell left unscanned — correct, since
+    its commands cannot be scoped to it and a cross-job pairing would be a false
+    claim — but doing that in silence renders the job as clean. `job_line_ranges`
+    is forced empty here because no workflow anyone would write reaches the
+    condition, and an undisclosed unscanned job is exactly the failure the
+    dropped-match list exists to prevent."""
+    before = len(scan._DROPPED_MATCHES)
+    wf = _wf(tmp_path, "wf.yml", _MUTABLE_FETCH)
+    with mock.patch.object(scan, "job_line_ranges", return_value=[]):
+        assert list(scan._correlation_unverified_remote_code_execution(wf)) == []
+    added = scan._DROPPED_MATCHES[before:]
+    assert any("could not be located" in d["reason"] and "build" in d["reason"]
+               for d in added), added
+
+
+@pytest.mark.parametrize("command", [
+    # `-m` names a MODULE, and a module name is not a file in the tree.
+    "python3 -m pytest tests/unit",
+    # `-c` runs the string that follows it, not a file.
+    'bash -c "echo built"',
+    # a package name resolved from an index is not a path at all.
+    "pip install requests",
+])
+def test_p1424_a_command_that_names_no_path_is_not_an_execution(
+    tmp_path, command,
+):
+    """A whole-tree fetch makes this the sharpest case: `git checkout
+    FETCH_HEAD` replaces the working tree, so EVERY relative path is inside the
+    fetched code and any token mistaken for one becomes a finding. A module
+    name, a `-c` script string and a package name are none of them paths, and
+    reporting one accuses a job over something it never ran."""
+    assert _remote_exec_hits(tmp_path, f"""\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git fetch "$TOOLS_URL" main
+                  git checkout FETCH_HEAD
+                  {command}
+    """) == [], command
+
+
+@pytest.mark.parametrize("command", [
+    'curl -fsSL "$INSTALLER_URL" | sudo bash',
+    'wget -qO- "$INSTALLER_URL" | sh',
+    'bash <(curl -fsSL "$INSTALLER_URL")',
+    'sh <(wget -qO- "$INSTALLER_URL")',
+    'deno run -A "https://$INSTALLER_HOST/install.ts"',
+])
+def test_p1424_every_spelling_of_the_piped_installer_reports(tmp_path, command):
+    """One vector, five idioms — process substitution and `deno run` fetch and
+    execute exactly as `curl | bash` does, and `wget` is the same command under
+    a different name. The pattern that recognises them now lives in Python
+    source rather than in the catalog's metadata, so a transcription slip in any
+    one arm would silently stop reporting that idiom, with nothing anywhere to
+    show that it had."""
+    hits = _remote_exec_hits(tmp_path, f"""\
+        name: setup
+        on: push
+        jobs:
+          install:
+            runs-on: ubuntu-latest
+            steps:
+              - run: {command}
+    """)
+    assert len(hits) == 1, command
+
+
+# ---------------------------------------------------------------------------
+# P14.24 — the YAML spelling of the same fetch.
+#
+# `actions/checkout` with `repository:` is how most workflows pull a second
+# repository, and at a branch or tag it is the identical trust model: the tree
+# that lands is whatever the other side serves when the job runs.
+# ---------------------------------------------------------------------------
+
+def test_p1424_checkout_of_another_repo_at_a_branch_then_execution(tmp_path):
+    """The idiomatic spelling fired no detector at all — P14.24 read `run:`
+    shell only, so the most common way to fetch a second repository was the one
+    way the vector could not see."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: main
+                  path: tools
+              - run: bash tools/run.sh
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "acme/tools" in note
+    assert "tools/run.sh" in note
+
+
+def test_p1424_checkout_pinned_to_a_full_sha_is_silent(tmp_path):
+    """Same exemption as the shell arm: a full 40-hex ref is immutable, and
+    reporting it would tell a reader to fix what they already did right."""
+    sha = "f" * 40
+    assert _remote_exec_hits(tmp_path, f"""\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: {sha}
+                  path: tools
+              - run: bash tools/run.sh
+    """) == []
+
+
+def test_p1424_checkout_of_the_scanned_repo_itself_is_silent(tmp_path):
+    """A plain `actions/checkout` with no `repository:` is your own code, and
+    so is one that names your own repository — the overwhelmingly common case,
+    which must not become a finding on every workflow in the world."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  path: tools
+              - run: bash tools/run.sh
+    """) == []
+    assert _remote_exec_hits(tmp_path / "self", """\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: ${{ github.repository }}
+                  ref: main
+                  path: tools
+              - run: bash tools/run.sh
+    """) == []
+
+
+def test_p1424_checkout_nothing_executes_from_is_silent(tmp_path):
+    """Fetching a second repository is not the finding — executing out of it
+    is. A checkout used for data must stay quiet."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/fixtures
+                  ref: main
+                  path: fixtures
+              - run: diff -r fixtures expected
+    """) == []
+
+
+def test_p1424_checkout_execution_in_another_job_does_not_connect(tmp_path):
+    """Jobs get their own runner and their own tree, exactly as for the shell
+    arm."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: ci
+        on: push
+        jobs:
+          fetch:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: main
+                  path: tools
+          run:
+            runs-on: ubuntu-latest
+            steps:
+              - run: bash tools/run.sh
+    """) == []
