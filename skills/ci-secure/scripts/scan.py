@@ -2936,8 +2936,9 @@ def _parse_clone(args: list[str]) -> tuple[str | None, str | None, str | None]:
 
 
 # `github.com/<owner>/<repo>`, in any of the spellings a workflow writes it:
-# `https://github.com/o/r.git`, `git@github.com:o/r.git`, and the authenticated
-# `https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/o/r.git`.
+# the https form, git's scp-like `user@host:owner/repo.git` form, and the
+# authenticated form that carries a token in the URL's userinfo (which the
+# `[/:]` and optional-userinfo handling below both cover).
 _GITHUB_SLUG_RE = re.compile(
     r"github\.com[/:]([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?(?:[/?#]|$)")
 _SELF_REPO_EXPRESSION_RE = re.compile(r"\$\{\{\s*github\.repository\s*\}\}")

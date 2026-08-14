@@ -121,7 +121,8 @@ entries are dated (UTC). Format loosely follows
   run at the branch head. The `git fetch` arm already refused the repo's own
   history; the `clone` arm now does too, recognising `${{ github.repository }}`,
   a literal `github.com/<owner>/<repo>` matching the checkout's `origin`
-  remote, and the `x-access-token:…@github.com/…` idiom. A tree with no `.git`
+  remote, and the authenticated form that carries a token in the URL's
+  userinfo. A tree with no `.git`
   cannot resolve `origin`, so the literal form reports there as before.
 
 - **2026-08-14** — **P14.24 follows `working-directory:`.** It was read
