@@ -2078,6 +2078,40 @@ def _run_scalar_line_numbers(text: str) -> set[int]:
     return shell
 
 
+def _run_scalar_starts(text: str) -> set[int]:
+    """1-based line numbers where a `run:` scalar's shell BEGINS.
+
+    The companion to `_run_scalar_line_numbers`, which answers "is this line
+    shell" but not "is this line a different step's shell". Line adjacency
+    cannot answer the second question in either direction: two inline
+    `- run:` steps are adjacent lines in different steps, and a blank line
+    inside one block scalar makes one step's shell non-adjacent. Anything that
+    dies with its step — the working directory above all — has to key off this
+    set instead.
+    """
+    starts: set[int] = set()
+    lines = text.splitlines()
+    shell = _run_scalar_line_numbers(text)
+    for i, line in enumerate(lines):
+        m = _RUN_KEY_LINE_RE.match(line)
+        if m is None:
+            continue
+        rest = m.group(2).strip()
+        if rest and not _BLOCK_SCALAR_RE.match(rest):
+            starts.add(i + 1)             # inline scalar: the key's own line
+            continue
+        for j in range(i + 1, len(lines) + 1):   # block scalar: its first body line
+            if j + 1 in shell:
+                starts.add(j + 1)
+                break
+    return starts
+
+
+# `<<WORD` / `<<-'WORD'` — a heredoc opener. `<<<` (a herestring) is excluded:
+# it carries its whole value on the line and opens no body.
+_HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
 def _install_line(
     text: str, job_range: tuple[int, int] | None
 ) -> tuple[int, str, str] | None:
@@ -2700,6 +2734,9 @@ _INTERPRETERS = {
 _SOURCE_CMDS = {"source", "."}
 _LEADING_WRAPPERS = {"sudo", "command", "exec", "time", "nohup", "env"}
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# A whole `${{ … }}` expression. The runner substitutes it before the shell
+# sees it, so it is ONE word — see `_shell_tokens`.
+_EXPRESSION_TOKEN_RE = re.compile(r"\$\{\{.*?\}\}", re.S)
 
 
 def _shell_tokens(segment: str) -> list[str]:
@@ -2709,9 +2746,17 @@ def _shell_tokens(segment: str) -> list[str]:
     returned as no tokens at all: this detector only ever ADDS a finding when
     it can see both halves of the chain, so an unparsable command simply
     contributes nothing rather than being guessed at.
+
+    A `${{ … }}` expression is collapsed to one opaque token FIRST. The runner
+    substitutes it before the shell ever sees it, so it is a single word; split
+    on its spaces it becomes three, every positional after it shifts, and the
+    clone's destination gets read out of the expression's insides. That is not
+    a missing destination but a WRONG one — and a wrong one is what a correct
+    40-hex pin on the real directory would then fail to match.
     """
     try:
-        return shlex.split(segment, comments=False, posix=True)
+        return shlex.split(_EXPRESSION_TOKEN_RE.sub("$EXPR", segment),
+                           comments=False, posix=True)
     except ValueError:
         return []
 
@@ -2771,16 +2816,21 @@ class _RemoteFetch:
     raw: str
     dest: str
     ref: str | None      # None = the remote's default branch (HEAD)
+    # Position in the job's command stream. Ordering is the finding's whole
+    # claim — the fetch put the code there BEFORE it ran — and a line number
+    # cannot carry it: `python3 tools/setup.py && git clone … tools` has both
+    # halves on one line, in the wrong order.
+    pos: int
 
 
 def _ref_description(ref: str | None) -> str:
     if ref is None:
         return "the remote's default branch (HEAD)"
     if _ABBREV_SHA_RE.match(ref):
-        return (
-            f"`{ref}` — an ABBREVIATED commit id, which git re-resolves at "
-            f"fetch time and is not an immutable object name"
-        )
+        # Reads mid-sentence ("fetches remote code at <this> into `tools`"), so
+        # it stays a NOUN PHRASE — a trailing clause here produced a sentence
+        # that ran on through the rest of the finding.
+        return f"`{ref}` (an ABBREVIATED commit id git re-resolves at fetch time)"
     return f"`{ref}`"
 
 
@@ -2892,20 +2942,34 @@ def _job_shell_commands(
 
     Restricted to `run:` scalar content, like every other shell reader here, so
     a step `name:` or a YAML comment is never read as a command. The fourth
-    element marks a discontinuity in shell lines, which is where the working
+    element marks the first command of a STEP, which is where the working
     directory must be forgotten: `cd` does not survive from one step to the
     next, and carrying it across would connect a fetch to an execution that
-    never ran in that directory.
+    never ran in that directory. Step identity comes from where each `run:`
+    scalar begins (`_run_scalar_starts`), never from line adjacency — adjacency
+    gets it wrong in both directions, joining two inline steps and splitting
+    one block scalar at a blank line.
+
+    A HEREDOC body is dropped: `cat <<'EOF' > install.sh` writes text to a
+    file, and the text a step writes is not a command the step runs. Reading it
+    as shell would let a documented example be reported as a live chain.
     """
     lines = text.splitlines()
     shell_lines = _run_scalar_line_numbers(text)
+    step_starts = _run_scalar_starts(text)
     start, end = job_range if job_range else (1, len(lines))
     out: list[tuple[int, str, str, bool]] = []
-    previous: int | None = None
+    heredoc: str | None = None
     for line_no, raw, cmd in _shell_commands(lines):
         if line_no < start or line_no > min(end, len(lines)):
             continue
         if line_no not in shell_lines:
+            continue
+        if line_no in step_starts:
+            heredoc = None            # a body cannot outlive its own step
+        if heredoc is not None:
+            if raw.strip() == heredoc:
+                heredoc = None
             continue
         # An INLINE scalar's shell starts after the `run:` key, and the raw
         # line carries that key: without stripping it the first token of
@@ -2914,8 +2978,10 @@ def _job_shell_commands(
         key = _RUN_KEY_LINE_RE.match(cmd)
         if key and key.group(2) and not _BLOCK_SCALAR_RE.match(key.group(2).strip()):
             cmd = key.group(2)
-        out.append((line_no, raw, cmd, previous is None or line_no != previous + 1))
-        previous = line_no
+        out.append((line_no, raw, cmd, line_no in step_starts))
+        opener = _HEREDOC_OPEN_RE.search(cmd)
+        if opener:
+            heredoc = opener.group(2)
     return out
 
 
@@ -2937,12 +3003,15 @@ def _mutable_fetch_executions(
     fetches: dict[str, _RemoteFetch] = {}
     pending_fetch_head: dict[str, _RemoteFetch] = {}
     pinned: set[str] = set()
-    executions: list[tuple[int, str, str]] = []   # (line, resolved, as-written)
+    # (position, line, resolved path, path as written)
+    executions: list[tuple[int, int, str, str]] = []
     cwd = "."
+    pos = 0
     for line_no, _raw, command, new_step in _job_shell_commands(text, job_range):
         if new_step:
             cwd = "."
         for segment in _install_command_segments(command):
+            pos += 1
             tokens = _strip_command_prefix(_shell_tokens(segment))
             if not tokens:
                 continue
@@ -2962,7 +3031,7 @@ def _mutable_fetch_executions(
                         pinned.add(dest)
                         continue
                     fetches.setdefault(
-                        dest, _RemoteFetch(line_no, _raw, dest, ref))
+                        dest, _RemoteFetch(line_no, _raw, dest, ref, pos))
                     continue
                 if sub == "fetch":
                     positionals = [a for a in args if not a.startswith("-")]
@@ -2976,7 +3045,7 @@ def _mutable_fetch_executions(
                     # executable code only once something checks FETCH_HEAD
                     # out, so it is held until that happens.
                     pending_fetch_head.setdefault(
-                        base, _RemoteFetch(line_no, _raw, base, ref))
+                        base, _RemoteFetch(line_no, _raw, base, ref, pos))
                     continue
                 if sub in ("checkout", "reset", "switch", "merge", "rebase"):
                     if any(_FULL_SHA_RE.match(a) for a in args):
@@ -2989,7 +3058,7 @@ def _mutable_fetch_executions(
                 continue
             path = _executed_path(tokens)
             if path:
-                executions.append((line_no, _resolve_path(cwd, path), path))
+                executions.append((pos, line_no, _resolve_path(cwd, path), path))
 
     pairs: list[tuple[_RemoteFetch, int, str]] = []
     for dest, fetch in fetches.items():
@@ -2997,8 +3066,9 @@ def _mutable_fetch_executions(
             continue
         hit = next(
             (
-                (line, written) for line, resolved, written in executions
-                if line >= fetch.line and _under(dest, resolved)
+                (line, written)
+                for at, line, resolved, written in executions
+                if at > fetch.pos and _under(dest, resolved)
             ),
             None,
         )

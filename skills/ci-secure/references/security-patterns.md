@@ -582,7 +582,7 @@ fix-surface: yaml
 title_template: "Unverified remote code execution in {basename}"
 -->
 
-**TL;DR.** A job runs code it never pinned, in one of two shapes. **The piped installer**: a `run:` step pipes a remotely-fetched script straight into a shell — `curl … | bash`, `wget … | sh`, `bash <(curl …)`, or `deno run <url>`. **The mutable fetch**: a job clones or fetches a git tree at a BRANCH, TAG, `HEAD`, or an abbreviated commit id — anything but a full 40-hex commit — and then executes a file out of that tree. Both run whatever the other side serves *at that moment*, with no integrity check, at full job privilege. A fetch pinned to a full 40-character commit id is immutable and is NOT a finding: that is the same trust model this catalog recommends for action pins.
+**TL;DR.** A `run:` step executes remotely-fetched code that nothing pins — a script piped straight into a shell, or a git tree cloned at a mutable ref and then run out of. **The piped installer**: a `run:` step pipes a remotely-fetched script straight into a shell — `curl … | bash`, `wget … | sh`, `bash <(curl …)`, or `deno run <url>`. **The mutable fetch**: a job clones or fetches a git tree at a BRANCH, TAG, `HEAD`, or an abbreviated commit id — anything but a full 40-hex commit — and then executes a file out of that tree. Both run whatever the other side serves *at that moment*, with no integrity check, at full job privilege. A fetch pinned to a full 40-character commit id is immutable and is NOT a finding: that is the same trust model this catalog recommends for action pins.
 
 **What an attacker can do.** Whoever controls the fetched code — the upstream host, a hijacked CDN, a maintainer account on the cloned repository — runs arbitrary code on your runner with the job's secrets and `GITHUB_TOKEN`. The mutable-fetch shape needs no host compromise at all: a branch or tag is *designed* to move, so anyone who can push to (or re-point a tag on) that repository changes what your next CI run executes, and nothing in your repo has to change for it to happen. Unlike a SHA-pinned action, both shapes re-resolve live on every run, so a one-time compromise hits every subsequent run until someone notices.
 
@@ -614,14 +614,23 @@ does key on a literal URL.)
 - run: python3 tools/setup.py
 ```
 
-Execution shapes matched: an interpreter running a fetched file (`python3`/`node`/`bash`/`sh`/`ruby`/`perl`/`pwsh` …), `source`ing a fetched script, `pip install <fetched-dir>`, and a fetched path invoked directly (`./tools/install`). `cd` into the fetched directory is followed within the same step, so `cd tools && ./install` connects.
+Execution shapes matched: an interpreter running a fetched file (`python3`/`node`/`bash`/`sh`/`ruby`/`perl`/`pwsh` …), `source`ing a fetched script, `pip install <fetched-dir>`, and a fetched path invoked directly (`./tools/install`). `cd` into the fetched directory is followed within the step that ran it, so `cd tools && ./install` connects — and, because `cd` dies with its step, a later step is read from the workspace root again.
 
-**Detection**, and where it deliberately stops short. The pairing must be VISIBLE: the fetch's destination directory and the executed path have to connect inside the same job, which the scanner reads off the shell text. Four consequences, stated rather than implied:
+**Detection**, and where it deliberately stops short. The pairing must be VISIBLE: the fetch's destination directory and the executed path have to connect inside the same job, which the scanner reads off the shell text. Its consequences, stated rather than implied:
 
 - **A full 40-hex pin silences it — a short sha does not.** `git clone … && git -C dir checkout <40-hex>` is immutable and never reported. An abbreviated id (`a1b2c3d`) is re-resolved by git at fetch time and is treated as mutable.
 - **A destination the scanner cannot see is not reported.** `git clone "$TOOLS_URL"` with no explicit target directory leaves the destination unknowable, so no connection is claimed and no finding is raised — a deliberate false negative in favour of never inventing a chain.
 - **`git fetch` fires only for a third-party remote** (a URL, or a variable holding one) that something then checks out (`git checkout FETCH_HEAD`). `git fetch origin main` pulls the repository's own history and is not this vector.
-- **Two shapes are outside the detector entirely**: `actions/checkout` of another `repository:` at a tag (a YAML-level fetch, not a shell one — review those by hand), and a fetch whose execution happens in a different job (different runner, different tree).
+- **The shell arm reads `git clone` / `git fetch` and nothing else.** Everything below is the same trust model and is NOT reported — a clean P14.24 is not a statement that the repo has no mutable fetch-and-run, only that no `git`-spelled one is visible:
+  - other fetchers: `gh repo clone`, `svn checkout`, `git submodule update --remote`, and package managers pointed at a git ref (`pip install "git+…@main"`, `go install …@latest`, an npm/cargo git dependency);
+  - a tarball fetched with `curl`/`wget`, unpacked, and then run;
+  - a fetch and its execution separated by a rename (`mv tools built && python3 built/setup.py`);
+  - execution through a build driver rather than an interpreter (`make -C tools`), or through a versioned interpreter (`python3.11`);
+  - `actions/checkout` of another `repository:` at a tag — a YAML-level fetch, not a shell one;
+  - a fetch whose execution happens in a different job (different runner, different tree).
+
+  Review those by hand. Widening the shell arm to guess at them would cost the property the whole entry rests on: every reported chain is one a reader can see in their own YAML.
+- **A clone of your OWN repository is reported like any other.** The scanner has no way to tell your URL from a stranger's, and the `git fetch` arm's own-history carve-out keys on the remote NAME (`origin`), which a clone does not have. Re-cloning your own repo at a branch is a benign hit — close it by pinning, or dismiss it.
 
 PowerShell `iex (New-Object Net.WebClient).DownloadString(...)` is the same class on Windows runners but is not matched here (casing / Windows-runner rarity); flag it in manual review if you run Windows jobs.
 

@@ -11,7 +11,59 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- **2026-08-14** — **P14.24's rendered finding title is now "Unverified remote
+  code execution", not "Unverified remote script execution".** The entry covers
+  two shapes and a title naming only one of them would misdescribe half its
+  findings. Reports generated before and after this change print different
+  titles for the identical defect; the pattern id, the severity and the fix
+  anchor are unchanged, so anything keyed on those still matches.
+
 ### Fixed
+
+- **2026-08-14** — **The skill description is back under the 1024-character
+  cap.** Naming both of P14.24's shapes in the vector enumeration pushed it to
+  1037 — over the limit, so the loader truncates it, and what gets truncated is
+  the tail: the "Do NOT trigger for …" clauses that keep ci-secure from
+  answering ci-speedup's and ci-score's questions. Trimmed to 1017, and a
+  repo-level guard (`tests/test_skill_description_budget.py`) now measures every
+  shipped skill's description so the next enumeration cannot cross it silently.
+
+- **2026-08-14** — **P14.24's catalog entry states the shapes it does NOT
+  catch.** The entry promised its stopping points were "stated rather than
+  implied" and then named two. The shell arm reads `git clone` / `git fetch`
+  only, so `gh repo clone`, `svn`, `pip install git+…@branch`, a submodule
+  `--remote` update, a fetched tarball, a rename between fetch and execution, a
+  build driver rather than an interpreter, and a versioned interpreter are all
+  the same trust model and all unreported — and a clone of your OWN repository
+  is reported like a stranger's, because nothing in the YAML tells them apart.
+  All now listed in the entry, so a clean P14.24 is not read as a guarantee.
+  The entry's TL;DR opening also names what is checked again, since the report's
+  "what each vector checks" appendix quotes that first sentence verbatim.
+
+- **2026-08-14** — **P14.24 no longer reads a step's working directory into the
+  step after it, and no longer forgets it at a blank line.** Step boundaries
+  were inferred from line adjacency, which is wrong in both directions: two
+  one-line `- run:` steps are adjacent lines in different steps, so a `cd` into
+  a freshly cloned directory leaked forward and the scan reported an execution
+  that never happened in that tree; and a blank line inside a single `run: |`
+  block broke adjacency mid-step, so a real fetch-then-execute chain was lost.
+  Boundaries now come from where each `run:` scalar begins. Two more shell
+  readings were wrong alongside it: a HEREDOC body (`cat <<'EOF' > install.sh`)
+  was read as commands the step runs, so documentation could be reported as a
+  live chain; and pairing compared line numbers only, so
+  `python3 tools/setup.py && git clone … tools` reported a script that ran
+  BEFORE the clone as having come out of it.
+
+- **2026-08-14** — **P14.24 no longer misreads a clone URL written as a `${{ }}`
+  expression.** The runner substitutes an expression before the shell sees it,
+  so it is one word; the scanner split it on its spaces, every positional
+  argument after it shifted, and the destination was read out of the
+  expression's insides. That is worse than an unknowable destination: the
+  detector correlated against a directory that does not exist, so the chain
+  went unreported AND a correct 40-hex pin on the real directory would not have
+  matched it either.
 
 - **2026-08-14** — **P14.24's mutable-fetch arm no longer goes blind on a
   `git clone --recurse-submodules`.** That option takes its value attached

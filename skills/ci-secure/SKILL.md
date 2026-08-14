@@ -8,10 +8,10 @@ description: >-
   caches/artifacts, unverified remote code execution (curl|bash and
   mutable fetch-and-run), and dependency install scripts
   running in a job that holds secrets — reports every finding
-  with a plain-English attacker scenario, reports pass/fail config
-  hygiene checks alongside them, and fixes selected findings via
-  per-finding subagents. Deliberately NOT comprehensive —
-  critical exploit-chain checks only (references/why-these-ten.md).
+  with a plain-English attacker scenario, plus pass/fail config
+  hygiene checks, and fixes selected findings via per-finding
+  subagents. Deliberately NOT comprehensive — critical
+  exploit-chain checks only (references/why-these-ten.md).
   Use when: the user asks to audit or review CI/CD or GitHub Actions
   security posture, "is my CI secure", "audit my CI security", or names
   ci-secure / /ci-secure. Do NOT trigger for: CI speed, cost, or

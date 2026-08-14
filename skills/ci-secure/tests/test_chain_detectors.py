@@ -2244,6 +2244,101 @@ def test_p1424_download_then_verify_stays_silent(tmp_path):
     """) == []
 
 
+def test_p1424_cd_does_not_survive_into_the_next_step(tmp_path):
+    """`cd` is a shell builtin: it dies with the step that ran it. Two inline
+    `- run:` steps are ADJACENT LINES, so a step boundary inferred from line
+    adjacency never fires between them and the fetched directory leaks into a
+    later step — inventing a chain in which `build.py` is executed out of the
+    clone, which it never was."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone --branch main "$TOOLS_REPO_URL" tools
+              - run: cd tools
+              - run: python3 build.py
+    """) == []
+
+
+def test_p1424_a_blank_line_does_not_end_the_step(tmp_path):
+    """The inverse error of the same broken proxy: a blank line inside ONE
+    `run: |` block is not shell, so line adjacency breaks and the working
+    directory is forgotten mid-step — losing a real chain."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_REPO_URL" tools
+                  cd tools
+
+                  python3 setup.py
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_a_heredoc_body_is_not_executed_shell(tmp_path):
+    """Text a step WRITES to a file is not a command the step runs. Reading a
+    heredoc body as shell fabricates the whole chain out of documentation."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  cat <<'EOF' > README.md
+                  git clone --branch main "$TOOLS_REPO_URL" tools
+                  python3 tools/setup.py
+                  EOF
+    """) == []
+
+
+def test_p1424_an_expression_url_does_not_shift_the_destination(tmp_path):
+    """`${{ … }}` is ONE value to the runner but three words to a shell
+    splitter, so the clone's positional arguments shift and the destination is
+    read out of the middle of the expression. That is worse than not seeing a
+    destination: the detector then correlates against — and would accept a pin
+    on — a directory that does not exist."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main ${{ env.TOOLS_REPO_URL }} tools
+                  python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+    assert "`tools`" in (hits[0].derived_note or "")
+
+
+def test_p1424_an_execution_before_the_fetch_on_one_line_does_not_pair(
+    tmp_path,
+):
+    """Ordering is the whole claim — the fetch must have put the code there
+    BEFORE it ran. Comparing line numbers alone makes both halves of a single
+    line simultaneous, so a pre-existing script reads as fetched code."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: python3 tools/setup.py && git clone --branch main "$TOOLS_REPO_URL" tools
+    """) == []
+
+
 def test_catalog_scan_end_to_end_fires_p14_24_on_a_mutable_fetch(tmp_path):
     _wf(tmp_path, "setup.yml", _MUTABLE_FETCH)
     catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")

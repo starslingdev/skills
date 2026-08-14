@@ -252,7 +252,7 @@ def test_render_plan_cli_lists_every_group(tmp_path: Path) -> None:
         "id": "f2",
         "pattern": "P14.24",
         "severity": "MEDIUM",
-        "title": "Unverified remote script",
+        "title": "Unverified remote code execution",
         "workflow_file": ".github/workflows/b.yml",
         "line": 9,
         "evidence": "9: run: curl ... | bash",
