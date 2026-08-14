@@ -1,0 +1,63 @@
+# ci-secure as a CI check: scans this repo's own .github/workflows with the
+# ci-secure engine and FAILS the build when any security fact fails, so a
+# workflow change that weakens CI security cannot merge green.
+#
+# Gate rule (mirrors registry-scan.yml's philosophy):
+#   - security_score FACTS are deterministic pass/fail checks -> any fail is RED.
+#   - pattern-layer FINDINGS (severity-rated, e.g. P14.18) do not block, but
+#     every one is surfaced as a ::warning:: annotation and in the job summary.
+#     "Does not block" must not decay into "does not appear".
+#
+# Reuse in any other repo: ci-secure is stdlib-only Python, so this file needs
+# nothing but a checkout and python3. This repo runs the in-tree engine; any
+# other repo replaces the "Run ci-secure" step's SCAN_ROOT setup with a
+# SHA-pinned fetch of the engine, e.g.:
+#   git clone --depth 1 https://github.com/starslingdev/skills /tmp/ci-secure-engine
+#   git -C /tmp/ci-secure-engine checkout <pinned-sha>
+#   python3 /tmp/ci-secure-engine/skills/ci-secure/scripts/scan.py --root .
+name: CI security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-secure-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The gate only reads the checked-out tree.
+permissions:
+  contents: read
+
+jobs:
+  ci-secure:
+    name: ci-secure
+    # Dogfoods StarSling runners like ci.yml; fork PRs are excluded from the
+    # self-hosted runner and get the hosted twin below instead.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
+    runs-on: starsling-ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Run ci-secure against this repo's workflows
+        run: python3 .github/scripts/ci_secure_gate.py
+
+  # Fork PRs run the identical scan on a GitHub-hosted runner: the scan needs
+  # no secrets, so hosted execution of fork code is the standard ci-fork model.
+  ci-secure-fork:
+    name: ci-secure (fork)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Run ci-secure against this repo's workflows
+        run: python3 .github/scripts/ci_secure_gate.py

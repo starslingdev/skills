@@ -1,0 +1,2 @@
+# Workflow changes carry CI-security consequences; route them to an owner.
+/.github/ @yonasb
