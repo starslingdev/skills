@@ -550,7 +550,6 @@ def _unpersisted_checkout_violations(doc: dict) -> list[str]:
 # `!cancelled()` both still run when a dependency is SKIPPED, which is the
 # state that matters here.
 _NEVER_SKIPS = {
-    "true",
     "always()",
     "!cancelled()",
     "always()||cancelled()",
@@ -565,6 +564,12 @@ _NEVER_SKIPS = {
 # `always()` or `!cancelled()`.
 _NEVER_SKIPS_WITHOUT_NEEDS = {
     "success()",
+    # A CONSTANT condition is not `always()` either. GitHub skips a dependent
+    # when a dependency skips unless the condition is `always()` or
+    # `!cancelled()`, and `if: true` is neither — so with `needs:` it is as
+    # bypassable as the suite it gates. Without `needs:` it cannot be false,
+    # and reding it would be a false RED on a repo that did nothing wrong.
+    "true",
     "success()||failure()",
     "failure()||success()",
     "success()||failure()||cancelled()",
@@ -594,9 +599,12 @@ def _normalise_condition(condition: str) -> str:
 
 def _never_skips(condition: str, has_needs: bool = True) -> bool:
     text = _normalise_condition(condition)
-    if text in _NEVER_SKIPS or _CONSTANT_TRUE_RE.match(text):
+    if text in _NEVER_SKIPS:
         return True
-    return not has_needs and text in _NEVER_SKIPS_WITHOUT_NEEDS
+    if has_needs:
+        return False
+    return text in _NEVER_SKIPS_WITHOUT_NEEDS or bool(
+        _CONSTANT_TRUE_RE.match(text))
 
 
 def _condition_text(job: dict) -> str | None:

@@ -22,6 +22,16 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **A constant `if:` no longer certifies a verdict job that
+  has `needs:`.** `if: true` (and `${{ 1 == 1 }}`) is not `always()`: GitHub
+  skips a dependent when a dependency skips unless the condition is `always()`
+  or `!cancelled()`, so a constant-conditioned verdict job with dependencies is
+  exactly as bypassable as the suite it gates — and the fact returned a
+  measured pass for it. The same false green as `success() || failure()`, one
+  condition over. Without `needs:` a constant still certifies, since it cannot
+  be false and reding it would be a false RED on a repository that did nothing
+  wrong.
+
 - **2026-08-14** — **A matrix job no longer certifies the bare context it never
   emits.** GitHub appends the combination to a matrix job's check name, so a
   job named `test` reports `test (3.11)` and `test (3.12)` and never `test`.

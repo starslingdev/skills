@@ -2745,3 +2745,53 @@ jobs:
     f = _outcome(_facts_with(tmp_path, {"ci.yml": matrix_skippable}, ["test"]),
                  _FACT)
     assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+@pytest.mark.parametrize("cond", ["true", "${{ true }}", "${{ 1 == 1 }}"])
+def test_a_constant_condition_does_not_certify_a_job_with_needs(tmp_path, cond):
+    """A constant `if:` does not make a job unskippable once it has `needs:`.
+    GitHub skips a dependent when a dependency skips unless the condition is
+    `always()` or `!cancelled()`; `if: true` is neither. Certifying it was the
+    same false green as `success() || failure()`, one condition over — and the
+    check it certified can be satisfied without the suite running."""
+    body = f"""\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  suite:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+  test:
+    needs: [suite]
+    if: {cond}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo verdict
+"""
+    out = _facts_with(tmp_path / cond.strip("${} =1"), {"ci.yml": body}, ["test"])
+    assert _outcome(out, _FACT)["outcome"] == "fail", _outcome(out, _FACT)
+
+
+@pytest.mark.parametrize("cond", ["true", "${{ 1 == 1 }}"])
+def test_a_constant_condition_still_certifies_without_needs(tmp_path, cond):
+    """The control: with nothing upstream to skip, a constant condition really
+    cannot be false, and reding it would be a false RED on a repo that did
+    nothing wrong (which is why M5 accepted these in the first place)."""
+    body = f"""\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    if: {cond}
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    out = _facts_with(tmp_path / cond.strip("${} =1"), {"ci.yml": body}, ["test"])
+    assert _outcome(out, _FACT)["outcome"] == "pass", _outcome(out, _FACT)
