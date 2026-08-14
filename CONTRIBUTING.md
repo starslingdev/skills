@@ -46,6 +46,9 @@ External contributions are welcome and follow the standard fork flow:
   `test (self-hosted)` job in the same workflow — we dogfood what we sell). By
   design, fork-PR code never executes on those self-hosted runners; the hosted
   job gives you the identical suite.
+- **One required check, `test`, covers both.** It is a verdict job that always
+  runs and passes only when the suite that was supposed to run actually ran and
+  passed — so a fork PR cannot merge without a green suite.
 - **Local gate: green on your machine means green in CI.** The same
   `python3 -m pytest -v` runs in both places, so you can reproduce CI locally
   before you push.

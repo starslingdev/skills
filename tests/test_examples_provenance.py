@@ -26,6 +26,10 @@ from pathlib import Path
 
 import pytest
 
+yaml = pytest.importorskip("yaml")
+
+import pytest
+
 _REPO = Path(__file__).resolve().parents[1]
 _EXAMPLES = _REPO / "examples"
 
@@ -262,16 +266,25 @@ def test_ci_workflows_check_out_full_history():
     # consistency checks, which a fabricated-but-consistent SHA passes. Pin `fetch-depth: 0` in
     # BOTH CI workflows so that coupling regressing goes red HERE, not silently defanged.
     # Both suite jobs now live in ci.yml (the fork twin moved in so the always-run
-    # verdict job can `needs:` it); pin fetch-depth: 0 once per suite job.
-    import yaml
+    # verdict job can `needs:` it). Derive the pin from every checkout in the file rather
+    # than enumerating job ids: a THIRD suite job added later with fetch-depth: 1 would
+    # defang the gate while an enumerated check kept passing.
     wf = _REPO / ".github" / "workflows" / "ci.yml"
     assert wf.exists(), (
         "ci.yml is missing — the example-provenance gate's full-history CI coupling can no "
         "longer be verified")
     jobs = yaml.safe_load(wf.read_text(encoding="utf-8"))["jobs"]
-    for job_id in ("test-self", "test-fork"):
-        steps = jobs[job_id]["steps"]
-        checkout = next(s for s in steps if "checkout" in str(s.get("uses", "")))
-        assert checkout["with"].get("fetch-depth") == 0, (
-            f"ci.yml job {job_id} no longer checks out `fetch-depth: 0` — the example-provenance "
-            "ancestry leg will silently skip in CI (shallow clone), defanging this gate")
+    checked = []
+    for job_id, job in jobs.items():
+        for step in job.get("steps") or []:
+            if "checkout" not in str(step.get("uses", "")):
+                continue
+            checked.append(job_id)
+            assert (step.get("with") or {}).get("fetch-depth") == 0, (
+                f"ci.yml job {job_id} checks out without `fetch-depth: 0` — the "
+                "example-provenance ancestry leg will silently skip in CI (shallow clone), "
+                "defanging this gate")
+    # The verdict job deliberately checks out nothing, so assert on the suites by name:
+    # if they stop checking out code at all, the loop above would pass vacuously.
+    assert set(checked) >= {"test-self", "test-fork"}, (
+        f"both suite jobs must check out code in ci.yml; found checkouts in {checked}")

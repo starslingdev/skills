@@ -11,7 +11,16 @@ name: CI
 # could merge with zero tests executed. The verdict is always produced, and passes only when
 # the one suite job that was supposed to run actually ran and passed.
 # tests/test_ci_required_check_verdict.py pins every clause of this arrangement.
+#
+# Residual, NOT closed by this arrangement: on `pull_request` the workflow definition comes from
+# the PR's own merge ref, so a fork PR that edits this file edits its own gate (and the guard
+# tests are editable in the same PR). That is loud in the diff and the merge still needs a
+# maintainer, but the gate is not self-enforcing against a hostile PR — reviewing `.github/**`
+# and `tests/` changes on fork PRs is the actual control.
 on:
+  # No merge_group trigger: this repo has no merge queue. If one is ever enabled, the trigger
+  # list and BOTH suite `if:` guards must change together — on a merge_group event there is no
+  # github.event.pull_request, so test-self would skip and test-fork would fire.
   push:
     branches: [main]
   pull_request:
@@ -32,6 +41,9 @@ jobs:
     # pull requests whose head is this same repository. Fork PRs get the identical suite on
     # GitHub-hosted runners via test-fork below.
     runs-on: starsling-ubuntu-24.04
+    # Without this, a dead runner pool leaves the job queued (self-hosted jobs wait up to 24h)
+    # and the required `test` check pending with no signal. The suite itself takes ~1.5 min.
+    timeout-minutes: 30
     if: >-
       github.event_name == 'push' ||
       github.event.pull_request.head.repo.full_name == github.repository
@@ -75,11 +87,16 @@ jobs:
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          # Full history so any provenance/ancestry guard can verify a recorded skill commit is an
+          # ancestor of HEAD (a shallow depth-1 checkout wouldn't contain those commits).
           fetch-depth: 0
+          # The gate only reads code (it never pushes), so don't leave the job token in
+          # .git/config — on a fork PR least of all.
           persist-credentials: false
 
       - name: Set up Python

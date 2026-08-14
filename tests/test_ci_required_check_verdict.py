@@ -16,9 +16,13 @@ protection rule requires `test`, so the verdict must exist on every event.
 Each assertion here names the bypass it blocks. Deleting one weakens branch
 protection as much as editing the workflow it guards.
 """
+import shutil
+import subprocess
 from pathlib import Path
 
-import yaml
+import pytest
+
+yaml = pytest.importorskip("yaml")
 
 _REPO = Path(__file__).resolve().parents[1]
 _WORKFLOWS = _REPO / ".github" / "workflows"
@@ -31,7 +35,20 @@ def _jobs():
 
 
 def _display_name(job_id: str, job: dict) -> str:
-    return job.get("name", job_id)
+    return str(job.get("name", job_id))
+
+
+def _forges_the_check_name(job_id: str, job: dict) -> bool:
+    """Would this job report a check run named `test`?
+
+    A literal `name: test` is the obvious case. An expression name —
+    `name: ${{ 'test' }}` — renders as `test` in the check run that branch
+    protection reads, but never equals the string "test" here. This census
+    cannot evaluate GitHub expressions, so outside ci.yml an expression-valued
+    job name IS the offence: it makes the required check name unknowable.
+    """
+    name = _display_name(job_id, job)
+    return name == "test" or "${{" in name
 
 
 def _verdict():
@@ -61,18 +78,38 @@ def test_verdict_needs_both_suite_jobs():
         f"the verdict must depend on both suite jobs, got {needs}")
 
 
-def test_verdict_passes_only_when_the_right_job_ran():
+_RESULTS = ("success", "failure", "cancelled", "skipped", "")
+# The only two states in which a suite that was supposed to run actually ran and
+# passed. Every other pair is a non-pass — including both-skipped.
+_ACCEPTED = {("success", "skipped"), ("skipped", "success")}
+
+
+@pytest.mark.parametrize("self_hosted", _RESULTS)
+@pytest.mark.parametrize("fork", _RESULTS)
+def test_verdict_passes_only_when_the_right_job_ran(self_hosted, fork):
     """Both-skipped, either-failed, and either-cancelled are not passes:
-    a suite that did not run is not a suite that passed."""
-    v = _verdict()
-    run = v["steps"][-1]["run"]
-    assert '"success" ] && [ "${FORK}" = "skipped"' in run.replace("'", '"'), (
-        "verdict must accept self-hosted success only when the fork job "
-        "was skipped")
-    assert '"success" ] && [ "${SELF_HOSTED}" = "skipped"' in run.replace("'", '"'), (
-        "verdict must accept fork success only when the self-hosted job "
-        "was skipped")
-    assert "exit 1" in run, "every other combination must fail the check"
+    a suite that did not run is not a suite that passed.
+
+    This RUNS the verdict's shell over every combination of job results rather
+    than grepping it for substrings. A text check cannot see an ADDED permissive
+    clause — inserting `if [ "${FORK}" = "cancelled" ]; then exit 0; fi` above
+    the real clauses leaves every substring assertion satisfied while reopening
+    exactly the bypass this file exists to block.
+    """
+    sh = shutil.which("sh")
+    assert sh, "no POSIX shell available to execute the verdict script"
+    run = _verdict()["steps"][-1]["run"]
+    proc = subprocess.run(
+        [sh, "-c", run],
+        env={"SELF_HOSTED": self_hosted, "FORK": fork, "PATH": "/usr/bin:/bin"},
+        capture_output=True, text=True,
+    )
+    should_pass = (self_hosted, fork) in _ACCEPTED
+    assert (proc.returncode == 0) is should_pass, (
+        f"verdict exited {proc.returncode} for "
+        f"(self-hosted={self_hosted!r}, fork={fork!r}); expected "
+        f"{'pass' if should_pass else 'FAIL'}. A suite that did not run, was "
+        f"cancelled, or failed is not a suite that passed.\n{proc.stdout}{proc.stderr}")
 
 
 def test_verdict_runs_hosted_and_checks_out_nothing():
@@ -97,6 +134,16 @@ def test_suite_jobs_split_by_fork_and_runner():
     assert fork["runs-on"] == "ubuntu-latest"
     assert "!= github.repository" in str(fork.get("if", "")), (
         "fork suite must run only for PRs whose head repo is not this repo")
+    # A job-level `success` says nothing about steps skipped by a step-level
+    # `if:` — the verdict only ever reads the JOB result, so a suite whose last
+    # step is `echo ok`, or is skipped, still reports success and goes green.
+    for job_id, job in (("test-self", self_hosted), ("test-fork", fork)):
+        last = job["steps"][-1]
+        assert last.get("run", "").strip() == "pytest -v", (
+            f"{job_id}'s last step must be the suite itself, got {last!r}")
+        assert "if" not in last, (
+            f"{job_id}'s suite step must not carry a step-level `if:` — it would "
+            "skip the tests while the job still reports success to the verdict")
 
 
 def test_fork_twin_workflow_is_retired():
@@ -121,7 +168,7 @@ def test_no_other_workflow_forges_the_required_check_name():
             continue
         doc = yaml.safe_load(wf.read_text())
         for jid, job in (doc.get("jobs") or {}).items():
-            if _display_name(jid, job) == "test":
+            if _forges_the_check_name(jid, job):
                 offenders.append(f"{wf.name}:{jid}")
     assert not offenders, (
         f"job(s) outside ci.yml carry the required check name 'test': {offenders}")
