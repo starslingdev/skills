@@ -4,5 +4,12 @@
 # The engine the CI-security gate executes. A pull request can edit the code
 # that judges it, so the gate's honesty rests on someone reading that diff --
 # owning the workflow but not the scanner it runs would leave the shorter path
-# to a forged pass unwatched.
-/skills/ci-secure/scripts/ @yonasb
+# to a forged pass unwatched. The whole directory, not just scripts/: the engine
+# loads its detector catalog from references/security-patterns.md, and deleting a
+# section there silences a detector as effectively as editing the code.
+/skills/ci-secure/ @yonasb
+
+# The tests are the only thing pinning the gate's rules -- the verdict logic, the
+# fork/self-hosted split, the escaping, the @claude hardening. Deleting an
+# assertion weakens the gate as much as editing the code it guards.
+/tests/ @yonasb

@@ -3,9 +3,11 @@
 `.github/workflows/ci-secure-check.yml` splits the scan in two: fork PRs run on a
 GitHub-hosted runner, everything else dogfoods StarSling's. Those two jobs are
 mutually exclusive, so neither of their check names is safe to require in branch
-protection — a required check that never runs is reported as absent, not as red, and
-GitHub lets the pull request merge. A fork could therefore fail the security scan and
-still merge, which is precisely the hole the gate exists to close.
+protection — a job skipped by a conditional reports Success to the required-check rule,
+so requiring the self-hosted job's name would be satisfied by a fork PR never running
+it. A fork could therefore fail the security scan and still merge, which is precisely
+the hole the gate exists to close. (A check that is genuinely absent stays Pending and
+does block; it is the skip that reads as green, which is why this is easy to miss.)
 
 The fix is a third job that always runs and carries the bare `ci-secure` name: it
 passes only when the one scan that was supposed to run actually ran and passed. These
@@ -82,6 +84,33 @@ def test_the_required_check_is_a_verdict_over_both_scans(workflow: dict, verdict
     assert "verdict" not in workflow["jobs"] or workflow["jobs"]["verdict"] is verdict
 
 
+def test_the_gate_still_fires_on_pull_requests(workflow: dict) -> None:
+    """The triggers themselves, which nothing else here pins.
+
+    Every other test in this file assumes the workflow runs. Delete `pull_request`
+    from the `on:` block and all of them still pass while the required `ci-secure`
+    check silently stops being produced on pull requests — the exact outcome this
+    whole PR exists to prevent, reached by deleting one line.
+    """
+    # PyYAML parses a bare `on:` key as the boolean True.
+    triggers = workflow[True]
+    assert "pull_request" in triggers, (
+        "the gate must run on pull requests, or the required check is never reported"
+    )
+    assert "push" in triggers and triggers["push"]["branches"] == ["main"], (
+        "main must be scanned too, or a direct push could land what a PR could not"
+    )
+
+
+def test_the_verdict_job_has_no_event_narrowing_condition(verdict: dict) -> None:
+    """`if: always()` and nothing else.
+
+    An added `github.event_name == ...` clause would make the check disappear on
+    some events — and a required check that is skipped reads as a pass.
+    """
+    assert " ".join(str(verdict["if"]).split()) == "always()"
+
+
 def test_the_scan_jobs_do_not_claim_the_required_name(workflow: dict) -> None:
     """The scan jobs are reported under distinguishable names.
 
@@ -106,9 +135,16 @@ def test_the_scan_jobs_stay_mutually_exclusive_and_cover_every_event(workflow: d
     # The two guards are exact complements of one predicate, so their union is
     # total and their intersection empty for every event. Comparing full_name to
     # the repository — the predicate ci.yml and ci-fork.yml already use — is what
-    # makes that true: `head.repo` is null once a fork is deleted while its PR is
-    # open, and in GitHub expressions `null == false` and `null == true` are BOTH
-    # false, so a `.fork`-based pair would skip both jobs on exactly that PR.
+    # makes that true, and the reason is worth stating precisely, because the
+    # obvious alternative fails in the dangerous direction.
+    #
+    # `head.repo` is null once a fork is deleted while its PR is still open.
+    # GitHub expressions compare mismatched types by casting to a number, and null
+    # casts to 0 — the same as `false`. So `head.repo.fork == false` is TRUE on
+    # that PR, and a `.fork`-based pair would hand fork-ref code to the SELF-HOSTED
+    # job. Comparing against a repository name casts to NaN instead, and NaN equals
+    # nothing: the `==` guard is false and the `!=` guard is true, so the
+    # deleted-fork PR goes to the GitHub-hosted job, where it belongs.
     predicate = "github.event.pull_request.head.repo.full_name == github.repository"
     assert " ".join(scan["if"].split()) == f"github.event_name != 'pull_request' || {predicate}"
     assert " ".join(fork["if"].split()) == (
@@ -140,10 +176,14 @@ def test_the_verdict_reads_both_results_from_env_not_interpolation(verdict: dict
     """Job results reach the script through `env:`, never spliced into the shell text."""
     step = verdict["steps"][0]
     env = step["env"]
-    assert set(env.values()) == {
-        "${{ needs.scan.result }}",
-        "${{ needs.scan-fork.result }}",
+    assert env == {
+        "SELF_HOSTED": "${{ needs.scan.result }}",
+        "FORK": "${{ needs.scan-fork.result }}",
     }
+    # Names, not just values: renaming a key in the YAML while the script still
+    # reads the old one makes the required check permanently red under `set -u`.
+    for name in env:
+        assert f"${{{name}}}" in step["run"], f"{name} is set but never read"
     assert "${{" not in step["run"], (
         "expressions interpolated straight into a run: block are a template-injection "
         "shape; pass them through env: instead"

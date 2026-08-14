@@ -8,9 +8,11 @@
 #     every one is surfaced as a ::warning:: annotation and in the job summary.
 #     "Does not block" must not decay into "does not appear".
 #
-# Reuse in any other repo: copy this file and .github/scripts/ci_secure_gate.py
-# (the gate script must keep that exact location - it derives the scan root from
-# it). This repo runs the engine from its own tree; a repo that does not vendor
+# Reuse in any other repo: copy this file and .github/scripts/ci_secure_gate.py.
+# Under Actions the gate takes its scan root from GITHUB_WORKSPACE, so the path
+# is free; off Actions it falls back to two directories up, which is why the
+# in-repo location is `.github/scripts/`. This repo runs the engine from its own
+# tree; a repo that does not vendor
 # the engine fetches it and points CI_SECURE_ENGINE at the fetched scan.py,
 # replacing the "Run ci-secure" step with:
 #   - run: |
@@ -24,9 +26,10 @@
 #     env:
 #       CI_SECURE_ENGINE: /tmp/ci-secure-engine/skills/ci-secure/scripts/scan.py
 #
-# Run the GATE, never scan.py directly: scan.py prints its JSON and exits 0 no
-# matter what it found, so a step that calls it is a green-forever check. The
-# pass/fail rule above lives entirely in ci_secure_gate.py.
+# Run the GATE, never scan.py directly: scan.py exits non-zero only on
+# OPERATIONAL errors (no workflows to scan, unreadable catalog, bad arguments)
+# and exits 0 for every security outcome it reports, so a step that calls it
+# directly is a green-forever check. The pass/fail rule above lives in the gate.
 #
 # Expect the first run on a new repo to be red on sec.codeowners.workflows until
 # a CODEOWNERS file exists - that is the gate working, not the gate broken.
@@ -78,9 +81,10 @@ jobs:
   # come from the head ref, so a fork can weaken its own scan in the same pull
   # request. Nothing inside CI can close that - a check whose code the pull
   # request edits cannot vouch for itself. What closes it is a human reading the
-  # diff. CODEOWNERS routes both paths that matter (`.github/` and the engine
-  # under skills/ci-secure/scripts/), and that routing only blocks a merge if
-  # branch protection has "Require review from Code Owners" turned on.
+  # diff. CODEOWNERS routes every path that could forge a pass (`.github/`, the
+  # engine under skills/ci-secure/, and the tests that pin the rules), and that
+  # routing only blocks a merge if branch protection has "Require review from
+  # Code Owners" turned on.
   # Treat a green fork scan as "nothing obvious", not as cleared.
   scan-fork:
     name: ci-secure (fork)

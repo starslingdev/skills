@@ -31,6 +31,7 @@ _CLEAN = {
     "scanned_workflows": 3,
     "findings": [],
     "scan_incomplete": [],
+    "dropped_matches": [],
     "gh_checks": {"P14.11": "skipped: disabled via --gh-impostor=off"},
     "security_score": {
         "facts": [
@@ -150,7 +151,8 @@ def test_unreadable_output_is_red(tmp_path: Path, payload: str) -> None:
     assert "no readable verdict" in proc.stdout
 
 
-@pytest.mark.parametrize("missing_key", ["findings", "scan_incomplete"])
+@pytest.mark.parametrize("missing_key", [
+    "findings", "scan_incomplete", "dropped_matches", "gh_checks"])
 def test_a_dropped_schema_key_is_red_not_assumed_empty(tmp_path: Path, missing_key: str) -> None:
     """If the engine stops reporting coverage gaps, the gate must not read that as zero gaps."""
     scan = _scan()
@@ -158,6 +160,48 @@ def test_a_dropped_schema_key_is_red_not_assumed_empty(tmp_path: Path, missing_k
     proc = run_scan(tmp_path, scan)
     assert proc.returncode == 1
     assert "no readable verdict" in proc.stdout
+
+
+def test_a_dropped_match_is_red(tmp_path: Path) -> None:
+    """A finding the detector produced and then discarded is a false negative.
+
+    The engine separates "this file could not be read" (`scan_incomplete`) from
+    "a detector matched inside a run: step it could not anchor to a line, so the
+    match was thrown away" (`dropped_matches`). Its own coverage predicate treats
+    them as the same class of hole, so a gate that blocks on one and ignores the
+    other reports 100 over a scan that admits it dropped a hit.
+    """
+    proc = run_scan(tmp_path, _scan(dropped_matches=[
+        {"workflow_file": ".github/workflows/deploy.yml",
+         "reason": "run: step could not be anchored to a raw line"}]))
+    assert proc.returncode == 1
+    assert "dropped" in proc.stdout and "deploy.yml" in proc.stdout
+
+
+def test_an_empty_facts_list_alone_is_red(tmp_path: Path) -> None:
+    """The `evaluated nothing` clause, isolated from the other degraded checks.
+
+    Covered only in combination before, so deleting the clause changed nothing:
+    the crash-shape test also sets `score: None` and `reason`, which fire on their
+    own. This is the drift the clause exists for — a numeric score over no facts.
+    """
+    proc = run_scan(tmp_path, _scan(security_score={
+        "facts": [], "score": 0, "passed": 0, "scored_count": 0,
+        "applicable_count": 0, "unmeasured": []}))
+    assert proc.returncode == 1
+    assert "evaluated nothing" in proc.stdout
+
+
+def test_a_missing_network_detector_status_is_red(tmp_path: Path) -> None:
+    """The gate always disables P14.11 explicitly, so a status must always exist.
+
+    Reading `gh_checks` with a default would make "the detector was skipped" and
+    "the engine stopped saying whether it ran" look identical — the exact
+    collapse the surrounding comment promises not to allow.
+    """
+    proc = run_scan(tmp_path, _scan(gh_checks={}))
+    assert proc.returncode == 1
+    assert "network-gated detector status" in proc.stdout
 
 
 def test_the_facts_layer_degrading_to_empty_is_red(tmp_path: Path) -> None:
@@ -241,9 +285,12 @@ def test_an_unmeasured_fact_warns_without_blocking(tmp_path: Path) -> None:
 # Everything the gate reports is read out of scanned workflow files, and on a
 # fork pull request an attacker writes those files — including their names, which
 # the engine reports verbatim. A newline in one of those strings would otherwise
-# let it emit workflow commands of its own. The command is built at runtime from
-# its pieces so this file never contains a literal attack string.
-_STOP = "::" + "stop-commands" + "::"
+# let it emit workflow commands of its own. Each command name is assembled at run
+# time rather than written out, so no scanner reading this file finds a literal
+# workflow command sitting in a test fixture.
+_STOP = "::" + "stop" + "-commands::"
+_MASK = "::" + "add" + "-mask::"
+_ERR = "::" + "err" + "or::"
 
 
 def _hostile(text: str) -> dict:
@@ -259,8 +306,8 @@ def _hostile(text: str) -> dict:
 
 @pytest.mark.parametrize("payload", [
     "evil\n" + _STOP + "deadbeef\nfoo.yml",
-    "a\r\n::error::forged\r\nb.yml",
-    "x\n::add-mask::secret\ny.yml",
+    "a\r\n" + _ERR + "forged\r\nb.yml",
+    "x\n" + _MASK + "secret\ny.yml",
 ])
 def test_a_crafted_filename_cannot_emit_its_own_workflow_commands(
     tmp_path: Path, payload: str
@@ -278,15 +325,72 @@ def test_a_crafted_filename_cannot_emit_its_own_workflow_commands(
     assert proc.returncode == 1, "a failed fact is still a failed fact"
 
     # Actions reads a workflow command only where one STARTS a line, so the
-    # invariant is per-line: every command-looking line must be one the gate
-    # wrote. The payload surviving mid-line, percent-encoded, is the intended
-    # outcome — escaped rather than dropped, so the evidence is still readable.
-    emitted = [ln.strip() for ln in (proc.stdout + proc.stderr).splitlines()]
-    for line in emitted:
-        if line.startswith("::"):
-            assert line.startswith(("::warning", "::error")), f"the gate emitted {line!r}"
-    # The real annotations survive, which is the point of escaping rather than dropping.
-    assert any(ln.startswith("::error::ci-secure fact failed") for ln in emitted)
+    # invariant is per-line. Counting, not prefix-matching: a forged `::error::`
+    # would satisfy "starts with ::error", so the assertion has to be that the
+    # gate emitted EXACTLY the commands it meant to — one warning for the one
+    # finding, one error for the one failed fact — and nothing else.
+    emitted = [ln.strip() for ln in (proc.stdout + proc.stderr).splitlines()
+               if ln.strip().startswith("::")]
+    assert len(emitted) == 2, f"expected exactly 2 workflow commands, got {emitted}"
+    assert sum(ln.startswith("::warning file=") for ln in emitted) == 1
+    assert sum(ln.startswith("::error::ci-secure fact failed") for ln in emitted) == 1
+    # Escaped rather than dropped: the payload survives mid-line, percent-encoded,
+    # so the evidence a reviewer needs is still legible.
+    assert "%0A" in proc.stdout
+
+
+def test_a_crafted_filename_cannot_rewrite_an_annotation_s_properties(
+    tmp_path: Path
+) -> None:
+    """`:` and `,` terminate a workflow command's property list.
+
+    Left unescaped in `file=`, a `::` in the filename ends the property list and
+    the attacker's text becomes the annotation body, while an embedded `,line=`
+    re-points the annotation at a file and line of their choosing — a real finding
+    displayed against innocent code.
+    """
+    proc = run_scan(tmp_path, _scan(findings=[{
+        "severity": "HIGH", "pattern": "P14.10", "title": "t",
+        "workflow_file": "a.yml" + _ERR + "forged clean,line=1", "line": 7}]))
+    assert proc.returncode == 0
+
+    line = next(ln for ln in proc.stdout.splitlines() if ln.startswith("::warning"))
+    assert "%3A" in line and "%2C" in line, f"properties not escaped: {line}"
+    # The command's own structure is intact: exactly one property list, ending at
+    # the real line number the engine reported.
+    assert line.count("::") == 2, f"the payload split the command: {line}"
+    assert ",line=7::" in line
+
+
+@pytest.mark.parametrize("sink", ["crash", "unreadable"])
+def test_engine_output_cannot_emit_workflow_commands(tmp_path: Path, sink: str) -> None:
+    """The engine's own stdout and stderr are attacker-controlled on a fork PR.
+
+    Both the crash path and the unreadable-verdict path echo engine output to the
+    log. Neither had a test, and `::stop-commands::` reaching the log from either
+    would silence the `::error::` the gate emits immediately afterwards.
+    """
+    payload = "boom\n" + _STOP + "deadbeef\nmore"
+    if sink == "crash":
+        # A separate filename: run_gate() writes its own stub_engine.py, which
+        # would overwrite this one and quietly test nothing.
+        stub = tmp_path / "noisy_engine.py"
+        stub.write_text(
+            "import sys\n"
+            f"sys.stderr.write({payload!r})\n"
+            "sys.exit(2)\n", encoding="utf-8")
+        proc = run_gate(tmp_path, stdout="", engine=str(stub))
+    else:
+        proc = run_gate(tmp_path, stdout=payload)
+
+    assert proc.returncode == 1
+    emitted = [ln.strip() for ln in (proc.stdout + proc.stderr).splitlines()
+               if ln.strip().startswith("::")]
+    assert len(emitted) == 1, f"expected only the gate's own error, got {emitted}"
+    assert emitted[0].startswith("::error::ci-secure")
+    # Echoed legibly rather than percent-encoded: this is what a maintainer reads
+    # when the gate goes red for a reason that is not a security finding.
+    assert "engine| boom" in proc.stderr
 
 
 def test_a_crafted_filename_cannot_break_out_of_the_summary(tmp_path: Path) -> None:
@@ -304,16 +408,36 @@ def test_a_crafted_filename_cannot_break_out_of_the_summary(tmp_path: Path) -> N
     )
 
 
-def test_the_summary_is_bounded(tmp_path: Path) -> None:
-    """An oversized summary is rejected wholesale, taking the failures with it."""
+GITHUB_SUMMARY_LIMIT_BYTES = 1024 * 1024  # 1 MiB, GitHub's documented cap
+
+
+@pytest.mark.parametrize("filler,label", [
+    ("x", "ascii"),
+    # Three bytes per character. A budget counted in characters passes this
+    # happily while the upload is ~3x over the real limit — and on a fork PR the
+    # filenames and evidence in a summary are attacker-chosen, so non-ASCII here
+    # is a choice an attacker gets to make, not an accident of someone's locale.
+    ("漢", "multibyte"),
+])
+def test_the_summary_is_bounded_in_bytes(tmp_path: Path, filler: str, label: str) -> None:
+    """GitHub rejects an oversized summary outright, so too big means none at all.
+
+    The limit it enforces is bytes; measuring characters is the bug this pins.
+    """
     scan = _scan(findings=[
-        {"severity": "LOW", "pattern": f"P{i}", "title": "x" * 500,
+        {"severity": "LOW", "pattern": f"P{i}", "title": filler * 500,
          "workflow_file": "w.yml", "line": i}
         for i in range(4000)])
     proc = run_scan(tmp_path, scan)
     assert proc.returncode == 0
-    assert len(proc.summary) < 1_000_000, "GitHub rejects a step summary over 1 MiB"
+
+    size = len(proc.summary.encode("utf-8"))
+    assert size < GITHUB_SUMMARY_LIMIT_BYTES, (
+        f"{label}: summary is {size} bytes, over GitHub's {GITHUB_SUMMARY_LIMIT_BYTES}"
+    )
     assert "truncated" in proc.summary
+    # Truncation cuts on a line boundary, so the last row is never half-rendered.
+    assert proc.summary.rstrip().endswith("_(summary truncated; see the step log)_")
 
 
 def test_every_failure_reason_is_reported_not_just_the_first(tmp_path: Path) -> None:

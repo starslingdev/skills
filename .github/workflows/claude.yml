@@ -12,15 +12,16 @@
 #      below to claude_code_oauth_token.
 #
 # Comment-triggered runs execute in base-repo context, so secrets are present
-# even when the comment is on a fork PR. The `if:` guard skips the job (and the
-# runner minutes) for every comment that does not clear both of its conditions,
-# and the action itself refuses to run for any commenter without write access to
-# this repo, so an outside commenter never reaches the secrets.
+# even when the comment is on a fork PR. The `if:` guard below is what keeps an
+# outsider away from them: it skips the job — and the runner minutes — for every
+# comment that does not clear both of its conditions, before anything starts. The
+# action ALSO refuses to proceed for a commenter without write access, but that
+# check runs inside the job, after the secrets are on the runner and the App
+# token has been minted, so it is a second line and not the boundary.
 #
 # Comment events always run the workflow file from the DEFAULT branch, so this
 # file does nothing until it merges — @claude cannot be smoke-tested on the PR
-# that adds it, and the action logs an expected "not found on default branch"
-# skip if you try.
+# that adds it. No run is created at all, so there is no log to inspect either.
 name: Claude Code
 
 on:
@@ -75,15 +76,19 @@ jobs:
     # GITHUB_TOKEN can do, not what Claude can do. Verified against the pinned
     # action: with no github_token input, its token setup takes the OIDC ->
     # app-token-exchange path and hands that App token to every write-capable
-    # tool it installs; the job's own GITHUB_TOKEN reaches the action only as
-    # DEFAULT_WORKFLOW_TOKEN, consumed by the read-only CI-status tool that needs
-    # the `actions: read` below. Dropping the three write grants would therefore
-    # silence a scanner finding without taking one capability away from a run a
-    # maintainer has already started. These grants match upstream's own published
-    # example workflow for this action, at the same pinned version. All of that
-    # describes the path where the App token exchange SUCCEEDS; if it ever fails
-    # (app uninstalled, OIDC unavailable) the action's fallback decides whether
-    # these three grants become live credentials rather than inert ones.
+    # tool it installs. Dropping the write grants would therefore silence a
+    # scanner finding without taking one of Claude's own capabilities away. These
+    # grants match upstream's published example for this action, at this pin.
+    #
+    # Two qualifications, so this does not read as a blanket "the block is inert".
+    # `contents: write` and `issues: write` are the inert ones. The job token also
+    # backs the action's fallback path for posting buffered inline review
+    # comments, so `pull-requests: write` is load-bearing — removing it would
+    # break a real feature, not just quiet a detector — and `actions: read` is
+    # equally real: the job token reaches the action as DEFAULT_WORKFLOW_TOKEN for
+    # its read-only CI-status tool. And all of this describes the path where the
+    # App token exchange SUCCEEDS; if it fails, the action raises and the step
+    # fails rather than quietly falling back to the job token.
     permissions:
       contents: write
       pull-requests: write
