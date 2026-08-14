@@ -630,7 +630,8 @@ Execution shapes matched: an interpreter running a fetched file (`python3`/`node
   - a fetch whose execution happens in a different job (different runner, different tree).
 
   Review those by hand. Widening the shell arm to guess at them would cost the property the whole entry rests on: every reported chain is one a reader can see in their own YAML.
-- **A clone of your OWN repository is reported like any other.** The scanner has no way to tell your URL from a stranger's, and the `git fetch` arm's own-history carve-out keys on the remote NAME (`origin`), which a clone does not have. Re-cloning your own repo at a branch is a benign hit — close it by pinning, or dismiss it.
+- **A clone of your OWN repository is not reported.** `${{ github.repository }}` is the scanned repo by definition, and a literal `github.com/<owner>/<repo>` is compared against the checkout's `origin` remote — including the authenticated `x-access-token:…@github.com/…` spelling. No third party is involved in re-cloning yourself, and the fix this entry recommends (pin to a full commit id) is unactionable for a release workflow that must run at the branch head. In an exported tree with no `.git`, `origin` is unknown and the literal form is reported like any other clone.
+- **`working-directory:` is followed** — on the step, and through `defaults.run.working-directory` on the job and on the workflow. A `working-directory:` computed at run time is not knowable, so that step is recorded as a coverage gap rather than guessed at.
 
 PowerShell `iex (New-Object Net.WebClient).DownloadString(...)` is the same class on Windows runners but is not matched here (casing / Windows-runner rarity); flag it in manual review if you run Windows jobs.
 

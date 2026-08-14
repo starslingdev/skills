@@ -37,6 +37,27 @@ entries are dated (UTC). Format loosely follows
   actually traced, and a scan that traced none of them is unmeasured rather
   than green.
 
+- **2026-08-14** — **P14.24 no longer reports a repository for cloning
+  ITSELF.** On a 2,920-workflow corpus this was 3 of the detector's 15 fires —
+  all one repository's release workflows, cloning their own repo at the branch
+  they release from. No third party is involved, and the advice the finding
+  carries (pin to a full commit id) is unactionable for a workflow that must
+  run at the branch head. The `git fetch` arm already refused the repo's own
+  history; the `clone` arm now does too, recognising `${{ github.repository }}`,
+  a literal `github.com/<owner>/<repo>` matching the checkout's `origin`
+  remote, and the `x-access-token:…@github.com/…` idiom. A tree with no `.git`
+  cannot resolve `origin`, so the literal form reports there as before.
+
+- **2026-08-14** — **P14.24 follows `working-directory:`.** It was read
+  nowhere — not on the step, not in `defaults.run` — so a clone written under
+  `working-directory: vendor` was placed at the workspace root, and a later
+  `python3 tools/build.py` reading the repository's OWN file was reported as
+  executing the fetched tree. That is a finding asserting a fact that is not in
+  the data, which this scanner may never do. The mirror case, a
+  `working-directory:` on the executing step, was a silent miss. Step, job and
+  workflow levels now resolve in GitHub's order; a value computed at run time
+  is recorded as a coverage gap instead of being guessed at.
+
 - **2026-08-14** — **Branch protection read from only ONE of its two sources
   no longer renders as a complete, measured pass.** A repository can require
   checks through rulesets or through classic branch protection, so both are

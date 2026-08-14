@@ -2771,7 +2771,10 @@ def _shell_tokens(segment: str) -> list[str]:
     it can see both halves of the chain, so an unparsable command simply
     contributes nothing rather than being guessed at.
 
-    A `${{ … }}` expression is collapsed to one opaque token FIRST. The runner
+    `${{ github.repository }}` collapses to a token that KEEPS its identity,
+    because it is the one expression whose value the scanner knows: it is the
+    repository being scanned, which is what makes a clone of it a self-clone.
+    Every other `${{ … }}` expression is collapsed to one opaque token FIRST. The runner
     substitutes it before the shell ever sees it, so it is a single word; split
     on its spaces it becomes three, every positional after it shifts, and the
     clone's destination gets read out of the expression's insides. That is not
@@ -2779,7 +2782,8 @@ def _shell_tokens(segment: str) -> list[str]:
     40-hex pin on the real directory would then fail to match.
     """
     try:
-        return shlex.split(_EXPRESSION_TOKEN_RE.sub("$EXPR", segment),
+        collapsed = _SELF_REPO_EXPRESSION_RE.sub(_SELF_REPO_TOKEN, segment)
+        return shlex.split(_EXPRESSION_TOKEN_RE.sub("$EXPR", collapsed),
                            comments=False, posix=True)
     except ValueError:
         return []
@@ -2908,6 +2912,72 @@ def _parse_clone(args: list[str]) -> tuple[str | None, str | None, str | None]:
     return url, dest, ref
 
 
+# `github.com/<owner>/<repo>`, in any of the spellings a workflow writes it:
+# `https://github.com/o/r.git`, `git@github.com:o/r.git`, and the authenticated
+# `https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/o/r.git`.
+_GITHUB_SLUG_RE = re.compile(
+    r"github\.com[/:]([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?(?:[/?#]|$)")
+_SELF_REPO_EXPRESSION_RE = re.compile(r"\$\{\{\s*github\.repository\s*\}\}")
+# Survives expression collapsing in `_shell_tokens` so the clone arm can still
+# see that the URL named the scanned repository.
+_SELF_REPO_TOKEN = "$SELF_REPO"
+
+
+@lru_cache(maxsize=64)
+def _origin_slug(root: str) -> str | None:
+    """`owner/repo` for the checkout at `root`, from `.git/config`, or None.
+
+    Read straight out of the config file rather than by running `git`: this is
+    a per-workflow-file question on a scan that already refuses to shell out
+    for anything, and a scan of an exported tree with no `.git` simply gets
+    None and reports as before.
+    """
+    try:
+        text = (Path(root) / ".git" / "config").read_text(
+            encoding="utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return None
+    section = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped
+            continue
+        if section != '[remote "origin"]' or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        if key.strip() != "url":
+            continue
+        match = _GITHUB_SLUG_RE.search(value.strip())
+        return f"{match.group(1)}/{match.group(2)}" if match else None
+    return None
+
+
+def _is_self_clone(url: str, file_path: Path) -> bool:
+    """Does this URL name the repository being scanned?
+
+    Cloning your own repository at a branch is not this vector: no third party
+    is involved, and the fix — pin to a full commit id — is unactionable for a
+    release workflow that must run at the branch head. On a 2,920-file corpus
+    this shape was 3 of the detector's 15 fires, all one repository's release
+    workflows. The `git fetch` arm already refuses the repo's own history via
+    its named-remote rule; the `clone` arm had no equivalent.
+    """
+    if not url:
+        return False
+    if _SELF_REPO_EXPRESSION_RE.search(url) or _SELF_REPO_TOKEN in url:
+        return True          # `${{ github.repository }}` IS the scanned repo
+    match = _GITHUB_SLUG_RE.search(url)
+    if not match:
+        return False
+    # `.github/workflows/<file>` — the scanned checkout is two levels up.
+    parents = file_path.resolve().parents
+    if len(parents) < 3:
+        return False
+    slug = _origin_slug(str(parents[2]))
+    return slug is not None and slug.lower() ==         f"{match.group(1)}/{match.group(2)}".lower()
+
+
 def _is_remote_url(token: str) -> bool:
     """A `git fetch` remote that names a THIRD PARTY rather than this repo.
 
@@ -3021,9 +3091,77 @@ def _job_shell_commands(
     return out
 
 
+# A step's own `working-directory:`, keyed by the line its `run:` shell begins
+# on — the same key `_run_scalar_starts` produces, so the two agree by
+# construction.
+_STEP_ITEM_RE = re.compile(r"^(\s*)-\s")
+_WORKING_DIR_RE = re.compile(r"^\s*working-directory\s*:\s*(.+?)\s*$")
+
+
+def _step_working_directories(text: str) -> dict[int, str]:
+    """{run-scalar start line: the step's `working-directory:`}.
+
+    Read from the raw text rather than the parsed document because everything
+    else in this detector is line-addressed, and a step's shell has to be tied
+    to the directory of the step it belongs to — not of the step before it.
+    A step is a YAML list item, so its block runs from its `- ` line to the
+    next list item at the same indent; `working-directory:` may be written
+    before or after `run:` inside that block.
+    """
+    lines = text.splitlines()
+    starts = _run_scalar_starts(text)
+    items: list[tuple[int, int]] = []          # (line index, indent)
+    for i, line in enumerate(lines):
+        m = _STEP_ITEM_RE.match(line)
+        if m:
+            items.append((i, len(m.group(1))))
+    out: dict[int, str] = {}
+    for start in starts:
+        owner = next((item for item in reversed(items) if item[0] < start), None)
+        if owner is None:
+            continue
+        begin, indent = owner
+        end = len(lines)
+        for i, other_indent in items:
+            if i > begin and other_indent <= indent:
+                end = i
+                break
+        for line in lines[begin:end]:
+            if len(line) - len(line.lstrip()) <= indent and not _STEP_ITEM_RE.match(line):
+                continue
+            wd = _WORKING_DIR_RE.match(line.replace("- ", "  ", 1)
+                                       if _STEP_ITEM_RE.match(line) else line)
+            if wd:
+                out[start] = wd.group(1).strip().strip("\"'")
+                break
+    return out
+
+
+def _default_working_directory(doc: dict, job: Any) -> str:
+    """`defaults.run.working-directory` for this job, else the workflow's.
+
+    GitHub resolves the job's over the workflow's, and a step's own
+    `working-directory:` over both.
+    """
+    def _of(node: Any) -> str | None:
+        if not isinstance(node, dict):
+            return None
+        run = (node.get("defaults") or {}).get("run") \
+            if isinstance(node.get("defaults"), dict) else None
+        value = run.get("working-directory") if isinstance(run, dict) else None
+        return str(value) if isinstance(value, (str, int, float)) else None
+
+    for candidate in (_of(job), _of(doc)):
+        if candidate and not _EXPRESSION_TOKEN_RE.search(candidate):
+            return _resolve_path(".", candidate)
+    return "."
+
+
 def _mutable_fetch_executions(
     text: str, job_range: tuple[int, int] | None,
     gap: Callable[[str], None] | None = None,
+    file_path: Path | None = None,
+    base_cwd: str = ".",
 ) -> list[tuple[_RemoteFetch, int, str]]:
     """Every (fetch, execution line, executed path) pair visible in one job.
 
@@ -3042,12 +3180,32 @@ def _mutable_fetch_executions(
     pinned: set[str] = set()
     # (position, line, resolved path, path as written)
     executions: list[tuple[int, int, str, str]] = []
-    cwd = "."
+    cwd = base_cwd
+    skip_step = False
     pos = 0
+    step_dirs = _step_working_directories(text)
     for line_no, _raw, command, new_step in _job_shell_commands(
             text, job_range, gap):
         if new_step:
-            cwd = "."
+            # `working-directory:` on the step wins over the job's and the
+            # workflow's `defaults.run.working-directory`; with none of them
+            # set, a step starts at the workspace root. Getting this wrong is
+            # not a missed finding but a FALSE one: a clone into `vendor/tools`
+            # and a `tools/build.py` that is the repository's own file were
+            # reported as a chain between them.
+            step_dir = step_dirs.get(line_no)
+            if step_dir is not None and _EXPRESSION_TOKEN_RE.search(step_dir):
+                if gap is not None:
+                    gap(f"a step's `working-directory: {step_dir}` is computed "
+                        f"at run time, so where its shell ran is not knowable "
+                        f"here and the step was NOT scanned for a mutable "
+                        f"fetch executed out of")
+                skip_step = True
+                continue
+            skip_step = False
+            cwd = _resolve_path(base_cwd, step_dir) if step_dir else base_cwd
+        if skip_step:
+            continue
         for segment in _install_command_segments(command):
             pos += 1
             tokens = _strip_command_prefix(_shell_tokens(segment))
@@ -3061,6 +3219,9 @@ def _mutable_fetch_executions(
                 base = _resolve_path(cwd, gdir) if gdir else cwd
                 if sub == "clone":
                     url, dest_written, ref = _parse_clone(args)
+                    if file_path is not None and _is_self_clone(url or "",
+                                                                file_path):
+                        continue
                     dest_written = _clone_destination(url or "", dest_written)
                     if not dest_written:
                         continue
@@ -3155,7 +3316,8 @@ def _correlation_unverified_remote_code_execution(
             })
 
         for fetch, exec_line, exec_path in _mutable_fetch_executions(
-            text, job_range, _gap,
+            text, job_range, _gap, file_path,
+            _default_working_directory(doc, _job),
         ):
             yield RawHit(
                 line=fetch.line,

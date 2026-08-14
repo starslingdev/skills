@@ -2407,3 +2407,143 @@ def test_p1424_an_unterminated_here_doc_is_recorded_as_a_coverage_gap(tmp_path):
     added = scan._DROPPED_MATCHES[before:]
     assert any("heredoc" in d["reason"] or "here-doc" in d["reason"]
                for d in added), added
+
+
+# ---------------------------------------------------------------------------
+# P14.24 — cloning YOUR OWN repository is not this vector.
+#
+# On a 2,920-file corpus, 3 of the detector's 15 fires were one repository
+# cloning itself in its release workflows. No third party is involved, and the
+# fix advice — pin to a full commit id — is unactionable for a release workflow
+# that must run at the branch head. The `git fetch` arm already refuses the
+# repo's own history; the `clone` arm had no equivalent.
+# ---------------------------------------------------------------------------
+
+def _self_clone_repo(tmp_path: Path, url: str, exec_line: str) -> list:
+    """A checkout whose `origin` is `owner/repo`, cloning `url`."""
+    (tmp_path / ".git").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = https://github.com/owner/repo.git\n')
+    wf = _wf(tmp_path, "release.yml", f"""\
+        name: release
+        on: push
+        jobs:
+          cut:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone {url} --depth=25 --branch main tools
+                  {exec_line}
+    """)
+    return list(scan._correlation_unverified_remote_code_execution(wf))
+
+
+def test_p1424_cloning_the_scanned_repository_itself_is_not_a_finding(tmp_path):
+    """The literal form: the release workflow of `owner/repo` clones
+    `owner/repo`. The code it runs is the repository's own."""
+    assert _self_clone_repo(
+        tmp_path, "https://github.com/owner/repo.git",
+        "python3 tools/release.py") == []
+
+
+def test_p1424_cloning_github_repository_expression_is_not_a_finding(tmp_path):
+    """`${{ github.repository }}` IS the scanned repository by definition, so
+    this one needs no knowledge of the checkout at all."""
+    assert _self_clone_repo(
+        tmp_path, "https://github.com/${{ github.repository }}.git",
+        "python3 tools/release.py") == []
+
+
+def test_p1424_the_token_clone_idiom_of_your_own_repo_is_not_a_finding(tmp_path):
+    """The authenticated spelling of the same self-clone."""
+    url = ("https://x-access-token:${{ secrets.GITHUB_TOKEN }}"
+           "@github.com/${{ github.repository }}.git")
+    assert _self_clone_repo(tmp_path, url, "python3 tools/release.py") == []
+
+
+def test_p1424_cloning_a_different_repository_still_fires(tmp_path):
+    """The positive control: the self-clone guard must not swallow the vector
+    it was added beside. A DIFFERENT repository at a branch still reports."""
+    hits = _self_clone_repo(
+        tmp_path, "https://github.com/third-party/tools.git",
+        "python3 tools/setup.py")
+    assert len(hits) == 1
+
+
+# ---------------------------------------------------------------------------
+# P14.24 — `working-directory:` decides where a step's shell actually runs.
+# ---------------------------------------------------------------------------
+
+def test_p1424_step_working_directory_moves_the_clone(tmp_path):
+    """The clone lands in `vendor/tools`; `tools/build.py` is the repository's
+    own file. Reporting a chain between them asserts a fact that is not in the
+    data — the one thing a finding may never do."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - name: Fetch vendor tools
+                working-directory: vendor
+                run: git clone --branch main "$TOOLS_URL" tools
+              - run: python3 tools/build.py
+    """) == []
+
+
+def test_p1424_step_working_directory_moves_the_execution(tmp_path):
+    """The mirror case, which was a silent MISS: the clone lands in `tools`,
+    and the executing step runs inside `tools`, so `./setup.py` is the fetched
+    code."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone --branch main "$TOOLS_URL" tools
+              - working-directory: tools
+                run: python3 setup.py
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_job_level_default_working_directory_is_honoured(tmp_path):
+    """`defaults.run.working-directory` on the job moves every step in it, so
+    the clone and the execution are still in the same tree — and the path the
+    finding quotes has to be the one that was actually written."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            defaults:
+              run:
+                working-directory: sub
+            steps:
+              - run: git clone --branch main "$TOOLS_URL" tools
+              - run: python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_workflow_level_default_working_directory_separates_them(tmp_path):
+    """Workflow-level defaults apply where the job sets none — and a step that
+    overrides them is somewhere else entirely."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        defaults:
+          run:
+            working-directory: app
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone --branch main "$TOOLS_URL" tools
+              - working-directory: other
+                run: python3 tools/setup.py
+    """) == []
