@@ -2890,7 +2890,8 @@ def _shell_tokens(segment: str) -> list[str]:
     `${{ github.repository }}` collapses to a token that KEEPS its identity,
     because it is the one expression whose value the scanner knows: it is the
     repository being scanned, which is what makes a clone of it a self-clone.
-    Every other `${{ … }}` expression is collapsed to one opaque token FIRST. The runner
+    Every other `${{ … }}` expression is collapsed to its OWN opaque token FIRST — one per
+    distinct expression text, never one shared by all of them. The runner
     substitutes it before the shell ever sees it, so it is a single word; split
     on its spaces it becomes three, every positional after it shifts, and the
     clone's destination gets read out of the expression's insides. That is not

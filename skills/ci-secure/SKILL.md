@@ -37,9 +37,10 @@ diff themselves.
 exploit-chain checks only — this is not a comprehensive audit.*
 
 **Prereqs:** PyYAML (`pip install pyyaml` — the scanner's only third-party
-dep). `gh` is optional and used for exactly two things: the network-gated
+dep). `gh` is optional and used for four things: the network-gated
 impostor-SHA check (P14.11 — the one vector that cannot be answered from
-YAML alone) and the dormancy note on findings. Everything else runs
+YAML alone), the dormancy note on findings, and the two config facts read
+over the API (required-checks-skippable, fork-PR approval). Everything else runs
 locally in seconds.
 
 **`<ci-secure>` in the commands below is this skill's own install
@@ -59,7 +60,7 @@ By default the skill operates on the current working directory.
    user the repo has no GitHub Actions workflows to scan.
 3. If `gh auth status` succeeds AND the repo has a GitHub remote, derive
    `owner/repo` from `git remote get-url origin` and pass it as `--repo`.
-   Three checks need it: the dormancy lookup, and the two config facts read
+   Four checks need it: the impostor-SHA vector, the dormancy lookup, and the two config facts read
    over the API (required-checks-skippable, fork-PR approval). The remote URL
    comes in two shapes — handle both:
 

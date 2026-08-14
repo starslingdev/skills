@@ -643,7 +643,7 @@ def _skip_path(jobs: dict[str, dict], key: str,
 
     MEMOIZED, because a branching graph reaches the same job down every path
     and the walk is otherwise exponential in depth: a 12-level graph two jobs
-    wide took 8,191 visits where 26 suffice. A cycle answer is NOT cached — it
+    wide took 8,191 visits where 47 suffice. A cycle answer is NOT cached — it
     depends on the path taken to get there, unlike every other answer, which
     depends only on the job.
     """
