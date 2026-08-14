@@ -103,16 +103,20 @@ def test_fork_twin_workflow_is_retired():
     """The fork twin now lives inside ci.yml so the verdict can `needs:` it —
     a separate workflow's jobs are invisible to `needs`, which is how the
     two check names diverged in the first place."""
-    assert not (_WORKFLOWS / "ci-fork.yml").exists(), (
-        "ci-fork.yml must not exist; its job moved into ci.yml")
+    twins = [p.name for p in (_WORKFLOWS / "ci-fork.yml",
+                              _WORKFLOWS / "ci-fork.yaml") if p.exists()]
+    assert not twins, (
+        f"the fork twin workflow must not exist; its job moved into ci.yml: {twins}")
 
 
 def test_no_other_workflow_forges_the_required_check_name():
     """Required checks match by check NAME, not by workflow: a job named
     'test' in any other workflow could satisfy branch protection by simply
-    exiting 0. Census every workflow, not just ci.yml."""
+    exiting 0. Census every workflow, not just ci.yml — GitHub Actions reads
+    both .yml and .yaml, so a `*.yml`-only census would pass vacuously while a
+    forged `.yaml` sat next to it."""
     offenders = []
-    for wf in sorted(_WORKFLOWS.glob("*.yml")):
+    for wf in sorted(_WORKFLOWS.glob("*.y*ml")):
         if wf.name == "ci.yml":
             continue
         doc = yaml.safe_load(wf.read_text())
