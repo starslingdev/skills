@@ -22,6 +22,27 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **A `404 Branch not protected` is an answer, not an unread
+  source.** GitHub returns it from the classic protection endpoint precisely
+  when classic protection is NOT configured — the normal state of every
+  repository that uses rulesets, which is the population
+  `sec.required-checks.skippable` was built for. Reading it as a failure made
+  the fact unmeasurable for all of them, and unmeasurable scores *better* than
+  failing: a repository with a genuinely bypassable required check came out
+  ~11 points ahead of the same repository with classic protection configured
+  empty. The 404 now means "nothing required here", scoped to that one endpoint
+  — a 404 from the repository or rulesets endpoint is still a missing
+  repository or a wrong path, and the fetcher's requested paths stay asserted
+  literally in the suite so a typo cannot hide behind it.
+
+- **2026-08-14** — **A partial read now says which source it could not read.**
+  When classic protection 403s — the ordinary case for anyone without admin on
+  the repository — the rulesets answer is used, and it was rendered as
+  complete: "all 1 required check(s) …". A check configured only in classic is
+  invisible to that read, so the count is a floor rather than a total, and the
+  evidence now says so.
+
+
 - **2026-08-14** — **`sec.required-checks.skippable` no longer reports a green
   over checks it never examined.** Five ways it did: `always()` was matched as a
   SUBSTRING, so `always() && <fork guard>` — the bypass this fact exists to

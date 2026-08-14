@@ -2224,3 +2224,55 @@ def test_the_skip_walk_does_not_take_exponential_time(tmp_path):
     assert elapsed < 1.0, f"the skip walk took {elapsed:.2f}s at depth {depth}"
     # And it still answers correctly: the chain ends somewhere unreadable.
     assert isinstance(answer, cf._Unknown), answer
+
+
+# ---------------------------------------------------------------------------
+# X1/R8 — a 404 from classic branch protection is an ANSWER, and an unread
+# source has to be disclosed even when the other source answered.
+# ---------------------------------------------------------------------------
+
+def test_a_404_from_classic_protection_means_not_protected_not_unread():
+    """GitHub returns `404 Branch not protected` precisely when classic
+    protection is NOT configured — the normal state of every repository that
+    uses rulesets, which is the population this fact was built for. Treating
+    that answer as a failure to read makes the fact unmeasurable for all of
+    them: a repo with a genuinely bypassable required check scores HIGHER than
+    the same repo with classic protection configured empty, because unmeasured
+    facts score nothing while a fail scores zero."""
+    with mock.patch.object(
+        cf, "_gh_utils",
+        lambda: _protection_gh(_RULESET_WITH_TEST,
+                               RuntimeError("HTTP 404: Branch not protected"))):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+    assert contexts == ["test"], (contexts, detail)
+    assert "could not be read" not in detail, detail
+
+
+def test_a_404_is_only_an_answer_from_the_protection_endpoint():
+    """The rulesets endpoint and the repository endpoint have no "not
+    configured" 404 — a 404 there is a mistyped path or a missing repository,
+    and accepting it as "nothing required" would make every repository in the
+    world read as unprotected."""
+    with mock.patch.object(
+        cf, "_gh_utils",
+        lambda: _protection_gh(RuntimeError("HTTP 404: Not Found"),
+                               {"contexts": [], "checks": []})):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+    assert contexts is None, (contexts, detail)
+
+
+def test_an_admin_only_403_discloses_the_source_it_could_not_read():
+    """The common non-admin case: rulesets answered, classic 403'd, and the
+    union is returned. It is returned as COMPLETE — "all 1 required check(s)"
+    — while a check configured only in classic is invisible and the count is
+    wrong. The docstring reasons about this correctly; the sentence the reader
+    sees has to carry it too."""
+    with mock.patch.object(
+        cf, "_gh_utils",
+        lambda: _protection_gh(
+            _RULESET_WITH_TEST,
+            RuntimeError("HTTP 403: Must have admin rights to Repository."))):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+    assert contexts == ["test"], contexts
+    assert "classic" in detail.lower(), detail
+    assert "admin" in detail.lower(), detail

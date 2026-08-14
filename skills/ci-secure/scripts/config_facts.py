@@ -857,6 +857,16 @@ def _is_admin_only_403(message: str) -> bool:
     return bool(_ADMIN_ONLY_403_RE.search(message))
 
 
+# `404 Branch not protected` from the classic protection endpoint. Matched on
+# the status AND the reason, so a 404 that means something else — a repository
+# that does not exist, a path this code got wrong — is still an unread source.
+_NOT_PROTECTED_404_RE = re.compile(r"\b404\b", re.I)
+
+
+def _is_not_protected_404(exc: Exception) -> bool:
+    return bool(_NOT_PROTECTED_404_RE.search(str(exc)))
+
+
 def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:
     """(contexts, detail) from the GitHub API, or (None, reason).
 
@@ -929,24 +939,51 @@ def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:
                 contexts.add(str(check["context"]))
         classic_ok = True
     except Exception as exc:                                   # noqa: BLE001
-        errors.append(f"classic branch protection: {exc}")
+        if _is_not_protected_404(exc):
+            # THIS endpoint answers 404 "Branch not protected" when classic
+            # protection is not configured — the normal state of every
+            # repository that uses rulesets, which is the population this fact
+            # was built for. That is an ANSWER ("nothing required here"), not a
+            # failure to read, and treating it as unread made the fact
+            # unmeasurable for all of them: a repo with a genuinely bypassable
+            # check then scored HIGHER than the same repo with classic
+            # protection configured empty, because an unmeasured fact scores
+            # nothing while a fail scores zero.
+            #
+            # Scoped to this arm deliberately. A 404 from the repository or
+            # rulesets endpoint is a missing repository or a mistyped path, and
+            # accepting it here would read every repository as unprotected —
+            # `test_the_branch_protection_fetcher_asks_for_the_two_documented
+            # _endpoints` asserts the requested paths literally for that reason.
+            classic_ok = True
+        else:
+            errors.append(f"classic branch protection: {exc}")
 
-    if not (rulesets_ok and classic_ok):
-        detail = "; ".join(errors)
-        if not (rulesets_ok or classic_ok):
-            return None, (f"branch protection for `{branch}` could not be read "
-                          f"at all ({detail})")
-        # One source answered. That is enough ONLY when the other failed the
-        # ordinary way — the admin-only 403 — and the one that answered found
-        # something. An empty answer from one source plus no answer from the
-        # other establishes nothing at all.
-        if not _is_admin_only_403(errors[-1]) or not contexts:
-            return None, (
-                f"only part of branch protection for `{branch}` could be read "
-                f"({detail}) — a required check configured in the unread "
-                f"source would be invisible to this scan, so whether one can "
-                f"be bypassed was not established")
-    return sorted(contexts), f"branch `{branch}`"
+    if rulesets_ok and classic_ok:
+        return sorted(contexts), f"branch `{branch}`"
+
+    detail = "; ".join(errors)
+    if not (rulesets_ok or classic_ok):
+        return None, (f"branch protection for `{branch}` could not be read "
+                      f"at all ({detail})")
+    # One source answered. That is enough ONLY when the other failed the
+    # ordinary way — the admin-only 403 — and the one that answered found
+    # something. An empty answer from one source plus no answer from the other
+    # establishes nothing at all.
+    if not _is_admin_only_403(errors[-1]) or not contexts:
+        return None, (
+            f"only part of branch protection for `{branch}` could be read "
+            f"({detail}) — a required check configured in the unread "
+            f"source would be invisible to this scan, so whether one can "
+            f"be bypassed was not established")
+    # Measured, but from ONE source. The reader is told which one was not read,
+    # because a check configured only there is invisible and the count of
+    # required checks the evidence quotes is therefore a floor, not a total.
+    unread = errors[-1].split(":", 1)[0]
+    return sorted(contexts), (
+        f"branch `{branch}` (read from rulesets only — {unread} is "
+        f"admin-only and could not be read, so a check configured only there "
+        f"is not counted here)")
 
 
 def _required_checks_skippable(
