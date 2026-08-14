@@ -626,7 +626,8 @@ Execution shapes matched: an interpreter running a fetched file (`python3`/`node
   - a tarball fetched with `curl`/`wget`, unpacked, and then run;
   - a fetch and its execution separated by a rename (`mv tools built && python3 built/setup.py`);
   - a remote whose URL is set with `git config remote.<name>.url` rather than `git remote add`;
-  - execution wrapped in `bash -c "…"`, whose inner command is not read;
+  - execution through an interpreter's INLINE program — `bash -c "…"`, `perl -e`, `php -r`, `pwsh -Command`, `powershell -EncodedCommand` — whose text is not read as commands;
+  - a path built from a variable this scan cannot resolve (`"$TOOLS/setup.sh"`), except for the runner's own absolute variables, which are treated as absolute;
   - execution through a build driver rather than an interpreter (`make -C tools`), or through a versioned interpreter (`python3.11`);
   - a fetch whose execution happens in a different job (different runner, different tree).
 
