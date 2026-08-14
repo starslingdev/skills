@@ -912,9 +912,11 @@ def _is_admin_only_403(message: str) -> bool:
 
 
 # `404 Branch not protected` from the classic protection endpoint. Matched on
-# the status AND the reason, so a 404 that means something else — a repository
-# that does not exist, a path this code got wrong — is still an unread source.
-_NOT_PROTECTED_404_RE = re.compile(r"\b404\b", re.I)
+# the status AND the reason — which the comment used to claim while the regex
+# was a bare `\b404\b`, so a branch renamed between the two calls, a
+# plan-gated endpoint, even a 502 quoting 404 in its body, all read as
+# "nothing required here": a measured PASS over a source never read.
+_NOT_PROTECTED_404_RE = re.compile(r"\b404\b.*branch not protected", re.I | re.S)
 
 
 def _is_not_protected_404(exc: Exception) -> bool:
@@ -1042,11 +1044,15 @@ def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:
     # Measured, but from ONE source. The reader is told which one was not read,
     # because a check configured only there is invisible and the count of
     # required checks the evidence quotes is therefore a floor, not a total.
-    unread = errors[-1].split(":", 1)[0]
+    # Both halves come from which source actually succeeded. Hardcoding
+    # "read from rulesets only" and cutting the unread name out of the error
+    # list told the reader, when RULESETS was the arm that 403'd, that rulesets
+    # — the source that ANSWERED — could not be read.
+    read, unread = ("rulesets", "classic branch protection") if rulesets_ok \
+        else ("classic branch protection", "rulesets")
     return sorted(contexts), (
-        f"branch `{branch}` (read from rulesets only — {unread} is "
-        f"admin-only and could not be read, so a check configured only there "
-        f"is not counted here)")
+        f"branch `{branch}` (read from {read} only — {unread} could not be "
+        f"read, so a check configured only there is not counted here)")
 
 
 def _required_checks_skippable(

@@ -2816,13 +2816,28 @@ def _expression_token(text: str) -> str:
     key = " ".join(text.split())
     token = _EXPR_TEXT_TOKEN.get(key)
     if token is None:
-        token = f"$EXPR{len(_EXPR_TEXT_TOKEN)}"
+        # DELIMITED with the same NUL sentinel the opaque directories use.
+        # An undelimited `$EXPR0` followed by a literal digit — `${{ env.DIR }}2`
+        # — read back as `$EXPR02`, the lookup missed, and the scanner's own
+        # token reached the report. NUL cannot appear in YAML, so nothing a
+        # workflow contains can collide with it or be mistaken for it.
+        token = f"$EXPR{len(_EXPR_TEXT_TOKEN)}\x00"
         _EXPR_TEXT_TOKEN[key] = token
         _EXPR_TOKEN_TEXT[token] = key
     return token
 
 
-_EXPR_TOKEN_RENDER_RE = re.compile(r"\$EXPR\d+")
+_EXPR_TOKEN_RENDER_RE = re.compile(r"\$EXPR\d+\x00")
+
+
+def _reset_expression_tokens() -> None:
+    """Clear the per-scan token registry.
+
+    Module-level and never reset, it let one workflow's expression text render
+    inside another's finding, with which text leaked depending on file order.
+    """
+    _EXPR_TEXT_TOKEN.clear()
+    _EXPR_TOKEN_TEXT.clear()
 
 
 def _as_written(path: str) -> str:
@@ -4635,6 +4650,7 @@ def scan(
     gh_skip_reason: str = _DEFAULT_GH_SKIP_REASON,
 ) -> dict[str, Any]:
     _DROPPED_MATCHES.clear()
+    _reset_expression_tokens()
     _PARSE_FAILURES_LOGGED.clear()
     workflow_files = all_workflow_files(root)
     missed = _undiscovered_workflows(root, workflow_files)

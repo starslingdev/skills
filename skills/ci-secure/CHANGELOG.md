@@ -22,6 +22,30 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **The partial-read disclosure named the source that
+  ANSWERED.** The sentence hardcoded "read from rulesets only" and cut the
+  unread source's name out of the error list, so when the RULESETS arm was the
+  one that 403'd — a GitHub App token, a fine-grained PAT — the shipped
+  markdown told the reader that rulesets could not be read. Both halves come
+  from which source actually succeeded now.
+
+- **2026-08-14** — **A 404 means "not protected" only when GitHub says so.**
+  The comment claimed the status AND the reason were matched; the regex was a
+  bare `404`, so a branch renamed between the two calls, a plan-gated endpoint,
+  even a 502 quoting 404 in its body all became "nothing required here" — a
+  measured PASS over a source that was never read.
+
+- **2026-08-14** — **The expression stand-in can no longer leak into a
+  report.** `${{ env.DIR }}2` tokenized to the stand-in followed by a literal
+  digit, which the render pattern swallowed, so the lookup missed and the
+  scanner's own token appeared where the reader's directory belongs. The token
+  is delimited with the NUL sentinel now — untypeable in YAML, so nothing a
+  workflow contains can collide with it. The token registry was also a module
+  global never reset, letting one workflow's expression text render inside
+  another's finding depending on scan order; it resets per scan. And
+  `verify_report.py` gained the invariant that no scanner-internal marker
+  survives into the report — it had been passing on a leaking one.
+
 - **2026-08-14** — **Which flags mean "the program is on the command line"
   depends on the interpreter, and only leading flags are the interpreter's.** A
   flat whitelist scanned over every argument leaked both ways. `-e`/`-E`/`-p`/

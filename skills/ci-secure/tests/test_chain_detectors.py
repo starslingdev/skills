@@ -4346,3 +4346,61 @@ def test_p1424_the_env_var_spelling_of_your_own_slug_is_not_third_party(
                   bash install.sh
     """)
     assert list(scan._correlation_unverified_remote_code_execution(wf)) == []
+
+
+def test_p1424_a_digit_after_an_expression_does_not_leak_the_token(tmp_path):
+    """`${{ env.DIR }}2` tokenizes to the stand-in followed by a literal `2`,
+    and the render pattern's `\\d+` swallowed that digit — so the lookup missed
+    and the reader saw the scanner's own token where their directory belongs.
+    The sentinel is delimited now, which is what makes the leak impossible
+    rather than merely unlikely."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" ${{ env.DIR }}2
+                  python3 ${{ env.DIR }}2/setup.py
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "EXPR" not in note, note
+    assert "${{ env.DIR }}2" in note, note
+
+
+def test_the_expression_registry_does_not_leak_across_scans(tmp_path):
+    """The token registry was a module global never reset, so a workflow whose
+    text literally contains a stand-in rendered as some OTHER workflow's
+    expression — and which text leaked depended on the order files were
+    scanned."""
+    _wf(tmp_path / "one", "a.yml", """\
+        name: a
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" ${{ env.SECRET_LOOKING }}
+                  python3 ${{ env.SECRET_LOOKING }}/setup.py
+    """)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    scan.scan(catalog, tmp_path / "one")
+
+    _wf(tmp_path / "two", "b.yml", """\
+        name: b
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  python3 tools/setup.py
+    """)
+    result = scan.scan(catalog, tmp_path / "two")
+    blob = json.dumps(result)
+    assert "SECRET_LOOKING" not in blob, "one scan's expressions leaked into another"

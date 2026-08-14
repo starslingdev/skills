@@ -2283,8 +2283,8 @@ def test_an_admin_only_403_discloses_the_source_it_could_not_read():
             RuntimeError("HTTP 403: Must have admin rights to Repository."))):
         contexts, detail = cf._required_contexts_via_gh("owner/repo")
     assert contexts == ["test"], contexts
-    assert "classic" in detail.lower(), detail
-    assert "admin" in detail.lower(), detail
+    assert "classic branch protection could not be read" in detail, detail
+    assert "read from rulesets only" in detail, detail
 
 
 def test_a_branch_filtered_push_workflow_cannot_veto_the_real_producer(tmp_path):
@@ -2534,3 +2534,47 @@ jobs:
 """
     out = _facts_with(tmp_path, {"ci.yml": ci, "deploy.yml": deploy}, ["test"])
     assert _outcome(out, _FACT)["outcome"] == "fail", _outcome(out, _FACT)
+
+
+def test_the_partial_read_names_the_source_it_could_not_read():
+    """The sentence hardcoded "read from rulesets only — {unread} is
+    admin-only" with the name cut from the error list, so when RULESETS is the
+    arm that 403s (a GitHub App token, a fine-grained PAT) the shipped markdown
+    told the reader that rulesets — the source that ANSWERED — could not be
+    read. Both halves have to come from which source actually succeeded."""
+    with mock.patch.object(
+        cf, "_gh_utils",
+        lambda: _protection_gh(
+            RuntimeError("HTTP 403: Resource not accessible by integration"),
+            {"contexts": ["lint"]})):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+    assert contexts == ["lint"], (contexts, detail)
+    assert "rulesets" in detail, detail
+    assert "read from rulesets only" not in detail, detail
+
+
+def test_a_404_for_a_reason_other_than_unprotected_is_still_unread():
+    """The comment says the 404 is matched on status AND reason; the regex was
+    `\\b404\\b`, so a branch renamed between the two calls, a plan-gated
+    endpoint, even a 502 mentioning 404 in its body, all became "nothing
+    required here" — a measured PASS over a source never read."""
+    for message in ("HTTP 404: Not Found",
+                    "Upgrade to GitHub Pro to use this feature (HTTP 404)",
+                    "HTTP 502: upstream returned 404 for 1 of 3 shards"):
+        with mock.patch.object(
+            cf, "_gh_utils",
+            lambda m=message: _protection_gh(_RULESET_WITH_TEST,
+                                             RuntimeError(m))):
+            contexts, detail = cf._required_contexts_via_gh("owner/repo")
+        assert contexts is None, (message, contexts, detail)
+
+
+def test_the_documented_not_protected_404_is_still_an_answer():
+    """The control: the reason GitHub actually returns when classic protection
+    is not configured stays an answer, which is X1's whole point."""
+    with mock.patch.object(
+        cf, "_gh_utils",
+        lambda: _protection_gh(_RULESET_WITH_TEST,
+                               RuntimeError("HTTP 404: Branch not protected"))):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+    assert contexts == ["test"], (contexts, detail)
