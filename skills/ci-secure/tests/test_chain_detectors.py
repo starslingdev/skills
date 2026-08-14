@@ -2547,3 +2547,78 @@ def test_p1424_workflow_level_default_working_directory_separates_them(tmp_path)
               - working-directory: other
                 run: python3 tools/setup.py
     """) == []
+
+
+# ---------------------------------------------------------------------------
+# The `repo` plumbing: scan(..., repo=...) -> the two API-gated config facts.
+#
+# Nothing exercised this. Deleting `repo=repo` from the call `scan()` makes
+# into `compute_config_facts` left the whole suite green — both facts would
+# report `unmeasured` for every repository in production, forever, and the
+# only visible symptom would be a coverage-gap line nobody reads as a bug.
+# ---------------------------------------------------------------------------
+
+def test_scan_passes_the_repo_through_to_the_api_gated_facts(tmp_path):
+    """End to end at the scan boundary, with the two fetchers stubbed at module
+    level — the seam a production run actually goes through."""
+    _wf(tmp_path, "ci.yml", """\
+        name: ci
+        on: pull_request
+        permissions:
+          contents: read
+        jobs:
+          test:
+            if: github.event.pull_request.head.repo.full_name == github.repository
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  persist-credentials: false
+              - run: pytest -v
+    """)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    import config_facts as cf
+
+    seen: list[str] = []
+
+    def _contexts(repo):
+        seen.append(repo)
+        return ["test"], "branch `main`"
+
+    def _approval(repo):
+        seen.append(repo)
+        return "first_time_contributors", "the repository's Actions settings"
+
+    with mock.patch.object(cf, "_required_contexts_via_gh", _contexts), \
+         mock.patch.object(cf, "_fork_approval_via_gh", _approval):
+        result = scan.scan(catalog, tmp_path, repo="owner/name")
+
+    # The repository reached BOTH fetchers — the plumbing under test.
+    assert seen == ["owner/name", "owner/name"], seen
+    facts = {f["fact_id"]: f for f in result["security_score"]["facts"]}
+    assert facts["sec.required-checks.skippable"]["outcome"] == "fail"
+    assert facts["sec.fork-approval.effective"]["outcome"] == "pass"
+    assert result["security_score"]["unmeasured"] == []
+
+
+def test_scan_without_a_repo_leaves_both_api_facts_unmeasured(tmp_path):
+    """The other half of the same plumbing: no repository means the two facts
+    are a disclosed coverage gap, never a pass — and they stay in the
+    applicable count so the gap is visible in the score."""
+    _wf(tmp_path, "ci.yml", """\
+        name: ci
+        on: pull_request
+        permissions:
+          contents: read
+        jobs:
+          test:
+            runs-on: ubuntu-latest
+            steps:
+              - run: pytest -v
+    """)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    result = scan.scan(catalog, tmp_path)
+    score = result["security_score"]
+    assert set(score["unmeasured"]) == {
+        "sec.required-checks.skippable", "sec.fork-approval.effective"}
+    assert score["scored_count"] == score["applicable_count"] - 2

@@ -1068,12 +1068,15 @@ jobs:
 def test_an_unmapped_required_context_is_disclosed_not_failed(tmp_path):
     """A required context no workflow job produces is usually an external app
     check (coverage, a deploy preview). The scanner cannot see those, so it
-    says so instead of failing a repo over what it cannot read."""
+    names them instead of failing a repo over what it cannot read — and it does
+    not claim a clean bill for them either: a pass is a statement about EVERY
+    required check, so one it never traced makes the fact unmeasured."""
     f = _outcome(
         _facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN},
                     ["test", "codecov/project"]),
         _FACT)
-    assert f["outcome"] == "pass"
+    assert f["outcome"] == "unmeasured"
+    assert f["outcome"] != "fail"
     assert "codecov/project" in f["evidence"]
 
 
@@ -1738,3 +1741,161 @@ def test_both_sources_readable_unions_their_contexts():
             {"contexts": ["lint"], "checks": [{"context": "build"}]})):
         contexts, _ = cf._required_contexts_via_gh("owner/repo")
     assert contexts == ["build", "lint", "test"], contexts
+
+
+def test_a_bare_needs_chain_is_not_an_always_running_producer(tmp_path):
+    """A job with `needs:` and no condition of its own is SKIPPED when a job it
+    needs fails — and a skipped required check is exactly what GitHub reports
+    as passed. Calling it "runs whatever else happens" describes the opposite
+    of what it does. The predicate is the one the fix recipe names: the
+    producer itself carries `always()` / `!cancelled()` / `success() ||
+    failure()`."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  suite:
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+  test:
+    needs: [suite]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo verdict
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "suite" in f["evidence"]
+
+
+def test_needs_as_a_scalar_string_is_read(tmp_path):
+    """`needs: build` is at least as common as `needs: [build]`, and the
+    failure direction of ignoring it is the false green."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: make
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "build" in f["evidence"]
+
+
+def test_conditions_that_cannot_be_false_are_not_bypasses(tmp_path):
+    """These all run the job every time, so failing them reds a repository that
+    did nothing wrong — and `if: ${{ always() }}` is the spelling GitHub's own
+    documentation shows, which makes it a false RED against exactly the repos
+    that implemented the recommended fix."""
+    # `!` opens a YAML tag, so the bare `!cancelled()` spelling does not exist
+    # in real workflows — it is written quoted or inside `${{ }}`.
+    for cond in ("true", "always()", "${{ always() }}", "'!cancelled()'",
+                 "${{ !cancelled() }}", "success() || failure()",
+                 "${{ success()||failure() }}",
+                 "success() || failure() || cancelled()", "success()"):
+        body = f"""\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    if: {cond}
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+        out = _facts_with(tmp_path / cond.replace("/", "_").replace(" ", "_")[:24],
+                          {"ci.yml": body}, ["test"])
+        assert _outcome(out, _FACT)["outcome"] == "pass", (cond, _outcome(out, _FACT))
+
+
+def test_success_with_a_needs_chain_is_still_skippable(tmp_path):
+    """The counterpart that keeps the rule above honest: `if: success()` runs
+    every time only when nothing upstream can fail first."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make
+  test:
+    needs: [build]
+    if: success()
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_plainly_bypassable_producer_outranks_an_unknown_one(tmp_path):
+    """A producer that demonstrably can skip is a finding whatever a second,
+    unreadable producer might have done. Checking the unknown first downgraded
+    a real fail to "not judged"."""
+    a = """\
+name: a
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    b = """\
+name: b
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  first:
+    needs: [second]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo
+  second:
+    needs: [first]
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo
+"""
+    f = _outcome(_facts_with(tmp_path, {"a.yml": a, "b.yml": b}, ["test"]), _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_pass_requires_every_required_check_to_have_been_traced(tmp_path):
+    """The normal shape of a mature repo is a dozen required contexts, most of
+    them from external apps. Returning `pass` on the strength of ONE traced
+    context makes the machine outcome say "no required check can be bypassed"
+    about eleven checks nobody looked at — and it counts toward `passed` and
+    never reaches `unmeasured`, so the caveat never fires either."""
+    out = _facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN},
+                      ["test", "codecov/project", "vercel"])
+    f = _outcome(out, _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "codecov/project" in f["evidence"]
+    assert _FACT in out["unmeasured"]

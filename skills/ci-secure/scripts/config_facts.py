@@ -547,22 +547,41 @@ def _unpersisted_checkout_violations(doc: dict) -> list[str]:
 # skippable, so the failure direction of a mis-parse is a false RED (visible,
 # arguable) rather than a false green.
 _NEVER_SKIPS = {
+    "true",
     "always()",
     "!cancelled()",
-    "success() || failure()",
-    "failure() || success()",
+    "success()||failure()",
+    "failure()||success()",
+    "success()||failure()||cancelled()",
+    "always()||cancelled()",
 }
+# `success()` runs the job every time ONLY when nothing upstream can fail
+# first, so it is never-skipping exactly when the job has no `needs:`.
+_NEVER_SKIPS_WITHOUT_NEEDS = {"success()"}
 _EXPRESSION_RE = re.compile(r"\$\{\{")
 _EXPRESSION_WRAPPER_RE = re.compile(r"^\$\{\{(.*)\}\}$", re.S)
 
 
-def _never_skips(condition: str) -> bool:
+def _normalise_condition(condition: str) -> str:
+    """`condition` with its `${{ }}` wrapper and all whitespace removed.
+
+    `if: ${{ always() }}` is the spelling GitHub's own documentation shows, and
+    `success()||failure()` is written both with and without spaces. Comparing
+    the raw text made those false REDS against repositories that implemented
+    the recommended fix correctly.
+    """
     text = condition.strip()
     wrapped = _EXPRESSION_WRAPPER_RE.match(text)
     if wrapped:
         text = wrapped.group(1).strip()
-    return " ".join(text.split()).replace(" (", "(").replace("! ", "!") \
-        in _NEVER_SKIPS
+    return "".join(text.split())
+
+
+def _never_skips(condition: str, has_needs: bool = True) -> bool:
+    text = _normalise_condition(condition)
+    if text in _NEVER_SKIPS:
+        return True
+    return not has_needs and text in _NEVER_SKIPS_WITHOUT_NEEDS
 
 
 def _condition_text(job: dict) -> str | None:
@@ -617,18 +636,28 @@ def _skip_path(jobs: dict[str, dict], key: str,
             f"`{key}` is not a job in this workflow, so whether it runs "
             f"cannot be determined here")
     job = jobs[key]
+    needs = _needs_of(job)
     condition = _condition_text(job)
-    if condition and _never_skips(condition):
+    if condition and _never_skips(condition, bool(needs)):
         return None
     if condition:
         return f"`{key}` carries `if: {condition}`"
-    for need in _needs_of(job):
-        upstream = _skip_path(jobs, need, seen | {key})
-        if upstream is None:
-            continue
-        if isinstance(upstream, _Unknown):
-            return _Unknown(f"`{key}` needs {upstream}")
-        return f"`{key}` needs `{need}`, and {upstream}"
+    # No condition of its own. A job with `needs:` is SKIPPED whenever a job it
+    # needs fails or skips — which is precisely what GitHub reports as a passed
+    # check. So the walk does not go looking for an always-running ancestor:
+    # there is no arrangement of ancestors that makes a bare dependent
+    # unskippable, and saying otherwise described the opposite of what it does.
+    # The producer has to carry `always()` / `!cancelled()` /
+    # `success() || failure()` ITSELF — which is what the fix recipe says.
+    if needs:
+        cycle = next((_skip_path(jobs, n, seen | {key}) for n in needs
+                      if isinstance(_skip_path(jobs, n, seen | {key}), _Unknown)),
+                     None)
+        if cycle is not None:
+            return _Unknown(f"`{key}` needs {cycle}")
+        return (f"`{key}` needs {_capped([f'`{n}`' for n in needs], 3, ', ')} "
+                f"and carries no condition of its own, so it is skipped "
+                f"whenever one of them fails or skips")
     return None
 
 
@@ -952,10 +981,13 @@ def _required_checks_skippable(
             skips.append(f"`{context}` ← {rel}: {reason}")
         if always_runs:
             gated += 1
+        elif skips:
+            # A producer that demonstrably can skip is a finding whatever a
+            # second, unreadable producer might have done. Checking `unknown`
+            # first downgraded a real fail to "not judged".
+            bypassable.extend(skips[:1])
         elif unknown:
             unjudged.extend(unknown[:1])
-        else:
-            bypassable.extend(skips[:1])
 
     tail = ((" Not judged: " + _capped(unjudged, 4, "; ") + ".")
             if unjudged else "")
@@ -965,17 +997,24 @@ def _required_checks_skippable(
             + _capped(bypassable, 3)
             + " — so nothing in these workflows is guaranteed to report it."
             + tail)
-    if not gated:
-        # Everything was unjudged. A green row here would be a claim about an
-        # empty set, contradicted by its own next sentence.
+    if unjudged:
+        # A pass is a claim about EVERY required check. The ordinary shape of a
+        # mature repository is a dozen required contexts with most coming from
+        # external apps, and returning `pass` off the one that could be traced
+        # made the machine outcome say "no required check can be bypassed"
+        # about all the others — while counting toward `passed` and staying out
+        # of `unmeasured`, so no caveat fired either.
+        traced = (f"{gated} of {len(contexts)} required check(s) could be "
+                  f"traced to a job in these workflows, and that one is gated"
+                  if gated else
+                  f"none of the {len(contexts)} required check(s) could be "
+                  f"traced to a job in these workflows")
         return "unmeasured", (
-            f"unmeasured: none of the checks {detail} requires could be traced "
-            f"to a job in these workflows, so whether any of them can be "
-            f"satisfied by a skipped job was never established." + tail)
+            f"unmeasured: {traced}, so whether every required check on {detail} "
+            f"survives a skipped job was not established." + tail)
     return "pass", (
-        f"every required check on {detail} that these workflows produce "
-        f"({gated} of {len(contexts)}) has a producer that runs whatever else "
-        f"happens." + tail)
+        f"all {gated} required check(s) on {detail} have a producer that runs "
+        f"whatever else happens.")
 
 
 # --- F8: fork-PR CI approval that gates nobody real --------------------------
