@@ -34,7 +34,7 @@ examples/                 sanitized sample report(s)
 maintainers/ci-speedup/   maintainer-only loop infra — OUTSIDE the installable tree
 tests/                    repo-level guards (install-surface invariant)
 pyproject.toml            pytest config; testpaths span the skill + maintainers/
-.github/workflows/        ci.yml (internal), ci-fork.yml (fork PRs)
+.github/workflows/        ci.yml (self-hosted + fork suites, `test` verdict)
 ```
 
 ## Running tests
@@ -60,10 +60,13 @@ git config core.hooksPath .githooks
 - **Never commit to `main`.** It is protected; branch (e.g. `docs/agents-md`),
   open a PR, and merge on green.
 - **The `test` check must pass.** Branch protection requires the full
-  `pytest -v` suite before a PR can merge.
-- **Fork PRs run on the hosted `ci-fork.yml`** (GitHub-hosted runners, no repo
-  secrets). Internal pushes and PRs run on StarSling's own runners (`ci.yml` — we
-  dogfood what we sell). Both run the identical suite.
+  `pytest -v` suite before a PR can merge. `test` is the always-running verdict
+  job in `ci.yml`; it passes only when the suite that should have run did run
+  and passed, so a skipped suite can never read as green.
+- **Fork PRs run the `test (fork)` job** (GitHub-hosted runners, no repo
+  secrets). Internal pushes and PRs run the `test (self-hosted)` job on
+  StarSling's own runners (we dogfood what we sell). Both live in `ci.yml` and
+  run the identical suite.
 
 ## Changelog discipline
 

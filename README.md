@@ -193,9 +193,9 @@ copies it into an install. It runs locally via Claude Code only, never as a
 GitHub Action. See [`maintainers/ci-speedup/MAINTAINERS.md`](maintainers/ci-speedup/MAINTAINERS.md).
 
 This repo's CI runs on [StarSling Runners](https://starsling.dev/). Fork PRs
-run the identical suite on GitHub-hosted runners
-([`ci-fork.yml`](.github/workflows/ci-fork.yml)); untrusted code never executes
-on the self-hosted runners. See [CONTRIBUTING.md](CONTRIBUTING.md).
+run the identical suite on GitHub-hosted runners (the `test (fork)` job in
+[`ci.yml`](.github/workflows/ci.yml)); untrusted code never executes on the
+self-hosted runners. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

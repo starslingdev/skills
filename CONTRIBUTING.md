@@ -40,11 +40,12 @@ Thanks for your interest in improving `ci-speedup`. Pull requests are welcome.
 External contributions are welcome and follow the standard fork flow:
 
 - **Fork, branch, and open a PR against `main`.**
-- **CI runs the full test suite on your PR** on GitHub-hosted runners
-  (`ci-fork.yml`), with no access to repo secrets.
-- **Internal pushes and PRs run on StarSling's own runners** (`ci.yml` — we
-  dogfood what we sell). By design, fork-PR code never executes on those
-  self-hosted runners; the hosted workflow gives you the identical suite.
+- **CI runs the full test suite on your PR** on GitHub-hosted runners (the
+  `test (fork)` job in `ci.yml`), with no access to repo secrets.
+- **Internal pushes and PRs run on StarSling's own runners** (the
+  `test (self-hosted)` job in the same workflow — we dogfood what we sell). By
+  design, fork-PR code never executes on those self-hosted runners; the hosted
+  job gives you the identical suite.
 - **Local gate: green on your machine means green in CI.** The same
   `python3 -m pytest -v` runs in both places, so you can reproduce CI locally
   before you push.
