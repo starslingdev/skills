@@ -2999,7 +2999,8 @@ def _is_self_clone(url: str, file_path: Path) -> bool:
     if len(parents) < 3:
         return False
     slug = _origin_slug(str(parents[2]))
-    return slug is not None and slug.lower() ==         f"{match.group(1)}/{match.group(2)}".lower()
+    cloned = f"{match.group(1)}/{match.group(2)}"
+    return slug is not None and slug.lower() == cloned.lower()
 
 
 def _is_remote_url(token: str) -> bool:
