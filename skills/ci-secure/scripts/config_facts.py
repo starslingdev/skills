@@ -70,6 +70,7 @@ without reading this source.
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import json
 import re
 import sys
@@ -696,50 +697,79 @@ def _context_producers(
 _MATRIX_META = {"include", "exclude"}
 
 
-def _matrix_values(job: dict) -> set[str] | None:
-    """Every literal value this job's matrix can render into its check name,
-    or None when the matrix is not knowable from the YAML.
+def _matrix_expansions(job: dict) -> set[str] | None:
+    """Every `(…)` suffix this job's matrix can actually render, or None when
+    the matrix is not knowable from the YAML.
 
-    Only a matrix expands a job into `name (value, …)` contexts, and it expands
-    into ITS OWN values. Both halves matter, and both were once missing:
-    offering the `name (…)` match to every job let an always-running verdict
-    job named `test` stand in as a producer of `test (self-hosted)` — this
-    repository's own CI shape, where the job added to CLOSE the bypass was
-    what hid it — and then offering it to any matrix let a job named `test`
-    running over `3.11`/`3.12` stand in for the same unrelated context.
+    Only a matrix expands a job into `name (value, …)` contexts; it expands
+    into its own values; and it expands into the COMBINATIONS it can really
+    run, joined in the order its axes are declared. All three clauses matter,
+    and each one was learned from a false green in the same family:
+
+      * offered to every job, an always-running verdict job named `test` stood
+        in as the producer of `test (self-hosted)` — this repository's own CI
+        shape, where the job added to CLOSE the bypass was what hid it;
+      * offered to any matrix, a job named `test` running over `3.11`/`3.12`
+        stood in for that same unrelated context;
+      * matched against a FLATTENED value set, a job over
+        `os: [self-hosted, ubuntu]` stood in for it again — a set says yes to
+        any tokens appearing anywhere, including a single value from a
+        two-axis matrix, a reordered pair, and a combination `exclude:`
+        removes.
+
+    `include:` is not enumerated: it can add combinations, rename axes, and
+    extend existing ones, and guessing its rendering is how the three defects
+    above happened. An unknowable matrix produces NO match, which leaves the
+    context disclosed as not judged; a wrong match is a silent pass.
     """
     strategy = job.get("strategy")
     matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
     if not isinstance(matrix, dict) or not matrix:
         return None
-    values: set[str] = set()
+    if matrix.get("include"):
+        return None
+    axes: list[list[str]] = []
+    names: list[str] = []
     for key, node in matrix.items():
-        entries = node if isinstance(node, list) else [node]
         if key in _MATRIX_META:
-            entries = [v for e in entries if isinstance(e, dict)
-                       for v in e.values()]
-        for entry in entries:
+            continue
+        if not isinstance(node, list) or not node:
+            return None
+        values: list[str] = []
+        for entry in node:
             if isinstance(entry, (dict, list)):
                 return None                      # nested shape: not knowable
-            text = str(entry)
+            text = str(entry).strip()
             if _EXPRESSION_RE.search(text):
                 return None                      # computed: not knowable
-            values.add(text.strip())
-    return values or None
+            values.append(text)
+        names.append(key)
+        axes.append(values)
+    if not axes:
+        return None
+
+    excluded = []
+    for entry in matrix.get("exclude") or []:
+        if not isinstance(entry, dict):
+            return None
+        excluded.append({str(k): str(v).strip() for k, v in entry.items()})
+
+    out: set[str] = set()
+    for combo in itertools.product(*axes):
+        assignment = dict(zip(names, combo))
+        if any(all(assignment.get(k) == v for k, v in rule.items())
+               for rule in excluded):
+            continue
+        out.add(", ".join(combo))
+    return out or None
 
 
 def _matrix_produces(job: dict, suffix: str) -> bool:
-    """Could this job's matrix render the `(…)` half of a check context?
-
-    Every value in the context has to be one of the matrix's own. A matrix this
-    scan cannot read (computed, `fromJSON`, nested) produces NO match rather
-    than any match: an unrecognised producer leaves the context unjudged, which
-    the fact discloses, while a wrong one is a silent green.
-    """
-    values = _matrix_values(job)
-    if values is None:
+    """Could this job's matrix render the `(…)` half of a check context?"""
+    expansions = _matrix_expansions(job)
+    if expansions is None:
         return False
-    return all(part.strip() in values for part in suffix.split(",") if part.strip())
+    return " ".join(suffix.split()) in expansions
 
 
 def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:

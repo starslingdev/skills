@@ -48,10 +48,16 @@ entries are dated (UTC). Format loosely follows
   context and really can skip. That is this repository's own CI shape, which
   means the bypass was hiding behind the fix for the bypass. The expansion
   match now applies only to a job that carries `strategy.matrix`, and only for
-  the values THAT matrix declares — a job named `test` running over `3.11` and
-  `3.12` is not a producer of `test (self-hosted)` either. A matrix this scan
-  cannot read (computed, `fromJSON`, nested) produces no match at all, which
-  leaves the context disclosed as not judged rather than silently gated.
+  the COMBINATIONS that matrix can actually run — joined in the order its axes
+  are declared, with `exclude:` honoured. A job named `test` running over
+  `3.11`/`3.12` is not a producer of `test (self-hosted)`, and neither is one
+  over `os: [self-hosted, ubuntu]` crossed with a second axis: a flattened
+  value set said yes to any tokens appearing anywhere, including a single
+  value from a two-axis matrix, a reordered pair, and an excluded combination.
+  A matrix this scan cannot enumerate (an expression, `fromJSON`, a nested
+  shape, or an `include:` block, which can add combinations and rename axes)
+  produces no match at all, which leaves the context disclosed as not judged
+  rather than silently gated.
 
 - **2026-08-14** — **A workflow the scan could not read no longer costs
   `sec.required-checks.skippable` its API round-trips.** An unscannable

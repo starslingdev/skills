@@ -1493,3 +1493,66 @@ jobs:
     f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test (self-hosted)"]),
                  _FACT)
     assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_matrix_does_not_produce_a_combination_it_cannot_run(tmp_path):
+    """A flattened value set says yes to any context whose tokens appear
+    ANYWHERE in the matrix — including a combination the matrix excludes, an
+    axis order it never renders, and a single value drawn from a two-axis
+    matrix. So an always-running matrix job over `[self-hosted, ubuntu]` was
+    read as the producer of `test (self-hosted)`, which a skippable job really
+    reports. Only combinations the matrix can actually run count."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  unit:
+    name: test
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [self-hosted, ubuntu]
+        py: ['3.12']
+    steps:
+      - run: pytest -v
+  suite:
+    name: test (self-hosted)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test (self-hosted)"]),
+                 _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_an_excluded_matrix_combination_is_not_a_producer(tmp_path):
+    """`exclude:` removes a combination, so the job never renders that name."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  unit:
+    name: test
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu, windows]
+        py: ['3.11', '3.12']
+        exclude:
+          - os: windows
+            py: '3.11'
+    steps:
+      - run: pytest -v
+"""
+    out = _facts_with(tmp_path / "a", {"ci.yml": body}, ["test (windows, 3.11)"])
+    assert _outcome(out, _FACT)["outcome"] == "unmeasured"
+    out2 = _facts_with(tmp_path / "b", {"ci.yml": body}, ["test (windows, 3.12)"])
+    assert _outcome(out2, _FACT)["outcome"] == "pass"
