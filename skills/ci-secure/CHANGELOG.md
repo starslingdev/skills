@@ -22,6 +22,30 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **Two wiring bugs in how the composed-YAML step marks are
+  used, and the pin bookkeeping beside them.** The checkout arm collected the
+  line of EVERY step carrying a `uses:` key while its index counted only
+  `actions/checkout` steps, so any `actions/setup-*` step ahead of the
+  third-party checkout — nearly every real workflow — shifted the mapping. The
+  evidence quoted the wrong step, and when the shift moved the checkout earlier
+  than a `run:` step it invented a chain whose execution happens BEFORE the
+  fetch, breaking the ordering contract the arm rests on.
+
+  A step's `working-directory:` was matched to the first shell start at or
+  after its `run:` line, searched over the whole file rather than the step. A
+  flow-style `- {run: …, working-directory: vendor/x}` — which the line regex
+  cannot see as a shell start at all — therefore donated its directory to the
+  next block-scalar step, in a DIFFERENT job, fabricating a destination there
+  and moving a real chain out of the fetched tree here. Both are now bounded to
+  the step's own source span.
+
+  Pins: only the earliest per destination was kept, while the rule needs ANY
+  pin between the fetch and the execution — so a repository that pinned an old
+  tree, discarded it, re-cloned and re-pinned (the fix recipe, applied twice)
+  was told it executes unpinned remote code. And a checkout-step fetch had no
+  position at all, so every pin in the job counted as "before anything ran from
+  it", including one applied to a tree the checkout then replaced.
+
 - **2026-08-14** — **A filtered `push` workflow's jobs are no longer dropped as
   producers — that re-opened the lever this fact exists to close.** Rejecting
   every branch- or path-filtered push removed the producer entirely, and when

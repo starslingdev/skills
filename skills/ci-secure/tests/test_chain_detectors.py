@@ -4000,3 +4000,148 @@ def test_p1424_a_checkout_pin_still_honours_position(tmp_path):
                   path: tools
     """)
     assert len(hits) == 1
+
+
+# ---------------------------------------------------------------------------
+# G2/G3 — two wiring bugs in the adoption of `_step_marks`. The approach is
+# right; both of these read the marks against the wrong index.
+# ---------------------------------------------------------------------------
+
+def test_p1424_a_setup_step_before_the_checkout_does_not_shift_it(tmp_path):
+    """Lines were collected from EVERY step carrying a `uses:` key while the
+    index counted only `actions/checkout` steps, so any
+    `- uses: actions/setup-node@v4` ahead of the third-party checkout — nearly
+    every real workflow — shifted the mapping and the evidence quoted the
+    wrong step."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+              - uses: actions/setup-node@v4
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: main
+                  path: tools
+              - run: bash tools/run.sh
+    """)
+    assert len(hits) == 1
+    assert "repository" in hits[0].evidence or hits[0].line == 9, \
+        (hits[0].line, hits[0].evidence)
+
+
+def test_p1424_an_execution_before_the_checkout_is_not_a_chain(tmp_path):
+    """The ordering contract, violated by the same mis-mapping: the shifted
+    line put the checkout EARLIER than the run step, so a `bash tools/run.sh`
+    that executes before anything is fetched was reported as executing out of
+    the fetched tree."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/setup-node@v4
+              - run: bash tools/run.sh
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: main
+                  path: tools
+    """) == []
+
+
+def test_p1424_a_flow_style_step_directory_stays_in_its_own_step(tmp_path):
+    """`_run_scalar_starts` is a line regex and cannot see a flow-style
+    `- {run: …}` step, so its `working-directory:` attached to the next block
+    scalar it could find — in a DIFFERENT job — and the finding named a
+    destination that appears nowhere near the step it describes."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          a:
+            runs-on: ubuntu-latest
+            steps:
+              - {run: echo hi, working-directory: vendor/x}
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  bash tools/build.sh
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "vendor/x" not in note, note
+    assert "`tools`" in note, note
+
+
+def test_p1424_a_flow_style_step_does_not_erase_a_real_chain(tmp_path):
+    """The inverse loss: a flow-style step between the fetch and the execution
+    donated its directory to the executing step and moved it out of the
+    fetched tree, so a real chain went unreported."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone --branch main "$TOOLS_URL" tools
+              - {run: echo hi, working-directory: /opt/other}
+              - run: bash tools/run.sh
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_a_repinned_reclone_is_still_pinned(tmp_path):
+    """Only the EARLIEST pin per destination was kept, while the rule needs A
+    pin between the fetch and the execution. Here the first pin lands on the
+    tree that is about to be discarded — before the clone that matters — so
+    keeping only that one hid the pin the repository actually applied, and a
+    repo that followed the fix recipe was told it executes unpinned code."""
+    old_sha, new_sha = "a" * 40, "b" * 40
+    assert _remote_exec_hits(tmp_path, f"""\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git -C tools checkout {old_sha}
+                  rm -rf tools
+                  git clone "$TOOLS_URL" tools
+                  git -C tools checkout {new_sha}
+                  python3 tools/setup.py
+    """) == []
+
+
+def test_p1424_a_checkout_arm_pin_must_also_come_after_the_fetch(tmp_path):
+    """The checkout arm's fetches carried no position, so every pin in the job
+    counted as "before anything ran from it" — including one applied to a tree
+    the checkout then replaced. Same ordering rule as the shell arm, or the
+    rule is only enforced on one of the two."""
+    sha = "c" * 40
+    hits = _remote_exec_hits(tmp_path, f"""\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git -C tools checkout {sha}
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: main
+                  path: tools
+              - run: bash tools/run.sh
+    """)
+    assert len(hits) == 1

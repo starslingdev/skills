@@ -3240,6 +3240,9 @@ class _StepMark:
     run_line: int | None        # 1-based line the `run:` VALUE starts on
     uses_line: int | None       # 1-based line the `uses:` VALUE starts on
     working_directory: str | None
+    uses: str | None            # the action the step runs, verbatim
+    start_line: int             # 1-based first line of the step itself
+    end_line: int               # 1-based last line of the step
 
 
 def _step_marks(text: str) -> list[_StepMark] | None:
@@ -3296,6 +3299,10 @@ def _step_marks(text: str) -> list[_StepMark] | None:
                 working_directory=(str(wd.value)
                                    if wd is not None and hasattr(wd, "value")
                                    else None),
+                uses=(str(uses.value)
+                      if uses is not None and hasattr(uses, "value") else None),
+                start_line=step.start_mark.line + 1,
+                end_line=step.end_mark.line + 1,
             ))
     return out
 
@@ -3318,7 +3325,15 @@ def _step_working_directories(text: str) -> dict[int, str]:
     for mark in marks:
         if mark.run_line is None or mark.working_directory is None:
             continue
-        start_line = next((s for s in starts if s >= mark.run_line), None)
+        # Bounded to the step's OWN source span. Matching the first shell start
+        # at or after the `run:` line searched the whole file, so a flow-style
+        # `- {run: …, working-directory: vendor/x}` — which the line regex
+        # cannot see as a shell start at all — donated its directory to the
+        # next block-scalar step, in a different JOB, fabricating a destination
+        # there and moving a real chain out of the fetched tree here.
+        start_line = next(
+            (s for s in starts
+             if mark.run_line <= s <= mark.end_line), None)
         if start_line is not None:
             out[start_line] = mark.working_directory.strip()
     return out
@@ -3396,9 +3411,16 @@ def _checkout_fetches(
     # order: the words `uses: actions/checkout@v4` inside a heredoc body shifted
     # every later step's line, so the evidence quoted a shell-script line, and a
     # flow-style step matched nothing and fell back to the job header.
+    # Only CHECKOUT steps, and their own `uses:` lines. Collecting every step
+    # with a `uses:` key while the index below counted only checkouts shifted
+    # the mapping by one for every `actions/setup-*` step ahead of the
+    # third-party checkout — nearly every real workflow — so the evidence
+    # quoted the wrong step and, when the shift moved the checkout EARLIER than
+    # a run step, invented a chain whose execution precedes its fetch.
     marks = _step_marks(text) or []
     at_lines = [m.uses_line for m in marks
-                if m.uses_line is not None and start <= m.uses_line <= end]
+                if m.uses_line is not None and start <= m.uses_line <= end
+                and (m.uses or "").startswith("actions/checkout")]
     out: list[_RemoteFetch] = []
     index = -1
     for step in steps:
@@ -3487,7 +3509,7 @@ def _mutable_fetch_executions(
     # destination -> the EARLIEST position a full-40-hex pin was applied to it.
     # Position matters: pinning is a claim about the code that ran, and a pin
     # applied after an execution pinned nothing that had already executed.
-    pinned: dict[str, int] = {}
+    pinned: dict[str, list[int]] = {}
     # `git remote add <name> <url>` — a third-party fetch spelled in two steps.
     # Without this, two characters of indirection made the whole arm blind.
     named_remotes: dict[str, str] = {}
@@ -3590,7 +3612,7 @@ def _mutable_fetch_executions(
                         continue
                     dest = _resolve_path(base, dest_written)
                     if ref and _FULL_SHA_RE.match(ref):
-                        pinned.setdefault(dest, pos)
+                        pinned.setdefault(dest, []).append(pos)
                         if gap is not None:
                             gap(f"a clone into `{_as_written(dest)}` on line {line_no} is "
                                 f"pinned to a full commit id, so it is "
@@ -3609,7 +3631,7 @@ def _mutable_fetch_executions(
                         continue
                     ref = positionals[1] if len(positionals) > 1 else None
                     if ref and _FULL_SHA_RE.match(ref):
-                        pinned.setdefault(base, pos)
+                        pinned.setdefault(base, []).append(pos)
                         continue
                     # A fetch alone changes no file in the tree — it becomes
                     # executable code only once something checks FETCH_HEAD
@@ -3619,7 +3641,7 @@ def _mutable_fetch_executions(
                     continue
                 if sub in ("checkout", "reset", "switch", "merge", "rebase"):
                     if any(_FULL_SHA_RE.match(a) for a in args):
-                        pinned.setdefault(base, pos)
+                        pinned.setdefault(base, []).append(pos)
                     if any("FETCH_HEAD" in a for a in args):
                         held = pending_fetch_head.get(base)
                         if held is not None:
@@ -3646,12 +3668,25 @@ def _mutable_fetch_executions(
         )
         if hit is None:
             continue
-        pin_at = pinned.get(dest)
-        # The pin has to land BETWEEN the fetch and the execution. Earlier than
-        # the fetch it pinned the tree as it stood, not the code the fetch then
-        # brought in — and it was suppressing the finding while saying the
-        # fetch "was pinned before anything ran from it", which it was not.
-        if pin_at is not None and fetch.pos < pin_at < hit[0]:
+        # ANY pin between the fetch and the execution suppresses — not just the
+        # first one seen. Keeping only the earliest hid the pin a repository
+        # actually applied when an older one landed on a tree it then
+        # discarded, and told it that it executes unpinned remote code.
+        #
+        # A checkout-step fetch has no position in the command stream, so its
+        # window opens at the first shell command AFTER its step. Without that
+        # the window opened at -1 and every pin in the job counted — including
+        # one applied to a tree the checkout then replaced, which suppressed the
+        # finding while recording that the fetch "was pinned before anything ran
+        # from it".
+        window_start = fetch.pos
+        if window_start < 0:
+            window_start = next(
+                (at for at, line, _r, _w in executions if line > fetch.line),
+                hit[0]) - 1
+        pin_at = next((p for p in pinned.get(dest, ())
+                       if window_start < p < hit[0]), None)
+        if pin_at is not None:
             # Pinned before it ran: the fix this entry recommends, applied.
             if gap is not None:
                 gap(f"a fetch into `{_as_written(dest)}` on line {fetch.line} was pinned to "
