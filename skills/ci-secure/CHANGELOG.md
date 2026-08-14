@@ -22,6 +22,29 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **P14.24 no longer reports an interpreter's inline script as
+  "the executed path".** `-e` / `-pe` / `-ne` / `-p` / `-n` put the program on
+  the command line exactly as `-c` does, and `-` reads it from stdin, but only
+  `-c` and `-m` were recognised — so the script TEXT became the path, and being
+  relative it satisfied the containment test and completed a chain. A real
+  public repository's three fires included "executes `chomp if eof` from it"
+  (the line was `perl -i -pe 'chomp if eof'`) and "executes `<<PY`" (the line
+  was `python3 - <<'PY'`). A `<<NAME` token is now rejected too, and a command
+  substitution is collapsed before the command is read: `FILE=$(ls tools/x.sql)`
+  had its assignment prefix stripped and the `ls` ARGUMENTS read as the
+  command, so a path `ls` merely listed was reported as executed — `ls` being
+  the code's own docstring example of something that is not execution.
+
+- **2026-08-14** — **`git remote add` makes the same self-clone judgment
+  `git clone` makes.** The two-step spelling registered any URL-shaped remote,
+  including the repository's own, so the identical URL was silent through the
+  clone arm and a finding through the fetch arm — two arms, opposite verdicts,
+  same repository.
+
+  Measured across five real checkouts (143 workflow files) before and after:
+  P14.24 fires 3 → 1, and the one that remains is the true positive (a clone at
+  a version variable followed by `./configure`). Coverage gaps 14 → 13.
+
 - **2026-08-14** — **A `404 Branch not protected` is an answer, not an unread
   source.** GitHub returns it from the classic protection endpoint precisely
   when classic protection is NOT configured — the normal state of every

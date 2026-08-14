@@ -3204,3 +3204,128 @@ def test_p1424_checkout_execution_in_another_job_does_not_connect(tmp_path):
             steps:
               - run: bash tools/run.sh
     """) == []
+
+
+# ---------------------------------------------------------------------------
+# X2/X3 — what the detector calls "the executed path", and which remotes the
+# named-remote arm is allowed to trust.
+#
+# Both were caught by running the shipped scanner over a real public repo:
+# 2 of its 3 fires quoted an interpreter's inline SCRIPT TEXT as the path
+# ("executes `chomp if eof`"), and the third arm registered the repository's
+# own URL as a third-party remote.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("tokens", [
+    ["perl", "-i", "-pe", "chomp if eof", "dump.sql"],
+    ["perl", "-ne", "print if /x/", "dump.sql"],
+    ["perl", "-p", "-e", "s/a/b/", "dump.sql"],
+    ["node", "-e", "console.log(1)"],
+    ["ruby", "-e", "puts 1"],
+    ["python3", "-"],
+    ["python3", "<<PY"],
+    ["bash", "<<'EOF'"],
+])
+def test_p1424_an_inline_script_body_is_not_an_executed_path(tokens):
+    """`-e` / `-pe` / `-ne` / `-p` / `-n` take the program on the command line,
+    exactly as `-c` does, and `-` reads it from stdin. The text after them is
+    a SCRIPT, not a file — and because it is relative it satisfied the
+    containment test and completed a chain, so the finding read "executes
+    `chomp if eof` from it". A `<<NAME` token is the here-doc that supplies
+    stdin, not a path either."""
+    assert scan._executed_path(tokens) is None, tokens
+
+
+@pytest.mark.parametrize("tokens", [
+    ["python3", "tools/setup.py"],
+    ["perl", "-w", "tools/gen.pl"],
+    ["node", "--experimental-vm-modules", "tools/run.js"],
+])
+def test_p1424_an_interpreter_running_a_real_file_still_reports(tokens):
+    """The control: narrowing the flag handling must not stop the arm from
+    seeing an interpreter given an actual file to run."""
+    assert scan._executed_path(tokens) == tokens[-1], tokens
+
+
+def test_p1424_a_remote_added_for_your_own_repository_is_not_third_party(
+    tmp_path,
+):
+    """`git remote add` is the two-step spelling of a fetch, so it has to make
+    the same judgment the one-step spelling makes. It did not: the identical
+    URL was silent through `git clone` and a finding through
+    `git remote add` — two arms, opposite verdicts, same repository."""
+    (tmp_path / ".git").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".git" / "config").write_text(_ORIGIN_CONFIG)
+    wf = _wf(tmp_path, "wf.yml", """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git remote add pub https://${{ github.repository }}.git
+                  git fetch pub main
+                  git checkout FETCH_HEAD
+                  bash install.sh
+    """)
+    assert list(scan._correlation_unverified_remote_code_execution(wf)) == []
+
+
+def test_p1424_a_remote_added_for_a_third_party_still_fires(tmp_path):
+    """The control for the guard above — the shape X2's repository really has,
+    and the one the catalog promises is visible."""
+    (tmp_path / ".git").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".git" / "config").write_text(_ORIGIN_CONFIG)
+    wf = _wf(tmp_path, "wf.yml", f"""\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git remote add up https://{_HOST}/third-party/tools.git
+                  git fetch up main
+                  git checkout FETCH_HEAD
+                  bash install.sh
+    """)
+    assert len(list(scan._correlation_unverified_remote_code_execution(wf))) == 1
+
+
+def test_p1424_a_command_substitution_body_is_not_the_command(tmp_path):
+    """`MIGRATION_FILE=$(ls pg_search/sql/*.sql)` assigns the OUTPUT of `ls`.
+    The assignment prefix was stripped and the substitution's arguments were
+    then read as a command, so a path `ls` merely listed became "executes
+    `pg_search/sql/…`" — the third nonsense fire on the same public repository
+    as the inline-script ones, and `ls` is named in the code's own docstring as
+    the example of something that is NOT execution."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  MIGRATION_FILE=$(ls tools/sql/migrate.sql | head -n 1)
+    """) == []
+
+
+def test_p1424_a_real_execution_after_a_substitution_still_reports(tmp_path):
+    """The control: collapsing substitutions must not swallow the command that
+    follows them."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  VERSION=$(cat VERSION)
+                  python3 tools/setup.py
+    """)
+    assert len(hits) == 1

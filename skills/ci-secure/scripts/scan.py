@@ -2755,6 +2755,13 @@ _INTERPRETERS = {
     "python", "python2", "python3", "node", "nodejs", "bash", "sh", "zsh",
     "ksh", "ruby", "perl", "php", "pwsh", "powershell",
 }
+# An interpreter reads its program from the command line (`-c`, `-e`, and the
+# perl one-liner combinations) or from stdin (`-`), rather than from a file
+# named as an argument. `-m` names a module, which is not a path either.
+_INLINE_SCRIPT_FLAGS = {
+    "-c", "-m", "-e", "-E", "-", "-pe", "-ne", "-p", "-n", "-ape", "-lpe",
+    "--eval", "--exec",
+}
 _SOURCE_CMDS = {"source", "."}
 # `pip install` options that consume a separate VALUE. Every one of these takes
 # a path or a name that pip reads or writes — never code pip executes.
@@ -2781,6 +2788,13 @@ _UNPARSED_CD_RE = re.compile(r"(?:^|[;&|]\s*)\s*cd\s")
 # A whole `${{ … }}` expression. The runner substitutes it before the shell
 # sees it, so it is ONE word — see `_shell_tokens`.
 _EXPRESSION_TOKEN_RE = re.compile(r"\$\{\{.*?\}\}", re.S)
+# `$( … )` — a command substitution. Its body is a command whose OUTPUT becomes
+# a word; the words inside it are not this command's arguments. Left expanded,
+# `FILE=$(ls tools/x.sql)` had its assignment prefix stripped and the `ls`
+# arguments read as the command, so a path `ls` merely listed was reported as
+# executed. Process substitution `<( … )` is deliberately untouched: the piped
+# installer arm matches `bash <(curl …)` on the raw text.
+_COMMAND_SUBSTITUTION_RE = re.compile(r"\$\((?:[^()]|\([^()]*\))*\)", re.S)
 
 
 def _shell_tokens(segment: str) -> list[str]:
@@ -2803,7 +2817,8 @@ def _shell_tokens(segment: str) -> list[str]:
     """
     try:
         collapsed = _SELF_REPO_EXPRESSION_RE.sub(_SELF_REPO_TOKEN, segment)
-        return shlex.split(_EXPRESSION_TOKEN_RE.sub("$EXPR", collapsed),
+        collapsed = _EXPRESSION_TOKEN_RE.sub("$EXPR", collapsed)
+        return shlex.split(_COMMAND_SUBSTITUTION_RE.sub("$SUBST", collapsed),
                            comments=False, posix=True)
     except ValueError:
         return []
@@ -3053,11 +3068,18 @@ def _executed_path(tokens: list[str]) -> str | None:
                 return tok
         return None
     if cmd in _INTERPRETERS:
-        if "-m" in rest or "-c" in rest:
+        # Flags that put the PROGRAM on the command line, or take it from
+        # stdin. What follows them is script text, not a path — and being
+        # relative it satisfied the containment test and completed a chain, so
+        # a `perl -i -pe 'chomp if eof'` line reported "executes `chomp if
+        # eof` from it". Two of one real repository's three fires were this.
+        if any(flag in rest for flag in _INLINE_SCRIPT_FLAGS):
             return None
         for tok in rest:
             if tok.startswith("-"):
                 continue
+            if tok.startswith("<<"):
+                return None       # the here-doc that supplies stdin, not a path
             return tok
         return None
     if "/" in cmd and not cmd.startswith("-"):
@@ -3329,7 +3351,11 @@ def _mutable_fetch_executions(
                 cwd = base_cwd
         if skip_step:
             continue
-        for segment in _install_command_segments(command):
+        # Substitutions are collapsed BEFORE the command is split, because the
+        # split breaks on `|` and would otherwise cut `$(ls a | head)` in half
+        # and read each piece as a command of its own.
+        for segment in _install_command_segments(
+                _COMMAND_SUBSTITUTION_RE.sub("$SUBST", command)):
             pos += 1
             if not segment.strip():
                 continue
@@ -3362,7 +3388,15 @@ def _mutable_fetch_executions(
                 base = _resolve_path(cwd, gdir) if gdir else cwd
                 if sub == "remote" and args[:1] == ["add"]:
                     positionals = [a for a in args[1:] if not a.startswith("-")]
-                    if len(positionals) >= 2 and _is_remote_url(positionals[1]):
+                    if (len(positionals) >= 2
+                            and _is_remote_url(positionals[1])
+                            and not (file_path is not None
+                                     and _is_self_clone(positionals[1],
+                                                        file_path))):
+                        # The two-step spelling of a fetch has to make the same
+                        # judgment the one-step spelling makes. Without the
+                        # self-clone test the identical URL was silent through
+                        # `git clone` and a finding through `git remote add`.
                         named_remotes[positionals[0]] = positionals[1]
                     continue
                 if sub == "clone":
