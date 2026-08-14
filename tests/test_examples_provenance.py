@@ -261,12 +261,17 @@ def test_ci_workflows_check_out_full_history():
     # returns False and the leg SKIPS — silently degrading the gate to the well-formedness /
     # consistency checks, which a fabricated-but-consistent SHA passes. Pin `fetch-depth: 0` in
     # BOTH CI workflows so that coupling regressing goes red HERE, not silently defanged.
-    wf_dir = _REPO / ".github" / "workflows"
-    for name in ("ci.yml", "ci-fork.yml"):
-        wf = wf_dir / name
-        assert wf.exists(), (
-            f"{name} is missing — the example-provenance gate's full-history CI coupling can no "
-            "longer be verified")
-        assert "fetch-depth: 0" in wf.read_text(encoding="utf-8"), (
-            f"{name} no longer checks out `fetch-depth: 0` — the example-provenance ancestry leg "
-            "will silently skip in CI (shallow clone), defanging this gate")
+    # Both suite jobs now live in ci.yml (the fork twin moved in so the always-run
+    # verdict job can `needs:` it); pin fetch-depth: 0 once per suite job.
+    import yaml
+    wf = _REPO / ".github" / "workflows" / "ci.yml"
+    assert wf.exists(), (
+        "ci.yml is missing — the example-provenance gate's full-history CI coupling can no "
+        "longer be verified")
+    jobs = yaml.safe_load(wf.read_text(encoding="utf-8"))["jobs"]
+    for job_id in ("test-self", "test-fork"):
+        steps = jobs[job_id]["steps"]
+        checkout = next(s for s in steps if "checkout" in str(s.get("uses", "")))
+        assert checkout["with"].get("fetch-depth") == 0, (
+            f"ci.yml job {job_id} no longer checks out `fetch-depth: 0` — the example-provenance "
+            "ancestry leg will silently skip in CI (shallow clone), defanging this gate")

@@ -158,7 +158,7 @@ def test_runner_matches_the_repo_ci_runner(workflow: dict):
     """This repo dogfoods StarSling runners for its internal CI. If ci.yml's runner
     moves, this gate moves with it rather than drifting onto different infrastructure."""
     ci = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
-    assert _scan_job(workflow)["runs-on"] == ci["jobs"]["test"]["runs-on"]
+    assert _scan_job(workflow)["runs-on"] == ci["jobs"]["test-self"]["runs-on"]
 
 
 def test_fork_prs_never_reach_the_self_hosted_runner(workflow: dict):

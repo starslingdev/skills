@@ -2,6 +2,15 @@ name: CI
 
 # Runs the full test suite (`pytest -v`) on every push to main and every pull request — the same
 # suite a developer runs locally must pass before code can merge.
+#
+# The suite runs as two mutually exclusive jobs: self-hosted for pushes and same-repo PRs
+# (this repo dogfoods StarSling runners), GitHub-hosted for fork PRs (untrusted code never
+# executes on the self-hosted pool). The required branch-protection check is `test` — the
+# always-running verdict job at the bottom — NOT either suite job. GitHub counts a skipped
+# required check as passing, so requiring a job that skips itself on fork PRs meant a fork PR
+# could merge with zero tests executed. The verdict is always produced, and passes only when
+# the one suite job that was supposed to run actually ran and passed.
+# tests/test_ci_required_check_verdict.py pins every clause of this arrangement.
 on:
   push:
     branches: [main]
@@ -17,11 +26,11 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    # This repo dogfoods StarSling runners for its own CI. The runner is self-hosted, so never
-    # execute untrusted fork-PR code on it: run only for pushes and pull requests whose head is
-    # this same repository. Fork PRs get the identical suite on GitHub-hosted runners via
-    # ci-fork.yml instead.
+  test-self:
+    name: test (self-hosted)
+    # Never execute untrusted fork-PR code on the self-hosted runner: run only for pushes and
+    # pull requests whose head is this same repository. Fork PRs get the identical suite on
+    # GitHub-hosted runners via test-fork below.
     runs-on: starsling-ubuntu-24.04
     if: >-
       github.event_name == 'push' ||
@@ -55,3 +64,78 @@ jobs:
 
       - name: Run tests
         run: pytest -v
+
+  test-fork:
+    name: test (fork)
+    # Inverse of test-self's guard: fork PRs only, on GitHub-hosted runners with no access to
+    # repo secrets. Same contract, different infrastructure. Lives in this workflow (not a
+    # separate file) because the verdict job below must `needs:` it, and `needs` cannot see
+    # across workflows — the old two-file layout is what let the check names diverge.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "20"
+
+      - name: Install test dependencies
+        run: pip install pytest pyyaml
+
+      - name: Run tests
+        run: pytest -v
+
+  # ONE check name carries the verdict for fork and non-fork alike. The two suite jobs are
+  # mutually exclusive, so a branch protection rule naming either of them directly is
+  # satisfiable by never running it: GitHub counts a skipped required check as a pass. This job
+  # always runs, so the required `test` check is always reported, and it passes only when the
+  # suite that was supposed to run actually ran and passed.
+  #
+  # `always()`, not `!cancelled()`: a cancelled run reports this job as skipped, and GitHub
+  # reads a skipped required check as green — a one-click bypass. The cost is a stale red on
+  # superseded runs; branch protection reads the newest run, so that costs nothing.
+  #
+  # GitHub-hosted on purpose: this job runs on fork PRs too, and its `run:` block travels with
+  # the head ref, so a self-hosted runner here would execute fork-authored shell on StarSling
+  # infrastructure. It checks out nothing.
+  verdict:
+    name: test
+    needs: [test-self, test-fork]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the suite that should have run to have passed
+        env:
+          SELF_HOSTED: ${{ needs.test-self.result }}
+          FORK: ${{ needs.test-fork.result }}
+        run: |
+          set -euo pipefail
+          echo "self-hosted suite: ${SELF_HOSTED}"
+          echo "fork suite:        ${FORK}"
+          # Exactly one of the two is meant to run; the other reports "skipped".
+          # Anything else - both skipped, either failed, either cancelled - is
+          # not a pass: a suite that did not run is not a suite that passed.
+          if [ "${SELF_HOSTED}" = "success" ] && [ "${FORK}" = "skipped" ]; then
+            echo "test passed (self-hosted suite)."
+            exit 0
+          fi
+          if [ "${FORK}" = "success" ] && [ "${SELF_HOSTED}" = "skipped" ]; then
+            echo "test passed (fork suite)."
+            exit 0
+          fi
+          echo "::error::test has no passing verdict (self-hosted=${SELF_HOSTED}, fork=${FORK}) - a suite that did not run, was cancelled, or failed is not a pass"
+          exit 1
