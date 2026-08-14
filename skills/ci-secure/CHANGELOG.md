@@ -40,6 +40,15 @@ entries are dated (UTC). Format loosely follows
   actually traced, and a scan that traced none of them is unmeasured rather
   than green.
 
+- **2026-08-14** — **A verdict job can no longer alibi the suite job it was
+  added to cover for.** `name (value)` is a MATRIX expansion, but the fact
+  offered that prefix match to every job — so an always-running job named
+  `test` was read as a producer of the required context `test (self-hosted)`,
+  and its always-runs answer covered for the suite job that really reports that
+  context and really can skip. That is this repository's own CI shape, which
+  means the bypass was hiding behind the fix for the bypass. The expansion
+  match now applies only to a job that actually carries `strategy.matrix`.
+
 - **2026-08-14** — **A workflow the scan could not read no longer costs
   `sec.required-checks.skippable` its API round-trips.** An unscannable
   workflow forces the fact to unmeasured — rightly, since the file nobody could

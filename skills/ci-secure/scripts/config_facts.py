@@ -685,9 +685,24 @@ def _context_producers(
             shown = _display_name(key, job)
             if _EXPRESSION_RE.search(shown):
                 continue
-            if context == shown or context.startswith(shown + " ("):
+            if context == shown:
+                out.append((rel, key, job, jobs, doc))
+            elif _has_matrix(job) and context.startswith(shown + " ("):
                 out.append((rel, key, job, jobs, doc))
     return out
+
+
+def _has_matrix(job: dict) -> bool:
+    """Does this job expand into `name (value, …)` check contexts?
+
+    Only a matrix does. Offering the `name (…)` match to every job let an
+    always-running verdict job named `test` be read as a producer of
+    `test (self-hosted)` — this repository's own CI shape — and its
+    always-runs answer then covered for the suite job that really reports that
+    context and really can skip. The bypass hid behind the fix for the bypass.
+    """
+    strategy = job.get("strategy")
+    return isinstance(strategy, dict) and bool(strategy.get("matrix"))
 
 
 def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:

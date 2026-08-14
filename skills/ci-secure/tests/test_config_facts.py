@@ -1006,10 +1006,35 @@ def test_the_always_running_verdict_job_passes(tmp_path):
     assert f["outcome"] == "pass", f["evidence"]
 
 
+_MATRIX_CONDITIONAL = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test-self:
+    name: test
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        py: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: pytest -v
+"""
+
+
 def test_a_matrix_expanded_context_maps_to_its_job(tmp_path):
-    """Branch protection records `test (3.12)` for a matrix job named `test`."""
+    """Branch protection records `test (3.12)` for a matrix job named `test`.
+
+    The fixture carries a real `strategy.matrix`, because that is what makes
+    the expanded context exist: a job without one produces only its own name,
+    and matching the expansion against it invents a producer."""
     f = _outcome(
-        _facts_with(tmp_path, {"ci.yml": _CONDITIONAL_ONLY}, ["test (3.12)"]),
+        _facts_with(tmp_path, {"ci.yml": _MATRIX_CONDITIONAL}, ["test (3.12)"]),
         _FACT)
     assert f["outcome"] == "fail"
     assert "test (3.12)" in f["evidence"]
@@ -1380,3 +1405,59 @@ def test_a_workflow_scan_gap_costs_no_api_calls_for_the_required_checks_fact(
         fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
     assert _outcome(out, _FACT)["outcome"] == "unmeasured"
     assert calls == [], f"branch protection was read for a discarded verdict: {calls}"
+
+
+def test_a_non_matrix_job_does_not_claim_a_matrix_expanded_context(tmp_path):
+    """`name (value)` is a MATRIX expansion, so only a job that has a matrix
+    can produce it. Prefix-matching every job means an always-running verdict
+    job named `test` is read as a producer of `test (self-hosted)` — the exact
+    shape of this repository's own CI — and its always-runs answer then covers
+    for the suite job that really reports that context and really can skip.
+    The bypass hides behind the fix for the bypass."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  suite:
+    name: test (self-hosted)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+  verdict:
+    name: test
+    needs: [suite]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo assert
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test (self-hosted)"]),
+                 _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_real_matrix_job_still_maps_to_its_expanded_context(tmp_path):
+    """The positive control for the rule above: the expansion match has to keep
+    working for jobs that actually carry a matrix, or every matrix-gated repo
+    silently stops being judged."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        py: ['3.11', '3.12']
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test (3.12)"]), _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "test (3.12)" in f["evidence"]
