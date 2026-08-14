@@ -22,6 +22,29 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **`working-directory:` and checkout steps are read from the
+  parsed document, not scraped off raw lines.** Three defects, one root cause —
+  a regex over the same bytes the parser had already read correctly:
+  `working-directory: .   # repo root` took the YAML comment into the value and
+  rendered a destination of `` `.   # repo root/tools` ``; a
+  `working-directory:` written inside a HEREDOC BODY — text the step generates,
+  not configuration of the step — was read as the step's own, so a finding
+  stated a destination lifted from generated content; and checkout steps were
+  tied to lines by counting `uses:` occurrences in order, so the same words
+  appearing in a heredoc shifted every later step and the evidence quoted a
+  line of shell script.
+
+- **2026-08-14** — **A pin now has to land between the fetch and the
+  execution.** A `git checkout <40-hex>` written BEFORE a fetch pinned the tree
+  as it stood, not the code the fetch then brought in — and it suppressed the
+  finding while stating the fetch "was pinned before anything ran from it".
+
+- **2026-08-14** — **Two fetches on one line no longer collapse into one that
+  names only the first.** Deduplication treats one line as one place to fix,
+  which is right, but the second chain was disappearing without a trace because
+  the finding identified itself by the whole LINE. It identifies itself by the
+  fetch — destination and ref — so both are named.
+
 - **2026-08-14** — **Expressions are opaque, consistently, and never rendered
   as scanner internals.** One family of defects, all from `${{ }}` values:
 

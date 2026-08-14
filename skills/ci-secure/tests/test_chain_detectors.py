@@ -3719,3 +3719,133 @@ def test_no_scanner_internal_token_reaches_the_rendered_report(tmp_path):
     assert "wd:" not in blob, "opaque sentinel prefix leaked"
     assert not re.search(r"\$EXPR\d", blob), "expression stand-in leaked"
     assert "${{ env.TOOLS_DIR }}" in rendered, rendered[:400]
+
+
+# ---------------------------------------------------------------------------
+# R4/R5/R6 — reading the step's own data instead of guessing at raw lines.
+# ---------------------------------------------------------------------------
+
+def test_p1424_a_trailing_yaml_comment_is_not_part_of_the_directory(tmp_path):
+    """`working-directory: .   # repo root` is the directory `.`; the comment
+    is YAML's, not the value's. Scraping the line with a regex made the
+    destination `` `.   # repo root/tools` `` — and on the checkout arm the
+    same scrape silently dropped a real finding."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - working-directory: .   # repo root
+                run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "repo root" not in note, note
+    assert "`tools`" in note, note
+
+
+def test_p1424_a_working_directory_inside_a_heredoc_is_not_the_steps(tmp_path):
+    """Text a step WRITES to a file is not configuration of the step. A
+    `cat > gen.yml <<EOF` body containing `working-directory: /opt/evil` was
+    read as the step's own, so the finding stated a destination taken from
+    generated content."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  cat > gen.yml <<EOF
+                  working-directory: /opt/evil
+                  EOF
+                  git clone --branch main "$TOOLS_URL" tools
+                  python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "/opt/evil" not in note, note
+
+
+def test_p1424_a_pin_before_the_fetch_pins_nothing_it_brought_in(tmp_path):
+    """Ordering is the whole claim. A `git checkout <40-hex>` two lines BEFORE
+    a fetch pinned the tree as it stood — not the code the fetch then brought
+    in — yet it suppressed the finding, and said so: "was pinned … before
+    anything ran from it"."""
+    sha = "d" * 40
+    hits = _remote_exec_hits(tmp_path, f"""\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git checkout {sha}
+                  git fetch "$TOOLS_URL" main
+                  git checkout FETCH_HEAD
+                  bash install.sh
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_two_fetches_on_one_line_are_two_findings(tmp_path):
+    """Deduplication keys on the evidence text, and the evidence was the whole
+    LINE — so two clones written on one line were byte-identical to the
+    deduper and the second chain vanished with no entry anywhere. A dropped
+    finding must be recorded somewhere; this one was not."""
+    _wf(tmp_path, "ci.yml", """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone --branch main "$A_URL" one && python3 one/x.py && git clone --branch main "$B_URL" two && python3 two/y.py
+    """)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    result = scan.scan(catalog, tmp_path)
+    hits = [f for f in result["findings"] if f["pattern"] == "P14.24"]
+    shown = " ".join(f.get("derived_note", "") + f.get("evidence", "")
+                     for f in hits)
+    # One line is one place to fix, so the deduper folds them — but both
+    # destinations have to be NAMED, or the second chain is simply gone.
+    assert "into one" in shown and "into two" in shown, shown
+
+
+def test_p1424_a_checkout_named_inside_a_heredoc_does_not_shift_the_evidence(
+    tmp_path,
+):
+    """Checkout steps were tied to lines by counting `uses:` occurrences in
+    order, so the WORDS `uses: actions/checkout@v4` written inside a heredoc
+    body — a step generating a workflow file — shifted every later step and the
+    evidence quoted a line of shell script instead of the checkout."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  cat > generated.yml <<'EOF'
+                  steps:
+                    - uses: actions/checkout@v4
+                  EOF
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: main
+                  path: tools
+              - run: bash tools/run.sh
+    """)
+    assert len(hits) == 1
+    # The REAL checkout step is the one carrying `repository:`; the heredoc
+    # mention is four lines above it. Only the line number distinguishes them,
+    # since both lines contain the words "uses" and "checkout".
+    assert hits[0].line == 12, (hits[0].line, hits[0].evidence)

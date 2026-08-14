@@ -3214,42 +3214,94 @@ _STEP_ITEM_RE = re.compile(r"^(\s*)-\s")
 _WORKING_DIR_RE = re.compile(r"^\s*working-directory\s*:\s*(.+?)\s*$")
 
 
+@dataclass(frozen=True)
+class _StepMark:
+    """One step, located by the YAML parser rather than by a line regex."""
+    job: str
+    run_line: int | None        # 1-based line the `run:` VALUE starts on
+    uses_line: int | None       # 1-based line the `uses:` VALUE starts on
+    working_directory: str | None
+
+
+def _step_marks(text: str) -> list[_StepMark] | None:
+    """Every step in the document with source lines, or None if it won't compose.
+
+    Read from the composed node tree — what the parser itself saw. The defects
+    this replaces all came from scraping raw lines with regexes while the
+    parsed document was already in hand:
+
+      * `working-directory: .   # repo root` took the YAML comment into the
+        value, rendering a destination of `` `.   # repo root/tools` ``;
+      * a `working-directory:` written INSIDE a heredoc body — text the step
+        GENERATES, not configuration of the step — was read as the step's own,
+        so the finding stated a destination lifted from generated content;
+      * checkout steps were matched to lines by ORDINAL, so the words
+        `uses: actions/checkout@v4` inside a heredoc shifted every later step.
+
+    A value the parser hands us cannot disagree with the document. A regex over
+    the same bytes can, and did.
+    """
+    try:
+        root = yaml.compose(text)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(root, yaml.MappingNode):
+        return None
+
+    def _child(node: Any, key: str) -> Any:
+        if not isinstance(node, yaml.MappingNode):
+            return None
+        for k, v in node.value:
+            if getattr(k, "value", None) == key:
+                return v
+        return None
+
+    jobs = _child(root, "jobs")
+    if not isinstance(jobs, yaml.MappingNode):
+        return None
+    out: list[_StepMark] = []
+    for job_key, job_node in jobs.value:
+        steps = _child(job_node, "steps")
+        if not isinstance(steps, yaml.SequenceNode):
+            continue
+        for step in steps.value:
+            if not isinstance(step, yaml.MappingNode):
+                continue
+            run = _child(step, "run")
+            uses = _child(step, "uses")
+            wd = _child(step, "working-directory")
+            out.append(_StepMark(
+                job=str(getattr(job_key, "value", "")),
+                run_line=(run.start_mark.line + 1) if run is not None else None,
+                uses_line=(uses.start_mark.line + 1) if uses is not None else None,
+                working_directory=(str(wd.value)
+                                   if wd is not None and hasattr(wd, "value")
+                                   else None),
+            ))
+    return out
+
+
 def _step_working_directories(text: str) -> dict[int, str]:
     """{run-scalar start line: the step's `working-directory:`}.
 
-    Read from the raw text rather than the parsed document because everything
-    else in this detector is line-addressed, and a step's shell has to be tied
-    to the directory of the step it belongs to — not of the step before it.
-    A step is a YAML list item, so its block runs from its `- ` line to the
-    next list item at the same indent; `working-directory:` may be written
-    before or after `run:` inside that block.
+    Keys are the lines `_run_scalar_starts` reports, because that is what
+    `_job_shell_commands` uses to mark a step boundary. VALUES come from the
+    composed document (`_step_marks`), so a YAML comment, a quoted value, or a
+    `working-directory:` written inside a heredoc body cannot reach them. Each
+    parsed step's `run:` line is matched to the first shell start at or after
+    it — the same step, by construction.
     """
-    lines = text.splitlines()
-    starts = _run_scalar_starts(text)
-    items: list[tuple[int, int]] = []          # (line index, indent)
-    for i, line in enumerate(lines):
-        m = _STEP_ITEM_RE.match(line)
-        if m:
-            items.append((i, len(m.group(1))))
+    marks = _step_marks(text)
+    if marks is None:
+        return {}
+    starts = sorted(_run_scalar_starts(text))
     out: dict[int, str] = {}
-    for start in starts:
-        owner = next((item for item in reversed(items) if item[0] < start), None)
-        if owner is None:
+    for mark in marks:
+        if mark.run_line is None or mark.working_directory is None:
             continue
-        begin, indent = owner
-        end = len(lines)
-        for i, other_indent in items:
-            if i > begin and other_indent <= indent:
-                end = i
-                break
-        for line in lines[begin:end]:
-            if len(line) - len(line.lstrip()) <= indent and not _STEP_ITEM_RE.match(line):
-                continue
-            wd = _WORKING_DIR_RE.match(line.replace("- ", "  ", 1)
-                                       if _STEP_ITEM_RE.match(line) else line)
-            if wd:
-                out[start] = wd.group(1).strip().strip("\"'")
-                break
+        start_line = next((s for s in starts if s >= mark.run_line), None)
+        if start_line is not None:
+            out[start_line] = mark.working_directory.strip()
     return out
 
 
@@ -3321,8 +3373,13 @@ def _checkout_fetches(
         return []
     lines = text.splitlines()
     start, end = job_range if job_range else (1, len(lines))
-    at_lines = [i + 1 for i in range(start - 1, min(end, len(lines)))
-                if _CHECKOUT_USES_RE.match(lines[i])]
+    # Lines from the PARSER, not from a regex counting `uses:` occurrences in
+    # order: the words `uses: actions/checkout@v4` inside a heredoc body shifted
+    # every later step's line, so the evidence quoted a shell-script line, and a
+    # flow-style step matched nothing and fell back to the job header.
+    marks = _step_marks(text) or []
+    at_lines = [m.uses_line for m in marks
+                if m.uses_line is not None and start <= m.uses_line <= end]
     out: list[_RemoteFetch] = []
     index = -1
     for step in steps:
@@ -3390,10 +3447,10 @@ def _mutable_fetch_executions(
     from. Within the job the pairing is positional: the execution must come
     after the fetch that put the code there.
 
-    A destination that is pinned to a full 40-hex commit ANYWHERE in the job is
-    dropped, without regard to order. Erring that way is deliberate: a pin the
-    scanner reads out of position suppresses a finding, while the opposite
-    error would report a repo that pinned correctly.
+    A pin suppresses a destination only when it lands BETWEEN the fetch and the
+    execution. Earlier than the fetch it pinned the tree as it stood rather
+    than the code the fetch brought in; later than the execution the code had
+    already run unpinned. Both used to suppress.
     """
     fetches: dict[str, _RemoteFetch] = {
         f.dest: f for f in reversed(extra_fetches or [])}
@@ -3561,7 +3618,11 @@ def _mutable_fetch_executions(
         if hit is None:
             continue
         pin_at = pinned.get(dest)
-        if pin_at is not None and pin_at < hit[0]:
+        # The pin has to land BETWEEN the fetch and the execution. Earlier than
+        # the fetch it pinned the tree as it stood, not the code the fetch then
+        # brought in — and it was suppressing the finding while saying the
+        # fetch "was pinned before anything ran from it", which it was not.
+        if pin_at is not None and fetch.pos < pin_at < hit[0]:
             # Pinned before it ran: the fix this entry recommends, applied.
             if gap is not None:
                 gap(f"a fetch into `{_as_written(dest)}` on line {fetch.line} was pinned to "
@@ -3623,7 +3684,12 @@ def _correlation_unverified_remote_code_execution(
             yield RawHit(
                 line=fetch.line,
                 evidence=f"{fetch.line:>4}: {fetch.raw}  <-- here",
-                match_text=fetch.raw.strip(),
+                # Identifies the FETCH, not the line. Deduplication keys on
+                # this, so using the whole line made two clones written on one
+                # line byte-identical and the second chain vanished with no
+                # record anywhere.
+                match_text=(f"fetch into {_as_written(fetch.dest)} at "
+                            f"{fetch.ref or 'HEAD'}"),
                 derived_note=(
                     (f"jobs.{job_name} checks out `{fetch.source}` at "
                      if fetch.source else
