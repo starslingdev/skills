@@ -22,6 +22,33 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **Which flags mean "the program is on the command line"
+  depends on the interpreter, and only leading flags are the interpreter's.** A
+  flat whitelist scanned over every argument leaked both ways. `-e`/`-E`/`-p`/
+  `-n` are ordinary shell and Python options, so `bash -e tools/install.sh` and
+  `bash tools/install.sh -n` — where the flag belongs to the FETCHED SCRIPT —
+  became silent false cleans on exactly the chain this vector catches. And
+  spellings the list did not carry (`bash -lc`, `perl -lane`, `php -r`,
+  `pwsh -Command`, `powershell -EncodedCommand`) still rendered the program
+  text as "the executed path". A flag's VALUE is no longer read as the path
+  either (`python3 -W ignore tools/setup.py`).
+
+- **2026-08-14** — **`$( … )` runs its body, and the body is read again as
+  commands.** Collapsing the substitution before tokenizing killed the
+  `$(ls tools/x.sql)` nonsense fire and took real executions with it:
+  `OUT=$(tools/setup.sh)` after a mutable clone produced no finding, no gap and
+  no suppression — while the backtick spelling of the same construct still
+  recorded one, so the scanner disagreed with itself about the same shape.
+
+- **2026-08-14** — **A checkout of your OWN repository no longer raises the
+  "not a clean result" banner.** The `repository:`-expression gap ran before
+  the self-repository test, so `repository: ${{ github.repository }}` — the
+  exact spelling the clone arm was taught to recognise — was recorded as
+  "whether it fetches a third party was NOT established". Two real repositories
+  open their reports with that warning over nothing but self-checkouts. The
+  genuinely unknowable fork-PR spelling stays a disclosed gap. The environment
+  variable `$GITHUB_REPOSITORY` is recognised as self-identifying too.
+
 - **2026-08-14** — **Two wiring bugs in how the composed-YAML step marks are
   used, and the pin bookkeeping beside them.** The checkout arm collected the
   line of EVERY step carrying a `uses:` key while its index counted only

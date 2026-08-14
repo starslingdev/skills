@@ -3030,7 +3030,10 @@ _SELF_REPO_TOKEN = "$SELF_REPO"
 # nothing appended to it.
 _SELF_REPO_SLUG_RE = re.compile(
     r"[/@]"
-    r"(?:\$\{\{\s*github\.repository\s*\}\}|\$SELF_REPO)"
+    r"(?:\$\{\{\s*github\.repository\s*\}\}|\$SELF_REPO"
+    # The environment-variable spelling is exactly as self-identifying as the
+    # expression, and the guard already honours the expression.
+    r"|\$GITHUB_REPOSITORY\b|\$\{GITHUB_REPOSITORY\})"
     r"(?:\.git)?(?:[/?#]|$)")
 
 
@@ -3145,22 +3148,70 @@ def _executed_path(tokens: list[str]) -> str | None:
                 return tok
         return None
     if cmd in _INTERPRETERS:
-        # Flags that put the PROGRAM on the command line, or take it from
-        # stdin. What follows them is script text, not a path — and being
-        # relative it satisfied the containment test and completed a chain, so
-        # a `perl -i -pe 'chomp if eof'` line reported "executes `chomp if
-        # eof` from it". Two of one real repository's three fires were this.
-        if any(flag in rest for flag in _INLINE_SCRIPT_FLAGS):
-            return None
-        for tok in rest:
-            if tok.startswith("-"):
-                continue
-            if tok.startswith("<<"):
-                return None       # the here-doc that supplies stdin, not a path
-            return tok
-        return None
+        return _interpreter_executed_path(cmd, rest)
     if "/" in cmd and not cmd.startswith("-"):
         return cmd
+    return None
+
+
+# Which flags mean "the program is on the command line" depends on the
+# INTERPRETER, and only the flags BEFORE the first operand are the
+# interpreter's at all.
+#
+# A flat whitelist scanned over every argument leaked in both directions.
+# `-e`/`-E`/`-p`/`-n` are ordinary shell and Python options, so
+# `bash -e tools/install.sh` and `bash tools/install.sh -n` — where the flag
+# belongs to the FETCHED SCRIPT — became silent false cleans on exactly the
+# chain this vector catches. Meanwhile spellings the list did not carry
+# (`bash -lc`, `perl -lane`, `php -r`, `pwsh -Command`) still rendered the
+# program text as "the executed path".
+_INLINE_LETTER_FLAGS = {
+    # A single-dash cluster containing one of these letters carries the program.
+    "perl": set("ce"), "ruby": set("ce"), "node": set("ep"), "nodejs": set("ep"),
+    "php": set("r"), "python": set("c"), "python2": set("c"), "python3": set("c"),
+    "bash": set("c"), "sh": set("c"), "zsh": set("c"), "ksh": set("c"),
+}
+# Long forms, and the PowerShells, which do not use single-letter clusters.
+_INLINE_LONG_FLAGS = {
+    "--eval", "--exec", "--command", "-command", "-encodedcommand", "-c",
+}
+# Options that consume a separate VALUE which is not the program — python's
+# warning filter. Case matters: python's `-W` takes a value, perl's `-w` is a
+# boolean, and conflating them ate the script path after it.
+_INTERPRETER_VALUE_OPTS = {"-W"}
+# `-m` names a MODULE, which is not a path at all.
+_MODULE_FLAGS = {"-m"}
+
+
+def _interpreter_executed_path(cmd: str, rest: list[str]) -> str | None:
+    """The FILE this interpreter runs, or None when it runs inline text.
+
+    Only leading flags are inspected: the scan stops at the first operand,
+    because everything after it belongs to the program being run, not to the
+    interpreter.
+    """
+    letters = _INLINE_LETTER_FLAGS.get(cmd, set())
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok == "-":
+            return None                      # the program comes from stdin
+        if tok.startswith("<<"):
+            return None                      # …from a here-doc
+        if not tok.startswith("-"):
+            return tok                       # the first operand IS the file
+        low = tok.lower()
+        if low in _INLINE_LONG_FLAGS or low.startswith("--eval="):
+            return None
+        if tok in _MODULE_FLAGS:
+            return None                      # a module name is not a path
+        if tok.startswith("-") and not tok.startswith("--") and len(tok) > 1:
+            if letters & set(tok[1:]):
+                return None                  # `-c`, `-lc`, `-lane`, `-pe`, …
+        if tok in _INTERPRETER_VALUE_OPTS:
+            i += 2                           # the value is not the program
+            continue
+        i += 1
     return None
 
 
@@ -3436,18 +3487,23 @@ def _checkout_fetches(
         repository = with_block.get("repository")
         if not isinstance(repository, str) or not repository.strip():
             continue                                   # your own code
+        # The self-repository test comes FIRST. Running the expression gap
+        # ahead of it recorded a checkout of your own repo — the very spelling
+        # the clone arm was taught to recognise — as "whether it fetches a
+        # third party was NOT established", into the channel that raises the
+        # "not a clean result" banner. Two real repositories opened their
+        # reports with that warning over nothing but self-checkouts.
+        if _is_self_clone(repository, file_path) or \
+                _is_self_clone(f"github.com/{repository.strip()}", file_path):
+            continue
         if _EXPRESSION_TOKEN_RE.search(repository):
-            # `repository: ${{ env.TOOLS_REPO }}` — the finding would name a
-            # third party the scan never established, and that variable
-            # routinely holds the organisation's own repository. `ref:` and
-            # `path:` expressions already recorded gaps; this one asserted.
+            # Anything else computed at run time — the fork-PR spelling above
+            # all — really is unknowable, and the finding would name a third
+            # party the scan never established.
             if gap is not None:
                 gap(f"an `actions/checkout` takes its `repository:` from "
                     f"`{repository.strip()}`, computed at run time, so whether "
                     f"it fetches a third party was NOT established")
-            continue
-        if _is_self_clone(repository, file_path) or \
-                _is_self_clone(f"github.com/{repository.strip()}", file_path):
             continue
         ref = with_block.get("ref")
         ref = str(ref).strip() if isinstance(ref, (str, int)) else None
@@ -3548,10 +3604,21 @@ def _mutable_fetch_executions(
                 cwd = base_cwd
         if skip_step:
             continue
-        # Substitutions are collapsed BEFORE the command is split, because the
+        # A substitution is collapsed BEFORE the command is split, because the
         # split breaks on `|` and would otherwise cut `$(ls a | head)` in half
         # and read each piece as a command of its own.
-        for segment in _install_command_segments(
+        #
+        # But `$( … )` RUNS its body, so the body is then read as commands in
+        # its own right, ahead of the command that captures its output.
+        # Collapsing alone lost them: `OUT=$(tools/setup.sh)` after a mutable
+        # clone produced no finding, no gap and no suppression, while the
+        # backtick spelling of the same construct still recorded one.
+        bodies = [
+            piece
+            for match in _COMMAND_SUBSTITUTION_RE.finditer(command)
+            for piece in _install_command_segments(match.group(0)[2:-1])
+        ]
+        for segment in bodies + _install_command_segments(
                 _COMMAND_SUBSTITUTION_RE.sub("$SUBST", command)):
             pos += 1
             if not segment.strip():

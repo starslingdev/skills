@@ -4145,3 +4145,204 @@ def test_p1424_a_checkout_arm_pin_must_also_come_after_the_fetch(tmp_path):
               - run: bash tools/run.sh
     """)
     assert len(hits) == 1
+
+
+# ---------------------------------------------------------------------------
+# G4 — which flags mean "the program is on the command line" depends on the
+# INTERPRETER, and only leading flags are the interpreter's at all.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("tokens,expected", [
+    # Shell options that are NOT inline-script flags. Treating them as such
+    # made a real fetched script silently unreported — a regression.
+    (["bash", "-e", "tools/install.sh"], "tools/install.sh"),
+    (["sh", "-e", "-x", "tools/install.sh"], "tools/install.sh"),
+    (["python3", "-E", "tools/setup.py"], "tools/setup.py"),
+    # A flag AFTER the path belongs to the fetched script, not the interpreter.
+    (["bash", "tools/install.sh", "-n"], "tools/install.sh"),
+    (["bash", "tools/deploy.sh", "-p", "8080"], "tools/deploy.sh"),
+    # A flag's VALUE is not the program either.
+    (["python3", "-W", "ignore", "tools/setup.py"], "tools/setup.py"),
+])
+def test_p1424_an_interpreter_option_does_not_hide_the_script(tokens, expected):
+    """`-e`/`-E`/`-p`/`-n` are ordinary shell and Python options. Matching them
+    anywhere in the argument list — including after the path, where they belong
+    to the fetched script — turned a real chain into a silent false clean."""
+    assert scan._executed_path(tokens) == expected, tokens
+
+
+@pytest.mark.parametrize("tokens", [
+    ["bash", "-lc", "echo hi"],
+    ["sh", "-lc", "make release"],
+    ["perl", "-lane", "print $F[0]", "dump.sql"],
+    ["perl", "-nle", "print", "dump.sql"],
+    ["php", "-r", "echo 1;"],
+    ["pwsh", "-Command", "Write-Host hi"],
+    ["powershell", "-EncodedCommand", "ZQBjAGgAbwA="],
+    ["ruby", "-e", "puts 1"],
+    ["node", "-e", "console.log(1)"],
+])
+def test_p1424_an_inline_program_is_still_not_a_path(tokens):
+    """The other direction, still open: a cluster carrying `c`/`e`/`r`, or a
+    PowerShell `-Command`, puts the PROGRAM on the command line. Rendering that
+    text as "the executed path" is how `executes \\`echo hi\\` from it` reached a
+    real report."""
+    assert scan._executed_path(tokens) is None, tokens
+
+
+def test_p1424_a_shell_option_before_a_fetched_script_still_reports(tmp_path):
+    """End to end: the regression this closes was a clone at a branch followed
+    by `bash tools/install.sh -n` producing zero findings, zero gaps and zero
+    suppressions."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  bash -e tools/install.sh -n
+    """)
+    assert len(hits) == 1
+
+
+# ---------------------------------------------------------------------------
+# G5 — `$( … )` RUNS its body. Collapsing it for tokenization is right; losing
+# it entirely is not.
+# ---------------------------------------------------------------------------
+
+def test_p1424_an_execution_inside_a_substitution_is_not_lost(tmp_path):
+    """`OUT=$(tools/setup.sh)` executes the fetched script — the substitution
+    is how its output is captured, not a reason it did not run. Collapsing the
+    body before tokenizing killed the nonsense `$(ls …)` fire and took this
+    with it: zero findings, zero gaps, zero suppressions, where the backtick
+    spelling of the same construct still recorded a gap."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  OUT=$(tools/setup.sh)
+    """)
+    assert len(hits) == 1
+    assert "tools/setup.sh" in (hits[0].derived_note or "")
+
+
+def test_p1424_an_interpreter_inside_a_substitution_is_not_lost(tmp_path):
+    """The same shape with the interpreter spelled out."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  VERSION=$(python3 tools/version.py)
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_a_substitution_that_only_reads_stays_quiet(tmp_path):
+    """The control that keeps the original fix intact: `$(ls tools/x.sql)`
+    lists a path, it does not execute it, and `ls` is this code's own example
+    of what is not execution."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  MIGRATION=$(ls tools/sql/migrate.sql | head -n 1)
+    """) == []
+
+
+def test_p1424_a_checkout_of_your_own_repository_raises_no_coverage_note(
+    tmp_path,
+):
+    """The expression gap ran BEFORE the self-repository test, so a checkout of
+    your own repo — the exact spelling the clone arm was taught to recognise —
+    recorded "whether it fetches a third party was NOT established" into the
+    channel that drives the `not a clean result` banner. Two real repositories
+    open their reports with that warning over nothing but self-checkouts. It is
+    X6's crying-wolf defect, one channel over."""
+    (tmp_path / ".git").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".git" / "config").write_text(_ORIGIN_CONFIG)
+    _wf(tmp_path, "ci.yml", """\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: ${{ github.repository }}
+                  ref: main
+                  path: tools
+              - run: bash tools/run.sh
+    """)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    result = scan.scan(catalog, tmp_path)
+    assert result["findings"] == []
+    assert result["coverage_notes"] == [], result["coverage_notes"]
+
+
+def test_p1424_a_genuinely_unknowable_checkout_repository_is_still_gapped(
+    tmp_path,
+):
+    """The control: the fork-PR spelling really is unknowable — it resolves to
+    the head repository of whoever opened the pull request — so it stays a
+    disclosed gap."""
+    (tmp_path / ".git").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".git" / "config").write_text(_ORIGIN_CONFIG)
+    _wf(tmp_path, "ci.yml", """\
+        name: ci
+        on: pull_request_target
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: ${{ github.event.pull_request.head.repo.full_name }}
+                  ref: main
+                  path: tools
+              - run: bash tools/run.sh
+    """)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    result = scan.scan(catalog, tmp_path)
+    assert len(result["coverage_notes"]) == 1, result["coverage_notes"]
+
+
+def test_p1424_the_env_var_spelling_of_your_own_slug_is_not_third_party(
+    tmp_path,
+):
+    """`$GITHUB_REPOSITORY` is exactly as self-identifying as
+    `${{ github.repository }}`, which the guard already honours."""
+    (tmp_path / ".git").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".git" / "config").write_text(_ORIGIN_CONFIG)
+    wf = _wf(tmp_path, "wf.yml", """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git remote add up "https://$GITHUB_REPOSITORY"
+                  git fetch up main
+                  git checkout FETCH_HEAD
+                  bash install.sh
+    """)
+    assert list(scan._correlation_unverified_remote_code_execution(wf)) == []
