@@ -37,6 +37,56 @@ entries are dated (UTC). Format loosely follows
   actually traced, and a scan that traced none of them is unmeasured rather
   than green.
 
+- **2026-08-14** — **P14.24 stops claiming executions pip does not perform, and
+  stops going quiet without saying so.** Five edges:
+
+  - **`pip install` flag VALUES were read as executed paths.**
+    `pip install --target tools/deps requests` reported "executes
+    `tools/deps`", and `-r tools/requirements.txt` reported executing a file
+    pip only reads. Options that take a separate value are skipped now;
+    `pip install ./tools` and `-e ./tools` still report.
+  - **A remote added by name is a remote.** `git remote add upstream <url>`
+    followed by `git fetch upstream` is the same third-party fetch spelled in
+    two steps, and two characters of indirection made the arm blind to it —
+    while the catalog promised any `git`-spelled mutable fetch-and-run was
+    visible.
+  - **A pin has to come before the code runs.** Pinning is a claim about what
+    executed, but any full-40-hex pin anywhere in the job suppressed the
+    finding, so a `git checkout <sha>` written AFTER the execution hid a real
+    chain. Pins now carry their position, and every suppression is recorded.
+  - **A clone with no visible destination** is still not reported — the
+    destination is unknowable — but it is now recorded, so a job that could not
+    be read is distinguishable from a job with nothing in it.
+  - **Shell that cannot be parsed** (an unbalanced quote) abandons the rest of
+    that step and is recorded. It used to contribute nothing silently, and an
+    unreadable `cd` left the working directory stale, so every path resolved
+    after it in the step was wrong.
+
+- **2026-08-14** — **`sec.required-checks.skippable` stops passing on partial
+  evidence, and stops reding conditions that cannot be false.** Four cases
+  where the outcome said more than the scan had established:
+
+  - A **pass now requires every required check to have been traced.** It was
+    returned as soon as ONE was gated, so the ordinary shape of a mature
+    repository — a dozen required contexts, eleven of them external app checks
+    — earned a machine `pass` that counted toward `passed` and never reached
+    `unmeasured`, which meant no coverage caveat fired either.
+  - A job with **`needs:` and no condition of its own is skippable**, not
+    always-running: it is skipped whenever something it needs fails, which is
+    exactly the state GitHub reports as a passed check. The producer has to
+    carry the never-skip condition itself, which is what the fix recipe says.
+    `needs:` written as a scalar string is read now too.
+  - **Conditions that cannot be false are no longer reported as bypasses.**
+    `if: true`, `if: ${{ always() }}` (the spelling GitHub's own documentation
+    shows), `success()||failure()` written without spaces, and
+    `success() || failure() || cancelled()` all failed — a false RED against
+    repositories that had implemented the recommended fix correctly.
+    `success()` counts as never-skipping only for a job with no `needs:`,
+    since that is the only time it cannot be false.
+  - A **demonstrated bypass now outranks an unreadable producer**: a real fail
+    was being downgraded to "not judged" by a second producer whose skip walk
+    had no answer.
+
 - **2026-08-14** — **P14.24 no longer reports a repository for cloning
   ITSELF.** On a 2,920-workflow corpus this was 3 of the detector's 15 fires —
   all one repository's release workflows, cloning their own repo at the branch

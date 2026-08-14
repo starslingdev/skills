@@ -2756,6 +2756,16 @@ _INTERPRETERS = {
     "ksh", "ruby", "perl", "php", "pwsh", "powershell",
 }
 _SOURCE_CMDS = {"source", "."}
+# `pip install` options that consume a separate VALUE. Every one of these takes
+# a path or a name that pip reads or writes — never code pip executes.
+_PIP_VALUE_OPTS = {
+    "-r", "--requirement", "-t", "--target", "-c", "--constraint",
+    "-i", "--index-url", "--extra-index-url", "-f", "--find-links",
+    "--prefix", "--root", "--src", "--upgrade-strategy", "--no-binary",
+    "--only-binary", "--platform", "--python-version", "--implementation",
+    "--abi", "--cache-dir", "--log", "--proxy", "--retries", "--timeout",
+    "--exists-action", "--cert", "--client-cert", "--report", "--config-settings",
+}
 _LEADING_WRAPPERS = {"sudo", "command", "exec", "time", "nohup", "env"}
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # A whole `${{ … }}` expression. The runner substitutes it before the shell
@@ -3008,9 +3018,20 @@ def _executed_path(tokens: list[str]) -> str | None:
         args = rest[2:] if rest[:2] == ["-m", "pip"] else rest
         if "install" not in args:
             return None
+        skip_next = False
         for i, tok in enumerate(args):
+            if skip_next:
+                skip_next = False
+                continue
             if tok == "-e" and i + 1 < len(args):
-                return args[i + 1]
+                return args[i + 1]          # editable install: it runs setup.py
+            if tok in _PIP_VALUE_OPTS:
+                # A flag's VALUE is not a positional. `--target tools/deps`
+                # names a destination pip writes into and `-r reqs.txt` names a
+                # file pip READS; reporting either as "executes" asserts
+                # something pip does not do.
+                skip_next = True
+                continue
             if tok.startswith("-") or tok == "install":
                 continue
             if tok.startswith("./") or tok.startswith("../") or "/" in tok:
@@ -3177,7 +3198,13 @@ def _mutable_fetch_executions(
     """
     fetches: dict[str, _RemoteFetch] = {}
     pending_fetch_head: dict[str, _RemoteFetch] = {}
-    pinned: set[str] = set()
+    # destination -> the EARLIEST position a full-40-hex pin was applied to it.
+    # Position matters: pinning is a claim about the code that ran, and a pin
+    # applied after an execution pinned nothing that had already executed.
+    pinned: dict[str, int] = {}
+    # `git remote add <name> <url>` — a third-party fetch spelled in two steps.
+    # Without this, two characters of indirection made the whole arm blind.
+    named_remotes: dict[str, str] = {}
     # (position, line, resolved path, path as written)
     executions: list[tuple[int, int, str, str]] = []
     cwd = base_cwd
@@ -3208,15 +3235,33 @@ def _mutable_fetch_executions(
             continue
         for segment in _install_command_segments(command):
             pos += 1
+            if not segment.strip():
+                continue
             tokens = _strip_command_prefix(_shell_tokens(segment))
             if not tokens:
-                continue
+                # `shlex` refused it — an unbalanced quote, most often. The
+                # command contributes nothing, which is right, but a scanner
+                # that silently reads nothing is claiming a clean job. Worse,
+                # an unreadable `cd` leaves the working directory stale, so
+                # every path resolved after it in this step is wrong: the step
+                # is abandoned rather than half-read.
+                if gap is not None:
+                    gap(f"a command on line {line_no} could not be parsed as "
+                        f"shell, so the rest of that step was NOT scanned for "
+                        f"a mutable fetch executed out of")
+                skip_step = True
+                break
             if tokens[0] == "cd" and len(tokens) > 1 and not tokens[1].startswith("-"):
                 cwd = _resolve_path(cwd, tokens[1])
                 continue
             if tokens[0] == "git":
                 sub, gdir, args = _git_subcommand(tokens)
                 base = _resolve_path(cwd, gdir) if gdir else cwd
+                if sub == "remote" and args[:1] == ["add"]:
+                    positionals = [a for a in args[1:] if not a.startswith("-")]
+                    if len(positionals) >= 2 and _is_remote_url(positionals[1]):
+                        named_remotes[positionals[0]] = positionals[1]
+                    continue
                 if sub == "clone":
                     url, dest_written, ref = _parse_clone(args)
                     if file_path is not None and _is_self_clone(url or "",
@@ -3224,21 +3269,30 @@ def _mutable_fetch_executions(
                         continue
                     dest_written = _clone_destination(url or "", dest_written)
                     if not dest_written:
+                        # Nothing is claimed without a visible destination, but
+                        # the job then reads as a job with no fetch in it.
+                        if gap is not None:
+                            gap(f"a `git clone` on line {line_no} has no "
+                                f"visible destination directory, so whether "
+                                f"anything executes out of it was NOT checked")
                         continue
                     dest = _resolve_path(base, dest_written)
                     if ref and _FULL_SHA_RE.match(ref):
-                        pinned.add(dest)
+                        pinned.setdefault(dest, pos)
                         continue
                     fetches.setdefault(
                         dest, _RemoteFetch(line_no, _raw, dest, ref, pos))
                     continue
                 if sub == "fetch":
                     positionals = [a for a in args if not a.startswith("-")]
-                    if not positionals or not _is_remote_url(positionals[0]):
+                    if not positionals:
+                        continue
+                    if not (_is_remote_url(positionals[0])
+                            or positionals[0] in named_remotes):
                         continue
                     ref = positionals[1] if len(positionals) > 1 else None
                     if ref and _FULL_SHA_RE.match(ref):
-                        pinned.add(base)
+                        pinned.setdefault(base, pos)
                         continue
                     # A fetch alone changes no file in the tree — it becomes
                     # executable code only once something checks FETCH_HEAD
@@ -3248,7 +3302,7 @@ def _mutable_fetch_executions(
                     continue
                 if sub in ("checkout", "reset", "switch", "merge", "rebase"):
                     if any(_FULL_SHA_RE.match(a) for a in args):
-                        pinned.add(base)
+                        pinned.setdefault(base, pos)
                     if any("FETCH_HEAD" in a for a in args):
                         held = pending_fetch_head.get(base)
                         if held is not None:
@@ -3261,18 +3315,25 @@ def _mutable_fetch_executions(
 
     pairs: list[tuple[_RemoteFetch, int, str]] = []
     for dest, fetch in fetches.items():
-        if dest in pinned:
-            continue
         hit = next(
             (
-                (line, written)
+                (at, line, written)
                 for at, line, resolved, written in executions
                 if at > fetch.pos and _under(dest, resolved)
             ),
             None,
         )
-        if hit is not None:
-            pairs.append((fetch, hit[0], hit[1]))
+        if hit is None:
+            continue
+        pin_at = pinned.get(dest)
+        if pin_at is not None and pin_at < hit[0]:
+            # Pinned before it ran: the fix this entry recommends, applied.
+            if gap is not None:
+                gap(f"a fetch into `{dest}` on line {fetch.line} was pinned to "
+                    f"a full commit id before anything ran from it, so it is "
+                    f"deliberately not reported")
+            continue
+        pairs.append((fetch, hit[1], hit[2]))
     return sorted(pairs, key=lambda p: p[0].line)
 
 

@@ -2622,3 +2622,145 @@ def test_scan_without_a_repo_leaves_both_api_facts_unmeasured(tmp_path):
     assert set(score["unmeasured"]) == {
         "sec.required-checks.skippable", "sec.fork-approval.effective"}
     assert score["scored_count"] == score["applicable_count"] - 2
+
+
+# ---------------------------------------------------------------------------
+# P14.24 — what the shell reader claims to have EXECUTED, and what it admits
+# it could not read.
+# ---------------------------------------------------------------------------
+
+def test_p1424_pip_flag_values_are_not_executed_paths(tmp_path):
+    """`--target tools/deps` names a destination and `-r tools/requirements.txt`
+    names a file pip READS. Neither is code pip runs, and calling them
+    "executes" is a claim the data does not support."""
+    for command in ("pip install --target tools/deps requests",
+                    "pip install -r tools/requirements.txt"):
+        assert _remote_exec_hits(tmp_path / command[-12:], f"""\
+            name: x
+            on: push
+            jobs:
+              b:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: |
+                      git clone --branch main "$TOOLS_URL" tools
+                      {command}
+        """) == [], command
+
+
+def test_p1424_pip_install_of_the_fetched_directory_still_fires(tmp_path):
+    """The positive control: `pip install ./tools` and `pip install -e ./tools`
+    do run the fetched tree's `setup.py`."""
+    for command in ("pip install ./tools", "pip install -e ./tools"):
+        hits = _remote_exec_hits(tmp_path / command[-10:], f"""\
+            name: x
+            on: push
+            jobs:
+              b:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: |
+                      git clone --branch main "$TOOLS_URL" tools
+                      {command}
+        """)
+        assert len(hits) == 1, command
+
+
+def test_p1424_a_remote_added_by_name_is_still_a_remote(tmp_path):
+    """`git remote add upstream <url>` then `git fetch upstream` is the same
+    third-party fetch spelled in two steps. The catalog promises that a
+    `git`-spelled mutable fetch-and-run is visible, and this is one."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git remote add upstream "$TOOLS_URL"
+                  git fetch upstream main
+                  git checkout FETCH_HEAD
+                  bash install.sh
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_a_pin_applied_after_the_execution_does_not_suppress(tmp_path):
+    """Pinning is a claim about the code that RAN. A `git checkout <40-hex>`
+    after the execution pinned nothing that had already been executed, and
+    suppressing the finding on the strength of it hides a real chain."""
+    sha = "d" * 40
+    hits = _remote_exec_hits(tmp_path, f"""\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  python3 tools/setup.py
+                  git -C tools checkout {sha}
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_a_pin_before_the_execution_still_suppresses(tmp_path):
+    """The positive control for the ordering rule: a pin applied before the
+    code runs is the fix this entry recommends, and must stay silent."""
+    sha = "e" * 40
+    assert _remote_exec_hits(tmp_path, f"""\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone "$TOOLS_URL" tools
+                  git -C tools checkout {sha}
+                  python3 tools/setup.py
+    """) == []
+
+
+def test_p1424_an_invisible_clone_destination_is_recorded_as_a_gap(tmp_path):
+    """`git clone "$TOOLS_URL"` with no target directory is correctly not
+    reported — the destination is unknowable — but the job then reads as a job
+    with no fetch in it at all. The reader has to be told the difference."""
+    before = len(scan._DROPPED_MATCHES)
+    _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone "$TOOLS_URL"
+                  python3 tools/setup.py
+    """)
+    added = scan._DROPPED_MATCHES[before:]
+    assert any("destination" in d["reason"] for d in added), added
+
+
+def test_p1424_shell_that_cannot_be_parsed_is_recorded_as_a_gap(tmp_path):
+    """An unbalanced quote makes a command unreadable. Contributing nothing is
+    the right verdict and a false clean if nobody says so — and a `cd` that
+    could not be read leaves the working directory stale for every path
+    resolved after it, so the rest of the step is not trustworthy either."""
+    before = len(scan._DROPPED_MATCHES)
+    _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  cd "unbalanced
+                  git clone --branch main "$TOOLS_URL" tools
+                  python3 tools/setup.py
+    """)
+    added = scan._DROPPED_MATCHES[before:]
+    assert any("could not be parsed" in d["reason"] for d in added), added
