@@ -51,6 +51,8 @@ _EXPECTED_FACTS = frozenset({
     "sec.trigger.fork-code-uncleared",
     "sec.secrets.no-blanket-inherit",
     "sec.checkout.credentials-scoped",
+    "sec.required-checks.skippable",
+    "sec.fork-approval.effective",
 })
 
 

@@ -14,7 +14,7 @@ of ci-score's check ids. The one near-collision the review found is handled by
 construction: ci-score's `ci.security.scoped-id-token` owns `id-token:` scoping,
 so the per-job-scoping fact here covers permissions OTHER than `id-token` only.
 
-THE SIX FACTS
+THE EIGHT FACTS
 
   F1 sec.permissions.workflow-declares    every workflow declares `permissions:`
                                           (top level, or on every job)
@@ -30,6 +30,16 @@ THE SIX FACTS
   F6 sec.checkout.credentials-scoped      on untrusted-trigger workflows, every
                                           checkout sets persist-credentials:
                                           false
+  F7 sec.required-checks.skippable        every required status check is
+                                          produced by a job that always runs
+                                          (API-gated)
+  F8 sec.fork-approval.effective          fork-PR CI approval gates more than
+                                          accounts new to GitHub (API-gated)
+
+F7 and F8 read the GitHub API, not workflow YAML, so they are TOKEN-GATED: no
+repo or no token means UNMEASURED with the reason stated — the same contract
+the impostor-SHA vector keeps. They are never a pass for being unreadable and
+never a fail for it either.
 
 F4 replaces "has a dangerous trigger", which is true of 84% of the repos
 measured during development and so discriminates nobody. The tiering is deliberate and keeps the
@@ -41,11 +51,13 @@ this number. P14.9's own docstring reserves the middle tier for exactly this
 fact ("the bare trigger without the head checkout ... belongs to the scored
 config checks").
 
-WHAT IS NEVER A SILENT PASS. Facts F1/F2/F4/F5/F6 are universal claims over
+WHAT IS NEVER A SILENT PASS. Facts F1/F2/F4/F5/F6/F7 are universal claims
+over
 every workflow file, so ANY unscannable workflow (`scan_incomplete`) forces
 them to UNMEASURED — no pass, no fail, a stated reason, and they stay in the
 applicable count as a visible coverage gap (the same shape ci-speedup's
-speed_score uses). F3 reads repo files, not workflow YAML, and is unaffected.
+speed_score uses). F3 reads repo files and F8 a repository setting, not
+workflow YAML, and neither is affected.
 
 THE REGISTERED SCORE — MACHINE-ONLY. This aggregate is NEVER rendered in the
 report (report.py prohibits it and tests/verify_report.py fails a report that
@@ -58,6 +70,7 @@ without reading this source.
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -98,6 +111,14 @@ def _scan() -> ModuleType:
                 sys.modules[n] = mod
             else:
                 sys.modules.pop(n, None)
+
+
+def _gh_utils() -> ModuleType:
+    """This skill's `gh_utils`, loaded by location for the same reason `_scan`
+    is: the module name collides across the skills in this repository."""
+    here = Path(__file__).resolve().parent
+    return _load_sibling("gh_utils", here / "gh_utils.py")
+
 
 
 # --- CODEOWNERS (F3) ---------------------------------------------------------
@@ -492,14 +513,311 @@ def _unpersisted_checkout_violations(doc: dict) -> list[str]:
     return out
 
 
+# --- F7: required checks that a job can skip ---------------------------------
+#
+# GitHub counts a SKIPPED required status check as a PASS. So a required check
+# produced only by a job that carries an `if:` condition is not a gate at all:
+# a pull request that fails to satisfy the condition merges with the check
+# green and the suite never run. This repository shipped that bypass and closed
+# it with the always-running verdict-job pattern, which is the fix recipe.
+#
+# TOKEN-GATED, like the impostor-SHA vector. Which checks a branch requires is
+# an API question, not a YAML one, so with no repo, no token, or a failed call
+# this fact is UNMEASURED with the reason stated — never a pass for being
+# unreadable, and never a fail for it either.
+
+# A condition that cannot skip the job. `always()` runs it in every state;
+# `!cancelled()` runs it unless the run was cancelled. Both keep the check
+# reporting, which is the property this fact is about.
+_ALWAYS_RUNS_RE = re.compile(r"always\s*\(\s*\)|!\s*cancelled\s*\(\s*\)")
+_EXPRESSION_RE = re.compile(r"\$\{\{")
+
+
+def _condition_text(job: dict) -> str | None:
+    cond = job.get("if")
+    if cond is None or isinstance(cond, (dict, list)):
+        return None
+    text = " ".join(str(cond).split())
+    return text or None
+
+
+def _needs_of(job: dict) -> list[str]:
+    needs = job.get("needs")
+    if isinstance(needs, str):
+        return [needs]
+    if isinstance(needs, list):
+        return [str(n) for n in needs if isinstance(n, (str, int))]
+    return []
+
+
+def _skip_path(jobs: dict[str, dict], key: str,
+               seen: frozenset[str] = frozenset()) -> str | None:
+    """Why this job can be skipped, or None if it always runs.
+
+    Two ways a job skips: its own `if:` evaluates false, or a job it `needs:`
+    skips (GitHub skips the dependents). Both report the check as skipped, and
+    a skipped required check is green — so both are the same defect here.
+
+    An `always()` / `!cancelled()` condition stops the walk in BOTH directions:
+    such a job runs whatever its dependencies did, which is exactly what makes
+    the verdict-job pattern work. Recursion is cycle-guarded (`seen`) because a
+    malformed `needs:` cycle must not hang the scan.
+    """
+    if key in seen or key not in jobs:
+        return None
+    job = jobs[key]
+    condition = _condition_text(job)
+    if condition and _ALWAYS_RUNS_RE.search(condition):
+        return None
+    if condition:
+        return f"`{key}` carries `if: {condition}`"
+    for need in _needs_of(job):
+        upstream = _skip_path(jobs, need, seen | {key})
+        if upstream:
+            return f"`{key}` needs `{need}`, and {upstream}"
+    return None
+
+
+def _display_name(key: str, job: dict) -> str:
+    name = job.get("name")
+    return " ".join(str(name).split()) if isinstance(name, str) and name.strip() else key
+
+
+def _context_producers(
+    docs: list[tuple[str, dict]], context: str,
+) -> list[tuple[str, str, dict, dict[str, dict]]]:
+    """(workflow, job key, job, sibling jobs) for every job that could report
+    `context` as a status check.
+
+    A check context is the job's DISPLAY name — its `name:` if it has one, else
+    its key — and a matrix job expands to `name (value, value)`. Both spellings
+    are matched; a display name built from an expression (`name: test ${{ … }}`)
+    is not matched at all, because what it renders to is not knowable here.
+    """
+    out = []
+    for rel, doc in docs:
+        jobs = {k: j for k, j in _jobs(doc)}
+        for key, job in jobs.items():
+            shown = _display_name(key, job)
+            if _EXPRESSION_RE.search(shown):
+                continue
+            if context == shown or context.startswith(shown + " ("):
+                out.append((rel, key, job, jobs))
+    return out
+
+
+def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:
+    """(contexts, detail) from the GitHub API, or (None, reason).
+
+    Two sources, unioned, because either can be the one a repository uses and
+    reading only one would report a protected branch as unprotected: the
+    rulesets endpoint (readable with repo read access) and the classic branch
+    protection endpoint (admin-only — a 403 there is expected and is not an
+    error when the rulesets call succeeded).
+    """
+    gh = _gh_utils()
+    if not gh.check_prereqs():
+        return None, "gh is unavailable or not authenticated (run gh auth login)"
+    try:
+        branch = json.loads(gh.run_gh_api(f"repos/{repo}")).get("default_branch")
+    except Exception as exc:                                   # noqa: BLE001
+        return None, f"the repository's default branch could not be read ({exc})"
+    if not branch:
+        return None, "the repository reported no default branch"
+
+    contexts: set[str] = set()
+    reached = False
+    try:
+        rules = json.loads(gh.run_gh_api(f"repos/{repo}/rules/branches/{branch}"))
+        reached = True
+        for rule in rules if isinstance(rules, list) else []:
+            if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
+                continue
+            params = rule.get("parameters") or {}
+            for check in params.get("required_status_checks") or []:
+                if isinstance(check, dict) and check.get("context"):
+                    contexts.add(str(check["context"]))
+    except Exception as exc:                                   # noqa: BLE001
+        logger_detail = str(exc)
+    else:
+        logger_detail = ""
+    try:
+        classic = json.loads(gh.run_gh_api(
+            f"repos/{repo}/branches/{branch}/protection/required_status_checks",
+            quiet_not_found=True))
+        reached = True
+        for context in classic.get("contexts") or []:
+            contexts.add(str(context))
+        for check in classic.get("checks") or []:
+            if isinstance(check, dict) and check.get("context"):
+                contexts.add(str(check["context"]))
+    except Exception as exc:                                   # noqa: BLE001
+        # Admin-only endpoint: a 403/404 here is ordinary. It only matters when
+        # the rulesets call did not land either — then nothing was read and the
+        # fact must say so rather than reporting "no required checks".
+        if not reached:
+            return None, (
+                f"branch protection for `{branch}` could not be read "
+                f"({logger_detail or exc})")
+    return sorted(contexts), f"branch `{branch}`"
+
+
+def _required_checks_skippable(
+    docs: list[tuple[str, dict]],
+    repo: str | None,
+    fetcher,
+) -> tuple[str, str]:
+    """(outcome, evidence) for `sec.required-checks.skippable`."""
+    if not repo:
+        return "unmeasured", (
+            "unmeasured: which status checks the branch requires is an API "
+            "fact, and no repository was supplied to read it from (pass "
+            "--repo owner/name)")
+    try:
+        contexts, detail = fetcher(repo)
+    except Exception as exc:                                   # noqa: BLE001
+        return "unmeasured", (f"unmeasured: branch protection could not be "
+                              f"read ({exc})")
+    if contexts is None:
+        return "unmeasured", f"unmeasured: {detail}"
+    if not contexts:
+        return "pass", (
+            f"{detail} requires no status check, so no required check can be "
+            "bypassed by a skipped job (whether the branch SHOULD require one "
+            "is a different question, not this fact's)")
+
+    bypassable: list[str] = []
+    unproduced: list[str] = []
+    for context in contexts:
+        producers = _context_producers(docs, context)
+        if not producers:
+            unproduced.append(context)
+            continue
+        skips = []
+        for rel, key, _job, jobs in producers:
+            reason = _skip_path(jobs, key)
+            if reason is None:
+                skips = []
+                break
+            skips.append(f"`{context}` ← {rel}: {reason}")
+        bypassable.extend(skips[:1])
+
+    external = (
+        (" Required context(s) produced by no workflow job — external app "
+         "checks, or stale entries — were not judged: "
+         + _capped(unproduced, 4, ", ") + ".") if unproduced else "")
+    if bypassable:
+        return "fail", (
+            "a skipped job reports its required check as PASSED, so "
+            + _capped(bypassable, 3)
+            + " — the check is satisfiable without the job ever running."
+            + external)
+    return "pass", (
+        f"every required check on {detail} is produced by a job that always "
+        "runs." + external)
+
+
+# --- F8: fork-PR CI approval that gates nobody real --------------------------
+#
+# GitHub's fork-PR approval policy decides whose pull request can start
+# workflows without a maintainer approving the run. The API's documented enum
+# (verified against `repos/{owner}/{repo}/actions/permissions/
+# fork-pr-contributor-approval`, and against a live repository's response):
+#
+#   first_time_contributors_new_to_github  approval only for accounts NEW TO
+#                                          GITHUB  -> the weakest tier
+#   first_time_contributors                approval for anyone who has not
+#                                          contributed to THIS repo (default)
+#   all_external_contributors              approval for every outside account
+#
+# Only the weakest tier fails. Requiring approval from first-time contributors
+# to the repo is a legitimate trust judgment — a maintainer who chose it is not
+# misconfigured — and this fact never dings it. What it does ding is a gate
+# that is on while gating nobody real: an attacker registers an account, lets
+# it age, and runs workflows on the repository unapproved.
+#
+# HONEST ABOUT THE STAKES: this is hygiene, not an exploit chain. A fork PR's
+# workflows still get a read-only token and no secrets, so the risk is compute
+# abuse under the repository's name and quiet iteration — an attacker probing
+# the CI surface, or mining on it, without a maintainer ever seeing a run
+# waiting for approval. It is not a path to your secrets or your write token.
+#
+# A value outside the enum is a future GitHub setting, and this fact says so
+# rather than inventing a verdict for it.
+_FORK_APPROVAL_FAIL = {"first_time_contributors_new_to_github"}
+_FORK_APPROVAL_PASS = {"first_time_contributors", "all_external_contributors"}
+
+
+def _fork_approval_via_gh(repo: str) -> tuple[str | None, str]:
+    """(approval_policy, detail) from the API, or (None, reason)."""
+    gh = _gh_utils()
+    if not gh.check_prereqs():
+        return None, "gh is unavailable or not authenticated (run gh auth login)"
+    try:
+        body = json.loads(gh.run_gh_api(
+            f"repos/{repo}/actions/permissions/fork-pr-contributor-approval",
+            quiet_not_found=True))
+    except Exception as exc:                                   # noqa: BLE001
+        return None, f"the fork-PR approval policy could not be read ({exc})"
+    policy = body.get("approval_policy") if isinstance(body, dict) else None
+    if not policy:
+        return None, ("the fork-PR approval endpoint returned no "
+                      "`approval_policy` value")
+    return str(policy), "the repository's Actions settings"
+
+
+def _fork_approval_effective(repo: str | None, fetcher) -> tuple[str, str]:
+    """(outcome, evidence) for `sec.fork-approval.effective`."""
+    if not repo:
+        return "unmeasured", (
+            "unmeasured: the fork-PR approval policy is a repository setting "
+            "read over the API, and no repository was supplied to read it "
+            "from (pass --repo owner/name)")
+    try:
+        policy, detail = fetcher(repo)
+    except Exception as exc:                                   # noqa: BLE001
+        return "unmeasured", (f"unmeasured: the fork-PR approval policy could "
+                              f"not be read ({exc})")
+    if policy is None:
+        return "unmeasured", f"unmeasured: {detail}"
+    if policy in _FORK_APPROVAL_FAIL:
+        return "fail", (
+            f"{detail} set fork-PR workflow approval to "
+            f"`{policy}` — approval is required only from accounts new to "
+            "GITHUB, so any outside account old enough runs this repository's "
+            "workflows with no maintainer approval. Fork runs still carry no "
+            "secrets and a read-only token; what an unapproved run buys an "
+            "attacker is compute under your repository's name and quiet "
+            "iteration against your CI surface")
+    if policy in _FORK_APPROVAL_PASS:
+        return "pass", (
+            f"fork-PR workflow approval is `{policy}`, which gates outside "
+            "accounts that have not contributed here before")
+    return "unmeasured", (
+        f"unmeasured: `{policy}` is not a value this check's enum recognises "
+        "(GitHub documents `first_time_contributors_new_to_github`, "
+        "`first_time_contributors`, `all_external_contributors`), so whether "
+        "it gates anyone is not something this scan can say")
+
+
 # --- the fact table -----------------------------------------------------------
 
 def compute_config_facts(
     root: Path,
     workflow_files: list[Path],
     scan_incomplete: list[dict[str, str]],
+    repo: str | None = None,
+    required_contexts_fetcher: Any = None,
+    fork_approval_fetcher: Any = None,
 ) -> dict[str, Any]:
-    """Every fact, every time — pass/fail/unmeasured, never silently absent."""
+    """Every fact, every time — pass/fail/unmeasured, never silently absent.
+
+    ``repo`` (``owner/name``) enables the one fact that needs the API. It is
+    optional, and its absence is disclosed as UNMEASURED rather than skipped —
+    a fact that quietly vanishes from the table is a silent pass.
+    ``required_contexts_fetcher`` is the seam the tests inject a recorded
+    response through; nothing in the suite touches the network.
+    """
     scan = _scan()
 
     docs: list[tuple[str, dict]] = []
@@ -604,6 +922,23 @@ def compute_config_facts(
         jobs = _unpersisted_checkout_violations(doc)
         if jobs:
             persist.append(f"{rel}: job(s) {_capped(jobs, 3, ', ')}")
+    rc_outcome, rc_evidence = _required_checks_skippable(
+        docs, repo, required_contexts_fetcher or _required_contexts_via_gh)
+    add("sec.required-checks.skippable",
+        "every required status check is produced by a job that always runs "
+        "(GitHub counts a SKIPPED required check as a pass, so a check only a "
+        "conditional job reports can be satisfied without running)",
+        True, rc_outcome == "pass", rc_evidence, outcome=rc_outcome)
+
+    fa_outcome, fa_evidence = _fork_approval_effective(
+        repo, fork_approval_fetcher or _fork_approval_via_gh)
+    add("sec.fork-approval.effective",
+        "fork-PR workflow approval gates more than accounts new to GitHub "
+        "(the weakest setting lets any aged outside account start CI "
+        "unapproved; requiring approval from first-time contributors to this "
+        "repo passes)",
+        False, fa_outcome == "pass", fa_evidence, outcome=fa_outcome)
+
     add("sec.checkout.credentials-scoped",
         "on untrusted-trigger workflows, every checkout sets "
         "persist-credentials: false (GitHub's default persists the token into "

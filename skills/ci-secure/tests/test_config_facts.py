@@ -105,11 +105,29 @@ def _outcome(result, fact_id):
 
 def test_a_well_configured_repo_passes_every_fact(tmp_path):
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
-    out = cf.compute_config_facts(root, files, [])
+    # `sec.required-checks.skippable` reads branch protection, so the repo and
+    # a recorded API response are supplied here; without them it is UNMEASURED
+    # (asserted separately below), never a pass.
+    out = cf.compute_config_facts(
+        root, files, [], repo="owner/repo",
+        required_contexts_fetcher=lambda repo: ([], "branch `main`"),
+        fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
     assert out["score"] == 100.0
-    assert out["passed"] == out["scored_count"] == 6
+    assert out["passed"] == out["scored_count"] == 8
     for f in out["facts"]:
         assert f["outcome"] == "pass", f"{f['fact_id']} failed: {f['evidence']}"
+
+
+def test_the_api_gated_facts_are_the_only_unmeasured_ones_offline(tmp_path):
+    """Offline, the six YAML/file facts still resolve and the two API-gated
+    ones disclose that they did not — a scan with no token is a smaller
+    measurement, not a cleaner repo."""
+    root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
+    out = cf.compute_config_facts(root, files, [])
+    assert sorted(out["unmeasured"]) == ["sec.fork-approval.effective",
+                                         "sec.required-checks.skippable"]
+    assert out["scored_count"] == 6 and out["applicable_count"] == 8
+    assert "COVERAGE GAP" in out["caveat"]
 
 
 # --- F1 / F2: permissions ----------------------------------------------------
@@ -512,8 +530,9 @@ def test_codeowners_undecodable_file_is_unmeasured_not_a_fail(tmp_path):
     assert f["outcome"] == "unmeasured", f
     assert "unmeasured" in f["evidence"], f
     assert "sec.codeowners.workflows" in out["unmeasured"]
-    # ...and it is a coverage gap, not a silent 5/6.
-    assert out["scored_count"] == 5 and out["applicable_count"] == 6
+    # ...and it is a coverage gap, not a silent pass. `applicable_count` is 7
+    # (both API-gated facts are unmeasured offline too).
+    assert out["scored_count"] == 5 and out["applicable_count"] == 8
     assert "COVERAGE GAP" in out["caveat"]
 
 
@@ -651,6 +670,11 @@ def test_unscannable_workflow_forces_workflow_facts_to_unmeasured(tmp_path):
     for f in out["facts"]:
         if f["fact_id"] == "sec.codeowners.workflows":
             assert f["outcome"] == "pass"
+        elif f["fact_id"] == "sec.fork-approval.effective":
+            # Reads a repository SETTING, not workflow YAML — an unparsable
+            # workflow says nothing about it. Unmeasured here only because
+            # this call passes no repo.
+            assert f["outcome"] == "unmeasured"
         else:
             assert f["outcome"] == "unmeasured", (
                 f"{f['fact_id']} resolved despite an unscanned workflow — "
@@ -658,7 +682,7 @@ def test_unscannable_workflow_forces_workflow_facts_to_unmeasured(tmp_path):
             )
             assert "broken.yml" in f["evidence"]
     assert out["scored_count"] == 1
-    assert out["applicable_count"] == 6
+    assert out["applicable_count"] == 8
     assert "COVERAGE GAP" in out["caveat"]
     # The ratio must be over RESOLVED facts only. If unmeasured facts leaked
     # into the numerator, 5 unmeasured + 1 pass over scored=1 would read 600 —
@@ -685,10 +709,13 @@ def test_score_is_the_registered_ratio_with_no_weights(tmp_path):
         "ci.yml": _SAFE_WF,
         "bad.yml": "on: [push]\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
                    "    steps: [{run: make}]\n"})
-    out = cf.compute_config_facts(root, files, [])
-    # bad.yml fails exactly one fact (permissions-declares); 5/6 pass.
-    assert out["passed"] == 5 and out["scored_count"] == 6
-    assert out["score"] == pytest.approx(round(100 * 5 / 6, 1))
+    out = cf.compute_config_facts(
+        root, files, [], repo="owner/repo",
+        required_contexts_fetcher=lambda repo: ([], "branch `main`"),
+        fork_approval_fetcher=lambda repo: ("first_time_contributors", "x"))
+    # bad.yml fails exactly one fact (permissions-declares); 7/8 pass.
+    assert out["passed"] == 7 and out["scored_count"] == 8
+    assert out["score"] == pytest.approx(round(100 * 7 / 8, 1))
     assert out["registered"]
     assert "no weights" in out["constants"]["rule"]
 
@@ -874,3 +901,277 @@ def test_capped_boundaries_at_exactly_the_cap_and_one_over():
     assert cf._capped(["a", "b", "c", "d"], 3, ", ") == "a, b, c — and 1 more"
     assert cf._capped(["a", "b"], 3, ", ") == "a, b"
     assert cf._capped([], 3, ", ") == ""
+
+
+# --- F7: sec.required-checks.skippable ---------------------------------------
+#
+# A required status check whose only producer can skip is not a gate: GitHub
+# counts a SKIPPED check as passing, so a PR that avoids the producing job's
+# `if:` condition merges with the check green and the suite never run. This
+# repository shipped exactly that bypass (#49) and closed it with the
+# always-running verdict-job pattern, which is this fact's pass shape.
+#
+# The fact needs branch protection, which is an API question, so it is
+# TOKEN-GATED like the impostor-SHA vector: with no repo or no token it is
+# UNMEASURED with a stated reason — never a pass, never a fail for being
+# unmeasurable. Tests stub the fetcher; nothing here touches the network.
+
+_FACT = "sec.required-checks.skippable"
+
+_CONDITIONAL_ONLY = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test-self:
+    name: test
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: pytest -v
+"""
+
+_VERDICT_PATTERN = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test-self:
+    name: test (self-hosted)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: pytest -v
+  test-fork:
+    name: test (fork)
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: pytest -v
+  verdict:
+    name: test
+    needs: [test-self, test-fork]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "assert the suite that should have run passed"
+"""
+
+
+def _fetcher(contexts, detail="branch `main` protection"):
+    def fetch(repo):
+        return list(contexts), detail
+    return fetch
+
+
+def _facts_with(tmp_path, workflows, contexts, **kw):
+    root, files = _repo(tmp_path, workflows)
+    return cf.compute_config_facts(
+        root, files, kw.pop("scan_incomplete", []),
+        repo="owner/repo", required_contexts_fetcher=_fetcher(contexts),
+        fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"),
+        **kw)
+
+
+def test_required_check_produced_only_by_a_conditional_job_fails(tmp_path):
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": _CONDITIONAL_ONLY}, ["test"]),
+                 _FACT)
+    assert f["outcome"] == "fail"
+    # Evidence names the required context, the workflow/job, and the condition.
+    assert "test" in f["evidence"]
+    assert "ci.yml" in f["evidence"]
+    assert "test-self" in f["evidence"]
+    assert "head.repo.full_name" in f["evidence"]
+
+
+def test_the_always_running_verdict_job_passes(tmp_path):
+    """The #49 fix shape: two mutually-exclusive suite jobs, and one
+    always-running job that carries the required check name."""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN}, ["test"]),
+                 _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_matrix_expanded_context_maps_to_its_job(tmp_path):
+    """Branch protection records `test (3.12)` for a matrix job named `test`."""
+    f = _outcome(
+        _facts_with(tmp_path, {"ci.yml": _CONDITIONAL_ONLY}, ["test (3.12)"]),
+        _FACT)
+    assert f["outcome"] == "fail"
+    assert "test (3.12)" in f["evidence"]
+
+
+def test_a_check_skippable_through_its_needs_chain_fails(tmp_path):
+    """A job with no `if:` of its own still skips when a job it `needs:`
+    skips — and a skipped required check is a pass to GitHub."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: make
+  test:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
+    assert f["outcome"] == "fail"
+    assert "build" in f["evidence"]
+
+
+def test_an_unmapped_required_context_is_disclosed_not_failed(tmp_path):
+    """A required context no workflow job produces is usually an external app
+    check (coverage, a deploy preview). The scanner cannot see those, so it
+    says so instead of failing a repo over what it cannot read."""
+    f = _outcome(
+        _facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN},
+                    ["test", "codecov/project"]),
+        _FACT)
+    assert f["outcome"] == "pass"
+    assert "codecov/project" in f["evidence"]
+
+
+def test_no_required_checks_configured_says_so(tmp_path):
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": _CONDITIONAL_ONLY}, []), _FACT)
+    assert f["outcome"] == "pass"
+    assert "requires no status check" in f["evidence"].lower()
+
+
+def test_without_a_repo_the_fact_is_unmeasured_never_a_pass(tmp_path):
+    root, files = _repo(tmp_path, {"ci.yml": _CONDITIONAL_ONLY})
+    f = _outcome(cf.compute_config_facts(root, files, []), _FACT)
+    assert f["outcome"] == "unmeasured"
+    assert "unmeasured" in f["evidence"].lower()
+
+
+def test_an_api_failure_is_unmeasured_with_the_reason(tmp_path):
+    def failing(repo):
+        return None, "gh is not authenticated (run gh auth login)"
+    root, files = _repo(tmp_path, {"ci.yml": _CONDITIONAL_ONLY})
+    out = cf.compute_config_facts(
+        root, files, [], repo="owner/repo",
+        required_contexts_fetcher=failing,
+        fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
+    f = _outcome(out, _FACT)
+    assert f["outcome"] == "unmeasured"
+    assert "gh is not authenticated" in f["evidence"]
+    # An unmeasured fact scores nothing and stays visible in the denominator.
+    assert _FACT in out["unmeasured"]
+    assert out["applicable_count"] == out["scored_count"] + 1
+
+
+def test_a_scan_gap_forces_the_fact_unmeasured(tmp_path):
+    """The claim is over every workflow: a file that would not parse could be
+    the one carrying the always-running producer."""
+    out = _facts_with(tmp_path, {"ci.yml": _CONDITIONAL_ONLY}, ["test"],
+                      scan_incomplete=[{"workflow_file": "broken.yml"}])
+    assert _outcome(out, _FACT)["outcome"] == "unmeasured"
+
+
+def test_the_fact_table_carries_both_api_gated_facts(tmp_path):
+    out = _facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN}, ["test"])
+    assert out["applicable_count"] == 8
+    assert out["scored_count"] == 8
+
+
+# --- F8: sec.fork-approval.effective -----------------------------------------
+#
+# GitHub's fork-PR approval policy decides whose pull request can start CI
+# without a maintainer clicking "approve". Its weakest setting requires
+# approval only from accounts NEW TO GITHUB, so any attacker with an aged
+# throwaway account runs workflows on the repository unapproved — the gate is
+# on and gates nobody real. The middle setting (first-time contributors to
+# this repo, GitHub's default) is a legitimate trust judgment and PASSES; so
+# does the strictest. Only the weakest tier fails.
+#
+# Verified against the API's documented enum, not guessed:
+# first_time_contributors_new_to_github | first_time_contributors |
+# all_external_contributors.
+#
+# Token-gated like the required-checks fact: no API access is disclosed, never
+# green and never red.
+
+_FORK_FACT = "sec.fork-approval.effective"
+
+
+def _fork_facts(tmp_path, policy, detail="repository Actions settings"):
+    root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
+    return cf.compute_config_facts(
+        root, files, [], repo="owner/repo",
+        required_contexts_fetcher=lambda repo: ([], "branch `main`"),
+        fork_approval_fetcher=lambda repo: (policy, detail))
+
+
+def test_approval_only_for_accounts_new_to_github_fails(tmp_path):
+    f = _outcome(_fork_facts(tmp_path, "first_time_contributors_new_to_github"),
+                 _FORK_FACT)
+    assert f["outcome"] == "fail"
+    assert "first_time_contributors_new_to_github" in f["evidence"]
+
+
+def test_first_time_contributors_is_a_legitimate_judgment_and_passes(tmp_path):
+    f = _outcome(_fork_facts(tmp_path, "first_time_contributors"), _FORK_FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_all_external_contributors_passes(tmp_path):
+    f = _outcome(_fork_facts(tmp_path, "all_external_contributors"), _FORK_FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_an_unrecognized_policy_value_is_disclosed_not_judged(tmp_path):
+    """A value this detector's enum does not know is a future GitHub setting,
+    not a verdict — calling it a pass or a fail would be inventing one."""
+    f = _outcome(_fork_facts(tmp_path, "some_future_policy"), _FORK_FACT)
+    assert f["outcome"] == "unmeasured"
+    assert "some_future_policy" in f["evidence"]
+
+
+def test_fork_approval_without_a_repo_is_unmeasured(tmp_path):
+    root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
+    f = _outcome(cf.compute_config_facts(root, files, []), _FORK_FACT)
+    assert f["outcome"] == "unmeasured"
+
+
+def test_fork_approval_api_failure_is_unmeasured_with_the_reason(tmp_path):
+    root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
+    out = cf.compute_config_facts(
+        root, files, [], repo="owner/repo",
+        fork_approval_fetcher=lambda repo: (None, "gh is not authenticated"))
+    f = _outcome(out, _FORK_FACT)
+    assert f["outcome"] == "unmeasured"
+    assert "gh is not authenticated" in f["evidence"]
+
+
+def test_a_scan_gap_does_not_unmeasure_the_fork_approval_fact(tmp_path):
+    """It reads a repository setting, not workflow YAML — an unparsable
+    workflow says nothing about it (the CODEOWNERS fact behaves the same)."""
+    root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
+    out = cf.compute_config_facts(
+        root, files, [{"workflow_file": "broken.yml"}], repo="owner/repo",
+        fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
+    assert _outcome(out, _FORK_FACT)["outcome"] == "pass"
+
+
+def test_the_fact_table_carries_eight_facts(tmp_path):
+    out = _fork_facts(tmp_path, "all_external_contributors")
+    assert out["applicable_count"] == 8
+    assert out["scored_count"] == 8

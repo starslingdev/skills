@@ -1688,7 +1688,7 @@ def _security_score_block(security_score: dict[str, Any] | None) -> str:
     vector rows, so a reader saw a grade that appeared to disagree with the
     scan. The two measure different things. Findings are open doors; these
     facts are armor. A single blended number labelled "Security score"
-    overclaims what six config observations can say, and quantification is
+    overclaims what a handful of config observations can say, and quantification is
     deferred to ci-advisor, where the blend context carries the denominators.
 
     This exact back-and-forth has already happened once in the other

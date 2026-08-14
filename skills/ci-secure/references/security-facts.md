@@ -1,6 +1,6 @@
 # The security config facts — machine-only inputs, and why each is disjoint from ci-score
 
-ci-secure computes six deterministic, pass/fail configuration facts as
+ci-secure computes eight deterministic, pass/fail configuration facts as
 MACHINE-ONLY inputs for a future blended score (the ci-advisor door, not yet
 public). They are aggregated `100 × passed / scored` with no weights and no
 partial credit (registered 2026-08-03) — but **that aggregate is never a number
@@ -11,17 +11,18 @@ vector detectors are lexical rather than confirmed exploit proofs, and a public
 number must not grade a stranger's repo down on an unconfirmed match.
 
 **The aggregate is machine-only.** ci-secure's own report and close render
-these six facts as a pass/fail table and **no number** by design: a hygiene
-aggregate labelled "Security score" overclaims what six config observations can
-say, and printed beside a ten-vector scan it read as a contradiction. The
+these facts as a pass/fail table and **no number** by design: a hygiene
+aggregate labelled "Security score" overclaims what eight config observations
+can say, and printed beside a ten-vector scan it read as a contradiction. The
 `security_score` block in the findings JSON keeps its shape — same keys, same `fact_id`s, same outcomes, same aggregate; only prose the
 report prints was reworded so it stops naming a score the reader never sees.
 Consumers bind to the ids, not to the sentences. ci-advisor blends from that
 block, and quantification belongs there, where the blend context carries the
 denominators.
 
-A fact that cannot be measured (an unscannable workflow file) is **unmeasured,
-never a silent pass**: it scores nothing, stays in the applicable count as a
+A fact that cannot be measured — an unscannable workflow file, or, for the two
+API-gated facts, no repository and no token — is **unmeasured, never a silent
+pass**: it scores nothing, stays in the applicable count as a
 named coverage gap, and the block says so.
 
 ## The disjointness census
@@ -40,6 +41,8 @@ instead of shipping.
 | `sec.codeowners.workflows` | — none | CODEOWNERS is not workflow YAML; no ci-score check reads it. |
 | `sec.trigger.fork-code-uncleared` | `ci.trigger.*` (concurrency, cancel, path-filter) | Those checks read `concurrency:` and `paths:` blocks; this fact reads the trigger list plus checkout `ref:`/`repository:` values. No shared YAML key. Also tiered against ci-secure's own P14.9 finding: a bare untrusted trigger passes (the true-of-84% defect, deliberately removed), trigger + attacker-head checkout fails this FACT, and only the full trigger + checkout + execution chain is the P14.9 finding — so the fact and the finding cannot fire on the same edit either. |
 | `sec.secrets.no-blanket-inherit` | — none | No ci-score check reads `secrets:` on reusable-workflow calls. |
+| `sec.required-checks.skippable` | — none | Branch protection is not workflow YAML; no ci-score check reads the API. The workflow-side edit this fact asks for (add an always-running verdict job that `needs:` the conditional ones) touches no key any ci-score check reads. |
+| `sec.fork-approval.effective` | — none | A repository Actions setting, not workflow YAML at all; no ci-score check reads it, and no YAML edit can move it. |
 | `sec.checkout.credentials-scoped` | `ci.checkout.shallow-clone` | Both read checkout steps, but different keys: `fetch-depth` there, `persist-credentials` here — two `with:` entries, two edits. This fact also applies only on untrusted-trigger workflows (excluding the payload-less `fork`/`watch` notification events); shallow-clone applies on PR-gating ones. |
 
 **Residual correlation, disclosed:** a repo with careless
@@ -68,6 +71,23 @@ two moved numbers.
 - **`sec.secrets.no-blanket-inherit`** — no reusable-workflow call passes
   `secrets: inherit`; secrets are passed by name so a called workflow's blast
   radius is visible in the caller.
+- **`sec.required-checks.skippable`** — every status check the default branch
+  REQUIRES is produced by a job that always runs. GitHub counts a skipped
+  required check as a pass, so a check only a conditional job reports can be
+  satisfied by never running it. The pass shape is the always-running verdict
+  job that `needs:` the conditional suites and asserts their results. Required
+  contexts no workflow job produces (external app checks) are named, not
+  judged. API-gated: with no repository or no token the fact is unmeasured and
+  says so.
+- **`sec.fork-approval.effective`** — the repository's fork-PR approval policy
+  gates more than accounts new to GitHub. `all_external_contributors` and
+  `first_time_contributors` (the default, and a legitimate trust judgment) both
+  pass; only `first_time_contributors_new_to_github` fails, because any outside
+  account old enough clears it and the gate then gates nobody real. Hygiene,
+  not an exploit chain — fork runs still carry no secrets and a read-only
+  token, so what an unapproved run buys is compute under the repository's name
+  and quiet iteration. API-gated, and a policy value outside GitHub's
+  documented enum is disclosed rather than judged.
 - **`sec.checkout.credentials-scoped`** — on untrusted-trigger workflows,
   every `actions/checkout` sets `persist-credentials: false`. GitHub's default
   persists the token into `.git/config`, where attacker-influenced later steps

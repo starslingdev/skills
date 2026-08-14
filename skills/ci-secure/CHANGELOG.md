@@ -27,6 +27,43 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- **2026-08-14** — **A scored config fact for required status checks a job can
+  skip.** GitHub counts a SKIPPED required check as a pass, so a required check
+  produced only by a job carrying an `if:` condition is not a gate: a pull
+  request that does not satisfy the condition merges with the check green and
+  the suite never run — a bypass this repository shipped and had to close. The
+  new `sec.required-checks.skippable` fact reads the branch's required contexts
+  over the API, maps each to the workflow jobs that could report it by display
+  name (matrix expansions included), and fails when every producer of a
+  required context can skip — through its own condition or through a `needs:`
+  chain that skips. The pass shape, and the fix recipe, is the always-running
+  verdict job that `needs:` the conditional suites and asserts their results;
+  `always()` / `!cancelled()` conditions are recognised as never-skipping.
+  Required contexts no workflow job produces (external app checks) are named in
+  the evidence, never failed — the scan cannot read them. Evidence names the
+  required context, the workflow and job, and the condition that skips it.
+
+- **2026-08-14** — **A scored config fact for fork-PR approval that gates
+  nobody real.** `sec.fork-approval.effective` reads the repository's fork-PR
+  workflow approval policy and fails only its weakest setting — approval
+  required just from accounts NEW TO GITHUB — because any outside account old
+  enough clears it and starts CI unapproved. Requiring approval from first-time
+  contributors to this repository (GitHub's default) is a legitimate trust
+  judgment and passes, as does requiring it from every outside account. The
+  fact is hygiene, not an exploit chain, and says so: fork runs still carry no
+  secrets and a read-only token, so an unapproved run buys compute under the
+  repository's name and quiet iteration against its CI surface, not a path to
+  secrets. The policy enum is the one GitHub documents and a live repository
+  returns; a value outside it is disclosed as unrecognised rather than judged.
+
+- **2026-08-14** — **Both new facts are token-gated and never silently green.**
+  They read the GitHub API rather than workflow YAML, so with no repository or
+  no token they report as UNMEASURED with the reason stated — the same contract
+  the impostor-SHA vector keeps. An unmeasured fact scores nothing and stays in
+  the applicable count as a named coverage gap, so an offline scan reads as a
+  smaller measurement rather than a cleaner repository. The scored basis grows
+  from six facts to eight for a scan that can reach the API.
+
 - **2026-08-14** — **P14.24 now catches remote code fetched with git, not just
   piped into a shell.** The vector was written around `curl … | bash`, so a
   workflow that cloned or fetched somebody else's repository at a BRANCH, TAG,

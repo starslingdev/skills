@@ -4231,7 +4231,7 @@ def scan(
         # prose. `report.py`
         # renders the FACTS as a `## 🧰 Config hygiene checks — pass/fail`
         # table and no number at all. A hygiene aggregate labelled "Security
-        # score" overclaims what six config observations can say and collides
+        # score" overclaims what a handful of config observations can say and collides
         # with the vector scan printed beside it — an early run read "5 of 6
         # facts pass" above ten green rows as a contradiction.
         #
@@ -4243,13 +4243,14 @@ def scan(
         # `tests/verify_report.py::check_no_rendered_security_score` makes the
         # invisibility an invariant. Do not "fix" it again.
         "security_score": _compute_security_score(root, workflow_files,
-                                                  scan_incomplete),
+                                                  scan_incomplete, repo),
     }
 
 
 def _compute_security_score(
     root: Path, workflow_files: list[Path],
     scan_incomplete: list[dict[str, str]],
+    repo: str | None = None,
 ) -> dict[str, Any]:
     """Isolated so a facts-layer crash degrades to an honest 'unmeasured'
     block instead of taking down the whole scan (the vectors are the product's
@@ -4257,7 +4258,7 @@ def _compute_security_score(
     try:
         import config_facts
         return config_facts.compute_config_facts(root, workflow_files,
-                                                 scan_incomplete)
+                                                 scan_incomplete, repo=repo)
     except Exception as exc:                                  # noqa: BLE001
         logger.warning("security_score unavailable: %r", exc)
         # Same key set as facts_to_score, so a consumer never has to branch on
