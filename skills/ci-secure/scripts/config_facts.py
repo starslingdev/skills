@@ -687,22 +687,59 @@ def _context_producers(
                 continue
             if context == shown:
                 out.append((rel, key, job, jobs, doc))
-            elif _has_matrix(job) and context.startswith(shown + " ("):
+            elif context.startswith(shown + " (") and _matrix_produces(
+                    job, context[len(shown) + 2:].rstrip(")")):
                 out.append((rel, key, job, jobs, doc))
     return out
 
 
-def _has_matrix(job: dict) -> bool:
-    """Does this job expand into `name (value, …)` check contexts?
+_MATRIX_META = {"include", "exclude"}
 
-    Only a matrix does. Offering the `name (…)` match to every job let an
-    always-running verdict job named `test` be read as a producer of
-    `test (self-hosted)` — this repository's own CI shape — and its
-    always-runs answer then covered for the suite job that really reports that
-    context and really can skip. The bypass hid behind the fix for the bypass.
+
+def _matrix_values(job: dict) -> set[str] | None:
+    """Every literal value this job's matrix can render into its check name,
+    or None when the matrix is not knowable from the YAML.
+
+    Only a matrix expands a job into `name (value, …)` contexts, and it expands
+    into ITS OWN values. Both halves matter, and both were once missing:
+    offering the `name (…)` match to every job let an always-running verdict
+    job named `test` stand in as a producer of `test (self-hosted)` — this
+    repository's own CI shape, where the job added to CLOSE the bypass was
+    what hid it — and then offering it to any matrix let a job named `test`
+    running over `3.11`/`3.12` stand in for the same unrelated context.
     """
     strategy = job.get("strategy")
-    return isinstance(strategy, dict) and bool(strategy.get("matrix"))
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    if not isinstance(matrix, dict) or not matrix:
+        return None
+    values: set[str] = set()
+    for key, node in matrix.items():
+        entries = node if isinstance(node, list) else [node]
+        if key in _MATRIX_META:
+            entries = [v for e in entries if isinstance(e, dict)
+                       for v in e.values()]
+        for entry in entries:
+            if isinstance(entry, (dict, list)):
+                return None                      # nested shape: not knowable
+            text = str(entry)
+            if _EXPRESSION_RE.search(text):
+                return None                      # computed: not knowable
+            values.add(text.strip())
+    return values or None
+
+
+def _matrix_produces(job: dict, suffix: str) -> bool:
+    """Could this job's matrix render the `(…)` half of a check context?
+
+    Every value in the context has to be one of the matrix's own. A matrix this
+    scan cannot read (computed, `fromJSON`, nested) produces NO match rather
+    than any match: an unrecognised producer leaves the context unjudged, which
+    the fact discloses, while a wrong one is a silent green.
+    """
+    values = _matrix_values(job)
+    if values is None:
+        return False
+    return all(part.strip() in values for part in suffix.split(",") if part.strip())
 
 
 def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:

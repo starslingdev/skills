@@ -1461,3 +1461,35 @@ jobs:
     f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test (3.12)"]), _FACT)
     assert f["outcome"] == "fail", f["evidence"]
     assert "test (3.12)" in f["evidence"]
+
+
+def test_a_matrix_job_only_produces_its_own_expansions(tmp_path):
+    """A matrix over `3.11`/`3.12` expands to `test (3.11)` and `test (3.12)`
+    — never `test (self-hosted)`. Matching the bare `name (` prefix lets an
+    always-running matrix job alibi a completely unrelated required context,
+    which is the same false green as before with one more step of indirection."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  unit:
+    name: test
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        py: ['3.11', '3.12']
+    steps:
+      - run: pytest -v
+  suite:
+    name: test (self-hosted)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test (self-hosted)"]),
+                 _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
