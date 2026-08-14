@@ -13,7 +13,14 @@
 #
 # Comment-triggered runs execute in base-repo context, so secrets are present
 # even when the comment is on a fork PR. The `if:` guard skips the job (and the
-# runner minutes) for every comment that does not clear both of its conditions.
+# runner minutes) for every comment that does not clear both of its conditions,
+# and the action itself refuses to run for any commenter without write access to
+# this repo, so an outside commenter never reaches the secrets.
+#
+# Comment events always run the workflow file from the DEFAULT branch, so this
+# file does nothing until it merges — @claude cannot be smoke-tested on the PR
+# that adds it, and the action logs an expected "not found on default branch"
+# skip if you try.
 name: Claude Code
 
 on:
@@ -35,6 +42,23 @@ jobs:
       contains(github.event.comment.body, '@claude') &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: starsling-ubuntu-24.04
+    # An agent turn has no natural bound, and a stalled one would otherwise hold
+    # a self-hosted runner for the six-hour GitHub default with no signal — the
+    # same reason registry-scan.yml sets a timeout.
+    timeout-minutes: 30
+    # One Claude at a time per issue/PR. Two mentions in quick succession would
+    # otherwise run two agents that both push to the same branch. Not
+    # cancel-in-progress: cancelling would kill a Claude mid-push and orphan the
+    # tracking comment it already posted.
+    concurrency:
+      group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+    # id-token: write is required, not over-broad — the action exchanges the
+    # job's OIDC token for the Claude App installation token that lets Claude
+    # push as the app instead of as a maintainer. Removing it breaks the
+    # workflow. Note that Claude's own write scope comes from that App token and
+    # is fixed by the app, so trimming the grants below changes what this job's
+    # GITHUB_TOKEN can do, not what Claude can do.
     permissions:
       contents: write
       pull-requests: write
@@ -45,11 +69,17 @@ jobs:
       # Actions are pinned to full commit SHAs, matching every other workflow in
       # this repo: this job holds the API key and repo-write permissions, so a
       # mutable tag would let an upstream retag run unreviewed code here.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
+          # Don't leave the job token in .git/config: Claude's own tools run
+          # inside this working tree. The action swaps in its App token for
+          # pushes regardless, so this costs nothing and closes the window.
+          persist-credentials: false
       # No github_token input on purpose: the action then authenticates its
       # pushes as the Claude App, which lets CI trigger on Claude's commits.
-      - uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
+      - name: Run Claude
+        uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
