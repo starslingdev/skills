@@ -3329,3 +3329,152 @@ def test_p1424_a_real_execution_after_a_substitution_still_reports(tmp_path):
                   python3 tools/setup.py
     """)
     assert len(hits) == 1
+
+
+# ---------------------------------------------------------------------------
+# X6/R3 — three channels, because "we did not scan this" and "we scanned this
+# and deliberately said nothing" are opposite claims.
+#
+# Both were feeding one list, which report.py renders under
+# "Incomplete coverage — N run: step(s) … were NOT scanned … This is not a
+# clean result". A repository that did exactly what the fix recipe says got
+# that banner, with a bullet underneath saying the step had been read in full.
+# ---------------------------------------------------------------------------
+
+def _scan_repo(tmp_path: Path, body: str, name: str = "ci.yml") -> dict:
+    _wf(tmp_path, name, body)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    return scan.scan(catalog, tmp_path)
+
+
+_PINNED_AS_RECIPE_SAYS = """\
+    name: ci
+    on: push
+    jobs:
+      b:
+        runs-on: ubuntu-latest
+        steps:
+          - run: |
+              git clone "$TOOLS_URL" tools
+              git -C tools checkout %s
+              python3 tools/setup.py
+""" % ("a" * 40)
+
+
+def test_a_pin_suppression_never_reads_as_missing_coverage(tmp_path):
+    """This repository followed the fix recipe exactly. Telling it that a step
+    "was NOT scanned" and that its report is "not a clean result" — with a
+    bullet underneath explaining the step was read completely — spends the
+    honesty banner's credibility on the repositories that did the right thing,
+    which is where it costs most."""
+    result = _scan_repo(tmp_path, _PINNED_AS_RECIPE_SAYS)
+    assert result["findings"] == []
+    assert result["dropped_matches"] == [], result["dropped_matches"]
+    # It is still recorded — just not as a coverage gap.
+    suppressed = result["suppressed_findings"]
+    assert len(suppressed) == 1, suppressed
+    assert "pinned" in suppressed[0]["reason"]
+
+
+def test_the_ordinary_pin_spellings_are_recorded_too(tmp_path):
+    """`security-patterns.md` and the changelog both say EVERY suppression is
+    recorded. Only the deferred late-pin path was: a clone whose own ref is a
+    full sha, and a checkout with a 40-hex `ref:`, both returned silently."""
+    clone_pin = _scan_repo(tmp_path / "clone", """\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch %s "$TOOLS_URL" tools
+                  python3 tools/setup.py
+    """ % ("b" * 40))
+    assert clone_pin["findings"] == []
+    assert any("pin" in e["reason"] for e in clone_pin["suppressed_findings"]), \
+        clone_pin["suppressed_findings"]
+
+    checkout_pin = _scan_repo(tmp_path / "checkout", """\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: %s
+                  path: tools
+              - run: bash tools/run.sh
+    """ % ("c" * 40))
+    assert checkout_pin["findings"] == []
+    assert any("pin" in e["reason"] for e in checkout_pin["suppressed_findings"]), \
+        checkout_pin["suppressed_findings"]
+
+
+def test_a_checkout_expression_is_a_coverage_note_not_an_unanchored_step(
+    tmp_path,
+):
+    """`ref: ${{ inputs.ref }}` is the standard `workflow_dispatch` spelling, so
+    this lands on ordinary repositories. It IS a real coverage gap — nothing
+    was established about that checkout — but it is not a `run:` step that
+    could not be anchored to a line, which is what the headline claims."""
+    result = _scan_repo(tmp_path, """\
+        name: ci
+        on: workflow_dispatch
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: ${{ inputs.ref }}
+                  path: tools
+              - run: bash tools/run.sh
+    """)
+    assert result["dropped_matches"] == [], result["dropped_matches"]
+    assert len(result["coverage_notes"]) == 1, result["coverage_notes"]
+
+
+def test_an_unanchorable_job_still_reaches_the_coverage_headline(tmp_path):
+    """The control: the channel that headline was written for must keep
+    reaching it, or splitting the channels would have quietly disabled the
+    honesty signal instead of aiming it. A job whose source range cannot be
+    found is the case it describes — its shell was never scanned at all."""
+    body = """\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone --branch main "$TOOLS_URL" tools
+    """
+    with mock.patch.object(scan, "job_line_ranges", lambda _p: []):
+        result = _scan_repo(tmp_path, body)
+    assert len(result["dropped_matches"]) >= 1, result["dropped_matches"]
+    assert all("could not be located" in e["reason"]
+               for e in result["dropped_matches"]), result["dropped_matches"]
+
+
+def test_unparsable_shell_is_a_coverage_note_not_an_unanchored_step(tmp_path):
+    """Shell that will not parse is a real gap — but the step WAS anchored and
+    read, so it does not belong under a headline about steps that could not be
+    tied to a line. Different sentence, same seriousness."""
+    result = _scan_repo(tmp_path, """\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  cd "unbalanced
+                  git clone --branch main "$TOOLS_URL" tools
+                  python3 tools/setup.py
+    """)
+    assert result["dropped_matches"] == [], result["dropped_matches"]
+    assert len(result["coverage_notes"]) == 1, result["coverage_notes"]

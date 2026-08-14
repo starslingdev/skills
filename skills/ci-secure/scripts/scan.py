@@ -776,11 +776,32 @@ _ATTACKER_FILLED_PREFIXES = (
 # made the banner count matches while calling them files. Coverage still
 # degrades to PARTIAL on either — an unanchored step is a real hole — but the
 # report says which hole it is.
+# THREE channels, because "we did not scan this" and "we scanned this and
+# deliberately said nothing" are opposite claims about the same step, and the
+# report's loudest honesty banner ("…were NOT scanned … This is not a clean
+# result") is only true of one of them:
+#
+#   UNANCHORED  a `run:` step a detector matched but could not tie to a raw
+#               line. The banner was written for exactly this and keeps it.
+#   NOT_SCANNED a real coverage gap that is NOT an unanchorable run step — a
+#               computed `working-directory:`, a `ref:` chosen at run time,
+#               shell that would not parse. Still not a clean result; its own
+#               sentence, because the headline's wording does not describe it.
+#   SUPPRESSED  a finding the scanner reached and deliberately did not report,
+#               above all a fetch pinned to a full commit id. INFORMATIONAL:
+#               it must never touch coverage, or a repository that did exactly
+#               what the fix recipe says gets told its report is unreliable.
+_KIND_UNANCHORED = "unanchored-run-step"
+_KIND_NOT_SCANNED = "not-scanned"
+_KIND_SUPPRESSED = "suppressed"
+
 _DROPPED_MATCHES: list[dict[str, str]] = []
 
 
-def _record_dropped_match(file_path: Path, reason: str) -> None:
-    _DROPPED_MATCHES.append({"file": str(file_path), "reason": reason})
+def _record_dropped_match(file_path: Path, reason: str,
+                          kind: str = _KIND_UNANCHORED) -> None:
+    _DROPPED_MATCHES.append(
+        {"file": str(file_path), "reason": reason, "kind": kind})
 
 
 def _repo_relative(path: str, root: Path) -> str:
@@ -2634,6 +2655,7 @@ def _correlation_install_scripts_in_privileged_job(
             # The parsed scalar matched but no raw line did (a folded scalar).
             # Reported as a coverage gap rather than dropped silently.
             _DROPPED_MATCHES.append({
+                "kind": _KIND_UNANCHORED,
                 "file": str(file_path),
                 "reason": (
                     f"P14.25: jobs.{job_name} runs a script-executing install "
@@ -3262,6 +3284,10 @@ def _checkout_fetches(
         ref = with_block.get("ref")
         ref = str(ref).strip() if isinstance(ref, (str, int)) else None
         if ref and _FULL_SHA_RE.match(ref):
+            if gap is not None:
+                gap(f"an `actions/checkout` of `{repository}` is pinned to a "
+                    f"full commit id, so it is deliberately not reported",
+                    kind=_KIND_SUPPRESSED)
             continue                                   # immutable, as pinned
         path = with_block.get("path")
         path = str(path).strip() if isinstance(path, (str, int)) else None
@@ -3416,6 +3442,11 @@ def _mutable_fetch_executions(
                     dest = _resolve_path(base, dest_written)
                     if ref and _FULL_SHA_RE.match(ref):
                         pinned.setdefault(dest, pos)
+                        if gap is not None:
+                            gap(f"a clone into `{dest}` on line {line_no} is "
+                                f"pinned to a full commit id, so it is "
+                                f"deliberately not reported",
+                                kind=_KIND_SUPPRESSED)
                         continue
                     fetches.setdefault(
                         dest, _RemoteFetch(line_no, _raw, dest, ref, pos))
@@ -3472,7 +3503,8 @@ def _mutable_fetch_executions(
             if gap is not None:
                 gap(f"a fetch into `{dest}` on line {fetch.line} was pinned to "
                     f"a full commit id before anything ran from it, so it is "
-                    f"deliberately not reported")
+                    f"deliberately not reported",
+                    kind=_KIND_SUPPRESSED)
             continue
         pairs.append((fetch, hit[1], hit[2]))
     return sorted(pairs, key=lambda p: p[0].line)
@@ -3503,6 +3535,7 @@ def _correlation_unverified_remote_code_execution(
             # scoped to it, and a cross-job pairing would be a false claim.
             # Recorded as a coverage gap rather than dropped in silence.
             _DROPPED_MATCHES.append({
+                "kind": _KIND_UNANCHORED,
                 "file": str(file_path),
                 "reason": (
                     f"P14.24: jobs.{job_name} could not be located in the raw "
@@ -3511,10 +3544,12 @@ def _correlation_unverified_remote_code_execution(
                 ),
             })
             continue
-        def _gap(reason: str, _job: str = job_name) -> None:
+        def _gap(reason: str, _job: str = job_name,
+                 kind: str = _KIND_NOT_SCANNED) -> None:
             _DROPPED_MATCHES.append({
                 "file": str(file_path),
                 "reason": f"P14.24: jobs.{_job}: {reason}",
+                "kind": kind,
             })
 
         for fetch, exec_line, exec_path in _mutable_fetch_executions(
@@ -4637,13 +4672,31 @@ def scan(
     # too — but a DIFFERENT one, kept in its own list. See `_DROPPED_MATCHES`:
     # the file here read and parsed fine, so its config facts are perfectly
     # measurable; only one `run:` step went unscanned.
+    #
+    # Split by KIND. Only an unanchorable `run:` step belongs under the
+    # report's "…were NOT scanned…" headline — a computed `working-directory:`
+    # is a real gap the headline does not describe, and a pin suppression is
+    # not a gap at all.
     dropped_matches: list[dict[str, str]] = []
+    coverage_notes: list[dict[str, str]] = []
+    suppressed_findings: list[dict[str, str]] = []
+    _by_kind = {
+        _KIND_UNANCHORED: dropped_matches,
+        _KIND_NOT_SCANNED: coverage_notes,
+        _KIND_SUPPRESSED: suppressed_findings,
+    }
     for dropped in _DROPPED_MATCHES:
         rel = _repo_relative(dropped["file"], root)
-        logger.warning("unscanned run: step: %s — %s", rel, dropped["reason"])
+        kind = dropped.get("kind", _KIND_UNANCHORED)
+        if kind != _KIND_SUPPRESSED:
+            logger.warning("coverage gap (%s): %s — %s", kind, rel,
+                           dropped["reason"])
+        else:
+            logger.debug("suppressed finding: %s — %s", rel, dropped["reason"])
         entry = {"workflow_file": rel, "reason": dropped["reason"]}
-        if entry not in dropped_matches:
-            dropped_matches.append(entry)
+        bucket = _by_kind.get(kind, dropped_matches)
+        if entry not in bucket:
+            bucket.append(entry)
 
     logger.debug(
         "scan complete: %d findings, %d coverage gap(s), %d dropped match(es)",
@@ -4698,6 +4751,16 @@ def scan(
         # facts stay measurable, while coverage still degrades to PARTIAL and
         # the report names the step count and the file count honestly.
         "dropped_matches": dropped_matches,
+        # A real coverage gap that is NOT an unanchorable run step — a
+        # computed `working-directory:`, a `ref:` chosen at run time, shell
+        # that would not parse. Its own key so the report can name it in its
+        # own words instead of under a headline that misdescribes it.
+        "coverage_notes": coverage_notes,
+        # Findings the scanner REACHED and deliberately did not report, above
+        # all a fetch pinned to a full commit id. Informational: this must
+        # never degrade coverage, or a repository that did exactly what the fix
+        # recipe says is told its report is not a clean result.
+        "suppressed_findings": suppressed_findings,
         # The config facts + the security component of the CI Score
         # (ci-secure owns this number; the ten vectors above stay
         # findings-only and never enter it). Unscannable workflows force

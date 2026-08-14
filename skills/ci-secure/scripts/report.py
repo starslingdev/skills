@@ -2303,29 +2303,43 @@ def _malformed_findings_banner(
 def _coverage_is_complete(
     scan_incomplete: list[dict[str, Any]] | None,
     dropped_matches: list[dict[str, Any]] | None = None,
+    coverage_notes: list[dict[str, Any]] | None = None,
 ) -> bool:
     """True when the static scan read every workflow file AND scanned every
     ``run:`` step inside them.
 
-    Two independent holes, both fatal to a claim of completeness:
+    Three independent holes, all fatal to a claim of completeness:
 
     - ``scan_incomplete`` — a FILE couldn't be read or YAML-parsed, so the
       detectors never ran on it.
     - ``dropped_matches`` — a file parsed fine, but a ``run:`` step in it
       couldn't be anchored to raw lines and was never scanned for injection
       sinks.
+    - ``coverage_notes`` — the step was read, but something in it was not
+      knowable from the YAML (a computed ``working-directory:``, a ``ref:``
+      chosen at run time, shell that would not parse), so part of it went
+      unchecked.
+
+    ``suppressed_findings`` is deliberately NOT here. That list is the
+    scanner reaching a finding and choosing not to report it — a fetch pinned
+    to a full commit id, which is the fix this catalog recommends. Counting it
+    as missing coverage told every repository that followed the fix recipe
+    that its report was "not a clean result", which spends the banner's
+    credibility exactly where it is least deserved.
 
     ``None`` means the findings JSON had no such array — i.e. no gaps were
     recorded, the same as an empty list. We normalize explicitly so the
     truthiness check can't be misread as silently turning a stray ``None``
     into a false "complete".
     """
-    return not (scan_incomplete or []) and not (dropped_matches or [])
+    return not (scan_incomplete or []) and not (dropped_matches or []) \
+        and not (coverage_notes or [])
 
 
 def _coverage_gap_banner(
     scan_incomplete: list[dict[str, Any]] | None = None,
     dropped_matches: list[dict[str, Any]] | None = None,
+    coverage_notes: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a prominent warning when the static scan left coverage unfinished.
 
@@ -2346,7 +2360,8 @@ def _coverage_gap_banner(
     """
     scan_incomplete = scan_incomplete or []
     dropped_matches = dropped_matches or []
-    if not scan_incomplete and not dropped_matches:
+    coverage_notes = coverage_notes or []
+    if not scan_incomplete and not dropped_matches and not coverage_notes:
         return ""
 
     parts: list[str] = []
@@ -2364,6 +2379,17 @@ def _coverage_gap_banner(
             "could not be anchored to raw lines and were NOT scanned for "
             "injection sinks"
         )
+    if coverage_notes:
+        # Its OWN sentence: these steps were read. What went unchecked is a
+        # value the YAML does not contain — where a step ran, which ref a
+        # checkout took, a command no shell parser accepts. Saying they "could
+        # not be anchored" would describe the wrong defect.
+        n_wf = len({str(e.get("workflow_file", "?")) for e in coverage_notes})
+        parts.append(
+            f"{len(coverage_notes)} step(s) in {n_wf} workflow(s) were read "
+            "but carry a value this scan cannot know, so part of each went "
+            "unchecked"
+        )
 
     lines = [
         "> [!WARNING]",
@@ -2374,6 +2400,13 @@ def _coverage_gap_banner(
     if scan_incomplete:
         lines += [">", "> _Static scan could not read/parse:_"]
         for entry in scan_incomplete:
+            lines.append(
+                f"> - **{_flatten_scanned(entry.get('workflow_file', '?'))}**: "
+                f"{_flatten_scanned(entry.get('reason', 'unknown'))}"
+            )
+    if coverage_notes:
+        lines += [">", "> _Read, but something in the step was not knowable:_"]
+        for entry in coverage_notes:
             lines.append(
                 f"> - **{_flatten_scanned(entry.get('workflow_file', '?'))}**: "
                 f"{_flatten_scanned(entry.get('reason', 'unknown'))}"
@@ -2493,7 +2526,9 @@ def render(
     out.append("")
     scan_incomplete = findings_json.get("scan_incomplete") or []
     dropped_matches = findings_json.get("dropped_matches") or []
-    coverage_complete = _coverage_is_complete(scan_incomplete, dropped_matches)
+    coverage_notes = findings_json.get("coverage_notes") or []
+    coverage_complete = _coverage_is_complete(
+        scan_incomplete, dropped_matches, coverage_notes)
     skill_tree_dirty = bool(findings_json.get("skill_tree_dirty"))
     out.append(_header_table(
         findings, scanned_workflows, repo, sha, skill_sha,
@@ -2542,7 +2577,8 @@ def render(
     # Coverage-gap banner — if the static scan couldn't read/parse a file,
     # say so loudly and up front. An unscanned file must never be mistaken
     # for a clean one.
-    gap_banner = _coverage_gap_banner(scan_incomplete, dropped_matches)
+    gap_banner = _coverage_gap_banner(
+        scan_incomplete, dropped_matches, coverage_notes)
     if gap_banner:
         out.append(gap_banner)
         out.append("")

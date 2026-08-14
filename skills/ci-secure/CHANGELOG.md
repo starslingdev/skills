@@ -22,6 +22,29 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **A deliberate non-report no longer reads as missing
+  coverage.** Pin suppressions were written into the same list as genuine
+  coverage gaps, which the report renders as *"Incomplete coverage — N run:
+  step(s) … were NOT scanned … This is **not** a clean result"* — so a
+  repository that did exactly what the fix recipe says (clone, pin to a full
+  commit id, run) got the report's loudest honesty warning, with a bullet
+  underneath explaining that the step had been read completely. The same
+  banner fired for `actions/checkout` with `ref: ${{ inputs.ref }}`, the
+  standard `workflow_dispatch` spelling, so most real repositories carried a
+  permanent false alarm on the one signal that has to stay credible.
+
+  There are three channels now. An unanchorable `run:` step keeps the existing
+  headline, which was written for it. A step that WAS read but carries a value
+  the YAML does not contain — a computed `working-directory:`, a `ref:` chosen
+  at run time, shell no parser accepts — gets its own sentence, still "not a
+  clean result" but described accurately. A suppression is informational and
+  never touches coverage at all.
+
+  Alongside it, the two ordinary pin spellings are recorded at last: a clone
+  whose own `--branch` is a full sha, and a checkout with a 40-hex `ref:`,
+  both returned silently while the catalog and the changelog claimed every
+  suppression was recorded.
+
 - **2026-08-14** — **P14.24 no longer reports an interpreter's inline script as
   "the executed path".** `-e` / `-pe` / `-ne` / `-p` / `-n` put the program on
   the command line exactly as `-c` does, and `-` reads it from stdin, but only
