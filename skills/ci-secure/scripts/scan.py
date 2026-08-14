@@ -2801,6 +2801,41 @@ _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # cannot collide with any real path, so paths under it match each other and
 # nothing else.
 _OPAQUE_DIR = "\x00wd:"
+# Expressions collapse to ONE TOKEN EACH, not one token for all of them. A
+# shared `$EXPR` made `${{ env.DIR_A }}` and `${{ env.DIR_B }}` the same
+# directory, so a clone into one paired with an execution from the other — a
+# chain the reader cannot find in their own YAML. Tokens are stable per
+# expression TEXT, so the same expression written twice is one place, which is
+# exactly as knowable as a named one.
+_EXPR_TOKEN_TEXT: dict[str, str] = {}
+_EXPR_TEXT_TOKEN: dict[str, str] = {}
+
+
+def _expression_token(text: str) -> str:
+    """A shlex-safe stand-in for `${{ … }}`, stable per expression text."""
+    key = " ".join(text.split())
+    token = _EXPR_TEXT_TOKEN.get(key)
+    if token is None:
+        token = f"$EXPR{len(_EXPR_TEXT_TOKEN)}"
+        _EXPR_TEXT_TOKEN[key] = token
+        _EXPR_TOKEN_TEXT[token] = key
+    return token
+
+
+_EXPR_TOKEN_RENDER_RE = re.compile(r"\$EXPR\d+")
+
+
+def _as_written(path: str) -> str:
+    """`path` with every scanner-internal stand-in put back as the YAML wrote it.
+
+    Nothing that reaches a reader may contain these. The opaque-directory
+    sentinel is a NUL byte, and it escaped into `derived_note`, findings.json
+    and the rendered markdown — the reader was shown a raw control character
+    where their own directory belonged.
+    """
+    shown = path.replace(_OPAQUE_DIR, "")
+    return _EXPR_TOKEN_RENDER_RE.sub(
+        lambda m: _EXPR_TOKEN_TEXT.get(m.group(0), m.group(0)), shown)
 # Does unreadable shell mention either half of the chain — a fetch, or something
 # that executes? If not, failing to read it costs this detector nothing.
 _CHAIN_RELEVANT_RE = re.compile(
@@ -2839,7 +2874,8 @@ def _shell_tokens(segment: str) -> list[str]:
     """
     try:
         collapsed = _SELF_REPO_EXPRESSION_RE.sub(_SELF_REPO_TOKEN, segment)
-        collapsed = _EXPRESSION_TOKEN_RE.sub("$EXPR", collapsed)
+        collapsed = _EXPRESSION_TOKEN_RE.sub(
+            lambda m: _expression_token(m.group(0)), collapsed)
         return shlex.split(_COMMAND_SUBSTITUTION_RE.sub("$SUBST", collapsed),
                            comments=False, posix=True)
     except ValueError:
@@ -3220,8 +3256,16 @@ def _step_working_directories(text: str) -> dict[int, str]:
 def _default_working_directory(doc: dict, job: Any) -> str:
     """`defaults.run.working-directory` for this job, else the workflow's.
 
-    GitHub resolves the job's over the workflow's, and a step's own
-    `working-directory:` over both.
+    GitHub resolves the JOB's over the workflow's, and a step's own
+    `working-directory:` over both. Precedence is decided HERE, before any
+    knowability test: treating an unreadable job default as absent fell
+    through to the workflow's value and placed the step in a directory it
+    demonstrably did not run in.
+
+    A default holding an expression gets the same opaque treatment a step's
+    does — `defaults: {run: {working-directory: apps/${{ matrix.app }}}}` is a
+    mainstream monorepo shape, and guessing the workspace root for it is the
+    defect class this scanner may not commit.
     """
     def _of(node: Any) -> str | None:
         if not isinstance(node, dict):
@@ -3231,10 +3275,26 @@ def _default_working_directory(doc: dict, job: Any) -> str:
         value = run.get("working-directory") if isinstance(run, dict) else None
         return str(value) if isinstance(value, (str, int, float)) else None
 
-    for candidate in (_of(job), _of(doc)):
-        if candidate and not _EXPRESSION_TOKEN_RE.search(candidate):
-            return _resolve_path(".", candidate)
-    return "."
+    written = _of(job)
+    if written is None:
+        written = _of(doc)
+    if not written:
+        return "."
+    if _EXPRESSION_TOKEN_RE.search(written):
+        return _opaque_dir(written)
+    return _resolve_path(".", written)
+
+
+def _opaque_dir(written: str) -> str:
+    """A directory whose real path the YAML does not contain.
+
+    Keyed by the WRITTEN TEXT, not by the line it appeared on. Keying by line
+    made two steps under the same `apps/${{ matrix.app }}` two different
+    unknown places, so a fetch in one and an execution in the other — the more
+    idiomatic spelling — produced no finding and no gap, while the single-step
+    form fired. The same expression is the same directory.
+    """
+    return _OPAQUE_DIR + " ".join(written.split())
 
 
 _CHECKOUT_USES_RE = re.compile(r"^\s*-?\s*uses\s*:\s*['\"]?actions/checkout[@'\"]")
@@ -3366,13 +3426,16 @@ def _mutable_fetch_executions(
                 # `working-directory: apps/${{ matrix.app }}` is extremely
                 # common and its value is not knowable here. Skipping the step
                 # would lose every chain inside it; pretending to know it would
-                # invent chains across it. So it becomes an OPAQUE root, unique
-                # to this step: a fetch and an execution that are both inside it
-                # still correlate with each other, and nothing inside it can
-                # ever match a directory anywhere else.
-                cwd = f"{_OPAQUE_DIR}{line_no}"
+                # invent chains across it. So it becomes an OPAQUE root, keyed
+                # by the expression TEXT: two steps under the same expression
+                # are the same place, and two different expressions never are.
+                cwd = _opaque_dir(step_dir)
             elif step_dir:
-                cwd = _resolve_path(base_cwd, step_dir)
+                # A step's `working-directory:` is resolved against the
+                # WORKSPACE and REPLACES the job default rather than nesting
+                # inside it. Composing them put a step under `app` into
+                # `app/app` and lost real chains through the job's own default.
+                cwd = _resolve_path(".", step_dir)
             else:
                 cwd = base_cwd
         if skip_step:
@@ -3443,7 +3506,7 @@ def _mutable_fetch_executions(
                     if ref and _FULL_SHA_RE.match(ref):
                         pinned.setdefault(dest, pos)
                         if gap is not None:
-                            gap(f"a clone into `{dest}` on line {line_no} is "
+                            gap(f"a clone into `{_as_written(dest)}` on line {line_no} is "
                                 f"pinned to a full commit id, so it is "
                                 f"deliberately not reported",
                                 kind=_KIND_SUPPRESSED)
@@ -3501,7 +3564,7 @@ def _mutable_fetch_executions(
         if pin_at is not None and pin_at < hit[0]:
             # Pinned before it ran: the fix this entry recommends, applied.
             if gap is not None:
-                gap(f"a fetch into `{dest}` on line {fetch.line} was pinned to "
+                gap(f"a fetch into `{_as_written(dest)}` on line {fetch.line} was pinned to "
                     f"a full commit id before anything ran from it, so it is "
                     f"deliberately not reported",
                     kind=_KIND_SUPPRESSED)
@@ -3565,10 +3628,12 @@ def _correlation_unverified_remote_code_execution(
                     (f"jobs.{job_name} checks out `{fetch.source}` at "
                      if fetch.source else
                      f"jobs.{job_name} fetches remote code at ")
-                    + f"{_ref_description(fetch.ref)} into `{fetch.dest}` — a "
+                    + f"{_ref_description(fetch.ref)} into "
+                      f"`{_as_written(fetch.dest)}` — a "
                     f"MUTABLE reference, so what lands in the tree is whatever "
                     f"the other side serves at the moment the job runs — and "
-                    f"then executes `{exec_path}` from it at line {exec_line}. "
+                    f"then executes `{_as_written(exec_path)}` from it at "
+                    f"line {exec_line}. "
                     f"A full 40-character commit id is the only reference that "
                     f"cannot change under you."
                 ),

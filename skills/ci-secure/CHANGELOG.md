@@ -22,6 +22,34 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **Expressions are opaque, consistently, and never rendered
+  as scanner internals.** One family of defects, all from `${{ }}` values:
+
+  - A computed `defaults.run.working-directory` was skipped rather than treated
+    as unknown, so the finding named a directory the data does not contain —
+    and an unreadable JOB default fell through to the WORKFLOW's, inverting
+    GitHub's precedence and placing the step somewhere it demonstrably did not
+    run. `defaults: {run: {working-directory: apps/${{ matrix.app }}}}` is a
+    mainstream monorepo shape. It gets the same opaque treatment a step's does.
+  - A step's `working-directory:` was resolved AGAINST the job default instead
+    of replacing it, putting a step under `app` into `app/app` and losing real
+    chains through the job's own default directory.
+  - Every expression collapsed to ONE shared token, so a clone into
+    `${{ env.DIR_A }}` and an execution from `${{ env.DIR_B }}` matched — a
+    chain the reader cannot find in their own YAML. Tokens are per expression
+    text now: the same expression twice is one place, two different ones never
+    are.
+  - The opaque root was keyed by step LINE, so two steps under the same
+    `apps/${{ matrix.app }}` were two different unknown places and produced no
+    finding and no gap, while the single-step spelling fired. Keyed by
+    expression text now — and splitting fetch and execution across steps is the
+    more idiomatic form, so this was the common case.
+  - The opaque sentinel — a NUL byte — reached `derived_note`, findings.json
+    and the rendered markdown, showing the reader a raw control character where
+    their directory belonged. Findings now render the text as the YAML wrote
+    it, with an artifact-level guard asserting no scanner-internal marker
+    survives into the report.
+
 - **2026-08-14** — **A deliberate non-report no longer reads as missing
   coverage.** Pin suppressions were written into the same list as genuine
   coverage gaps, which the report renders as *"Incomplete coverage — N run:

@@ -10,6 +10,7 @@ skip-is-never-a-pass contract.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import textwrap
@@ -3478,3 +3479,243 @@ def test_unparsable_shell_is_a_coverage_note_not_an_unanchored_step(tmp_path):
     """)
     assert result["dropped_matches"] == [], result["dropped_matches"]
     assert len(result["coverage_notes"]) == 1, result["coverage_notes"]
+
+
+# ---------------------------------------------------------------------------
+# X4/X5 — expressions. One family: a value the YAML does not contain must be
+# opaque, opaque consistently, and never rendered as scanner internals.
+# ---------------------------------------------------------------------------
+
+def test_p1424_a_computed_job_default_working_directory_is_opaque(tmp_path):
+    """Fixed at step level in cea9dde and left open one level above: a
+    `defaults.run.working-directory` holding an expression was skipped, so the
+    finding named a directory the data does not contain — `tools`, at the
+    workspace root, when the step ran somewhere the YAML never says.
+    `defaults: {run: {working-directory: apps/${{ matrix.app }}}}` is a
+    mainstream monorepo shape."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            defaults:
+              run:
+                working-directory: apps/${{ matrix.app }}
+            steps:
+              - run: git clone --branch main "$TOOLS_URL" tools
+              - run: python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "apps/${{ matrix.app }}/tools" in note, note
+
+
+def test_p1424_a_computed_job_default_still_connects_within_itself(tmp_path):
+    """The control, and the whole point of opaque rather than skipped: both
+    halves are under the same unknown directory, so they are exactly as
+    connected as if it were named."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            defaults:
+              run:
+                working-directory: apps/${{ matrix.app }}
+            steps:
+              - run: git clone --branch main "$TOOLS_URL" tools
+              - run: python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+    assert "\x00" not in (hits[0].derived_note or "")
+
+
+def test_p1424_a_job_default_does_not_fall_back_to_the_workflow_default(
+    tmp_path,
+):
+    """GitHub resolves the JOB's default over the workflow's. Treating an
+    unreadable job default as absent inverted that precedence, so the finding
+    placed the step in the workflow's directory — a place it demonstrably did
+    not run."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        defaults:
+          run:
+            working-directory: app
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            defaults:
+              run:
+                working-directory: apps/${{ matrix.app }}
+            steps:
+              - run: git clone --branch main "$TOOLS_URL" tools
+              - run: python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "app/tools" not in note.replace("apps/", ""), note
+
+
+def test_p1424_a_step_working_directory_replaces_the_job_default(tmp_path):
+    """A step's `working-directory:` is resolved against the WORKSPACE and
+    replaces the job default — it does not nest inside it. Composing the two
+    put the step in `app/app`, so a real chain through the job's own default
+    directory went unreported."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            defaults:
+              run:
+                working-directory: app
+            steps:
+              - run: git clone --branch main "$TOOLS_URL" tools
+              - working-directory: app
+                run: python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_two_different_expressions_are_two_different_places(tmp_path):
+    """Every `${{ }}` collapsed to one shared token, so a clone into
+    `${{ env.DIR_A }}` and an execution from `${{ env.DIR_B }}` matched each
+    other — a chain the reader cannot see in their own YAML, rendered with a
+    scanner-internal token as the directory name."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" ${{ env.DIR_A }}
+                  python3 ${{ env.DIR_B }}/setup.py
+    """) == []
+
+
+def test_p1424_one_expression_used_twice_is_one_place(tmp_path):
+    """The control for the rule above: the SAME expression is exactly as
+    knowable in both spots, so the chain is real and has to report."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" ${{ env.TOOLS_DIR }}
+                  python3 ${{ env.TOOLS_DIR }}/setup.py
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "${{ env.TOOLS_DIR }}" in note, note
+    assert "$EXPR" not in note, note
+
+
+def test_p1424_the_same_working_directory_expression_connects_across_steps(
+    tmp_path,
+):
+    """The opaque root was keyed by STEP LINE, so two steps under the same
+    `apps/${{ matrix.app }}` were treated as two different unknown places and
+    produced no finding and no gap — while the single-step spelling fired.
+    Splitting fetch and execution across steps is the more idiomatic form."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - working-directory: apps/${{ matrix.app }}
+                run: git clone --branch main "$TOOLS_URL" tools
+              - working-directory: apps/${{ matrix.app }}
+                run: python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_two_different_working_directory_expressions_do_not_connect(
+    tmp_path,
+):
+    """And the control on the other side — different expressions stay
+    different places."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - working-directory: apps/${{ matrix.app }}
+                run: git clone --branch main "$TOOLS_URL" tools
+              - working-directory: pkgs/${{ matrix.pkg }}
+                run: python3 tools/setup.py
+    """) == []
+
+
+def test_p1424_no_finding_ever_renders_the_opaque_sentinel(tmp_path):
+    """`_OPAQUE_DIR` is a NUL byte and a scanner-internal prefix. It reached
+    `derived_note`, findings.json and the rendered markdown, so the reader was
+    shown a raw control character where their own directory should be."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - working-directory: apps/${{ matrix.app }}
+                run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "\x00" not in note, repr(note)
+    assert "wd:" not in note, note
+    assert "apps/${{ matrix.app }}/tools" in note, note
+
+
+def test_no_scanner_internal_token_reaches_the_rendered_report(tmp_path):
+    """The artifact-level guard for the whole family. `_OPAQUE_DIR` is a NUL
+    byte and `$EXPRn` is a tokenizer stand-in; both are scanner internals, and
+    both reached `derived_note` and from there findings.json and the markdown.
+    Asserting it at the rendered artifact means any new internal marker that
+    escapes is caught here rather than by a reader."""
+    _wf(tmp_path, "ci.yml", """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            defaults:
+              run:
+                working-directory: apps/${{ matrix.app }}
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" ${{ env.TOOLS_DIR }}
+                  python3 ${{ env.TOOLS_DIR }}/setup.py
+              - working-directory: pkgs/${{ matrix.pkg }}
+                run: |
+                  git clone --branch main "$OTHER_URL" vendor
+                  bash vendor/install.sh
+    """)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    result = scan.scan(catalog, tmp_path)
+    assert result["findings"], "fixture must produce findings to be a guard"
+
+    import report as report_module
+    rendered = report_module.render(result)
+    blob = json.dumps(result) + rendered
+    assert "\\u0000" not in blob and "\x00" not in blob, "opaque sentinel leaked"
+    assert "wd:" not in blob, "opaque sentinel prefix leaked"
+    assert not re.search(r"\$EXPR\d", blob), "expression stand-in leaked"
+    assert "${{ env.TOOLS_DIR }}" in rendered, rendered[:400]
