@@ -31,11 +31,14 @@ jobs:
       id-token: write
       actions: read
     steps:
-      - uses: actions/checkout@v6
+      # Actions are pinned to full commit SHAs, matching every other workflow in
+      # this repo: this job holds the API key and repo-write permissions, so a
+      # mutable tag would let an upstream retag run unreviewed code here.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
       # No github_token input on purpose: the action then authenticates its
       # pushes as the Claude App, which lets CI trigger on Claude's commits.
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
