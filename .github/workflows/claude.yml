@@ -4,14 +4,16 @@
 #
 # Needs two one-time pieces of setup outside this file (repo admin):
 #   1. Install the Claude GitHub App on this repo: https://github.com/apps/claude
-#   2. Add the ANTHROPIC_API_KEY repository secret (Settings -> Secrets and
-#      variables -> Actions). A Claude subscription token works instead:
-#      run `claude setup-token` locally and store it as CLAUDE_CODE_OAUTH_TOKEN,
-#      then switch the input below to claude_code_oauth_token.
+#   2. ANTHROPIC_API_KEY is an org-wide secret on starslingdev, so there is no
+#      repository secret to create — confirm this repo is in that org secret's
+#      repository-access list (org secrets can be scoped to selected repos).
+#      A Claude subscription token works instead: run `claude setup-token`
+#      locally and store it as CLAUDE_CODE_OAUTH_TOKEN, then switch the input
+#      below to claude_code_oauth_token.
 #
 # Comment-triggered runs execute in base-repo context, so secrets are present
 # even when the comment is on a fork PR. The `if:` guard skips the job (and the
-# runner minutes) for comments that never mention @claude.
+# runner minutes) for every comment that does not clear both of its conditions.
 name: Claude Code
 
 on:
@@ -22,7 +24,16 @@ on:
 
 jobs:
   claude:
-    if: contains(github.event.comment.body, '@claude')
+    # Comment-triggered workflows get no first-time-contributor approval screen:
+    # GitHub's "require approval for first-time contributors" setting only gates
+    # pull_request events from forks, and this job runs on comments. This gate is
+    # the equivalent — an outsider's @claude mention does not start the job, and
+    # a maintainer re-mentioning @claude IS the approval. The action itself also
+    # independently requires the commenter to have write access, so this is
+    # defense in depth, not the only line.
+    if: >-
+      contains(github.event.comment.body, '@claude') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: starsling-ubuntu-24.04
     permissions:
       contents: write
