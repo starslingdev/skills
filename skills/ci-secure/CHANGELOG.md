@@ -13,6 +13,15 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **P14.24's mutable-fetch arm no longer goes blind on a
+  `git clone --recurse-submodules`.** That option takes its value attached
+  (`=<pathspec>`) or not at all, but the clone parser treated it as taking a
+  separate argument, so it swallowed the next token and shifted the URL, the
+  destination and the ref by one. The detector then correlated against a
+  directory that never existed and reported nothing — a clone at a mutable ref
+  followed by executing a file out of it went unreported whenever that flag was
+  present. Only options that genuinely take a separate value are consumed now.
+
 - **2026-08-12** — **The `sec.checkout.credentials-scoped` fact no longer fails
   workflows triggered only by `fork`/`watch`.** Those events fire when someone
   forks or stars the repo; the workflow runs base code in the base context with

@@ -2678,12 +2678,17 @@ _ABBREV_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,39}$")
 # `git clone` options that consume a separate VALUE argument. Getting this set
 # wrong would make an option's value look like the clone's URL or destination,
 # and the destination is what the whole connection test rests on.
+#
+# Options whose value is only ever ATTACHED (`--recurse-submodules=<pathspec>`,
+# `--also-filter-submodules`) must stay OUT: listed here they would eat the
+# following argument, shifting the URL, the destination and the ref by one and
+# leaving the correlation chasing a directory that does not exist.
 _CLONE_VALUE_OPTS = {
     "-b", "--branch", "--revision", "--depth", "-o", "--origin", "-u",
     "--upload-pack", "--reference", "--reference-if-able",
     "--separate-git-dir", "--template", "-c", "--config", "-j", "--jobs",
     "--filter", "--shallow-since", "--shallow-exclude", "--server-option",
-    "--bundle-uri", "--recurse-submodules", "--jobs",
+    "--bundle-uri",
 }
 # Interpreters that run a FILE named on their command line. `-m` is excluded
 # where it appears (a module name is not a path), except for the pip form

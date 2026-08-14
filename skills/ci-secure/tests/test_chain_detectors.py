@@ -1992,6 +1992,26 @@ def test_p1424_fires_on_a_branch_clone_then_execution(tmp_path):
     assert "main" in note
 
 
+def test_p1424_flag_only_clone_options_do_not_swallow_the_url(tmp_path):
+    """`--recurse-submodules` takes its value ATTACHED (`=<pathspec>`) or not
+    at all. Treating it as a separate-value option makes it eat the next
+    argument, so the URL, the destination and the ref all shift by one and the
+    directory the detector correlates against is a phantom — the whole chain
+    goes unreported."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone --recurse-submodules --branch main "$TOOLS_REPO_URL" tools
+              - run: python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+    assert "tools/setup.py" in (hits[0].derived_note or "")
+
+
 def test_p1424_silent_when_the_clone_is_pinned_to_a_full_sha(tmp_path):
     """A full 40-hex commit is immutable — the same trust model the catalog
     recommends for actions. Reporting it would be a false positive against a
