@@ -74,10 +74,14 @@ jobs:
   # Fork PRs run the same scan on a GitHub-hosted runner: the scan needs no
   # secrets, so hosted execution of fork code is the standard ci-fork model.
   # It is the same command over the same tree, but it is NOT an equivalent
-  # assurance: on a fork PR the gate script and the engine both come from the
-  # head ref, so a fork can weaken its own scan in the same pull request. What
-  # stops that is human review of a `.github/` diff (CODEOWNERS routes it), not
-  # this job. Treat a green fork scan as "nothing obvious", not as cleared.
+  # assurance: on a fork PR this workflow, the gate script, and the engine all
+  # come from the head ref, so a fork can weaken its own scan in the same pull
+  # request. Nothing inside CI can close that - a check whose code the pull
+  # request edits cannot vouch for itself. What closes it is a human reading the
+  # diff. CODEOWNERS routes both paths that matter (`.github/` and the engine
+  # under skills/ci-secure/scripts/), and that routing only blocks a merge if
+  # branch protection has "Require review from Code Owners" turned on.
+  # Treat a green fork scan as "nothing obvious", not as cleared.
   scan-fork:
     name: ci-secure (fork)
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
@@ -98,13 +102,25 @@ jobs:
   # ONE check name carries the verdict for fork and non-fork alike. The two scan
   # jobs are mutually exclusive, so a branch protection rule naming either of
   # them directly would be satisfiable by never running it: a fork PR skips the
-  # self-hosted job, and a required check that is absent does not block a merge.
-  # This job always runs, so the required check is always reported, and it passes
-  # only when the one scan that was supposed to run actually ran and passed.
+  # self-hosted job, and GitHub counts a skipped required check as a pass. This
+  # job always runs, so the required check is always reported, and it passes only
+  # when the one scan that was supposed to run actually ran and passed. Point
+  # branch protection at `ci-secure` - this job - and at nothing else here.
+  #
+  # The same caveat as the fork scan above applies to this comparison: on a fork
+  # PR this script travels with the head ref too, so what it guarantees is a
+  # consistent verdict over jobs that ran, not that the jobs were honest. The
+  # `.github/` diff review is the thing that guarantees the latter.
   #
   # GitHub-hosted on purpose: this job runs on fork PRs too, and its `run:` block
   # travels with the head ref, so a self-hosted runner here would execute
   # fork-authored shell on StarSling infrastructure. It checks out nothing.
+  #
+  # `always()`, not `!cancelled()`: a cancelled run reports this job as skipped,
+  # and GitHub reads a skipped required check as green. Rather than hand anyone a
+  # one-click way to turn the gate green, a superseded run is left to report a
+  # red `ci-secure` - branch protection reads the newest run, so the cost is a
+  # stale red in the history and the alternative is a bypass.
   verdict:
     name: ci-secure
     needs: [scan, scan-fork]

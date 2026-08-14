@@ -1,2 +1,8 @@
 # Workflow changes carry CI-security consequences; route them to an owner.
 /.github/ @yonasb
+
+# The engine the CI-security gate executes. A pull request can edit the code
+# that judges it, so the gate's honesty rests on someone reading that diff --
+# owning the workflow but not the scanner it runs would leave the shorter path
+# to a forged pass unwatched.
+/skills/ci-secure/scripts/ @yonasb

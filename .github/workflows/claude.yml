@@ -35,9 +35,23 @@ jobs:
     # GitHub's "require approval for first-time contributors" setting only gates
     # pull_request events from forks, and this job runs on comments. This gate is
     # the equivalent — an outsider's @claude mention does not start the job, and
-    # a maintainer re-mentioning @claude IS the approval. The action itself also
-    # independently requires the commenter to have write access, so this is
-    # defense in depth, not the only line.
+    # someone with standing re-mentioning @claude IS the approval. The action
+    # itself also independently requires the commenter to have write access, so
+    # this is defense in depth, not the only line.
+    #
+    # Be precise about what this allowlist admits: MEMBER is any starslingdev org
+    # member and COLLABORATOR is anyone invited to this repo at any level, so
+    # neither implies write access. A read-only org member can therefore burn a
+    # self-hosted runner slot with a mention, and the action's write-access check
+    # is what stops them — after the job starts, not before. That is the accepted
+    # trade: the alternative is an allowlist of usernames to maintain by hand.
+    #
+    # Note also what this gate does NOT cover. It approves the COMMENTER, never
+    # the content. A maintainer mentioning @claude on a fork PR starts a job that
+    # holds the App's write credentials and then reads fork-authored diff, PR
+    # body, and comments — attacker-controlled text on the privileged side of the
+    # boundary. That residue is the action's prompt handling to manage, and it is
+    # the reason to think before mentioning @claude on an outside contribution.
     if: >-
       contains(github.event.comment.body, '@claude') &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
@@ -66,7 +80,10 @@ jobs:
     # the `actions: read` below. Dropping the three write grants would therefore
     # silence a scanner finding without taking one capability away from a run a
     # maintainer has already started. These grants match upstream's own published
-    # example workflow for this action, at the same pinned version.
+    # example workflow for this action, at the same pinned version. All of that
+    # describes the path where the App token exchange SUCCEEDS; if it ever fails
+    # (app uninstalled, OIDC unavailable) the action's fallback decides whether
+    # these three grants become live credentials rather than inert ones.
     permissions:
       contents: write
       pull-requests: write

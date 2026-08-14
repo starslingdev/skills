@@ -56,9 +56,48 @@ KNOWN_OUTCOMES = {"pass", "fail", "unmeasured"}
 ENGINE_ARGS = ["--gh-impostor", "off"]
 
 
+# A job summary over this many characters is rejected by GitHub, which would
+# throw away the whole thing - including the failures. Truncate instead.
+SUMMARY_LIMIT = 900_000
+
+
+def esc(value: object, *, prop: bool = False) -> str:
+    """Escape untrusted text before it goes into a ::workflow command::.
+
+    Everything this gate reports about is read out of scanned workflow files, and
+    on a fork pull request an attacker writes those files - including their NAMES,
+    which the engine reports verbatim. GitHub parses `::command::` sequences out
+    of a step's stdout line by line, so an unescaped newline in a filename lets
+    that filename emit commands of its own. `::stop-commands::` is the one that
+    matters: it switches off command parsing for the rest of the step, which
+    would silence the `::error::` annotations this gate emits for real failures.
+    The exit code is computed in Python and cannot be touched this way, so a
+    build still goes red - but "the finding does not block" must not decay into
+    "the finding does not appear", which is this gate's whole premise.
+
+    Escapes are the ones GitHub decodes: %25 first (or it would double-encode the
+    others), then CR and LF. Property values additionally escape `:` and `,`,
+    which terminate the property list.
+    """
+    text = str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    if prop:
+        text = text.replace(":", "%3A").replace(",", "%2C")
+    return text
+
+
+def flat(value: object) -> str:
+    """Collapse untrusted text to one line for the Markdown job summary.
+
+    Same attacker-controlled source as `esc`, different sink: a newline here does
+    not run a command, it breaks out of the list item and lets a crafted filename
+    render its own Markdown - a summary that reads as a clean pass.
+    """
+    return " ".join(str(value).split())
+
+
 def fail(message: str) -> int:
     """Annotate the check run with a red reason. Returns 1, the gate's exit code."""
-    print(f"::error::{message}")
+    print(f"::error::{esc(message)}")
     return 1
 
 
@@ -78,7 +117,9 @@ def main() -> int:
                     "the gate cannot pass without a verdict")
 
     if result.returncode != 0:
-        print(result.stderr, file=sys.stderr)
+        # Escaped like everything else: on a fork PR the engine is attacker code,
+        # and Actions parses workflow commands out of stderr too.
+        print(esc(result.stderr[:4000]), file=sys.stderr)
         return fail("ci-secure engine failed to run - the gate cannot pass without "
                     "a verdict (a scan that did not run is not a scan that passed)")
 
@@ -93,7 +134,7 @@ def main() -> int:
         findings = scan["findings"]
         incomplete = scan["scan_incomplete"]
     except (ValueError, KeyError, TypeError) as exc:
-        sys.stderr.write(result.stdout[:2000])
+        sys.stderr.write(esc(result.stdout[:2000]))
         return fail(f"ci-secure engine produced no readable verdict ({exc!r}) - "
                     "the gate cannot pass without one")
 
@@ -123,34 +164,42 @@ def main() -> int:
     # the summary a human reads must never disagree with the exit code.
     marks = {"pass": "PASS", "fail": "**FAIL**", "unmeasured": "UNMEASURED"}
     for f in facts:
-        mark = marks.get(f["outcome"], f"**{str(f['outcome']).upper()}**")
-        lines.append(f"- {mark} `{f['fact_id']}` - {f['evidence']}")
+        mark = marks.get(f["outcome"], f"**{flat(f['outcome']).upper()}**")
+        lines.append(f"- {mark} `{flat(f['fact_id'])}` - {flat(f['evidence'])}")
     if findings:
         lines += ["", "### Findings (surfaced, non-blocking)", ""]
         for f in findings:
-            loc = f"{f.get('workflow_file', '?')}:{f.get('line', '?')}"
-            lines.append(f"- {f.get('severity', '?')} `{f.get('pattern', '?')}` {f.get('title', '')} ({loc})")
-            print(f"::warning file={f.get('workflow_file', '')},line={f.get('line', 1)}::"
-                  f"ci-secure {f.get('severity', '?')} {f.get('pattern', '?')}: {f.get('title', '')}")
+            loc = f"{flat(f.get('workflow_file', '?'))}:{flat(f.get('line', '?'))}"
+            lines.append(f"- {flat(f.get('severity', '?'))} `{flat(f.get('pattern', '?'))}` "
+                         f"{flat(f.get('title', ''))} ({loc})")
+            print(f"::warning file={esc(f.get('workflow_file', ''), prop=True)},"
+                  f"line={esc(f.get('line', 1), prop=True)}::"
+                  f"ci-secure {esc(f.get('severity', '?'))} {esc(f.get('pattern', '?'))}: "
+                  f"{esc(f.get('title', ''))}")
     # A detector that did not run is reported, not omitted: "no findings from
     # P14.11" and "P14.11 never ran" must not look the same to a reader.
     gh_checks = scan.get("gh_checks") or {}
     if gh_checks:
         lines += ["", "### Network-gated detectors", ""]
-        lines += [f"- `{k}`: {v}" for k, v in sorted(gh_checks.items())]
+        lines += [f"- `{flat(k)}`: {flat(v)}" for k, v in sorted(gh_checks.items())]
     # Individually unmeasured facts do not block - several have honest causes
     # that would otherwise leave the gate permanently red - but they are never
     # silent, and a run where NOTHING was measured is caught by `degraded` above.
     for f in unmeasured:
-        print(f"::warning::ci-secure fact unmeasured: {f['fact_id']} - {f['evidence']}")
+        print(f"::warning::ci-secure fact unmeasured: {esc(f['fact_id'])} - {esc(f['evidence'])}")
     if incomplete:
-        lines += ["", f"### Coverage gaps: {incomplete}"]
+        lines += ["", f"### Coverage gaps: {flat(incomplete)}"]
 
+    body = "\n".join(lines)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
+        # A scan can legitimately produce thousands of findings, and an oversized
+        # summary is rejected wholesale - taking the failures down with it.
+        text = body if len(body) <= SUMMARY_LIMIT else (
+            body[:SUMMARY_LIMIT] + "\n\n_(summary truncated; see the step log)_")
         with open(summary, "a", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
-    print("\n".join(lines))
+            fh.write(text + "\n")
+    print(body)
 
     red = False
     for reason in degraded:

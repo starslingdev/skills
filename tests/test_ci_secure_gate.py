@@ -234,6 +234,88 @@ def test_an_unmeasured_fact_warns_without_blocking(tmp_path: Path) -> None:
     assert "PASS `sec.codeowners.workflows`" not in proc.summary
 
 
+# --------------------------------------------------------------------------
+# Untrusted text reaching the annotation and summary sinks
+# --------------------------------------------------------------------------
+
+# Everything the gate reports is read out of scanned workflow files, and on a
+# fork pull request an attacker writes those files — including their names, which
+# the engine reports verbatim. A newline in one of those strings would otherwise
+# let it emit workflow commands of its own. The command is built at runtime from
+# its pieces so this file never contains a literal attack string.
+_STOP = "::" + "stop-commands" + "::"
+
+
+def _hostile(text: str) -> dict:
+    """A scan whose every untrusted string carries an embedded workflow command."""
+    scan = _scan(findings=[{
+        "severity": "HIGH", "pattern": "P14.10", "title": text,
+        "workflow_file": text, "line": text}])
+    scan["security_score"]["facts"][0].update(
+        outcome="fail", fact_id=text, evidence=text)
+    scan["gh_checks"] = {text: text}
+    return scan
+
+
+@pytest.mark.parametrize("payload", [
+    "evil\n" + _STOP + "deadbeef\nfoo.yml",
+    "a\r\n::error::forged\r\nb.yml",
+    "x\n::add-mask::secret\ny.yml",
+])
+def test_a_crafted_filename_cannot_emit_its_own_workflow_commands(
+    tmp_path: Path, payload: str
+) -> None:
+    """No line the gate prints may begin with `::` unless the gate wrote it.
+
+    `::stop-commands::` is the one that matters: it switches command parsing off
+    for the rest of the step, which would silence the `::error::` annotations
+    this gate emits for genuine failures. The exit code is computed in Python and
+    no workflow command can touch it, so the build still goes red either way —
+    but "the finding does not block" must not decay into "the finding does not
+    appear", and a fork must not be able to blind the check tab at will.
+    """
+    proc = run_scan(tmp_path, _hostile(payload))
+    assert proc.returncode == 1, "a failed fact is still a failed fact"
+
+    # Actions reads a workflow command only where one STARTS a line, so the
+    # invariant is per-line: every command-looking line must be one the gate
+    # wrote. The payload surviving mid-line, percent-encoded, is the intended
+    # outcome — escaped rather than dropped, so the evidence is still readable.
+    emitted = [ln.strip() for ln in (proc.stdout + proc.stderr).splitlines()]
+    for line in emitted:
+        if line.startswith("::"):
+            assert line.startswith(("::warning", "::error")), f"the gate emitted {line!r}"
+    # The real annotations survive, which is the point of escaping rather than dropping.
+    assert any(ln.startswith("::error::ci-secure fact failed") for ln in emitted)
+
+
+def test_a_crafted_filename_cannot_break_out_of_the_summary(tmp_path: Path) -> None:
+    """A newline in the Markdown sink would let a filename render its own list items."""
+    proc = run_scan(tmp_path, _hostile("evil\n- PASS `all good`\nfoo.yml"))
+    assert proc.returncode == 1
+    # Collapsed onto one line, the payload is inert text inside a row the gate
+    # wrote. On its own line it would be a row of its own, reading as a pass that
+    # the exit code contradicts — so the invariant is that no summary line the
+    # gate did not author exists at all.
+    forged = [ln for ln in proc.summary.splitlines() if ln.strip() == "- PASS `all good`"]
+    assert not forged, "a crafted filename rendered its own summary row"
+    assert any("evil - PASS `all good` foo.yml" in ln for ln in proc.summary.splitlines()), (
+        "the filename should still be readable in the row the gate wrote, just flattened"
+    )
+
+
+def test_the_summary_is_bounded(tmp_path: Path) -> None:
+    """An oversized summary is rejected wholesale, taking the failures with it."""
+    scan = _scan(findings=[
+        {"severity": "LOW", "pattern": f"P{i}", "title": "x" * 500,
+         "workflow_file": "w.yml", "line": i}
+        for i in range(4000)])
+    proc = run_scan(tmp_path, scan)
+    assert proc.returncode == 0
+    assert len(proc.summary) < 1_000_000, "GitHub rejects a step summary over 1 MiB"
+    assert "truncated" in proc.summary
+
+
 def test_every_failure_reason_is_reported_not_just_the_first(tmp_path: Path) -> None:
     """A red build must list all of its causes, so one fix does not reveal the next."""
     scan = _scan(scanned_workflows=0, scan_incomplete=[
