@@ -40,6 +40,13 @@ entries are dated (UTC). Format loosely follows
   actually traced, and a scan that traced none of them is unmeasured rather
   than green.
 
+- **2026-08-14** — **A workflow the scan could not read no longer costs
+  `sec.required-checks.skippable` its API round-trips.** An unscannable
+  workflow forces the fact to unmeasured — rightly, since the file nobody could
+  read may be the one holding an always-running producer — but the fact was
+  computed first and the answer thrown away, spending two or three `gh api`
+  calls to reach a verdict nothing would read.
+
 - **2026-08-14** — **Branch protection that could not be read in full is no
   longer reported as "requires no status check".** The rulesets endpoint is
   readable with repo read access; classic branch protection is admin-only. For

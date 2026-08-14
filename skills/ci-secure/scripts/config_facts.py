@@ -1048,8 +1048,14 @@ def compute_config_facts(
         jobs = _unpersisted_checkout_violations(doc)
         if jobs:
             persist.append(f"{rel}: job(s) {_capped(jobs, 3, ', ')}")
-    rc_outcome, rc_evidence = _required_checks_skippable(
-        docs, repo, required_contexts_fetcher or _required_contexts_via_gh)
+    # Not computed at all when a workflow could not be scanned: `add` would
+    # discard the answer for the gap reason anyway (rightly — the unreadable
+    # workflow could be the one holding an always-running producer), and
+    # computing it first spent two or three `gh api` round-trips to reach a
+    # verdict nothing would read.
+    rc_outcome, rc_evidence = (
+        ("unmeasured", gap_reason) if gap else _required_checks_skippable(
+            docs, repo, required_contexts_fetcher or _required_contexts_via_gh))
     add("sec.required-checks.skippable",
         "every required status check is produced by a job that always runs "
         "(GitHub counts a SKIPPED required check as a pass, so a check only a "

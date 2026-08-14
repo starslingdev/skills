@@ -1357,3 +1357,26 @@ jobs:
 """
     f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
     assert "True" not in f["evidence"], f["evidence"]
+
+
+def test_a_workflow_scan_gap_costs_no_api_calls_for_the_required_checks_fact(
+    tmp_path,
+):
+    """An unscannable workflow forces this fact to `unmeasured` — rightly: the
+    workflow nobody could read might be the one holding an always-running
+    producer. So the API round-trips that would compute a verdict nothing reads
+    must not be spent."""
+    calls = []
+
+    def fetch(repo):
+        calls.append(repo)
+        return ["test"], "branch `main`"
+
+    root, files = _repo(tmp_path, {"ci.yml": _CONDITIONAL_ONLY})
+    out = cf.compute_config_facts(
+        root, files,
+        [{"workflow_file": "broken.yml"}],
+        repo="owner/repo", required_contexts_fetcher=fetch,
+        fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
+    assert _outcome(out, _FACT)["outcome"] == "unmeasured"
+    assert calls == [], f"branch protection was read for a discarded verdict: {calls}"
