@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--root", required=True, help="Repo root to scan.")
     parser.add_argument("--out", required=True, type=Path, help="Findings JSON path.")
-    parser.add_argument("--repo", default=None, help="owner/repo for dormancy activity lookup.")
+    parser.add_argument("--repo", default=None, help="owner/repo for the dormancy lookup and the API-gated config facts.")
     parser.add_argument(
         "--gh-impostor", choices=["auto", "on", "off"], default="auto",
         help="Pass-through to scan.py's network-gated impostor-SHA check.",

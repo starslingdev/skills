@@ -22,11 +22,55 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **`sec.required-checks.skippable` no longer reports a green
+  over checks it never examined.** Five ways it did: `always()` was matched as a
+  SUBSTRING, so `always() && <fork guard>` — the bypass this fact exists to
+  catch, with two tokens prepended — read as never-skipping; `success() ||
+  failure()`, the third spelling of the verdict-job condition, was not
+  recognised and failed a job that always reports; a required context produced
+  by no job here was excluded from judgment but still counted toward a sentence
+  claiming "every required check is produced by a job that always runs", which
+  when ALL of them were external made the row a claim about an empty set; a
+  `needs:` naming a job that is not in the file (and a `needs:` cycle) resolved
+  to "always runs" instead of "unknown"; and workflow-level `paths:` /
+  `branches:` filters on the `pull_request` trigger were never read, though a
+  path-filtered required check is this bypass in its textbook form and needs no
+  `if:` at all. Each context now resolves three ways — gated, bypassable, or
+  NOT JUDGED — the pass sentence states how many of the required checks it
+  actually traced, and a scan that traced none of them is unmeasured rather
+  than green.
+
+- **2026-08-14** — **Branch protection that could not be read in full is no
+  longer reported as "requires no status check".** The rulesets endpoint is
+  readable with repo read access; classic branch protection is admin-only. For
+  the reader this fact is written for — auditing a repository they do not
+  administer — the ordinary result is an empty rulesets response plus a 403,
+  and that pair was returning "no required checks", which the fact scored as a
+  pass. A repository can require checks through either mechanism, so an empty
+  answer from one and no answer from the other is unread, not unprotected: the
+  fact is now unmeasured, with the admin-only endpoint named as the reason.
+
+- **2026-08-14** — **Evidence that describes what was actually read.**
+  `sec.fork-approval.effective` printed `first_time_contributors`' sentence for
+  `all_external_contributors` too, understating the reader's own setting and
+  stating something false about what GitHub gates; each tier now has its own
+  sentence. `sec.required-checks.skippable` quoted Python's `True` back at a
+  file that says `if: true`. Both facts' unmeasured evidence told the operator
+  to "pass --repo owner/name" — a flag they never type, since the skill's own
+  flow derives it — and named the wrong cause: the reachable remedy is
+  `gh auth login`, and it now says so. The census document gains the fix recipe
+  for each new fact (the verdict job; the repository Actions setting, which no
+  YAML edit can close), a source note for the skipped-required-check behaviour
+  the whole fact rests on, and the caveat that the score's denominator is
+  token-dependent and therefore not comparable across differently
+  authenticated scans. SKILL.md and `run.py` no longer describe `--repo` as
+  being for the dormancy lookup alone, or a missing token as costing one check.
+
 - **2026-08-14** — **The skill description is back under the 1024-character
   cap.** Naming both of P14.24's shapes in the vector enumeration pushed it to
   1037 — over the limit, so the loader truncates it, and what gets truncated is
   the tail: the "Do NOT trigger for …" clauses that keep ci-secure from
-  answering ci-speedup's and ci-score's questions. Trimmed to 1017, and a
+  answering ci-speedup's and ci-score's questions. Trimmed to 1019, and a
   repo-level guard (`tests/test_skill_description_budget.py`) now measures every
   shipped skill's description so the next enumeration cannot cross it silently.
 

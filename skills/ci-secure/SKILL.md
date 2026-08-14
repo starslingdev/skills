@@ -58,8 +58,10 @@ By default the skill operates on the current working directory.
 2. Verify `.github/workflows/` exists. If it doesn't, stop and tell the
    user the repo has no GitHub Actions workflows to scan.
 3. If `gh auth status` succeeds AND the repo has a GitHub remote, derive
-   `owner/repo` from `git remote get-url origin` and use it for the
-   dormancy lookup. The remote URL comes in two shapes — handle both:
+   `owner/repo` from `git remote get-url origin` and pass it as `--repo`.
+   Three checks need it: the dormancy lookup, and the two config facts read
+   over the API (required-checks-skippable, fork-PR approval). The remote URL
+   comes in two shapes — handle both:
 
    ```bash
    url=$(git remote get-url origin)
@@ -71,8 +73,9 @@ By default the skill operates on the current working directory.
    Confirm the result is exactly `owner/repo` (one `/`, no scheme, no
    `.git` suffix) before passing it to `--repo`; if it doesn't match that
    shape, skip the lookup rather than passing it on. If gh is unavailable,
-   proceed — the scan runs without it, and the report will say the
-   impostor-SHA check was skipped.
+   proceed — the scan runs without it, and the report says so: the
+   impostor-SHA check is reported as skipped, and the two API-gated config
+   facts are reported as UNMEASURED coverage gaps rather than passes.
 
 ## Phase 2: Scan (one driver call)
 
@@ -607,7 +610,7 @@ hash in `tests/fixtures/cloak-manifest.json` or the cloak-prune step drops it.
 |-------|----------|
 | "no .github/workflows directory" | Run from a repo root that contains GitHub Actions workflows |
 | PyYAML missing | `pip install pyyaml` (the scanner's only third-party dep) |
-| gh not installed / not logged in | The scan still runs; the impostor-SHA check is skipped and reported as skipped. `gh auth login` to enable it |
+| gh not installed / not logged in | The scan still runs; three checks go unmeasured and are reported as such — the impostor-SHA vector, and the two API-gated config facts (required-checks-skippable, fork-PR approval). `gh auth login` to enable them |
 | Scanner emits zero findings | Most likely the workflows are actually clean — that's the headline, not a bug. Otherwise check for a detector regression via `tests/` |
 | Scanner exits non-zero or writes unparseable output | Coverage failure, not a clean repo — surface exit code + stderr and stop (see NEVER rules) |
 | Subagent stops with a question | Surface it to the user; the finding's heading stays unmarked until the subagent completes |

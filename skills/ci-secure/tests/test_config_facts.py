@@ -7,7 +7,9 @@ must never silently pass, and how the score treats a fact it could not measure.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
+from unittest import mock
 from pathlib import Path
 
 import pytest
@@ -530,8 +532,9 @@ def test_codeowners_undecodable_file_is_unmeasured_not_a_fail(tmp_path):
     assert f["outcome"] == "unmeasured", f
     assert "unmeasured" in f["evidence"], f
     assert "sec.codeowners.workflows" in out["unmeasured"]
-    # ...and it is a coverage gap, not a silent pass. `applicable_count` is 7
-    # (both API-gated facts are unmeasured offline too).
+    # ...and it is a coverage gap, not a silent pass. `applicable_count` stays
+    # 8 — every fact is still applicable — while only 5 score: this one plus
+    # both API-gated facts, which are unmeasured offline too.
     assert out["scored_count"] == 5 and out["applicable_count"] == 8
     assert "COVERAGE GAP" in out["caveat"]
 
@@ -1175,3 +1178,182 @@ def test_the_fact_table_carries_eight_facts(tmp_path):
     out = _fork_facts(tmp_path, "all_external_contributors")
     assert out["applicable_count"] == 8
     assert out["scored_count"] == 8
+
+
+# ---------------------------------------------------------------------------
+# F7/F8 — the ways a gate check can lie in the direction of "you are fine".
+#
+# Every test below was written against the shipped fact and watched to fail.
+# They are grouped because they share one property: the fact rendered a green
+# or a red whose EVIDENCE SENTENCE asserted something the code never checked.
+# ---------------------------------------------------------------------------
+
+def test_always_with_a_further_condition_still_skips(tmp_path):
+    """`always() && <guard>` is not `always()`. The job runs in every result
+    state AND only when the guard holds — so a fork PR still skips it, and the
+    required check is still green without the suite. Matching `always()` as a
+    substring turns the #49 bypass with two tokens prepended into a pass."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test-self:
+    name: test
+    if: always() && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_success_or_failure_is_recognised_as_never_skipping(tmp_path):
+    """`success() || failure()` is the third spelling of "runs whatever the
+    dependencies did" — the same verdict-job shape as `!cancelled()`. Failing
+    it accuses a job that always reports of never running."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+  verdict:
+    name: test
+    needs: [suite]
+    if: success() || failure()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo assert
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_path_filtered_workflow_cannot_be_an_always_running_producer(tmp_path):
+    """The textbook version of this bypass needs no `if:` at all: a required
+    check whose workflow only triggers on `paths:` is skipped by any PR that
+    touches nothing matching, and GitHub greens it. Reading only `if:` and
+    `needs:` and then claiming the producer "always runs" states a property
+    that was never tested."""
+    body = """\
+name: ci
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "paths" in f["evidence"]
+
+
+def test_when_no_required_context_is_produced_here_nothing_is_claimed(tmp_path):
+    """Required contexts produced by no job in this repo — external app checks
+    — are deliberately not judged. When they are ALL of them, zero checks were
+    examined, so a green row saying "every required check is produced by a job
+    that always runs" is a claim about an empty set, contradicted by its own
+    next sentence."""
+    f = _outcome(
+        _facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN},
+                    ["codecov/project", "netlify/deploy"]),
+        _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "codecov/project" in f["evidence"]
+
+
+def test_an_unresolvable_needs_target_is_not_an_all_clear(tmp_path):
+    """A `needs:` naming a job that is not in the file (a typo, or a job that
+    moved) leaves the skip walk with no answer. Treating no-answer as "always
+    runs" upgrades an unknown to a pass."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    needs: [ghost]
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "ghost" in f["evidence"]
+
+
+def test_empty_rulesets_plus_an_unreadable_classic_endpoint_is_not_a_pass(
+    tmp_path,
+):
+    """The reader most likely to have this defect is auditing a repository
+    they do not administer. Classic branch protection is admin-only, so their
+    token 403s there; the rulesets endpoint answers `[]` because the repo uses
+    classic protection. Reading that pair as "requires no status check" turns
+    "I could not read your protection" into "your protection is fine"."""
+    calls = []
+
+    class _Gh:
+        @staticmethod
+        def check_prereqs():
+            return True
+
+        @staticmethod
+        def run_gh_api(path, **kw):
+            calls.append(path)
+            if path == "repos/owner/repo":
+                return json.dumps({"default_branch": "main"})
+            if path.endswith("/rules/branches/main"):
+                return json.dumps([])
+            raise RuntimeError("HTTP 403: Must have admin rights to Repository")
+
+    with mock.patch.object(cf, "_gh_utils", lambda: _Gh):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+    assert contexts is None, (contexts, detail)
+    assert "admin" in detail or "could not be read" in detail
+
+
+def test_the_pass_evidence_describes_the_policy_it_actually_read(tmp_path):
+    """`all_external_contributors` gates EVERY outside account, contributor or
+    not. Describing it with `first_time_contributors`' sentence understates the
+    reader's own setting and states something false about GitHub."""
+    f = _outcome(_fork_facts(tmp_path / "a", "all_external_contributors"),
+                 _FORK_FACT)
+    assert f["outcome"] == "pass"
+    assert "every outside" in f["evidence"].lower(), f["evidence"]
+    f2 = _outcome(_fork_facts(tmp_path / "b", "first_time_contributors"),
+                  _FORK_FACT)
+    assert f2["outcome"] == "pass"
+    assert "not contributed" in f2["evidence"], f2["evidence"]
+
+
+def test_a_yaml_boolean_condition_is_quoted_back_as_yaml(tmp_path):
+    """The evidence quotes the reader's own file at them, so it must not print
+    Python's `True` for a line that says `true`."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    if: true
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
+    assert "True" not in f["evidence"], f["evidence"]

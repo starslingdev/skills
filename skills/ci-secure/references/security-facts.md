@@ -10,6 +10,15 @@ vectors this skill scans for are **findings, never score input** — several
 vector detectors are lexical rather than confirmed exploit proofs, and a public
 number must not grade a stranger's repo down on an unconfirmed match.
 
+**The denominator is token-dependent, so the aggregate is not comparable
+across scans run under different auth.** Two of the eight facts read the GitHub
+API. A scan with no repository or no token measures six of eight and scores
+`100 × passed / 6`; the same repository scanned with a token scores over eight.
+The unmeasured ids are named in the block's `unmeasured` list and the caveat, so
+a consumer — ci-advisor above all — can tell the two apart, but only if it
+checks: comparing the raw numbers across differently-authenticated scans
+compares different measurements.
+
 **The aggregate is machine-only.** ci-secure's own report and close render
 these facts as a pass/fail table and **no number** by design: a hygiene
 aggregate labelled "Security score" overclaims what eight config observations
@@ -76,9 +85,24 @@ two moved numbers.
   required check as a pass, so a check only a conditional job reports can be
   satisfied by never running it. The pass shape is the always-running verdict
   job that `needs:` the conditional suites and asserts their results. Required
-  contexts no workflow job produces (external app checks) are named, not
-  judged. API-gated: with no repository or no token the fact is unmeasured and
-  says so.
+  contexts no workflow job produces are named, not judged — external app
+  checks, reusable-workflow jobs, and templated job names all land there — and
+  when NONE of the required contexts could be traced to a job here, the fact is
+  unmeasured rather than green, because nothing was examined. A `needs:` target
+  that is not a job in the file, and a `needs:` cycle, are unknowns for the
+  same reason. A workflow whose `pull_request` trigger carries `paths:` /
+  `branches:` filters is not an always-running producer: a pull request outside
+  the filter never starts it, which is this bypass without any `if:` at all.
+  **To fix a fail**: add one job that carries the required check's name, runs
+  `if: always()` (or `!cancelled()`, or `success() || failure()`), `needs:` the
+  conditional suites, and fails unless the suite that should have run passed —
+  then point branch protection at that job's name instead of the suites'.
+  API-gated: with no repository or no token the fact is unmeasured and says so.
+
+  *Source*: GitHub documents this under "Handling skipped but required checks"
+  — a skipped required check is treated as successful, so branch protection
+  does not hold the pull request. This repository shipped that bypass and
+  closed it with the verdict-job pattern above.
 - **`sec.fork-approval.effective`** — the repository's fork-PR approval policy
   gates more than accounts new to GitHub. `all_external_contributors` and
   `first_time_contributors` (the default, and a legitimate trust judgment) both
@@ -86,8 +110,12 @@ two moved numbers.
   account old enough clears it and the gate then gates nobody real. Hygiene,
   not an exploit chain — fork runs still carry no secrets and a read-only
   token, so what an unapproved run buys is compute under the repository's name
-  and quiet iteration. API-gated, and a policy value outside GitHub's
-  documented enum is disclosed rather than judged.
+  and quiet iteration. **To fix a fail**: this is a repository setting, not a
+  YAML edit — Settings → Actions → General → "Approval for running fork pull
+  request workflows" → require approval from first-time contributors (or from
+  all outside collaborators). No workflow change closes it. API-gated, and a
+  policy value outside GitHub's documented enum is disclosed rather than
+  judged.
 - **`sec.checkout.credentials-scoped`** — on untrusted-trigger workflows,
   every `actions/checkout` sets `persist-credentials: false`. GitHub's default
   persists the token into `.git/config`, where attacker-influenced later steps

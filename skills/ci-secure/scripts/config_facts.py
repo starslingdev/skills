@@ -73,6 +73,7 @@ import importlib.util
 import json
 import re
 import sys
+from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Iterator
@@ -113,12 +114,18 @@ def _scan() -> ModuleType:
                 sys.modules.pop(n, None)
 
 
+@lru_cache(maxsize=1)
 def _gh_utils() -> ModuleType:
     """This skill's `gh_utils`, loaded by location for the same reason `_scan`
-    is: the module name collides across the skills in this repository."""
+    is: the module name collides across the skills in this repository.
+
+    Cached because re-executing the module also resets `check_prereqs`'s own
+    cache, so each API-gated fact was spawning its own `gh auth status` and, on
+    an unauthenticated run, logging its own ERROR line for a state the caller
+    has already handled.
+    """
     here = Path(__file__).resolve().parent
     return _load_sibling("gh_utils", here / "gh_utils.py")
-
 
 
 # --- CODEOWNERS (F3) ---------------------------------------------------------
@@ -526,18 +533,45 @@ def _unpersisted_checkout_violations(doc: dict) -> list[str]:
 # this fact is UNMEASURED with the reason stated — never a pass for being
 # unreadable, and never a fail for it either.
 
-# A condition that cannot skip the job. `always()` runs it in every state;
-# `!cancelled()` runs it unless the run was cancelled. Both keep the check
-# reporting, which is the property this fact is about.
-_ALWAYS_RUNS_RE = re.compile(r"always\s*\(\s*\)|!\s*cancelled\s*\(\s*\)")
+# Conditions that cannot skip the job — the WHOLE condition, not a substring
+# of it. `always()` runs it in every result state, `!cancelled()` unless the
+# run was cancelled, and `success() || failure()` is the third spelling of the
+# same thing. All three keep the check reporting, which is the property this
+# fact is about.
+#
+# Matching these as substrings was the defect: `always() && <fork guard>` runs
+# in every result state AND only when the guard holds, so it skips exactly like
+# the bare guard — which is the bypass this fact exists to catch, with two
+# tokens prepended. A condition this list does not recognise is treated as
+# skippable, so the failure direction of a mis-parse is a false RED (visible,
+# arguable) rather than a false green.
+_NEVER_SKIPS = {
+    "always()",
+    "!cancelled()",
+    "success() || failure()",
+    "failure() || success()",
+}
 _EXPRESSION_RE = re.compile(r"\$\{\{")
+_EXPRESSION_WRAPPER_RE = re.compile(r"^\$\{\{(.*)\}\}$", re.S)
+
+
+def _never_skips(condition: str) -> bool:
+    text = condition.strip()
+    wrapped = _EXPRESSION_WRAPPER_RE.match(text)
+    if wrapped:
+        text = wrapped.group(1).strip()
+    return " ".join(text.split()).replace(" (", "(").replace("! ", "!") \
+        in _NEVER_SKIPS
 
 
 def _condition_text(job: dict) -> str | None:
     cond = job.get("if")
     if cond is None or isinstance(cond, (dict, list)):
         return None
-    text = " ".join(str(cond).split())
+    # The evidence quotes the reader's own file back at them, so a YAML
+    # boolean has to read as YAML: `if: true`, never Python's `True`.
+    text = ("true" if cond is True else "false" if cond is False
+            else " ".join(str(cond).split()))
     return text or None
 
 
@@ -550,32 +584,82 @@ def _needs_of(job: dict) -> list[str]:
     return []
 
 
+class _Unknown(str):
+    """A skip answer the scan could not determine, carrying its reason.
+
+    A subclass of `str` so it reads like the reason strings beside it, and a
+    distinct TYPE so "I don't know" can never be mistaken for either "always
+    runs" (`None`) or "can skip" (a plain reason). It used to be the former,
+    which is the direction that hides a defect.
+    """
+
+
 def _skip_path(jobs: dict[str, dict], key: str,
                seen: frozenset[str] = frozenset()) -> str | None:
-    """Why this job can be skipped, or None if it always runs.
+    """Why this job can be skipped, `None` if it always runs, or `_Unknown`.
 
     Two ways a job skips: its own `if:` evaluates false, or a job it `needs:`
     skips (GitHub skips the dependents). Both report the check as skipped, and
     a skipped required check is green — so both are the same defect here.
 
-    An `always()` / `!cancelled()` condition stops the walk in BOTH directions:
-    such a job runs whatever its dependencies did, which is exactly what makes
-    the verdict-job pattern work. Recursion is cycle-guarded (`seen`) because a
-    malformed `needs:` cycle must not hang the scan.
+    A never-skipping condition (`always()`, `!cancelled()`,
+    `success() || failure()`) stops the walk in BOTH directions: such a job
+    runs whatever its dependencies did, which is exactly what makes the
+    verdict-job pattern work. Recursion is cycle-guarded (`seen`) because a
+    malformed `needs:` cycle must not hang the scan; a cycle is unresolvable
+    rather than safe, and says so.
     """
-    if key in seen or key not in jobs:
-        return None
+    if key in seen:
+        return _Unknown(f"`{key}` is part of a `needs:` cycle")
+    if key not in jobs:
+        return _Unknown(
+            f"`{key}` is not a job in this workflow, so whether it runs "
+            f"cannot be determined here")
     job = jobs[key]
     condition = _condition_text(job)
-    if condition and _ALWAYS_RUNS_RE.search(condition):
+    if condition and _never_skips(condition):
         return None
     if condition:
         return f"`{key}` carries `if: {condition}`"
     for need in _needs_of(job):
         upstream = _skip_path(jobs, need, seen | {key})
-        if upstream:
-            return f"`{key}` needs `{need}`, and {upstream}"
+        if upstream is None:
+            continue
+        if isinstance(upstream, _Unknown):
+            return _Unknown(f"`{key}` needs {upstream}")
+        return f"`{key}` needs `{need}`, and {upstream}"
     return None
+
+
+# Workflow-level filters that keep a job from running at all on a given pull
+# request. A required check whose workflow only triggers on `paths:` is the
+# textbook form of this bypass — touch nothing matching and GitHub greens the
+# check with the suite never run — and it needs no `if:` anywhere.
+_TRIGGER_FILTERS = ("paths", "paths-ignore", "branches", "branches-ignore")
+
+
+def _trigger_skip_reason(rel: str, doc: dict) -> str | None:
+    """Why this workflow may not run on a pull request at all, or None."""
+    # `on` is a YAML 1.1 boolean, so the key parses as `True` — read it the way
+    # the rest of this scanner does rather than by literal name.
+    on = _scan()._get_on_node(doc) if isinstance(doc, dict) else None
+    if on is True or on is None:
+        return None
+    if isinstance(on, str):
+        on = {on: None}
+    if isinstance(on, list):
+        on = {str(k): None for k in on}
+    if not isinstance(on, dict):
+        return None
+    pr = on.get("pull_request", on.get("pull_request_target"))
+    if not isinstance(pr, dict):
+        return None
+    present = [f for f in _TRIGGER_FILTERS if pr.get(f)]
+    if not present:
+        return None
+    return (f"{rel} triggers on `pull_request` only for "
+            + ", ".join(f"`{f}:`" for f in present)
+            + ", so a pull request outside that filter never starts it")
 
 
 def _display_name(key: str, job: dict) -> str:
@@ -585,9 +669,9 @@ def _display_name(key: str, job: dict) -> str:
 
 def _context_producers(
     docs: list[tuple[str, dict]], context: str,
-) -> list[tuple[str, str, dict, dict[str, dict]]]:
-    """(workflow, job key, job, sibling jobs) for every job that could report
-    `context` as a status check.
+) -> list[tuple[str, str, dict, dict[str, dict], dict]]:
+    """(workflow, job key, job, sibling jobs, workflow doc) for every job that
+    could report `context` as a status check.
 
     A check context is the job's DISPLAY name — its `name:` if it has one, else
     its key — and a matrix job expands to `name (value, value)`. Both spellings
@@ -602,7 +686,7 @@ def _context_producers(
             if _EXPRESSION_RE.search(shown):
                 continue
             if context == shown or context.startswith(shown + " ("):
-                out.append((rel, key, job, jobs))
+                out.append((rel, key, job, jobs, doc))
     return out
 
 
@@ -652,13 +736,21 @@ def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:
             if isinstance(check, dict) and check.get("context"):
                 contexts.add(str(check["context"]))
     except Exception as exc:                                   # noqa: BLE001
-        # Admin-only endpoint: a 403/404 here is ordinary. It only matters when
-        # the rulesets call did not land either — then nothing was read and the
-        # fact must say so rather than reporting "no required checks".
-        if not reached:
+        # Admin-only endpoint: a 403/404 here is ordinary — WHEN the other
+        # source already told us something. It did not if it never landed, and
+        # it did not if it landed EMPTY: a repository can require checks
+        # through either mechanism, so "no ruleset requires a check" plus "I
+        # may not read classic protection" is unread, not unprotected. That
+        # pair is the normal case for the reader this fact is written for —
+        # auditing a repository they do not administer — and reading it as a
+        # pass turns "I could not see your gate" into "your gate is fine".
+        if not reached or not contexts:
             return None, (
-                f"branch protection for `{branch}` could not be read "
-                f"({logger_detail or exc})")
+                f"branch protection for `{branch}` could not be read in full "
+                f"({logger_detail or exc}) — the rulesets endpoint reported "
+                f"no required check and classic branch protection is "
+                f"admin-only, so a required check configured there would be "
+                f"invisible to this token")
     return sorted(contexts), f"branch `{branch}`"
 
 
@@ -671,8 +763,9 @@ def _required_checks_skippable(
     if not repo:
         return "unmeasured", (
             "unmeasured: which status checks the branch requires is an API "
-            "fact, and no repository was supplied to read it from (pass "
-            "--repo owner/name)")
+            "fact, and this scan had no repository to read it from — that "
+            "needs `gh` authenticated (`gh auth login`) and a GitHub remote "
+            "to derive `owner/name` from")
     try:
         contexts, detail = fetcher(repo)
     except Exception as exc:                                   # noqa: BLE001
@@ -686,35 +779,60 @@ def _required_checks_skippable(
             "bypassed by a skipped job (whether the branch SHOULD require one "
             "is a different question, not this fact's)")
 
+    # Three outcomes per context, never two: GATED (some producer always runs),
+    # BYPASSABLE (every producer can skip), or UNJUDGED (nothing here produces
+    # it, or a producer's skip walk had no answer). Collapsing UNJUDGED into
+    # GATED is what let a green row claim "every required check is produced by
+    # a job that always runs" about checks it had never looked at.
     bypassable: list[str] = []
-    unproduced: list[str] = []
+    unjudged: list[str] = []
+    gated = 0
     for context in contexts:
         producers = _context_producers(docs, context)
         if not producers:
-            unproduced.append(context)
+            unjudged.append(
+                f"`{context}` (no job in these workflows reports it — an "
+                f"external app check, a reusable-workflow job, a templated "
+                f"job name, or a stale entry)")
             continue
-        skips = []
-        for rel, key, _job, jobs in producers:
-            reason = _skip_path(jobs, key)
+        skips: list[str] = []
+        unknown: list[str] = []
+        always_runs = False
+        for rel, key, _job, jobs, doc in producers:
+            reason = _skip_path(jobs, key) or _trigger_skip_reason(rel, doc)
             if reason is None:
-                skips = []
+                always_runs = True
                 break
+            if isinstance(reason, _Unknown):
+                unknown.append(f"`{context}` ← {rel}: {reason}")
+                continue
             skips.append(f"`{context}` ← {rel}: {reason}")
-        bypassable.extend(skips[:1])
+        if always_runs:
+            gated += 1
+        elif unknown:
+            unjudged.extend(unknown[:1])
+        else:
+            bypassable.extend(skips[:1])
 
-    external = (
-        (" Required context(s) produced by no workflow job — external app "
-         "checks, or stale entries — were not judged: "
-         + _capped(unproduced, 4, ", ") + ".") if unproduced else "")
+    tail = ((" Not judged: " + _capped(unjudged, 4, "; ") + ".")
+            if unjudged else "")
     if bypassable:
         return "fail", (
-            "a skipped job reports its required check as PASSED, so "
+            "GitHub reports a SKIPPED required check as passed, and "
             + _capped(bypassable, 3)
-            + " — the check is satisfiable without the job ever running."
-            + external)
+            + " — so nothing in these workflows is guaranteed to report it."
+            + tail)
+    if not gated:
+        # Everything was unjudged. A green row here would be a claim about an
+        # empty set, contradicted by its own next sentence.
+        return "unmeasured", (
+            f"unmeasured: none of the checks {detail} requires could be traced "
+            f"to a job in these workflows, so whether any of them can be "
+            f"satisfied by a skipped job was never established." + tail)
     return "pass", (
-        f"every required check on {detail} is produced by a job that always "
-        "runs." + external)
+        f"every required check on {detail} that these workflows produce "
+        f"({gated} of {len(contexts)}) has a producer that runs whatever else "
+        f"happens." + tail)
 
 
 # --- F8: fork-PR CI approval that gates nobody real --------------------------
@@ -771,8 +889,9 @@ def _fork_approval_effective(repo: str | None, fetcher) -> tuple[str, str]:
     if not repo:
         return "unmeasured", (
             "unmeasured: the fork-PR approval policy is a repository setting "
-            "read over the API, and no repository was supplied to read it "
-            "from (pass --repo owner/name)")
+            "read over the API, and this scan had no repository to read it "
+            "from — that needs `gh` authenticated (`gh auth login`) and a "
+            "GitHub remote to derive `owner/name` from")
     try:
         policy, detail = fetcher(repo)
     except Exception as exc:                                   # noqa: BLE001
@@ -790,9 +909,16 @@ def _fork_approval_effective(repo: str | None, fetcher) -> tuple[str, str]:
             "attacker is compute under your repository's name and quiet "
             "iteration against your CI surface")
     if policy in _FORK_APPROVAL_PASS:
+        # One sentence per tier: `all_external_contributors` gates EVERY
+        # outside account, contributor or not, and describing it with
+        # `first_time_contributors`' wording understated the reader's own
+        # setting while stating something false about what GitHub does.
+        gated = (
+            "every outside account, whether or not it has contributed here"
+            if policy == "all_external_contributors"
+            else "outside accounts that have not contributed here before")
         return "pass", (
-            f"fork-PR workflow approval is `{policy}`, which gates outside "
-            "accounts that have not contributed here before")
+            f"fork-PR workflow approval is `{policy}`, which gates {gated}")
     return "unmeasured", (
         f"unmeasured: `{policy}` is not a value this check's enum recognises "
         "(GitHub documents `first_time_contributors_new_to_github`, "
