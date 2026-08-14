@@ -96,11 +96,16 @@ def test_verdict_passes_only_when_the_right_job_ran(self_hosted, fork):
     the real clauses leaves every substring assertion satisfied while reopening
     exactly the bypass this file exists to block.
     """
-    sh = shutil.which("sh")
-    assert sh, "no POSIX shell available to execute the verdict script"
+    # bash, not sh: GitHub Actions runs a `run:` block under bash by default, and the script
+    # opens with `set -euo pipefail`, which dash rejects outright ("Illegal option -o
+    # pipefail"). Executing it under /bin/sh would test a shell CI never uses — and on Linux,
+    # where sh IS dash, every case would fail for a reason the workflow doesn't have.
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash unavailable; the verdict script is a bash script in CI")
     run = _verdict()["steps"][-1]["run"]
     proc = subprocess.run(
-        [sh, "-c", run],
+        [bash, "-c", run],
         env={"SELF_HOSTED": self_hosted, "FORK": fork, "PATH": "/usr/bin:/bin"},
         capture_output=True, text=True,
     )
