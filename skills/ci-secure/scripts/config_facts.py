@@ -535,10 +535,10 @@ def _unpersisted_checkout_violations(doc: dict) -> list[str]:
 # unreadable, and never a fail for it either.
 
 # Conditions that cannot skip the job — the WHOLE condition, not a substring
-# of it. `always()` runs it in every result state, `!cancelled()` unless the
-# run was cancelled, and `success() || failure()` is the third spelling of the
-# same thing. All three keep the check reporting, which is the property this
-# fact is about.
+# of it. `always()` runs it in every result state and `!cancelled()` unless the
+# run was cancelled, so both keep the check reporting, which is the property
+# this fact is about. `success() || failure()` is NOT a third spelling of the
+# same thing once the job has `needs:` — see `_NEVER_SKIPS_WITHOUT_NEEDS`.
 #
 # Matching these as substrings was the defect: `always() && <fork guard>` runs
 # in every result state AND only when the guard holds, so it skips exactly like
@@ -680,8 +680,9 @@ def _skip_path(jobs: dict[str, dict], key: str,
     # check. So the walk does not go looking for an always-running ancestor:
     # there is no arrangement of ancestors that makes a bare dependent
     # unskippable, and saying otherwise described the opposite of what it does.
-    # The producer has to carry `always()` / `!cancelled()` /
-    # `success() || failure()` ITSELF — which is what the fix recipe says.
+    # The producer has to carry `always()` or `!cancelled()` ITSELF — which is
+    # what the fix recipe says. (`success() || failure()` does not qualify
+    # here: a skipped dependency makes both predicates false.)
     if needs:
         # Each dependency is walked ONCE. Testing the result's type and then
         # recomputing it doubled the work at every link, so a linear `needs:`

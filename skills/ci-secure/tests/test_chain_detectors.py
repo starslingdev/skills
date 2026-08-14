@@ -4555,3 +4555,72 @@ def test_p1424_the_second_chain_on_a_line_is_described_not_just_named(tmp_path):
     note = hits[0].get("derived_note", "")
     assert "two/y.py" in note, note
     assert "one/x.py" in note, note
+
+
+def test_p1424_a_checkout_pinned_by_a_later_step_is_suppressed(tmp_path):
+    """The direction the checkout arm's pin test never covered, and the one the
+    catalog promises: fetch, pin to a full commit id, then run. This is the fix
+    recipe applied exactly, and it was being reported — because the suppression
+    window opened at the first EXECUTION-shaped command after the fetch, which
+    is the reported execution itself, leaving an empty interval no pin could
+    land in. Whether it suppressed depended on an unrelated command happening
+    to sit in between."""
+    sha = "1" * 40
+    hits, = (_remote_exec_hits(tmp_path, f"""\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: main
+                  path: tools
+              - run: git -C tools checkout {sha}
+              - run: bash tools/run.sh
+    """),)
+    assert hits == [], hits
+
+
+def test_p1424_a_checkout_pin_does_not_depend_on_an_unrelated_neighbour(
+    tmp_path,
+):
+    """The same repository with one irrelevant command added ahead of the pin
+    must reach the same verdict. It did not: the extra execution opened the
+    window that the recipe-compliant shape lacked, so an unrelated line decided
+    whether a correctly pinned repo was reported."""
+    sha = "2" * 40
+    without = _remote_exec_hits(tmp_path / "without", f"""\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: main
+                  path: tools
+              - run: git -C tools checkout {sha}
+              - run: bash tools/run.sh
+    """)
+    with_neighbour = _remote_exec_hits(tmp_path / "with", f"""\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: main
+                  path: tools
+              - run: python3 unrelated/x.py
+              - run: git -C tools checkout {sha}
+              - run: bash tools/run.sh
+    """)
+    assert without == with_neighbour == []

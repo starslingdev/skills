@@ -3611,6 +3611,12 @@ def _mutable_fetch_executions(
     named_remotes: dict[str, str] = {}
     # (position, line, resolved path, path as written)
     executions: list[tuple[int, int, str, str]] = []
+    # (position, line) for EVERY command in the job. A checkout-step fetch has
+    # no position of its own, so its suppression window has to open at the
+    # first command after it — any command. Deriving that from `executions`
+    # instead opened the window at the first EXECUTION, which is the reported
+    # hit itself, leaving an interval nothing could fall inside.
+    command_lines: list[tuple[int, int]] = []
     cwd = base_cwd
     skip_step = False
     pos = 0
@@ -3663,6 +3669,7 @@ def _mutable_fetch_executions(
             pos += 1
             if not segment.strip():
                 continue
+            command_lines.append((pos, line_no))
             tokens = _strip_command_prefix(_shell_tokens(segment))
             if not tokens:
                 # `shlex` refused it — an unbalanced quote, most often, and
@@ -3781,16 +3788,19 @@ def _mutable_fetch_executions(
         # discarded, and told it that it executes unpinned remote code.
         #
         # A checkout-step fetch has no position in the command stream, so its
-        # window opens at the first shell command AFTER its step. Without that
-        # the window opened at -1 and every pin in the job counted — including
-        # one applied to a tree the checkout then replaced, which suppressed the
-        # finding while recording that the fetch "was pinned before anything ran
-        # from it".
+        # window opens just before the first shell command AFTER its step —
+        # ANY command. Two ways to get this wrong, and this code has had both:
+        # opening at -1 let every pin in the job count, including one applied
+        # to a tree the checkout then replaced; opening at the first
+        # EXECUTION-shaped command left the window empty whenever that
+        # execution was the reported hit, so the fix recipe's own shape
+        # (checkout, pin, run) could never suppress and an unrelated command
+        # sitting in between decided the verdict.
         window_start = fetch.pos
         if window_start < 0:
             window_start = next(
-                (at for at, line, _r, _w in executions if line > fetch.line),
-                hit[0]) - 1
+                (at for at, line in command_lines if line > fetch.line),
+                hit[0] + 1) - 1
         pin_at = next((p for p in pinned.get(dest, ())
                        if window_start < p < hit[0]), None)
         if pin_at is not None:

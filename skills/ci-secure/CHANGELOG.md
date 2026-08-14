@@ -22,6 +22,18 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **A pin applied after an `actions/checkout` can suppress
+  again — the fix recipe's own shape had stopped being recognised.** Giving
+  checkout-arm fetches a suppression window (so a pin applied to a tree the
+  checkout later replaced could not silence a finding) opened that window at
+  the first EXECUTION-shaped command after the fetch. That execution is the
+  reported one, so the interval was empty and no later pin could ever land in
+  it: checkout, `git -C tools checkout <40-hex>`, run — exactly what the
+  catalog teaches — was reported, and whether it was depended on an unrelated
+  command happening to sit in between. The window opens at the first shell
+  command of any kind now. The `git clone` arm was never affected, and the
+  shipped test covered only the direction that fires.
+
 - **2026-08-14** — **`success() || failure()` no longer certifies a verdict job
   that has `needs:` — the recommended fix was itself bypassable.** It reads
   like `always()` and behaves like it only while the job has no dependencies.
