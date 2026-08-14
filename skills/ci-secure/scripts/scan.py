@@ -2839,8 +2839,15 @@ def _as_written(path: str) -> str:
 # Does unreadable shell mention either half of the chain — a fetch, or something
 # that executes? If not, failing to read it costs this detector nothing.
 _CHAIN_RELEVANT_RE = re.compile(
+    # Command NAMES that fetch or execute…
     r"\b(?:git|cd|source|pip|pip3|python[0-9.]*|node|nodejs|bash|sh|zsh|ksh"
-    r"|ruby|perl|php|pwsh|powershell)\b|\./")
+    r"|ruby|perl|php|pwsh|powershell)\b"
+    # …and the shape of an execution that names no command at all: a PATH
+    # invoked directly (`tools/setup.py --msg=…`). Without this arm a visible
+    # clone followed by an unparseable `tools/setup.py` produced zero findings
+    # AND zero gaps — a silent false clean on exactly the chain this vector
+    # exists to catch.
+    r"|(?:^|[;&|])\s*\.{0,2}/?[\w.@-]+/[\w./@-]+")
 _UNPARSED_CD_RE = re.compile(r"(?:^|[;&|]\s*)\s*cd\s")
 # A whole `${{ … }}` expression. The runner substitutes it before the shell
 # sees it, so it is ONE word — see `_shell_tokens`.

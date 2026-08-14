@@ -3849,3 +3849,63 @@ def test_p1424_a_checkout_named_inside_a_heredoc_does_not_shift_the_evidence(
     # mention is four lines above it. Only the line number distinguishes them,
     # since both lines contain the words "uses" and "checkout".
     assert hits[0].line == 12, (hits[0].line, hits[0].evidence)
+
+
+def test_p1424_an_execution_shaped_unparsable_line_is_recorded(tmp_path):
+    """A visible clone at a branch, then `tools/setup.py --msg=it's here` — an
+    apostrophe `shlex` refuses. The command names a path and could be the
+    execution half of the chain, but the relevance test only matched command
+    NAMES, so a bare path matched nothing: zero findings, zero gaps, a silent
+    false clean on exactly the shape the vector exists to catch."""
+    before = len(scan._DROPPED_MATCHES)
+    _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  tools/setup.py --msg=it's here
+    """)
+    added = scan._DROPPED_MATCHES[before:]
+    assert any("could not be parsed" in d["reason"] for d in added), added
+
+
+def test_p1424_a_sourced_path_shaped_unparsable_line_is_recorded(tmp_path):
+    """`source` and `.` are executions whose names the relevance test also
+    missed."""
+    before = len(scan._DROPPED_MATCHES)
+    _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  . tools/env.sh --name=it's
+    """)
+    added = scan._DROPPED_MATCHES[before:]
+    assert any("could not be parsed" in d["reason"] for d in added), added
+
+
+def test_p1424_an_irrelevant_unparsable_line_stays_quiet(tmp_path):
+    """The control that keeps the gap channel from becoming noise again: a
+    `jq` filter with an unbalanced quote cannot hold either half of the chain,
+    so failing to read it costs this detector nothing."""
+    before = len(scan._DROPPED_MATCHES)
+    _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  echo hello
+                  jq -r '.a["b] | @csv' data.json
+    """)
+    assert scan._DROPPED_MATCHES[before:] == []

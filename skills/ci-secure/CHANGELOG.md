@@ -22,6 +22,22 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **A branch- or path-filtered `push` workflow can no longer
+  veto the real producer.** Only the tag-only shape was rejected, but
+  `on: push: branches: [main]` — the deploy-workflow shape, far commoner — does
+  not run on a pull request's branch either. A job named `test` in one was
+  accepted as an always-running producer of the required `test` context and
+  turned the real, gated producer's bypass green.
+
+- **2026-08-14** — **Unreadable shell that looks like an EXECUTION is recorded
+  again.** The relevance test matched command names only, so a bare path
+  (`tools/setup.py --msg=it's here` — an apostrophe `shlex` refuses) matched
+  nothing: a visible clone at a branch followed by that line produced zero
+  findings AND zero gaps, a silent false clean on precisely the chain this
+  vector exists to catch. A directly-invoked path is now recognised, while a
+  `jq` filter with an unbalanced quote still stays quiet, which is what keeps
+  the channel from becoming noise.
+
 - **2026-08-14** — **`working-directory:` and checkout steps are read from the
   parsed document, not scraped off raw lines.** Three defects, one root cause —
   a regex over the same bytes the parser had already read correctly:

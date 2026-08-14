@@ -727,9 +727,17 @@ def _can_report_on_a_pull_request(doc: dict) -> bool:
     if "push" in on:
         push = on.get("push")
         if not isinstance(push, dict):
-            return True
+            return True                  # `on: push` with no filters at all
         if any(push.get(k) for k in _TAG_ONLY_KEYS) and not (
                 push.get("branches") or push.get("branches-ignore")):
+            return False                 # tags only: no PR branch push matches
+        if push.get("branches") or push.get("paths"):
+            # A push filtered to `branches: [main]` — the deploy-workflow shape,
+            # far commoner than the tag-only one — does not run on a pull
+            # request's branch, so a job in it is not what gates the PR. Reading
+            # it as an always-running producer let it veto the real, gated one
+            # and turned a bypass green. A `paths:` filter is the same: it may
+            # not run on the PR's push either, so it cannot be relied on.
             return False
         return True
     return False

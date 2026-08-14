@@ -2276,3 +2276,58 @@ def test_an_admin_only_403_discloses_the_source_it_could_not_read():
     assert contexts == ["test"], contexts
     assert "classic" in detail.lower(), detail
     assert "admin" in detail.lower(), detail
+
+
+def test_a_branch_filtered_push_workflow_cannot_veto_the_real_producer(tmp_path):
+    """The tag-only shape was rejected; `on: push: branches: [main]` was not —
+    and it is far commoner. A deploy workflow with a job named `test` never
+    runs on a pull request, so accepting it as an always-running producer turns
+    the real, gated producer's bypass green."""
+    ci = """\
+name: ci
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  test:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+    deploy = """\
+name: deploy
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make smoke
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": ci, "deploy.yml": deploy},
+                             ["test"]), _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_an_unfiltered_push_workflow_is_still_a_producer(tmp_path):
+    """The control: a plain `on: push` workflow shares its head commit with a
+    same-repo pull request, so its checks really do land on the PR."""
+    body = """\
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
