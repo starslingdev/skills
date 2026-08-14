@@ -3025,6 +3025,13 @@ _SELF_REPO_EXPRESSION_RE = re.compile(r"\$\{\{\s*github\.repository\s*\}\}")
 # Survives expression collapsing in `_shell_tokens` so the clone arm can still
 # see that the URL named the scanned repository.
 _SELF_REPO_TOKEN = "$SELF_REPO"
+# The self-repository expression (or its collapsed token) as the ENTIRE
+# `owner/repo` path segment of a URL — `github.com/${{ github.repository }}` and
+# nothing appended to it.
+_SELF_REPO_SLUG_RE = re.compile(
+    r"[/@]"
+    r"(?:\$\{\{\s*github\.repository\s*\}\}|\$SELF_REPO)"
+    r"(?:\.git)?(?:[/?#]|$)")
 
 
 @lru_cache(maxsize=64)
@@ -3069,8 +3076,13 @@ def _is_self_clone(url: str, file_path: Path) -> bool:
     """
     if not url:
         return False
-    if _SELF_REPO_EXPRESSION_RE.search(url) or _SELF_REPO_TOKEN in url:
-        return True          # `${{ github.repository }}` IS the scanned repo
+    # `${{ github.repository }}` IS the scanned repository — but only when it
+    # is the WHOLE `owner/repo` part of the URL. Searching for it anywhere let
+    # `…/evil/${{ github.repository }}-mirror` — a stranger's URL that merely
+    # embeds yours — read as your own and go silent, and this guard exists to
+    # suppress findings, so a loose match suppresses real ones.
+    if _SELF_REPO_SLUG_RE.search(url):
+        return True
     match = _GITHUB_SLUG_RE.search(url)
     if not match:
         return False
@@ -3402,6 +3414,16 @@ def _checkout_fetches(
         repository = with_block.get("repository")
         if not isinstance(repository, str) or not repository.strip():
             continue                                   # your own code
+        if _EXPRESSION_TOKEN_RE.search(repository):
+            # `repository: ${{ env.TOOLS_REPO }}` — the finding would name a
+            # third party the scan never established, and that variable
+            # routinely holds the organisation's own repository. `ref:` and
+            # `path:` expressions already recorded gaps; this one asserted.
+            if gap is not None:
+                gap(f"an `actions/checkout` takes its `repository:` from "
+                    f"`{repository.strip()}`, computed at run time, so whether "
+                    f"it fetches a third party was NOT established")
+            continue
         if _is_self_clone(repository, file_path) or \
                 _is_self_clone(f"github.com/{repository.strip()}", file_path):
             continue

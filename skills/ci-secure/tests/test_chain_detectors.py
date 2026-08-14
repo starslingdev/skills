@@ -3909,3 +3909,94 @@ def test_p1424_an_irrelevant_unparsable_line_stays_quiet(tmp_path):
                   jq -r '.a["b] | @csv' data.json
     """)
     assert scan._DROPPED_MATCHES[before:] == []
+
+
+def test_p1424_a_lookalike_repository_is_not_your_repository(tmp_path):
+    """The self-clone test matched the slug ANYWHERE in the URL, so
+    `.../owner/repo-mirror` — someone else's fork under a name that contains
+    yours — was treated as your own repository and went silent. Contrived, but
+    the guard exists to suppress findings, so a loose match suppresses real
+    ones."""
+    # The literal-slug half already compares the whole `owner/repo`; the
+    # EXPRESSION half searched for `${{ github.repository }}` anywhere in the
+    # URL, so a stranger's URL that merely embeds it read as your own.
+    hits = _self_clone_repo(
+        tmp_path, "https://" + _HOST + "/evil/${{ github.repository }}-mirror.git",
+        "python3 tools/release.py")
+    assert len(hits) == 1, hits
+    assert _self_clone_repo(
+        tmp_path / "self", "https://" + _HOST + "/${{ github.repository }}.git",
+        "python3 tools/release.py") == []
+
+
+def test_p1424_a_computed_checkout_repository_is_gapped_not_named(tmp_path):
+    """`repository: ${{ env.TOOLS_REPO }}` fired and rendered "checks out
+    `${{ env.TOOLS_REPO }}`" — naming a third party the scan never
+    established, when that variable routinely holds the org's own repository.
+    `ref:` and `path:` expressions already recorded gaps; `repository:` did
+    not."""
+    before = len(scan._DROPPED_MATCHES)
+    hits = _remote_exec_hits(tmp_path, """\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: ${{ env.TOOLS_REPO }}
+                  ref: main
+                  path: tools
+              - run: bash tools/run.sh
+    """)
+    assert hits == [], hits
+    added = scan._DROPPED_MATCHES[before:]
+    assert any("repository" in d["reason"] for d in added), added
+
+
+def test_p1424_a_checkout_with_no_path_replaces_the_workspace(tmp_path):
+    """With no `path:`, `actions/checkout` REPLACES the workspace, so anything
+    the job runs afterwards comes out of the fetched tree. That is the arm's
+    broadest pairing rule and it had no test in either direction."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: main
+              - run: bash scripts/build.sh
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_a_checkout_pin_still_honours_position(tmp_path):
+    """Parity with the shell arm: a checkout at a mutable ref followed by an
+    execution reports even when a LATER checkout of the same path is pinned —
+    the code that ran was the unpinned one."""
+    sha = "e" * 40
+    hits = _remote_exec_hits(tmp_path, f"""\
+        name: ci
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: main
+                  path: tools
+              - run: bash tools/run.sh
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: {sha}
+                  path: tools
+    """)
+    assert len(hits) == 1

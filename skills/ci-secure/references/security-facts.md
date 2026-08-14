@@ -87,8 +87,11 @@ two moved numbers.
   job that `needs:` the conditional suites and asserts their results. Required
   contexts no workflow job produces are named, not judged — external app
   checks, reusable-workflow jobs, and templated job names all land there — and
-  when NONE of the required contexts could be traced to a job here, the fact is
-  unmeasured rather than green, because nothing was examined. A `needs:` target
+  a PASS is a statement about EVERY required check, so ANY context that could
+  not be traced leaves the fact unmeasured rather than green — the ordinary
+  shape of a mature repository is a dozen required contexts with most coming
+  from external apps, and a green earned off the one traceable check would be
+  a clean bill for the others. A `needs:` target
   that is not a job in the file, and a `needs:` cycle, are unknowns for the
   same reason. Only jobs in a workflow that can actually report on a pull
   request count as producers — a `pull_request` workflow, or a `push` one that

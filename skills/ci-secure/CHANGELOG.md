@@ -22,6 +22,21 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **Smaller corrections found alongside the round-2 review.**
+  A rulesets response of an unexpected shape (an error object, a paginated
+  envelope) was skipped while the source was still marked READ, so it meant
+  "this branch requires nothing" — the classic arm treats an unexpected shape
+  as unread, and an asymmetry between two sources decides the verdict. A
+  constant condition written the long way (`if: ${{ 1 == 1 }}`) still read as
+  a bypass. `${{ github.repository }}` was matched ANYWHERE in a clone URL, so
+  a stranger's URL that merely embeds yours (`…/evil/${{ github.repository
+  }}-mirror`) was treated as a self-clone and silenced — a guard that
+  suppresses findings has to match exactly. An `actions/checkout` whose
+  `repository:` is computed at run time is now a coverage gap instead of a
+  finding naming a third party the scan never established. And the `needs:`
+  walk is memoized: a 12-level graph two jobs wide took 8,191 visits where 26
+  suffice.
+
 - **2026-08-14** — **A branch- or path-filtered `push` workflow can no longer
   veto the real producer.** Only the tag-only shape was rejected, but
   `on: push: branches: [main]` — the deploy-workflow shape, far commoner — does
@@ -381,9 +396,10 @@ entries are dated (UTC). Format loosely follows
   only, so `gh repo clone`, `svn`, `pip install git+…@branch`, a submodule
   `--remote` update, a fetched tarball, a rename between fetch and execution, a
   build driver rather than an interpreter, and a versioned interpreter are all
-  the same trust model and all unreported — and a clone of your OWN repository
-  is reported like a stranger's, because nothing in the YAML tells them apart.
-  All now listed in the entry, so a clean P14.24 is not read as a guarantee.
+  the same trust model and all unreported. All now listed in the entry, so a
+  clean P14.24 is not read as a guarantee. (Self-clones were also listed here
+  at the time; they stopped being reported at all later the same day — see the
+  self-clone entry above, which is the final behaviour.)
   The entry's TL;DR opening also names what is checked again, since the report's
   "what each vector checks" appendix quotes that first sentence verbatim.
 

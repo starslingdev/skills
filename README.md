@@ -119,9 +119,9 @@ $ci-speedup      # or $ci-score, $ci-secure
   only.** Its run-history data pass reads the audited repo's Actions
   run/job/log data through read-only `gh` API calls; a token with read access to
   the repo's Actions is enough. `ci-score` never uses the network at all, and
-  `ci-secure` treats `gh` as optional: with it, the impostor-SHA check and the
-  dormancy notes run; without it, the scan still runs and the report says which
-  check was skipped.
+  `ci-secure` treats `gh` as optional: with it, the impostor-SHA check, the
+  dormancy notes, and the two config facts read over the API run; without it,
+  the scan still runs and the report says which checks went unmeasured.
 - **`python3` (3.9 or newer)** and **PyYAML**: the bundled scripts are
   stdlib-only apart from one third-party dependency, **PyYAML**, which the
   scanner uses to parse your workflow YAML. Install it with `pip install pyyaml`

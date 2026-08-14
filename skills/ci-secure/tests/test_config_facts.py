@@ -2203,27 +2203,36 @@ jobs:
     assert "cycle" in f["evidence"], f["evidence"]
 
 
-def test_the_skip_walk_does_not_take_exponential_time(tmp_path):
-    """The cycle guard's docstring promises a malformed `needs:` graph "must
-    not hang the scan", and it did: the unknown-branch called the recursion
-    twice per level — once to test the result's type, once to use it — so the
-    work doubled with every link. Measured on a linear chain ending in a
-    missing job: depth 16 took 0.05s, depth 20 took 0.95s, depth 22 took 3.4s.
-    A ~30-deep chain with a typo'd root is a quarter of an hour, on a scanner
-    whose whole promise is that it is cheap and deterministic."""
-    import time
+def test_the_skip_walk_visits_each_job_once(tmp_path):
+    """A `needs:` graph that branches revisits the same subtree down every
+    path, so an unmemoized walk is exponential in depth — the cycle guard's
+    docstring promises a malformed graph "must not hang the scan".
 
-    depth = 22
-    jobs = {f"j{i}": {"needs": [f"j{i + 1}"]} for i in range(depth)}
-    jobs[f"j{depth - 1}"] = {"needs": ["ghost"]}
+    Asserted as a CALL-COUNT invariant rather than a wall-clock bound: a time
+    limit on a private helper measures the machine, not the code, and would
+    redden a correct fix on a loaded CI runner."""
+    depth = 12
+    jobs: dict[str, dict] = {}
+    for i in range(depth):
+        jobs[f"a{i}"] = {"needs": [f"a{i + 1}", f"b{i + 1}"]}
+        jobs[f"b{i}"] = {"needs": [f"a{i + 1}", f"b{i + 1}"]}
+    jobs[f"a{depth}"] = {"if": "github.event_name == 'push'"}
+    jobs[f"b{depth}"] = {"if": "github.event_name == 'push'"}
 
-    started = time.monotonic()
-    answer = cf._skip_path(jobs, "j0")
-    elapsed = time.monotonic() - started
+    visits: list[str] = []
+    real = cf._skip_path
 
-    assert elapsed < 1.0, f"the skip walk took {elapsed:.2f}s at depth {depth}"
-    # And it still answers correctly: the chain ends somewhere unreadable.
-    assert isinstance(answer, cf._Unknown), answer
+    def counting(all_jobs, key, seen=frozenset(), memo=None):
+        visits.append(key)
+        return real(all_jobs, key, seen, memo)
+
+    with mock.patch.object(cf, "_skip_path", counting):
+        answer = counting(jobs, "a0")
+
+    # Proportional to the GRAPH (one call per edge, give or take), never
+    # exponential in its depth: 47 calls here against 8,191 before memoizing.
+    assert len(visits) <= 4 * len(jobs), len(visits)
+    assert answer is not None            # the chain really is skippable
 
 
 # ---------------------------------------------------------------------------
@@ -2331,3 +2340,41 @@ jobs:
 """
     f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
     assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_rulesets_body_of_an_unexpected_shape_is_unread_not_empty():
+    """The rulesets arm skipped a non-list body and still marked the source
+    READ, so an unexpected payload — an error object, a paginated envelope —
+    came back as "this branch requires nothing". The classic arm treats an
+    unexpected shape as unread; both sources have to fail the same way, or the
+    asymmetry decides the verdict."""
+    with mock.patch.object(
+        cf, "_gh_utils",
+        lambda: _protection_gh({"message": "Bad credentials"},
+                               {"contexts": ["lint"]})):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+    # Classic answered, so a check IS required — but the rulesets source was
+    # not read, and a check required only there would be invisible.
+    assert contexts is None or "part" in detail, (contexts, detail)
+
+
+def test_a_constant_true_expression_is_not_a_bypass(tmp_path):
+    """`if: ${{ 1 == 1 }}` cannot be false, so failing it reds a repository
+    that did nothing wrong. `if: true` was already handled; the wrapped
+    constant comparison is the same statement written the long way."""
+    for cond in ("${{ 1 == 1 }}", "${{ true }}", "${{ 'a' == 'a' }}"):
+        body = f"""\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    if: {cond}
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+        out = _facts_with(tmp_path / cond.replace("/", "_").replace(" ", "_")[:20],
+                          {"ci.yml": body}, ["test"])
+        assert _outcome(out, _FACT)["outcome"] == "pass", (cond, _outcome(out, _FACT))

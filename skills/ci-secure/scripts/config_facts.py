@@ -558,6 +558,10 @@ _NEVER_SKIPS = {
 # `success()` runs the job every time ONLY when nothing upstream can fail
 # first, so it is never-skipping exactly when the job has no `needs:`.
 _NEVER_SKIPS_WITHOUT_NEEDS = {"success()"}
+# `${{ 1 == 1 }}` and friends: a comparison of two identical literals is `true`
+# written the long way, and failing it reds a repository that did nothing wrong.
+# Deliberately narrow — this evaluates NOTHING, it recognises a constant.
+_CONSTANT_TRUE_RE = re.compile(r"^(?:true|(?P<a>'[^']*'|\"[^\"]*\"|\d+)==(?P=a))$")
 _EXPRESSION_RE = re.compile(r"\$\{\{")
 _EXPRESSION_WRAPPER_RE = re.compile(r"^\$\{\{(.*)\}\}$", re.S)
 
@@ -579,7 +583,7 @@ def _normalise_condition(condition: str) -> str:
 
 def _never_skips(condition: str, has_needs: bool = True) -> bool:
     text = _normalise_condition(condition)
-    if text in _NEVER_SKIPS:
+    if text in _NEVER_SKIPS or _CONSTANT_TRUE_RE.match(text):
         return True
     return not has_needs and text in _NEVER_SKIPS_WITHOUT_NEEDS
 
@@ -604,6 +608,13 @@ def _needs_of(job: dict) -> list[str]:
     return []
 
 
+def _remember(memo: dict[str, str | None], key: str,
+              answer: str | None) -> str | None:
+    """Cache an answer that depends only on the job, and return it."""
+    memo[key] = answer
+    return answer
+
+
 class _Unknown(str):
     """A skip answer the scan could not determine, carrying its reason.
 
@@ -615,7 +626,8 @@ class _Unknown(str):
 
 
 def _skip_path(jobs: dict[str, dict], key: str,
-               seen: frozenset[str] = frozenset()) -> str | None:
+               seen: frozenset[str] = frozenset(),
+               memo: dict[str, str | None] | None = None) -> str | None:
     """Why this job can be skipped, `None` if it always runs, or `_Unknown`.
 
     Two ways a job skips: its own `if:` evaluates false, or a job it `needs:`
@@ -628,20 +640,30 @@ def _skip_path(jobs: dict[str, dict], key: str,
     verdict-job pattern work. Recursion is cycle-guarded (`seen`) because a
     malformed `needs:` cycle must not hang the scan; a cycle is unresolvable
     rather than safe, and says so.
+
+    MEMOIZED, because a branching graph reaches the same job down every path
+    and the walk is otherwise exponential in depth: a 12-level graph two jobs
+    wide took 8,191 visits where 26 suffice. A cycle answer is NOT cached — it
+    depends on the path taken to get there, unlike every other answer, which
+    depends only on the job.
     """
+    if memo is None:
+        memo = {}
+    if key in memo:
+        return memo[key]
     if key in seen:
-        return _Unknown(f"`{key}` is part of a `needs:` cycle")
+        return _Unknown(f"`{key}` is part of a `needs:` cycle")   # never cached
     if key not in jobs:
-        return _Unknown(
+        return _remember(memo, key, _Unknown(
             f"`{key}` is not a job in this workflow, so whether it runs "
-            f"cannot be determined here")
+            f"cannot be determined here"))
     job = jobs[key]
     needs = _needs_of(job)
     condition = _condition_text(job)
     if condition and _never_skips(condition, bool(needs)):
-        return None
+        return _remember(memo, key, None)
     if condition:
-        return f"`{key}` carries `if: {condition}`"
+        return _remember(memo, key, f"`{key}` carries `if: {condition}`")
     # No condition of its own. A job with `needs:` is SKIPPED whenever a job it
     # needs fails or skips — which is precisely what GitHub reports as a passed
     # check. So the walk does not go looking for an always-running ancestor:
@@ -657,16 +679,18 @@ def _skip_path(jobs: dict[str, dict], key: str,
         # cycle guard above promises cannot happen.
         cycle = next(
             (walked for walked in
-             (_skip_path(jobs, n, seen | {key}) for n in needs)
+             (_skip_path(jobs, n, seen | {key}, memo) for n in needs)
              if isinstance(walked, _Unknown)),
             None,
         )
         if cycle is not None:
             return _Unknown(f"`{key}` needs {cycle}")
-        return (f"`{key}` needs {_capped([f'`{n}`' for n in needs], 3, ', ')} "
-                f"and carries no condition of its own, so it is skipped "
-                f"whenever one of them fails or skips")
-    return None
+        return _remember(
+            memo, key,
+            f"`{key}` needs {_capped([f'`{n}`' for n in needs], 3, ', ')} "
+            f"and carries no condition of its own, so it is skipped "
+            f"whenever one of them fails or skips")
+    return _remember(memo, key, None)
 
 
 # Which workflows can report a check on a pull request at all.
@@ -926,7 +950,16 @@ def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:
     rulesets_ok = classic_ok = False
     try:
         rules = json.loads(gh.run_gh_api(f"repos/{repo}/rules/branches/{branch}"))
-        for rule in rules if isinstance(rules, list) else []:
+        if not isinstance(rules, list):
+            # An error object, a paginated envelope, anything but the documented
+            # array. Skipping it and still marking the source READ made an
+            # unexpected payload mean "this branch requires nothing" — while the
+            # classic arm treats an unexpected shape as unread. Two sources that
+            # fail differently let the asymmetry decide the verdict.
+            raise ValueError(
+                f"the rulesets endpoint returned {type(rules).__name__}, not "
+                f"the documented array of rules")
+        for rule in rules:
             if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
                 continue
             params = rule.get("parameters") or {}
@@ -1073,7 +1106,8 @@ def _required_checks_skippable(
         # about all the others — while counting toward `passed` and staying out
         # of `unmeasured`, so no caveat fired either.
         traced = (f"{gated} of {len(contexts)} required check(s) could be "
-                  f"traced to a job in these workflows, and that one is gated"
+                  f"traced to a job in these workflows, and "
+                  f"{'that one is' if gated == 1 else 'those are'} gated"
                   if gated else
                   f"none of the {len(contexts)} required check(s) could be "
                   f"traced to a job in these workflows")
