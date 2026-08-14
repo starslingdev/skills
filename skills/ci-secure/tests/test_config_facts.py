@@ -1649,3 +1649,92 @@ jobs:
     assert _outcome(out, _FACT)["outcome"] == "unmeasured"
     out2 = _facts_with(tmp_path / "b", {"ci.yml": body}, ["test (windows, 3.12)"])
     assert _outcome(out2, _FACT)["outcome"] == "pass"
+
+
+def _protection_gh(rulesets, classic):
+    """A stubbed `gh` whose two protection endpoints answer independently.
+
+    Drives the REAL `_required_contexts_via_gh`, so the shipped parsing and the
+    partial-read guard are what gets exercised.
+    """
+    class _Gh:
+        @staticmethod
+        def check_prereqs():
+            return True
+
+        @staticmethod
+        def run_gh_api(path, **kw):
+            if path == "repos/owner/repo":
+                return json.dumps({"default_branch": "main"})
+            answer = rulesets if "/rules/branches/" in path else classic
+            if isinstance(answer, Exception):
+                raise answer
+            return json.dumps(answer)
+    return _Gh
+
+
+_RULESET_WITH_TEST = [{
+    "type": "required_status_checks",
+    "parameters": {"required_status_checks": [{"context": "test"}]},
+}]
+
+
+def test_a_partially_read_protection_is_never_reported_as_complete():
+    """Branch protection has two sources and a repository can use either. When
+    one answers and the other ERRORS for a reason that is not the ordinary
+    admin-only 403 — a rate limit, a timeout, a 5xx — the contexts that came
+    back are a PARTIAL set, and returning them as complete means a required
+    check configured in the unread source is invisible. The fact then renders a
+    measured pass, counts toward `passed`, and never appears in `unmeasured`,
+    so a consumer blends it as clean and fully measured."""
+    for label, rulesets, classic in (
+        ("classic errors", _RULESET_WITH_TEST, RuntimeError("HTTP 500")),
+        ("rulesets errors", RuntimeError("HTTP 429 rate limit"),
+         {"contexts": ["test"]}),
+    ):
+        with mock.patch.object(cf, "_gh_utils",
+                               lambda r=rulesets, c=classic: _protection_gh(r, c)):
+            contexts, detail = cf._required_contexts_via_gh("owner/repo")
+        assert contexts is None, (label, contexts, detail)
+        assert "part" in detail or "could not be read" in detail, (label, detail)
+
+
+def test_an_unread_source_plus_an_empty_one_is_not_no_required_checks():
+    """The worst shape of the same defect: the source that answered says
+    "nothing required" and the other was never read at all, which came back as
+    `pass — requires no status check`. That is a claim about a source the scan
+    never saw."""
+    with mock.patch.object(
+        cf, "_gh_utils",
+        lambda: _protection_gh(RuntimeError("HTTP 429"),
+                               {"contexts": [], "checks": []})):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+    assert contexts is None, (contexts, detail)
+
+
+def test_the_admin_only_403_with_a_ruleset_answer_still_measures():
+    """The positive control that keeps the guard honest. A 403 from the
+    admin-only classic endpoint is ORDINARY, and when the rulesets endpoint
+    returned real contexts the scan has a complete answer from the source the
+    repository actually uses — refusing that would make the fact unmeasurable
+    for every non-admin, which is most of its readers."""
+    with mock.patch.object(
+        cf, "_gh_utils",
+        lambda: _protection_gh(
+            _RULESET_WITH_TEST,
+            RuntimeError("HTTP 403: Must have admin rights to Repository."))):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+    assert contexts == ["test"], (contexts, detail)
+
+
+def test_both_sources_readable_unions_their_contexts():
+    """Neither source alone is authoritative, so both are read and unioned —
+    including classic's `checks` list, which is the newer spelling beside
+    `contexts`."""
+    with mock.patch.object(
+        cf, "_gh_utils",
+        lambda: _protection_gh(
+            _RULESET_WITH_TEST,
+            {"contexts": ["lint"], "checks": [{"context": "build"}]})):
+        contexts, _ = cf._required_contexts_via_gh("owner/repo")
+    assert contexts == ["build", "lint", "test"], contexts

@@ -2347,3 +2347,63 @@ def test_catalog_scan_end_to_end_fires_p14_24_on_a_mutable_fetch(tmp_path):
     assert len(hits) == 1
     assert hits[0]["severity"] == "MEDIUM"
     assert hits[0]["affected_jobs"] == ["build"]
+
+
+def test_p1424_a_here_string_does_not_open_a_here_doc(tmp_path):
+    """`<<<` is a here-string: it carries its whole value on the line and opens
+    no body. Reading it as a here-doc opener suppresses every command after it
+    to the end of the step — so a real fetch-and-run below it disappears, and
+    silently, because nothing records that the step stopped being read."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_REPO_URL" tools
+                  grep -q x <<< foo
+                  python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_a_here_doc_named_inside_a_quoted_string_opens_nothing(tmp_path):
+    """`echo "use << EOF for heredocs"` mentions a here-doc, it does not open
+    one. The opener search has to look at shell syntax, not at text."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  echo "use << EOF for heredocs"
+                  git clone --branch main "$TOOLS_REPO_URL" tools
+                  python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_an_unterminated_here_doc_is_recorded_as_a_coverage_gap(tmp_path):
+    """When a here-doc really is open at the end of a step, the commands inside
+    it were correctly not read — but the reader has to be told that a step went
+    unscanned, or "no finding here" reads as "nothing here"."""
+    before = len(scan._DROPPED_MATCHES)
+    _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  cat <<'EOF' > install.sh
+                  git clone --branch main "$TOOLS_REPO_URL" tools
+                  python3 tools/setup.py
+    """)
+    added = scan._DROPPED_MATCHES[before:]
+    assert any("heredoc" in d["reason"] or "here-doc" in d["reason"]
+               for d in added), added

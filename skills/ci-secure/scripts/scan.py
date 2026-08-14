@@ -2107,9 +2107,33 @@ def _run_scalar_starts(text: str) -> set[int]:
     return starts
 
 
-# `<<WORD` / `<<-'WORD'` — a heredoc opener. `<<<` (a herestring) is excluded:
-# it carries its whole value on the line and opens no body.
-_HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+# `<<WORD` / `<<-'WORD'` — a heredoc opener.
+#
+# The lookarounds are load-bearing. `<<<` is a here-STRING: it carries its whole
+# value on the line and opens no body. Without `(?!<)` the search simply retried
+# at the second `<` and matched `<< abc` inside `sort <<< abc`, which suppressed
+# every command to the end of the step — losing real findings, silently.
+_HEREDOC_OPEN_RE = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def _heredoc_delimiter(command: str) -> str | None:
+    """The word ending the here-doc this command opens, or None.
+
+    The OPERATOR has to be shell syntax, the DELIMITER does not:
+    `echo "use << EOF for heredocs"` mentions a here-doc inside a quoted string
+    and opens nothing, while `cat <<'EOF'` quotes its delimiter and opens one —
+    quoting the delimiter is the idiom, since it stops expansion in the body.
+    So the quote test is applied to the `<<` itself, using the syntax/data
+    split this file already computes once in `_shell_scan`, and the delimiter
+    is read from the raw text. Blanking all quoted text instead would miss
+    every `<<'EOF'` in the corpus.
+    """
+    syntax = [is_syntax for _ch, is_syntax in _shell_scan(command)]
+    for match in _HEREDOC_OPEN_RE.finditer(command):
+        at = match.start()
+        if at + 1 < len(syntax) and syntax[at] and syntax[at + 1]:
+            return match.group(2)
+    return None
 
 
 def _install_line(
@@ -2937,6 +2961,7 @@ def _executed_path(tokens: list[str]) -> str | None:
 
 def _job_shell_commands(
     text: str, job_range: tuple[int, int] | None,
+    gap: Callable[[str], None] | None = None,
 ) -> list[tuple[int, str, str, bool]]:
     """(line, verbatim line, joined command, starts-a-new-step) for the job.
 
@@ -2966,6 +2991,13 @@ def _job_shell_commands(
         if line_no not in shell_lines:
             continue
         if line_no in step_starts:
+            if heredoc is not None and gap is not None:
+                # The body really was open at the end of the step, so its
+                # commands were correctly not read — but a step that stopped
+                # being scanned must not read as a step with nothing in it.
+                gap(f"a here-doc opened with `{heredoc}` was never closed "
+                    f"before the step ended, so the rest of that step was NOT "
+                    f"scanned for a mutable fetch executed out of")
             heredoc = None            # a body cannot outlive its own step
         if heredoc is not None:
             if raw.strip() == heredoc:
@@ -2979,14 +3011,19 @@ def _job_shell_commands(
         if key and key.group(2) and not _BLOCK_SCALAR_RE.match(key.group(2).strip()):
             cmd = key.group(2)
         out.append((line_no, raw, cmd, line_no in step_starts))
-        opener = _HEREDOC_OPEN_RE.search(cmd)
-        if opener:
-            heredoc = opener.group(2)
+        opened = _heredoc_delimiter(cmd)
+        if opened:
+            heredoc = opened
+    if heredoc is not None and gap is not None:
+        gap(f"a here-doc opened with `{heredoc}` was never closed before the "
+            f"job ended, so the rest of that step was NOT scanned for a "
+            f"mutable fetch executed out of")
     return out
 
 
 def _mutable_fetch_executions(
     text: str, job_range: tuple[int, int] | None,
+    gap: Callable[[str], None] | None = None,
 ) -> list[tuple[_RemoteFetch, int, str]]:
     """Every (fetch, execution line, executed path) pair visible in one job.
 
@@ -3007,7 +3044,8 @@ def _mutable_fetch_executions(
     executions: list[tuple[int, int, str, str]] = []
     cwd = "."
     pos = 0
-    for line_no, _raw, command, new_step in _job_shell_commands(text, job_range):
+    for line_no, _raw, command, new_step in _job_shell_commands(
+            text, job_range, gap):
         if new_step:
             cwd = "."
         for segment in _install_command_segments(command):
@@ -3110,8 +3148,14 @@ def _correlation_unverified_remote_code_execution(
                 ),
             })
             continue
+        def _gap(reason: str, _job: str = job_name) -> None:
+            _DROPPED_MATCHES.append({
+                "file": str(file_path),
+                "reason": f"P14.24: jobs.{_job}: {reason}",
+            })
+
         for fetch, exec_line, exec_path in _mutable_fetch_executions(
-            text, job_range,
+            text, job_range, _gap,
         ):
             yield RawHit(
                 line=fetch.line,

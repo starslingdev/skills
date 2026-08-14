@@ -37,6 +37,33 @@ entries are dated (UTC). Format loosely follows
   actually traced, and a scan that traced none of them is unmeasured rather
   than green.
 
+- **2026-08-14** — **Branch protection read from only ONE of its two sources
+  no longer renders as a complete, measured pass.** A repository can require
+  checks through rulesets or through classic branch protection, so both are
+  read and unioned — but the completeness guard sat inside the classic
+  endpoint's `except`, leaving three ways for an unread source to render as a
+  clean one: rulesets answering while classic failed for a non-403 reason (rate
+  limit, timeout, 5xx) returned a PARTIAL set as complete; rulesets failing
+  while classic answered lost the rulesets error entirely; and rulesets
+  throwing while classic answered EMPTY returned "requires no status check",
+  which scores as a pass — a claim about a source never read. All three
+  rendered a green that counted toward `passed` and stayed out of
+  `unmeasured`, so a consumer blended them as clean AND fully measured. The
+  guard is now per-source and outside both calls; only the ordinary admin-only
+  403, alongside a source that actually found something, still measures.
+
+- **2026-08-14** — **A here-string no longer silences the rest of a step.**
+  `<<<` carries its value on the line and opens no body, but the here-doc
+  opener pattern retried at the second `<` and matched it — so everything after
+  a `grep -q x <<< foo` was treated as here-doc body and never scanned, losing
+  real findings with no trace. A here-doc named inside a quoted string
+  (`echo "use << EOF for heredocs"`) did the same. The operator is now required
+  to be shell syntax rather than text, using the quoting split this file
+  already computes once, while the delimiter may still be quoted — `<<'EOF'`
+  is the idiom. And when a here-doc really is open at the end of a step, that
+  step is recorded in the scan's dropped-matches list, so a step that stopped
+  being read is no longer indistinguishable from a step with nothing in it.
+
 - **2026-08-14** — **A job in a workflow that cannot run on a pull request is
   no longer accepted as the thing gating one.** Producers are matched by
   display name across every workflow, with no check that the workflow runs on

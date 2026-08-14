@@ -809,14 +809,37 @@ def _matrix_produces(job: dict, suffix: str) -> bool:
     return " ".join(suffix.split()) in expansions
 
 
+# A 403 from the admin-only classic endpoint is ORDINARY — most readers of this
+# fact are auditing a repository they do not administer. Any other failure
+# (rate limit, timeout, 5xx, malformed body) is not ordinary, and must not be
+# laundered into the same "expected" bucket.
+_ADMIN_ONLY_403_RE = re.compile(r"\b403\b|must have admin", re.I)
+
+
+def _is_admin_only_403(message: str) -> bool:
+    return bool(_ADMIN_ONLY_403_RE.search(message))
+
+
 def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:
     """(contexts, detail) from the GitHub API, or (None, reason).
 
-    Two sources, unioned, because either can be the one a repository uses and
+    TWO sources, unioned, because either can be the one a repository uses and
     reading only one would report a protected branch as unprotected: the
     rulesets endpoint (readable with repo read access) and the classic branch
-    protection endpoint (admin-only — a 403 there is expected and is not an
-    error when the rulesets call succeeded).
+    protection endpoint (admin-only).
+
+    The completeness question is therefore per-SOURCE, and the guard has to sit
+    outside both calls. It used to live inside the classic endpoint's `except`,
+    which left three ways to render an unread source as a clean one: rulesets
+    answering with contexts while classic failed for a NON-403 reason returned
+    a partial set as complete; rulesets failing while classic answered lost the
+    rulesets error entirely (it was assigned and never read on any returning
+    path); and rulesets throwing while classic answered EMPTY returned "no
+    required checks", which the fact scores as a pass — a claim about a source
+    the scan never saw. All three render `✅ pass`, count toward `passed`, and
+    stay out of `unmeasured`, so a consumer blends them as clean AND fully
+    measured. That is the "unread is not clean" failure this fact exists to
+    prevent, committed by the fact itself.
     """
     gh = _gh_utils()
     if not gh.check_prereqs():
@@ -829,10 +852,10 @@ def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:
         return None, "the repository reported no default branch"
 
     contexts: set[str] = set()
-    reached = False
+    errors: list[str] = []
+    rulesets_ok = classic_ok = False
     try:
         rules = json.loads(gh.run_gh_api(f"repos/{repo}/rules/branches/{branch}"))
-        reached = True
         for rule in rules if isinstance(rules, list) else []:
             if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
                 continue
@@ -840,36 +863,37 @@ def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:
             for check in params.get("required_status_checks") or []:
                 if isinstance(check, dict) and check.get("context"):
                     contexts.add(str(check["context"]))
+        rulesets_ok = True
     except Exception as exc:                                   # noqa: BLE001
-        logger_detail = str(exc)
-    else:
-        logger_detail = ""
+        errors.append(f"rulesets: {exc}")
     try:
         classic = json.loads(gh.run_gh_api(
             f"repos/{repo}/branches/{branch}/protection/required_status_checks",
             quiet_not_found=True))
-        reached = True
         for context in classic.get("contexts") or []:
             contexts.add(str(context))
         for check in classic.get("checks") or []:
             if isinstance(check, dict) and check.get("context"):
                 contexts.add(str(check["context"]))
+        classic_ok = True
     except Exception as exc:                                   # noqa: BLE001
-        # Admin-only endpoint: a 403/404 here is ordinary — WHEN the other
-        # source already told us something. It did not if it never landed, and
-        # it did not if it landed EMPTY: a repository can require checks
-        # through either mechanism, so "no ruleset requires a check" plus "I
-        # may not read classic protection" is unread, not unprotected. That
-        # pair is the normal case for the reader this fact is written for —
-        # auditing a repository they do not administer — and reading it as a
-        # pass turns "I could not see your gate" into "your gate is fine".
-        if not reached or not contexts:
+        errors.append(f"classic branch protection: {exc}")
+
+    if not (rulesets_ok and classic_ok):
+        detail = "; ".join(errors)
+        if not (rulesets_ok or classic_ok):
+            return None, (f"branch protection for `{branch}` could not be read "
+                          f"at all ({detail})")
+        # One source answered. That is enough ONLY when the other failed the
+        # ordinary way — the admin-only 403 — and the one that answered found
+        # something. An empty answer from one source plus no answer from the
+        # other establishes nothing at all.
+        if not _is_admin_only_403(errors[-1]) or not contexts:
             return None, (
-                f"branch protection for `{branch}` could not be read in full "
-                f"({logger_detail or exc}) — the rulesets endpoint reported "
-                f"no required check and classic branch protection is "
-                f"admin-only, so a required check configured there would be "
-                f"invisible to this token")
+                f"only part of branch protection for `{branch}` could be read "
+                f"({detail}) — a required check configured in the unread "
+                f"source would be invisible to this scan, so whether one can "
+                f"be bypassed was not established")
     return sorted(contexts), f"branch `{branch}`"
 
 
