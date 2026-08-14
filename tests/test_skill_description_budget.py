@@ -9,9 +9,10 @@ with it, which is exactly the half that keeps three sibling skills from
 answering each other's questions.
 
 There was no guard on this and the cap was reached the ordinary way: an
-enumeration inside a description grew by one clause. ci-secure's went from 990
-to 1040 characters when a vector was renamed to name both of its shapes — over
-the cap, in a PR about something else, with a full green suite. This is that
+enumeration inside a description grew by one clause. ci-secure's went from 987
+to 1037 characters when a vector was renamed to name both of its shapes — over
+the cap, in a PR about something else, with a full green suite (it is back
+under the cap, at 1019, on this branch's head). This is that
 guard, at the repo level rather than per-skill, because the failure mode is
 identical for all three and only one of them happened to be near the line.
 

@@ -37,6 +37,24 @@ entries are dated (UTC). Format loosely follows
   actually traced, and a scan that traced none of them is unmeasured rather
   than green.
 
+- **2026-08-14** — **P14.24 covers `actions/checkout` of another repository.**
+  It is how most workflows fetch a second repository, and at a branch or tag it
+  is the identical trust model — but the detector read `run:` shell only, so
+  the most common spelling was the one it could not see. A checkout naming
+  another `repository:` at a mutable `ref:`, with something in a later step of
+  the same job executing out of its `path:`, now reports. A full 40-hex `ref:`
+  is silent, your own repository is silent, and a `ref:` or `path:` computed at
+  run time is recorded as a coverage gap rather than guessed at.
+
+- **2026-08-14** — **A `working-directory:` computed at run time no longer
+  blinds the step it is on.** `apps/${{ matrix.app }}` is extremely common;
+  skipping those steps lost every chain inside them. Such a directory is now
+  opaque instead: a fetch and an execution both inside it still connect to each
+  other, and nothing inside it can match a directory anywhere else. Unreadable
+  shell is likewise only recorded as a coverage gap when the text that could
+  not be parsed mentions a fetch or an execution — reporting every `jq` filter
+  with an unbalanced quote produced about eight notes per repository.
+
 - **2026-08-14** — **P14.24 stops claiming executions pip does not perform, and
   stops going quiet without saying so.** Five edges:
 

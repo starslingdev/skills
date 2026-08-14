@@ -41,11 +41,35 @@ rejection record).
 | 6 | P14.15 | Attacker-controlled `$GITHUB_ENV` / `$GITHUB_PATH` write — hijacks later steps | GitHub Security Lab environment-injection writeups |
 | 7 | P14.18 | `pull-requests: write` on an untrusted trigger — outsider's event holds a write token | elementary-data (2026) — forged release via default-write token |
 | 8 | P14.19 | Credential files in caches/artifacts — keys fetchable by other jobs or the public | Trivy round 2 (2026) — attacker swept the runner for exactly these credential files (SSH keys, cloud creds, Kubernetes tokens); caching or uploading them extends that exposure |
-| 9 | P14.24 | Unverified remote code execution — a piped installer, or a git tree fetched at a mutable ref and executed | Codecov bash-uploader breach (2021) |
+| 9 | P14.24 | Unverified remote code execution — a piped installer, or a git tree fetched at a mutable ref and executed | Codecov bash-uploader breach (2021) — the PIPED-INSTALLER arm only; the mutable-fetch arm has no named breach of its own (see below) |
 | 10 | P14.25 | Dependency install scripts executing in a privileged job — a compromised upstream package runs code where the secrets are | nx / s1ngularity install-script payload (2025); Miasma / `@redhat-cloud-services` (2026); GitHub's July 28 2026 supply-chain post |
 
 Full incident citations live in the catalog's
 [Reference incidents](security-patterns.md#reference-incidents) section.
+
+### P14.24's two arms, and which one the incident evidences
+
+P14.24 detects two shapes, and only one of them is carried by the incident
+cited beside it. Saying so is the point of the incident test — an entry that
+lets a second shape ride quietly on the first shape's breach has not passed it.
+
+- **The piped installer** (`curl … | bash` and friends) is evidenced directly.
+  The Codecov bash-uploader breach (2021) IS this shape: an altered script
+  served from the vendor's own host, piped into a shell by every job that used
+  it, exfiltrating the CI environment. That is the citation's whole scope.
+- **The mutable fetch** (a git tree cloned at a branch, tag, `HEAD`, or an
+  abbreviated commit, and then executed out of) is **not** evidenced by
+  Codecov, and this document does not claim a breach for it. It is in the
+  catalog on the strength of the SHARED TRUST MODEL rather than a named
+  incident: both shapes execute code the repo never pinned, re-resolved live on
+  every run, at full job privilege — and a branch or tag is *designed* to move,
+  so it needs no host compromise at all, only push access on the other side.
+  The mitigation is identical (pin to a full 40-character commit), which is why
+  it is one vector with two arms rather than two entries.
+
+If a public incident of the mutable-fetch shape is later cited, it belongs in
+the catalog's Reference incidents section and in this row — until then, the
+asymmetry stays stated rather than smoothed over.
 
 ### The tenth vector, evaluated against the three tests
 
@@ -105,9 +129,11 @@ pass/fail is the honest weight for a presence fact — or were dropped.
 
 Two catalog-MEDIUM patterns **passed** the filter and stayed: the fork-code
 trust chain (P14.9 — its severity was raised to HIGH with the rebuilt
-detector) and unverified remote code execution (P14.24 — the Codecov chain is
-real; its potency depends on a live condition, which is why its catalog
-severity stays MEDIUM while it remains a critical finding by membership).
+detector) and unverified remote code execution (P14.24 — the Codecov chain,
+which is the piped-installer arm, is real; the mutable-fetch arm shares that
+chain's trust model rather than a breach of its own. Either way the potency
+depends on a live condition, which is why its catalog severity stays MEDIUM
+while it remains a critical finding by membership).
 
 The removed patterns are not shipped with the skill; re-admitting any entry
 means passing this document's three tests and updating the census.

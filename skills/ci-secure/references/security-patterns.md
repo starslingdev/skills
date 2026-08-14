@@ -606,7 +606,7 @@ what makes those unsafe is the pipe into a shell, not the address being
 fetched; the `deno run` form is the exception — it has no pipe, so that arm
 does key on a literal URL.)
 
-*Shape 2 — the mutable fetch*: within ONE job, a `git clone` / `git fetch` of a tree at a mutable reference, followed by a command that executes out of the directory it landed in.
+*Shape 2 — the mutable fetch*: within ONE job, a `git clone` / `git fetch` / `actions/checkout` of another repository at a mutable reference, followed by a command that executes out of the directory it landed in.
 
 ```yaml
 # WRONG — `main` is whatever that branch points at when the job runs
@@ -627,12 +627,12 @@ Execution shapes matched: an interpreter running a fetched file (`python3`/`node
   - a fetch and its execution separated by a rename (`mv tools built && python3 built/setup.py`);
   - execution wrapped in `bash -c "…"`, whose inner command is not read;
   - execution through a build driver rather than an interpreter (`make -C tools`), or through a versioned interpreter (`python3.11`);
-  - `actions/checkout` of another `repository:` at a tag — a YAML-level fetch, not a shell one;
   - a fetch whose execution happens in a different job (different runner, different tree).
 
   Review those by hand. Widening the shell arm to guess at them would cost the property the whole entry rests on: every reported chain is one a reader can see in their own YAML.
 - **A clone of your OWN repository is not reported.** `${{ github.repository }}` is the scanned repo by definition, and a literal `github.com/<owner>/<repo>` is compared against the checkout's `origin` remote — including the authenticated `x-access-token:…@github.com/…` spelling. No third party is involved in re-cloning yourself, and the fix this entry recommends (pin to a full commit id) is unactionable for a release workflow that must run at the branch head. In an exported tree with no `.git`, `origin` is unknown and the literal form is reported like any other clone.
-- **`working-directory:` is followed** — on the step, and through `defaults.run.working-directory` on the job and on the workflow. A `working-directory:` computed at run time is not knowable, so that step is recorded as a coverage gap rather than guessed at.
+- **`working-directory:` is followed** — on the step, and through `defaults.run.working-directory` on the job and on the workflow. A `working-directory:` computed at run time (`apps/${{ matrix.app }}`) is not knowable, so it becomes an opaque directory: a fetch and an execution both inside it still connect to each other, and nothing inside it can match a directory anywhere else.
+- **`actions/checkout` of another `repository:` is covered too**, since it is how most workflows fetch a second repository. The same rules apply: a full 40-hex `ref:` is silent, your own repository is silent, and something in a LATER step of the same job has to execute out of the `path:` it landed in. A `ref:` or `path:` computed at run time is recorded as a coverage gap rather than guessed at.
 
 PowerShell `iex (New-Object Net.WebClient).DownloadString(...)` is the same class on Windows runners but is not matched here (casing / Windows-runner rarity); flag it in manual review if you run Windows jobs.
 

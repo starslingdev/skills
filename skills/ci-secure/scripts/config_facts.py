@@ -857,18 +857,33 @@ def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:
     rulesets endpoint (readable with repo read access) and the classic branch
     protection endpoint (admin-only).
 
-    The completeness question is therefore per-SOURCE, and the guard has to sit
-    outside both calls. It used to live inside the classic endpoint's `except`,
-    which left three ways to render an unread source as a clean one: rulesets
-    answering with contexts while classic failed for a NON-403 reason returned
-    a partial set as complete; rulesets failing while classic answered lost the
-    rulesets error entirely (it was assigned and never read on any returning
-    path); and rulesets throwing while classic answered EMPTY returned "no
-    required checks", which the fact scores as a pass — a claim about a source
-    the scan never saw. All three render `✅ pass`, count toward `passed`, and
-    stay out of `unmeasured`, so a consumer blends them as clean AND fully
-    measured. That is the "unread is not clean" failure this fact exists to
-    prevent, committed by the fact itself.
+    The completeness question is therefore per-SOURCE. Each call records its own
+    success flag (`rulesets_ok` / `classic_ok`) and appends its own message to
+    `errors`, and the guard sits OUTSIDE both calls, on those flags — not inside
+    either `except`, where it could only see one source's fate:
+
+      * both sources read — return the union, which may legitimately be empty
+        (no required checks configured, which the fact scores as a pass);
+      * neither read — return `None` with "could not be read at all", listing
+        both errors;
+      * exactly one read — return the union ONLY when both of these hold: the
+        source that failed did so the ORDINARY way (`_is_admin_only_403` over
+        the recorded message: a 403, or "must have admin" — most readers of
+        this fact do not administer the repository they are auditing), AND the
+        source that answered actually found contexts. Otherwise return `None`
+        with the "only part of branch protection ... could be read" reason,
+        because a required check configured in the unread source would be
+        invisible here.
+
+    Both halves of that last condition are load-bearing. A non-403 failure
+    (rate limit, timeout, 5xx, malformed body) is not evidence that the unread
+    source is empty, so a partial set must not be returned as complete; and an
+    EMPTY answer from the one source that worked establishes nothing at all
+    about the other — returning it would score "no required checks" as a pass
+    over a source the scan never saw. Anything returned as a pass counts toward
+    `passed` and stays out of `unmeasured`, so a consumer blends it as clean AND
+    fully measured. That is the "unread is not clean" failure this fact exists
+    to prevent, and returning `None` is how it is avoided.
     """
     gh = _gh_utils()
     if not gh.check_prereqs():
@@ -1120,11 +1135,16 @@ def compute_config_facts(
 ) -> dict[str, Any]:
     """Every fact, every time — pass/fail/unmeasured, never silently absent.
 
-    ``repo`` (``owner/name``) enables the one fact that needs the API. It is
-    optional, and its absence is disclosed as UNMEASURED rather than skipped —
-    a fact that quietly vanishes from the table is a silent pass.
-    ``required_contexts_fetcher`` is the seam the tests inject a recorded
-    response through; nothing in the suite touches the network.
+    ``repo`` (``owner/name``) enables the TWO facts that need the API —
+    ``sec.required-checks.skippable`` (branch protection) and
+    ``sec.fork-approval.effective`` (the repository's fork-PR approval setting).
+    It is optional, and its absence is disclosed as UNMEASURED rather than
+    skipped — a fact that quietly vanishes from the table is a silent pass.
+
+    ``required_contexts_fetcher`` and ``fork_approval_fetcher`` are the seams
+    the tests inject a recorded response through, one per API-gated fact,
+    defaulting to ``_required_contexts_via_gh`` and ``_fork_approval_via_gh``;
+    nothing in the suite touches the network.
     """
     scan = _scan()
 

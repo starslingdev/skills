@@ -2768,6 +2768,16 @@ _PIP_VALUE_OPTS = {
 }
 _LEADING_WRAPPERS = {"sudo", "command", "exec", "time", "nohup", "env"}
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Prefix for a directory whose real path is not knowable from the YAML. It
+# cannot collide with any real path, so paths under it match each other and
+# nothing else.
+_OPAQUE_DIR = "\x00wd:"
+# Does unreadable shell mention either half of the chain — a fetch, or something
+# that executes? If not, failing to read it costs this detector nothing.
+_CHAIN_RELEVANT_RE = re.compile(
+    r"\b(?:git|cd|source|pip|pip3|python[0-9.]*|node|nodejs|bash|sh|zsh|ksh"
+    r"|ruby|perl|php|pwsh|powershell)\b|\./")
+_UNPARSED_CD_RE = re.compile(r"(?:^|[;&|]\s*)\s*cd\s")
 # A whole `${{ … }}` expression. The runner substitutes it before the shell
 # sees it, so it is ONE word — see `_shell_tokens`.
 _EXPRESSION_TOKEN_RE = re.compile(r"\$\{\{.*?\}\}", re.S)
@@ -2859,6 +2869,9 @@ class _RemoteFetch:
     # cannot carry it: `python3 tools/setup.py && git clone … tools` has both
     # halves on one line, in the wrong order.
     pos: int
+    # For the YAML arm: the repository `actions/checkout` was pointed at. None
+    # for a shell fetch, whose evidence line already shows the URL.
+    source: str | None = None
 
 
 def _ref_description(ref: str | None) -> str:
@@ -3178,11 +3191,87 @@ def _default_working_directory(doc: dict, job: Any) -> str:
     return "."
 
 
+_CHECKOUT_USES_RE = re.compile(r"^\s*-?\s*uses\s*:\s*['\"]?actions/checkout[@'\"]")
+
+
+def _checkout_fetches(
+    job: Any, text: str, job_range: tuple[int, int] | None, file_path: Path,
+    gap: Callable[[str], None] | None = None,
+) -> list[_RemoteFetch]:
+    """`actions/checkout` steps that fetch ANOTHER repository at a mutable ref.
+
+    The YAML spelling of the same trust model, and the common one: most
+    workflows pull a second repository with `actions/checkout`, not with
+    `git clone`. At a branch or tag the tree that lands is whatever the other
+    side serves when the job runs, exactly as for the shell arm — and the shell
+    arm could not see it, because it reads `run:` scalars only.
+
+    A checkout with no `repository:` is your own code. So is one naming your
+    own repository. Both are the overwhelmingly common case and neither is this
+    vector.
+    """
+    steps = job.get("steps") if isinstance(job, dict) else None
+    if not isinstance(steps, list):
+        return []
+    lines = text.splitlines()
+    start, end = job_range if job_range else (1, len(lines))
+    at_lines = [i + 1 for i in range(start - 1, min(end, len(lines)))
+                if _CHECKOUT_USES_RE.match(lines[i])]
+    out: list[_RemoteFetch] = []
+    index = -1
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        uses = step.get("uses")
+        if not (isinstance(uses, str) and uses.startswith("actions/checkout")):
+            continue
+        index += 1
+        with_block = step.get("with")
+        if not isinstance(with_block, dict):
+            continue
+        repository = with_block.get("repository")
+        if not isinstance(repository, str) or not repository.strip():
+            continue                                   # your own code
+        if _is_self_clone(repository, file_path) or \
+                _is_self_clone(f"github.com/{repository.strip()}", file_path):
+            continue
+        ref = with_block.get("ref")
+        ref = str(ref).strip() if isinstance(ref, (str, int)) else None
+        if ref and _FULL_SHA_RE.match(ref):
+            continue                                   # immutable, as pinned
+        path = with_block.get("path")
+        path = str(path).strip() if isinstance(path, (str, int)) else None
+        if path and _EXPRESSION_TOKEN_RE.search(path):
+            if gap is not None:
+                gap(f"an `actions/checkout` of `{repository}` uses a `path:` "
+                    f"computed at run time, so what executes out of it was "
+                    f"NOT checked")
+            continue
+        if ref and _EXPRESSION_TOKEN_RE.search(ref):
+            # A ref chosen at run time is not knowably mutable OR pinned.
+            if gap is not None:
+                gap(f"an `actions/checkout` of `{repository}` uses a `ref:` "
+                    f"computed at run time, so whether it is pinned was NOT "
+                    f"established")
+            continue
+        line = at_lines[index] if index < len(at_lines) else start
+        out.append(_RemoteFetch(
+            line=line,
+            raw=lines[line - 1] if line - 1 < len(lines) else "",
+            dest=_resolve_path(".", path) if path else ".",
+            ref=ref,
+            pos=-1,                       # a YAML step: ordered by line, below
+            source=repository.strip(),
+        ))
+    return out
+
+
 def _mutable_fetch_executions(
     text: str, job_range: tuple[int, int] | None,
     gap: Callable[[str], None] | None = None,
     file_path: Path | None = None,
     base_cwd: str = ".",
+    extra_fetches: list[_RemoteFetch] | None = None,
 ) -> list[tuple[_RemoteFetch, int, str]]:
     """Every (fetch, execution line, executed path) pair visible in one job.
 
@@ -3196,7 +3285,8 @@ def _mutable_fetch_executions(
     scanner reads out of position suppresses a finding, while the opposite
     error would report a repo that pinned correctly.
     """
-    fetches: dict[str, _RemoteFetch] = {}
+    fetches: dict[str, _RemoteFetch] = {
+        f.dest: f for f in reversed(extra_fetches or [])}
     pending_fetch_head: dict[str, _RemoteFetch] = {}
     # destination -> the EARLIEST position a full-40-hex pin was applied to it.
     # Position matters: pinning is a claim about the code that ran, and a pin
@@ -3221,16 +3311,20 @@ def _mutable_fetch_executions(
             # and a `tools/build.py` that is the repository's own file were
             # reported as a chain between them.
             step_dir = step_dirs.get(line_no)
-            if step_dir is not None and _EXPRESSION_TOKEN_RE.search(step_dir):
-                if gap is not None:
-                    gap(f"a step's `working-directory: {step_dir}` is computed "
-                        f"at run time, so where its shell ran is not knowable "
-                        f"here and the step was NOT scanned for a mutable "
-                        f"fetch executed out of")
-                skip_step = True
-                continue
             skip_step = False
-            cwd = _resolve_path(base_cwd, step_dir) if step_dir else base_cwd
+            if step_dir is not None and _EXPRESSION_TOKEN_RE.search(step_dir):
+                # `working-directory: apps/${{ matrix.app }}` is extremely
+                # common and its value is not knowable here. Skipping the step
+                # would lose every chain inside it; pretending to know it would
+                # invent chains across it. So it becomes an OPAQUE root, unique
+                # to this step: a fetch and an execution that are both inside it
+                # still correlate with each other, and nothing inside it can
+                # ever match a directory anywhere else.
+                cwd = f"{_OPAQUE_DIR}{line_no}"
+            elif step_dir:
+                cwd = _resolve_path(base_cwd, step_dir)
+            else:
+                cwd = base_cwd
         if skip_step:
             continue
         for segment in _install_command_segments(command):
@@ -3239,18 +3333,25 @@ def _mutable_fetch_executions(
                 continue
             tokens = _strip_command_prefix(_shell_tokens(segment))
             if not tokens:
-                # `shlex` refused it — an unbalanced quote, most often. The
-                # command contributes nothing, which is right, but a scanner
-                # that silently reads nothing is claiming a clean job. Worse,
-                # an unreadable `cd` leaves the working directory stale, so
-                # every path resolved after it in this step is wrong: the step
-                # is abandoned rather than half-read.
-                if gap is not None:
-                    gap(f"a command on line {line_no} could not be parsed as "
-                        f"shell, so the rest of that step was NOT scanned for "
-                        f"a mutable fetch executed out of")
-                skip_step = True
-                break
+                # `shlex` refused it — an unbalanced quote, most often, and
+                # ordinary in real workflows (`awk '{print $1}'` inside a
+                # quoted string, and so on). It contributes nothing, which is
+                # correct: it is only a COVERAGE GAP when the text it could not
+                # read could have held one of the two halves this detector
+                # pairs. Reporting every unreadable command instead produced
+                # roughly eight notes per repository about `jq` filters.
+                if _CHAIN_RELEVANT_RE.search(segment):
+                    if gap is not None:
+                        gap(f"a command on line {line_no} could not be parsed "
+                            f"as shell and mentions a fetch or an execution, "
+                            f"so it was NOT checked — review it by hand")
+                    if _UNPARSED_CD_RE.search(segment):
+                        # A `cd` nobody could read leaves the working directory
+                        # stale, so every path resolved after it in this step
+                        # would be wrong. That half-read step is abandoned.
+                        skip_step = True
+                        break
+                continue
             if tokens[0] == "cd" and len(tokens) > 1 and not tokens[1].startswith("-"):
                 cwd = _resolve_path(cwd, tokens[1])
                 continue
@@ -3319,7 +3420,11 @@ def _mutable_fetch_executions(
             (
                 (at, line, written)
                 for at, line, resolved, written in executions
-                if at > fetch.pos and _under(dest, resolved)
+                # A shell fetch is ordered by position in the command stream
+                # (both halves can share a line); a checkout step has no
+                # position there, so it is ordered by line.
+                if (line > fetch.line if fetch.pos < 0 else at > fetch.pos)
+                and _under(dest, resolved)
             ),
             None,
         )
@@ -3379,14 +3484,17 @@ def _correlation_unverified_remote_code_execution(
         for fetch, exec_line, exec_path in _mutable_fetch_executions(
             text, job_range, _gap, file_path,
             _default_working_directory(doc, _job),
+            _checkout_fetches(_job, text, job_range, file_path, _gap),
         ):
             yield RawHit(
                 line=fetch.line,
                 evidence=f"{fetch.line:>4}: {fetch.raw}  <-- here",
                 match_text=fetch.raw.strip(),
                 derived_note=(
-                    f"jobs.{job_name} fetches remote code at "
-                    f"{_ref_description(fetch.ref)} into `{fetch.dest}` — a "
+                    (f"jobs.{job_name} checks out `{fetch.source}` at "
+                     if fetch.source else
+                     f"jobs.{job_name} fetches remote code at ")
+                    + f"{_ref_description(fetch.ref)} into `{fetch.dest}` — a "
                     f"MUTABLE reference, so what lands in the tree is whatever "
                     f"the other side serves at the moment the job runs — and "
                     f"then executes `{exec_path}` from it at line {exec_line}. "
