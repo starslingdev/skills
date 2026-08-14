@@ -4404,3 +4404,75 @@ def test_the_expression_registry_does_not_leak_across_scans(tmp_path):
     result = scan.scan(catalog, tmp_path / "two")
     blob = json.dumps(result)
     assert "SECRET_LOOKING" not in blob, "one scan's expressions leaked into another"
+
+
+def test_p1424_expression_spacing_does_not_split_a_directory(tmp_path):
+    """`apps/${{ matrix.app }}` and `apps/${{matrix.app}}` are the same
+    directory — GitHub ignores the spacing inside the braces. Keying the opaque
+    root on the raw text made them two different unknown places, so the chain
+    produced no finding and no gap."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - working-directory: apps/${{ matrix.app }}
+                run: git clone --branch main "$TOOLS_URL" tools
+              - working-directory: apps/${{matrix.app}}
+                run: python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_sourcing_an_extensionless_fetched_path_is_recorded(tmp_path):
+    """`. tools/env --name=it's` sources a fetched file — `shlex` refuses the
+    apostrophe, and the relevance test required no space after the `.`, so
+    nothing was reported and nothing was recorded. The shipped test for this
+    used `tools/env.sh`, whose `.sh` matched the interpreter alternation on
+    base too, so it passed either way and masked the live hole."""
+    before = len(scan._DROPPED_MATCHES)
+    _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  . tools/env --name=it's
+    """)
+    added = scan._DROPPED_MATCHES[before:]
+    assert any("could not be parsed" in d["reason"] for d in added), added
+
+
+def test_a_coverage_note_names_the_line_it_came_from(tmp_path):
+    """Notes dedupe on their reason text, and the checkout-arm reasons carried
+    no line — so two steps with the same unresolvable expression collapsed into
+    one entry, the banner under-counted, and the reader had nowhere to look."""
+    _wf(tmp_path, "ci.yml", """\
+        name: ci
+        on: workflow_dispatch
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: ${{ inputs.ref }}
+                  path: one
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/tools
+                  ref: ${{ inputs.ref }}
+                  path: two
+              - run: bash one/run.sh
+    """)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    result = scan.scan(catalog, tmp_path)
+    notes = result["coverage_notes"]
+    assert len(notes) == 2, notes
+    assert all("line" in n["reason"] for n in notes), notes

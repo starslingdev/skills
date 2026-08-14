@@ -2578,3 +2578,24 @@ def test_the_documented_not_protected_404_is_still_an_answer():
                                RuntimeError("HTTP 404: Branch not protected"))):
         contexts, detail = cf._required_contexts_via_gh("owner/repo")
     assert contexts == ["test"], (contexts, detail)
+
+
+def test_the_memo_returns_the_same_answer_it_computed(tmp_path):
+    """The memo's only test asserted a CALL COUNT and `is not None` — and
+    `_Unknown` is not None, so a mutant returning `_Unknown` on every cache hit
+    flipped a diamond graph from fail to unmeasured with the suite green. The
+    cached answer has to be the answer."""
+    depth = 6
+    jobs: dict[str, dict] = {}
+    for i in range(depth):
+        jobs[f"a{i}"] = {"needs": [f"a{i + 1}", f"b{i + 1}"]}
+        jobs[f"b{i}"] = {"needs": [f"a{i + 1}", f"b{i + 1}"]}
+    jobs[f"a{depth}"] = {"if": "github.event_name == 'push'"}
+    jobs[f"b{depth}"] = {"if": "github.event_name == 'push'"}
+
+    answer = cf._skip_path(jobs, "a0")
+    assert answer is not None, answer
+    assert not isinstance(answer, cf._Unknown), answer
+    assert "a0" in answer, answer
+    # The same graph walked without any memo must agree exactly.
+    assert answer == cf._skip_path(jobs, "a0", frozenset(), {}), answer

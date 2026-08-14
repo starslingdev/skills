@@ -2862,7 +2862,10 @@ _CHAIN_RELEVANT_RE = re.compile(
     # clone followed by an unparseable `tools/setup.py` produced zero findings
     # AND zero gaps — a silent false clean on exactly the chain this vector
     # exists to catch.
-    r"|(?:^|[;&|])\s*\.{0,2}/?[\w.@-]+/[\w./@-]+")
+    r"|(?:^|[;&|])\s*\.{0,2}/?[\w.@-]+/[\w./@-]+"
+    # …and a sourced path, which needs no extension and no command name:
+    # `. tools/env` is an execution the alternation above cannot see.
+    r"|(?:^|[;&|])\s*(?:\.|source)\s+\S*/")
 _UNPARSED_CD_RE = re.compile(r"(?:^|[;&|]\s*)\s*cd\s")
 # A whole `${{ … }}` expression. The runner substitutes it before the shell
 # sees it, so it is ONE word — see `_shell_tokens`.
@@ -3446,7 +3449,13 @@ def _opaque_dir(written: str) -> str:
     idiomatic spelling — produced no finding and no gap, while the single-step
     form fired. The same expression is the same directory.
     """
-    return _OPAQUE_DIR + " ".join(written.split())
+    # Normalized INSIDE the braces too: GitHub ignores the spacing there, so
+    # `apps/${{ matrix.app }}` and `apps/${{matrix.app}}` are one directory.
+    # Keying on the raw text made them two unknown places and lost the chain
+    # between them with no finding and no gap.
+    canonical = _EXPRESSION_TOKEN_RE.sub(
+        lambda m: "${{ " + " ".join(m.group(0)[3:-2].split()) + " }}", written)
+    return _OPAQUE_DIR + " ".join(canonical.split())
 
 
 _CHECKOUT_USES_RE = re.compile(r"^\s*-?\s*uses\s*:\s*['\"]?actions/checkout[@'\"]")
@@ -3496,6 +3505,10 @@ def _checkout_fetches(
         if not (isinstance(uses, str) and uses.startswith("actions/checkout")):
             continue
         index += 1
+        # The line this checkout sits on, resolved once so every gap sentence
+        # can name it: notes dedupe on their reason text, and two steps with
+        # the same unresolvable expression collapsed into one entry.
+        mark_line = at_lines[index] if index < len(at_lines) else start
         with_block = step.get("with")
         if not isinstance(with_block, dict):
             continue
@@ -3516,34 +3529,36 @@ def _checkout_fetches(
             # all — really is unknowable, and the finding would name a third
             # party the scan never established.
             if gap is not None:
-                gap(f"an `actions/checkout` takes its `repository:` from "
-                    f"`{repository.strip()}`, computed at run time, so whether "
-                    f"it fetches a third party was NOT established")
+                gap(f"an `actions/checkout` on line {mark_line} takes its "
+                    f"`repository:` from `{repository.strip()}`, computed at "
+                    f"run time, so whether it fetches a third party was NOT "
+                    f"established")
             continue
         ref = with_block.get("ref")
         ref = str(ref).strip() if isinstance(ref, (str, int)) else None
         if ref and _FULL_SHA_RE.match(ref):
             if gap is not None:
-                gap(f"an `actions/checkout` of `{repository}` is pinned to a "
-                    f"full commit id, so it is deliberately not reported",
+                gap(f"an `actions/checkout` of `{repository}` on line "
+                    f"{mark_line} is pinned to a full commit id, so it is "
+                    f"deliberately not reported",
                     kind=_KIND_SUPPRESSED)
             continue                                   # immutable, as pinned
         path = with_block.get("path")
         path = str(path).strip() if isinstance(path, (str, int)) else None
         if path and _EXPRESSION_TOKEN_RE.search(path):
             if gap is not None:
-                gap(f"an `actions/checkout` of `{repository}` uses a `path:` "
-                    f"computed at run time, so what executes out of it was "
-                    f"NOT checked")
+                gap(f"an `actions/checkout` of `{repository}` on line "
+                    f"{mark_line} uses a `path:` computed at run time, so what "
+                    f"executes out of it was NOT checked")
             continue
         if ref and _EXPRESSION_TOKEN_RE.search(ref):
             # A ref chosen at run time is not knowably mutable OR pinned.
             if gap is not None:
-                gap(f"an `actions/checkout` of `{repository}` uses a `ref:` "
-                    f"computed at run time, so whether it is pinned was NOT "
-                    f"established")
+                gap(f"an `actions/checkout` of `{repository}` on line "
+                    f"{mark_line} uses a `ref:` computed at run time, so "
+                    f"whether it is pinned was NOT established")
             continue
-        line = at_lines[index] if index < len(at_lines) else start
+        line = mark_line
         out.append(_RemoteFetch(
             line=line,
             raw=lines[line - 1] if line - 1 < len(lines) else "",

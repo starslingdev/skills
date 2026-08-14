@@ -22,6 +22,25 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **Three smaller losses, and the tests that had been missing
+  under them.** An expression's inner spacing split a directory in two:
+  `apps/${{ matrix.app }}` and `apps/${{matrix.app}}` are the same place to
+  GitHub, but keying on the raw text made them two unknown ones, so a chain
+  across them produced no finding and no gap. Sourcing an extensionless fetched
+  path (`. tools/env`) was invisible to the relevance test — and the shipped
+  test for that used `tools/env.sh`, whose `.sh` matched on the unfixed code
+  too, so it passed either way and masked the hole it claimed to close. And
+  coverage notes from the checkout arm carried no line number, so two steps
+  with the same unresolvable expression deduped into one entry and the banner
+  under-counted.
+
+  Alongside them, three mutants that had been surviving a green suite now die:
+  the memo returning a different answer on a cache hit (its only test asserted
+  a call count and `is not None`, and the "unknown" type IS not None), the
+  coverage-note headline restoring the "were NOT scanned" wording the channel
+  split exists to prevent, and notes no longer breaking the completeness flag —
+  which let the header call a scan complete directly above a warning banner.
+
 - **2026-08-14** — **The partial-read disclosure named the source that
   ANSWERED.** The sentence hardcoded "read from rulesets only" and cut the
   unread source's name out of the error list, so when the RULESETS arm was the
