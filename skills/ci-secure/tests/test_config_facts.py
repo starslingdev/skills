@@ -1261,18 +1261,28 @@ jobs:
     assert f["outcome"] == "pass", f["evidence"]
 
 
-def test_a_path_filtered_workflow_cannot_be_an_always_running_producer(tmp_path):
-    """The textbook version of this bypass needs no `if:` at all: a required
-    check whose workflow only triggers on `paths:` is skipped by any PR that
-    touches nothing matching, and GitHub greens it. Reading only `if:` and
-    `needs:` and then claiming the producer "always runs" states a property
-    that was never tested."""
-    body = """\
+def test_a_path_filtered_workflow_is_not_a_bypass(tmp_path):
+    """GitHub does the OPPOSITE of what this fact once assumed. A workflow that
+    path- or branch-filtering skips never reports its check at all, so the
+    required check sits PENDING and the pull request cannot merge. Only a
+    skipped JOB reports Success. Failing the filtered repo reds a repo whose
+    merges are blocked — and the shape that really is green-without-running,
+    GitHub's recommended always-succeeding stub job, passed.
+
+    `pull_request.branches` filters the BASE branch, which is the branch whose
+    protection was just read, so every pull request this fact gates is inside
+    that filter by construction.
+
+    Source: Troubleshooting required status checks — a required check that no
+    workflow reports blocks the merge; it is not treated as passed.
+    """
+    for spelling in ("paths:\n      - 'src/**'", "branches: [main]",
+                     "paths-ignore:\n      - 'docs/**'"):
+        body = f"""\
 name: ci
 on:
   pull_request:
-    paths:
-      - 'src/**'
+    {spelling}
 permissions:
   contents: read
 jobs:
@@ -1281,9 +1291,92 @@ jobs:
     steps:
       - run: pytest -v
 """
+        f = _outcome(_facts_with(tmp_path / spelling[:6].strip(),
+                                 {"ci.yml": body}, ["test"]), _FACT)
+        assert f["outcome"] == "pass", (spelling, f["evidence"])
+
+
+def test_a_job_in_a_workflow_that_cannot_run_on_a_pr_is_not_a_producer(tmp_path):
+    """Producer matching is by display name, so an unrelated job that happens to
+    share the required check's name — `test` in a tag-only release workflow —
+    was accepted as an always-running producer and vetoed the real, gated one.
+    The check that gates the pull request can only come from a workflow that
+    runs on pull requests."""
+    ci = """\
+name: ci
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  test:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+    release = """\
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make smoke
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": ci, "release.yml": release},
+                             ["test"]), _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "ci.yml" in f["evidence"]
+
+
+def test_a_dispatch_only_workflow_is_not_a_producer(tmp_path):
+    """Same rule, the other common spellings: a workflow reachable only by
+    `workflow_dispatch` or `workflow_call` never reports a check on a pull
+    request, so it cannot be the thing that makes the gate sound."""
+    for trigger in ("workflow_dispatch:", "workflow_call:"):
+        body = f"""\
+name: manual
+on:
+  {trigger}
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make smoke
+"""
+        out = _facts_with(tmp_path / trigger.strip(":"), {"m.yml": body},
+                          ["test"])
+        f = _outcome(out, _FACT)
+        assert f["outcome"] == "unmeasured", (trigger, f["evidence"])
+
+
+def test_a_push_workflow_still_counts_as_a_producer(tmp_path):
+    """The positive control for the rule above. A plain `push` workflow does
+    report check runs on a same-repo pull request's head commit, so excluding
+    every non-`pull_request` workflow would stop judging repos that gate on
+    one — the opposite failure."""
+    body = """\
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
     f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
     assert f["outcome"] == "fail", f["evidence"]
-    assert "paths" in f["evidence"]
 
 
 def test_when_no_required_context_is_produced_here_nothing_is_claimed(tmp_path):

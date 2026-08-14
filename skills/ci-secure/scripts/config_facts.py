@@ -632,35 +632,70 @@ def _skip_path(jobs: dict[str, dict], key: str,
     return None
 
 
-# Workflow-level filters that keep a job from running at all on a given pull
-# request. A required check whose workflow only triggers on `paths:` is the
-# textbook form of this bypass — touch nothing matching and GitHub greens the
-# check with the suite never run — and it needs no `if:` anywhere.
-_TRIGGER_FILTERS = ("paths", "paths-ignore", "branches", "branches-ignore")
+# Which workflows can report a check on a pull request at all.
+#
+# NOT a skip rule. Path and branch filtering does the OPPOSITE of what this
+# fact once assumed: a workflow those filters skip never reports its check, so
+# a required check stays PENDING and the pull request cannot merge. Only a
+# skipped JOB reports Success — that is the whole bypass, and it is an `if:`.
+# Treating a filtered workflow as a bypass failed repositories whose merges
+# were already blocked, while GitHub's recommended workaround for exactly that
+# situation — an always-succeeding stub job carrying the same name — passed.
+# (`pull_request.branches` filters the BASE branch, which is the branch whose
+# protection was just read, so every PR this fact gates is inside the filter.)
+#
+# What the trigger DOES decide is whether a job is a producer of the context at
+# all. Producers are matched by display name across every workflow, so a `test`
+# job in a tag-only release workflow was accepted as an always-running producer
+# and vetoed the real, gated one.
+_PR_TRIGGERS = ("pull_request", "pull_request_target")
+_TAG_ONLY_KEYS = ("tags", "tags-ignore")
 
 
-def _trigger_skip_reason(rel: str, doc: dict) -> str | None:
-    """Why this workflow may not run on a pull request at all, or None."""
-    # `on` is a YAML 1.1 boolean, so the key parses as `True` — read it the way
-    # the rest of this scanner does rather than by literal name.
+def _on_mapping(doc: dict) -> dict | None:
+    """The workflow's `on:` block as a mapping, or None when unreadable.
+
+    `on` is a YAML 1.1 boolean, so the key parses as `True` — read it the way
+    the rest of this scanner does rather than by literal name.
+    """
     on = _scan()._get_on_node(doc) if isinstance(doc, dict) else None
-    if on is True or on is None:
+    if on is None or on is True:
         return None
     if isinstance(on, str):
-        on = {on: None}
+        return {on: None}
     if isinstance(on, list):
-        on = {str(k): None for k in on}
-    if not isinstance(on, dict):
-        return None
-    pr = on.get("pull_request", on.get("pull_request_target"))
-    if not isinstance(pr, dict):
-        return None
-    present = [f for f in _TRIGGER_FILTERS if pr.get(f)]
-    if not present:
-        return None
-    return (f"{rel} triggers on `pull_request` only for "
-            + ", ".join(f"`{f}:`" for f in present)
-            + ", so a pull request outside that filter never starts it")
+        return {str(k): None for k in on}
+    return on if isinstance(on, dict) else None
+
+
+def _can_report_on_a_pull_request(doc: dict) -> bool:
+    """Could a job in this workflow report a status check on a pull request?
+
+    A `pull_request` / `pull_request_target` workflow obviously can. A `push`
+    workflow can too, for a same-repo pull request: the branch push and the PR
+    share a head commit, and check runs attach to the commit — so excluding
+    every non-`pull_request` workflow would stop judging repositories that gate
+    on one. A push restricted to TAGS cannot: no pull-request branch push
+    matches it, which is the release-workflow shape that vetoed a real finding.
+
+    Anything else — `workflow_dispatch`, `workflow_call`, `schedule` — reports
+    nothing on a pull request. An unreadable `on:` block is treated as able,
+    since refusing it would silently drop a producer.
+    """
+    on = _on_mapping(doc)
+    if on is None:
+        return True
+    if any(t in on for t in _PR_TRIGGERS):
+        return True
+    if "push" in on:
+        push = on.get("push")
+        if not isinstance(push, dict):
+            return True
+        if any(push.get(k) for k in _TAG_ONLY_KEYS) and not (
+                push.get("branches") or push.get("branches-ignore")):
+            return False
+        return True
+    return False
 
 
 def _display_name(key: str, job: dict) -> str:
@@ -681,6 +716,8 @@ def _context_producers(
     """
     out = []
     for rel, doc in docs:
+        if not _can_report_on_a_pull_request(doc):
+            continue
         jobs = {k: j for k, j in _jobs(doc)}
         for key, job in jobs.items():
             shown = _display_name(key, job)
@@ -881,7 +918,7 @@ def _required_checks_skippable(
         unknown: list[str] = []
         always_runs = False
         for rel, key, _job, jobs, doc in producers:
-            reason = _skip_path(jobs, key) or _trigger_skip_reason(rel, doc)
+            reason = _skip_path(jobs, key)
             if reason is None:
                 always_runs = True
                 break

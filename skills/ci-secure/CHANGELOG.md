@@ -32,13 +32,29 @@ entries are dated (UTC). Format loosely follows
   claiming "every required check is produced by a job that always runs", which
   when ALL of them were external made the row a claim about an empty set; a
   `needs:` naming a job that is not in the file (and a `needs:` cycle) resolved
-  to "always runs" instead of "unknown"; and workflow-level `paths:` /
-  `branches:` filters on the `pull_request` trigger were never read, though a
-  path-filtered required check is this bypass in its textbook form and needs no
-  `if:` at all. Each context now resolves three ways — gated, bypassable, or
-  NOT JUDGED — the pass sentence states how many of the required checks it
+  to "always runs" instead of "unknown". Each context now resolves three ways —
+  gated, bypassable, or NOT JUDGED — the pass sentence states how many of the required checks it
   actually traced, and a scan that traced none of them is unmeasured rather
   than green.
+
+- **2026-08-14** — **A job in a workflow that cannot run on a pull request is
+  no longer accepted as the thing gating one.** Producers are matched by
+  display name across every workflow, with no check that the workflow runs on
+  pull requests at all — so a `test` job in a tag-only release workflow (and
+  the same shape under `workflow_dispatch:` / `workflow_call:`) was read as an
+  always-running producer and vetoed the real, conditional one, turning a fail
+  into a pass. Only `pull_request` / `pull_request_target` workflows, and
+  `push` workflows not restricted to tags, can produce a pull request's checks.
+
+- **2026-08-14** — **Path- and branch-filtered workflows are no longer reported
+  as a bypass — that rule was backwards.** A workflow those filters skip never
+  reports its check, so the required check stays PENDING and the pull request
+  is BLOCKED; only a skipped JOB reports Success. Failing the filtered repo red
+  a repository whose merges were already blocked, while the shape that really
+  is green-without-running — GitHub's recommended always-succeeding stub job
+  with the same name — passed. `pull_request.branches` also filters the base
+  branch, the branch whose protection was just read, so every pull request this
+  fact gates is inside that filter by construction. The clause is gone.
 
 - **2026-08-14** — **A verdict job can no longer alibi the suite job it was
   added to cover for.** `name (value)` is a MATRIX expansion, but the fact

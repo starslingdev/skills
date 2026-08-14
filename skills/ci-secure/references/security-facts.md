@@ -90,13 +90,25 @@ two moved numbers.
   when NONE of the required contexts could be traced to a job here, the fact is
   unmeasured rather than green, because nothing was examined. A `needs:` target
   that is not a job in the file, and a `needs:` cycle, are unknowns for the
-  same reason. A workflow whose `pull_request` trigger carries `paths:` /
-  `branches:` filters is not an always-running producer: a pull request outside
-  the filter never starts it, which is this bypass without any `if:` at all.
+  same reason. Only jobs in a workflow that can actually report on a pull
+  request count as producers — a `pull_request` workflow, or a `push` one that
+  is not restricted to tags. A same-named job in a tag-only release workflow is
+  not the thing gating your pull requests.
+
+  Path and branch filtering is deliberately NOT treated as a bypass, because
+  GitHub does the opposite: a workflow those filters skip never reports its
+  check, so the required check stays PENDING and the pull request cannot merge.
+  Only a skipped JOB reports Success. (`pull_request.branches` filters the base
+  branch — the branch whose protection is being read — so every pull request
+  this fact gates is inside that filter anyway.)
   **To fix a fail**: add one job that carries the required check's name, runs
   `if: always()` (or `!cancelled()`, or `success() || failure()`), `needs:` the
   conditional suites, and fails unless the suite that should have run passed —
   then point branch protection at that job's name instead of the suites'.
+  A branch that requires NO status check passes this fact — there is no
+  required check to bypass — which is a true statement about a narrow question
+  and not a statement that the branch is protected. Whether a branch should
+  require a check is a different fact's business.
   API-gated: with no repository or no token the fact is unmeasured and says so.
 
   *Source*: GitHub documents this under "Handling skipped but required checks"
