@@ -729,42 +729,63 @@ def _on_mapping(doc: dict) -> dict | None:
     return on if isinstance(on, dict) else None
 
 
-def _can_report_on_a_pull_request(doc: dict) -> bool:
-    """Could a job in this workflow report a status check on a pull request?
+# Whether a workflow's jobs can report a status check on a pull request is
+# THREE-valued, and collapsing it to a boolean cost a verdict in each direction.
+#
+#   YES      `pull_request` / `pull_request_target`; a plain `push`; a push
+#            whose branch filter matches every branch.
+#   NO       provably cannot — a push restricted to TAGS. No pull-request
+#            branch push matches it.
+#   UNKNOWN  a push filtered to specific branches or paths. Whether it runs on
+#            a given pull request's head branch is not knowable from the YAML.
+#
+# UNKNOWN is not NO. Treating it as NO dropped the producer entirely, and when
+# it was the only one the fact went UNMEASURED — which scores nothing, while a
+# fail scores zero, so a repository with a genuinely bypassable required check
+# came out ahead of one that configured protection properly. That is the same
+# "unmeasurable beats failing" lever this fact exists to close, moved into the
+# producer arm. Treating UNKNOWN as YES is the other error: a `deploy.yml`
+# filtered to `branches: [main]` then certified a check it may never report.
+#
+# So an UNKNOWN producer participates — its skip analysis still counts against
+# the check — but it can never be the evidence that a check always reports.
+_ABILITY_YES, _ABILITY_NO, _ABILITY_UNKNOWN = "yes", "no", "unknown"
+_MATCH_ALL_BRANCH_PATTERNS = {"**", "*", "'**'", '"**"'}
 
-    A `pull_request` / `pull_request_target` workflow obviously can. A `push`
-    workflow can too, for a same-repo pull request: the branch push and the PR
-    share a head commit, and check runs attach to the commit — so excluding
-    every non-`pull_request` workflow would stop judging repositories that gate
-    on one. A push restricted to TAGS cannot: no pull-request branch push
-    matches it, which is the release-workflow shape that vetoed a real finding.
 
-    Anything else — `workflow_dispatch`, `workflow_call`, `schedule` — reports
-    nothing on a pull request. An unreadable `on:` block is treated as able,
-    since refusing it would silently drop a producer.
-    """
+def _matches_every_branch(patterns: Any) -> bool:
+    """Does this branch filter match every branch a pull request could use?"""
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    if not isinstance(patterns, list) or not patterns:
+        return False
+    return any(str(p).strip() in _MATCH_ALL_BRANCH_PATTERNS for p in patterns)
+
+
+def _pr_reporting_ability(doc: dict) -> str:
+    """`yes` / `no` / `unknown` — see the comment above."""
     on = _on_mapping(doc)
     if on is None:
-        return True
+        return _ABILITY_YES          # unreadable `on:`: never silently dropped
     if any(t in on for t in _PR_TRIGGERS):
-        return True
-    if "push" in on:
-        push = on.get("push")
-        if not isinstance(push, dict):
-            return True                  # `on: push` with no filters at all
-        if any(push.get(k) for k in _TAG_ONLY_KEYS) and not (
-                push.get("branches") or push.get("branches-ignore")):
-            return False                 # tags only: no PR branch push matches
-        if push.get("branches") or push.get("paths"):
-            # A push filtered to `branches: [main]` — the deploy-workflow shape,
-            # far commoner than the tag-only one — does not run on a pull
-            # request's branch, so a job in it is not what gates the PR. Reading
-            # it as an always-running producer let it veto the real, gated one
-            # and turned a bypass green. A `paths:` filter is the same: it may
-            # not run on the PR's push either, so it cannot be relied on.
-            return False
-        return True
-    return False
+        return _ABILITY_YES
+    if "push" not in on:
+        # `workflow_dispatch`, `workflow_call`, `schedule` report nothing on a
+        # pull request.
+        return _ABILITY_NO
+    push = on.get("push")
+    if not isinstance(push, dict):
+        return _ABILITY_YES          # `on: push` with no filters at all
+    branches = push.get("branches")
+    if branches and _matches_every_branch(branches):
+        return _ABILITY_YES          # `branches: ['**']` runs on every push
+    if any(push.get(k) for k in _TAG_ONLY_KEYS) and not (
+            branches or push.get("branches-ignore")):
+        return _ABILITY_NO           # tags only: provably cannot
+    if branches or push.get("paths") or push.get("paths-ignore") \
+            or push.get("branches-ignore"):
+        return _ABILITY_UNKNOWN
+    return _ABILITY_YES
 
 
 def _display_name(key: str, job: dict) -> str:
@@ -774,9 +795,9 @@ def _display_name(key: str, job: dict) -> str:
 
 def _context_producers(
     docs: list[tuple[str, dict]], context: str,
-) -> list[tuple[str, str, dict, dict[str, dict], dict]]:
-    """(workflow, job key, job, sibling jobs, workflow doc) for every job that
-    could report `context` as a status check.
+) -> list[tuple[str, str, dict, dict[str, dict], dict, str]]:
+    """(workflow, job key, job, sibling jobs, workflow doc, PR-reporting
+    ability) for every job that could report `context` as a status check.
 
     A check context is the job's DISPLAY name — its `name:` if it has one, else
     its key — and a matrix job expands to `name (value, value)`. Both spellings
@@ -785,7 +806,8 @@ def _context_producers(
     """
     out = []
     for rel, doc in docs:
-        if not _can_report_on_a_pull_request(doc):
+        ability = _pr_reporting_ability(doc)
+        if ability == _ABILITY_NO:
             continue
         jobs = {k: j for k, j in _jobs(doc)}
         for key, job in jobs.items():
@@ -793,10 +815,10 @@ def _context_producers(
             if _EXPRESSION_RE.search(shown):
                 continue
             if context == shown:
-                out.append((rel, key, job, jobs, doc))
+                out.append((rel, key, job, jobs, doc, ability))
             elif context.startswith(shown + " (") and _matrix_produces(
                     job, context[len(shown) + 2:].rstrip(")")):
-                out.append((rel, key, job, jobs, doc))
+                out.append((rel, key, job, jobs, doc, ability))
     return out
 
 
@@ -1071,11 +1093,19 @@ def _required_checks_skippable(
         skips: list[str] = []
         unknown: list[str] = []
         always_runs = False
-        for rel, key, _job, jobs, doc in producers:
+        for rel, key, _job, jobs, doc, ability in producers:
             reason = _skip_path(jobs, key)
             if reason is None:
-                always_runs = True
-                break
+                if ability == _ABILITY_YES:
+                    always_runs = True
+                    break
+                # It never skips, but whether this workflow runs on a pull
+                # request at all is not knowable — so it cannot certify the
+                # check. Recorded as unknown rather than dropped.
+                unknown.append(
+                    f"`{context}` ← {rel}: always runs, but its trigger "
+                    f"filters may not match a pull request's head branch")
+                continue
             if isinstance(reason, _Unknown):
                 unknown.append(f"`{context}` ← {rel}: {reason}")
                 continue

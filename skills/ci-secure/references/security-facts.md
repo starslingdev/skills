@@ -93,13 +93,20 @@ two moved numbers.
   from external apps, and a green earned off the one traceable check would be
   a clean bill for the others. A `needs:` target
   that is not a job in the file, and a `needs:` cycle, are unknowns for the
-  same reason. Only jobs in a workflow that can actually report on a pull
-  request count as producers — a `pull_request` workflow, or a `push` one that
-  is not restricted to tags. A same-named job in a tag-only release workflow is
-  not the thing gating your pull requests.
+  same reason. Whether a workflow's jobs can report on a pull request at all is
+  three-valued, and each value is treated differently. A `pull_request`
+  workflow, a plain `push`, or a push over every branch (`branches: ['**']`)
+  CAN report, so an always-running job there certifies the check. A push
+  restricted to TAGS provably cannot — no pull-request branch push matches it —
+  so a same-named job in a tag-only release workflow is not a producer at all.
+  A push filtered to specific branches or paths is UNKNOWN: it may or may not
+  run on a given pull request's head branch, so its jobs still count against
+  the check but can never be the evidence that one always reports. Unknown is
+  never treated as absent — dropping the only producer would make the fact
+  unmeasured, and an unmeasured fact scores nothing while a fail scores zero.
 
-  Path and branch filtering is deliberately NOT treated as a bypass, because
-  GitHub does the opposite: a workflow those filters skip never reports its
+  None of that makes filtering a BYPASS, which is a separate question and the
+  opposite of what GitHub does: a workflow those filters skip never reports its
   check, so the required check stays PENDING and the pull request cannot merge.
   Only a skipped JOB reports Success. (`pull_request.branches` filters the base
   branch — the branch whose protection is being read — so every pull request

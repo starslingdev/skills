@@ -2378,3 +2378,159 @@ jobs:
         out = _facts_with(tmp_path / cond.replace("/", "_").replace(" ", "_")[:20],
                           {"ci.yml": body}, ["test"])
         assert _outcome(out, _FACT)["outcome"] == "pass", (cond, _outcome(out, _FACT))
+
+
+# ---------------------------------------------------------------------------
+# G1 — a producer's ability to report is THREE-valued. Collapsing it to a
+# boolean re-opened the "unmeasurable scores better than failing" lever this
+# whole fact exists to close: a repository with a genuinely bypassable required
+# check came back unmeasured (scoring nothing) instead of failing.
+# ---------------------------------------------------------------------------
+
+_SKIPPABLE_PUSH = """\
+name: ci
+on:
+  push:
+%s
+jobs:
+  test:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+
+
+@pytest.mark.parametrize("filters", [
+    "    branches: ['**']\n",
+    "    branches: ['**']\n    tags: ['v*']\n",
+    "    paths: ['src/**']\n",
+    "    paths-ignore: ['docs/**']\n",
+    "    branches: [main]\n",
+])
+def test_a_filtered_push_producer_is_never_silently_dropped(tmp_path, filters):
+    """Dropping the only producer makes the fact UNMEASURED, and an unmeasured
+    fact scores nothing while a fail scores zero — so a repository whose
+    required check really can be bypassed came out ahead of one that configured
+    protection properly. Whatever the filter, a producer that can skip has to
+    reach the verdict."""
+    out = _facts_with(tmp_path / filters.strip()[:14].replace("/", "_").replace(" ", "_"),
+                      {"ci.yml": _SKIPPABLE_PUSH % filters}, ["test"])
+    assert _outcome(out, _FACT)["outcome"] == "fail", _outcome(out, _FACT)
+
+
+def test_a_push_over_every_branch_can_certify_a_check(tmp_path):
+    """The reverse direction. `branches: ['**']` matches every branch push, so
+    an always-running job in it really does report on a same-repo pull request
+    — vetoing it turned a correctly-gated repository RED."""
+    always = """\
+name: ci
+on:
+  push:
+    branches: ['**']
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+    skippable = """\
+name: pr
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  test:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+    out = _facts_with(tmp_path, {"a.yml": always, "b.yml": skippable}, ["test"])
+    assert _outcome(out, _FACT)["outcome"] == "pass", _outcome(out, _FACT)
+
+
+def test_a_plain_push_workflow_is_a_producer_on_its_own(tmp_path):
+    """The control the previous one lacked: its fixture carried `pull_request:`
+    alongside `push:`, so the assertion passed no matter what the push arm did
+    — a mutant rejecting every push workflow left the suite green. This fixture
+    has NO `pull_request:` key, so it tests only the push arm."""
+    body = """\
+name: ci
+on: push
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+"""
+    out = _facts_with(tmp_path, {"ci.yml": body}, ["test"])
+    assert _outcome(out, _FACT)["outcome"] == "pass", _outcome(out, _FACT)
+
+
+def test_a_tag_only_push_workflow_still_cannot_certify(tmp_path):
+    """And the one veto that IS provable: no pull-request branch push matches a
+    tags-only filter, so a same-named job there is not what gates the PR."""
+    ci = """\
+name: ci
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  test:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+    release = """\
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make smoke
+"""
+    out = _facts_with(tmp_path, {"ci.yml": ci, "release.yml": release}, ["test"])
+    assert _outcome(out, _FACT)["outcome"] == "fail", _outcome(out, _FACT)
+
+
+def test_a_branch_filtered_push_cannot_certify_either(tmp_path):
+    """R1's shape, which must stay closed: a `deploy.yml` filtered to
+    `branches: [main]` may or may not run on a pull request's head branch —
+    unknowable — so it can never be the evidence that a check always reports.
+    Unknown is not the same as absent: it just cannot certify."""
+    ci = """\
+name: ci
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  test:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+    deploy = """\
+name: deploy
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make smoke
+"""
+    out = _facts_with(tmp_path, {"ci.yml": ci, "deploy.yml": deploy}, ["test"])
+    assert _outcome(out, _FACT)["outcome"] == "fail", _outcome(out, _FACT)

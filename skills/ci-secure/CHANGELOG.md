@@ -22,6 +22,25 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **A filtered `push` workflow's jobs are no longer dropped as
+  producers — that re-opened the lever this fact exists to close.** Rejecting
+  every branch- or path-filtered push removed the producer entirely, and when
+  it was the only one the fact went UNMEASURED: an unmeasured fact scores
+  nothing while a fail scores zero, so a repository whose required check really
+  could be bypassed came out ahead of one that configured protection properly.
+  The same "unmeasurable beats failing" lever, moved out of the API arm and
+  into the producer arm. It also failed the reverse direction — a genuine
+  always-running producer under `branches: ['**']` was vetoed and a correctly
+  gated repository went RED.
+
+  A workflow's ability to report on a pull request is three-valued now. A
+  `pull_request` workflow, a plain `push`, or a push over every branch CAN
+  report and may certify a check. A tags-only push provably CANNOT and is not a
+  producer. A push filtered to specific branches or paths — including
+  `paths-ignore:`, which was not considered at all — is UNKNOWN: its jobs still
+  count against the check, but can never be the evidence that one always
+  reports. Unknown is never treated as absent.
+
 - **2026-08-14** — **Smaller corrections found alongside the round-2 review.**
   A rulesets response of an unexpected shape (an error object, a paginated
   envelope) was skipped while the source was still marked READ, so it meant
