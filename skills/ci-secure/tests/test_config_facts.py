@@ -1243,30 +1243,28 @@ jobs:
     assert f["outcome"] == "fail", f["evidence"]
 
 
-def test_success_or_failure_is_recognised_as_never_skipping(tmp_path):
-    """`success() || failure()` is the third spelling of "runs whatever the
-    dependencies did" — the same verdict-job shape as `!cancelled()`. Failing
-    it accuses a job that always reports of never running."""
-    body = """\
+def test_success_or_failure_certifies_only_without_needs(tmp_path):
+    """`success() || failure()` reads like `always()` and behaves like it only
+    while the job has no `needs:`. Once it does, a SKIPPED dependency makes
+    both predicates false and GitHub skips the job — so it is exactly as
+    bypassable as the suite it was meant to gate. This test asserted the
+    opposite when it was written; the shape it used (`needs:` plus
+    `success() || failure()`) is the one that does NOT certify.
+    """
+    without_needs = """\
 name: ci
 on: [pull_request]
 permissions:
   contents: read
 jobs:
-  suite:
-    runs-on: ubuntu-latest
-    steps:
-      - run: pytest -v
-  verdict:
-    name: test
-    needs: [suite]
+  test:
     if: success() || failure()
     runs-on: ubuntu-latest
     steps:
-      - run: echo assert
+      - run: pytest -v
 """
-    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
-    assert f["outcome"] == "pass", f["evidence"]
+    out = _facts_with(tmp_path / "no-needs", {"ci.yml": without_needs}, ["test"])
+    assert _outcome(out, _FACT)["outcome"] == "pass", _outcome(out, _FACT)
 
 
 def test_a_path_filtered_workflow_is_not_a_bypass(tmp_path):
@@ -2599,3 +2597,59 @@ def test_the_memo_returns_the_same_answer_it_computed(tmp_path):
     assert "a0" in answer, answer
     # The same graph walked without any memo must agree exactly.
     assert answer == cf._skip_path(jobs, "a0", frozenset(), {}), answer
+
+
+def test_success_or_failure_with_needs_is_skippable(tmp_path):
+    """`success() || failure()` is NOT equivalent to `always()` once the job
+    has `needs:`. If a dependency is SKIPPED, neither predicate is true, so
+    GitHub skips the verdict job too — and a skipped required check is exactly
+    what it reports as passed. Treating it as never-skipping certified the one
+    shape this fact recommends, so the recommended fix was itself bypassable.
+    `always()` and `!cancelled()` both still run when a dependency skips."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  suite:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+  test:
+    needs: [suite]
+    if: success() || failure()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo verdict
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test"]), _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+@pytest.mark.parametrize("cond", ["always()", "${{ always() }}", "'!cancelled()'"])
+def test_the_recommended_verdict_conditions_still_certify(tmp_path, cond):
+    """The control: the conditions the fix recipe actually recommends do run
+    when a dependency is skipped, so the verdict job still reports."""
+    body = f"""\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  suite:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+  test:
+    needs: [suite]
+    if: {cond}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo verdict
+"""
+    out = _facts_with(tmp_path / cond.strip("'${} ()!")[:10], {"ci.yml": body},
+                      ["test"])
+    assert _outcome(out, _FACT)["outcome"] == "pass", _outcome(out, _FACT)

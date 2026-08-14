@@ -546,18 +546,29 @@ def _unpersisted_checkout_violations(doc: dict) -> list[str]:
 # tokens prepended. A condition this list does not recognise is treated as
 # skippable, so the failure direction of a mis-parse is a false RED (visible,
 # arguable) rather than a false green.
+# Conditions that run the job whatever its dependencies did. `always()` and
+# `!cancelled()` both still run when a dependency is SKIPPED, which is the
+# state that matters here.
 _NEVER_SKIPS = {
     "true",
     "always()",
     "!cancelled()",
+    "always()||cancelled()",
+}
+# These run the job every time ONLY when nothing upstream can skip or fail
+# first, so they are never-skipping exactly when the job has no `needs:`.
+#
+# `success() || failure()` looks like `always()` and is not: if a dependency is
+# SKIPPED, neither predicate holds and GitHub skips the job too — and a skipped
+# required check is what it reports as passed. Certifying it meant the verdict
+# job this fact RECOMMENDS could itself be bypassed, so the recommendation is
+# `always()` or `!cancelled()`.
+_NEVER_SKIPS_WITHOUT_NEEDS = {
+    "success()",
     "success()||failure()",
     "failure()||success()",
     "success()||failure()||cancelled()",
-    "always()||cancelled()",
 }
-# `success()` runs the job every time ONLY when nothing upstream can fail
-# first, so it is never-skipping exactly when the job has no `needs:`.
-_NEVER_SKIPS_WITHOUT_NEEDS = {"success()"}
 # `${{ 1 == 1 }}` and friends: a comparison of two identical literals is `true`
 # written the long way, and failing it reds a repository that did nothing wrong.
 # Deliberately narrow — this evaluates NOTHING, it recognises a constant.
@@ -634,8 +645,8 @@ def _skip_path(jobs: dict[str, dict], key: str,
     skips (GitHub skips the dependents). Both report the check as skipped, and
     a skipped required check is green — so both are the same defect here.
 
-    A never-skipping condition (`always()`, `!cancelled()`,
-    `success() || failure()`) stops the walk in BOTH directions: such a job
+    A never-skipping condition (`always()`, `!cancelled()`) stops the walk in
+    BOTH directions: such a job
     runs whatever its dependencies did, which is exactly what makes the
     verdict-job pattern work. Recursion is cycle-guarded (`seen`) because a
     malformed `needs:` cycle must not hang the scan; a cycle is unresolvable

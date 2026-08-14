@@ -112,9 +112,15 @@ two moved numbers.
   branch — the branch whose protection is being read — so every pull request
   this fact gates is inside that filter anyway.)
   **To fix a fail**: add one job that carries the required check's name, runs
-  `if: always()` (or `!cancelled()`, or `success() || failure()`), `needs:` the
+  `if: always()` (or `!cancelled()`), `needs:` the
   conditional suites, and fails unless the suite that should have run passed —
   then point branch protection at that job's name instead of the suites'.
+  `success() || failure()` is deliberately NOT accepted on a job with
+  `needs:`. It reads like `always()` and is not: when a dependency is SKIPPED
+  neither predicate holds, so GitHub skips the verdict job too — and a skipped
+  required check is exactly what it reports as passed. Accepting it would
+  certify a gate with the same hole the fact exists to find.
+
   A branch that requires NO status check passes this fact — there is no
   required check to bypass — which is a true statement about a narrow question
   and not a statement that the branch is protected. Whether a branch should

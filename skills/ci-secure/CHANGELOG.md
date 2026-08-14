@@ -22,6 +22,16 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **`success() || failure()` no longer certifies a verdict job
+  that has `needs:` — the recommended fix was itself bypassable.** It reads
+  like `always()` and behaves like it only while the job has no dependencies.
+  Once it does, a SKIPPED dependency makes both predicates false, so GitHub
+  skips the verdict job too — and a skipped required check is precisely what it
+  reports as passed. The fact was therefore certifying the exact shape it
+  recommends, with the hole it exists to find. `always()` and `!cancelled()`
+  both still run when a dependency skips, and are what the fix recipe names
+  now, in the census document and in the code's own docstring.
+
 - **2026-08-14** — **A runner-absolute path is no longer resolved inside a
   checkout.** `$GITHUB_WORKSPACE`, `$HOME`, `$RUNNER_TEMP` and the runner's own
   directories are absolute by GitHub's contract, but they were joined onto the
