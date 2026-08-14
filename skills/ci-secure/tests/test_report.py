@@ -180,7 +180,7 @@ def test_finding_order_is_the_action_plan_no_duplicate_summary_sections() -> Non
     assert "Quick wins" not in md and "Bigger projects" not in md
     assert "| **Risk** |" not in md and "| Risk |" not in md
     # the curated action verb survives, inside the finding's Fix block
-    assert "**Do this:** Download + checksum-verify remote scripts" in md
+    assert "**Do this:** Pin remote code to a full commit SHA" in md
     # HIGH finding renders before the MEDIUM one — severity order, not input
     # order — and that order is the plan.
     assert md.index("## 🟥 Finding 1:") < md.index("## 🟧 Finding 2:")

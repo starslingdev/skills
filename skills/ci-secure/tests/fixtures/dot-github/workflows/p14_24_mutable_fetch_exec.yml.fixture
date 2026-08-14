@@ -1,0 +1,22 @@
+# Positive fixture for P14.24's second shape — the job clones a third-party
+# tree at a BRANCH (mutable: whatever that branch points at when the job
+# runs) and then executes a file out of the cloned directory. Same trust
+# model as piping a fetched script into a shell, different clothes.
+#
+# Scanner expectation: one P14.24 finding on the `git clone` line.
+
+name: setup
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: git clone --branch main "$TOOLS_REPO_URL" tools
+      - run: python3 tools/setup.py

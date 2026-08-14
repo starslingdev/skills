@@ -1947,3 +1947,288 @@ def test_p1425_package_json_without_an_allowlist_declares_nothing(tmp_path, blob
     tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / "package.json").write_text(blob + "\n")
     assert scan._pnpm_build_allowlist(tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# P14.24 — unverified-remote-code-execution
+#
+# The vector's second shape: CI fetches a git tree at a MUTABLE ref (branch,
+# tag, HEAD, a short sha, or no ref at all) and then executes a file out of
+# that tree. Same trust model as `curl | bash` — the job runs whatever the
+# other side serves at that moment — so the same vector covers it, and the
+# same fix closes it: pin to a full 40-hex commit or vendor the code.
+#
+# A fetch pinned to a FULL 40-hex commit is immutable and must stay silent;
+# that is the trust model the catalog recommends for actions, and flagging it
+# would tell a reader to fix something they already did right.
+# ---------------------------------------------------------------------------
+
+_MUTABLE_FETCH = """\
+    name: setup
+    on: push
+    jobs:
+      build:
+        runs-on: ubuntu-latest
+        steps:
+          - run: git clone --branch main "$TOOLS_REPO_URL" tools
+          - run: python3 tools/setup.py
+"""
+
+
+def _remote_exec_hits(tmp_path: Path, body: str) -> list:
+    wf = _wf(tmp_path, "wf.yml", body)
+    return list(scan._correlation_unverified_remote_code_execution(wf))
+
+
+def test_p1424_fires_on_a_branch_clone_then_execution(tmp_path):
+    hits = _remote_exec_hits(tmp_path, _MUTABLE_FETCH)
+    assert len(hits) == 1
+    # The evidence quotes the FETCH — the line the fix recipe edits — and the
+    # execution that makes it a finding travels as a labelled derived claim.
+    assert "git clone" in hits[0].evidence
+    assert hits[0].derived is False
+    note = hits[0].derived_note or ""
+    assert "tools/setup.py" in note
+    assert "main" in note
+
+
+def test_p1424_silent_when_the_clone_is_pinned_to_a_full_sha(tmp_path):
+    """A full 40-hex commit is immutable — the same trust model the catalog
+    recommends for actions. Reporting it would be a false positive against a
+    repo that already did the right thing."""
+    sha = "b" * 40
+    assert _remote_exec_hits(tmp_path, f"""\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone "$TOOLS_REPO_URL" tools
+                  git -C tools checkout {sha}
+              - run: python3 tools/setup.py
+    """) == []
+
+
+def test_p1424_a_short_sha_is_not_a_pin(tmp_path):
+    """An abbreviated sha names a commit today and can be re-resolved; only a
+    full 40-hex object id is immutable."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone "$TOOLS_REPO_URL" tools
+                  git -C tools checkout a1b2c3d
+              - run: python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_silent_on_a_fetch_with_no_execution(tmp_path):
+    """Fetching a tree is not this vector — executing out of it is."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone --branch main "$TOOLS_REPO_URL" tools
+              - run: ls tools
+    """) == []
+
+
+def test_p1424_silent_when_the_executed_path_is_not_the_fetched_tree(tmp_path):
+    """Conservative by design: the fetch destination and the executed path
+    must visibly connect, or the scanner is guessing."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone --branch main "$TOOLS_REPO_URL" tools
+              - run: python3 scripts/build.py
+    """) == []
+
+
+def test_p1424_fires_when_the_job_cds_into_the_clone(tmp_path):
+    hits = _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone "$TOOLS_REPO_URL" tools
+                  cd tools
+                  ./install
+    """)
+    assert len(hits) == 1
+    assert "./install" in (hits[0].derived_note or "")
+
+
+def test_p1424_fires_on_pip_install_of_the_fetched_tree(tmp_path):
+    hits = _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone --branch release "$TOOLS_REPO_URL" tools
+              - run: pip install ./tools
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_fires_on_sourcing_a_fetched_script(tmp_path):
+    hits = _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone "$TOOLS_REPO_URL" tools
+                  source tools/env.sh
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_fires_on_a_fetch_head_checkout_then_execution(tmp_path):
+    hits = _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git fetch "$TOOLS_REPO_URL" main
+                  git checkout FETCH_HEAD
+                  node ./tool.js
+    """)
+    assert len(hits) == 1
+    assert "git fetch" in hits[0].evidence
+
+
+def test_p1424_silent_when_the_fetched_ref_is_a_full_sha(tmp_path):
+    sha = "c" * 40
+    assert _remote_exec_hits(tmp_path, f"""\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git fetch "$TOOLS_REPO_URL" {sha}
+                  git checkout FETCH_HEAD
+                  node ./tool.js
+    """) == []
+
+
+def test_p1424_silent_on_a_fetch_from_a_named_remote(tmp_path):
+    """`git fetch origin main` pulls the repo's OWN history — the code is the
+    repo's, not a third party's, so it is not this vector."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git fetch origin main
+                  git checkout FETCH_HEAD
+                  node ./tool.js
+    """) == []
+
+
+def test_p1424_silent_when_the_destination_cannot_be_determined(tmp_path):
+    """No explicit destination and a variable URL: the scanner cannot see
+    where the tree lands, so it cannot show the connection and does not
+    claim one."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone "$TOOLS_REPO_URL"
+              - run: python3 tools/setup.py
+    """) == []
+
+
+def test_p1424_execution_in_a_different_job_does_not_connect(tmp_path):
+    """Jobs run on different runners with different working trees; a clone in
+    one job is not the tree the other job executes."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          fetch:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone --branch main "$TOOLS_REPO_URL" tools
+          run:
+            runs-on: ubuntu-latest
+            steps:
+              - run: python3 tools/setup.py
+    """) == []
+
+
+_CURL_PIPE = """\
+    name: setup
+    on: push
+    jobs:
+      install:
+        runs-on: ubuntu-latest
+        steps:
+          - run: curl -fsSL "$INSTALLER_URL" | bash
+"""
+
+
+def test_p1424_still_reports_the_piped_installer_exactly_once(tmp_path):
+    """The vector's original shape keeps firing, and the widened detector must
+    not report it twice — one occurrence is one thing to fix."""
+    hits = _remote_exec_hits(tmp_path, _CURL_PIPE)
+    assert len(hits) == 1
+    assert "curl" in hits[0].evidence
+
+
+def test_p1424_download_then_verify_stays_silent(tmp_path):
+    """The catalog's own RIGHT recipe: fetch to a file, check the digest, run
+    the local copy. Neither arm may fire on it."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: setup
+        on: push
+        jobs:
+          install:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  curl -fsSL -o install.sh "$INSTALLER_URL"
+                  echo "<digest>  install.sh" | sha256sum -c -
+                  bash install.sh
+    """) == []
+
+
+def test_catalog_scan_end_to_end_fires_p14_24_on_a_mutable_fetch(tmp_path):
+    _wf(tmp_path, "setup.yml", _MUTABLE_FETCH)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    result = scan.scan(catalog, tmp_path)
+    hits = [f for f in result["findings"] if f["pattern"] == "P14.24"]
+    assert len(hits) == 1
+    assert hits[0]["severity"] == "MEDIUM"
+    assert hits[0]["affected_jobs"] == ["build"]

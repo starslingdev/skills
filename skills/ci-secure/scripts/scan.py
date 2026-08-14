@@ -2646,6 +2646,414 @@ def _correlation_install_scripts_in_privileged_job(
         )
 
 
+# --- P14.24: unverified remote code execution --------------------------------
+#
+# ONE vector, two shapes, because they are the same trust model: the job runs
+# code that a third party can change between now and the next run.
+#
+#   1. the piped installer — `curl … | bash`, `bash <(curl …)`, `deno run <url>`
+#   2. a MUTABLE git fetch executed out of — `git clone` / `git fetch` at a
+#      branch, tag, HEAD, or an abbreviated sha, followed by running a file
+#      from the fetched tree
+#
+# Shape 1 stays exactly where it was: the regex below is handed to the shared
+# `detect_yaml_run_injection` walker, so its matching, line attribution and
+# evidence are the code that was already shipping. It lives here rather than in
+# the catalog's METADATA because one entry carries one detector, and this entry
+# now needs two arms.
+#
+# A fetch pinned to a FULL 40-hex commit is IMMUTABLE and is never a finding —
+# that is the same trust model this catalog recommends for action pins, and
+# reporting it would tell a reader to fix what they already did right. A short
+# sha is not a pin: git re-resolves an abbreviated id at fetch time.
+_REMOTE_PIPE_TO_SHELL = (
+    r"(?:(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:bash|sh)\b"
+    r"|\b(?:bash|sh)\s+<\(\s*(?:curl|wget)\b"
+    r"|\bdeno\s+run\b[^\n]*https?://)"
+)
+
+_FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_ABBREV_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,39}$")
+
+# `git clone` options that consume a separate VALUE argument. Getting this set
+# wrong would make an option's value look like the clone's URL or destination,
+# and the destination is what the whole connection test rests on.
+_CLONE_VALUE_OPTS = {
+    "-b", "--branch", "--revision", "--depth", "-o", "--origin", "-u",
+    "--upload-pack", "--reference", "--reference-if-able",
+    "--separate-git-dir", "--template", "-c", "--config", "-j", "--jobs",
+    "--filter", "--shallow-since", "--shallow-exclude", "--server-option",
+    "--bundle-uri", "--recurse-submodules", "--jobs",
+}
+# Interpreters that run a FILE named on their command line. `-m` is excluded
+# where it appears (a module name is not a path), except for the pip form
+# handled separately below.
+_INTERPRETERS = {
+    "python", "python2", "python3", "node", "nodejs", "bash", "sh", "zsh",
+    "ksh", "ruby", "perl", "php", "pwsh", "powershell",
+}
+_SOURCE_CMDS = {"source", "."}
+_LEADING_WRAPPERS = {"sudo", "command", "exec", "time", "nohup", "env"}
+_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _shell_tokens(segment: str) -> list[str]:
+    """`segment` split the way a shell would, or `[]` when it cannot be.
+
+    A segment carrying an unbalanced quote or a construct `shlex` refuses is
+    returned as no tokens at all: this detector only ever ADDS a finding when
+    it can see both halves of the chain, so an unparsable command simply
+    contributes nothing rather than being guessed at.
+    """
+    try:
+        return shlex.split(segment, comments=False, posix=True)
+    except ValueError:
+        return []
+
+
+def _strip_command_prefix(tokens: list[str]) -> list[str]:
+    """Drop leading `VAR=value` assignments and command wrappers (`sudo`, …)."""
+    i = 0
+    while i < len(tokens) and (
+        _ASSIGNMENT_RE.match(tokens[i]) or tokens[i] in _LEADING_WRAPPERS
+    ):
+        i += 1
+    return tokens[i:]
+
+
+def _resolve_path(cwd: str, path: str) -> str:
+    """`path` as seen from `cwd`, normalized. Absolute paths pass through."""
+    if path.startswith("/"):
+        return os.path.normpath(path)
+    return os.path.normpath(os.path.join(cwd, path))
+
+
+def _under(dest: str, path: str) -> bool:
+    """Is `path` inside the fetched destination `dest`?
+
+    `dest == "."` is the whole working tree (what a `git fetch` +
+    `git checkout FETCH_HEAD` replaces), so every relative path is inside it;
+    an absolute path never is.
+    """
+    if dest == ".":
+        return not path.startswith("/")
+    return path == dest or path.startswith(dest + "/")
+
+
+def _clone_destination(url: str, dest: str | None) -> str | None:
+    """The directory a `git clone` writes into, or None when it is not visible.
+
+    With no explicit destination git derives one from the URL's last path
+    segment — knowable only when the URL is a literal. A URL held in a shell
+    variable (`"$TOOLS_REPO_URL"`) leaves the destination unknowable, and this
+    detector reports nothing it cannot show: no destination means no visible
+    connection to whatever executes later.
+    """
+    if dest:
+        return dest
+    if not url or "$" in url:
+        return None
+    base = url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    if base.endswith(".git"):
+        base = base[: -len(".git")]
+    return base or None
+
+
+@dataclass(frozen=True)
+class _RemoteFetch:
+    """A fetch of third-party code into a directory this job can execute."""
+    line: int
+    raw: str
+    dest: str
+    ref: str | None      # None = the remote's default branch (HEAD)
+
+
+def _ref_description(ref: str | None) -> str:
+    if ref is None:
+        return "the remote's default branch (HEAD)"
+    if _ABBREV_SHA_RE.match(ref):
+        return (
+            f"`{ref}` — an ABBREVIATED commit id, which git re-resolves at "
+            f"fetch time and is not an immutable object name"
+        )
+    return f"`{ref}`"
+
+
+def _git_subcommand(tokens: list[str]) -> tuple[str | None, str | None, list[str]]:
+    """(subcommand, `-C` directory, remaining args) for a `git …` invocation."""
+    i, gdir = 1, None
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "-C" and i + 1 < len(tokens):
+            gdir = tokens[i + 1]
+            i += 2
+            continue
+        if tok in ("-c", "--namespace", "--git-dir", "--work-tree") and i + 1 < len(tokens):
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return tok, gdir, tokens[i + 1:]
+    return None, gdir, []
+
+
+def _parse_clone(args: list[str]) -> tuple[str | None, str | None, str | None]:
+    """(url, destination-as-written, ref) from `git clone`'s arguments."""
+    ref: str | None = None
+    positionals: list[str] = []
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok.startswith("--") and "=" in tok:
+            name, _, value = tok.partition("=")
+            if name in ("--branch", "--revision"):
+                ref = value
+            i += 1
+            continue
+        if tok in _CLONE_VALUE_OPTS:
+            if i + 1 < len(args):
+                if tok in ("-b", "--branch", "--revision"):
+                    ref = args[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        positionals.append(tok)
+        i += 1
+    url = positionals[0] if positionals else None
+    dest = positionals[1] if len(positionals) > 1 else None
+    return url, dest, ref
+
+
+def _is_remote_url(token: str) -> bool:
+    """A `git fetch` remote that names a THIRD PARTY rather than this repo.
+
+    `git fetch origin main` pulls the repository's own history — the code is
+    already the repo's, so it is not this vector. A URL (or a variable holding
+    one) is the shape that reaches somebody else's server.
+    """
+    return "://" in token or "@" in token or "$" in token
+
+
+def _executed_path(tokens: list[str]) -> str | None:
+    """The path this command EXECUTES, as written, or None.
+
+    Deliberately narrow — an interpreter running a named file, a sourced
+    script, a `pip install` of a directory, or a path invoked directly. A
+    command that merely reads the tree (`ls`, `cat`, `grep`) is not execution
+    and must not be treated as it.
+    """
+    if not tokens:
+        return None
+    cmd = tokens[0]
+    rest = tokens[1:]
+    if cmd in _SOURCE_CMDS:
+        return rest[0] if rest and not rest[0].startswith("-") else None
+    if cmd in ("pip", "pip3") or (
+        cmd in _INTERPRETERS and rest[:2] == ["-m", "pip"]
+    ):
+        args = rest[2:] if rest[:2] == ["-m", "pip"] else rest
+        if "install" not in args:
+            return None
+        for i, tok in enumerate(args):
+            if tok == "-e" and i + 1 < len(args):
+                return args[i + 1]
+            if tok.startswith("-") or tok == "install":
+                continue
+            if tok.startswith("./") or tok.startswith("../") or "/" in tok:
+                return tok
+        return None
+    if cmd in _INTERPRETERS:
+        if "-m" in rest or "-c" in rest:
+            return None
+        for tok in rest:
+            if tok.startswith("-"):
+                continue
+            return tok
+        return None
+    if "/" in cmd and not cmd.startswith("-"):
+        return cmd
+    return None
+
+
+def _job_shell_commands(
+    text: str, job_range: tuple[int, int] | None,
+) -> list[tuple[int, str, str, bool]]:
+    """(line, verbatim line, joined command, starts-a-new-step) for the job.
+
+    Restricted to `run:` scalar content, like every other shell reader here, so
+    a step `name:` or a YAML comment is never read as a command. The fourth
+    element marks a discontinuity in shell lines, which is where the working
+    directory must be forgotten: `cd` does not survive from one step to the
+    next, and carrying it across would connect a fetch to an execution that
+    never ran in that directory.
+    """
+    lines = text.splitlines()
+    shell_lines = _run_scalar_line_numbers(text)
+    start, end = job_range if job_range else (1, len(lines))
+    out: list[tuple[int, str, str, bool]] = []
+    previous: int | None = None
+    for line_no, raw, cmd in _shell_commands(lines):
+        if line_no < start or line_no > min(end, len(lines)):
+            continue
+        if line_no not in shell_lines:
+            continue
+        # An INLINE scalar's shell starts after the `run:` key, and the raw
+        # line carries that key: without stripping it the first token of
+        # `- run: git clone …` is the list dash, and every one-line step in
+        # the file reads as an unparsable command.
+        key = _RUN_KEY_LINE_RE.match(cmd)
+        if key and key.group(2) and not _BLOCK_SCALAR_RE.match(key.group(2).strip()):
+            cmd = key.group(2)
+        out.append((line_no, raw, cmd, previous is None or line_no != previous + 1))
+        previous = line_no
+    return out
+
+
+def _mutable_fetch_executions(
+    text: str, job_range: tuple[int, int] | None,
+) -> list[tuple[_RemoteFetch, int, str]]:
+    """Every (fetch, execution line, executed path) pair visible in one job.
+
+    Both halves have to be visible in the SAME job — jobs get their own runner
+    and their own working tree, so a clone in one is not the tree another runs
+    from. Within the job the pairing is positional: the execution must come
+    after the fetch that put the code there.
+
+    A destination that is pinned to a full 40-hex commit ANYWHERE in the job is
+    dropped, without regard to order. Erring that way is deliberate: a pin the
+    scanner reads out of position suppresses a finding, while the opposite
+    error would report a repo that pinned correctly.
+    """
+    fetches: dict[str, _RemoteFetch] = {}
+    pending_fetch_head: dict[str, _RemoteFetch] = {}
+    pinned: set[str] = set()
+    executions: list[tuple[int, str, str]] = []   # (line, resolved, as-written)
+    cwd = "."
+    for line_no, _raw, command, new_step in _job_shell_commands(text, job_range):
+        if new_step:
+            cwd = "."
+        for segment in _install_command_segments(command):
+            tokens = _strip_command_prefix(_shell_tokens(segment))
+            if not tokens:
+                continue
+            if tokens[0] == "cd" and len(tokens) > 1 and not tokens[1].startswith("-"):
+                cwd = _resolve_path(cwd, tokens[1])
+                continue
+            if tokens[0] == "git":
+                sub, gdir, args = _git_subcommand(tokens)
+                base = _resolve_path(cwd, gdir) if gdir else cwd
+                if sub == "clone":
+                    url, dest_written, ref = _parse_clone(args)
+                    dest_written = _clone_destination(url or "", dest_written)
+                    if not dest_written:
+                        continue
+                    dest = _resolve_path(base, dest_written)
+                    if ref and _FULL_SHA_RE.match(ref):
+                        pinned.add(dest)
+                        continue
+                    fetches.setdefault(
+                        dest, _RemoteFetch(line_no, _raw, dest, ref))
+                    continue
+                if sub == "fetch":
+                    positionals = [a for a in args if not a.startswith("-")]
+                    if not positionals or not _is_remote_url(positionals[0]):
+                        continue
+                    ref = positionals[1] if len(positionals) > 1 else None
+                    if ref and _FULL_SHA_RE.match(ref):
+                        pinned.add(base)
+                        continue
+                    # A fetch alone changes no file in the tree — it becomes
+                    # executable code only once something checks FETCH_HEAD
+                    # out, so it is held until that happens.
+                    pending_fetch_head.setdefault(
+                        base, _RemoteFetch(line_no, _raw, base, ref))
+                    continue
+                if sub in ("checkout", "reset", "switch", "merge", "rebase"):
+                    if any(_FULL_SHA_RE.match(a) for a in args):
+                        pinned.add(base)
+                    if any("FETCH_HEAD" in a for a in args):
+                        held = pending_fetch_head.get(base)
+                        if held is not None:
+                            fetches.setdefault(base, held)
+                    continue
+                continue
+            path = _executed_path(tokens)
+            if path:
+                executions.append((line_no, _resolve_path(cwd, path), path))
+
+    pairs: list[tuple[_RemoteFetch, int, str]] = []
+    for dest, fetch in fetches.items():
+        if dest in pinned:
+            continue
+        hit = next(
+            (
+                (line, written) for line, resolved, written in executions
+                if line >= fetch.line and _under(dest, resolved)
+            ),
+            None,
+        )
+        if hit is not None:
+            pairs.append((fetch, hit[0], hit[1]))
+    return sorted(pairs, key=lambda p: p[0].line)
+
+
+def _correlation_unverified_remote_code_execution(
+    file_path: Path,
+) -> Iterator[RawHit]:
+    """P14.24 — the job executes remote code nobody pinned.
+
+    Two arms, one vector (see the comment block above): the piped installer,
+    delegated unchanged to the shared `run:`-scalar walker, and a git fetch at
+    a MUTABLE ref whose tree the same job then executes from.
+    """
+    yield from detect_yaml_run_injection(file_path, _REMOTE_PIPE_TO_SHELL)
+
+    text = _read_text_safe(file_path)
+    if not text:
+        return
+    doc = _parse_yaml_text(text, file_path)
+    if not isinstance(doc, dict):
+        return
+    ranges = {name: (s, e) for name, s, e in (job_line_ranges(file_path) or [])}
+    for job_name, _job in _walk_jobs(doc):
+        job_range = ranges.get(job_name)
+        if job_range is None:
+            # No source range for this job means its commands cannot be
+            # scoped to it, and a cross-job pairing would be a false claim.
+            # Recorded as a coverage gap rather than dropped in silence.
+            _DROPPED_MATCHES.append({
+                "file": str(file_path),
+                "reason": (
+                    f"P14.24: jobs.{job_name} could not be located in the raw "
+                    f"file, so its shell was NOT scanned for a mutable fetch "
+                    f"executed out of — review the job manually"
+                ),
+            })
+            continue
+        for fetch, exec_line, exec_path in _mutable_fetch_executions(
+            text, job_range,
+        ):
+            yield RawHit(
+                line=fetch.line,
+                evidence=f"{fetch.line:>4}: {fetch.raw}  <-- here",
+                match_text=fetch.raw.strip(),
+                derived_note=(
+                    f"jobs.{job_name} fetches remote code at "
+                    f"{_ref_description(fetch.ref)} into `{fetch.dest}` — a "
+                    f"MUTABLE reference, so what lands in the tree is whatever "
+                    f"the other side serves at the moment the job runs — and "
+                    f"then executes `{exec_path}` from it at line {exec_line}. "
+                    f"A full 40-character commit id is the only reference that "
+                    f"cannot change under you."
+                ),
+            )
+
+
 def _correlation_untrusted_trigger_writes_cache(
     file_path: Path,
 ) -> Iterator[RawHit]:
@@ -2937,6 +3345,7 @@ _Correlation = Callable[[Path], Iterator[RawHit]]
 _JOB_CORRELATIONS: dict[str, _Correlation] = {
     "credential-file-in-cache-or-artifact": _correlation_credential_file_in_cache_or_artifact,
     "install-scripts-in-privileged-job": _correlation_install_scripts_in_privileged_job,
+    "unverified-remote-code-execution": _correlation_unverified_remote_code_execution,
 }
 _WORKFLOW_CORRELATIONS: dict[str, _Correlation] = {
     "untrusted-trigger-writes-cache": _correlation_untrusted_trigger_writes_cache,

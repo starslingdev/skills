@@ -27,6 +27,25 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- **2026-08-14** — **P14.24 now catches remote code fetched with git, not just
+  piped into a shell.** The vector was written around `curl … | bash`, so a
+  workflow that cloned or fetched somebody else's repository at a BRANCH, TAG,
+  `HEAD`, or a short commit id — and then ran a file out of the tree it
+  landed in — passed the scan clean. It is the same trust model in different
+  clothes: a branch or tag is designed to move, so whoever can push to that
+  repository chooses what the next CI run executes, with nothing in your own
+  repo changing. The entry keeps its id, its severity, and its place among the
+  ten; its detector now has two arms, and the piped-installer arm is the code
+  that was already shipping, unchanged. A fetch pinned to a full 40-character
+  commit is immutable and is deliberately NOT a finding — that is the trust
+  model this catalog recommends for action pins — while an abbreviated sha,
+  which git re-resolves at fetch time, is. The pairing has to be visible
+  inside one job (destination directory ↔ executed path, `cd` followed), so a
+  clone whose destination the YAML does not show, and an execution in another
+  job, are not reported rather than guessed at. Execution shapes covered:
+  interpreters running a fetched file, `source`, `pip install <fetched-dir>`,
+  and a fetched path invoked directly.
+
 - **2026-08-10** — **A repo guard for installer-shaped literals.** Two shapes
   now fail the build if they appear in tracked text: a fetch of a literal
   http(s) URL that is then executed (piped into a shell, run via process

@@ -1,0 +1,24 @@
+# Negative-lookalike fixture for P14.24 — the SAME clone-and-run shape,
+# pinned to a full 40-hex commit before anything executes. A full commit id
+# is immutable, which is the trust model this catalog recommends for actions,
+# so the finding must not fire.
+#
+# Scanner expectation: zero P14.24 findings on this file.
+
+name: setup
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: |
+          git clone "$TOOLS_REPO_URL" tools
+          git -C tools checkout 0000000000000000000000000000000000000000
+      - run: python3 tools/setup.py

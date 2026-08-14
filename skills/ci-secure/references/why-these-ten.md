@@ -41,7 +41,7 @@ rejection record).
 | 6 | P14.15 | Attacker-controlled `$GITHUB_ENV` / `$GITHUB_PATH` write — hijacks later steps | GitHub Security Lab environment-injection writeups |
 | 7 | P14.18 | `pull-requests: write` on an untrusted trigger — outsider's event holds a write token | elementary-data (2026) — forged release via default-write token |
 | 8 | P14.19 | Credential files in caches/artifacts — keys fetchable by other jobs or the public | Trivy round 2 (2026) — attacker swept the runner for exactly these credential files (SSH keys, cloud creds, Kubernetes tokens); caching or uploading them extends that exposure |
-| 9 | P14.24 | Unverified `curl \| bash` with secrets present — remote host compromise becomes yours | Codecov bash-uploader breach (2021) |
+| 9 | P14.24 | Unverified remote code execution — a piped installer, or a git tree fetched at a mutable ref and executed | Codecov bash-uploader breach (2021) |
 | 10 | P14.25 | Dependency install scripts executing in a privileged job — a compromised upstream package runs code where the secrets are | nx / s1ngularity install-script payload (2025); Miasma / `@redhat-cloud-services` (2026); GitHub's July 28 2026 supply-chain post |
 
 Full incident citations live in the catalog's
@@ -105,9 +105,9 @@ pass/fail is the honest weight for a presence fact — or were dropped.
 
 Two catalog-MEDIUM patterns **passed** the filter and stayed: the fork-code
 trust chain (P14.9 — its severity was raised to HIGH with the rebuilt
-detector) and `curl | bash` (P14.24 — the Codecov chain is real; its potency
-depends on a live condition, which is why its catalog severity stays MEDIUM
-while it remains a critical finding by membership).
+detector) and unverified remote code execution (P14.24 — the Codecov chain is
+real; its potency depends on a live condition, which is why its catalog
+severity stays MEDIUM while it remains a critical finding by membership).
 
 The removed patterns are not shipped with the skill; re-admitting any entry
 means passing this document's three tests and updating the census.

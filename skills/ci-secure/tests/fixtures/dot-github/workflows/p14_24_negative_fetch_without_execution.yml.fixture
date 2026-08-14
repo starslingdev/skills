@@ -1,0 +1,21 @@
+# Negative-lookalike fixture for P14.24 — a mutable clone that nothing ever
+# executes from. Fetching a tree is not the vector; executing out of it is,
+# so this file must stay clean.
+#
+# Scanner expectation: zero P14.24 findings on this file.
+
+name: docs
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: git clone --branch main "$DOCS_REPO_URL" docs-src
+      - run: ls docs-src

@@ -5,7 +5,8 @@ description: >-
   attack vectors — template injection, fork code executed with privileges
   (pwn requests), cache poisoning, impostor action SHAs, secrets dumps,
   GITHUB_ENV hijack, write-token untrusted triggers, credentials in
-  caches/artifacts, unverified curl|bash, and dependency install scripts
+  caches/artifacts, unverified remote code execution (curl|bash and
+  mutable fetch-and-run), and dependency install scripts
   running in a job that holds secrets — reports every finding
   with a plain-English attacker scenario, reports pass/fail config
   hygiene checks alongside them, and fixes selected findings via

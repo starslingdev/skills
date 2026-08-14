@@ -2214,7 +2214,7 @@ _ACTION_BY_FIX_STRATEGY = {
     "sanitize-before-export": "Sanitize untrusted input before writing to `$GITHUB_ENV` / `$GITHUB_PATH`",
     "split-trusted-untrusted-workflows": "Split into separate trusted / untrusted workflows",
     "move-credential-outside-cached-path": "Move credential files out of cached / uploaded paths",
-    "pin-and-verify-remote-script": "Download + checksum-verify remote scripts (no `curl | bash`)",
+    "pin-and-verify-remote-script": "Pin remote code to a full commit SHA, or checksum-verify a downloaded script, before executing it",
     "ignore-install-scripts-in-privileged-job": "Install with `--ignore-scripts` in the job that holds secrets or a write token",
 }
 

@@ -102,7 +102,11 @@ EXPECTED_COUNTS = {
     "P14.15": 2,
     "P14.18": 1,
     "P14.19": 1,
-    "P14.24": 1,
+    # 1 piped-installer occurrence + 1 mutable-fetch-then-execute occurrence:
+    # the vector's two shapes, one positive fixture each. Its two negative
+    # controls (a full-40-hex-pinned clone, a fetch nothing executes from)
+    # must contribute nothing.
+    "P14.24": 2,
     # 1 from the P14.25 positive fixture + 2 from
     # p14_8_workflow_scope_id_token.yml, whose two jobs each run `npm ci`
     # under a workflow-scope `id-token: write` — a real payoff, not an
