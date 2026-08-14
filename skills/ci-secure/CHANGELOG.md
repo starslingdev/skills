@@ -22,6 +22,19 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **A runner-absolute path is no longer resolved inside a
+  checkout.** `$GITHUB_WORKSPACE`, `$HOME`, `$RUNNER_TEMP` and the runner's own
+  directories are absolute by GitHub's contract, but they were joined onto the
+  step's `working-directory:` — so a `vale` binary downloaded from its own
+  release page and sha256-verified was reported as executing "from" a docs
+  checkout on a real repository. That was one of only two findings the scanner
+  produced across a seven-repository corpus, and its evidence was fabricated.
+
+- **2026-08-14** — **The second chain on a line is described, not just named.**
+  One line is one place to fix, so folding two findings is right — but the kept
+  finding's prose described only the first chain, so what runs out of the
+  second tree was stated nowhere. Its claim is folded in now.
+
 - **2026-08-14** — **Three smaller losses, and the tests that had been missing
   under them.** An expression's inner spacing split a directory in two:
   `apps/${{ matrix.app }}` and `apps/${{matrix.app}}` are the same place to

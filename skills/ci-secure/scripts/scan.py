@@ -2918,9 +2918,18 @@ def _strip_command_prefix(tokens: list[str]) -> list[str]:
     return tokens[i:]
 
 
+# Runner variables that are ABSOLUTE by GitHub's contract. Joining them onto a
+# step's `working-directory:` put them inside a checkout they have nothing to do
+# with — a `vale` binary downloaded from its own release page and sha-verified
+# was reported as executing "from" a docs checkout on a real repository.
+_RUNNER_ABSOLUTE_RE = re.compile(
+    r"^\$\{?(?:GITHUB_WORKSPACE|HOME|RUNNER_TEMP|RUNNER_WORKSPACE"
+    r"|RUNNER_TOOL_CACHE|GITHUB_ACTION_PATH)\}?/")
+
+
 def _resolve_path(cwd: str, path: str) -> str:
     """`path` as seen from `cwd`, normalized. Absolute paths pass through."""
-    if path.startswith("/"):
+    if path.startswith("/") or _RUNNER_ABSOLUTE_RE.match(path):
         return os.path.normpath(path)
     return os.path.normpath(os.path.join(cwd, path))
 
@@ -4641,6 +4650,14 @@ def _dedupe_occurrences(findings: list[Finding]) -> list[Finding]:
             bucket = texts[id(seen[key])]
             if match_text and match_text not in bucket:
                 bucket.append(match_text)
+            # Fold the folded finding's own CLAIM in too, not just its label.
+            # Naming the second fetch on the marker stopped it vanishing, but
+            # the kept finding's prose still described only the first chain, so
+            # what runs out of the second tree was stated nowhere at all.
+            note = str(f.get("derived_note") or "")
+            kept_note = str(seen[key].get("derived_note") or "")
+            if note and note not in kept_note:
+                seen[key]["derived_note"] = f"{kept_note} ALSO: {note}"
             continue
         seen[key] = f
         texts[id(f)] = [match_text] if match_text else []

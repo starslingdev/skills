@@ -4476,3 +4476,82 @@ def test_a_coverage_note_names_the_line_it_came_from(tmp_path):
     notes = result["coverage_notes"]
     assert len(notes) == 2, notes
     assert all("line" in n["reason"] for n in notes), notes
+
+
+@pytest.mark.parametrize("path", [
+    "${GITHUB_WORKSPACE}/vale",
+    "$GITHUB_WORKSPACE/bin/tool",
+    "$HOME/bin/tool",
+    "$RUNNER_TEMP/installer",
+    "${RUNNER_WORKSPACE}/x/tool",
+    "$GITHUB_ACTION_PATH/run.sh",
+])
+def test_p1424_a_runner_absolute_path_is_not_inside_the_fetched_tree(
+    tmp_path, path,
+):
+    """`$GITHUB_WORKSPACE`, `$HOME` and the runner's own directories are
+    ABSOLUTE by GitHub's contract. Resolving them relative to the step's
+    `working-directory:` put them inside a checkout they have nothing to do
+    with — teleport's report says a `vale` binary downloaded and sha-verified
+    from its own release page is executed "from" a docs checkout."""
+    assert _remote_exec_hits(tmp_path / path[-8:].replace("/", "_"), f"""\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/docs
+                  ref: main
+                  path: docs
+              - working-directory: docs/content/current
+                run: |
+                  "{path}" --config .vale.ini docs/pages
+    """) == []
+
+
+def test_p1424_a_relative_path_under_a_working_directory_still_reports(
+    tmp_path,
+):
+    """The control: an ordinary relative execution inside the fetched checkout
+    is exactly what this vector is for."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  repository: acme/docs
+                  ref: main
+                  path: docs
+              - run: bash docs/build.sh
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_the_second_chain_on_a_line_is_described_not_just_named(tmp_path):
+    """One line is one place to fix, so folding the two findings is right — but
+    the kept finding's prose described only the FIRST chain, so what runs out
+    of the second tree was stated nowhere. Naming the fetch on the marker was
+    half the contract; the reader still has to be told what it executes."""
+    _wf(tmp_path, "ci.yml", """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone --branch main "$A_URL" one && python3 one/x.py && git clone --branch main "$B_URL" two && python3 two/y.py
+    """)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    result = scan.scan(catalog, tmp_path)
+    hits = [f for f in result["findings"] if f["pattern"] == "P14.24"]
+    assert len(hits) == 1, hits
+    note = hits[0].get("derived_note", "")
+    assert "two/y.py" in note, note
+    assert "one/x.py" in note, note
