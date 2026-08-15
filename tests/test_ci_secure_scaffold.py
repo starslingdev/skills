@@ -1,4 +1,4 @@
-"""What an outside repository gets when ci-secure installs itself as a gate.
+"""What an outside repository gets when someone sets ci-secure up as a gate.
 
 The scaffold vendors the engine, the gate and the licence into the adopter's
 repository and adds one workflow. That copy has to be as strong as the check we
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -382,8 +383,31 @@ def test_nothing_in_the_template_can_swallow_a_failing_gate(
                     f"`{swallow}` in {run!r} can turn a non-zero exit into a "
                     "passing step")
 
+    # The verdict job's own STEPS, not just the job. This is the job whose name
+    # branch protection requires, and the sweep above stopped at the job key:
+    # `continue-on-error: true` on the single step that computes the verdict
+    # let it fail without failing the job, so `ci-secure` reported green over a
+    # failed scan - the bypass this test is named for, one level further down
+    # than it was looking, in the one job that matters most.
     verdict = template["jobs"]["verdict"]
     assert "continue-on-error" not in verdict
+    for step in verdict["steps"]:
+        assert "continue-on-error" not in step, (
+            f"continue-on-error on {step.get('name')} lets the REQUIRED check's "
+            "own step fail while the check still reports success")
+        assert "if" not in step, (
+            f"a condition on {step.get('name')} lets the required check green "
+            "by skipping the step that decides the verdict")
+        for swallow in ("|| true", "|| exit 0", "set +e"):
+            assert swallow not in step.get("run", ""), (
+                f"`{swallow}` in the verdict step turns its exit 1 into a pass")
+
+    # `always()` is what stops a cancelled or skipped scan reporting green, so
+    # the verdict job's condition is load-bearing rather than incidental.
+    assert str(verdict.get("if")).strip() == "always()", (
+        "the verdict job must run unconditionally: `!cancelled()` reports it "
+        "as skipped on a cancelled run, which a required-check rule reads as "
+        f"green - found {verdict.get('if')!r}")
 
 
 @pytest.mark.parametrize(
@@ -551,6 +575,51 @@ def test_vendoring_produces_a_working_gate_and_a_manifest_that_verifies(
          "--verify", str(vendored)],
         capture_output=True, text=True)
     assert check.returncode == 0, check.stdout + check.stderr
+
+    # RUN the vendored gate, which is what this test's name has always claimed
+    # and what nothing in the suite actually did. Placement and hashes are not
+    # the property that matters: the adopter's first run either reaches a
+    # verdict or it does not. Checking only the file list let the vendored set
+    # be shrunk - dropping `scripts/gh_utils.py`, which `config_facts.py` loads
+    # by location from beside the engine, shipped an install whose engine died
+    # on import for every adopter with the whole suite green.
+    gate = subprocess.run(
+        [sys.executable, str(vendored / "scripts" / "gate.py")],
+        cwd=repo, capture_output=True, text=True,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+             "GITHUB_WORKSPACE": str(repo),
+             "CI_SECURE_ENGINE": "ci-secure/scripts/scan.py",
+             "CI_SECURE_GH_IMPOSTOR": "off",
+             "PYTHONDONTWRITEBYTECODE": "1"})
+
+    assert "engine failed to run" not in gate.stdout, (
+        "the vendored engine could not start - the vendored file set is not "
+        "closed under the engine's imports:\n" + gate.stdout + gate.stderr)
+    assert "rule (config.py)" not in gate.stdout, (
+        "the vendored gate looked for its rule at a path that only exists in "
+        "OUR tree:\n" + gate.stdout)
+    assert "no readable verdict" not in gate.stdout, gate.stdout
+    assert gate.returncode == 1, (
+        "a repository that has never been scanned reds on its first blocking "
+        "run - a 0 here means the gate reached no verdict at all:\n"
+        + gate.stdout + gate.stderr)
+
+    # The same scan, ramped: this is the mode the shipped workflow installs.
+    ramped = subprocess.run(
+        [sys.executable, str(vendored / "scripts" / "gate.py"), "--advisory"],
+        cwd=repo, capture_output=True, text=True,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+             "GITHUB_WORKSPACE": str(repo),
+             "CI_SECURE_ENGINE": "ci-secure/scripts/scan.py",
+             "CI_SECURE_GH_IMPOSTOR": "off",
+             "PYTHONDONTWRITEBYTECODE": "1"})
+    assert ramped.returncode == 0, (
+        "the flag the template ships did not clear the first-run facts:\n"
+        + ramped.stdout + ramped.stderr)
+
+    assert not list(vendored.rglob("__pycache__")), (
+        "the gate wrote bytecode into the vendored tree, which its own drift "
+        "check reds on")
 
 
 def _vendor(repo: Path) -> subprocess.CompletedProcess:
@@ -846,12 +915,27 @@ def test_the_template_stops_the_gate_writing_bytecode(template: dict) -> None:
     Committed bytecode is drift and reds. Bytecode the gate wrote a second
     earlier is the same file with an innocent cause, so the workflow tells
     Python not to produce it — which is what makes reporting it affordable.
+
+    Asserted on the JOB, not on the gate step. Scoped to that one step the
+    guard stopped one step short of the drift check, which runs python first:
+    the step whose whole purpose is rejecting bytecode was the step free to
+    write it. Safe today only because `--verify` happens to import nothing,
+    which is a property of one function's import graph holding up a stated
+    invariant about the whole job.
     """
-    gate_step = next(s for s in template["jobs"]["scan"]["steps"]
-                     if "gate.py" in s.get("run", ""))
-    assert gate_step.get("env", {}).get("PYTHONDONTWRITEBYTECODE") == "1", (
-        "the gate step may leave __pycache__ in the vendored tree, which the "
-        "next --verify correctly reds - stop it being written at all")
+    scan = template["jobs"]["scan"]
+    assert scan.get("env", {}).get("PYTHONDONTWRITEBYTECODE") == "1", (
+        "set this on the scan JOB: any python step here may otherwise leave "
+        "__pycache__ in the vendored tree, which the next --verify correctly "
+        "reds - stop it being written at all")
+
+    for step in scan["steps"]:
+        if "python" not in step.get("run", ""):
+            continue
+        effective = dict(scan.get("env", {}), **step.get("env", {}))
+        assert effective.get("PYTHONDONTWRITEBYTECODE") == "1", (
+            f"{step.get('name', step.get('run'))!r} runs python without the "
+            "no-bytecode guard in effect")
 
 
 def test_refresh_removes_a_file_a_later_version_stopped_vendoring(
@@ -1004,3 +1088,134 @@ def test_a_hand_edited_vendored_file_is_caught(tmp_path: Path) -> None:
     assert check.returncode == 1
     assert "scripts/gate.py: modified" in check.stdout
     assert "refresh" in check.stdout
+
+
+# --------------------------------------------------------------------------
+# The manifest defines what must be there, not merely what happens to be there
+# --------------------------------------------------------------------------
+
+def test_a_file_dropped_from_the_copy_AND_the_manifest_is_still_drift(
+        tmp_path: Path) -> None:
+    """Deleting a vendored file and its manifest entry must not verify clean.
+
+    This is the hole the "anyone who can edit the gate can edit the manifest"
+    caveat does NOT cover. Nothing here is edited-with-a-matching-hash: a file
+    is removed from the manifest's DOMAIN, so every remaining hash still agrees
+    and the drift check - sold as the thing that notices the vendored copy is
+    no longer what was reviewed - reports a match.
+
+    It is not cosmetic. `config.py` is the rule that says which outcomes block,
+    and the gate resolves a fallback rule from `<gate>/../../skills/ci-secure/
+    scripts/config.py`, which in the vendored layout is a path INSIDE the
+    repository being audited. Delete the vendored `config.py` plus its manifest
+    entry, add that path in the same pull request, and the gate executes a rule
+    the pull request wrote - with a green drift check above it.
+    """
+    repo = tmp_path / "acme-app"
+    repo.mkdir()
+    assert _vendor(repo).returncode == 0
+    vendored = repo / "ci-secure"
+
+    (vendored / "scripts" / "config.py").unlink()
+    manifest_path = vendored / "VENDORED.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["files"]["scripts/config.py"]
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                             encoding="utf-8")
+
+    check = _verify(vendored)
+
+    assert check.returncode == 1, (
+        "a manifest that no longer lists config.py verified CLEAN - the copy "
+        "can be shrunk out from under the check that exists to notice it:\n"
+        + check.stdout)
+    assert "scripts/config.py" in check.stdout, (
+        "the red has to name the file that went missing from the manifest")
+
+
+def test_a_vendored_file_deleted_while_the_manifest_still_lists_it_is_drift(
+        tmp_path: Path) -> None:
+    """The other half: listed but absent. `--verify` must not read that as clean."""
+    repo = tmp_path / "acme-app"
+    repo.mkdir()
+    assert _vendor(repo).returncode == 0
+    vendored = repo / "ci-secure"
+
+    (vendored / "scripts" / "config.py").unlink()
+
+    check = _verify(vendored)
+    assert check.returncode == 1, check.stdout
+    assert "scripts/config.py: missing" in check.stdout
+
+
+def test_verify_cannot_be_made_to_forge_or_silence_its_own_annotations(
+        tmp_path: Path) -> None:
+    """`VENDORED.json` is repository content, and it is printed into a log sink.
+
+    The gate escapes everything it reads out of the repository for exactly this
+    reason, and says so at length. `--verify` reads from the same trust class -
+    a pull request checkout, including a fork's - and runs in the step ABOVE
+    the gate. Unescaped, a newline in the recorded version forges a `::notice::`
+    on the check run, and a newline in a manifest key emits `::stop-commands::`,
+    which swallows every drift reason printed after it: the step reds with no
+    stated cause, which is the unexplained red this codebase argues against.
+    """
+    repo = tmp_path / "acme-app"
+    repo.mkdir()
+    assert _vendor(repo).returncode == 0
+    vendored = repo / "ci-secure"
+    manifest_path = vendored / "VENDORED.json"
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["skill_version"] = "0.2.0\n::notice::all clear"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                             encoding="utf-8")
+    forged = _verify(vendored)
+    assert "\n::notice::" not in forged.stdout, (
+        "repository content emitted a workflow command of its own:\n"
+        + forged.stdout)
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["\n::stop-commands::deadbeef\nzzz.py"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                             encoding="utf-8")
+    silenced = _verify(vendored)
+    assert silenced.returncode == 1
+    assert "\n::stop-commands::" not in silenced.stdout, (
+        "a manifest key stopped the workflow commands that report the drift:\n"
+        + silenced.stdout)
+
+
+def test_the_installer_ignores_an_ambient_git_environment(tmp_path: Path) -> None:
+    """`GIT_DIR` overrides `-C`, so the guards must not ask the ambient git.
+
+    Every `git` call here is asking about a SPECIFIC directory - is this the
+    root of its repository, what commit is this skill at - and `-C` is not
+    enough to make that true: an exported `GIT_DIR` (a hook, a `rebase -x`, a
+    worktree-driven session) silently redirects the answer to an unrelated
+    repository. The subdirectory guard then refuses a perfectly good install
+    and tells the adopter to vendor a live workflow into that other repository
+    instead, which is the "wrote it somewhere you never looked" outcome the
+    sibling guard exists to prevent, reached THROUGH a guard.
+    """
+    repo = tmp_path / "acme-app"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True,
+                   capture_output=True)
+    elsewhere = tmp_path / "unrelated"
+    elsewhere.mkdir()
+    subprocess.run(["git", "init", "-q", str(elsewhere)], check=True,
+                   capture_output=True)
+
+    env = dict(os.environ, GIT_DIR=str(elsewhere / ".git"),
+               GIT_WORK_TREE=str(elsewhere))
+    install = subprocess.run(
+        [sys.executable, str(_VENDOR), "--into", str(repo)],
+        capture_output=True, text=True, env=env)
+
+    assert install.returncode == 0, (
+        "an unrelated GIT_DIR in the environment made the install refuse:\n"
+        + install.stdout + install.stderr)
+    assert (repo / "ci-secure" / "VENDORED.json").is_file()
+    assert not (elsewhere / "ci-secure").exists(), (
+        "the install must never touch the repository GIT_DIR pointed at")

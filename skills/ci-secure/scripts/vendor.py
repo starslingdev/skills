@@ -12,8 +12,11 @@ people to run it.
 What that buys, and what it costs: the adopter can read every line that will
 judge their pull requests, and it never changes underneath them. In exchange
 the copy goes stale, so this script also writes VENDORED.json — the skill
-version, the source commit, and a hash per file — which turns "is our copy
-current, and has anyone edited it?" into a command instead of a visual diff.
+version, the source commit, and a hash per file — which turns "has anyone
+edited our copy?" into a command instead of a visual diff. It does NOT
+answer "is our copy current": `--verify` compares the copy against its own
+manifest, never against this skill, so the recorded version is the only
+staleness signal and reading it is a human step.
 
     vendor.py --into <repo>     copy in (or refresh) and write the manifest
     vendor.py --verify <dir>    recompute the hashes and compare
@@ -29,6 +32,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -84,6 +88,40 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def esc(value: object) -> str:
+    """Neutralise workflow commands in anything read out of the repository.
+
+    `VENDORED.json` arrives with a branch, a pull request checkout or a fork
+    clone, and every string in it is printed into a step's log - which is a
+    command sink, not a text field. A newline in the recorded version forges a
+    `::notice::all clear` on the check run; a newline in a `files` key emits
+    `::stop-commands::`, which swallows every drift reason printed after it and
+    turns a stated red into an unexplained one. The gate escapes engine output
+    for exactly this reason; `--verify` reads from the same trust class and
+    runs in the step above it.
+    """
+    return (str(value).replace("%", "%25")
+            .replace("\r", "%0D").replace("\n", "%0A"))
+
+
+def _git(*args: str, timeout: int = 10) -> subprocess.CompletedProcess:
+    """Run git with the ambient GIT_* variables stripped.
+
+    `GIT_DIR` OVERRIDES `-C`, so `-C <dir> rev-parse` is not actually a question
+    about `<dir>` when one is exported - by a hook, a `rebase -x`, or a
+    worktree-driven session. Left alone it makes the subdirectory guard read an
+    unrelated repository's toplevel and refuse a correct install, telling the
+    adopter to vendor a live workflow into that other repository instead: the
+    "written somewhere you never looked" outcome the guards exist to prevent,
+    arrived at THROUGH a guard. It also makes `source_commit` stamp the
+    manifest with a stranger's HEAD - the plausible wrong sha this file says is
+    worse than saying nothing.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return subprocess.run(["git", *args], capture_output=True, text=True,
+                          timeout=timeout, env=env)
+
+
 def source_commit() -> str:
     """The commit this copy was taken from, or a marker that says we cannot tell.
 
@@ -92,18 +130,26 @@ def source_commit() -> str:
     sha and a much better one than a plausible wrong sha.
     """
     try:
-        out = subprocess.run(
-            ["git", "-C", str(_SKILL), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10)
+        out = _git("-C", str(_SKILL), "rev-parse", "HEAD")
     except (OSError, subprocess.SubprocessError):
         return "unknown (no git available)"
     if out.returncode != 0:
         return "unknown (not a git checkout)"
     sha = out.stdout.strip()
-    dirty = subprocess.run(
-        ["git", "-C", str(_SKILL), "status", "--porcelain"],
-        capture_output=True, text=True).stdout.strip()
-    return f"{sha}-dirty" if dirty else sha
+    # The dirty test gets the same timeout and the same return-code check as
+    # the call above it. Unguarded, ANY failure of `git status` - a held index
+    # lock, EACCES, a wedged process - yields empty stdout, which reads as
+    # "clean" and stamps the manifest with a bare sha: an assertion that this
+    # copy is byte-for-byte the published commit, over a copy that is not. That
+    # is the plausible wrong sha, manufactured by the one path that was not
+    # checked.
+    try:
+        status = _git("-C", str(_SKILL), "status", "--porcelain")
+    except (OSError, subprocess.SubprocessError):
+        return f"{sha} (working tree state unknown)"
+    if status.returncode != 0:
+        return f"{sha} (working tree state unknown)"
+    return f"{sha}-dirty" if status.stdout.strip() else sha
 
 
 def skill_version() -> str:
@@ -154,9 +200,7 @@ def _refuse_a_subdirectory(repo: Path) -> None:
     guessing at intent there would refuse work that is fine.
     """
     try:
-        out = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=10)
+        out = _git("-C", str(repo), "rev-parse", "--show-toplevel")
     except (OSError, subprocess.SubprocessError):     # no git to ask
         return
     if out.returncode != 0:                           # not in a repository
@@ -270,9 +314,11 @@ def _refuse_redirected_destinations(repo: Path, dest: Path) -> None:
 def install(repo: Path) -> Path:
     """Copy the engine, the gate and the licence into `repo/ci-secure/`.
 
-    Everything that can refuse refuses BEFORE anything is written. A partial
-    install is not a tidy failure: it is a live workflow in the adopter's
-    repository beside a vendored tree with no manifest, whose first CI run reds
+    Every REFUSAL happens before anything is written. That is not the same as
+    "nothing can fail after the first write" — `write_manifest` runs last and
+    can still raise — and the ordering below is chosen for exactly that case.
+    A partial install is not a tidy failure: a live workflow in the adopter's
+    repository beside a vendored tree with no manifest reds their first CI run
     with "cannot tell what this copy was supposed to be".
     """
     gate = _SKILL / GATE_SOURCE
@@ -321,7 +367,7 @@ def install(repo: Path) -> Path:
     for rel in sorted(stale):
         candidate = Path(rel)
         if candidate.is_absolute() or ".." in candidate.parts:
-            print(f"::warning::ignoring manifest entry {rel!r}, which points "
+            print(f"::warning::ignoring manifest entry {esc(rel)!r}, which points "
                   "outside the vendored directory")
             continue
         old = dest / rel
@@ -330,12 +376,12 @@ def install(repo: Path) -> Path:
         except OSError:                          # pragma: no cover - defensive
             inside = False
         if not inside:
-            print(f"::warning::ignoring manifest entry {rel!r}, which resolves "
+            print(f"::warning::ignoring manifest entry {esc(rel)!r}, which resolves "
                   "outside the vendored directory")
             continue
         if old.is_file():
             old.unlink()
-            print(f"removed {rel}, which this version no longer vendors")
+            print(f"removed {esc(rel)}, which this version no longer vendors")
 
     # The workflow belongs to the adopter. They are invited to change the
     # runner and the triggers, and — the entire point of the ramp — to delete
@@ -390,11 +436,11 @@ def write_manifest(dest: Path) -> Path:
         "source_repo": "https://github.com/starslingdev/skills",
         "files": {rel: sha256(dest / rel) for rel in vendored_paths()},
         "note": (
-            "Written by ci-secure's install step. `vendor.py --verify` "
+            "Written by the ci-secure setup you ran. `vendor.py --verify` "
             "recomputes these hashes. To update the vendored copy, ask "
-            "ci-secure to refresh it; hand edits show up as that pull "
-            "request's diff, for you to resolve — they are never silently "
-            "overwritten outside a pull request."
+            "ci-secure to refresh it. A refresh OVERWRITES the files listed "
+            "here, so any hand edit to them is replaced and shows up in "
+            "`git diff` — review that before you commit."
         ),
     }
     path = dest / MANIFEST_NAME
@@ -419,7 +465,7 @@ def verify(dest: Path) -> int:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         recorded = manifest["files"]
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
-        print(f"::error::{MANIFEST_NAME} is unreadable ({exc!r})")
+        print(f"::error::{MANIFEST_NAME} is unreadable ({esc(repr(exc))})")
         return 1
     if not isinstance(manifest, dict) or not isinstance(recorded, dict):
         print(f"::error::{MANIFEST_NAME} does not have the shape of a "
@@ -428,6 +474,19 @@ def verify(dest: Path) -> int:
         return 1
 
     drift = []
+    # What the manifest must LIST, before what it happens to list is checked.
+    # Every hash agreeing is not the property wanted - the manifest defines its
+    # own domain, so a file removed from the copy AND from `files` leaves every
+    # remaining hash correct and verifies clean. That is not the acknowledged
+    # "anyone who can edit the gate can edit the manifest" caveat: nothing is
+    # edited-with-a-matching-hash, the copy is simply made smaller than the
+    # thing that was reviewed. It matters most for `config.py`, the rule that
+    # says which outcomes block: with the vendored one gone the gate falls back
+    # to a path inside the repository being audited, so a pull request that
+    # deletes it here and adds it there runs a rule it wrote itself.
+    for rel in sorted(set(vendored_paths()) - set(recorded)):
+        drift.append(f"{rel}: no longer listed in {MANIFEST_NAME}, so the copy "
+                     "cannot be checked against what was reviewed")
     for rel, expected in sorted(recorded.items()):
         path = dest / rel
         if not path.is_file():
@@ -469,15 +528,15 @@ def verify(dest: Path) -> int:
 
     if not drift:
         print(f"ci-secure vendored copy matches {MANIFEST_NAME} "
-              f"(skill v{manifest.get('skill_version', '?')}, "
-              f"from {manifest.get('source_commit', '?')})")
+              f"(skill v{esc(manifest.get('skill_version', '?'))}, "
+              f"from {esc(manifest.get('source_commit', '?'))})")
         return 0
 
     for item in drift:
-        print(f"::error::vendored ci-secure has drifted - {item}")
+        print(f"::error::vendored ci-secure has drifted - {esc(item)}")
     print("::error::the vendored gate is no longer the code that was reviewed. "
-          "Ask ci-secure to refresh the vendored copy, which opens a pull "
-          "request with the differences, or revert the local edit.")
+          "Ask ci-secure to refresh the vendored copy, then review the "
+          "resulting diff, or revert the local edit.")
     return 1
 
 

@@ -1,7 +1,7 @@
 # ci-secure as a blocking CI check.
 #
-# Installed by ci-secure into your repository, together with a vendored copy of
-# the engine and the gate under `ci-secure/`. No ci-secure code is fetched at CI
+# Written into your repository when you set ci-secure up as a gate, together
+# with a vendored copy of the engine and the gate under `ci-secure/`. No ci-secure code is fetched at CI
 # time: the code that judges your pull requests is code you can read, in your
 # repository, changed only by a pull request you review. The one thing this job
 # does install from the network is PyYAML, pinned by version below — the engine
@@ -64,10 +64,11 @@
 # you cannot fix in your own repository, so read it as "not measured", not as
 # "newly insecure".
 #
-# REQUIREMENTS: Python 3.12 (pinned below rather than inherited from the runner
-# image — this is a security gate, and which interpreter it runs under should
-# not drift with an image rebuild) and PyYAML, pinned to a version for the same
-# reason. The engine is not stdlib-only; the gate is.
+# REQUIREMENTS: Python 3.12 and PyYAML, both named below rather than inherited
+# from the runner image — this is a security gate, and which interpreter and
+# parser it runs under should not change silently with an image rebuild. Both
+# are MINOR-version pins: the patch release still moves. The engine is not
+# stdlib-only; the gate is.
 name: CI security
 
 on:
@@ -85,7 +86,10 @@ concurrency:
   group: ci-secure-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
-# The gate only reads the checked-out tree.
+# The gate reads the checked-out tree. On non-fork runs it ALSO reads the
+# GitHub API, with a token, for the impostor-SHA check — see
+# CI_SECURE_GH_IMPOSTOR below. `contents: read` is what that needs and the
+# most this job ever gets; nothing here writes.
 permissions:
   contents: read
 
@@ -94,12 +98,25 @@ jobs:
     name: ci-secure scan
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # No `__pycache__` in the vendored tree, for EVERY python step in this
+      # job rather than the last one. A `.pyc` written with an unchecked hash
+      # is loaded without being compared to its source, so one sitting next to
+      # a hash-verified `config.py` can override it — which is why the drift
+      # check reports bytecode rather than ignoring it. Scoped to the gate step
+      # alone, the guard stopped exactly one step short of the drift check
+      # itself, which runs python first and would have been free to write the
+      # bytecode the step after it exists to reject.
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
-          # The scan reads the tree; it has no reason to hold a credential, and
-          # a credential left in the checkout is one of the things it flags.
+          # The scan reads the tree; it has no reason to hold a credential.
+          # Hardening you keep rather than something the gate enforces: the
+          # credentials-scoped fact only looks at UNTRUSTED triggers, and
+          # plain `pull_request` is not one, so deleting this line is not
+          # something the scan below would tell you about.
           persist-credentials: false
       - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
@@ -108,6 +125,9 @@ jobs:
       # this resolves to gets a say in what the scan sees and therefore in what
       # the gate reports. An unpinned install is the one piece of code in this
       # job that could change without a pull request of yours.
+      # A version pin binds a name, not bytes — no `--require-hashes`. It buys
+      # "no surprise version change between runs", which is the drift that
+      # actually happens, and not integrity against a compromised index.
       - run: pip install pyyaml==6.0.2
 
       # Is the vendored copy still the code that was reviewed? This catches the
@@ -121,14 +141,6 @@ jobs:
       - name: Run ci-secure
         run: python3 ci-secure/scripts/gate.py --advisory
         env:
-          # No `__pycache__` in the vendored tree. A `.pyc` written with an
-          # unchecked hash is loaded without being compared to its source, so
-          # one sitting next to a hash-verified `config.py` can override it —
-          # which is why the drift check reports bytecode rather than ignoring
-          # it. This is the other half: the gate never writes any, so the only
-          # bytecode that can ever appear there is bytecode somebody committed.
-          PYTHONDONTWRITEBYTECODE: "1"
-
           # The gate resolves its engine relative to its own file, which in a
           # vendored layout is this directory. `config.py` — the rule that says
           # which outcomes block — is then loaded from beside that engine, so

@@ -29,8 +29,9 @@ entries are dated (UTC). Format loosely follows
   you merge, updated only when you ask — plus one workflow whose always-running
   verdict job carries the `ci-secure` check. Nothing happens on its own: the
   setup runs when you ask for it, the check ships in `--advisory` mode, and it
-  blocks a merge only once YOU add `ci-secure` to your required checks. No ci-secure code is fetched and executed at CI time: a pin
-  can be moved or deleted in a repository you do not control, and we ship a
+  blocks a merge only once YOU add `ci-secure` to your required checks. No
+  ci-secure code is fetched and executed at CI time: a pin can be moved or
+  deleted in a repository you do not control, and we ship a
   detector for that shape (P14.24). `scripts/vendor.py` does the copying, writes
   a `VENDORED.json` of per-file hashes, and re-checks them from your own CI, so
   a local edit to the vendored gate is loud instead of invisible. The workflow
@@ -44,10 +45,7 @@ entries are dated (UTC). Format loosely follows
   this could do. Ships alongside the skill's own `LICENSE`. The gate program
   gained an `--advisory` flag for this; our own workflow still runs it without
   the flag, and the vendored gate is held byte-identical to ours so a weaker
-  copy cannot ship. `--verify` reports compiled bytecode found in the vendored
-  tree rather than passing over it, because a `.pyc` written with an unchecked
-  hash is loaded without being compared to its source and can override a file
-  that hashed correctly; the workflow stops the gate writing any. Every
+  copy cannot ship. Every
   destination is checked to be inside the repository before anything is
   written, so a symlink committed at `ci-secure/`, at any directory beneath it,
   or at `.github/` makes the install refuse rather than quietly write the gate
@@ -81,6 +79,44 @@ entries are dated (UTC). Format loosely follows
   one an attacker aims at.
 
 ### Fixed
+
+- **2026-08-15** — **`--verify` no longer passes a vendored copy that was made
+  smaller than the one that was reviewed.** Deleting a vendored file *and* its
+  `VENDORED.json` entry left every remaining hash correct, so the drift check
+  reported a match — the manifest was allowed to define its own domain. This is
+  not the documented "anyone who can edit the gate can edit the manifest"
+  caveat: nothing is edited-with-a-matching-hash, the copy is simply shrunk. It
+  matters most for `config.py`, the rule that says which outcomes block: with
+  the vendored copy gone the gate falls back to a path *inside the repository
+  being audited*, so one pull request could delete the rule here, add its own
+  there, and be judged by a rule it wrote — under a green drift check. The
+  manifest is now checked for completeness before any hash is compared.
+
+- **2026-08-15** — **The setup no longer asks the wrong repository whether a
+  destination is a repository root.** `GIT_DIR` overrides `git -C`, so an
+  exported one — from a hook, a `rebase -x`, a worktree-driven session — made
+  the subdirectory guard read an unrelated repository's toplevel, refuse a
+  perfectly good install, and tell you to vendor the gate and a live workflow
+  into *that other repository* instead. The same variable made the recorded
+  source commit a stranger's HEAD. All git calls now run with the ambient
+  `GIT_*` variables stripped. Relatedly, the working-tree-dirty check now has
+  the timeout and return-code check its sibling call always had: any failure of
+  `git status` previously read as "clean" and stamped the manifest with a bare
+  sha, which asserts this copy is byte-for-byte the published commit.
+
+- **2026-08-15** — **`--verify` escapes what it reads out of your repository
+  before printing it.** `VENDORED.json` arrives with a branch, a pull request
+  checkout or a fork clone, and its strings went to a step log unescaped — a
+  newline in the recorded version forged a `::notice::all clear` on the check
+  run, and one in a `files` key emitted `::stop-commands::`, swallowing every
+  drift reason printed after it so the step red with no stated cause. The gate
+  has escaped engine output for this reason all along; the drift check runs in
+  the step above it and reads from the same trust class.
+
+- **2026-08-15** — **`PYTHONDONTWRITEBYTECODE` now covers the whole scan job.**
+  Scoped to the gate step alone, it stopped one step short of the drift check
+  itself — the step whose entire purpose is rejecting bytecode was the one
+  Python was free to write it from.
 
 - **2026-08-15** — **The skill imports again on Python 3.9**, the floor
   `pyproject.toml` declares. `config.py` was the only module under `scripts/`

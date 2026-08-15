@@ -31,10 +31,19 @@ from pathlib import Path
 import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+SCAFFOLD = Path(__file__).resolve().parents[1] / "scaffold"
 
 
 def _modules() -> list[Path]:
-    return sorted(p for p in SCRIPTS.glob("*.py"))
+    # `scaffold/` as well as `scripts/`, because `scaffold/gate.py` is the file
+    # with the LEAST say over its interpreter: it is copied into adopters'
+    # repositories and run by whatever `python3` they have. Its own comment
+    # argues the point at length — "this file is vendored into adopters' repos
+    # where python3 is whatever they have" — and then nothing checked it, so
+    # one `-> str | None` in a signature would have broken every adopter below
+    # 3.10 with this suite green, and the byte-identity test would have carried
+    # the break from the gate we run on ourselves straight into the copy.
+    return sorted([*SCRIPTS.glob("*.py"), *SCAFFOLD.glob("*.py")])
 
 
 def _has_future_annotations(tree: ast.Module) -> bool:

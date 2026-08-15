@@ -3,7 +3,12 @@
 
 Runs the ci-secure engine against the repository root, then applies the gate:
 
-  facts    -> deterministic pass/fail security checks; ANY fail exits 1.
+  facts    -> deterministic pass/fail security checks; ANY fail exits 1,
+              UNLESS `--advisory` was passed, which downgrades a failed
+              fact to a warning and nothing else (see advisory_requested).
+              The scaffold this skill installs ships that flag ON, so
+              advisory is the configuration most copies of this file run
+              under - do not read the line above without this one.
   findings -> severity-rated pattern matches; they never exit non-zero, but
               each one becomes a ::warning:: annotation and a summary row,
               so accepting one is a visible decision, not silence.

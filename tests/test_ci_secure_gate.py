@@ -58,7 +58,8 @@ def _scan(**overrides) -> dict:
 
 
 def run_gate(tmp_path: Path, *, stdout: str, returncode: int = 0,
-             engine: str | None = None, env_extra: dict[str, str] | None = None):
+             engine: str | None = None, env_extra: dict[str, str] | None = None,
+             args: tuple[str, ...] = ()):
     """Run the real gate against a stub engine that prints `stdout` and exits `returncode`."""
     stub = tmp_path / "stub_engine.py"
     stub.write_text(
@@ -85,7 +86,7 @@ def run_gate(tmp_path: Path, *, stdout: str, returncode: int = 0,
     # "the job did not decide" rather than merely "the job decided badly".
     env = {k: v for k, v in env.items() if v is not None}
     proc = subprocess.run(
-        [sys.executable, str(_GATE)],
+        [sys.executable, str(_GATE), *args],
         capture_output=True, text=True, env=env,
     )
     proc.summary = summary.read_text(encoding="utf-8") if summary.exists() else ""
@@ -893,3 +894,124 @@ def test_a_rule_that_exits_cleanly_on_load_cannot_forge_a_pass(tmp_path: Path) -
         "a rule file that called sys.exit(0) produced a GREEN gate with no scan")
     assert "::error::" in proc.stdout, "the forged pass was turned red with no stated cause"
     assert "could not be loaded" in proc.stdout
+
+
+# --------------------------------------------------------------------------
+# `--advisory`: a ramp for findings, never a mute button for a broken scan
+# --------------------------------------------------------------------------
+#
+# The flag ships ON in the workflow every adopter installs, so its SCOPE is the
+# most load-bearing untested thing about it. Three separate surfaces promise
+# that it downgrades failed FACTS and nothing else. Until these tests existed
+# that promise was held up by a coincidence: the flag defaults off, so the
+# blocking-mode tests above passed no matter how wide advisory's reach was.
+# Widening it - `red = not ADVISORY` in the degraded loop, or gating STRICT_GH
+# on it - left the whole suite green, which is exactly how a ramp becomes a mute
+# button. `ADVISORY = False` (the flag as a silent no-op) was equally invisible.
+
+_A_FAILED_FACT = _scan(security_score={
+    "facts": [{"fact_id": "sec.codeowners.workflows", "outcome": "fail",
+               "evidence": "no CODEOWNERS entry for .github/"}],
+    "score": 0, "passed": 0, "scored_count": 1, "applicable_count": 1,
+})
+
+
+def test_advisory_downgrades_a_failed_fact_and_still_reports_it(
+        tmp_path: Path) -> None:
+    """The whole point of the flag: day one does not brick the merge path.
+
+    Reported at full volume, just not blocking - "this passed" and "this failed
+    and you have chosen not to be stopped by it yet" must stay distinguishable,
+    or the ramp has quietly become a clean bill of health.
+    """
+    blocking = run_scan(tmp_path, _A_FAILED_FACT)
+    assert blocking.returncode == 1, "without the flag a failed fact must block"
+
+    proc = run_scan(tmp_path, _A_FAILED_FACT, args=("--advisory",))
+
+    assert proc.returncode == 0, (
+        "--advisory must downgrade a failed FACT, or the flag does nothing and "
+        "the install bricks the adopter's merges on day one:\n" + proc.stdout)
+    assert "::warning::" in proc.stdout and "advisory" in proc.stdout, (
+        "a downgraded fact still has to be reported, loudly:\n" + proc.stdout)
+    assert "sec.codeowners.workflows" in proc.stdout, (
+        "the downgraded fact must still be named")
+    assert "::error::" not in proc.stdout, (
+        "nothing else in this scan is wrong, so nothing may red")
+    assert "Advisory mode" in proc.summary, (
+        "the summary a human reads must say the verdict was downgraded")
+
+
+@pytest.mark.parametrize("label,scan,engine_rc", [
+    ("the facts layer crashed to empty",
+     _scan(security_score={"facts": [], "score": None, "passed": 0,
+                           "scored_count": 0, "applicable_count": 0}), 0),
+    ("nothing was scanned", _scan(scanned_workflows=0), 0),
+    ("an outcome the rule cannot classify",
+     _scan(security_score={
+         "facts": [{"fact_id": "sec.demo", "outcome": "probably-fine",
+                    "evidence": "x"}],
+         "score": 100, "passed": 1, "scored_count": 1, "applicable_count": 1}), 0),
+    ("the scan was incomplete", _scan(scan_incomplete=["ci.yml: unparseable"]), 0),
+    ("a match was dropped", _scan(dropped_matches=["P14.1: regex timeout"]), 0),
+    ("the engine crashed", _CLEAN, 3),
+])
+def test_advisory_never_downgrades_a_scan_that_cannot_be_trusted(
+        tmp_path: Path, label: str, scan: dict, engine_rc: int) -> None:
+    """Every shape that means the scan itself is untrustworthy stays red.
+
+    These and a failed fact look identical from outside - a red check - and
+    only one of them is safe to ignore. If advisory covered both, an adopter
+    burning down findings would be silencing a broken scanner at the same time
+    and could not tell.
+    """
+    proc = run_scan(tmp_path, scan, returncode=engine_rc, args=("--advisory",))
+
+    assert proc.returncode == 1, (
+        f"--advisory must NOT downgrade {label!r} - advisory is a ramp for "
+        "findings, never a mute button for a broken scan:\n" + proc.stdout)
+    assert "::error::" in proc.stdout, (
+        "a red with no stated cause is the thing this gate argues against")
+
+
+def test_advisory_never_downgrades_the_weekly_networks_completeness_demand(
+        tmp_path: Path) -> None:
+    """The one run that must not be silenceable by burning API quota.
+
+    `CI_SECURE_GH_STRICT=1` is set only on the schedule trigger, whose whole
+    job is catching a pin that ROTS. Letting `--advisory` reach it would mean
+    an adopter still ramping their findings had no rot detection at all, and
+    nothing would say so.
+    """
+    partial = _scan(gh_checks={"P14.11": "partial: rate limit exhausted"})
+
+    proc = run_scan(tmp_path, partial, args=("--advisory",),
+                    env_extra={"CI_SECURE_GH_STRICT": "1"})
+
+    assert proc.returncode == 1, (
+        "--advisory must not reach the weekly run's completeness demand:\n"
+        + proc.stdout)
+    assert "::error::" in proc.stdout
+
+
+@pytest.mark.parametrize("argv", [
+    ("--advisery",),               # the typo that must not silently block
+    ("--advisory", "--no-block"),  # a second flag that must not be ignored
+    ("-a",),
+    ("--advisory=true",),
+])
+def test_the_gate_refuses_an_argument_it_does_not_recognise(
+        tmp_path: Path, argv: tuple[str, ...]) -> None:
+    """An unrecognised flag is a decision that did not land, so it reds.
+
+    Without this, `--advisery` runs the gate in BLOCKING mode while the adopter
+    believes they are ramping, and `--advisory --no-block` silently ignores the
+    half the author cared about. Both are quiet, and both are wrong.
+    """
+    proc = run_scan(tmp_path, _CLEAN, args=argv)
+
+    assert proc.returncode == 1, (
+        f"the gate accepted {argv!r} instead of refusing it:\n" + proc.stdout)
+    assert "unrecognised argument" in proc.stdout
+    assert argv[-1] in proc.stdout or argv[0] in proc.stdout, (
+        "the refusal has to name what it did not understand")
