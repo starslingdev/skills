@@ -11,7 +11,7 @@ from typing import Final
 # Skill version. Stamped into the report's Scanner row so an INSTALLED skill
 # (no .git checkout, so no commit sha to record) still carries a provenance
 # marker instead of a bare "(unknown)". Bump this on every shipped change.
-__version__: Final[str] = "0.1.0"
+__version__: Final[str] = "0.2.0"
 
 
 # Default log level resolved from STARSLING_LOG_LEVEL env var
@@ -140,7 +140,62 @@ def setup_logging(
 
 
 # =============================================================================
+# CONFIG-FACT OUTCOMES — the blocking rule
+# =============================================================================
+#
+# `config_facts.py` gives every check an OUTCOME. Three separate questions are
+# asked about one, and each gets its own name here, because collapsing any two
+# of them is how a new failure state ships green:
+#
+#   BLOCKING_OUTCOMES  which outcomes fail a build
+#   KNOWN_OUTCOMES     which outcomes anything here recognises at all
+#   OUTCOME_MARKS      how each one is displayed to a reader
+#
+# NONE of these is derived from another, and in particular the first two are
+# never computed from the third. Deriving the allowlist from the display table
+# reads as tidy and is a security hole: adding a display style for a new
+# outcome would silently widen the set of outcomes accepted as recognised, so
+# the "outcome I cannot classify" red never fires — while the new outcome is
+# still not in BLOCKING_OUTCOMES, so it does not fail either. A one-line
+# cosmetic edit would then be enough to ship a failure state as a pass.
+#
+# The CI gate (`.github/scripts/ci_secure_gate.py`) imports all three by name.
+# Adding an outcome to `config_facts.py` means editing all three deliberately;
+# the census test in `tests/test_ci_secure_gate_resolution.py` fails until you do.
+
+BLOCKING_OUTCOMES: Final[frozenset[str]] = frozenset({"fail"})
+
+KNOWN_OUTCOMES: Final[frozenset[str]] = frozenset({"pass", "fail", "unmeasured"})
+
+OUTCOME_MARKS: Final[dict[str, str]] = {
+    "pass": "PASS",
+    "fail": "**FAIL**",
+    "unmeasured": "UNMEASURED",
+}
+
+
+def coverage_is_complete(
+    blocking: frozenset[str] | set[str] = BLOCKING_OUTCOMES,
+    known: frozenset[str] | set[str] = KNOWN_OUTCOMES,
+    marks: dict[str, str] | None = None,
+) -> bool:
+    """True when the three tables above are mutually coherent.
+
+    Coherent means: everything that blocks is recognised, and everything
+    recognised can be displayed. It is NOT a claim about `config_facts.py` —
+    that the engine's actual vocabulary fits inside these tables is a census
+    the test suite runs against the source, since this module cannot import
+    the engine without dragging PyYAML into a stdlib-only gate.
+
+    The parameters exist so the predicate can be exercised against tables
+    other than the live ones; production callers pass nothing.
+    """
+    marks = OUTCOME_MARKS if marks is None else marks
+    return set(blocking) <= set(known) <= set(marks)
+
+
+# =============================================================================
 # VERSION
 # =============================================================================
 
-VERSION: Final[str] = "0.1.0"
+VERSION: Final[str] = "0.2.0"

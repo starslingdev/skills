@@ -21,13 +21,29 @@ This file is stdlib only. The engine it runs is NOT: `scan.py` imports PyYAML
 and exits 1 with an install hint without it, so the job needs `pip install
 pyyaml` (or an image that already has it) as well as a checkout and python3.
 
-Portability. This file must live at `.github/scripts/` (it takes the scan root
-from GITHUB_WORKSPACE, falling back to two directories up). The engine defaults
-to an in-tree checkout of starslingdev/skills, which is what this repo has; any
-repo that vendors the gate without vendoring the engine points CI_SECURE_ENGINE
-at a fetched `scan.py` instead. A missing engine is a red build naming the path
-it looked in, never a silent pass.
+Two trees, and the difference between them is the whole security argument. The
+SCAN ROOT is the repository under examination, taken from GITHUB_WORKSPACE; on
+a fork pull request an attacker writes every byte of it. The ENGINE and the
+RULE are the code this gate executes, and they are resolved relative to THIS
+FILE - never from the scan root. A gate that loaded its engine from the tree it
+was auditing would be running the code it is supposed to be judging, and would
+print whatever verdict that code returned.
+
+CI_SECURE_ENGINE is the one deliberate redirect, for a repository that vendors
+ci-secure into a directory of its own instead of checking out this whole tree.
+It is safe only while the workflow that sets it is pinned to the base
+repository's definition - a fork that can edit the workflow `env:` can point it
+back into the workspace and reopen the hole this resolution closes.
+
+`config.py` follows the ENGINE, not this file: it is loaded from the directory
+of whichever engine was resolved, falling back to this tree's copy. One rule
+serves both layouts - here the gate sits at `.github/scripts/` and the engine
+under `skills/ci-secure/scripts/`, while a vendored install puts engine and
+config in one directory - and the redirect travels with CI_SECURE_ENGINE, so
+the rule is always in the same trust class as the engine it configures rather
+than a third thing that can be aimed somewhere else on its own.
 """
+import importlib.util
 import json
 import os
 import subprocess
@@ -35,21 +51,48 @@ import sys
 import traceback
 from pathlib import Path
 
+# The tree being AUDITED. Attacker-writable on a fork PR; only ever scan input.
 REPO_ROOT = Path(os.environ.get("GITHUB_WORKSPACE")
                  or Path(__file__).resolve().parents[2])
-ENGINE = Path(os.environ.get("CI_SECURE_ENGINE")
-              or REPO_ROOT / "skills" / "ci-secure" / "scripts" / "scan.py")
+
+# The tree the gate EXECUTES from, relative to this file: `.github/scripts/` ->
+# repo root -> the in-tree skill. Deliberately not REPO_ROOT-relative.
+_GATE_TREE = Path(__file__).resolve().parents[2]
+_ENGINE_DEFAULT = _GATE_TREE / "skills" / "ci-secure" / "scripts" / "scan.py"
+_CONFIG_FALLBACK = _ENGINE_DEFAULT.parent / "config.py"
+
+ENGINE = Path(os.environ.get("CI_SECURE_ENGINE") or _ENGINE_DEFAULT)
+
+
+def load_config():
+    """Load `config.py` from beside the resolved engine, else from this tree.
+
+    By file location, through importlib, rather than by package import: a
+    vendored install carries the engine and this gate and nothing else - no
+    test helpers, no conftest, no `skills.ci_secure` package on sys.path.
+    Anything that works here only because the repository's test tree happens
+    to be importable would fail on every adopter.
+    """
+    for candidate in (ENGINE.resolve().parent / "config.py", _CONFIG_FALLBACK):
+        if not candidate.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location(
+            "ci_secure_gate_config", candidate)
+        if spec is None or spec.loader is None:      # pragma: no cover - defensive
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module, candidate
+    return None, None
+
+
+CONFIG, CONFIG_PATH = load_config()
 
 # The job's own timeout-minutes would eventually catch a hung engine, but only
 # as an unexplained cancellation; failing here names the cause on the check run.
 # It must therefore fire FIRST: at parity with the job's 10 minutes this path was
 # unreachable, because checkout and pip had already spent a minute of that clock.
 ENGINE_TIMEOUT_S = 420
-
-# The outcomes the engine's config-facts layer is known to emit. Anything else
-# is a contract change between engine and gate, and must not be quietly bucketed
-# as "not a fail" - that is how a new failure state ships green.
-KNOWN_OUTCOMES = {"pass", "fail", "unmeasured"}
 
 # P14.11 (impostor action SHA) is the one detector that needs network + a GitHub
 # token. Neither job here has one, so it is turned off explicitly rather than
@@ -139,6 +182,26 @@ def main() -> int:
             "checkout's skills/ci-secure/scripts/scan.py. The gate cannot pass "
             "without a verdict (a scan that did not run is not a scan that passed)")
 
+    # No rule, no verdict. The gate could fall back to a hardcoded copy of the
+    # outcome tables, and that is exactly the failure this indirection exists to
+    # prevent: a second definition of "which outcomes block" that drifts from
+    # the engine's and is never noticed, because a build that finds it goes
+    # green either way.
+    if CONFIG is None:
+        return fail(
+            f"ci-secure rule (config.py) not found beside the engine at "
+            f"{ENGINE.parent} nor at {_CONFIG_FALLBACK} - the gate cannot decide "
+            "what blocks without one")
+    missing = [name for name in
+               ("BLOCKING_OUTCOMES", "KNOWN_OUTCOMES", "OUTCOME_MARKS")
+               if not hasattr(CONFIG, name)]
+    if missing:
+        return fail(f"ci-secure rule at {CONFIG_PATH} defines no {', '.join(missing)} "
+                    "- engine and gate disagree about what an outcome means")
+    if not CONFIG.coverage_is_complete():
+        return fail(f"ci-secure rule at {CONFIG_PATH} is incoherent: an outcome that "
+                    "blocks or is recognised has no display mark")
+
     try:
         result = subprocess.run(
             [sys.executable, str(ENGINE), "--root", str(REPO_ROOT), *ENGINE_ARGS],
@@ -193,12 +256,16 @@ def main() -> int:
         degraded.append(str(score["reason"]))
     if not gh_checks:
         degraded.append("the engine reported no network-gated detector status")
-    unknown = sorted(str(o) for o in {f["outcome"] for f in facts} - KNOWN_OUTCOMES)
+    unknown = sorted(str(o) for o in
+                     {f["outcome"] for f in facts} - set(CONFIG.KNOWN_OUTCOMES))
     if unknown:
         degraded.append(f"unrecognised fact outcome(s) {unknown} - this gate cannot "
                         "tell whether they are failures")
 
-    failed = [f for f in facts if f["outcome"] == "fail"]
+    # Which outcomes block is the rule's call, not a string literal here: a
+    # hardcoded "fail" filter means a newly-added failure outcome is neither
+    # blocked nor unrecognised, and ships green.
+    failed = [f for f in facts if f["outcome"] in CONFIG.BLOCKING_OUTCOMES]
     unmeasured = [f for f in facts if f["outcome"] == "unmeasured"]
 
     # `applicable_count` is in the headline, not just `scored_count`: when a fact
@@ -222,9 +289,9 @@ def main() -> int:
 
     # An unrecognised outcome renders as itself rather than folding into FAIL:
     # the summary a human reads must never disagree with the exit code.
-    marks = {"pass": "PASS", "fail": "**FAIL**", "unmeasured": "UNMEASURED"}
     for f in facts:
-        mark = marks.get(f["outcome"], f"**{flat(f['outcome']).upper()}**")
+        mark = CONFIG.OUTCOME_MARKS.get(
+            f["outcome"], f"**{flat(f['outcome']).upper()}**")
         lines.append(f"- {mark} `{flat(f['fact_id'])}` - {flat(f['evidence'])}")
     if findings:
         lines += ["", "### Findings (surfaced, non-blocking)", ""]

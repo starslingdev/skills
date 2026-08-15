@@ -11,6 +11,18 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **2026-08-15** — **The blocking rule is now part of the skill, as three
+  independent names in `config.py`.** `BLOCKING_OUTCOMES` (which fact outcomes
+  fail a build), `KNOWN_OUTCOMES` (which are recognised at all) and
+  `OUTCOME_MARKS` (how each is displayed), plus `coverage_is_complete()`, which
+  says whether the three agree. None is derived from another — in particular
+  the first two are never computed from the display table, because that
+  coupling lets a cosmetic edit widen the set of accepted outcomes and ship a
+  new failure state as a pass. Anything running ci-secure as a CI gate imports
+  these instead of hardcoding a copy that can drift from the engine's.
+
 ### Changed
 
 - **2026-08-14** — **P14.24's rendered finding title is now "Unverified remote
