@@ -30,7 +30,11 @@ entries are dated (UTC). Format loosely follows
   real producer skips. The check greened with neither job having run. That
   combination is UNKNOWN now: it still counts against the check, so a
   bypassable job there is still found, but it can never be the evidence that
-  one always reports. An unfiltered `branches: ['**']` push still certifies.
+  one always reports. A `branches-ignore:` written alongside
+  `branches: ['**']` defeats the shortcut for the same reason — the two
+  contradict each other, so "runs on every push" is not a claim this scan
+  can make about the pair. An otherwise unfiltered `branches: ['**']` push
+  still certifies.
 
 - **2026-08-14** — **A constant `if:` no longer certifies a verdict job that
   has `needs:`.** `if: true` (and `${{ 1 == 1 }}`) is not `always()`: GitHub

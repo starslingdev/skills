@@ -797,13 +797,17 @@ def _pr_reporting_ability(doc: dict) -> str:
     if not isinstance(push, dict):
         return _ABILITY_YES          # `on: push` with no filters at all
     branches = push.get("branches")
-    # A PATH filter is a reason the push may not run, whatever the branch
-    # filter says — so it has to be read before the match-all shortcut answers.
-    # Reading `branches: ['**']` first certified a required check that a pull
-    # request touching nothing under `paths:` never causes to report, while the
-    # real producer skipped: the check greened with neither job having run.
-    path_filtered = bool(push.get("paths") or push.get("paths-ignore"))
-    if branches and _matches_every_branch(branches) and not path_filtered:
+    # ANY other filter is a reason the push may not run, whatever the branch
+    # pattern says — so all of them have to be read before the match-all
+    # shortcut answers. Reading `branches: ['**']` first certified a required
+    # check that a pull request touching nothing under `paths:` never causes to
+    # report, while the real producer skipped: the check greened with neither
+    # job having run. A `branches-ignore:` alongside `branches:` is the same
+    # problem in the other spelling — the two contradict each other, and
+    # "runs on every push" is not a claim this scan can make about the pair.
+    also_filtered = bool(push.get("paths") or push.get("paths-ignore")
+                         or push.get("branches-ignore"))
+    if branches and _matches_every_branch(branches) and not also_filtered:
         return _ABILITY_YES          # `branches: ['**']` runs on every push
     if any(push.get(k) for k in _TAG_ONLY_KEYS) and not (
             branches or push.get("branches-ignore")):

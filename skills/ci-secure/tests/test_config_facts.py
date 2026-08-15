@@ -2901,3 +2901,31 @@ def test_a_path_filtered_push_alone_is_not_a_false_red(tmp_path):
     f = _outcome(_facts_with(tmp_path, {"build.yml": _PATHS_PUSH_PRODUCER},
                              ["test"]), _FACT)
     assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_a_branch_exclusion_also_defeats_the_match_all_shortcut(tmp_path):
+    """`branches: ['**']` alongside `branches-ignore:` cannot be shown to run
+    on every branch — the two filters contradict each other, and whichever way
+    GitHub resolves that, "runs on every push" is not a claim this scan can
+    make. The shortcut answered before reading the exclusion, so an
+    always-running job there certified the check while the reachable
+    pull-request producer could skip."""
+    both = """\
+name: build
+on:
+  push:
+    branches: ['**']
+    branches-ignore: ['release/**']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"build.yml": both,
+                               "pr.yml": _SKIPPABLE_PR_PRODUCER}, ["test"]),
+        _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
