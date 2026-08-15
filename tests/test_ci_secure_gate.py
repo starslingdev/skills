@@ -446,6 +446,56 @@ def _engine_argv(tmp_path: Path, env_extra: dict[str, str] | None = None):
     return proc
 
 
+def test_the_summary_header_is_escaped_like_every_other_row(tmp_path: Path) -> None:
+    """The headline interpolates engine fields too, and they are not trustworthy.
+
+    On a fork pull request the engine IS attacker code, so the counts it
+    reports are attacker-chosen strings, not integers. The header was the one
+    line where that was easy to forget — it renders numbers, and numbers feel
+    safe — but a newline in `passed` starts a row of its own, above every real
+    result, where a reader is most likely to stop.
+    """
+    scan = _scan()
+    scan["security_score"].update(passed="2\n- PASS `everything is fine`")
+    scan["security_score"]["facts"][0].update(outcome="fail")
+
+    proc = run_scan(tmp_path, scan)
+
+    assert proc.returncode == 1
+    # Anchored at the START of a line, not compared whole: the payload lands
+    # mid-sentence, with the rest of the header trailing after it, so an
+    # equality check would pass while the forged row rendered perfectly well.
+    forged = [ln for ln in proc.summary.splitlines()
+              if ln.strip().startswith("- PASS `everything is fine`")]
+    assert not forged, (
+        f"the header forged a summary row above the real results:\n{proc.summary}")
+
+
+def test_a_summary_that_cannot_be_written_still_leaves_a_verdict(tmp_path: Path) -> None:
+    """The verdict is emitted BEFORE the summary, so a cosmetic sink cannot eat it.
+
+    GITHUB_STEP_SUMMARY is a file GitHub provisions and occasionally cannot be
+    written. If the summary were written first, an OSError there would take the
+    whole failure list down with it and the operator would get a traceback
+    about a summary file instead of the security failure that caused the red.
+    The build still fails either way — but "the gate went red for an unstated
+    reason" is how a real finding gets waved through as flakiness.
+    """
+    scan = _scan()
+    scan["security_score"]["facts"][0].update(
+        outcome="fail", evidence="no CODEOWNERS entry covers .github/")
+
+    # A directory where a file is expected: writing to it raises OSError.
+    unwritable = tmp_path / "summary_dir"
+    unwritable.mkdir()
+    proc = run_scan(tmp_path, scan, env_extra={"GITHUB_STEP_SUMMARY": str(unwritable)})
+
+    assert proc.returncode == 1
+    assert "::error::ci-secure fact failed: sec.codeowners.workflows" in proc.stdout, (
+        "the verdict was lost when the summary could not be written")
+    assert "could not write the job summary" in proc.stdout
+
+
 def test_the_scan_root_defaults_to_the_gates_own_tree_off_actions(tmp_path: Path) -> None:
     """With no GITHUB_WORKSPACE, the scan root is the repository the gate is in.
 
