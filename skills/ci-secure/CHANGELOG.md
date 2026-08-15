@@ -80,6 +80,21 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-15** — **The gate setup instructions cover the paths a real
+  session actually takes.** Setup and refresh are the same command, and which
+  one runs is decided by whether `VENDORED.json` is already there — so an
+  agent following the setup steps on a repo that had the vendored copy but no
+  workflow announced a workflow that was never written. The instructions now
+  name that discriminator, stop rather than guessing when the destination is
+  not a git work tree, warn when a repository has no workflows at all (the gate
+  reds permanently on "nothing scanned", which `--advisory` does not clear),
+  say that the copied files are left uncommitted and nothing runs until they
+  are committed, complete the list of refusals, and require checking for local
+  edits before a refresh overwrites them. "Make ci-secure block my PRs" now has
+  a procedure of its own instead of resolving to a setup run that changes
+  nothing. Backing the gate out has an order: the workflow first, then the
+  vendored directory.
+
 - **2026-08-15** — **`--verify` no longer passes a vendored copy that was made
   smaller than the one that was reviewed.** Deleting a vendored file *and* its
   `VENDORED.json` entry left every remaining hash correct, so the drift check

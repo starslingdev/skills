@@ -569,9 +569,25 @@ into the user's tree unasked" rule binds: say exactly what will be
 written, get a yes, and only then run it. Do it on a branch, as one
 setup PR; never push without asking.
 
-`<repo-root>` is the output of `git rev-parse --show-toplevel`, never
-the current directory — vendoring into a subdirectory produces a
-workflow GitHub never runs and an install that looks like it worked.
+Check three things BEFORE saying what will be written, because two of
+them change the answer and the third makes the install pointless:
+
+- `git rev-parse --show-toplevel` gives `<repo-root>`. It is never the
+  current directory — vendoring into a subdirectory produces a workflow
+  GitHub never runs and an install that looks like it worked. If that
+  command FAILS, this is not a git work tree: stop and ask, rather than
+  falling back to the current directory, which is that same outcome
+  reached by guessing.
+- **Does `<repo-root>/ci-secure/VENDORED.json` already exist?** Install
+  and Refresh below are the same command, and this file is what decides
+  which one runs. If it exists this is a REFRESH — go to Refresh, and do
+  not promise a workflow, because a refresh writes none even when none
+  is there.
+- **Does `<repo-root>/.github/workflows/` hold any workflow?** With
+  nothing to scan, the gate reports "no workflow files were scanned",
+  which is a DEGRADED outcome and stays red even in `--advisory` — a
+  permanently red check that neither documented remedy clears. Say so
+  and let the user decide before installing.
 
 ```bash
 <ci-secure>/scripts/vendor.py --into <repo-root>
@@ -594,16 +610,26 @@ Everything that can refuse refuses before the first byte is written, and
 the workflow is written last, after the manifest. So a non-zero exit
 means at worst a partly-copied `ci-secure/`, never a live workflow with
 no gate behind it. It refuses on: a vendored copy trying to install, a
-missing licence, a `<repo-root>` that is a subdirectory of a repository
-rather than its root, a destination redirected by a symlink, and a
-`ci-secure/` directory that already holds someone else's files — that
-last one because the workflow re-checks that directory against the
-manifest on every run and would red on anything else it finds there.
-Report the error and stop; do not retry blind.
+missing licence, an incomplete skill, a `<repo-root>` that is a
+subdirectory of a repository rather than its root, a destination
+redirected by a symlink, a `ci-secure` that exists and is not a
+directory, and a `ci-secure/` directory that already holds someone
+else's files — that last one because the workflow re-checks that
+directory against the manifest on every run and would red on anything
+else it finds there. That collision refusal applies to a FIRST install
+only; a refresh expects to find our files there. Report the error and
+stop; do not retry blind.
 
 If it reports that `.github/workflows/ci-secure.yml` already existed, the
 install did NOT wire anything up — resolve that with the user before
-telling them they have a gate.
+telling them they have a gate. The exit code is 0 either way, so read
+the output; do not infer success from it.
+
+The install leaves everything UNCOMMITTED, and nothing runs until those
+files are on a branch GitHub can see. Say that plainly when handing over
+— committing is theirs to do unless they ask, and the NEVER rules below
+bind. If their tree already had uncommitted work in it, say that too:
+the vendored files are now mixed in with it.
 
 Then walk the user through the following in the message that hands the
 work over. They need it whether or not a PR gets opened. Items 1, 3 and
@@ -627,17 +653,31 @@ to an install PR as much as to a fix PR:
    engine, zero workflows scanned, an unrecognised outcome or an
    incomplete scan stay red, because a ramp for findings must never
    become a mute button for a broken scan.
-3. **Going blocking**, once those are burned down: drop `--advisory`,
-   then require **`ci-secure`** — the always-running verdict job, never
-   the scan job. A conditional job that gets skipped reports Success to
-   a required-check rule, so requiring one is a rule that can be
-   satisfied by never running it.
+3. **Going blocking**, once those are burned down: drop `--advisory`
+   from the "Run ci-secure" step in
+   `.github/workflows/ci-secure.yml`, then require **`ci-secure`** — the
+   always-running verdict job, never the scan job. A conditional job that
+   gets skipped reports Success to a required-check rule, so requiring
+   one is a rule that can be satisfied by never running it. The second
+   half is a repository setting only they can change.
+
+   "Make ci-secure block my PRs" on a repo that already has the gate is
+   asking for this, not for an install — the install command would run a
+   refresh, touch no workflow, and leave `--advisory` exactly where it
+   was. Editing that one line is a write into their tree like any other:
+   say which line, get a yes, then make the edit.
 4. **Getting out**, if it ever reds their default branch: un-require
-   `ci-secure` (one settings change, reversible). **Not** deleting the
-   workflow — that leaves them believing they have a check they do not.
-   Putting `--advisory` back is the narrower remedy and only clears a
-   red caused by a failed fact; it will not clear a crashed engine, an
-   incomplete scan, or a rate-limited weekly run.
+   `ci-secure` (one settings change, reversible, and it needs admin).
+   That unblocks MERGES; the branch itself stays red until the cause is
+   fixed, because the `push:` trigger keeps running. **Not** deleting
+   the workflow — that leaves them believing they have a check they do
+   not. Putting `--advisory` back is the narrower remedy and only clears
+   a red caused by a failed fact; it will not clear a crashed engine, an
+   incomplete scan, or a rate-limited weekly run — the workflow also
+   runs weekly, which is where that last one comes from. If they want
+   the gate gone entirely, the order matters: delete the workflow FIRST,
+   then `ci-secure/`. The other way round reds every run in between, on
+   the drift check, before the gate is even reached.
 5. **Two facts stay UNMEASURED** on any CI token: whether required
    checks are skippable, and the fork-PR approval policy. Both are
    admin-scoped API reads. They are disclosed and dropped from the
@@ -660,9 +700,15 @@ the install does, so the same rule binds — say what will be rewritten,
 get a yes, and only then run it. Show them the resulting diff; open a PR
 only if they ask for one.
 
+- Run `vendor.py --verify ci-secure` and `git status` FIRST. A refresh
+  overwrites every vendored file, and an UNCOMMITTED local edit is gone
+  for good — `git diff` afterwards cannot show what it replaced, because
+  there is no committed version to compare against. If either command
+  shows local changes, surface them and get a decision before running
+  anything.
 - The vendored CODE is replaced, and files a newer version no longer
-  ships are removed. Hand edits to it surface as that PR's diff for the
-  user to resolve. Their CI re-checks the copy every run
+  ships are removed. Committed hand edits show up in the resulting
+  `git diff` for the user to resolve. Their CI re-checks the copy every run
   (`vendor.py --verify ci-secure`), which catches the local edit made
   while debugging and never removed — not a determined attacker, who can
   edit the manifest in the same commit.
@@ -689,7 +735,9 @@ only if they ask for one.
   between dispatches.
 - **Never push, commit, or open a PR from inside the skill unless the user
   explicitly asks.** By default the user reviews the working tree
-  themselves. (Corollary: if the user does
+  themselves, and that includes the gate install, a refresh, and the
+  one-line `--advisory` edit that goes blocking: each of those WRITES
+  with consent, and none of them commits. (Corollary: if the user does
   ask you to open a PR for the fixes, the PR body must not name the
   vulnerability class being closed or narrate the attack — a public PR
   describing an unfixed-until-now hole is a disclosure. Describe the
