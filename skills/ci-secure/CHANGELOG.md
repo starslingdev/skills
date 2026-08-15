@@ -23,11 +23,13 @@ entries are dated (UTC). Format loosely follows
   new failure state as a pass. Anything running ci-secure as a CI gate imports
   these instead of hardcoding a copy that can drift from the engine's.
 
-- **2026-08-15** — **ci-secure can install itself as a blocking CI gate.** Ask
-  it by name and it VENDORS the engine, the gate and the licence into your
-  repository — copied in, reviewed as a pull request, refreshed when you ask —
-  plus one workflow whose always-running verdict job carries the required
-  `ci-secure` check. No ci-secure code is fetched and executed at CI time: a pin
+- **2026-08-15** — **You can now set ci-secure up as a CI check in your own
+  repository.** Ask for it by name, and ci-secure VENDORS the engine, the gate
+  and the licence into your repository — copied in, reviewed as a pull request
+  you merge, updated only when you ask — plus one workflow whose always-running
+  verdict job carries the `ci-secure` check. Nothing happens on its own: the
+  setup runs when you ask for it, the check ships in `--advisory` mode, and it
+  blocks a merge only once YOU add `ci-secure` to your required checks. No ci-secure code is fetched and executed at CI time: a pin
   can be moved or deleted in a repository you do not control, and we ship a
   detector for that shape (P14.24). `scripts/vendor.py` does the copying, writes
   a `VENDORED.json` of per-file hashes, and re-checks them from your own CI, so
