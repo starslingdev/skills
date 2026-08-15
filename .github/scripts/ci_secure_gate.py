@@ -91,9 +91,15 @@ def load_config():
 # this the likeliest line in the file to raise, not the least. It runs at module
 # scope, OUTSIDE main()'s handler, so a config.py with a syntax error or an
 # import-time raise used to exit non-zero with a bare traceback and no
-# `::error::`. The build was never at risk; the operator just got the
-# "unexplained red" this file argues against everywhere else. The failure is
-# captured here and re-reported as a stated verdict inside main().
+# `::error::` - the "unexplained red" this file argues against everywhere else.
+# The failure is captured here and re-reported as a stated verdict in main().
+#
+# `BaseException`, not `Exception`, and that is the load-bearing part rather
+# than defensive habit: `SystemExit` is not an `Exception`, so a config.py whose
+# module body called `sys.exit(0)` ENDED THIS PROCESS RIGHT HERE with status 0
+# and no output - a green gate over a scan that never ran. Narrowing this clause
+# is a natural-looking tidy-up that brings that forged pass straight back, which
+# is why `test_a_rule_that_exits_cleanly_on_load_cannot_forge_a_pass` pins it.
 #
 # Deliberately unannotated: a PEP 604 `BaseException | None` here would be
 # evaluated at module scope, and this file is vendored into adopters' repos
@@ -113,15 +119,23 @@ except BaseException as _exc:                                 # noqa: BLE001
 # Overridable by env so the timeout can be exercised for real in a test rather
 # than trusted. A test that has to sleep 420s does not get written, and an
 # untested timeout is how this constant sat at parity with the job clock -
-# unreachable - in the first place. The override only ever SHORTENS the wait in
-# a test; no workflow sets it, and a bad value falls back to the default rather
-# than disabling the timeout, since "no timeout" is the failure being prevented.
+# unreachable - in the first place.
+#
+# The override can only ever SHORTEN the wait, and the clamp is what makes that
+# true rather than a comment hoping it is. Without it a workflow could set the
+# variable high enough to put the timeout back out of reach, which is exactly
+# the regression this constant exists to prevent - and the invariant test reads
+# the source literal, so it would not notice. A zero, a negative or a
+# non-numeric falls back to the default, since "no timeout at all" is the
+# failure being prevented, not a way to ask for one.
+_TIMEOUT_CEILING = 420
 try:
-    ENGINE_TIMEOUT_S = int(os.environ.get("CI_SECURE_ENGINE_TIMEOUT_S", "") or 420)
+    ENGINE_TIMEOUT_S = int(os.environ.get("CI_SECURE_ENGINE_TIMEOUT_S", "")
+                           or _TIMEOUT_CEILING)
 except ValueError:
-    ENGINE_TIMEOUT_S = 420
-if ENGINE_TIMEOUT_S <= 0:
-    ENGINE_TIMEOUT_S = 420
+    ENGINE_TIMEOUT_S = _TIMEOUT_CEILING
+if not 0 < ENGINE_TIMEOUT_S <= _TIMEOUT_CEILING:
+    ENGINE_TIMEOUT_S = _TIMEOUT_CEILING
 
 # P14.11 (impostor action SHA) is the one detector that needs network and a
 # GitHub token, so whether it runs is a property of the JOB, not of this script:

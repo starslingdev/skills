@@ -2296,7 +2296,12 @@ def test_the_renderer_does_not_keep_its_own_copy_of_the_rule() -> None:
             f"the renderer and the gate disagree about {probe!r}; the rule has "
             "been copied instead of shared")
 
-    body = inspect.getsource(report._flatten_scanned)
-    assert "replace" not in body, (
-        "report._flatten_scanned has re-inlined the escaping rule instead of "
-        "delegating to config.flatten_scanned")
+    # Either it IS the shared rule, or its body calls it. Asserting the
+    # absence of `replace` was both evadable (a re-inline via `translate` or
+    # `re.sub` passed) and prone to a false red (a direct alias makes
+    # `getsource` return config's own body, which contains `replace`).
+    if report._flatten_scanned is not config.flatten_scanned:
+        body = inspect.getsource(report._flatten_scanned)
+        assert "_flatten_rule" in body or "config.flatten_scanned" in body, (
+            "report._flatten_scanned has re-inlined the escaping rule instead "
+            f"of delegating to config.flatten_scanned:\n{body}")

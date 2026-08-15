@@ -6,17 +6,22 @@ happens to have, not against the 3.12 every workflow in this repo pins. That
 asymmetry is the whole reason this file exists — CI cannot see the break,
 because CI never runs the version that breaks.
 
-The specific hazard is PEP 604 (`X | Y`) in an annotation that is EVALUATED at
-definition time. Annotations on a parameter that carries a default, and any
-annotation outside a `from __future__ import annotations` module, are evaluated
-when the `def` executes — so on 3.9 they raise `TypeError: unsupported operand
-type(s) for |` at IMPORT time and take the entire module down. Not a subtle
-degradation: `import config` fails, so `scan.py`, `report.py` and the CI gate
-all fail, for every 3.9 user, silently as far as this repo's CI is concerned.
+Two hazards, and they need different guards.
 
-`from __future__ import annotations` defers annotation evaluation to a string,
-which makes PEP 604 safe on 3.9. Every other module under `scripts/` already
-carries it; this test makes that a rule instead of a habit.
+1. PEP 604 (`X | Y`) in an ANNOTATION. Parameter and return annotations are
+   evaluated when the `def` executes, so on 3.9 they raise `TypeError:
+   unsupported operand type(s) for |` at IMPORT time and take the whole module
+   down. `from __future__ import annotations` defers them to strings, which
+   makes the syntax safe — so for this hazard the future import IS the fix.
+
+2. Anything 3.9 cannot even PARSE (`match` statements, and PEP 604 outside an
+   annotation — a type alias, an `isinstance` argument — where the future
+   import does not help because the expression is evaluated for real). Only
+   compiling against 3.9's grammar catches these.
+
+Not a subtle degradation either way: `import config` fails, so `scan.py`,
+`report.py` and the CI gate all fail together, for every 3.9 user, and silently
+as far as this repository's CI is concerned — every workflow here pins 3.12.
 """
 from __future__ import annotations
 
@@ -71,8 +76,8 @@ def _pep604_annotations(tree: ast.Module) -> list[str]:
 def test_pep604_annotations_are_deferred(module: Path) -> None:
     """A `X | Y` annotation without the future import breaks the skill on 3.9.
 
-    Red on the unfixed tree: `config.py` grew `frozenset[str] | set[str]` on a
-    parameter WITH a default, which 3.9 evaluates at `def` time and refuses.
+    Red on the unfixed tree: `config.py` grew `frozenset[str] | set[str]`
+    parameter annotations, which 3.9 evaluates at `def` time and refuses.
     """
     tree = ast.parse(module.read_text(encoding="utf-8"))
     unions = _pep604_annotations(tree)
@@ -86,6 +91,35 @@ def test_pep604_annotations_are_deferred(module: Path) -> None:
         "takes the whole scanner down. Every workflow here pins 3.12, so CI "
         "cannot catch this for you."
     )
+
+
+@pytest.mark.parametrize("module", _modules(), ids=lambda p: p.name)
+def test_the_module_parses_under_the_oldest_supported_grammar(module: Path) -> None:
+    """Syntax 3.9 cannot compile at all, which no future import can defer.
+
+    `feature_version` makes CPython's own parser refuse anything newer than the
+    target, so this covers `match` statements and every other post-3.9 form in
+    one line — including the PEP 604 unions that live OUTSIDE an annotation
+    (a module-level type alias, an `isinstance` argument), where the future
+    import genuinely does not help because the expression is evaluated for real.
+    """
+    try:
+        ast.parse(module.read_text(encoding="utf-8"), feature_version=(3, 9))
+    except SyntaxError as exc:
+        raise AssertionError(
+            f"{module.name} uses syntax Python 3.9 cannot parse (line "
+            f"{exc.lineno}): {exc.msg}. pyproject.toml declares 3.9 as the "
+            "floor, and this is an installed skill — CI pins 3.12 and cannot "
+            "catch this for you."
+        ) from None
+
+
+def test_the_grammar_guard_can_actually_fail() -> None:
+    """The 3.9 parse check is not a no-op that accepts everything."""
+    newer = "def f(v):\n    match v:\n        case 1:\n            return 2\n"
+    ast.parse(newer)                                   # fine on this interpreter
+    with pytest.raises(SyntaxError):
+        ast.parse(newer, feature_version=(3, 9))
 
 
 def test_the_guard_can_actually_fail(tmp_path: Path) -> None:

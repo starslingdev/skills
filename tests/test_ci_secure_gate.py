@@ -863,3 +863,33 @@ def test_every_failure_reason_is_reported_not_just_the_first(tmp_path: Path) -> 
     assert "no workflow files were scanned" in proc.stdout
     assert "scan incomplete" in proc.stdout
     assert "ci-secure fact failed: sec.actions.pinned" in proc.stdout
+
+
+def test_a_rule_that_exits_cleanly_on_load_cannot_forge_a_pass(tmp_path: Path) -> None:
+    """`sys.exit(0)` in a rule file must not become a green gate.
+
+    This is why the handler around the config load catches `BaseException` and
+    not `Exception`: `SystemExit` inherits from the former, so a `config.py`
+    whose module body calls `sys.exit(0)` used to end the gate process right
+    there — before any scan, with exit status 0 and no output at all. A scan
+    that never ran, reported as a pass, which is the one outcome this whole
+    file exists to make impossible.
+
+    Loading the rule EXECUTES it, and in a vendored layout that file sits
+    beside the engine rather than in this tree, so this is reachable by anyone
+    who can write there. Narrowing the clause to `Exception` — a natural-looking
+    tidy-up — brings the forged pass straight back.
+    """
+    engine_dir = tmp_path / "vendored_exit"
+    engine_dir.mkdir()
+    (engine_dir / "config.py").write_text(
+        "import sys\nsys.exit(0)\n", encoding="utf-8")
+    engine = engine_dir / "scan.py"
+    engine.write_text("import sys\nsys.stdout.write('{}')\n", encoding="utf-8")
+
+    proc = run_scan(tmp_path, _CLEAN, engine=str(engine))
+
+    assert proc.returncode == 1, (
+        "a rule file that called sys.exit(0) produced a GREEN gate with no scan")
+    assert "::error::" in proc.stdout, "the forged pass was turned red with no stated cause"
+    assert "could not be loaded" in proc.stdout

@@ -246,10 +246,18 @@ def test_the_engine_timeout_stays_inside_the_jobs_own_clock() -> None:
     """
     gate = (_REPO / ".github" / "scripts" / "ci_secure_gate.py").read_text(
         encoding="utf-8")
-    match = re.search(r"or (\d+)\)\n", gate) or re.search(
-        r"ENGINE_TIMEOUT_S = (\d+)", gate)
-    assert match, "ENGINE_TIMEOUT_S is not a readable literal any more"
+    # Anchored on the ceiling's own name rather than on `or NNN)`, which would
+    # match the first such fragment anywhere in the file.
+    match = re.search(r"^_TIMEOUT_CEILING = (\d+)$", gate, re.M) or re.search(
+        r"^ENGINE_TIMEOUT_S = (\d+)$", gate, re.M)
+    assert match, "the engine timeout is not a readable literal any more"
     engine_timeout = int(match.group(1))
+
+    # The env override must be clamped to that ceiling, or a workflow could set
+    # the timeout back out of reach and this test — which reads the source —
+    # would still pass.
+    assert "_TIMEOUT_CEILING" in gate and "ENGINE_TIMEOUT_S = _TIMEOUT_CEILING" in gate, (
+        "the engine timeout override is no longer clamped to a ceiling")
 
     workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
     for name in ("scan", "scan-fork"):

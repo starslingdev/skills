@@ -55,8 +55,6 @@ entries are dated (UTC). Format loosely follows
   titles for the identical defect; the pattern id, the severity and the fix
   anchor are unchanged, so anything keyed on those still matches.
 
-### Fixed
-
 - **2026-08-14** — **A single-star branch filter (`branches: ['*']`) no longer
   certifies a required check.** GitHub's filter glob `*` matches a run of
   characters that does NOT include a slash, so `feature/x`, `dependabot/…` and
