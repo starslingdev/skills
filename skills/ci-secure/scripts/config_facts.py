@@ -774,12 +774,23 @@ _MATCH_ALL_BRANCH_PATTERNS = {"**", "*", "'**'", '"**"'}
 
 
 def _matches_every_branch(patterns: Any) -> bool:
-    """Does this branch filter match every branch a pull request could use?"""
+    """Does this branch filter match every branch a pull request could use?
+
+    A `!` pattern anywhere in the list means it does not. GitHub does not
+    accept `branches` and `branches-ignore` for the same event, so a negated
+    pattern INSIDE `branches:` is the documented — and only — way to write
+    "everything except", which makes it the shape that actually appears in
+    workflows. Reading the `'**'` beside it and ignoring the exclusion
+    certified a required check that never reports on an excluded branch.
+    """
     if isinstance(patterns, str):
         patterns = [patterns]
     if not isinstance(patterns, list) or not patterns:
         return False
-    return any(str(p).strip() in _MATCH_ALL_BRANCH_PATTERNS for p in patterns)
+    cleaned = [str(p).strip() for p in patterns]
+    if any(p.startswith("!") for p in cleaned):
+        return False
+    return any(p in _MATCH_ALL_BRANCH_PATTERNS for p in cleaned)
 
 
 def _pr_reporting_ability(doc: dict) -> str:

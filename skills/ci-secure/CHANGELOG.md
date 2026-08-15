@@ -33,8 +33,13 @@ entries are dated (UTC). Format loosely follows
   one always reports. A `branches-ignore:` written alongside
   `branches: ['**']` defeats the shortcut for the same reason — the two
   contradict each other, so "runs on every push" is not a claim this scan
-  can make about the pair. An otherwise unfiltered `branches: ['**']` push
-  still certifies.
+  can make about the pair — though GitHub does not accept both filters on one
+  event, so that guard is defensive rather than a live defect. The shape that
+  IS expressible, and was a live false pass, is a `!` pattern inside
+  `branches:` — GitHub's documented (and only) way to write "everything
+  except". `branches: ['**', '!release/**']` was read as match-all and
+  certified a check that never reports on an excluded branch. An otherwise
+  unfiltered `branches: ['**']` push still certifies.
 
 - **2026-08-14** — **A constant `if:` no longer certifies a verdict job that
   has `needs:`.** `if: true` (and `${{ 1 == 1 }}`) is not `always()`: GitHub

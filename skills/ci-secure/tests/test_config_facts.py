@@ -2929,3 +2929,55 @@ jobs:
                                "pr.yml": _SKIPPABLE_PR_PRODUCER}, ["test"]),
         _FACT)
     assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_negated_pattern_means_the_branch_filter_is_not_match_all(tmp_path):
+    """GitHub's documented way to exclude branches while including others is a
+    `!` pattern INSIDE `branches:` — `branches` and `branches-ignore` cannot
+    filter the same event, so this is the expressible form of "match all
+    except". Reading `'**'` and ignoring the exclusion beside it certified a
+    check that never reports on an excluded branch, while the real producer
+    could skip."""
+    negated = """\
+name: build
+on:
+  push:
+    branches:
+      - '**'
+      - '!release/**'
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"build.yml": negated,
+                               "pr.yml": _SKIPPABLE_PR_PRODUCER}, ["test"]),
+        _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_an_unnegated_match_all_branch_filter_still_certifies(tmp_path):
+    """The control: `branches: ['**']` with nothing excluded really does run on
+    every branch push, and must keep certifying."""
+    plain = """\
+name: build
+on:
+  push:
+    branches: ['**']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"build.yml": plain,
+                               "pr.yml": _SKIPPABLE_PR_PRODUCER}, ["test"]),
+        _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
