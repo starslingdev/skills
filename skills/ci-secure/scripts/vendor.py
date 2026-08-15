@@ -140,6 +140,61 @@ def _previously_vendored(dest: Path) -> list[str]:
         return []
 
 
+def _refuse_destinations_outside(repo: Path, dest: Path) -> None:
+    """Refuse, before writing anything, if any destination leaves the repository.
+
+    A symlink is ordinary repository content: it survives a clone, a pull
+    request checkout and a fork, and it costs an attacker one committed file.
+    One at `ci-secure/`, at any directory beneath it, or at `.github/` is
+    followed by `mkdir` and `copy2` exactly as a real directory would be, so
+    without this the engine, the gate and a live workflow land somewhere the
+    adopter never looked while this prints success — and the repository it was
+    aimed at ends up with no gate at all.
+
+    Every destination is checked, not just the vendored root, because the
+    escape can sit at any component of any path, or at a single file. Resolving
+    each one and requiring it to stay under the resolved repository covers all
+    of those in one test, including `..` inside a path and a symlink loop.
+    """
+    root = repo.resolve()
+    targets = [dest, dest / MANIFEST_NAME, dest / GATE_DEST, dest / LICENSE_DEST,
+               repo / WORKFLOW_DEST, (repo / WORKFLOW_DEST).parent]
+    targets += [dest / rel for rel in VENDORED_FILES]
+    # Directories this will `mkdir` are destinations too, and naming them keeps
+    # the refusal pointed at the one symlink to remove rather than at the six
+    # files under it.
+    targets += [parent for target in list(targets)
+                for parent in target.parents if repo in parent.parents]
+
+    escaped = []
+    for target in targets:
+        try:
+            resolved = target.resolve()
+        except OSError:                          # symlink loop, unreadable path
+            escaped.append(target)
+            continue
+        if not resolved.is_relative_to(root):
+            escaped.append(target)
+
+    if escaped:
+        # One symlink at `ci-secure/` escapes every destination beneath it.
+        # Naming all ten obscures the single thing the adopter has to fix, so
+        # only the shallowest offender on each branch is reported.
+        shallowest = [path for path in escaped
+                      if not any(other != path and other in path.parents
+                                 for other in escaped)]
+        listed = "\n  ".join(
+            f"{path.relative_to(repo)} -> outside the repository"
+            for path in sorted(set(shallowest)))
+        raise SystemExit(
+            "refusing to install: these destinations resolve outside "
+            f"{root}, so installing would write the gate somewhere this "
+            "repository's pull requests would never see it:\n  "
+            f"{listed}\n"
+            "A symlink on one of those paths is almost certainly not what you "
+            "want under a security gate. Remove it, then run this again.")
+
+
 def install(repo: Path) -> Path:
     """Copy the engine, the gate and the licence into `repo/ci-secure/`.
 
@@ -169,6 +224,8 @@ def install(repo: Path) -> Path:
             "licence violation, so this refuses rather than shipping one")
 
     dest = repo / VENDOR_DIRNAME
+    _refuse_destinations_outside(repo, dest)
+
     first_install = not (dest / MANIFEST_NAME).is_file()
     stale = set(_previously_vendored(dest)) - set(vendored_paths())
 

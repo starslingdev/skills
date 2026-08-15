@@ -45,7 +45,11 @@ entries are dated (UTC). Format loosely follows
   copy cannot ship. `--verify` reports compiled bytecode found in the vendored
   tree rather than passing over it, because a `.pyc` written with an unchecked
   hash is loaded without being compared to its source and can override a file
-  that hashed correctly; the workflow stops the gate writing any.
+  that hashed correctly; the workflow stops the gate writing any. Every
+  destination is checked to be inside the repository before anything is
+  written, so a symlink committed at `ci-secure/`, at any directory beneath it,
+  or at `.github/` makes the install refuse rather than quietly write the gate
+  and a live workflow somewhere your pull requests would never see them.
 
 - **2026-08-15** — **`config.py` now owns the one definition of how a scanned
   string is neutralized.** `flatten_scanned()` collapses whitespace, replaces

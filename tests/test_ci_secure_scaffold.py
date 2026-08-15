@@ -702,6 +702,45 @@ def test_pruning_cannot_reach_outside_the_vendored_directory(
         "a refresh deleted a file outside the repository entirely")
 
 
+@pytest.mark.parametrize("link_at", ["ci-secure", "ci-secure/scripts",
+                                     "ci-secure/references",
+                                     "ci-secure/scripts/gate.py", ".github",
+                                     ".github/workflows",
+                                     ".github/workflows/ci-secure.yml"])
+def test_an_install_never_writes_outside_the_repository(
+        tmp_path: Path, link_at: str) -> None:
+    """Every destination is inside the repository, or nothing is written at all.
+
+    The install is aimed at a directory the adopter controls, and a symlink is
+    ordinary repository content — it survives a clone, a pull request checkout
+    and a fork. If one sitting at `ci-secure/`, at any directory beneath it, or
+    at `.github/` is followed, the tool writes the engine, the gate and a live
+    workflow somewhere the adopter never looked, reports success, and leaves the
+    repository with no gate at all while its own documentation states exactly
+    what it wrote and where.
+    """
+    repo = tmp_path / "acme-app"
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    link = repo / link_at
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside)
+
+    result = _vendor(repo)
+
+    assert result.returncode != 0, (
+        f"a symlink at {link_at} was followed and the install reported success")
+    assert not list(outside.rglob("*")), (
+        f"the install wrote outside the repository via {link_at}: "
+        f"{[p.name for p in outside.rglob('*')]}")
+    # `is_file`, not `exists`: in the cases where the planted symlink IS one of
+    # these two paths it already "exists", and that is the fixture, not a write.
+    assert not (repo / "ci-secure" / "VENDORED.json").is_file(), (
+        "a refused install left a vendored tree behind")
+    assert not (repo / ".github" / "workflows" / "ci-secure.yml").is_file(), (
+        "a refused install left a live ci-secure workflow behind")
+
+
 def test_an_install_that_cannot_finish_writes_nothing(tmp_path: Path) -> None:
     """Validate first, then write. A half-install is a live workflow with no gate.
 
