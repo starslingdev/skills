@@ -547,6 +547,66 @@ If the user asks for verification next steps: run the report self-check
 `--clone <audited-repo>` to confirm every fix in `## Fixes applied`
 actually changed its file.
 
+## Add ci-secure as a CI gate
+
+**Reached by NAMING it** — "install ci-secure as a CI check", "make
+ci-secure block my PRs", "add the ci-secure gate", "update/refresh the
+ci-secure gate". A scan request is not an install request: audit as
+usual and, if a gate would help, offer one at the close.
+
+A scan says what is wrong today. A gate stops it coming back — the same
+engine, on every pull request, red when a security fact fails. It is
+**vendored, never fetched**: the engine, the gate and the licence are
+COPIED into the user's repository, so the code judging their PRs is code
+they can read and it cannot change underneath them. Fetching a pinned
+SHA and executing it at CI time is a shape this skill FLAGS (P14.24); do
+not ship it.
+
+**Install** (one setup PR on their branch — the "never push without
+asking" rule still applies):
+
+```bash
+<ci-secure>/scripts/vendor.py --into <repo-root>
+```
+
+That writes `ci-secure/` (engine + `gate.py` + `LICENSE` +
+`VENDORED.json`) and `.github/workflows/ci-secure.yml`. Cover these in
+the PR body:
+
+1. **Requirements**: Python 3.12 and PyYAML, both pinned in the
+   workflow. The engine is not stdlib-only; the gate is.
+2. **It ships in `--advisory` mode.** A repo that has never been scanned
+   usually reds two or three facts on its first run (workflows with no
+   `permissions:`, no CODEOWNERS entry for `.github/`). Advisory reports
+   them without blocking, so the installing PR does not brick their
+   merge path. **`--advisory` downgrades FAILED FACTS ONLY** — a crashed
+   engine, zero workflows scanned, an unrecognised outcome or an
+   incomplete scan stay red, because a ramp for findings must never
+   become a mute button for a broken scan.
+3. **Going blocking**, once those are burned down: drop `--advisory`,
+   then require **`ci-secure`** — the always-running verdict job, never
+   the scan job. A conditional job that gets skipped reports Success to
+   a required-check rule, so requiring one is a rule that can be
+   satisfied by never running it.
+4. **Getting out**, if it ever reds their default branch: un-require
+   `ci-secure` (one settings change, reversible) or put `--advisory`
+   back. **Not** deleting the workflow — that leaves them believing they
+   have a check they do not.
+5. **Two facts stay UNMEASURED** on any CI token: whether required
+   checks are skippable, and the fork-PR approval policy. Both are
+   admin-scoped API reads. They are disclosed and dropped from the
+   score, never counted as passes.
+
+**Refresh** ("update the ci-secure gate"): re-run `vendor.py --into`
+from the current skill version and open a PR with the delta. Hand edits
+to vendored files surface as that PR's diff for the user to resolve —
+they are never silently clobbered outside a PR. The workflow file is
+deliberately NOT checksummed: runners and triggers are theirs to tune.
+The vendored CODE is, and their CI re-checks it every run
+(`vendor.py --verify ci-secure`). That catches the local edit made while
+debugging and never removed — not a determined attacker, who can edit
+the manifest in the same commit.
+
 ## NEVER rules
 
 - **Never modify a file outside the one named in a finding's

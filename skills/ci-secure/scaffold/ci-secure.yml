@@ -1,0 +1,170 @@
+# ci-secure as a blocking CI check.
+#
+# Installed by ci-secure into your repository, together with a vendored copy of
+# the engine and the gate under `ci-secure/`. Nothing is fetched at CI time: the
+# code that judges your pull requests is code you can read, in your repository,
+# changed only by a pull request you review.
+#
+# WHAT TO REQUIRE IN BRANCH PROTECTION: `ci-secure`, the verdict job at the
+# bottom. Not the scan job. A job that a condition skips reports as Success to a
+# required-check rule, so requiring a conditional job is a rule that can be
+# satisfied by never running it.
+#
+# TRIGGERS, and why each one is here:
+#   pull_request      the point of the gate — judge the change before it lands
+#   push (default)    catches anything that reached the branch another way
+#   schedule          re-judges what already merged. It is the only trigger that
+#                     notices a pinned action SHA that ROTS: legitimate today,
+#                     deleted or orphaned tomorrow in a repository you do not
+#                     control. No pull request of yours would ever see it.
+#   workflow_dispatch so you can run it by hand while burning down findings
+#
+# NOT merge_group, deliberately. If you run a merge queue and add it, trace two
+# things first: a check required in the queue whose workflow does not trigger on
+# `merge_group` never reports, and the queue waits forever; and a verdict job
+# that greens while the scan it needs was SKIPPED for that event hands you back
+# the skipped-check bypass this file exists to close.
+#
+# FIRST RUN: expect two or three red facts on a repository that has never been
+# scanned — most commonly workflows that do not declare `permissions:` and a
+# missing CODEOWNERS entry for `.github/`. That is the gate working. It ships in
+# `--advisory` mode so those do not block your merges on day one; burn them
+# down, then delete the flag (see "GOING BLOCKING" below).
+#
+# IF THIS EVER REDS YOUR DEFAULT BRANCH AND YOU NEED OUT: remove `ci-secure`
+# from your required checks (one settings change, reversible in a click), or put
+# `--advisory` back. Do NOT delete the workflow — that leaves you with a
+# security check you believe you have and do not.
+#
+# REQUIREMENTS: Python 3.12 (pinned below rather than inherited from the runner
+# image — this is a security gate, and which interpreter it runs under should
+# not drift with an image rebuild) and PyYAML. The engine is not stdlib-only;
+# the gate is.
+name: CI security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  # `github.event_name` is in the key on purpose: without it an ordinary push
+  # can cancel the weekly run, silently costing you the one run whose whole job
+  # is catching rot.
+  group: ci-secure-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The gate only reads the checked-out tree.
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: ci-secure scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          # The scan reads the tree; it has no reason to hold a credential, and
+          # a credential left in the checkout is one of the things it flags.
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+
+      # Is the vendored copy still the code that was reviewed? This catches the
+      # accident — a local edit made while debugging, still there six months
+      # later, quietly weakening a check nobody re-read. It is NOT a tamper
+      # seal: anyone who can edit the vendored gate can edit the manifest in the
+      # same commit. The accident is the case that actually happens.
+      - name: Check the vendored ci-secure copy has not drifted
+        run: python3 ci-secure/scripts/vendor.py --verify ci-secure
+
+      - name: Run ci-secure
+        run: python3 ci-secure/scripts/gate.py --advisory
+        env:
+          # The gate resolves its engine relative to its own file, which in a
+          # vendored layout is this directory. `config.py` — the rule that says
+          # which outcomes block — is then loaded from beside that engine, so
+          # this one pointer moves both and they can never come from different
+          # places.
+          CI_SECURE_ENGINE: ci-secure/scripts/scan.py
+
+          # The impostor-SHA check (P14.11) verifies that each pinned action SHA
+          # actually exists in the action's canonical repository, which catches
+          # a pin aimed at a fork-only or dangling commit. It needs an
+          # authenticated `gh`.
+          #
+          # ON for your own branches, OFF for pull requests from forks. This one
+          # job serves both, and a fork pull request runs code its author wrote
+          # — handing that a token variable costs more than the coverage it
+          # buys. On fork runs the check is off and the gate says so, on both
+          # surfaces, because a check that did not run is never a pass. `auto`
+          # is not offered: it would make "did this security check run?" depend
+          # on the runner image.
+          CI_SECURE_GH_IMPOSTOR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'off' || 'on' }}
+          GH_TOKEN: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '' || github.token }}
+
+          # A network check that could not finish is red on the weekly run and a
+          # warning everywhere else. Your pull requests should not be blocked by
+          # somebody else's rate limit; the weekly run has no deadline and
+          # nothing to race, and it is the run that must not be mutable by
+          # exhausting API quota.
+          CI_SECURE_GH_STRICT: ${{ github.event_name == 'schedule' && '1' || '0' }}
+
+  # ONE always-running job carries the required check name.
+  #
+  # This is NOT the same shape as the verdict job in starslingdev/skills, and
+  # copying that one here would break: it arbitrates between two mutually
+  # exclusive scan jobs (self-hosted and hosted-fork), so it needs both, and a
+  # `needs:` on a job that does not exist never resolves. One scan job means one
+  # dependency and a simpler rule — but the rule it enforces is the same one,
+  # and it is the reason this job exists at all: a scan that was skipped,
+  # cancelled or failed is not a scan that passed, and GitHub reads a skipped
+  # required check as green.
+  #
+  # `always()`, not `!cancelled()`: a cancelled run reports this job as skipped,
+  # which a required-check rule reads as green. A superseded run is left to
+  # report a red instead — the cost is a stale red in the history, and the
+  # alternative is a one-click way to turn the gate green.
+  verdict:
+    name: ci-secure
+    needs: [scan]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the scan to have passed
+        env:
+          SCAN: ${{ needs.scan.result }}
+        run: |
+          set -euo pipefail
+          echo "scan: ${SCAN}"
+          if [ "${SCAN}" = "success" ]; then
+            echo "ci-secure passed."
+            exit 0
+          fi
+          echo "::error::ci-secure has no passing verdict (scan=${SCAN}) - a scan that did not run, was cancelled, or failed is not a pass"
+          exit 1
+
+# GOING BLOCKING, once the first-run findings are burned down:
+#   1. delete `--advisory` from the "Run ci-secure" step above;
+#   2. add `ci-secure` to your branch protection's required checks.
+#
+# `--advisory` only ever downgrades a FAILED FACT. Everything that means the
+# scan could not be trusted — the engine crashing, zero workflow files scanned,
+# an outcome the gate cannot classify, an incomplete scan — stays red in
+# advisory mode too. Advisory is a ramp for findings, never a mute button for a
+# broken scan.
+#
+# Two facts will likely stay UNMEASURED whatever you do: whether your required
+# checks can be skipped, and your fork-PR approval policy. Both are repository
+# settings behind admin-scoped API endpoints that a CI job's token cannot read.
+# They are reported as unmeasured and are excluded from the score rather than
+# counted as passes — a coverage gap stated out loud, not a clean result.

@@ -23,6 +23,20 @@ entries are dated (UTC). Format loosely follows
   new failure state as a pass. Anything running ci-secure as a CI gate imports
   these instead of hardcoding a copy that can drift from the engine's.
 
+- **2026-08-15** — **ci-secure can install itself as a blocking CI gate.** Ask
+  it by name and it VENDORS the engine, the gate and the licence into your
+  repository — copied in, reviewed as a pull request, refreshed when you ask —
+  plus one workflow whose always-running verdict job carries the required
+  `ci-secure` check. Nothing is fetched and executed at CI time: a pin can be
+  moved or deleted in a repository you do not control, and we ship a detector
+  for that shape (P14.24). `scripts/vendor.py` does the copying, writes a
+  `VENDORED.json` of per-file hashes, and re-checks them from your own CI, so a
+  local edit to the vendored gate is loud instead of invisible. The workflow
+  ships in `--advisory` mode, which downgrades failed FACTS only — a crashed
+  engine, zero workflows scanned, an unrecognised outcome or an incomplete scan
+  stay red, because a ramp for findings must never become a mute button for a
+  broken scan.
+
 - **2026-08-15** — **`config.py` now owns the one definition of how a scanned
   string is neutralized.** `flatten_scanned()` collapses whitespace, replaces
   the backtick and escapes the pipe — the rule the report renderer already
