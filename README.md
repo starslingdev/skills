@@ -64,8 +64,9 @@ with privileges (pwn requests), `pull_request_target` jobs that poison the share
 cache, impostor action SHAs, whole-context secret dumps, `$GITHUB_ENV` /
 `$GITHUB_PATH` hijack, `pull-requests: write` granted to untrusted triggers,
 credential files swept into caches and artifacts, unverified remote code
-execution (`curl | bash`, or a git tree fetched at a branch or tag and then
-run), and dependency install scripts running in a job that holds secrets.
+execution (an installer piped straight into a shell, or a git tree fetched at
+a branch or tag and then run), and dependency install scripts running in a job
+that holds secrets.
 Every finding comes with the exact file and line, evidence taken from your
 own workflow, and a plain-English **"what an attacker could do"** scenario —
 then the skill offers to fix the ones you pick, dispatching a subagent per

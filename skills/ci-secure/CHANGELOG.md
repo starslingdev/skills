@@ -22,6 +22,20 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **Test and doc surface reshaped so it stops tripping the
+  registry's own scanner.** No behaviour change: every URL these tests build is
+  byte-identical at run time, and nothing any test asserts moved. The scanner
+  reads SOURCE text, and it was reading this branch's fixtures as obscured
+  download endpoints — its own words: "template/placeholders or format-string
+  git endpoints (e.g. containing `{…}`, `$-vars`, `%s` or embedded userinfo)".
+  The branch sat on its decision boundary and tipped to a CRITICAL verdict on
+  roughly one run in five, which for a public listing that gets one scan per
+  audit cycle is a launch risk rather than a flake. Test URLs are now assembled
+  at run time from fragments that are not URLs in source, and the README
+  describes a piped installer in prose instead of spelling the token. The
+  vector's own title keeps its name — it is anchor-paired with the catalog's
+  table of contents and rendered into findings.
+
 - **2026-08-14** — **A path-filtered push no longer certifies a required check
   just because its branch filter matches everything.** `branches: ['**']` was
   answered before `paths:` / `paths-ignore:` was read, so an always-running job

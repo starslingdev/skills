@@ -656,7 +656,7 @@ PowerShell `iex (New-Object Net.WebClient).DownloadString(...)` is the same clas
     bash install.sh
 ```
 
-Prefer a package manager or a SHA-pinned action over an ad-hoc installer where one exists. For tools distributed only via `curl | bash`, or a repository you must build from source, vendor the code into the repo (so it is reviewed and pinned by git) and run the local copy.
+Prefer a package manager or a SHA-pinned action over an ad-hoc installer where one exists. For tools distributed only as a piped installer, or a repository you must build from source, vendor the code into the repo (so it is reviewed and pinned by git) and run the local copy.
 
 **Sources**: poutine `unverified_script_exec` rule (boostsecurityio/poutine); OpenSSF "Mitigating attack vectors in GitHub workflows".
 

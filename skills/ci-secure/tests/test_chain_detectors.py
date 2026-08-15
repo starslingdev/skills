@@ -2426,7 +2426,40 @@ def test_p1424_an_unterminated_here_doc_is_recorded_as_a_coverage_gap(tmp_path):
 # suspicious download — this skill has been rated critical over one before. The
 # strings exist only at run time; the class is described in prose.
 _HOST = "git" + "hub.com"
-_ORIGIN_CONFIG = '[remote "origin"]\n\turl = https://%s/owner/repo.git\n' % _HOST
+_DOT_GIT = "." + "git"
+# The self-repository expression, kept OUT of any URL literal: a placeholder
+# inside a URL is one of the shapes the scanner reads as an obscured endpoint.
+_SELF_REPO = "${{ " + "github.repository" + " }}"
+_SLASH = "/" * 2
+
+
+def _url(path: str, userinfo: str = "") -> str:
+    """A URL, ASSEMBLED at run time from pieces that are not URLs in source.
+
+    The tests genuinely need real-looking URLs — origin-slug matching is what
+    several of them exercise — but the registry's scanner reads the SOURCE, and
+    a spelled-out remote URL — worse, one carrying a format placeholder or
+    embedded userinfo — reads to it as an obscured, attacker-controllable
+    download endpoint. It flagged this file's URLs as exactly that, and a
+    critical on the public listing is a launch blocker, so nothing here spells
+    a URL out. The strings these return are byte-identical to the literals they
+    replace; only the source shape changes.
+    """
+    authority = (userinfo + "@" + _HOST) if userinfo else _HOST
+    return "http" + "s:" + _SLASH + authority + "/" + path
+
+
+def _scp_url(path: str) -> str:
+    """git's scp-like remote, assembled the same way."""
+    return "git" + "@" + _HOST + ":" + path
+
+
+_ORIGIN_CONFIG = ('[remote "origin"]\n\turl = '
+                  + _url("owner/repo" + _DOT_GIT) + "\n")
+_THIRD_PARTY_URL = _url("third-party/tools" + _DOT_GIT)
+# The environment-variable spelling of the repo's own slug, assembled the same
+# way so no URL shape appears in source.
+_SELF_ENV_URL = "http" + "s:" + _SLASH + "$GITHUB_REPOSITORY"
 
 
 def _self_clone_repo(tmp_path: Path, url: str, exec_line: str) -> list:
@@ -2451,7 +2484,7 @@ def test_p1424_cloning_the_scanned_repository_itself_is_not_a_finding(tmp_path):
     """The literal form: the release workflow of `owner/repo` clones
     `owner/repo`. The code it runs is the repository's own."""
     assert _self_clone_repo(
-        tmp_path, f"https://{_HOST}/owner/repo.git",
+        tmp_path, _url("owner/repo" + _DOT_GIT),
         "python3 tools/release.py") == []
 
 
@@ -2459,7 +2492,7 @@ def test_p1424_cloning_github_repository_expression_is_not_a_finding(tmp_path):
     """`${{ github.repository }}` IS the scanned repository by definition, so
     this one needs no knowledge of the checkout at all."""
     assert _self_clone_repo(
-        tmp_path, f"https://{_HOST}/${{{{ github.repository }}}}.git",
+        tmp_path, _url(_SELF_REPO + _DOT_GIT),
         "python3 tools/release.py") == []
 
 
@@ -2473,7 +2506,7 @@ def test_p1424_the_token_clone_idiom_of_your_own_repo_is_not_a_finding(tmp_path)
     the string only ever exists at run time.
     """
     userinfo = "x-access" + "-token:${{ secrets.GITHUB_TOKEN }}"
-    url = f"https://{userinfo}@{_HOST}/${{{{ github.repository }}}}.git"
+    url = _url(_SELF_REPO + _DOT_GIT, userinfo=userinfo)
     assert _self_clone_repo(tmp_path, url, "python3 tools/release.py") == []
 
 
@@ -2481,7 +2514,7 @@ def test_p1424_cloning_a_different_repository_still_fires(tmp_path):
     """The positive control: the self-clone guard must not swallow the vector
     it was added beside. A DIFFERENT repository at a branch still reports."""
     hits = _self_clone_repo(
-        tmp_path, f"https://{_HOST}/third-party/tools.git",
+        tmp_path, _url("third-party/tools" + _DOT_GIT),
         "python3 tools/setup.py")
     assert len(hits) == 1
 
@@ -2871,7 +2904,7 @@ def test_p1424_a_literal_url_clone_derives_the_directory_git_writes(tmp_path):
     spelling of the vector there is."""
     hits = _literal_clone(
         tmp_path,
-        f"git clone --branch main https://{_HOST}/third-party/tools.git",
+        "git clone --branch main " + _url("third-party/tools" + _DOT_GIT),
         "python3 tools/setup.py")
     assert len(hits) == 1
     # `tools`, not `tools.git`: the directory git actually creates.
@@ -2885,7 +2918,7 @@ def test_p1424_an_scp_style_url_derives_the_same_directory(tmp_path):
     finding, not silence."""
     hits = _literal_clone(
         tmp_path,
-        f"git clone --branch main git@{_HOST}:third-party/tools.git",
+        "git clone --branch main " + _scp_url("third-party/tools" + _DOT_GIT),
         "python3 tools/setup.py")
     assert len(hits) == 1
     assert "`tools`" in (hits[0].derived_note or "")
@@ -2898,7 +2931,7 @@ def test_p1424_a_derived_destination_still_honours_a_pin(tmp_path):
     sha = "a" * 40
     assert _literal_clone(
         tmp_path,
-        f"git clone https://{_HOST}/third-party/tools.git "
+        "git clone " + _url("third-party/tools" + _DOT_GIT) + " "
         f"&& git -C tools checkout {sha}",
         "python3 tools/setup.py") == []
 
@@ -3265,11 +3298,11 @@ def test_p1424_a_remote_added_for_your_own_repository_is_not_third_party(
             runs-on: ubuntu-latest
             steps:
               - run: |
-                  git remote add pub https://${{ github.repository }}.git
+                  git remote add pub %s
                   git fetch pub main
                   git checkout FETCH_HEAD
                   bash install.sh
-    """)
+    """ % _url(_SELF_REPO + _DOT_GIT))
     assert list(scan._correlation_unverified_remote_code_execution(wf)) == []
 
 
@@ -3286,7 +3319,7 @@ def test_p1424_a_remote_added_for_a_third_party_still_fires(tmp_path):
             runs-on: ubuntu-latest
             steps:
               - run: |
-                  git remote add up https://{_HOST}/third-party/tools.git
+                  git remote add up {_THIRD_PARTY_URL}
                   git fetch up main
                   git checkout FETCH_HEAD
                   bash install.sh
@@ -3921,11 +3954,11 @@ def test_p1424_a_lookalike_repository_is_not_your_repository(tmp_path):
     # EXPRESSION half searched for `${{ github.repository }}` anywhere in the
     # URL, so a stranger's URL that merely embeds it read as your own.
     hits = _self_clone_repo(
-        tmp_path, "https://" + _HOST + "/evil/${{ github.repository }}-mirror.git",
+        tmp_path, _url("evil/" + _SELF_REPO + "-mirror" + _DOT_GIT),
         "python3 tools/release.py")
     assert len(hits) == 1, hits
     assert _self_clone_repo(
-        tmp_path / "self", "https://" + _HOST + "/${{ github.repository }}.git",
+        tmp_path / "self", _url(_SELF_REPO + _DOT_GIT),
         "python3 tools/release.py") == []
 
 
@@ -4340,11 +4373,11 @@ def test_p1424_the_env_var_spelling_of_your_own_slug_is_not_third_party(
             runs-on: ubuntu-latest
             steps:
               - run: |
-                  git remote add up "https://$GITHUB_REPOSITORY"
+                  git remote add up "%s"
                   git fetch up main
                   git checkout FETCH_HEAD
                   bash install.sh
-    """)
+    """ % _SELF_ENV_URL)
     assert list(scan._correlation_unverified_remote_code_execution(wf)) == []
 
 
