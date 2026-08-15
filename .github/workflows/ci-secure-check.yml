@@ -8,23 +8,27 @@
 #     every one is surfaced as a ::warning:: annotation and in the job summary.
 #     "Does not block" must not decay into "does not appear".
 #
-# Reuse in any other repo: copy this file and .github/scripts/ci_secure_gate.py.
-# Under Actions the gate takes its scan root from GITHUB_WORKSPACE, so the path
-# is free; off Actions it falls back to two directories up, which is why the
-# in-repo location is `.github/scripts/`. This repo runs the engine from its own
-# tree; a repo that does not vendor
-# the engine fetches it and points CI_SECURE_ENGINE at the fetched scan.py,
-# replacing the "Run ci-secure" step with:
-#   - run: |
-#       git init /tmp/ci-secure-engine
-#       git -C /tmp/ci-secure-engine fetch --depth 1 \
-#         https://github.com/starslingdev/skills <pinned-sha>
-#       git -C /tmp/ci-secure-engine checkout FETCH_HEAD
-#     # `git clone --depth 1` cannot be followed by `checkout <sha>`: a depth-1
-#     # clone fetches only the default-branch tip, so the pin would never resolve.
-#   - run: python3 .github/scripts/ci_secure_gate.py
-#     env:
-#       CI_SECURE_ENGINE: /tmp/ci-secure-engine/skills/ci-secure/scripts/scan.py
+# Reuse in another repo: ask ci-secure to install itself. It VENDORS the engine
+# and the gate into your repository - copied in, reviewed as a pull request,
+# refreshed when you ask - so nothing is fetched and executed at CI time. The
+# gate resolves the engine relative to its own file, with CI_SECURE_ENGINE as
+# the redirect for a vendored layout; the scan root stays GITHUB_WORKSPACE,
+# which is the tree being judged and is never where executable code comes from.
+#
+# There is deliberately no fetch-a-pinned-sha-and-run-it recipe here any more.
+# We ship a detector for that shape (P14.24, unverified remote code execution):
+# a pin can be moved or deleted in a repository you do not control, so a CI job
+# that fetches and executes code is one upstream compromise away from running
+# whatever arrives. Recommending it in the header of our own security gate was
+# advice this scanner would flag in anyone else's workflow.
+#
+# A note for whoever adds a merge queue here. `ci-secure` is produced by the
+# verdict job below, whose predicate reasons about two mutually exclusive scans,
+# and neither scan's condition was written with `merge_group` in mind. If
+# `ci-secure` is required in the queue while this workflow does not trigger on
+# `merge_group`, the check never reports and the queue waits forever; and if the
+# verdict job greens while the scan it needs was SKIPPED for that event, the
+# skipped-check bypass reopens one event over. Trace both before adding it.
 #
 # Run the GATE, never scan.py directly: scan.py exits non-zero only on
 # OPERATIONAL errors (no workflows to scan, unreadable catalog, bad arguments)
@@ -39,6 +43,13 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Every other trigger judges a proposed change. This one re-judges what
+  # already merged, which is the only way a pin that ROTS is ever noticed: an
+  # action SHA that is legitimate today can be deleted or orphaned tomorrow in
+  # a repository nobody here controls, and no pull request of ours would see
+  # it. Mondays, early UTC.
+  schedule:
+    - cron: "17 6 * * 1"
   workflow_dispatch:
 
 concurrency:
@@ -73,6 +84,28 @@ jobs:
       - run: pip install pyyaml
       - name: Run ci-secure against this repo's workflows
         run: python3 .github/scripts/ci_secure_gate.py
+        env:
+          # P14.11 verifies that every pinned action SHA actually exists in the
+          # action's canonical repository — the check that catches a pin aimed
+          # at a fork-only or dangling commit. It needs an authenticated `gh`,
+          # so it runs HERE, in the job whose code we control, and nowhere else.
+          #
+          # Turned on explicitly rather than by omission: the engine's default
+          # is `auto`, which runs the check iff an authenticated gh happens to
+          # be on the runner. That makes "did this security check run?" a
+          # property of the runner image, one rebuild away from silently
+          # stopping.
+          CI_SECURE_GH_IMPOSTOR: "on"
+          # The job's own read-only token: the least privilege that can read
+          # public commit metadata. It never reaches the fork twin below.
+          GH_TOKEN: ${{ github.token }}
+          # Anything short of a completed network check is red on the weekly
+          # run and a warning everywhere else. A pull request must not be
+          # blocked by somebody else's rate limit; the weekly run has no
+          # deadline and nothing to race, and it is the one run whose whole
+          # purpose is catching rot — so it is the one that must not be mutable
+          # by exhausting API quota.
+          CI_SECURE_GH_STRICT: ${{ github.event_name == 'schedule' && '1' || '0' }}
 
   # Fork PRs run the same scan on a GitHub-hosted runner: the scan needs no
   # secrets, so hosted execution of fork code is the standard ci-fork model.
@@ -102,6 +135,14 @@ jobs:
       - run: pip install pyyaml
       - name: Run ci-secure against this repo's workflows
         run: python3 .github/scripts/ci_secure_gate.py
+        env:
+          # OFF here, and off explicitly. This job executes code the pull
+          # request author wrote; handing it a token variable would hand
+          # attacker-authored steps a credential, which costs far more than the
+          # coverage it buys. The gate says the check did not run on both
+          # surfaces — the annotations and the summary's opening lines —
+          # because a check that did not run is never a pass.
+          CI_SECURE_GH_IMPOSTOR: "off"
 
   # ONE check name carries the verdict for fork and non-fork alike. The two scan
   # jobs are mutually exclusive, so a branch protection rule naming either of

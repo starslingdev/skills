@@ -57,7 +57,8 @@ def _scan(**overrides) -> dict:
     return scan
 
 
-def run_gate(tmp_path: Path, *, stdout: str, returncode: int = 0, engine: str | None = None):
+def run_gate(tmp_path: Path, *, stdout: str, returncode: int = 0,
+             engine: str | None = None, env_extra: dict[str, str] | None = None):
     """Run the real gate against a stub engine that prints `stdout` and exits `returncode`."""
     stub = tmp_path / "stub_engine.py"
     stub.write_text(
@@ -70,15 +71,16 @@ def run_gate(tmp_path: Path, *, stdout: str, returncode: int = 0, engine: str | 
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
 
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "GITHUB_WORKSPACE": str(workspace),
+        "CI_SECURE_ENGINE": engine if engine is not None else str(stub),
+        "GITHUB_STEP_SUMMARY": str(summary),
+    }
+    env.update(env_extra or {})
     proc = subprocess.run(
         [sys.executable, str(_GATE)],
-        capture_output=True, text=True,
-        env={
-            "PATH": "/usr/bin:/bin",
-            "GITHUB_WORKSPACE": str(workspace),
-            "CI_SECURE_ENGINE": engine if engine is not None else str(stub),
-            "GITHUB_STEP_SUMMARY": str(summary),
-        },
+        capture_output=True, text=True, env=env,
     )
     proc.summary = summary.read_text(encoding="utf-8") if summary.exists() else ""
     return proc
@@ -328,11 +330,14 @@ def test_a_crafted_filename_cannot_emit_its_own_workflow_commands(
     # invariant is per-line. Counting, not prefix-matching: a forged `::error::`
     # would satisfy "starts with ::error", so the assertion has to be that the
     # gate emitted EXACTLY the commands it meant to — one warning for the one
-    # finding, one error for the one failed fact — and nothing else.
+    # finding, one warning for the network-gated check this fixture reports as
+    # incomplete, one error for the one failed fact — and nothing else.
     emitted = [ln.strip() for ln in (proc.stdout + proc.stderr).splitlines()
                if ln.strip().startswith("::")]
-    assert len(emitted) == 2, f"expected exactly 2 workflow commands, got {emitted}"
+    assert len(emitted) == 3, f"expected exactly 3 workflow commands, got {emitted}"
     assert sum(ln.startswith("::warning file=") for ln in emitted) == 1
+    assert sum(ln.startswith("::warning::ci-secure network-gated check")
+               for ln in emitted) == 1
     assert sum(ln.startswith("::error::ci-secure fact failed") for ln in emitted) == 1
     # Escaped rather than dropped: the payload survives mid-line, percent-encoded,
     # so the evidence a reviewer needs is still legible.
@@ -409,6 +414,139 @@ def test_a_crafted_filename_cannot_break_out_of_the_summary(tmp_path: Path) -> N
     assert any("evil - PASS 'all good' foo.yml" in ln for ln in proc.summary.splitlines()), (
         "the filename should still be readable in the row the gate wrote, just flattened"
     )
+
+
+# --------------------------------------------------------------------------
+# The network-gated check: on or off, never "whatever the runner happened to have"
+# --------------------------------------------------------------------------
+
+def _engine_argv(tmp_path: Path, env_extra: dict[str, str] | None = None):
+    """Run a stub engine that reports the argv the gate invoked it with."""
+    stub = tmp_path / "argv_engine.py"
+    argv_file = tmp_path / "argv.json"
+    # Written to a file, not to stderr: the gate captures the engine's stderr
+    # and only echoes it on a failing run, so a stub that reported there would
+    # be invisible on exactly the green path this asserts about.
+    stub.write_text(
+        "import json, sys\n"
+        f"open({str(argv_file)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+        f"sys.stdout.write({json.dumps(_CLEAN)!r})\n",
+        encoding="utf-8")
+    summary = tmp_path / "summary.md"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    env = {"PATH": "/usr/bin:/bin", "GITHUB_WORKSPACE": str(workspace),
+           "CI_SECURE_ENGINE": str(stub), "GITHUB_STEP_SUMMARY": str(summary)}
+    env.update(env_extra or {})
+    proc = subprocess.run([sys.executable, str(_GATE)],
+                          capture_output=True, text=True, env=env)
+    proc.summary = summary.read_text(encoding="utf-8") if summary.exists() else ""
+    proc.argv = (json.loads(argv_file.read_text(encoding="utf-8"))
+                 if argv_file.exists() else [])
+    return proc
+
+
+def test_the_scan_root_defaults_to_the_gates_own_tree_off_actions(tmp_path: Path) -> None:
+    """With no GITHUB_WORKSPACE, the scan root is the repository the gate is in.
+
+    Two paths matter and only one of them is exercised by CI. Under Actions
+    GITHUB_WORKSPACE is always set, so the fallback is the path a maintainer
+    hits running the gate by hand — and if it resolved to the wrong directory
+    the engine would scan a tree with no workflows in it, which the gate calls
+    "no workflow files were scanned" and reds. Silent, confusing, and only
+    reachable off CI, which is exactly why it is pinned here.
+
+    The scan root is also the ONLY thing GITHUB_WORKSPACE may decide. The
+    engine and the rule are resolved from the gate's own location regardless;
+    see test_ci_secure_gate_resolution.py.
+    """
+    proc = _engine_argv(tmp_path, {"GITHUB_WORKSPACE": ""})
+
+    assert "--root" in proc.argv, "the gate must always tell the engine what to scan"
+    assert proc.argv[proc.argv.index("--root") + 1] == str(_REPO), (
+        "off Actions the scan root falls back to the gate's own repository root")
+
+
+def test_the_impostor_check_is_always_passed_explicitly(tmp_path: Path) -> None:
+    """`auto` is never sent, and the flag is never simply omitted.
+
+    Omitting it lands on the engine's `auto` default, which runs the check iff
+    an authenticated `gh` happens to be on the runner. That makes "did this
+    security check run?" a property of the runner image rather than of the
+    workflow — the silent-skip trap, one image rebuild away.
+    """
+    proc = _engine_argv(tmp_path)
+    assert "--gh-impostor" in proc.argv, "the flag must be explicit, never defaulted"
+    assert proc.argv[proc.argv.index("--gh-impostor") + 1] == "off"
+
+
+def test_the_job_decides_whether_the_impostor_check_runs(tmp_path: Path) -> None:
+    """A job holding a token turns it ON; the same script, a different job, does not."""
+    proc = _engine_argv(tmp_path, {"CI_SECURE_GH_IMPOSTOR": "on"})
+    assert proc.argv[proc.argv.index("--gh-impostor") + 1] == "on"
+
+
+def test_an_unrecognised_impostor_setting_is_red(tmp_path: Path) -> None:
+    """Anything but on/off is red, and `auto` especially so.
+
+    A typo must not silently become "off" — that is the difference between a
+    check that was turned off deliberately and one that stopped running.
+    """
+    for value in ("auto", "yes", ""):
+        proc = _engine_argv(tmp_path, {"CI_SECURE_GH_IMPOSTOR": value})
+        assert proc.returncode == 1, f"{value!r} was accepted"
+        assert "CI_SECURE_GH_IMPOSTOR" in proc.stdout
+
+
+def test_a_partial_network_result_is_disclosed_and_never_reads_as_clean(
+        tmp_path: Path) -> None:
+    """`partial:` means some pins were never verified. That is not "no findings".
+
+    Rate limiting is the ordinary cause, and it is reachable on purpose: an
+    attacker who can burn the API quota can otherwise mute this check.
+    """
+    scan = _scan(gh_checks={"P14.11": "partial: 3 of 9 unique pin(s) verified, 0 "
+                                      "flagged, 6 UNVERIFIED (network/rate-limit) "
+                                      "— not treated as clean"})
+    proc = run_scan(tmp_path, scan)
+
+    assert proc.returncode == 0, "a partial result discloses on a PR, it does not block"
+    assert "::warning::" in proc.stdout
+    assert "did not complete" in proc.stdout.lower() or "partial" in proc.stdout.lower()
+    assert "P14.11" in proc.summary
+
+
+def test_a_partial_network_result_is_red_when_the_run_demands_completeness(
+        tmp_path: Path) -> None:
+    """The scheduled run against the default branch is the one that must be complete.
+
+    A pull request cannot be held hostage to somebody else's rate limit, but
+    the weekly run has no deadline and nothing to race — so there, anything
+    short of "ran" is a red the maintainer sees rather than a warning nobody
+    reads.
+    """
+    scan = _scan(gh_checks={"P14.11": "partial: 1 of 9 unique pin(s) verified, 0 "
+                                      "flagged, 8 UNVERIFIED (network/rate-limit)"})
+    proc = run_scan(tmp_path, scan, env_extra={"CI_SECURE_GH_STRICT": "1"})
+
+    assert proc.returncode == 1
+    assert "::error::" in proc.stdout
+    assert "P14.11" in proc.stdout
+
+
+def test_a_skipped_check_is_disclosed_in_the_summarys_first_lines(
+        tmp_path: Path) -> None:
+    """Both surfaces say it, and the summary says it before anything reassuring.
+
+    A reader who stops after the headline must not come away thinking the scan
+    covered what it did not. "No findings from P14.11" and "P14.11 never ran"
+    are different claims, and only one of them is true here.
+    """
+    proc = run_scan(tmp_path, _CLEAN)
+
+    head = "\n".join(proc.summary.splitlines()[:6])
+    assert "did NOT run" in head or "did not run" in head, (
+        f"the skip is not disclosed in the summary's first lines:\n{head}")
 
 
 def test_the_summary_reports_counts_and_never_the_bare_aggregate(tmp_path: Path) -> None:

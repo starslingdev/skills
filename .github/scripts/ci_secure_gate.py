@@ -94,12 +94,31 @@ CONFIG, CONFIG_PATH = load_config()
 # unreachable, because checkout and pip had already spent a minute of that clock.
 ENGINE_TIMEOUT_S = 420
 
-# P14.11 (impostor action SHA) is the one detector that needs network + a GitHub
-# token. Neither job here has one, so it is turned off explicitly rather than
-# left on `auto`: otherwise whether a security check runs would depend on
-# whichever runner image happened to ship an authenticated `gh`. The engine
-# records the decision in `gh_checks`, which this gate renders.
-ENGINE_ARGS = ["--gh-impostor", "off"]
+# P14.11 (impostor action SHA) is the one detector that needs network and a
+# GitHub token, so whether it runs is a property of the JOB, not of this script:
+# a job holding a read-only token turns it on, a job running fork-authored code
+# does not get one. CI_SECURE_GH_IMPOSTOR carries that decision.
+#
+# The value is always passed through explicitly and `auto` is not accepted.
+# `auto` (and simply omitting the flag, which lands on it) runs the check iff an
+# authenticated `gh` happens to be present, which makes "did this security check
+# run?" a property of the runner image - one rebuild away from silently
+# stopping. A typo is red for the same reason: a check that quietly turned
+# itself off looks exactly like a check that passed.
+IMPOSTOR = os.environ.get("CI_SECURE_GH_IMPOSTOR", "off").strip().lower()
+ENGINE_ARGS = ["--gh-impostor", IMPOSTOR]
+
+# Anything short of a completed network check is disclosed everywhere; whether
+# it also BLOCKS depends on the run. A pull request must not be held hostage to
+# someone else's rate limit, so there it warns. The scheduled run against the
+# default branch has no deadline and nothing to race, so there it is red - and
+# it is the run that catches a pin that rots after merge.
+STRICT_GH = os.environ.get("CI_SECURE_GH_STRICT", "").strip() == "1"
+
+# The engine's own vocabulary for a completed network check. `partial:` (some
+# pins unverified) and `skipped:` (never ran) are the two it uses for anything
+# less, and both are held to be short of "ran".
+GH_CHECK_COMPLETE_PREFIX = "ran:"
 
 
 # GitHub rejects a step summary over 1 MiB, so an oversized one is not a big
@@ -210,6 +229,13 @@ def main() -> int:
         return fail(f"ci-secure rule at {CONFIG_PATH} is incoherent: an outcome that "
                     "blocks or is recognised has no display mark")
 
+    if IMPOSTOR not in ("on", "off"):
+        return fail(
+            f"CI_SECURE_GH_IMPOSTOR must be 'on' or 'off', not {IMPOSTOR!r} - "
+            "'auto' and an unset value are refused on purpose, because they make "
+            "whether the network-gated check runs depend on the runner image "
+            "rather than on this job")
+
     try:
         result = subprocess.run(
             [sys.executable, str(ENGINE), "--root", str(REPO_ROOT), *ENGINE_ARGS],
@@ -299,6 +325,18 @@ def main() -> int:
     if score.get("caveat"):
         lines += [f"> {flat(score['caveat'])}", ""]
 
+    # A network-gated check that did not complete is disclosed HERE, in the
+    # summary's opening lines, not only in the detector section far below. A
+    # reader who stops after the headline must not come away with a coverage
+    # claim the run cannot support: "no findings from P14.11" and "P14.11 never
+    # ran" are different statements, and the reassuring one is false.
+    incomplete_gh = {k: v for k, v in gh_checks.items()
+                     if not str(v).startswith(GH_CHECK_COMPLETE_PREFIX)}
+    if incomplete_gh:
+        lines += [f"> **Network-gated check(s) did NOT run to completion:** "
+                  f"{', '.join(flat(k) for k in sorted(incomplete_gh))}. "
+                  "This scan does not cover what they would have checked.", ""]
+
     # An unrecognised outcome renders as itself rather than folding into FAIL:
     # the summary a human reads must never disagree with the exit code.
     for f in facts:
@@ -329,6 +367,12 @@ def main() -> int:
     # silent, and a run where NOTHING was measured is caught by `degraded` above.
     for f in unmeasured:
         print(f"::warning::ci-secure fact unmeasured: {esc(f['fact_id'])} - {esc(f['evidence'])}")
+    # The second surface for the same disclosure. On a strict run this is
+    # promoted to a verdict below rather than repeated as a warning.
+    if not STRICT_GH:
+        for name, status in sorted(incomplete_gh.items()):
+            print(f"::warning::ci-secure network-gated check {esc(name)} did not "
+                  f"complete: {esc(status)} - this scan does not cover it")
     if incomplete:
         lines += ["", f"### Coverage gaps: {flat(incomplete)}"]
 
@@ -355,6 +399,12 @@ def main() -> int:
     for f in failed:
         fail(f"ci-secure fact failed: {f['fact_id']} - {f['evidence']}")
         red = True
+    if STRICT_GH:
+        for name, status in sorted(incomplete_gh.items()):
+            fail(f"ci-secure network-gated check {name} did not complete: {status} "
+                 "- this run requires complete coverage, and a check that could "
+                 "not finish is not a check that passed")
+            red = True
 
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:

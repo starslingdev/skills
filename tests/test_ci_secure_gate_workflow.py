@@ -154,10 +154,83 @@ def test_the_scan_jobs_stay_mutually_exclusive_and_cover_every_event(workflow: d
     assert scan["steps"][-1]["run"] == fork["steps"][-1]["run"], (
         "both runners must execute the identical gate, or the fork twin is a weaker check"
     )
-    assert scan["steps"][-1]["run"] == "python3 .github/scripts/ci_secure_gate.py", (
+    run = scan["steps"][-1]["run"]
+    assert run == "python3 .github/scripts/ci_secure_gate.py", (
         "the jobs must run the gate, not the engine: scan.py prints its JSON and exits 0 "
         "whatever it found, so a step that calls it directly is a green-forever check"
     )
+    # String identity alone is not enough, and neither is existence alone. A
+    # rename that updates the workflow and forgets nothing still has to point at
+    # a file that is there; and `is_file()` on its own would be satisfied just as
+    # happily by `python3 skills/ci-secure/scripts/scan.py`, which is the
+    # green-forever substitution the string assert above exists to block.
+    assert (_REPO / run.split()[-1]).is_file(), (
+        f"the workflow runs {run.split()[-1]!r}, which does not exist")
+
+
+def test_only_the_trusted_job_can_run_the_network_gated_check(workflow: dict) -> None:
+    """The impostor check runs for real where there is a token, and nowhere else.
+
+    P14.11 verifies that each pinned action SHA actually exists in the action's
+    canonical repository — the check that catches an impostor pin pointing at a
+    fork-only or dangling commit. It needs the network and an authenticated
+    `gh`, so it only runs in the job that has one.
+
+    The fork twin deliberately does not get one. That job executes code the
+    pull request author wrote, and handing it a token variable would be
+    handing attacker-authored steps a credential to use — a much larger loss
+    than the coverage gained. It runs with the check OFF and says so on both
+    surfaces instead, because a check that did not run is never a pass.
+    """
+    scan = workflow["jobs"]["scan"]["steps"][-1]
+    fork = workflow["jobs"]["scan-fork"]["steps"][-1]
+
+    assert scan["env"]["CI_SECURE_GH_IMPOSTOR"] == "on", (
+        "the trusted job must turn the check on explicitly; omitting it lands on "
+        "the engine's `auto`, where a runner image decides whether a security "
+        "check runs")
+    assert scan["env"]["GH_TOKEN"] == "${{ github.token }}", (
+        "the check needs an authenticated gh; the job's own read-only token is "
+        "the least privilege that works")
+
+    assert fork["env"]["CI_SECURE_GH_IMPOSTOR"] == "off", (
+        "the fork twin must turn it off explicitly, not leave it to a default")
+    assert not any("TOKEN" in key.upper() for key in fork.get("env", {})), (
+        "the fork job runs pull-request-authored code and must not be handed a "
+        "token of any kind")
+
+
+def test_a_weekly_run_rechecks_the_default_branch_and_demands_completeness(
+        workflow: dict) -> None:
+    """Only a scheduled run catches a pin that rots AFTER it merged.
+
+    Every other trigger here judges a proposed change. But an action SHA that
+    is legitimate today can be deleted or orphaned tomorrow, in a repository
+    nobody here controls — nothing about our own pull requests would ever
+    notice. The weekly run against the default branch is the only shape that
+    does.
+
+    It also runs strict: a network check that could not complete is red there,
+    where a pull request only warns. A pull request must not be blocked by
+    someone else's rate limit, but the weekly run has no deadline and nothing
+    to race, and letting it pass on an incomplete check would make the one run
+    that exists to catch rot the easiest one to mute.
+    """
+    triggers = workflow[True] if True in workflow else workflow["on"]
+    assert "schedule" in triggers, "no scheduled run: post-merge pin rot goes unnoticed"
+    crons = [entry["cron"] for entry in triggers["schedule"]]
+    assert crons, "the schedule trigger carries no cron expression"
+
+    env = workflow["jobs"]["scan"]["steps"][-1]["env"]
+    strict = " ".join(str(env["CI_SECURE_GH_STRICT"]).split())
+    assert "schedule" in strict, (
+        "the scheduled run must demand a complete network check; strict mode is "
+        f"wired as {strict!r}")
+
+    # The concurrency key separates events, so the weekly run cannot be
+    # cancelled by an ordinary push — which would silently cost us the one run
+    # that catches rot.
+    assert "github.event_name" in workflow["concurrency"]["group"]
 
 
 def test_the_verdict_job_is_hosted_and_checks_out_nothing(verdict: dict) -> None:
