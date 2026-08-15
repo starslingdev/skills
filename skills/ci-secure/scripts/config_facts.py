@@ -770,7 +770,14 @@ def _on_mapping(doc: dict) -> dict | None:
 # So an UNKNOWN producer participates — its skip analysis still counts against
 # the check — but it can never be the evidence that a check always reports.
 _ABILITY_YES, _ABILITY_NO, _ABILITY_UNKNOWN = "yes", "no", "unknown"
-_MATCH_ALL_BRANCH_PATTERNS = {"**", "*", "'**'", '"**"'}
+# Only `**` matches EVERY branch. A single `*` is not a synonym for it: in
+# GitHub's filter glob `*` matches a run of characters that does NOT include a
+# slash, so `feature/x`, `dependabot/npm/…` and every other slashed head branch
+# escape it. Treating `*` as match-all certified a required check on a push
+# that never fires for those branches — the same over-certification `**`
+# alongside an exclusion was already taught to avoid — so `*` routes to UNKNOWN
+# with the rest of the specific-branch filters.
+_MATCH_ALL_BRANCH_PATTERNS = {"**", "'**'", '"**"'}
 
 
 def _matches_every_branch(patterns: Any) -> bool:
@@ -808,6 +815,16 @@ def _pr_reporting_ability(doc: dict) -> str:
     if not isinstance(push, dict):
         return _ABILITY_YES          # `on: push` with no filters at all
     branches = push.get("branches")
+    branches_ignore = push.get("branches-ignore")
+    # A `branches-ignore:` that excludes EVERY branch means the push fires on
+    # none of them, so it can never report a check on a pull request — that is
+    # NO, not UNKNOWN. Left as UNKNOWN, a sole producer under it that could also
+    # skip was counted as a bypassable required check and the fact went RED on a
+    # merge that is in fact always blocked (the check stays pending, it does not
+    # green). GitHub does not accept `branches` and `branches-ignore` for the
+    # same event, so a match-all exclusion stands alone and needs no other test.
+    if branches_ignore and _matches_every_branch(branches_ignore):
+        return _ABILITY_NO
     # ANY other filter is a reason the push may not run, whatever the branch
     # pattern says — so all of them have to be read before the match-all
     # shortcut answers. Reading `branches: ['**']` first certified a required
@@ -1214,8 +1231,15 @@ def _required_checks_skippable(
     tail = ((" Not judged: " + _capped(unjudged, 4, "; ") + ".")
             if unjudged else "")
     if bypassable:
+        # `detail` names the branch and, when only one protection source could
+        # be read, carries the partial-read caveat. The pass and unmeasured arms
+        # both surface it; the fail arm dropped it, so a reader shown a
+        # bypassable check was never told the required-check list they were
+        # judged against was itself a floor — a check configured only in the
+        # unread source is invisible here.
         return "fail", (
-            "GitHub reports a SKIPPED required check as passed, and "
+            f"on {detail}, GitHub reports a SKIPPED required check as passed, "
+            "and "
             + _capped(bypassable, 3)
             + " — so nothing in these workflows is guaranteed to report it."
             + tail)

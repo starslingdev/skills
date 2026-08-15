@@ -22,6 +22,61 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **A single-star branch filter (`branches: ['*']`) no longer
+  certifies a required check.** GitHub's filter glob `*` matches a run of
+  characters that does NOT include a slash, so `feature/x`, `dependabot/…` and
+  every slashed head branch escape it — an always-running job under `['*']`
+  cannot be shown to run on every pull request. It was read as match-all and
+  certified the check while the reachable PR producer could skip; it routes to
+  UNKNOWN now, alongside the other specific-branch filters. `**` still certifies.
+
+- **2026-08-14** — **A push that ignores every branch (`branches-ignore:
+  ['**']`) is treated as a non-producer, not a bypass.** The push fires on no
+  branch, so it can never report a check on a pull request — the check stays
+  pending and the merge is blocked, it does not green. Left as UNKNOWN, a sole
+  skippable producer under it was counted as a bypassable required check and the
+  fact went RED on a repository whose merges are in fact always blocked.
+
+- **2026-08-14** — **A bypassable required check found on a partially-read
+  branch protection now discloses that the required-check list was itself a
+  floor.** When only one protection source could be read (the other 403'd), the
+  fail evidence dropped the partial-read caveat the pass and unmeasured arms
+  both carry, so the reader was judged against a list they were never told was
+  incomplete — a check configured only in the unread source is invisible here.
+
+- **2026-08-14** — **P14.24: an execution whose path BEGINS with an unresolved
+  shell variable (`$MYVAR/tool.sh`) is a coverage note, not a finding.** It was
+  joined onto the working directory and, inside a third-party checkout, fired —
+  but the variable could hold an absolute path that escapes the tree, so
+  resolving it was a guess. The runner's own absolute variables are still
+  resolved, and a variable DEEPER in a path rooted at the fetched directory
+  (`tools/$V/run.sh`) is inside the tree whatever it holds and still fires.
+
+- **2026-08-14** — **P14.24: `bash -o pipefail tools/run.sh` and its kin no
+  longer miss the execution.** `-o` (and bash's `-O`) name a shell OPTION as
+  their value, so the script is the next word; read flatly, `pipefail` was taken
+  for the path and the real execution silently missed. Scoped to the shells —
+  python's `-O` is a boolean and still runs its script.
+
+- **2026-08-14** — **P14.24: a nested command substitution
+  (`OUT=$(echo $(tools/setup.sh))`) is now scanned.** `$(…)` runs its body and a
+  body can hold another `$(…)`; reading only the outer level left the inner
+  execution a silent false clean — no finding, no gap.
+
+- **2026-08-14** — **P14.24: a re-clone of a directory after an earlier pin is
+  no longer read as pinned.** clone → pin → re-clone → run: the tree that runs
+  is the unpinned re-clone, but keeping the FIRST fetch let the pin (which sat
+  between the stale first clone and the execution) suppress the finding, so the
+  job went silent while it ran unpinned remote code. The last unpinned fetch
+  into a destination wins; a genuine pin of that surviving fetch still
+  suppresses.
+
+- **2026-08-14** — **P14.24: a single-line `run:` value written with YAML quotes
+  is read as the parser saw it.** `run: "git clone … && bash x.sh"` was scraped
+  raw, so the quotes reached the shell tokenizer and the whole line came back as
+  one quoted word — the clone and the execution both vanished, a silent false
+  clean. Block scalars and multi-line scalars are unaffected.
+
 - **2026-08-14** — **Test and doc surface reshaped so it stops tripping the
   registry's own scanner.** No behaviour change: every URL these tests build is
   byte-identical at run time, and nothing any test asserts moved. The scanner

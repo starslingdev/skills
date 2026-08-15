@@ -625,9 +625,10 @@ Execution shapes matched: an interpreter running a fetched file (`python3`/`node
   - other fetchers: `gh repo clone`, `svn checkout`, `git submodule update --remote`, and package managers pointed at a git ref (`pip install "git+…@main"`, `go install …@latest`, an npm/cargo git dependency);
   - a tarball fetched with `curl`/`wget`, unpacked, and then run;
   - a fetch and its execution separated by a rename (`mv tools built && python3 built/setup.py`);
+  - the mirror of that rename — a third-party tree whose bytes are OVERWRITTEN by the repo's own content before the named file runs (`rm -rf dir/*; cp -r "$GITHUB_WORKSPACE/mine" dir/`), so the fetch into `dir` is real but the executed file is self-owned; the finding names the fetch it can see, and whether a copy-in later replaced those bytes is not tracked;
   - a remote whose URL is set with `git config remote.<name>.url` rather than `git remote add`;
   - execution through an interpreter's INLINE program — `bash -c "…"`, `perl -e`, `php -r`, `pwsh -Command`, `powershell -EncodedCommand` — whose text is not read as commands;
-  - a path built from a variable this scan cannot resolve (`"$TOOLS/setup.sh"`), except for the runner's own absolute variables, which are treated as absolute;
+  - an execution whose path BEGINS with a variable this scan cannot resolve (`"$TOOLS/setup.sh"`) — it could hold an absolute path that escapes the fetched tree, so it is recorded as a coverage note rather than resolved and reported; the runner's own absolute variables (`$GITHUB_WORKSPACE/…`) are the exception, treated as absolute, and a variable DEEPER in a path rooted at the fetched directory (`tools/$V/run.sh`) is inside the tree whatever it holds and still fires;
   - execution through a build driver rather than an interpreter (`make -C tools`), or through a versioned interpreter (`python3.11`);
   - a fetch whose execution happens in a different job (different runner, different tree).
 

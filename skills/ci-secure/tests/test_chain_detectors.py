@@ -4657,3 +4657,177 @@ def test_p1424_a_checkout_pin_does_not_depend_on_an_unrelated_neighbour(
               - run: bash tools/run.sh
     """)
     assert without == with_neighbour == []
+
+
+# ---------------------------------------------------------------------------
+# P14.24 — follow-up hardening: shell-var executed paths, shell `-o` values,
+# nested substitution, re-clone-after-pin, and YAML-quoted single-line steps.
+# ---------------------------------------------------------------------------
+
+
+def test_p1424_an_unresolved_shell_variable_path_is_a_gap_not_a_fire(tmp_path):
+    """A path whose first component is a shell variable this scan cannot resolve
+    (`$MYVAR/tool.sh`) was joined onto the working directory and, inside a
+    third-party checkout, fired — but the variable could hold an absolute path
+    that escapes the tree entirely, so resolving it was a guess. It is a
+    coverage note, not a finding."""
+    before = len(scan._DROPPED_MATCHES)
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  cd tools
+                  bash $MYVAR/tool.sh
+    """)
+    added = scan._DROPPED_MATCHES[before:]
+    assert hits == []
+    assert any("shell variable" in d["reason"] for d in added), added
+
+
+def test_p1424_a_path_under_a_known_tree_still_fires_though_it_holds_a_var(
+        tmp_path):
+    """The narrowness control: only a LEADING variable is unknowable. A path
+    rooted at the fetched directory with a variable deeper in
+    (`tools/$V/run.sh`) is inside the tree whatever the variable holds, so it is
+    still a real execution out of it."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  bash tools/$V/run.sh
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_a_shell_o_option_value_is_not_the_executed_path(tmp_path):
+    """`bash -o pipefail tools/run.sh` names a shell OPTION as the value of
+    `-o`; the script is the NEXT word. Read flatly, `pipefail` was taken for the
+    path and the real execution silently missed."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  bash -o pipefail tools/run.sh
+    """)
+    assert len(hits) == 1
+    assert "tools/run.sh" in (hits[0].derived_note or "")
+
+
+def test_p1424_python_dash_capital_o_is_boolean_and_runs_its_script(tmp_path):
+    """The scoping control for the `-o`/`-O` value rule: python's `-O` is a
+    boolean (optimize), so `python3 -O tools/setup.py` runs `tools/setup.py`.
+    Treating `-O` as value-taking there would eat the script."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  python3 -O tools/setup.py
+    """)
+    assert len(hits) == 1
+    assert "tools/setup.py" in (hits[0].derived_note or "")
+
+
+def test_p1424_a_nested_command_substitution_is_scanned(tmp_path):
+    """`$(…)` runs its body, and a body can hold another `$(…)`. Reading only
+    the outer level left `OUT=$(echo $(tools/setup.sh))` a silent false clean —
+    no finding, no gap. The inner execution is now seen."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone --branch main "$TOOLS_URL" tools
+                  OUT=$(echo $(tools/setup.sh))
+    """)
+    assert len(hits) == 1
+    assert "tools/setup.sh" in (hits[0].derived_note or "")
+
+
+def test_p1424_a_reclone_after_a_pin_is_not_treated_as_pinned(tmp_path):
+    """clone → pin → re-clone of the SAME directory → run: the tree that runs is
+    the unpinned re-clone. Keeping the FIRST fetch let the pin (which sat
+    between the stale first clone and the execution) suppress the finding, so
+    the job went silent while it ran unpinned remote code. The last unpinned
+    fetch into a destination wins."""
+    sha = "a" * 40
+    hits = _remote_exec_hits(tmp_path, f"""\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone "$TOOLS_URL" tools
+                  git -C tools checkout {sha}
+                  git clone "$TOOLS_URL" tools
+                  python3 tools/setup.py
+    """)
+    assert len(hits) == 1
+
+
+def test_p1424_a_genuine_pin_of_the_surviving_reclone_still_suppresses(
+        tmp_path):
+    """The control for last-fetch-wins: a pin applied to the re-clone, before it
+    runs, is the fix this entry recommends and must still stay silent."""
+    sha = "a" * 40
+    assert _remote_exec_hits(tmp_path, f"""\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone "$TOOLS_URL" tools
+                  git clone "$TOOLS_URL" tools
+                  git -C tools checkout {sha}
+                  python3 tools/setup.py
+    """) == []
+
+
+def test_p1424_a_quoted_single_line_run_scalar_is_read_as_shell(tmp_path):
+    """A single-line `run:` value written with YAML quotes was scraped raw, so
+    the quotes reached the shell tokenizer and `run: "git clone … && bash
+    x.sh"` came back as one quoted word — the clone and the execution both
+    vanished, a silent false clean. The value is read as the parser saw it."""
+    for quote in ('"', "'"):
+        body = (
+            "name: x\n"
+            "on: push\n"
+            "jobs:\n"
+            "  b:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: " + quote
+            + "git clone --branch main $U tools && bash tools/go.sh" + quote
+            + "\n"
+        )
+        wf = _wf(tmp_path, f"wf_{quote!r}.yml".replace("'", "s").replace('"', "d"),
+                 body)
+        hits = list(scan._correlation_unverified_remote_code_execution(wf))
+        assert len(hits) == 1, (quote, hits)
+        assert "tools/go.sh" in (hits[0].derived_note or "")

@@ -2981,3 +2981,104 @@ jobs:
                                "pr.yml": _SKIPPABLE_PR_PRODUCER}, ["test"]),
         _FACT)
     assert f["outcome"] == "pass", f["evidence"]
+
+
+# --- follow-ups: branch-filter glob semantics and fail-evidence honesty ------
+
+_STAR_PUSH_PRODUCER = """\
+name: build
+on:
+  push:
+    branches: ['*']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+"""
+
+
+def test_a_single_star_branch_filter_does_not_certify(tmp_path):
+    """`*` is not `**`. GitHub's filter glob `*` matches a run of characters
+    that excludes `/`, so `feature/x`, `dependabot/…` and every slashed head
+    branch escape it — an always-running job under `branches: ['*']` cannot be
+    shown to run on every pull request's head branch. Treating `*` as match-all
+    certified the required check while the reachable PR producer could skip, so
+    the check greened on a slashed branch with neither job having reported."""
+    f = _outcome(
+        _facts_with(tmp_path, {"build.yml": _STAR_PUSH_PRODUCER,
+                               "pr.yml": _SKIPPABLE_PR_PRODUCER}, ["test"]),
+        _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_double_star_branch_filter_still_certifies(tmp_path):
+    """The control that keeps the fix narrow: `**` really does match every
+    branch, so an always-running job under it still certifies."""
+    dbl = _STAR_PUSH_PRODUCER.replace("['*']", "['**']")
+    f = _outcome(
+        _facts_with(tmp_path, {"build.yml": dbl,
+                               "pr.yml": _SKIPPABLE_PR_PRODUCER}, ["test"]),
+        _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+_MATCH_ALL_IGNORE_PRODUCER = """\
+name: build
+on:
+  push:
+    branches-ignore: ['**']
+permissions:
+  contents: read
+jobs:
+  test:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+"""
+
+
+def test_a_push_that_ignores_every_branch_is_no_producer_not_a_fail(tmp_path):
+    """`branches-ignore: ['**']` excludes every branch, so the push fires on
+    none of them and can never report a check on a pull request — the check
+    stays pending and the merge is blocked, it does not bypass. Left as UNKNOWN
+    ability, this sole skippable producer was still counted as a bypassable
+    required check and the fact went RED on a repository whose merge is in fact
+    always blocked. It must not be traced to a producer at all."""
+    f = _outcome(
+        _facts_with(tmp_path, {"build.yml": _MATCH_ALL_IGNORE_PRODUCER},
+                    ["test"]),
+        _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert f["outcome"] != "fail"
+
+
+def _partial_fetcher(contexts):
+    caveat = ("read from rulesets only — classic branch protection could not "
+              "be read, so a check configured only there is not counted here")
+    detail = "branch `main` (" + caveat + ")"
+
+    def fetch(repo):
+        return list(contexts), detail
+    return fetch
+
+
+def test_a_bypass_found_on_a_partially_read_protection_discloses_the_gap(
+        tmp_path):
+    """When only one protection source could be read AND a bypassable check is
+    found, the fail evidence must still say the required-check list was itself a
+    floor — a check configured only in the unread source is invisible here. The
+    fail arm dropped the partial-read caveat the pass and unmeasured arms both
+    carry, so the reader was judged against a list they were never told was
+    incomplete."""
+    root, files = _repo(tmp_path, {"ci.yml": _CONDITIONAL_ONLY})
+    f = _outcome(cf.compute_config_facts(
+        root, files, [], repo="owner/repo",
+        required_contexts_fetcher=_partial_fetcher(["test"]),
+        fork_approval_fetcher=lambda repo: ("all_external_contributors", "x")),
+        _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "read from rulesets only" in f["evidence"], f["evidence"]

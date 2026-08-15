@@ -2879,6 +2879,24 @@ _EXPRESSION_TOKEN_RE = re.compile(r"\$\{\{.*?\}\}", re.S)
 _COMMAND_SUBSTITUTION_RE = re.compile(r"\$\((?:[^()]|\([^()]*\))*\)", re.S)
 
 
+def _substitution_command_bodies(command: str) -> list[str]:
+    """Every command run INSIDE a `$( … )` substitution, at any nesting depth.
+
+    `$(…)` runs its body and its OUTPUT becomes a word, so the body is a command
+    in its own right. A body can itself hold a substitution —
+    `OUT=$(echo $(tools/setup.sh))` — and reading only the outer level left the
+    inner `tools/setup.sh` unscanned: no finding, no gap, a silent false clean.
+    Each body is recursed into before it is split, so an execution nested one or
+    more levels deep is still seen.
+    """
+    out: list[str] = []
+    for match in _COMMAND_SUBSTITUTION_RE.finditer(command):
+        inner = match.group(0)[2:-1]
+        out.extend(_substitution_command_bodies(inner))
+        out.extend(_install_command_segments(inner))
+    return out
+
+
 def _shell_tokens(segment: str) -> list[str]:
     """`segment` split the way a shell would, or `[]` when it cannot be.
 
@@ -2932,6 +2950,27 @@ def _resolve_path(cwd: str, path: str) -> str:
     if path.startswith("/") or _RUNNER_ABSOLUTE_RE.match(path):
         return os.path.normpath(path)
     return os.path.normpath(os.path.join(cwd, path))
+
+
+# A path whose FIRST component is a shell variable (`$FOO/x`, `${FOO}/x`) whose
+# value this scanner cannot know. Joining it onto the working directory is a
+# guess: the variable could hold an absolute path that escapes the fetched tree
+# entirely, so resolving it relative to a third-party checkout and firing was a
+# false positive. The runner-absolute variables (`$GITHUB_WORKSPACE/…` etc.)
+# are excluded — GitHub's contract makes them absolute, so `_resolve_path`
+# already places them, correctly, outside any relative destination. The
+# scanner's own stand-ins are excluded too: a `${{ }}` expression collapses to a
+# NUL-delimited `$EXPR<n>` token, `${{ github.repository }}` to `$SELF_REPO`,
+# and a `$(…)` substitution to `$SUBST`.
+_LEADING_SHELL_VAR_RE = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?(?:/|$)")
+
+
+def _leading_unresolved_var(path: str) -> bool:
+    if "\x00" in path or _RUNNER_ABSOLUTE_RE.match(path):
+        return False
+    if path.startswith(_SELF_REPO_TOKEN) or path.startswith("$SUBST"):
+        return False
+    return bool(_LEADING_SHELL_VAR_RE.match(path))
 
 
 def _under(dest: str, path: str) -> bool:
@@ -3207,6 +3246,16 @@ _INLINE_LONG_FLAGS = {
 # warning filter. Case matters: python's `-W` takes a value, perl's `-w` is a
 # boolean, and conflating them ate the script path after it.
 _INTERPRETER_VALUE_OPTS = {"-W"}
+# Shell-only value options. `bash -o pipefail script.sh` and its kin name a
+# shell OPTION as the value of `-o` (and `-O` for a bash `shopt` name), so the
+# path is the NEXT word — read flatly, `pipefail` was taken for the script and
+# the real execution silently missed. Scoped to the shells because python's
+# `-O` is a boolean (`python3 -O tool.py` runs `tool.py`), so a global entry
+# would eat the script there. `sh`/dash carries `-o` but not `-O`.
+_SHELL_VALUE_OPTS = {
+    "bash": {"-o", "-O"}, "zsh": {"-o", "-O"}, "ksh": {"-o", "-O"},
+    "sh": {"-o"},
+}
 # `-m` names a MODULE, which is not a path at all.
 _MODULE_FLAGS = {"-m"}
 
@@ -3219,6 +3268,7 @@ def _interpreter_executed_path(cmd: str, rest: list[str]) -> str | None:
     interpreter.
     """
     letters = _INLINE_LETTER_FLAGS.get(cmd, set())
+    value_opts = _INTERPRETER_VALUE_OPTS | _SHELL_VALUE_OPTS.get(cmd, set())
     i = 0
     while i < len(rest):
         tok = rest[i]
@@ -3233,12 +3283,12 @@ def _interpreter_executed_path(cmd: str, rest: list[str]) -> str | None:
             return None
         if tok in _MODULE_FLAGS:
             return None                      # a module name is not a path
+        if tok in value_opts:
+            i += 2                           # the value is not the program
+            continue
         if tok.startswith("-") and not tok.startswith("--") and len(tok) > 1:
             if letters & set(tok[1:]):
                 return None                  # `-c`, `-lc`, `-lane`, `-pe`, …
-        if tok in _INTERPRETER_VALUE_OPTS:
-            i += 2                           # the value is not the program
-            continue
         i += 1
     return None
 
@@ -3266,6 +3316,7 @@ def _job_shell_commands(
     lines = text.splitlines()
     shell_lines = _run_scalar_line_numbers(text)
     step_starts = _run_scalar_starts(text)
+    inline_values = _inline_run_values(text)
     start, end = job_range if job_range else (1, len(lines))
     out: list[tuple[int, str, str, bool]] = []
     heredoc: str | None = None
@@ -3293,7 +3344,11 @@ def _job_shell_commands(
         # the file reads as an unparsable command.
         key = _RUN_KEY_LINE_RE.match(cmd)
         if key and key.group(2) and not _BLOCK_SCALAR_RE.match(key.group(2).strip()):
-            cmd = key.group(2)
+            # Prefer the parser's own value for a single-line scalar, so YAML
+            # quoting (`run: "git clone … && bash x.sh"`) is stripped before the
+            # shell tokenizer sees it. Multi-line scalars are not in the map and
+            # keep the raw line.
+            cmd = inline_values.get(line_no, key.group(2))
         out.append((line_no, raw, cmd, line_no in step_starts))
         opened = _heredoc_delimiter(cmd)
         if opened:
@@ -3322,6 +3377,8 @@ class _StepMark:
     uses: str | None            # the action the step runs, verbatim
     start_line: int             # 1-based first line of the step itself
     end_line: int               # 1-based last line of the step
+    run_value: str | None = None      # the `run:` scalar, as the PARSER read it
+    run_end_line: int | None = None   # 1-based line the `run:` VALUE ends on
 
 
 def _step_marks(text: str) -> list[_StepMark] | None:
@@ -3382,6 +3439,10 @@ def _step_marks(text: str) -> list[_StepMark] | None:
                       if uses is not None and hasattr(uses, "value") else None),
                 start_line=step.start_mark.line + 1,
                 end_line=step.end_mark.line + 1,
+                run_value=(str(run.value)
+                           if run is not None and hasattr(run, "value")
+                           else None),
+                run_end_line=(run.end_mark.line + 1) if run is not None else None,
             ))
     return out
 
@@ -3415,6 +3476,33 @@ def _step_working_directories(text: str) -> dict[int, str]:
              if mark.run_line <= s <= mark.end_line), None)
         if start_line is not None:
             out[start_line] = mark.working_directory.strip()
+    return out
+
+
+def _inline_run_values(text: str) -> dict[int, str]:
+    """{run-scalar start line: the parser's own value} for SINGLE-LINE `run:`.
+
+    A single-line `run:` value comes from the composed document, not the raw
+    line, so YAML quoting never reaches the shell tokenizer. `run: "git clone …
+    && bash x.sh"` was handed to `shlex` with its double quotes intact and came
+    back as ONE quoted word — the clone and the execution both vanished, a
+    silent false clean. Block scalars (`run: |`) and plain multi-line scalars
+    keep their line-by-line reading; only a value the parser saw begin and end
+    on one line is substituted, so nothing multi-line is disturbed.
+    """
+    marks = _step_marks(text)
+    if marks is None:
+        return {}
+    starts = sorted(_run_scalar_starts(text))
+    out: dict[int, str] = {}
+    for mark in marks:
+        if (mark.run_line is None or mark.run_value is None
+                or mark.run_end_line != mark.run_line):
+            continue
+        start_line = next(
+            (s for s in starts if mark.run_line <= s <= mark.end_line), None)
+        if start_line is not None:
+            out[start_line] = mark.run_value
     return out
 
 
@@ -3611,6 +3699,11 @@ def _mutable_fetch_executions(
     named_remotes: dict[str, str] = {}
     # (position, line, resolved path, path as written)
     executions: list[tuple[int, int, str, str]] = []
+    # Executions whose path begins with a shell variable this scan cannot
+    # resolve. Held aside, not resolved: their real location is unknowable, so
+    # pairing one against a fetch would be a guess. Surfaced as a coverage note
+    # (below) when the job actually has a fetch to run out of.
+    unresolved_execs: list[tuple[int, str]] = []
     # (position, line) for EVERY command in the job. A checkout-step fetch has
     # no position of its own, so its suppression window has to open at the
     # first command after it — any command. Deriving that from `executions`
@@ -3659,11 +3752,7 @@ def _mutable_fetch_executions(
         # Collapsing alone lost them: `OUT=$(tools/setup.sh)` after a mutable
         # clone produced no finding, no gap and no suppression, while the
         # backtick spelling of the same construct still recorded one.
-        bodies = [
-            piece
-            for match in _COMMAND_SUBSTITUTION_RE.finditer(command)
-            for piece in _install_command_segments(match.group(0)[2:-1])
-        ]
+        bodies = _substitution_command_bodies(command)
         for segment in bodies + _install_command_segments(
                 _COMMAND_SUBSTITUTION_RE.sub("$SUBST", command)):
             pos += 1
@@ -3733,8 +3822,14 @@ def _mutable_fetch_executions(
                                 f"deliberately not reported",
                                 kind=_KIND_SUPPRESSED)
                         continue
-                    fetches.setdefault(
-                        dest, _RemoteFetch(line_no, _raw, dest, ref, pos))
+                    # LAST unpinned fetch into a destination wins — it is the
+                    # tree that actually ran. `setdefault` kept the FIRST, so a
+                    # clone, a pin of it, then a re-clone of the same directory
+                    # read as pinned (the pin sat between the stale first clone
+                    # and the execution) and the job went silent while it ran
+                    # the unpinned re-clone. The `pinned` list still holds every
+                    # pin, so a genuine pin of the surviving fetch suppresses.
+                    fetches[dest] = _RemoteFetch(line_no, _raw, dest, ref, pos)
                     continue
                 if sub == "fetch":
                     positionals = [a for a in args if not a.startswith("-")]
@@ -3764,7 +3859,22 @@ def _mutable_fetch_executions(
                 continue
             path = _executed_path(tokens)
             if path:
+                if _leading_unresolved_var(path):
+                    unresolved_execs.append((line_no, path))
+                    continue
                 executions.append((pos, line_no, _resolve_path(cwd, path), path))
+
+    # A path led by an unresolvable shell variable is a coverage gap ONLY where
+    # there is a fetched tree it might have run out of — otherwise every
+    # `$CARGO_HOME/bin/tool` in an ordinary job would raise a note about a chain
+    # that cannot exist. Whether the fetch is visible is known only now the
+    # whole job has been read.
+    if fetches and gap is not None:
+        for line_no, path in unresolved_execs:
+            gap(f"an execution on line {line_no} runs a path beginning with a "
+                f"shell variable (`{_as_written(path)}`) whose value is not "
+                f"visible in this YAML, so whether it runs out of a fetched "
+                f"tree was NOT checked — review it by hand")
 
     pairs: list[tuple[_RemoteFetch, int, str]] = []
     for dest, fetch in fetches.items():
