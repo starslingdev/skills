@@ -1,0 +1,14 @@
+# TEMPORARY probe: verifies that a failed ci-secure fact actually blocks a merge,
+# not just that the check reports red. Deliberately omits the `permissions:`
+# block, which is one of the config facts ci-secure checks for. This file is
+# deleted as soon as the answer is recorded.
+name: Gate blocking probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "probe"
