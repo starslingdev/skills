@@ -590,8 +590,15 @@ That writes, all under `<repo-root>`:
 - `.github/workflows/ci-secure.yml`, only if it does not already exist
   (see Refresh).
 
-If the command exits non-zero it has written nothing — it validates
-before it writes — so report the error and stop rather than retrying.
+Everything that can refuse — a copy that cannot install, a missing
+licence — refuses before the first byte is written, and the workflow is
+written last, after the manifest. So a non-zero exit means at worst a
+partly-copied `ci-secure/`, never a live workflow with no gate behind
+it. Report the error and stop; do not retry blind.
+
+If it reports that `.github/workflows/ci-secure.yml` already existed, the
+install did NOT wire anything up — resolve that with the user before
+telling them they have a gate.
 
 Then walk the user through the following, in the PR body and in the
 message that hands the PR over. They need it whether or not a PR gets

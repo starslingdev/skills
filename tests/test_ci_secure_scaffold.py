@@ -201,6 +201,13 @@ def _evaluate(expr: str, context: dict) -> str:
     x` does not yield the empty string when `cond` holds; the empty middle is
     falsy, the `||` takes over, and the answer is always `x`. Asserting that an
     expression mentions the right condition cannot see that. Evaluating it can.
+
+    This models `&&`, `||`, `==`, `!=` and parentheses over context values and
+    single-quoted literals, which is all the two expressions here use. It does
+    NOT model `!`, the functions, or Actions' type coercion and case-insensitive
+    string comparison. Anything it cannot parse RAISES rather than guessing, so
+    an expression written in a shape this does not cover fails the test instead
+    of quietly passing it.
     """
     body = expr.strip()
     assert body.startswith("${{") and body.endswith("}}"), body
@@ -250,11 +257,19 @@ def _evaluate(expr: str, context: dict) -> str:
 
     def term(token: str) -> str:
         token = token.strip()
-        while token.startswith("(") and token.endswith(")"):
-            inner = token[1:-1]
-            if split_top(inner, ")") and inner.count("(") == inner.count(")"):
-                return evaluate(inner)
-            break
+        # A fully parenthesised group — `(a && b)`. Equal counts are NOT proof
+        # of that: `(a) == (b)` also balances, and stripping its outer
+        # characters yields `a) == (b`. The test is that depth never returns to
+        # zero before the end, which is what makes the outer pair a matched
+        # pair rather than two adjacent groups.
+        if token.startswith("(") and token.endswith(")"):
+            depth = 0
+            for i, char in enumerate(token):
+                depth += (char == "(") - (char == ")")
+                if depth == 0 and i < len(token) - 1:
+                    break
+            else:
+                return evaluate(token[1:-1])
         if token.startswith("'") and token.endswith("'"):
             return token[1:-1]
         if token in context:
@@ -368,10 +383,33 @@ def test_nothing_in_the_template_can_swallow_a_failing_gate(
 
     verdict = template["jobs"]["verdict"]
     assert "continue-on-error" not in verdict
-    script = verdict["steps"][-1]["run"]
-    assert "exit 1" in script, (
-        "the verdict's not-success branch has no non-zero exit, so the "
-        "required check is green whatever the scan did")
+
+
+@pytest.mark.parametrize(
+    ("scan_result", "expected_zero"),
+    [("success", True), ("failure", False), ("cancelled", False),
+     ("skipped", False), ("", False)],
+)
+def test_the_verdict_script_is_run_not_read(
+        template: dict, scan_result: str, expected_zero: bool) -> None:
+    """Grepping the script for `exit 1` is not the same as it exiting 1.
+
+    An `exit 0` inserted anywhere above the check satisfies every substring
+    assertion — `needs`, `always()`, the predicate, no `${{`, an `exit 1`
+    present somewhere — while the required check greens over a scan that
+    failed. The script is plain bash with one input, so the honest test runs
+    it, on every result GitHub can report.
+    """
+    script = template["jobs"]["verdict"]["steps"][-1]["run"]
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                          env={"PATH": "/usr/bin:/bin", "SCAN": scan_result})
+    if expected_zero:
+        assert proc.returncode == 0, (
+            f"the verdict reds on scan={scan_result!r}:\n{proc.stdout}{proc.stderr}")
+    else:
+        assert proc.returncode != 0, (
+            f"the verdict PASSES on scan={scan_result!r} - a scan that did not "
+            f"run, was cancelled or failed is not a pass:\n{proc.stdout}")
 
 
 def test_the_template_triggers_carry_no_narrowing_filter(template: dict) -> None:
@@ -555,14 +593,18 @@ def test_refresh_leaves_the_adopters_own_workflow_alone(tmp_path: Path) -> None:
         "skip is indistinguishable from an update that happened")
 
 
-def test_verify_ignores_the_bytecode_running_the_gate_creates(
+def test_committed_bytecode_is_drift_and_says_what_to_do_about_it(
         tmp_path: Path) -> None:
-    """A `.pyc` is not a tampered gate, and crying drift over one trains it out.
+    """A `.pyc` beside a verified source file is not noise — it OVERRIDES it.
 
-    The engine is imported as modules, so any local run leaves
-    `ci-secure/scripts/__pycache__/`. SKILL.md hands `--verify` to the adopter
-    as a command they can run; if it accuses them of editing the gate the first
-    time they try it, the real drift signal is noise from then on.
+    Python does not always re-derive bytecode from source: a `.pyc` written
+    with an unchecked hash is loaded as-is, which is exactly how the gate loads
+    `config.py`. So a planted one can empty the set of outcomes that block
+    while every source file still hashes correctly and the manifest is
+    untouched — a green required check over a repository with failing facts.
+    Exempting bytecode to quieten the alarm would remove the only thing that
+    catches it. It is reported, with the fix, and the workflow stops the gate
+    writing any in the first place.
     """
     repo = tmp_path / "acme-app"
     (repo / ".github" / "workflows").mkdir(parents=True)
@@ -574,8 +616,25 @@ def test_verify_ignores_the_bytecode_running_the_gate_creates(
     (cache / "config.cpython-312.pyc").write_bytes(b"\x00compiled")
 
     check = _verify(vendored)
-    assert check.returncode == 0, (
-        "verify red on bytecode the gate itself writes:\n" + check.stdout)
+    assert check.returncode == 1, (
+        "bytecode that can override a hash-verified source file was accepted "
+        "as a clean copy:\n" + check.stdout)
+    assert "__pycache__" in check.stdout, (
+        "the report does not name the bytecode, so the reader cannot act on it")
+
+
+def test_the_template_stops_the_gate_writing_bytecode(template: dict) -> None:
+    """The noise the exemption would have papered over is removable at source.
+
+    Committed bytecode is drift and reds. Bytecode the gate wrote a second
+    earlier is the same file with an innocent cause, so the workflow tells
+    Python not to produce it — which is what makes reporting it affordable.
+    """
+    gate_step = next(s for s in template["jobs"]["scan"]["steps"]
+                     if "gate.py" in s.get("run", ""))
+    assert gate_step.get("env", {}).get("PYTHONDONTWRITEBYTECODE") == "1", (
+        "the gate step may leave __pycache__ in the vendored tree, which the "
+        "next --verify correctly reds - stop it being written at all")
 
 
 def test_refresh_removes_a_file_a_later_version_stopped_vendoring(
@@ -607,6 +666,40 @@ def test_refresh_removes_a_file_a_later_version_stopped_vendoring(
         "run reds with 'not in the manifest'")
     check = _verify(vendored)
     assert check.returncode == 0, check.stdout
+
+
+def test_pruning_cannot_reach_outside_the_vendored_directory(
+        tmp_path: Path) -> None:
+    """The manifest is repository content, so it is untrusted input to a delete.
+
+    It arrives with a branch, a pull request checkout or a fork clone, and the
+    refresh runs on someone's machine with their privileges. A `files` entry of
+    `../.github/workflows/release.yml` would otherwise be repo-controlled
+    arbitrary file deletion, aimed at exactly the directory this tool exists to
+    protect — and a merely CORRUPT manifest would do the same damage.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    assert _vendor(repo).returncode == 0
+
+    bystander = repo / ".github" / "workflows" / "release.yml"
+    bystander.write_text("name: release\n", encoding="utf-8")
+    outsider = tmp_path / "outside.txt"
+    outsider.write_text("not ours\n", encoding="utf-8")
+
+    manifest_path = repo / "ci-secure" / "VENDORED.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["../.github/workflows/release.yml"] = "0" * 64
+    manifest["files"][str(outsider)] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                             encoding="utf-8")
+
+    assert _vendor(repo).returncode == 0
+    assert bystander.is_file(), (
+        "a refresh deleted a workflow because the manifest named it - the "
+        "manifest is repository content and must never steer a delete")
+    assert outsider.is_file(), (
+        "a refresh deleted a file outside the repository entirely")
 
 
 def test_an_install_that_cannot_finish_writes_nothing(tmp_path: Path) -> None:

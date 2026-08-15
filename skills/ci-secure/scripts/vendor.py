@@ -169,6 +169,7 @@ def install(repo: Path) -> Path:
             "licence violation, so this refuses rather than shipping one")
 
     dest = repo / VENDOR_DIRNAME
+    first_install = not (dest / MANIFEST_NAME).is_file()
     stale = set(_previously_vendored(dest)) - set(vendored_paths())
 
     for rel in VENDORED_FILES:
@@ -178,8 +179,28 @@ def install(repo: Path) -> Path:
     shutil.copy2(gate, dest / GATE_DEST)
     shutil.copy2(licence, dest / LICENSE_DEST)
 
+    # The manifest is repository content - it arrives with a branch, a pull
+    # request checkout or a fork clone - and this loop DELETES. A `files` entry
+    # of `../.github/workflows/release.yml` would otherwise be repo-controlled
+    # file deletion aimed at the very directory this tool exists to protect, and
+    # a merely corrupt manifest would do the same damage by accident. Only paths
+    # that stay inside the vendored directory are ever touched.
+    resolved_dest = dest.resolve()
     for rel in sorted(stale):
+        candidate = Path(rel)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            print(f"::warning::ignoring manifest entry {rel!r}, which points "
+                  "outside the vendored directory")
+            continue
         old = dest / rel
+        try:
+            inside = old.resolve().is_relative_to(resolved_dest)
+        except OSError:                          # pragma: no cover - defensive
+            inside = False
+        if not inside:
+            print(f"::warning::ignoring manifest entry {rel!r}, which resolves "
+                  "outside the vendored directory")
+            continue
         if old.is_file():
             old.unlink()
             print(f"removed {rel}, which this version no longer vendors")
@@ -191,17 +212,30 @@ def install(repo: Path) -> Path:
     # gate to advisory, and because the workflow is deliberately not
     # checksummed, nothing downstream would catch it. So it is written once and
     # never rewritten.
+    # The manifest is written BEFORE the workflow. It is the last thing that
+    # can fail - it hashes every file and reads the skill version - and a
+    # workflow already on disk when it fails is a live check beside a tree with
+    # no manifest, whose first run reds with "cannot tell what this copy was
+    # supposed to be".
+    write_manifest(dest)
+
     workflow = repo / WORKFLOW_DEST
     if workflow.exists():
-        print(f"left the workflow at {WORKFLOW_DEST} exactly as it is - it is "
-              f"yours to tune. To take up template changes, diff it against "
-              f"{WORKFLOW_SOURCE} in the skill and apply what you want.")
+        if first_install:
+            print(f"::warning::{WORKFLOW_DEST} already existed and was NOT "
+                  "replaced, so nothing here runs the gate yet. Compare it "
+                  f"against {WORKFLOW_SOURCE} in the skill and merge what you "
+                  "need, or move it aside and run this again.")
+        else:
+            print(f"left the workflow at {WORKFLOW_DEST} exactly as it is - it "
+                  f"is yours to tune. To take up template changes, diff it "
+                  f"against {WORKFLOW_SOURCE} in the skill and apply what you "
+                  "want.")
     else:
         workflow.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(workflow_source, workflow)
         print(f"wrote the workflow to {WORKFLOW_DEST}")
 
-    write_manifest(dest)
     return dest
 
 
@@ -255,12 +289,19 @@ def verify(dest: Path) -> int:
         rel = path.relative_to(dest).as_posix()
         if not path.is_file() or rel == MANIFEST_NAME or rel in recorded:
             continue
-        # Bytecode is not a tampered gate. The engine is imported as modules,
-        # so any local run of the gate leaves `__pycache__/` behind, and this
-        # command is one the adopter is told to run. An alarm that fires on a
-        # `.pyc` the tool wrote itself is an alarm nobody reads by the third
-        # time, which costs more than the case it would ever catch.
+        # Bytecode gets its OWN message, not an exemption. A `.pyc` written
+        # with an unchecked hash is never validated against its source: Python
+        # loads it as-is, which is how the gate loads `config.py`. So one
+        # planted here can empty the set of outcomes that block while every
+        # source file still hashes correctly - a green check over a repository
+        # with failing facts, and nothing else would ever see it. The innocent
+        # cause is a local run, which the shipped workflow prevents outright by
+        # telling Python not to write bytecode at all.
         if "__pycache__" in path.parts or path.suffix == ".pyc":
+            drift.append(
+                f"{rel}: compiled bytecode, which can override the source file "
+                "verified above - delete ci-secure/**/__pycache__, and do not "
+                "commit it")
             continue
         drift.append(f"{rel}: not in the manifest")
 

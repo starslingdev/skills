@@ -116,6 +116,14 @@ jobs:
       - name: Run ci-secure
         run: python3 ci-secure/scripts/gate.py --advisory
         env:
+          # No `__pycache__` in the vendored tree. A `.pyc` written with an
+          # unchecked hash is loaded without being compared to its source, so
+          # one sitting next to a hash-verified `config.py` can override it —
+          # which is why the drift check reports bytecode rather than ignoring
+          # it. This is the other half: the gate never writes any, so the only
+          # bytecode that can ever appear there is bytecode somebody committed.
+          PYTHONDONTWRITEBYTECODE: "1"
+
           # The gate resolves its engine relative to its own file, which in a
           # vendored layout is this directory. `config.py` — the rule that says
           # which outcomes block — is then loaded from beside that engine, so

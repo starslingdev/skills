@@ -39,9 +39,13 @@ entries are dated (UTC). Format loosely follows
   version no longer ships, but never rewrites your workflow file: the runner,
   the triggers and the `--advisory` flag you deleted when you went blocking are
   yours, and an update that quietly put advisory back would be the worst thing
-  this could do. Ships alongside the skill's own `LICENSE`, and adds
-  `--advisory` to the gate this repository runs on itself — the vendored gate is
-  held byte-identical to it, so a weaker copy cannot ship.
+  this could do. Ships alongside the skill's own `LICENSE`. The gate program
+  gained an `--advisory` flag for this; our own workflow still runs it without
+  the flag, and the vendored gate is held byte-identical to ours so a weaker
+  copy cannot ship. `--verify` reports compiled bytecode found in the vendored
+  tree rather than passing over it, because a `.pyc` written with an unchecked
+  hash is loaded without being compared to its source and can override a file
+  that hashed correctly; the workflow stops the gate writing any.
 
 - **2026-08-15** — **`config.py` now owns the one definition of how a scanned
   string is neutralized.** `flatten_scanned()` collapses whitespace, replaces
