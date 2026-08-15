@@ -49,7 +49,26 @@ entries are dated (UTC). Format loosely follows
   destination is checked to be inside the repository before anything is
   written, so a symlink committed at `ci-secure/`, at any directory beneath it,
   or at `.github/` makes the install refuse rather than quietly write the gate
-  and a live workflow somewhere your pull requests would never see them.
+  and a live workflow somewhere your pull requests would never see them. The
+  same check refuses a symlink aimed at another file INSIDE your repository,
+  which stays contained and would still have written the licence text over
+  whatever it pointed at. The install also refuses `--into` a subdirectory of a
+  repository rather than its root (a workflow written there is one GitHub never
+  runs, and it looked like it had worked), and refuses a `ci-secure/` directory
+  that already holds files of yours — the workflow re-checks that directory
+  against the manifest every run, so merging into it would have red every run
+  from the first, with an error about drift that named your own files. A
+  refresh now writes no workflow at all: re-adding the advisory template beside
+  a copy you had renamed or deleted reached the same "quietly back to advisory"
+  outcome by adding rather than overwriting. `--verify` treats compiled
+  bytecode as drift even when `VENDORED.json` lists it, and treats any symlink
+  under the vendored tree as drift — the manifest is repository content and
+  cannot exempt a `.pyc`, and a symlinked `__pycache__` hid one from the walk
+  entirely. A malformed `VENDORED.json` reds with a stated reason instead of a
+  stack trace. The gate also now refuses arguments other than `--advisory`
+  rather than ignoring them, and its refusal message for an unset
+  `CI_SECURE_GH_IMPOSTOR` no longer claims that unset is a supported, disclosed
+  setting — it is refused, which is the entire point of having no default.
 
 - **2026-08-15** — **`config.py` now owns the one definition of how a scanned
   string is neutralized.** `flatten_scanned()` collapses whitespace, replaces

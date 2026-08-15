@@ -327,9 +327,12 @@ def main() -> int:
             f"CI_SECURE_GH_IMPOSTOR must be 'on' or 'off', not {IMPOSTOR!r} - "
             "'auto' is refused on purpose, because it makes whether the "
             "network-gated check runs depend on the runner image rather than "
-            "on this job. Leaving the variable unset lands on 'off', which is "
-            "a DISCLOSED off: it is reported under 'Network-gated detectors' "
-            "as a check that did not run, never as one that passed")
+            "on this job. An UNSET value is refused for the same reason and "
+            "reaches you as this same error: deleting the `env:` block must "
+            "not be a way to turn the check off. Set it to 'off' explicitly "
+            "if you want it off - that is a DISCLOSED off, reported under "
+            "'Network-gated detectors' as a check that did not run, never as "
+            "one that passed")
 
     if STRICT_RAW not in ("0", "1"):
         return fail(

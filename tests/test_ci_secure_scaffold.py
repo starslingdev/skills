@@ -26,6 +26,7 @@ stops being — nobody here runs it. So these tests do three separate jobs:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -591,6 +592,222 @@ def test_refresh_leaves_the_adopters_own_workflow_alone(tmp_path: Path) -> None:
     assert "workflow" in refresh.stdout.lower(), (
         "refresh left the workflow alone but did not say so, and an unsaid "
         "skip is indistinguishable from an update that happened")
+
+
+@pytest.mark.parametrize("what_they_did", ["renamed", "deleted"])
+def test_refresh_never_re_adds_the_workflow_template(
+        tmp_path: Path, what_they_did: str) -> None:
+    """"Left exactly as it is" has to hold for a workflow that MOVED, too.
+
+    The guarantee was enforced by "do not overwrite a file that is there",
+    which is a different promise. An adopter who renamed the file to fit their
+    conventions — or deleted it while backing the gate out — got the advisory
+    template silently re-added on the next refresh. That is the outcome the
+    design calls the worst thing this feature can do, reached by adding rather
+    than overwriting: two workflows both publishing the required check name
+    `ci-secure`, one of them advisory, and nothing said so.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    assert _vendor(repo).returncode == 0
+
+    workflows = repo / ".github" / "workflows"
+    installed = workflows / "ci-secure.yml"
+    blocking = installed.read_text(encoding="utf-8").replace(
+        "gate.py --advisory", "gate.py")
+    if what_they_did == "renamed":
+        (workflows / "security.yml").write_text(blocking, encoding="utf-8")
+    installed.unlink()
+
+    refresh = _vendor(repo)
+    assert refresh.returncode == 0, refresh.stderr
+    assert not installed.exists(), (
+        "a refresh re-added the advisory template at the path the adopter had "
+        "moved the workflow away from - two jobs now carry the required check "
+        "name and one of them cannot block")
+    if what_they_did == "renamed":
+        assert "gate.py --advisory" not in (workflows / "security.yml").read_text(
+            encoding="utf-8")
+
+
+def test_installing_over_someone_elses_ci_secure_directory_refuses(
+        tmp_path: Path) -> None:
+    """A destination that is already in use is refused, not merged into.
+
+    `ci-secure/` is a plausible name for a directory an adopter already keeps —
+    policies, notes — and the install used to copy in beside whatever was
+    there and exit 0. The manifest then lists only our files, so the very first
+    CI run reds on `--verify` with "not in the manifest" for the adopter's own
+    files, before the gate runs at all. Neither documented remedy reaches it:
+    `--advisory` downgrades failed FACTS, and this is not a fact. The install
+    reported success, so nobody is looking at the install.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / "ci-secure").mkdir(parents=True)
+    theirs = repo / "ci-secure" / "NOTES.md"
+    theirs.write_text("our security policies\n", encoding="utf-8")
+
+    result = _vendor(repo)
+
+    assert result.returncode != 0, (
+        "installed into a directory already holding the adopter's files, "
+        "which reds their CI on every run from the first one")
+    assert "NOTES.md" in result.stdout + result.stderr, (
+        "the refusal did not name the file in the way, so the adopter cannot "
+        "act on it")
+    assert theirs.read_text(encoding="utf-8") == "our security policies\n"
+    assert not (repo / "ci-secure" / "VENDORED.json").exists()
+    assert not (repo / ".github" / "workflows" / "ci-secure.yml").exists()
+
+
+def test_installing_into_a_subdirectory_of_a_repo_refuses(
+        tmp_path: Path) -> None:
+    """`--into` must be the repository root, and the tool can tell.
+
+    A workflow written to `services/api/.github/workflows/` is a file GitHub
+    never reads. The install printed the same success it prints for a correct
+    one, so the adopter is told they have a gate and every pull request merges
+    unscanned — the one silent failure the documentation itself calls out, left
+    to the caller to avoid when the tool has the path in hand.
+    """
+    repo = tmp_path / "acme-app"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True,
+                   capture_output=True)
+    nested = repo / "services" / "api"
+    nested.mkdir(parents=True)
+
+    result = _vendor(nested)
+
+    assert result.returncode != 0, (
+        "vendored into a subdirectory of a repository and reported success - "
+        "the workflow written there is one GitHub never runs")
+    assert not (nested / "ci-secure").exists()
+    assert not (nested / ".github").exists()
+
+
+def test_a_symlinked_destination_inside_the_repo_is_refused(
+        tmp_path: Path) -> None:
+    """Containment is not enough: a symlink can aim at a file in the same repo.
+
+    `ci-secure/LICENSE -> ../.github/workflows/release.yml` stays inside the
+    repository, so a check that only asks "does this leave the repo?" passes
+    it, and `copy2` then writes the licence text over the adopter's release
+    workflow. It is reached by an ordinary contributor pull request planting a
+    symlink under a directory reviewers read as "vendored tool, do not touch",
+    followed by the documented refresh — and the refresh reports success.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    assert _vendor(repo).returncode == 0
+
+    bystander = repo / ".github" / "workflows" / "release.yml"
+    bystander.write_text("name: release\n", encoding="utf-8")
+    licence = repo / "ci-secure" / "LICENSE"
+    licence.unlink()
+    licence.symlink_to(Path("..") / ".github" / "workflows" / "release.yml")
+
+    refresh = _vendor(repo)
+
+    assert refresh.returncode != 0, (
+        "a refresh wrote through a symlink under the vendored tree")
+    assert bystander.read_text(encoding="utf-8") == "name: release\n", (
+        "a refresh destroyed the adopter's release workflow, and said it had "
+        "succeeded")
+
+
+def test_a_destination_that_is_a_plain_file_is_refused_in_words(
+        tmp_path: Path) -> None:
+    """`ci-secure` already existing as a FILE gets a sentence, not a traceback."""
+    repo = tmp_path / "acme-app"
+    repo.mkdir()
+    (repo / "ci-secure").write_text("not a directory\n", encoding="utf-8")
+
+    result = _vendor(repo)
+
+    assert result.returncode != 0
+    assert "Traceback" not in result.stderr, (
+        "the refusal is a stack trace, in a tool whose whole argument is that "
+        f"a failure states its cause: {result.stderr}")
+    assert "ci-secure" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("plant", ["listed_in_manifest", "symlinked_cache"])
+def test_planted_bytecode_is_drift_even_when_the_manifest_blesses_it(
+        tmp_path: Path, plant: str) -> None:
+    """The manifest is repository content, so it cannot exempt a `.pyc`.
+
+    The gate loads `config.py` — which defines what blocks — with
+    `exec_module`, and Python runs a `.pyc` beside it without ever comparing
+    it to its source. So one planted in the vendored tree empties the set of
+    outcomes that block while every source file still hashes correctly: a
+    green required check over a repository whose own job summary says FAIL.
+
+    Two routes had to be closed. Adding the `.pyc` to `VENDORED.json` — the
+    attacker controls that file too — made it "recorded", and the recorded
+    short-circuit ran before the bytecode test. Hiding it behind a symlinked
+    `__pycache__` made it invisible to a walk that neither descends symlinks
+    nor reports them. The delete loop already refuses to let the manifest
+    steer it; this sweep was still trusting it.
+    """
+    repo = tmp_path / "acme-app"
+    repo.mkdir()
+    assert _vendor(repo).returncode == 0
+    vendored = repo / "ci-secure"
+
+    if plant == "listed_in_manifest":
+        cache = vendored / "scripts" / "__pycache__"
+        cache.mkdir()
+        pyc = cache / "config.cpython-312.pyc"
+        pyc.write_bytes(b"planted bytecode")
+        manifest_path = vendored / "VENDORED.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["files"]["scripts/__pycache__/config.cpython-312.pyc"] = (
+            hashlib.sha256(pyc.read_bytes()).hexdigest())
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8")
+    else:
+        elsewhere = tmp_path / "build-cache"
+        elsewhere.mkdir()
+        (elsewhere / "config.cpython-312.pyc").write_bytes(b"planted bytecode")
+        (vendored / "scripts" / "__pycache__").symlink_to(elsewhere)
+
+    check = _verify(vendored)
+
+    assert check.returncode == 1, (
+        f"planted bytecode ({plant}) passed --verify, so the adopter's "
+        "required check goes green while the gate executes it")
+    assert "bytecode" in check.stdout, (
+        f"--verify reds but never names the bytecode: {check.stdout}")
+
+
+@pytest.mark.parametrize("manifest_text", [
+    '{"files": []}', '{"files": "scripts/scan.py"}', '{"files": null}',
+    "[]", "null", '{"files": {"scripts/scan.py": null}}',
+])
+def test_a_type_confused_manifest_reds_with_a_reason(
+        tmp_path: Path, manifest_text: str) -> None:
+    """`VENDORED.json` is repository content, so its SHAPE is untrusted too.
+
+    Every shape already failed closed, which is the part that matters, but
+    four of them failed with a bare traceback: a security check going red in
+    someone's pull request with no stated cause, in a tool whose whole
+    argument is that a red says what is wrong and what to do about it.
+    """
+    repo = tmp_path / "acme-app"
+    repo.mkdir()
+    assert _vendor(repo).returncode == 0
+    vendored = repo / "ci-secure"
+    (vendored / "VENDORED.json").write_text(manifest_text, encoding="utf-8")
+
+    check = _verify(vendored)
+
+    assert check.returncode == 1
+    assert "Traceback" not in check.stderr, (
+        f"a malformed manifest reds with a stack trace: {check.stderr}")
+    assert "::error::" in check.stdout, (
+        f"a malformed manifest reds with no annotation: {check.stdout!r}")
 
 
 def test_committed_bytecode_is_drift_and_says_what_to_do_about_it(

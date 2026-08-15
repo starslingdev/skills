@@ -140,57 +140,129 @@ def _previously_vendored(dest: Path) -> list[str]:
         return []
 
 
-def _refuse_destinations_outside(repo: Path, dest: Path) -> None:
-    """Refuse, before writing anything, if any destination leaves the repository.
+def _refuse_a_subdirectory(repo: Path) -> None:
+    """Refuse `--into` a subdirectory of a repository rather than its root.
+
+    `services/api/.github/workflows/ci-secure.yml` is a file GitHub never
+    reads. The install otherwise prints exactly what a correct one prints, so
+    the adopter is told they have a gate and every pull request merges
+    unscanned — worse than no install, because it stops them installing again.
+
+    Only a path that IS inside a git work tree but is not its root is refused.
+    A directory that is not in a repository at all is left alone: vendoring
+    into a tree before `git init` is a legitimate order to do things in, and
+    guessing at intent there would refuse work that is fine.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):     # no git to ask
+        return
+    if out.returncode != 0:                           # not in a repository
+        return
+
+    root = Path(out.stdout.strip())
+    if not root.name or root.resolve() == repo.resolve():
+        return
+    raise SystemExit(
+        f"refusing to install: {repo} is inside the repository at {root}, not "
+        "its root. A workflow written here is one GitHub never runs, and the "
+        "install would look like it had worked. Run this again with "
+        f"--into {root}")
+
+
+def _refuse_a_destination_in_use(dest: Path) -> None:
+    """Refuse a first install into a `ci-secure/` directory someone else owns.
+
+    `ci-secure/` is a plausible name for a directory an adopter already keeps,
+    and copying in beside what is there exits 0 while the manifest lists only
+    our files — so their own CI reds on `--verify` with "not in the manifest",
+    on the first run and every run after it, before the gate is reached.
+    Neither documented remedy applies: `--advisory` downgrades failed FACTS,
+    and this is not a fact. Refusing while the adopter is still looking at the
+    install is the only moment this is cheap to resolve.
+
+    Only a FIRST install is refused. A refresh is expected to find our files
+    there, and drift in a copy we did install is what `--verify` is for.
+    """
+    if not dest.exists():
+        return
+    if not dest.is_dir():
+        raise SystemExit(
+            f"refusing to install: {dest} already exists and is not a "
+            "directory, so there is nowhere to put the vendored copy. Move it "
+            "aside, then run this again.")
+    intruders = sorted(path.relative_to(dest).as_posix()
+                       for path in dest.rglob("*") if path.is_file())
+    if not intruders:
+        return
+    shown = ", ".join(intruders[:5])
+    more = f" (and {len(intruders) - 5} more)" if len(intruders) > 5 else ""
+    raise SystemExit(
+        f"refusing to install: {dest} already holds files that are not "
+        f"ci-secure's - {shown}{more}. The vendored copy has to be the only "
+        "thing in that directory, because the workflow re-checks it against a "
+        "manifest on every run and would red on anything else it finds. Move "
+        "them somewhere else, then run this again.")
+
+
+def _refuse_redirected_destinations(repo: Path, dest: Path) -> None:
+    """Refuse, before writing anything, if any destination has been redirected.
 
     A symlink is ordinary repository content: it survives a clone, a pull
     request checkout and a fork, and it costs an attacker one committed file.
-    One at `ci-secure/`, at any directory beneath it, or at `.github/` is
-    followed by `mkdir` and `copy2` exactly as a real directory would be, so
-    without this the engine, the gate and a live workflow land somewhere the
-    adopter never looked while this prints success — and the repository it was
-    aimed at ends up with no gate at all.
+    One at `ci-secure/`, at any directory beneath it, at a single vendored
+    file, or at `.github/` is followed by `mkdir` and `copy2` exactly as a real
+    directory would be.
+
+    Two different harms, so two tests. A destination that leaves the repository
+    puts the engine, the gate and a live workflow somewhere the adopter never
+    looked while this prints success, and the repository it was aimed at comes
+    away with no gate. A destination redirected to somewhere else INSIDE the
+    repository stays contained and is worse in a different way: a symlink at
+    `ci-secure/LICENSE` pointing at `.github/workflows/release.yml` passes any
+    containment test and then has the licence text written over the adopter's
+    release workflow, on a refresh that reports success. Containment alone is
+    not the property wanted; "this path is what it appears to be" is.
 
     Every destination is checked, not just the vendored root, because the
-    escape can sit at any component of any path, or at a single file. Resolving
-    each one and requiring it to stay under the resolved repository covers all
-    of those in one test, including `..` inside a path and a symlink loop.
+    redirect can sit at any component of any path. The directories this would
+    `mkdir` are destinations too, which also keeps the refusal pointed at the
+    one symlink to remove rather than at the six files under it.
     """
     root = repo.resolve()
     targets = [dest, dest / MANIFEST_NAME, dest / GATE_DEST, dest / LICENSE_DEST,
                repo / WORKFLOW_DEST, (repo / WORKFLOW_DEST).parent]
     targets += [dest / rel for rel in VENDORED_FILES]
-    # Directories this will `mkdir` are destinations too, and naming them keeps
-    # the refusal pointed at the one symlink to remove rather than at the six
-    # files under it.
     targets += [parent for target in list(targets)
                 for parent in target.parents if repo in parent.parents]
 
-    escaped = []
+    bad: dict[Path, str] = {}
     for target in targets:
+        if target.is_symlink():
+            bad.setdefault(target, "is a symlink, so writing it would write "
+                                   "somewhere else")
+            continue
         try:
             resolved = target.resolve()
         except OSError:                          # symlink loop, unreadable path
-            escaped.append(target)
+            bad.setdefault(target, "cannot be resolved")
             continue
         if not resolved.is_relative_to(root):
-            escaped.append(target)
+            bad.setdefault(target, "resolves outside the repository")
 
-    if escaped:
-        # One symlink at `ci-secure/` escapes every destination beneath it.
-        # Naming all ten obscures the single thing the adopter has to fix, so
-        # only the shallowest offender on each branch is reported.
-        shallowest = [path for path in escaped
-                      if not any(other != path and other in path.parents
-                                 for other in escaped)]
-        listed = "\n  ".join(
-            f"{path.relative_to(repo)} -> outside the repository"
-            for path in sorted(set(shallowest)))
+    if bad:
+        # One symlink at `ci-secure/` redirects every destination beneath it.
+        # Naming all ten obscures the single thing the adopter has to fix.
+        shallowest = sorted(path for path in bad
+                            if not any(other in path.parents for other in bad))
+        listed = "\n  ".join(f"{path.relative_to(repo)} {bad[path]}"
+                             for path in shallowest)
         raise SystemExit(
-            "refusing to install: these destinations resolve outside "
-            f"{root}, so installing would write the gate somewhere this "
-            "repository's pull requests would never see it:\n  "
-            f"{listed}\n"
+            "refusing to install: these destinations are not the plain paths "
+            "they look like, so installing would write somewhere other than "
+            f"where this says it writes:\n  {listed}\n"
             "A symlink on one of those paths is almost certainly not what you "
             "want under a security gate. Remove it, then run this again.")
 
@@ -224,9 +296,12 @@ def install(repo: Path) -> Path:
             "licence violation, so this refuses rather than shipping one")
 
     dest = repo / VENDOR_DIRNAME
-    _refuse_destinations_outside(repo, dest)
+    _refuse_a_subdirectory(repo)
+    _refuse_redirected_destinations(repo, dest)
 
     first_install = not (dest / MANIFEST_NAME).is_file()
+    if first_install:
+        _refuse_a_destination_in_use(dest)
     stale = set(_previously_vendored(dest)) - set(vendored_paths())
 
     for rel in VENDORED_FILES:
@@ -277,17 +352,24 @@ def install(repo: Path) -> Path:
     write_manifest(dest)
 
     workflow = repo / WORKFLOW_DEST
-    if workflow.exists():
-        if first_install:
-            print(f"::warning::{WORKFLOW_DEST} already existed and was NOT "
-                  "replaced, so nothing here runs the gate yet. Compare it "
-                  f"against {WORKFLOW_SOURCE} in the skill and merge what you "
-                  "need, or move it aside and run this again.")
-        else:
-            print(f"left the workflow at {WORKFLOW_DEST} exactly as it is - it "
-                  f"is yours to tune. To take up template changes, diff it "
-                  f"against {WORKFLOW_SOURCE} in the skill and apply what you "
-                  "want.")
+    if not first_install:
+        # A refresh writes NO workflow, whether or not one is sitting at that
+        # path. "Do not overwrite what is there" was a narrower promise than
+        # the one made: an adopter who RENAMED the file to fit their
+        # conventions, or deleted it while backing the gate out, got the
+        # advisory template silently re-added beside their blocking one -
+        # reaching the same "quietly back to advisory" outcome by adding
+        # rather than overwriting, with two jobs then publishing the required
+        # check name.
+        print("this is a refresh, so the workflow was not touched - it is "
+              "yours, including where it lives. To take up template changes, "
+              f"diff yours against {WORKFLOW_SOURCE} in the skill and apply "
+              "what you want.")
+    elif workflow.exists():
+        print(f"::warning::{WORKFLOW_DEST} already existed and was NOT "
+              "replaced, so nothing here runs the gate yet. Compare it "
+              f"against {WORKFLOW_SOURCE} in the skill and merge what you "
+              "need, or move it aside and run this again.")
     else:
         workflow.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(workflow_source, workflow)
@@ -328,11 +410,21 @@ def verify(dest: Path) -> int:
         print(f"::error::{MANIFEST_NAME} is missing from {dest} - cannot tell "
               "what this copy of ci-secure was supposed to be")
         return 1
+    # `VENDORED.json` is repository content, so its SHAPE is untrusted too. A
+    # `files` that is a list, a string or null used to red with a bare
+    # traceback: a security check failing inside someone's pull request with no
+    # stated cause, in a tool whose whole argument is that a red says what is
+    # wrong and what to do about it.
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         recorded = manifest["files"]
-    except (ValueError, KeyError) as exc:
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
         print(f"::error::{MANIFEST_NAME} is unreadable ({exc!r})")
+        return 1
+    if not isinstance(manifest, dict) or not isinstance(recorded, dict):
+        print(f"::error::{MANIFEST_NAME} does not have the shape of a "
+              "manifest - `files` must be a mapping of path to hash. Ask "
+              "ci-secure to refresh the vendored copy, which rewrites it.")
         return 1
 
     drift = []
@@ -344,12 +436,12 @@ def verify(dest: Path) -> int:
             drift.append(f"{rel}: modified")
     for path in dest.rglob("*"):
         rel = path.relative_to(dest).as_posix()
-        if not path.is_file() or rel == MANIFEST_NAME or rel in recorded:
-            continue
-        # Bytecode gets its OWN message, not an exemption. A `.pyc` written
-        # with an unchecked hash is never validated against its source: Python
-        # loads it as-is, which is how the gate loads `config.py`. So one
-        # planted here can empty the set of outcomes that block while every
+        # Bytecode gets its OWN message, not an exemption - and the test comes
+        # BEFORE the manifest short-circuit below, because the manifest is
+        # repository content and cannot be allowed to bless a `.pyc`. A `.pyc`
+        # written with an unchecked hash is never validated against its source:
+        # Python loads it as-is, which is how the gate loads `config.py`. So
+        # one planted here can empty the set of outcomes that block while every
         # source file still hashes correctly - a green check over a repository
         # with failing facts, and nothing else would ever see it. The innocent
         # cause is a local run, which the shipped workflow prevents outright by
@@ -359,6 +451,19 @@ def verify(dest: Path) -> int:
                 f"{rel}: compiled bytecode, which can override the source file "
                 "verified above - delete ci-secure/**/__pycache__, and do not "
                 "commit it")
+            continue
+        # A symlink is drift whatever it points at. The walk does not descend
+        # one, so a `__pycache__` symlinked to a build directory elsewhere in
+        # the repository would otherwise hide planted bytecode from the test
+        # above without the manifest being touched at all; and a vendored file
+        # replaced by a symlink is not the file that was reviewed.
+        if path.is_symlink():
+            drift.append(
+                f"{rel}: a symlink, which a vendored copy never contains - it "
+                "makes the verified path and the file that is actually read "
+                "two different things")
+            continue
+        if not path.is_file() or rel == MANIFEST_NAME or rel in recorded:
             continue
         drift.append(f"{rel}: not in the manifest")
 

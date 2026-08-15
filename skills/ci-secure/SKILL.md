@@ -590,23 +590,35 @@ That writes, all under `<repo-root>`:
 - `.github/workflows/ci-secure.yml`, only if it does not already exist
   (see Refresh).
 
-Everything that can refuse — a copy that cannot install, a missing
-licence — refuses before the first byte is written, and the workflow is
-written last, after the manifest. So a non-zero exit means at worst a
-partly-copied `ci-secure/`, never a live workflow with no gate behind
-it. Report the error and stop; do not retry blind.
+Everything that can refuse refuses before the first byte is written, and
+the workflow is written last, after the manifest. So a non-zero exit
+means at worst a partly-copied `ci-secure/`, never a live workflow with
+no gate behind it. It refuses on: a vendored copy trying to install, a
+missing licence, a `<repo-root>` that is a subdirectory of a repository
+rather than its root, a destination redirected by a symlink, and a
+`ci-secure/` directory that already holds someone else's files — that
+last one because the workflow re-checks that directory against the
+manifest on every run and would red on anything else it finds there.
+Report the error and stop; do not retry blind.
 
 If it reports that `.github/workflows/ci-secure.yml` already existed, the
 install did NOT wire anything up — resolve that with the user before
 telling them they have a gate.
 
-Then walk the user through the following, in the PR body and in the
-message that hands the PR over. They need it whether or not a PR gets
-opened:
+Then walk the user through the following in the message that hands the
+work over. They need it whether or not a PR gets opened. Items 1, 3 and
+4 also belong in the PR body; items 2, 5 and 6 name weaknesses the repo
+still has, so on a public repository keep those out of the PR body and
+say them to the user directly — the disclosure corollary below applies
+to an install PR as much as to a fix PR:
 
 1. **Requirements**: Python 3.12 and PyYAML, both pinned in the
    workflow. The engine is not stdlib-only; the gate is. `vendor.py`
-   itself needs Python 3.10 or newer to run.
+   itself needs Python 3.9 or newer to run. **Check their default
+   branch**: the workflow ships `push: branches: [main]`, so if theirs
+   is not `main`, change it in the file before handing it over — left as
+   shipped that trigger silently covers nothing, and it is the one that
+   re-judges what already merged. Pull requests are judged either way.
 2. **It ships in `--advisory` mode.** A repo that has never been scanned
    usually reds two or three facts on its first run (workflows with no
    `permissions:`, no CODEOWNERS entry for `.github/`). Advisory reports
@@ -630,14 +642,23 @@ opened:
    checks are skippable, and the fork-PR approval policy. Both are
    admin-scoped API reads. They are disclosed and dropped from the
    score, never counted as passes.
-6. **A pull request can edit the workflow that judges it.** On
-   `pull_request` GitHub runs the definition from the PR, so this check
-   is only as strong as review on `.github/` — which is why a CODEOWNERS
-   entry there is one of the facts it checks. Tell them to require that
-   review before they make `ci-secure` a required check.
+6. **A pull request can edit the workflow that judges it — and the gate
+   it runs.** On `pull_request` GitHub checks out the PR's tree, so both
+   `.github/workflows/ci-secure.yml` and the vendored `ci-secure/` are
+   the PR's versions. Tell them to require review on **both** paths
+   before making `ci-secure` a required check. A CODEOWNERS entry for
+   `.github/` is one of the facts this gate checks; `/ci-secure/` is not
+   — nothing checks it for them, and `.github/` alone leaves the gate,
+   the engine, `config.py` (which defines which outcomes block) and the
+   manifest editable by an ordinary approval. Hashing does not help
+   here: whoever edits the vendored gate edits `VENDORED.json` in the
+   same commit.
 
 **Refresh** ("update the ci-secure gate"): re-run `vendor.py --into`
-from the current skill version and open a PR with the delta.
+from the current skill version. This writes into their tree exactly as
+the install does, so the same rule binds — say what will be rewritten,
+get a yes, and only then run it. Show them the resulting diff; open a PR
+only if they ask for one.
 
 - The vendored CODE is replaced, and files a newer version no longer
   ships are removed. Hand edits to it surface as that PR's diff for the
@@ -645,15 +666,20 @@ from the current skill version and open a PR with the delta.
   (`vendor.py --verify ci-secure`), which catches the local edit made
   while debugging and never removed — not a determined attacker, who can
   edit the manifest in the same commit.
-- **Their workflow is left exactly as it is**, always. It is theirs:
-  the runner, the triggers, and the `--advisory` flag they deleted when
-  they went blocking. Overwriting it on refresh would quietly return a
-  blocking gate to advisory, and since it is deliberately not
-  checksummed, nothing downstream would catch that. If the template has
-  changed in a way they want, show them the diff against
-  `<ci-secure>/scaffold/ci-secure.yml` and let them choose.
-- If the vendored copy is already current, say so and open nothing. A
-  PR whose only change is a rewritten manifest is noise.
+- **A refresh writes no workflow at all**, whether or not one is sitting
+  at `.github/workflows/ci-secure.yml`. That file is theirs: the runner,
+  the triggers, the path they moved it to, and the `--advisory` flag they
+  deleted when they went blocking. Rewriting it — or re-adding the
+  template beside a copy they renamed — quietly returns a blocking gate
+  to advisory, and since it is deliberately not checksummed nothing
+  downstream would catch that. If the template has changed in a way they
+  want, show them the diff against `<ci-secure>/scaffold/ci-secure.yml`
+  and let them choose.
+- There is no dry run, and `--verify` compares their copy against its own
+  manifest, not against this skill — so "is it already current?" can only
+  be answered after the refresh, from `git diff`. If that diff is empty,
+  say so and open nothing: a PR whose only change is a rewritten manifest
+  is noise.
 
 ## NEVER rules
 
@@ -672,7 +698,9 @@ from the current skill version and open a PR with the delta.
   unasked.** Render to tmp; only the explicit save pick (or `open`)
   writes `./ci-secure-report.md` — one stable name, as both siblings use,
   so a re-run overwrites the last report instead of accreting dated copies
-  the user has to reconcile.
+  the user has to reconcile. The gate install and refresh are the other
+  writers, and they are asked for by name: the same rule binds them, which
+  is why each states what it will write and waits for a yes.
 - **Never widen a fix beyond what the catalog recipe specifies.** Each
   vector's patch is exactly its recipe; adjacent hardening is a separate
   finding and a separate dispatch.

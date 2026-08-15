@@ -12,9 +12,14 @@
 # from the pull request, so a pull request can edit THIS FILE — point the gate
 # at a different engine, or weaken the step — and the check it reports is the
 # edited one. That is true of every in-repo check, and the edit is visible in
-# the diff. Requiring review on `.github/` (a CODEOWNERS entry, which this gate
-# also checks for) is what actually closes it. Do that before you make the check
-# required.
+# the diff. Requiring review on BOTH `.github/` (a CODEOWNERS entry, which this
+# gate also checks for) and `/ci-secure/` is what actually closes it. `.github/`
+# alone is half the trust path: the gate, the engine, `config.py` — which
+# defines which outcomes block — and the manifest all live under `/ci-secure/`,
+# are checked out from the pull request too, and none of them are under
+# `.github/`. A pull request that edits `ci-secure/scripts/config.py` and its
+# hash in `VENDORED.json` passes the drift check and needs no `.github/`
+# approval. Do both before you make the check required.
 #
 # WHAT TO REQUIRE IN BRANCH PROTECTION: `ci-secure`, the verdict job at the
 # bottom. Not the scan job. A job that a condition skips reports as Success to a
