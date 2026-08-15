@@ -2795,3 +2795,109 @@ jobs:
 """
     out = _facts_with(tmp_path / cond.strip("${} =1"), {"ci.yml": body}, ["test"])
     assert _outcome(out, _FACT)["outcome"] == "pass", _outcome(out, _FACT)
+
+
+# ---------------------------------------------------------------------------
+# F1 — a path filter is a reason a push may NOT run, whatever its branch filter
+# says. The match-all-branches shortcut returned before the paths filter was
+# ever looked at.
+# ---------------------------------------------------------------------------
+
+_PATHS_PUSH_PRODUCER = """\
+name: build
+on:
+  push:
+    branches: ['**']
+    paths: ['src/**']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+"""
+
+_SKIPPABLE_PR_PRODUCER = """\
+name: pr
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  test:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+
+
+def test_a_path_filtered_push_cannot_certify_even_over_every_branch(tmp_path):
+    """`branches: ['**']` was answered before `paths:` was read, so an
+    always-running job in a path-filtered push certified the required check —
+    and on a pull request that touches nothing under `paths:` that workflow
+    never runs, while the real producer skips. The check greens with neither
+    job having reported."""
+    f = _outcome(
+        _facts_with(tmp_path, {"build.yml": _PATHS_PUSH_PRODUCER,
+                               "pr.yml": _SKIPPABLE_PR_PRODUCER}, ["test"]),
+        _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+@pytest.mark.parametrize("filters", [
+    "    branches: ['**']\n    paths: ['src/**']\n",
+    "    branches: ['**']\n    paths-ignore: ['docs/**']\n",
+])
+def test_a_path_filtered_push_still_counts_against_the_check(tmp_path, filters):
+    """The other half of UNKNOWN, and the F13 trap: unable-to-certify must not
+    become unable-to-run. A SKIPPABLE job in such a workflow still counts
+    against the required check, so its bypass is still found."""
+    body = f"""\
+name: ci
+on:
+  push:
+{filters}permissions:
+  contents: read
+jobs:
+  test:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+    out = _facts_with(tmp_path / filters[14:24].strip().replace("/", "_"),
+                      {"ci.yml": body}, ["test"])
+    assert _outcome(out, _FACT)["outcome"] == "fail", _outcome(out, _FACT)
+
+
+def test_an_unfiltered_all_branches_push_still_certifies(tmp_path):
+    """The control that keeps the fix narrow: with no path filter,
+    `branches: ['**']` really does run on every branch push, so an
+    always-running job there still certifies. Reding this would be the
+    over-correction G1 was about."""
+    always = """\
+name: ci
+on:
+  push:
+    branches: ['**']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+    out = _facts_with(tmp_path, {"a.yml": always,
+                                 "b.yml": _SKIPPABLE_PR_PRODUCER}, ["test"])
+    assert _outcome(out, _FACT)["outcome"] == "pass", _outcome(out, _FACT)
+
+
+def test_a_path_filtered_push_alone_is_not_a_false_red(tmp_path):
+    """And the F13 direction: an ALWAYS-running job in a path-filtered push,
+    as the only producer, is not evidence of a bypass — it is simply not
+    knowable whether it reports. Not judged, not failed."""
+    f = _outcome(_facts_with(tmp_path, {"build.yml": _PATHS_PUSH_PRODUCER},
+                             ["test"]), _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]

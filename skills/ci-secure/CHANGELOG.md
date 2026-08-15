@@ -22,6 +22,16 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-14** — **A path-filtered push no longer certifies a required check
+  just because its branch filter matches everything.** `branches: ['**']` was
+  answered before `paths:` / `paths-ignore:` was read, so an always-running job
+  in such a workflow was accepted as proof that the check always reports — when
+  a pull request touching nothing under those paths never starts it, and the
+  real producer skips. The check greened with neither job having run. That
+  combination is UNKNOWN now: it still counts against the check, so a
+  bypassable job there is still found, but it can never be the evidence that
+  one always reports. An unfiltered `branches: ['**']` push still certifies.
+
 - **2026-08-14** — **A constant `if:` no longer certifies a verdict job that
   has `needs:`.** `if: true` (and `${{ 1 == 1 }}`) is not `always()`: GitHub
   skips a dependent when a dependency skips unless the condition is `always()`
