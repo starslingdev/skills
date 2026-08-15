@@ -45,6 +45,16 @@ _OUR_GATE = _REPO / ".github" / "scripts" / "ci_secure_gate.py"
 _VENDOR = _SKILL / "scripts" / "vendor.py"
 
 
+def _load_vendor_module():
+    """Import vendor.py directly, for the paths that need to fail mid-install."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_ci_secure_vendor", _VENDOR)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.fixture(scope="module")
 def template() -> dict:
     return yaml.safe_load(_TEMPLATE.read_text(encoding="utf-8"))
@@ -174,11 +184,231 @@ def test_the_template_never_hands_fork_code_a_token(template: dict) -> None:
 
     for key in ("CI_SECURE_GH_IMPOSTOR", "GH_TOKEN"):
         expr = " ".join(str(env[key]).split())
-        assert "head.repo.full_name != github.repository" in expr, (
+        # Either polarity is fine here — which way round it has to be written
+        # is pinned by the evaluating test below, not by a substring.
+        assert "head.repo.full_name" in expr and "github.repository" in expr, (
             f"{key} is not conditioned on the pull request being from a fork: "
             f"{expr}")
     assert "'auto'" not in str(env["CI_SECURE_GH_IMPOSTOR"]), (
         "`auto` makes a security check's presence depend on the runner image")
+
+
+def _evaluate(expr: str, context: dict) -> str:
+    """Evaluate a `${{ COND && A || B }}` workflow expression the way Actions does.
+
+    The rule that matters here is that Actions has no ternary operator, only
+    `&&`/`||` over truthiness — and an EMPTY STRING is falsy. So `cond && '' ||
+    x` does not yield the empty string when `cond` holds; the empty middle is
+    falsy, the `||` takes over, and the answer is always `x`. Asserting that an
+    expression mentions the right condition cannot see that. Evaluating it can.
+    """
+    body = expr.strip()
+    assert body.startswith("${{") and body.endswith("}}"), body
+    body = " ".join(body[3:-2].split())
+
+    def truthy(value: str) -> bool:
+        # Actions: '' and false are falsy; every other string is truthy.
+        return value not in ("", "false")
+
+    def split_top(text: str, op: str) -> list[str]:
+        """Split on `op` at parenthesis depth 0."""
+        parts, depth, start, i = [], 0, 0, 0
+        while i < len(text):
+            char = text[i]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif depth == 0 and text.startswith(op, i):
+                parts.append(text[start:i])
+                i += len(op)
+                start = i
+                continue
+            i += 1
+        parts.append(text[start:])
+        return [p.strip() for p in parts]
+
+    def evaluate(text: str) -> str:
+        text = text.strip()
+        alternatives = split_top(text, "||")
+        if len(alternatives) > 1:
+            result = ""
+            for alternative in alternatives:
+                result = evaluate(alternative)
+                if truthy(result):
+                    return result
+            return result
+        conjuncts = split_top(text, "&&")
+        if len(conjuncts) > 1:
+            result = "true"
+            for conjunct in conjuncts:
+                result = evaluate(conjunct)
+                if not truthy(result):
+                    return result
+            return result
+        return term(text)
+
+    def term(token: str) -> str:
+        token = token.strip()
+        while token.startswith("(") and token.endswith(")"):
+            inner = token[1:-1]
+            if split_top(inner, ")") and inner.count("(") == inner.count(")"):
+                return evaluate(inner)
+            break
+        if token.startswith("'") and token.endswith("'"):
+            return token[1:-1]
+        if token in context:
+            return context[token]
+        # A comparison, `a == b` or `a != b`, over context values.
+        for op in ("!=", "=="):
+            if op in token:
+                left, right = (p.strip() for p in token.split(op, 1))
+                equal = term(left) == term(right)
+                return "true" if (equal if op == "==" else not equal) else ""
+        raise AssertionError(f"unknown token in template expression: {token!r}")
+
+    return evaluate(body)
+
+
+_FORK_PR = {
+    "github.event_name": "pull_request",
+    "github.event.pull_request.head.repo.full_name": "someone-else/skills",
+    "github.repository": "adopter/repo",
+    "github.token": "TOKEN",
+}
+_SAME_REPO_PR = {
+    "github.event_name": "pull_request",
+    "github.event.pull_request.head.repo.full_name": "adopter/repo",
+    "github.repository": "adopter/repo",
+    "github.token": "TOKEN",
+}
+_DELETED_FORK_PR = {
+    # GitHub nulls out `head.repo` once the fork is deleted; an unset context
+    # value renders as the empty string.
+    "github.event_name": "pull_request",
+    "github.event.pull_request.head.repo.full_name": "",
+    "github.repository": "adopter/repo",
+    "github.token": "TOKEN",
+}
+_PUSH = {
+    "github.event_name": "push",
+    "github.event.pull_request.head.repo.full_name": "",
+    "github.repository": "adopter/repo",
+    "github.token": "TOKEN",
+}
+_SCHEDULE = dict(_PUSH, **{"github.event_name": "schedule"})
+
+
+@pytest.mark.parametrize(
+    ("name", "context", "impostor", "token"),
+    [
+        # Fork pull request: the check is disclosed as not run, and the step
+        # gets NO credential. This is the case the whole expression exists for.
+        ("fork pull request", _FORK_PR, "off", ""),
+        ("deleted-fork pull request", _DELETED_FORK_PR, "off", ""),
+        # Everything else is the adopter's own code and gets the check.
+        ("same-repo pull request", _SAME_REPO_PR, "on", "TOKEN"),
+        ("push", _PUSH, "on", "TOKEN"),
+        ("schedule", _SCHEDULE, "on", "TOKEN"),
+    ],
+)
+def test_the_template_withholds_the_token_on_fork_runs_when_evaluated(
+    template: dict, name: str, context: dict, impostor: str, token: str,
+) -> None:
+    """Not "mentions the fork condition" — what the expression actually returns.
+
+    A previous version conditioned the token correctly and still handed it to
+    every fork pull request, because the withholding branch was an empty string
+    on the left of `||` and Actions treats that as falsy.
+    """
+    env = template["jobs"]["scan"]["steps"][-1]["env"]
+    assert _evaluate(str(env["CI_SECURE_GH_IMPOSTOR"]), context) == impostor, (
+        f"on a {name} the impostor check should be {impostor!r}")
+    assert _evaluate(str(env["GH_TOKEN"]), context) == token, (
+        f"on a {name} GH_TOKEN should evaluate to {token!r}; a fork pull "
+        f"request runs code its author wrote and must not be handed a "
+        f"credential")
+
+
+def test_nothing_in_the_template_can_swallow_a_failing_gate(
+        template: dict) -> None:
+    """The verdict is only worth what the FAILURE path is worth.
+
+    Everything else here pins which command runs and what the pass predicate
+    says. That is all satisfiable by a scaffold whose gate can never fail:
+    `continue-on-error` on the step or the job (GitHub reports a
+    continue-on-error job to `needs` as a SUCCESS), a `|| true` on the run
+    line, or a step-level `if:` that skips the gate on pull requests — the same
+    skipped-check bypass the file's own header warns about, one level down.
+    Each of those ships a green required check over an unscanned repository.
+    """
+    scan = template["jobs"]["scan"]
+    assert "continue-on-error" not in scan, (
+        "a continue-on-error scan job reports SUCCESS to `needs`, so the "
+        "verdict greens over a gate that failed")
+    assert "if" not in scan, (
+        "a condition on the scan job makes it skippable, and the verdict reads "
+        "a skipped dependency as something other than a failure")
+
+    for step in scan["steps"]:
+        assert "continue-on-error" not in step, (
+            f"continue-on-error on {step.get('name', step.get('uses'))} lets "
+            "the step fail without failing the job")
+        assert "if" not in step, (
+            f"a condition on {step.get('name', step.get('uses'))} lets the "
+            "gate be skipped while the job still reports success")
+
+    for step in scan["steps"]:
+        run = step.get("run", "")
+        if "gate.py" in run or "vendor.py" in run:
+            for swallow in ("||", "&&", ";", "| true", "set +e"):
+                assert swallow not in run, (
+                    f"`{swallow}` in {run!r} can turn a non-zero exit into a "
+                    "passing step")
+
+    verdict = template["jobs"]["verdict"]
+    assert "continue-on-error" not in verdict
+    script = verdict["steps"][-1]["run"]
+    assert "exit 1" in script, (
+        "the verdict's not-success branch has no non-zero exit, so the "
+        "required check is green whatever the scan did")
+
+
+def test_the_template_triggers_carry_no_narrowing_filter(template: dict) -> None:
+    """`pull_request:` with a filter is a gate that mostly does not run.
+
+    `types: [labeled]` or `paths: [...]` under `pull_request` leaves the check
+    reporting green on every pull request that does not match — which a
+    required-check rule cannot tell apart from a scan that passed.
+    """
+    triggers = _triggers(template)
+    assert triggers["pull_request"] is None, (
+        f"the pull_request trigger carries a filter ({triggers['pull_request']}); "
+        "every pull request has to be scanned or the required check is a "
+        "rule that can be satisfied by not matching it")
+
+
+def test_the_installer_installs_exactly_the_files_under_test(
+        tmp_path: Path) -> None:
+    """The suite inspects `scaffold/`; the installer reads two constants.
+
+    Nothing otherwise binds the two together, so repointing `GATE_SOURCE` at a
+    five-line gate that exits 0 ships that gate to every adopter with the whole
+    suite green — the reviewed file and the installed file are simply different
+    files. This is what ties them.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    assert _vendor(repo).returncode == 0
+
+    assert (repo / "ci-secure" / "scripts" / "gate.py").read_bytes() == \
+        (_SCAFFOLD / "gate.py").read_bytes(), (
+            "the gate that gets installed is not the gate the identity test "
+            "holds to the one we run on ourselves")
+    assert (repo / ".github" / "workflows" / "ci-secure.yml").read_bytes() == \
+        _TEMPLATE.read_bytes(), (
+            "the workflow that gets installed is not the template every other "
+            "test in this file inspects")
 
 
 def test_the_template_verifies_its_own_vendored_copy(template: dict) -> None:
@@ -198,10 +428,15 @@ def test_the_template_verifies_its_own_vendored_copy(template: dict) -> None:
 # they are not licence for the template itself to be dirty.
 _FIRST_RUN_FACTS = {
     "sec.codeowners.workflows",          # no CODEOWNERS entry yet
-    "sec.permissions.workflow-declares",  # the adopter's OTHER workflows
     "sec.required-checks.skippable",     # admin-scoped API, unmeasurable in CI
     "sec.fork-approval.effective",       # admin-scoped API, unmeasurable in CI
 }
+
+# `sec.permissions.workflow-declares` is deliberately NOT excused here. The
+# fixture repository's only workflow is the one we ship, so that fact is a
+# statement about OUR file and nothing else — excusing it as "the adopter's
+# other workflows" would let the template drop its `permissions:` block with
+# this test still green.
 
 
 def test_the_installed_template_passes_the_gate_it_installs(tmp_path: Path) -> None:
@@ -278,19 +513,127 @@ def test_vendoring_produces_a_working_gate_and_a_manifest_that_verifies(
         capture_output=True, text=True)
     assert check.returncode == 0, check.stdout + check.stderr
 
-    # The gate runs, finds its engine and its rule, and judges the tree.
-    gate = subprocess.run(
-        [sys.executable, str(vendored / "scripts" / "gate.py"), "--advisory"],
-        capture_output=True, text=True,
-        env={"PATH": "/usr/bin:/bin",
-             "GITHUB_WORKSPACE": str(repo),
-             "CI_SECURE_ENGINE": str(vendored / "scripts" / "scan.py"),
-             "CI_SECURE_GH_IMPOSTOR": "off"})
-    assert "rule (config.py) not found" not in gate.stdout, gate.stdout
-    assert "engine not found" not in gate.stdout, gate.stdout
-    assert gate.returncode == 0, (
-        "a freshly vendored gate must not red on the workflow it installed, in "
-        f"advisory mode:\n{gate.stdout}\n{gate.stderr}")
+
+def _vendor(repo: Path) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(_VENDOR), "--into", str(repo)],
+                          capture_output=True, text=True)
+
+
+def _verify(vendored: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(vendored / "scripts" / "vendor.py"),
+         "--verify", str(vendored)], capture_output=True, text=True)
+
+
+def test_refresh_leaves_the_adopters_own_workflow_alone(tmp_path: Path) -> None:
+    """Refreshing the vendored CODE must not rewrite the workflow they tuned.
+
+    The workflow is the one file the adopter is invited to change: their runner,
+    their triggers, and — the whole point of the ramp — deleting `--advisory`
+    once the first-run findings are burned down. Copying the template back over
+    it on refresh silently returns a blocking gate to advisory, which is the
+    worst outcome this feature can produce, and the manifest cannot catch it
+    because the workflow is deliberately not checksummed.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    assert _vendor(repo).returncode == 0
+
+    installed = repo / ".github" / "workflows" / "ci-secure.yml"
+    tuned = installed.read_text(encoding="utf-8").replace(
+        "gate.py --advisory", "gate.py")
+    assert "gate.py --advisory" not in tuned
+    installed.write_text(tuned, encoding="utf-8")
+
+    refresh = _vendor(repo)
+    assert refresh.returncode == 0, refresh.stderr
+    assert installed.read_text(encoding="utf-8") == tuned, (
+        "refresh overwrote the adopter's workflow - a gate they had taken "
+        "blocking is advisory again and nothing told them")
+    assert "workflow" in refresh.stdout.lower(), (
+        "refresh left the workflow alone but did not say so, and an unsaid "
+        "skip is indistinguishable from an update that happened")
+
+
+def test_verify_ignores_the_bytecode_running_the_gate_creates(
+        tmp_path: Path) -> None:
+    """A `.pyc` is not a tampered gate, and crying drift over one trains it out.
+
+    The engine is imported as modules, so any local run leaves
+    `ci-secure/scripts/__pycache__/`. SKILL.md hands `--verify` to the adopter
+    as a command they can run; if it accuses them of editing the gate the first
+    time they try it, the real drift signal is noise from then on.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    assert _vendor(repo).returncode == 0
+    vendored = repo / "ci-secure"
+
+    cache = vendored / "scripts" / "__pycache__"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "config.cpython-312.pyc").write_bytes(b"\x00compiled")
+
+    check = _verify(vendored)
+    assert check.returncode == 0, (
+        "verify red on bytecode the gate itself writes:\n" + check.stdout)
+
+
+def test_refresh_removes_a_file_a_later_version_stopped_vendoring(
+        tmp_path: Path) -> None:
+    """Otherwise the refresh that drops a file reds the adopter's next run.
+
+    `--verify` flags anything under the vendored directory that the manifest
+    does not list. A file removed from the vendored set in a later version is
+    exactly that, so a correct refresh would hand the adopter a red required
+    check for a file they never touched.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    assert _vendor(repo).returncode == 0
+    vendored = repo / "ci-secure"
+
+    # Stand in for a file an earlier version vendored and this one does not.
+    stale = vendored / "scripts" / "retired_helper.py"
+    stale.write_text("# vendored by an older ci-secure\n", encoding="utf-8")
+    manifest_path = vendored / "VENDORED.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["scripts/retired_helper.py"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                             encoding="utf-8")
+
+    assert _vendor(repo).returncode == 0
+    assert not stale.exists(), (
+        "refresh left behind a file it no longer vendors; the adopter's next "
+        "run reds with 'not in the manifest'")
+    check = _verify(vendored)
+    assert check.returncode == 0, check.stdout
+
+
+def test_an_install_that_cannot_finish_writes_nothing(tmp_path: Path) -> None:
+    """Validate first, then write. A half-install is a live workflow with no gate.
+
+    The workflow used to be copied in before the licence was resolved and
+    before the manifest was written, so a refusal partway through left the
+    adopter with a workflow GitHub runs, a vendored tree, and no
+    `VENDORED.json` — whose very first CI run reds on `--verify` with "cannot
+    tell what this copy was supposed to be".
+    """
+    vendor = _load_vendor_module()
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+
+    original = vendor._license_source
+    vendor._license_source = lambda: None
+    try:
+        with pytest.raises(SystemExit):
+            vendor.install(repo)
+    finally:
+        vendor._license_source = original
+
+    assert not (repo / ".github" / "workflows" / "ci-secure.yml").exists(), (
+        "a refused install left a live ci-secure workflow behind")
+    assert not (repo / "ci-secure").exists(), (
+        "a refused install left a vendored tree with no manifest behind")
 
 
 def test_a_hand_edited_vendored_file_is_caught(tmp_path: Path) -> None:

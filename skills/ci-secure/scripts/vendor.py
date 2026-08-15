@@ -122,28 +122,44 @@ def _license_source() -> Path | None:
     return None
 
 
+def _previously_vendored(dest: Path) -> list[str]:
+    """What the last install put here, according to its own manifest.
+
+    A refresh needs this so it can REMOVE what this version no longer vendors.
+    A dropped file is not inert: `--verify` reds on anything under the vendored
+    directory the manifest does not list, so leaving it behind would hand the
+    adopter a failing required check for a file they never touched, on a
+    refresh that was otherwise correct.
+    """
+    path = dest / MANIFEST_NAME
+    if not path.is_file():
+        return []
+    try:
+        return sorted(json.loads(path.read_text(encoding="utf-8"))["files"])
+    except (ValueError, KeyError, TypeError):
+        return []
+
+
 def install(repo: Path) -> Path:
-    """Copy the engine, the gate and the licence into `repo/ci-secure/`."""
-    if not (_SKILL / GATE_SOURCE).is_file():
+    """Copy the engine, the gate and the licence into `repo/ci-secure/`.
+
+    Everything that can refuse refuses BEFORE anything is written. A partial
+    install is not a tidy failure: it is a live workflow in the adopter's
+    repository beside a vendored tree with no manifest, whose first CI run reds
+    with "cannot tell what this copy was supposed to be".
+    """
+    gate = _SKILL / GATE_SOURCE
+    workflow_source = _SKILL / WORKFLOW_SOURCE
+    if not gate.is_file() or not workflow_source.is_file():
         raise SystemExit(
             "this looks like a VENDORED copy of ci-secure, which can verify "
             "itself but cannot install: the scaffold and the rest of the skill "
             "are not here. Run --into from an installed ci-secure skill, or ask "
             "ci-secure to refresh this copy.")
-    dest = repo / VENDOR_DIRNAME
-    for rel in VENDORED_FILES:
-        target = dest / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(_SKILL / rel, target)
 
-    gate = _SKILL / GATE_SOURCE
-    if not gate.is_file():                       # pragma: no cover - defensive
-        raise SystemExit(f"gate not found at {gate}")
-    shutil.copy2(gate, dest / GATE_DEST)
-
-    workflow = repo / WORKFLOW_DEST
-    workflow.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(_SKILL / WORKFLOW_SOURCE, workflow)
+    missing = [rel for rel in VENDORED_FILES if not (_SKILL / rel).is_file()]
+    if missing:                                  # pragma: no cover - defensive
+        raise SystemExit(f"ci-secure is incomplete, cannot vendor: {missing}")
 
     # The licence travels with the code or the copy is a licence violation.
     licence = _license_source()
@@ -151,13 +167,45 @@ def install(repo: Path) -> Path:
         raise SystemExit(
             "no LICENSE found to vendor; copying the code without it would be a "
             "licence violation, so this refuses rather than shipping one")
+
+    dest = repo / VENDOR_DIRNAME
+    stale = set(_previously_vendored(dest)) - set(vendored_paths())
+
+    for rel in VENDORED_FILES:
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(_SKILL / rel, target)
+    shutil.copy2(gate, dest / GATE_DEST)
     shutil.copy2(licence, dest / LICENSE_DEST)
+
+    for rel in sorted(stale):
+        old = dest / rel
+        if old.is_file():
+            old.unlink()
+            print(f"removed {rel}, which this version no longer vendors")
+
+    # The workflow belongs to the adopter. They are invited to change the
+    # runner and the triggers, and — the entire point of the ramp — to delete
+    # `--advisory` once the first run's findings are burned down. Copying the
+    # template back over it on every refresh would quietly return a blocking
+    # gate to advisory, and because the workflow is deliberately not
+    # checksummed, nothing downstream would catch it. So it is written once and
+    # never rewritten.
+    workflow = repo / WORKFLOW_DEST
+    if workflow.exists():
+        print(f"left the workflow at {WORKFLOW_DEST} exactly as it is - it is "
+              f"yours to tune. To take up template changes, diff it against "
+              f"{WORKFLOW_SOURCE} in the skill and apply what you want.")
+    else:
+        workflow.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(workflow_source, workflow)
+        print(f"wrote the workflow to {WORKFLOW_DEST}")
 
     write_manifest(dest)
     return dest
 
 
-def vendored_paths(dest: Path) -> list[str]:
+def vendored_paths() -> list[str]:
     return sorted([*VENDORED_FILES, GATE_DEST, LICENSE_DEST])
 
 
@@ -167,7 +215,7 @@ def write_manifest(dest: Path) -> Path:
         "skill_version": skill_version(),
         "source_commit": source_commit(),
         "source_repo": "https://github.com/starslingdev/skills",
-        "files": {rel: sha256(dest / rel) for rel in vendored_paths(dest)},
+        "files": {rel: sha256(dest / rel) for rel in vendored_paths()},
         "note": (
             "Written by ci-secure's install step. `vendor.py --verify` "
             "recomputes these hashes. To update the vendored copy, ask "
@@ -205,8 +253,16 @@ def verify(dest: Path) -> int:
             drift.append(f"{rel}: modified")
     for path in dest.rglob("*"):
         rel = path.relative_to(dest).as_posix()
-        if path.is_file() and rel != MANIFEST_NAME and rel not in recorded:
-            drift.append(f"{rel}: not in the manifest")
+        if not path.is_file() or rel == MANIFEST_NAME or rel in recorded:
+            continue
+        # Bytecode is not a tampered gate. The engine is imported as modules,
+        # so any local run of the gate leaves `__pycache__/` behind, and this
+        # command is one the adopter is told to run. An alarm that fires on a
+        # `.pyc` the tool wrote itself is an alarm nobody reads by the third
+        # time, which costs more than the case it would ever catch.
+        if "__pycache__" in path.parts or path.suffix == ".pyc":
+            continue
+        drift.append(f"{rel}: not in the manifest")
 
     if not drift:
         print(f"ci-secure vendored copy matches {MANIFEST_NAME} "

@@ -260,9 +260,11 @@ def main() -> int:
     if IMPOSTOR not in ("on", "off"):
         return fail(
             f"CI_SECURE_GH_IMPOSTOR must be 'on' or 'off', not {IMPOSTOR!r} - "
-            "'auto' and an unset value are refused on purpose, because they make "
-            "whether the network-gated check runs depend on the runner image "
-            "rather than on this job")
+            "'auto' is refused on purpose, because it makes whether the "
+            "network-gated check runs depend on the runner image rather than "
+            "on this job. Leaving the variable unset lands on 'off', which is "
+            "a DISCLOSED off: it is reported under 'Network-gated detectors' "
+            "as a check that did not run, never as one that passed")
 
     try:
         result = subprocess.run(
@@ -390,8 +392,8 @@ def main() -> int:
                   f"{esc(f.get('title', ''))}")
     # A detector that did not run is reported, not omitted: "no findings from
     # P14.11" and "P14.11 never ran" must not look the same to a reader. Indexed,
-    # not `.get(... ) or {}`: this gate always passes `--gh-impostor off`, so the
-    # engine always has a status to report, and an absent key is schema drift -
+    # not `.get(... ) or {}`: this gate always passes `--gh-impostor` explicitly,
+    # so the engine always has a status to report, and an absent key is drift -
     # which would make those two cases look identical again.
     lines += ["", "### Network-gated detectors", ""]
     lines += [f"- `{flat(k)}`: {flat(v)}" for k, v in sorted(gh_checks.items())]

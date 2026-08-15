@@ -552,7 +552,9 @@ actually changed its file.
 **Reached by NAMING it** — "install ci-secure as a CI check", "make
 ci-secure block my PRs", "add the ci-secure gate", "update/refresh the
 ci-secure gate". A scan request is not an install request: audit as
-usual and, if a gate would help, offer one at the close.
+usual, and do not add a gate option to the Phase 6 close, whose option
+list is fixed. If the user asks what would stop the findings coming
+back, this section is the answer.
 
 A scan says what is wrong today. A gate stops it coming back — the same
 engine, on every pull request, red when a security fact fails. It is
@@ -562,19 +564,42 @@ they can read and it cannot change underneath them. Fetching a pinned
 SHA and executing it at CI time is a shape this skill FLAGS (P14.24); do
 not ship it.
 
-**Install** (one setup PR on their branch — the "never push without
-asking" rule still applies):
+**Install.** This WRITES INTO their working tree, so the "never write
+into the user's tree unasked" rule binds: say exactly what will be
+written, get a yes, and only then run it. Do it on a branch, as one
+setup PR; never push without asking.
+
+`<repo-root>` is the output of `git rev-parse --show-toplevel`, never
+the current directory — vendoring into a subdirectory produces a
+workflow GitHub never runs and an install that looks like it worked.
 
 ```bash
 <ci-secure>/scripts/vendor.py --into <repo-root>
 ```
 
-That writes `ci-secure/` (engine + `gate.py` + `LICENSE` +
-`VENDORED.json`) and `.github/workflows/ci-secure.yml`. Cover these in
-the PR body:
+That writes, all under `<repo-root>`:
+
+- `ci-secure/scripts/` — the engine (`scan.py`, `config.py`,
+  `config_facts.py`, `gh_utils.py`), `gate.py`, and `vendor.py` itself,
+  which is what their CI runs to check the copy has not drifted;
+- `ci-secure/references/security-patterns.md` — the pattern catalog the
+  engine reads at runtime. It is a large document that quotes attack
+  shapes, so a repo running its own secret or malware scanners may want
+  to allow-list the path;
+- `ci-secure/LICENSE` and `ci-secure/VENDORED.json`;
+- `.github/workflows/ci-secure.yml`, only if it does not already exist
+  (see Refresh).
+
+If the command exits non-zero it has written nothing — it validates
+before it writes — so report the error and stop rather than retrying.
+
+Then walk the user through the following, in the PR body and in the
+message that hands the PR over. They need it whether or not a PR gets
+opened:
 
 1. **Requirements**: Python 3.12 and PyYAML, both pinned in the
-   workflow. The engine is not stdlib-only; the gate is.
+   workflow. The engine is not stdlib-only; the gate is. `vendor.py`
+   itself needs Python 3.10 or newer to run.
 2. **It ships in `--advisory` mode.** A repo that has never been scanned
    usually reds two or three facts on its first run (workflows with no
    `permissions:`, no CODEOWNERS entry for `.github/`). Advisory reports
@@ -589,23 +614,39 @@ the PR body:
    a required-check rule, so requiring one is a rule that can be
    satisfied by never running it.
 4. **Getting out**, if it ever reds their default branch: un-require
-   `ci-secure` (one settings change, reversible) or put `--advisory`
-   back. **Not** deleting the workflow — that leaves them believing they
-   have a check they do not.
+   `ci-secure` (one settings change, reversible). **Not** deleting the
+   workflow — that leaves them believing they have a check they do not.
+   Putting `--advisory` back is the narrower remedy and only clears a
+   red caused by a failed fact; it will not clear a crashed engine, an
+   incomplete scan, or a rate-limited weekly run.
 5. **Two facts stay UNMEASURED** on any CI token: whether required
    checks are skippable, and the fork-PR approval policy. Both are
    admin-scoped API reads. They are disclosed and dropped from the
    score, never counted as passes.
+6. **A pull request can edit the workflow that judges it.** On
+   `pull_request` GitHub runs the definition from the PR, so this check
+   is only as strong as review on `.github/` — which is why a CODEOWNERS
+   entry there is one of the facts it checks. Tell them to require that
+   review before they make `ci-secure` a required check.
 
 **Refresh** ("update the ci-secure gate"): re-run `vendor.py --into`
-from the current skill version and open a PR with the delta. Hand edits
-to vendored files surface as that PR's diff for the user to resolve —
-they are never silently clobbered outside a PR. The workflow file is
-deliberately NOT checksummed: runners and triggers are theirs to tune.
-The vendored CODE is, and their CI re-checks it every run
-(`vendor.py --verify ci-secure`). That catches the local edit made while
-debugging and never removed — not a determined attacker, who can edit
-the manifest in the same commit.
+from the current skill version and open a PR with the delta.
+
+- The vendored CODE is replaced, and files a newer version no longer
+  ships are removed. Hand edits to it surface as that PR's diff for the
+  user to resolve. Their CI re-checks the copy every run
+  (`vendor.py --verify ci-secure`), which catches the local edit made
+  while debugging and never removed — not a determined attacker, who can
+  edit the manifest in the same commit.
+- **Their workflow is left exactly as it is**, always. It is theirs:
+  the runner, the triggers, and the `--advisory` flag they deleted when
+  they went blocking. Overwriting it on refresh would quietly return a
+  blocking gate to advisory, and since it is deliberately not
+  checksummed, nothing downstream would catch that. If the template has
+  changed in a way they want, show them the diff against
+  `<ci-secure>/scaffold/ci-secure.yml` and let them choose.
+- If the vendored copy is already current, say so and open nothing. A
+  PR whose only change is a rewritten manifest is noise.
 
 ## NEVER rules
 

@@ -27,15 +27,21 @@ entries are dated (UTC). Format loosely follows
   it by name and it VENDORS the engine, the gate and the licence into your
   repository — copied in, reviewed as a pull request, refreshed when you ask —
   plus one workflow whose always-running verdict job carries the required
-  `ci-secure` check. Nothing is fetched and executed at CI time: a pin can be
-  moved or deleted in a repository you do not control, and we ship a detector
-  for that shape (P14.24). `scripts/vendor.py` does the copying, writes a
-  `VENDORED.json` of per-file hashes, and re-checks them from your own CI, so a
-  local edit to the vendored gate is loud instead of invisible. The workflow
+  `ci-secure` check. No ci-secure code is fetched and executed at CI time: a pin
+  can be moved or deleted in a repository you do not control, and we ship a
+  detector for that shape (P14.24). `scripts/vendor.py` does the copying, writes
+  a `VENDORED.json` of per-file hashes, and re-checks them from your own CI, so
+  a local edit to the vendored gate is loud instead of invisible. The workflow
   ships in `--advisory` mode, which downgrades failed FACTS only — a crashed
   engine, zero workflows scanned, an unrecognised outcome or an incomplete scan
   stay red, because a ramp for findings must never become a mute button for a
-  broken scan.
+  broken scan. Refreshing replaces the vendored code and drops what a newer
+  version no longer ships, but never rewrites your workflow file: the runner,
+  the triggers and the `--advisory` flag you deleted when you went blocking are
+  yours, and an update that quietly put advisory back would be the worst thing
+  this could do. Ships alongside the skill's own `LICENSE`, and adds
+  `--advisory` to the gate this repository runs on itself — the vendored gate is
+  held byte-identical to it, so a weaker copy cannot ship.
 
 - **2026-08-15** — **`config.py` now owns the one definition of how a scanned
   string is neutralized.** `flatten_scanned()` collapses whitespace, replaces

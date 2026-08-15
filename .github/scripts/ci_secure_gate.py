@@ -325,9 +325,11 @@ def main() -> int:
     if IMPOSTOR not in ("on", "off"):
         return fail(
             f"CI_SECURE_GH_IMPOSTOR must be 'on' or 'off', not {IMPOSTOR!r} - "
-            "'auto' and an unset value are refused on purpose, because they make "
-            "whether the network-gated check runs depend on the runner image "
-            "rather than on this job")
+            "'auto' is refused on purpose, because it makes whether the "
+            "network-gated check runs depend on the runner image rather than "
+            "on this job. Leaving the variable unset lands on 'off', which is "
+            "a DISCLOSED off: it is reported under 'Network-gated detectors' "
+            "as a check that did not run, never as one that passed")
 
     if STRICT_RAW not in ("0", "1"):
         return fail(

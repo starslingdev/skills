@@ -1,9 +1,20 @@
 # ci-secure as a blocking CI check.
 #
 # Installed by ci-secure into your repository, together with a vendored copy of
-# the engine and the gate under `ci-secure/`. Nothing is fetched at CI time: the
-# code that judges your pull requests is code you can read, in your repository,
-# changed only by a pull request you review.
+# the engine and the gate under `ci-secure/`. No ci-secure code is fetched at CI
+# time: the code that judges your pull requests is code you can read, in your
+# repository, changed only by a pull request you review. The one thing this job
+# does install from the network is PyYAML, pinned by version below — the engine
+# parses your workflows with it, so it sits inside the verdict's trust path and
+# is named here rather than left as an implicit runner detail.
+#
+# WHAT THIS CANNOT DO: on `pull_request`, GitHub runs the workflow definition
+# from the pull request, so a pull request can edit THIS FILE — point the gate
+# at a different engine, or weaken the step — and the check it reports is the
+# edited one. That is true of every in-repo check, and the edit is visible in
+# the diff. Requiring review on `.github/` (a CODEOWNERS entry, which this gate
+# also checks for) is what actually closes it. Do that before you make the check
+# required.
 #
 # WHAT TO REQUIRE IN BRANCH PROTECTION: `ci-secure`, the verdict job at the
 # bottom. Not the scan job. A job that a condition skips reports as Success to a
@@ -12,7 +23,10 @@
 #
 # TRIGGERS, and why each one is here:
 #   pull_request      the point of the gate — judge the change before it lands
-#   push (default)    catches anything that reached the branch another way
+#   push              catches anything that reached the branch another way. It
+#                     is written as `branches: [main]` below; if your default
+#                     branch is not `main`, change it there or this trigger
+#                     silently covers nothing.
 #   schedule          re-judges what already merged. It is the only trigger that
 #                     notices a pinned action SHA that ROTS: legitimate today,
 #                     deleted or orphaned tomorrow in a repository you do not
@@ -32,14 +46,23 @@
 # down, then delete the flag (see "GOING BLOCKING" below).
 #
 # IF THIS EVER REDS YOUR DEFAULT BRANCH AND YOU NEED OUT: remove `ci-secure`
-# from your required checks (one settings change, reversible in a click), or put
-# `--advisory` back. Do NOT delete the workflow — that leaves you with a
-# security check you believe you have and do not.
+# from your required checks (one settings change, reversible in a click). Do NOT
+# delete the workflow — that leaves you with a security check you believe you
+# have and do not. Putting `--advisory` back is the narrower remedy: it covers a
+# red caused by a FAILED FACT and nothing else, so it will not clear a red from
+# a crashed engine, an incomplete scan, or a rate-limited weekly run.
+#
+# ON THE WEEKLY RUN specifically: it is the one run where an unfinished network
+# check is red rather than a warning, so a GitHub API outage or an exhausted
+# rate limit reds your default branch until the next run. That is deliberate —
+# the run that must not be silenceable by burning API quota — but it is a red
+# you cannot fix in your own repository, so read it as "not measured", not as
+# "newly insecure".
 #
 # REQUIREMENTS: Python 3.12 (pinned below rather than inherited from the runner
 # image — this is a security gate, and which interpreter it runs under should
-# not drift with an image rebuild) and PyYAML. The engine is not stdlib-only;
-# the gate is.
+# not drift with an image rebuild) and PyYAML, pinned to a version for the same
+# reason. The engine is not stdlib-only; the gate is.
 name: CI security
 
 on:
@@ -76,7 +99,11 @@ jobs:
       - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.12"
-      - run: pip install pyyaml
+      # Pinned: the engine parses your workflow files with PyYAML, so whatever
+      # this resolves to gets a say in what the scan sees and therefore in what
+      # the gate reports. An unpinned install is the one piece of code in this
+      # job that could change without a pull request of yours.
+      - run: pip install pyyaml==6.0.2
 
       # Is the vendored copy still the code that was reviewed? This catches the
       # accident — a local edit made while debugging, still there six months
@@ -109,7 +136,15 @@ jobs:
           # is not offered: it would make "did this security check run?" depend
           # on the runner image.
           CI_SECURE_GH_IMPOSTOR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'off' || 'on' }}
-          GH_TOKEN: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '' || github.token }}
+          #
+          # The condition below is inverted on purpose. Actions has no ternary,
+          # only `&&`/`||` over truthiness, and THE EMPTY STRING IS FALSY — so
+          # `is-a-fork && '' || github.token` reads as "no token on forks" and
+          # hands one to every fork pull request, because the empty middle term
+          # is falsy and the `||` takes over. The value being withheld can never
+          # be the middle term; the condition is flipped instead, so the token
+          # sits on the truthy branch and the empty string is the fallback.
+          GH_TOKEN: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.token || '' }}
 
           # A network check that could not finish is red on the weekly run and a
           # warning everywhere else. Your pull requests should not be blocked by
