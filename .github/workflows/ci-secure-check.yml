@@ -8,12 +8,14 @@
 #     every one is surfaced as a ::warning:: annotation and in the job summary.
 #     "Does not block" must not decay into "does not appear".
 #
-# Reuse in another repo: ask ci-secure to install itself. It VENDORS the engine
-# and the gate into your repository - copied in, reviewed as a pull request,
-# refreshed when you ask - so nothing is fetched and executed at CI time. The
-# gate resolves the engine relative to its own file, with CI_SECURE_ENGINE as
-# the redirect for a vendored layout; the scan root stays GITHUB_WORKSPACE,
-# which is the tree being judged and is never where executable code comes from.
+# Reuse in another repo: copy this workflow and the gate in, alongside a
+# checkout of the engine. Nothing is fetched and executed at CI time - the code
+# that runs is code that arrived through a reviewed pull request. The gate
+# resolves the engine relative to its own file, with CI_SECURE_ENGINE as the
+# redirect for a vendored layout; the scan root stays GITHUB_WORKSPACE, which is
+# the tree being judged and is never where executable code comes from.
+# (An `install itself` flow that does the copying for you is proposed, not
+# shipped - do not read this comment as describing a command that exists.)
 #
 # There is deliberately no fetch-a-pinned-sha-and-run-it recipe here any more.
 # We ship a detector for that shape (P14.24, unverified remote code execution):

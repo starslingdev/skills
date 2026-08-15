@@ -2250,3 +2250,53 @@ def test_a_pin_suppression_alone_leaves_the_report_complete():
     as the fix recipe says gets no banner and no incomplete-coverage flag."""
     assert report._coverage_is_complete([], [], []) is True
     assert report._coverage_gap_banner([], [], []) == ""
+
+
+# ---------------------------------------------------------------------------
+# The renderer half of the shared neutralization rule
+# ---------------------------------------------------------------------------
+# `flatten_scanned` moved into config.py so the stdlib-only CI gate and this
+# renderer neutralize scanned strings identically — "two copies of an escaping
+# rule eventually differ, and the surface with the weaker copy is the one an
+# attacker aims at." The gate's half is covered by tests/test_ci_secure_gate.py.
+# This half had no coverage at all, so re-inlining a WEAKER rule here — the
+# precise drift the refactor exists to prevent — was green across the whole
+# repository suite.
+
+def test_the_renderer_neutralizes_scanned_strings_via_the_shared_rule() -> None:
+    """Newline, backtick and pipe all lose their structural meaning."""
+    hostile = "a`b|c\nd  e"
+    flat = report._flatten_scanned(hostile)
+
+    assert "\n" not in flat, "a newline lets a scanned name start a row of its own"
+    assert "`" not in flat, "a backtick closes the inline code span this lands in"
+    assert "|" not in flat.replace("\\|", ""), "an unescaped pipe forges a table column"
+    assert flat == "a'b\\|c d e"
+
+
+def test_the_renderer_does_not_keep_its_own_copy_of_the_rule() -> None:
+    """It must DELEGATE, so the two surfaces cannot drift apart.
+
+    Asserting on behaviour alone would let a re-inlined identical copy pass and
+    then rot independently. This asserts the single definition itself.
+    """
+    import inspect
+
+    sys.path.insert(0, _SCRIPTS)
+    try:
+        import config  # noqa: PLC0415
+    finally:
+        try:
+            sys.path.remove(_SCRIPTS)
+        except ValueError:
+            pass
+
+    for probe in ("x`y|z\n w", "", "  ", "a\tb", None, 12, "ünïcode`|"):
+        assert report._flatten_scanned(probe) == config.flatten_scanned(probe), (
+            f"the renderer and the gate disagree about {probe!r}; the rule has "
+            "been copied instead of shared")
+
+    body = inspect.getsource(report._flatten_scanned)
+    assert "replace" not in body, (
+        "report._flatten_scanned has re-inlined the escaping rule instead of "
+        "delegating to config.flatten_scanned")

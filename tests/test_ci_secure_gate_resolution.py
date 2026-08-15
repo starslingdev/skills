@@ -76,6 +76,8 @@ def _run(engine: Path, tmp_path: Path, *, env_engine: bool = True):
         "PATH": "/usr/bin:/bin",
         "GITHUB_WORKSPACE": str(workspace),
         "GITHUB_STEP_SUMMARY": str(summary),
+        # Explicit, because the gate refuses an unset value on purpose.
+        "CI_SECURE_GH_IMPOSTOR": "off",
     }
     if env_engine:
         env["CI_SECURE_ENGINE"] = str(engine)
@@ -162,7 +164,14 @@ def test_the_engine_default_is_gate_relative_not_the_audited_workspace(
 
     assert "decoy engine ran" not in proc.stdout + proc.stderr, (
         "the gate executed an engine out of the tree it was auditing")
-    assert str(_ENGINE) in proc.stdout + proc.stderr or proc.returncode in (0, 1)
+    # Whatever it decided, it decided it OUT LOUD. The old form of this line was
+    # `... or proc.returncode in (0, 1)`, which this script can never violate —
+    # it only ever exits 0 or 1 — so the assertion could not fail at all. The
+    # real engine scanning an empty workspace is legitimately red here; what
+    # must never happen is a red with no stated cause.
+    assert proc.returncode == 0 or "::error::" in proc.stdout, (
+        f"the gate exited {proc.returncode} with no stated cause:\n"
+        f"{proc.stdout}\n{proc.stderr}")
 
 
 def test_the_gate_imports_no_test_helper(tmp_path: Path) -> None:
@@ -230,6 +239,82 @@ def test_the_blocking_rule_is_never_derived_from_the_display_dict() -> None:
             "the security rule")
 
 
+def _outcomes_emitted_by(source: Path) -> set[str]:
+    """Every fact-outcome string literal `config_facts.py` can actually produce.
+
+    An extraction, not a checklist. Three shapes produce an outcome in that
+    module, and all three are read out of the AST:
+
+      1. a dict literal carrying an `"outcome"` key   -> its value expression
+      2. a comparison against `something["outcome"]`  -> the comparators
+      3. a helper documented `(outcome, evidence)`    -> the first tuple slot
+
+    Shape 3 matters because the engine's three-state facts compute their own
+    result in a helper and pass it through, so a new outcome could enter there
+    without ever appearing beside the `"outcome"` key.
+    """
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    found: set[str] = set()
+
+    def strings(node: ast.AST) -> set[str]:
+        return {n.value for n in ast.walk(node)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+
+    for node in ast.walk(tree):
+        # 1. {"outcome": <expr>}
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if (isinstance(key, ast.Constant) and key.value == "outcome"):
+                    found |= strings(value)
+        # 2. x["outcome"] == "..." / in ("...", "...")
+        elif isinstance(node, ast.Compare):
+            subs = [n for n in [node.left, *node.comparators]
+                    if isinstance(n, ast.Subscript)
+                    and isinstance(n.slice, ast.Constant)
+                    and n.slice.value == "outcome"]
+            if subs:
+                for operand in (node.left, *node.comparators):
+                    if operand not in subs:
+                        found |= strings(operand)
+        # 3. def f(...) -> """(outcome, evidence) ..."""
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            doc = ast.get_docstring(node) or ""
+            if doc.startswith("(outcome, evidence)"):
+                for inner in ast.walk(node):
+                    if isinstance(inner, ast.Return) and isinstance(
+                            inner.value, ast.Tuple) and inner.value.elts:
+                        found |= strings(inner.value.elts[0])
+    return found
+
+
+def test_the_census_extracts_rather_than_filters(tmp_path: Path) -> None:
+    """The census must SEE an outcome nobody told it about.
+
+    This is the property that makes the three-table design safe: adding an
+    outcome to the engine has to red the build until a human classifies it. A
+    census implemented as `{v for v in ("pass","fail","unmeasured") if ...}`
+    passes every other assertion in this file while being structurally
+    incapable of noticing a fourth — so the guard is tested with a fourth.
+    """
+    invented = tmp_path / "config_facts_like.py"
+    invented.write_text(
+        'def _thing(root):\n'
+        '    """(outcome, evidence) for a fact that computes its own result."""\n'
+        '    return ("deferred", "waiting on an admin-scoped read")\n'
+        '\n'
+        'def _record(facts, passed):\n'
+        '    facts.append({"fact_id": "x", "outcome": "quarantined"})\n'
+        '    facts.append({"fact_id": "y", "outcome": "pass" if passed else "fail"})\n'
+        '\n'
+        'def _score(facts):\n'
+        '    return [f for f in facts if f["outcome"] in ("pass", "provisional")]\n',
+        encoding="utf-8")
+
+    found = _outcomes_emitted_by(invented)
+    assert {"deferred", "quarantined", "pass", "fail", "provisional"} <= found, (
+        f"the census missed an outcome it was never told about: {sorted(found)}")
+
+
 def test_every_outcome_the_engine_emits_is_known_marked_and_covered() -> None:
     """A census, not a spot check: the engine's vocabulary ⊆ the gate's.
 
@@ -243,10 +328,14 @@ def test_every_outcome_the_engine_emits_is_known_marked_and_covered() -> None:
     finally:
         sys.path.pop(0)
 
-    facts_source = (_CONFIG.parent / "config_facts.py").read_text(encoding="utf-8")
-    emitted = {value for value in ("pass", "fail", "unmeasured")
-               if f'"{value}"' in facts_source}
+    emitted = _outcomes_emitted_by(_CONFIG.parent / "config_facts.py")
     assert emitted, "found no outcome literals in config_facts.py — census broken"
+    # The census must EXTRACT, never filter a list written here: a filter can
+    # only ever return a subset of what it already knew, so a fourth outcome in
+    # config_facts.py would leave the result unchanged and this test green —
+    # the exact drift it exists to catch. `_census_is_an_extraction` pins that.
+    assert {"pass", "fail", "unmeasured"} <= emitted, (
+        f"the census lost a known outcome; it found only {sorted(emitted)}")
 
     assert emitted <= set(config.KNOWN_OUTCOMES), (
         f"config_facts emits {sorted(emitted - set(config.KNOWN_OUTCOMES))}, "

@@ -76,8 +76,14 @@ def run_gate(tmp_path: Path, *, stdout: str, returncode: int = 0,
         "GITHUB_WORKSPACE": str(workspace),
         "CI_SECURE_ENGINE": engine if engine is not None else str(stub),
         "GITHUB_STEP_SUMMARY": str(summary),
+        # Explicit, because the gate refuses an unset value on purpose. A
+        # harness that omitted it would exercise a shape no real job produces.
+        "CI_SECURE_GH_IMPOSTOR": "off",
     }
     env.update(env_extra or {})
+    # A None in `env_extra` UNSETS the variable, which is how a test reaches
+    # "the job did not decide" rather than merely "the job decided badly".
+    env = {k: v for k, v in env.items() if v is not None}
     proc = subprocess.run(
         [sys.executable, str(_GATE)],
         capture_output=True, text=True, env=env,
@@ -436,8 +442,10 @@ def _engine_argv(tmp_path: Path, env_extra: dict[str, str] | None = None):
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     env = {"PATH": "/usr/bin:/bin", "GITHUB_WORKSPACE": str(workspace),
-           "CI_SECURE_ENGINE": str(stub), "GITHUB_STEP_SUMMARY": str(summary)}
+           "CI_SECURE_ENGINE": str(stub), "GITHUB_STEP_SUMMARY": str(summary),
+           "CI_SECURE_GH_IMPOSTOR": "off"}
     env.update(env_extra or {})
+    env = {k: v for k, v in env.items() if v is not None}   # None unsets
     proc = subprocess.run([sys.executable, str(_GATE)],
                           capture_output=True, text=True, env=env)
     proc.summary = summary.read_text(encoding="utf-8") if summary.exists() else ""
@@ -525,9 +533,139 @@ def test_the_impostor_check_is_always_passed_explicitly(tmp_path: Path) -> None:
     security check run?" a property of the runner image rather than of the
     workflow — the silent-skip trap, one image rebuild away.
     """
-    proc = _engine_argv(tmp_path)
+    proc = _engine_argv(tmp_path, {"CI_SECURE_GH_IMPOSTOR": "off"})
     assert "--gh-impostor" in proc.argv, "the flag must be explicit, never defaulted"
     assert proc.argv[proc.argv.index("--gh-impostor") + 1] == "off"
+
+
+def test_an_unset_impostor_setting_is_red_like_any_other_non_decision(
+        tmp_path: Path) -> None:
+    """UNSET is refused, not quietly read as "off".
+
+    This is the case the variable exists for. A default of "off" made deleting
+    the `env:` block from a scan job — a plausible refactor — silently stop the
+    network-gated check on every run, which is the precise outcome the gate's
+    own refusal message claims is impossible. "Nobody decided" and "the job
+    decided not to" must not produce the same scan.
+    """
+    proc = _engine_argv(tmp_path, {"CI_SECURE_GH_IMPOSTOR": None})
+
+    assert proc.returncode == 1, (
+        "an unset CI_SECURE_GH_IMPOSTOR was accepted; whether the network-gated "
+        "check runs must be a decision the job makes, never a default")
+    assert "CI_SECURE_GH_IMPOSTOR" in proc.stdout
+    assert proc.argv == [], "the engine must not even be invoked without a decision"
+
+
+def test_a_strict_setting_that_is_not_a_flag_is_red(tmp_path: Path) -> None:
+    """`true`/`yes`/`schedule` read as strict to a human and all meant lax.
+
+    Strict mode is what makes the weekly run red on an incomplete network
+    check, and that run is the only way a pin that ROTS after merge is ever
+    noticed. A value that silently disables it mutes exactly that.
+    """
+    for value in ("true", "yes", "schedule", "on"):
+        proc = run_scan(tmp_path, _CLEAN, env_extra={"CI_SECURE_GH_STRICT": value})
+        assert proc.returncode == 1, f"{value!r} was accepted as a strict setting"
+        assert "CI_SECURE_GH_STRICT" in proc.stdout
+
+
+def test_an_unset_strict_setting_means_lax_and_is_allowed(tmp_path: Path) -> None:
+    """Unlike the impostor flag, unset strict is legitimate: the fork job omits it.
+
+    The dial changes SEVERITY, not coverage — lax still discloses on both
+    surfaces — so there is no silent-skip to prevent here, and refusing unset
+    would red the fork job for doing the right thing.
+    """
+    proc = run_scan(tmp_path, _CLEAN, env_extra={"CI_SECURE_GH_STRICT": None})
+    assert proc.returncode == 0, proc.stdout
+
+
+def test_the_scan_root_is_the_workspace_the_job_checked_out(tmp_path: Path) -> None:
+    """GITHUB_WORKSPACE decides the scan root — the audited half of the two-tree rule.
+
+    Only the FALLBACK was pinned before, and in this repo the two paths
+    coincide, so a gate that ignored the workspace entirely would pass CI here
+    and silently scan its own directory instead of the adopter's repository in
+    a vendored install.
+    """
+    workspace = tmp_path / "elsewhere"
+    workspace.mkdir()
+    proc = _engine_argv(tmp_path, {"GITHUB_WORKSPACE": str(workspace)})
+
+    assert proc.argv[proc.argv.index("--root") + 1] == str(workspace), (
+        "the scan root must be the tree the job checked out, not the gate's own")
+
+
+def test_a_rule_that_raises_on_load_is_red_with_a_stated_cause(tmp_path: Path) -> None:
+    """A config.py that blows up on import must not be an unexplained red.
+
+    Loading the rule EXECUTES it, and in a vendored layout that code sits
+    beside the engine — so this is the likeliest line in the gate to raise, not
+    the least. It runs at module scope, outside main()'s handler, so it used to
+    exit non-zero with a bare traceback and no ::error:: annotation.
+    """
+    engine_dir = tmp_path / "vendored"
+    engine_dir.mkdir()
+    (engine_dir / "config.py").write_text(
+        "raise RuntimeError('rule exploded on import')\n", encoding="utf-8")
+    engine = engine_dir / "scan.py"
+    engine.write_text("import sys\nsys.stdout.write('{}')\n", encoding="utf-8")
+
+    proc = run_scan(tmp_path, _CLEAN, engine=str(engine))
+
+    assert proc.returncode == 1
+    assert "::error::" in proc.stdout, (
+        "a rule that raises on load produced a red with no stated cause")
+    assert "could not be loaded" in proc.stdout
+
+
+def test_a_rule_missing_the_coherence_predicate_says_so(tmp_path: Path) -> None:
+    """`coverage_is_complete` is CALLED, so its absence is a named disagreement.
+
+    Left out of the presence check, a vendored rule missing only that name
+    reached the crash handler and reported an AttributeError — still red, but
+    the adopter is told about a Python attribute instead of about the rule.
+    """
+    engine_dir = tmp_path / "vendored_partial"
+    engine_dir.mkdir()
+    (engine_dir / "config.py").write_text(
+        "BLOCKING_OUTCOMES = frozenset({'fail'})\n"
+        "KNOWN_OUTCOMES = frozenset({'pass', 'fail'})\n"
+        "OUTCOME_MARKS = {'pass': 'PASS', 'fail': 'FAIL'}\n"
+        "def flatten_scanned(v):\n    return '' if v is None else str(v)\n",
+        encoding="utf-8")
+    engine = engine_dir / "scan.py"
+    engine.write_text("import sys\nsys.stdout.write('{}')\n", encoding="utf-8")
+
+    proc = run_scan(tmp_path, _CLEAN, engine=str(engine))
+
+    assert proc.returncode == 1
+    assert "coverage_is_complete" in proc.stdout
+    assert "engine and gate disagree" in proc.stdout
+
+
+def test_a_hung_engine_is_red_with_a_named_cause(tmp_path: Path) -> None:
+    """The engine timeout must actually fire, and say why.
+
+    Without it a hung engine runs until the JOB's own timeout cancels it, which
+    reaches the check run as an unexplained cancellation rather than a stated
+    verdict — and the job timeout is the thing this constant must stay under.
+    """
+    stub = tmp_path / "hang.py"
+    stub.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    summary = tmp_path / "summary.md"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    proc = subprocess.run(
+        [sys.executable, str(_GATE)], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "GITHUB_WORKSPACE": str(workspace),
+             "CI_SECURE_ENGINE": str(stub), "GITHUB_STEP_SUMMARY": str(summary),
+             "CI_SECURE_GH_IMPOSTOR": "off",
+             "CI_SECURE_ENGINE_TIMEOUT_S": "1"})
+
+    assert proc.returncode == 1
+    assert "did not finish within" in proc.stdout, proc.stdout + proc.stderr
 
 
 def test_the_job_decides_whether_the_impostor_check_runs(tmp_path: Path) -> None:

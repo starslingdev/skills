@@ -118,6 +118,35 @@ def test_id_token_write_is_present(job: dict) -> None:
     assert job["permissions"]["id-token"] == "write"
 
 
+def test_the_grant_set_is_exactly_what_the_action_needs(job: dict) -> None:
+    """The whole permission block, not one key of it.
+
+    This is the most privileged job in the repository — it holds the API key
+    and runs an agent — and every grant here is argued for individually in the
+    workflow's own comments. Pinning only `id-token` left the set open at the
+    top: adding `packages: write` or `security-events: write` would widen the
+    most dangerous job in the repo with nothing going red, while the equivalent
+    test for the security gate already asserts its block exactly. The laxer
+    test was guarding the riskier workflow.
+
+    ci-secure's own `sec.permissions.write-scoped` fact does not cover this: it
+    reads WORKFLOW-level grants, and these are job-level.
+    """
+    assert job["permissions"] == {
+        "contents": "write",
+        "pull-requests": "write",
+        "issues": "write",
+        "id-token": "write",
+        "actions": "read",
+    }, (
+        "the @claude job's grants changed. Each is justified in the workflow's "
+        "comments — id-token for the App token exchange, pull-requests: write "
+        "for the buffered-review-comment fallback, actions: read for the "
+        "read-only CI-status tool. Widening the job that holds the API key is "
+        "a deliberate edit, not a drift."
+    )
+
+
 def test_no_workflow_level_permissions_block(workflow: dict) -> None:
     """Grants stay scoped to the one job that needs them."""
     assert "permissions" not in workflow

@@ -13,3 +13,9 @@
 # fork/self-hosted split, the escaping, the @claude hardening. Deleting an
 # assertion weakens the gate as much as editing the code it guards.
 /tests/ @yonasb
+
+# The off-switch for all of the above. `testpaths` here is what makes those
+# suites run at all, so dropping an entry disables them wholesale without
+# touching a single owned path -- a shorter route to a forged pass than editing
+# any test.
+/pyproject.toml @yonasb

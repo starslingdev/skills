@@ -86,13 +86,42 @@ def load_config():
     return None, None
 
 
-CONFIG, CONFIG_PATH = load_config()
+# Loading the rule EXECUTES code - `spec.loader.exec_module` - and in a vendored
+# layout that code sits beside the engine rather than in this tree, which makes
+# this the likeliest line in the file to raise, not the least. It runs at module
+# scope, OUTSIDE main()'s handler, so a config.py with a syntax error or an
+# import-time raise used to exit non-zero with a bare traceback and no
+# `::error::`. The build was never at risk; the operator just got the
+# "unexplained red" this file argues against everywhere else. The failure is
+# captured here and re-reported as a stated verdict inside main().
+#
+# Deliberately unannotated: a PEP 604 `BaseException | None` here would be
+# evaluated at module scope, and this file is vendored into adopters' repos
+# where python3 is whatever they have. That is the same break this PR fixed in
+# the skill's own config.py.
+try:
+    CONFIG, CONFIG_PATH = load_config()
+    CONFIG_ERROR = None
+except BaseException as _exc:                                 # noqa: BLE001
+    CONFIG, CONFIG_PATH, CONFIG_ERROR = None, None, _exc
 
 # The job's own timeout-minutes would eventually catch a hung engine, but only
 # as an unexplained cancellation; failing here names the cause on the check run.
 # It must therefore fire FIRST: at parity with the job's 10 minutes this path was
 # unreachable, because checkout and pip had already spent a minute of that clock.
-ENGINE_TIMEOUT_S = 420
+#
+# Overridable by env so the timeout can be exercised for real in a test rather
+# than trusted. A test that has to sleep 420s does not get written, and an
+# untested timeout is how this constant sat at parity with the job clock -
+# unreachable - in the first place. The override only ever SHORTENS the wait in
+# a test; no workflow sets it, and a bad value falls back to the default rather
+# than disabling the timeout, since "no timeout" is the failure being prevented.
+try:
+    ENGINE_TIMEOUT_S = int(os.environ.get("CI_SECURE_ENGINE_TIMEOUT_S", "") or 420)
+except ValueError:
+    ENGINE_TIMEOUT_S = 420
+if ENGINE_TIMEOUT_S <= 0:
+    ENGINE_TIMEOUT_S = 420
 
 # P14.11 (impostor action SHA) is the one detector that needs network and a
 # GitHub token, so whether it runs is a property of the JOB, not of this script:
@@ -105,7 +134,12 @@ ENGINE_TIMEOUT_S = 420
 # run?" a property of the runner image - one rebuild away from silently
 # stopping. A typo is red for the same reason: a check that quietly turned
 # itself off looks exactly like a check that passed.
-IMPOSTOR = os.environ.get("CI_SECURE_GH_IMPOSTOR", "off").strip().lower()
+# No default. Defaulting to "off" made UNSET the one value that skipped the
+# refusal below - so deleting the `env:` block from a scan job would quietly
+# turn the network-gated check off, which is exactly the outcome this variable
+# exists to make impossible, and the refusal message right below claimed was
+# already impossible.
+IMPOSTOR = os.environ.get("CI_SECURE_GH_IMPOSTOR", "").strip().lower()
 ENGINE_ARGS = ["--gh-impostor", IMPOSTOR]
 
 # Anything short of a completed network check is disclosed everywhere; whether
@@ -113,7 +147,15 @@ ENGINE_ARGS = ["--gh-impostor", IMPOSTOR]
 # someone else's rate limit, so there it warns. The scheduled run against the
 # default branch has no deadline and nothing to race, so there it is red - and
 # it is the run that catches a pin that rots after merge.
-STRICT_GH = os.environ.get("CI_SECURE_GH_STRICT", "").strip() == "1"
+#
+# Unset is allowed and means lax, because the fork job deliberately does not set
+# it and lax still DISCLOSES on both surfaces - the dial changes severity, not
+# coverage. An unrecognised value is refused, though: `true`, `yes` and
+# `schedule` all read as "strict is on" to a human editing the YAML and all
+# silently meant lax, which would have muted the one run whose whole purpose is
+# catching a pin that rots after merge.
+STRICT_RAW = os.environ.get("CI_SECURE_GH_STRICT", "0").strip()
+STRICT_GH = STRICT_RAW == "1"
 
 # The engine's own vocabulary for a completed network check. `partial:` (some
 # pins unverified) and `skipped:` (never ran) are the two it uses for anything
@@ -213,14 +255,23 @@ def main() -> int:
     # prevent: a second definition of "which outcomes block" that drifts from
     # the engine's and is never noticed, because a build that finds it goes
     # green either way.
+    if CONFIG_ERROR is not None:
+        quote("".join(traceback.format_exception(
+            type(CONFIG_ERROR), CONFIG_ERROR, CONFIG_ERROR.__traceback__)))
+        return fail(
+            f"ci-secure rule (config.py) could not be loaded ({CONFIG_ERROR!r}) "
+            "- the gate cannot decide what blocks without one")
     if CONFIG is None:
         return fail(
             f"ci-secure rule (config.py) not found beside the engine at "
             f"{ENGINE.parent} nor at {_CONFIG_FALLBACK} - the gate cannot decide "
             "what blocks without one")
+    # `coverage_is_complete` is in this list because it is CALLED below: left
+    # out, a vendored rule missing only that name reached the crash handler and
+    # reported an AttributeError instead of the specific disagreement.
     missing = [name for name in
                ("BLOCKING_OUTCOMES", "KNOWN_OUTCOMES", "OUTCOME_MARKS",
-                "flatten_scanned")
+                "flatten_scanned", "coverage_is_complete")
                if not hasattr(CONFIG, name)]
     if missing:
         return fail(f"ci-secure rule at {CONFIG_PATH} defines no {', '.join(missing)} "
@@ -235,6 +286,12 @@ def main() -> int:
             "'auto' and an unset value are refused on purpose, because they make "
             "whether the network-gated check runs depend on the runner image "
             "rather than on this job")
+
+    if STRICT_RAW not in ("0", "1"):
+        return fail(
+            f"CI_SECURE_GH_STRICT must be '0' or '1', not {STRICT_RAW!r} - a "
+            "value like 'true' reads as strict and meant lax, which would mute "
+            "the run whose purpose is catching a pin that rots after merge")
 
     try:
         result = subprocess.run(
@@ -357,9 +414,9 @@ def main() -> int:
                   f"{esc(f.get('title', ''))}")
     # A detector that did not run is reported, not omitted: "no findings from
     # P14.11" and "P14.11 never ran" must not look the same to a reader. Indexed,
-    # not `.get(... ) or {}`: this gate always passes `--gh-impostor off`, so the
-    # engine always has a status to report, and an absent key is schema drift -
-    # which would make those two cases look identical again.
+    # not `.get(... ) or {}`: this gate always passes `--gh-impostor` explicitly,
+    # on or off, so the engine always has a status to report, and an absent key
+    # is schema drift - which would make those two cases look identical again.
     lines += ["", "### Network-gated detectors", ""]
     lines += [f"- `{flat(k)}`: {flat(v)}" for k, v in sorted(gh_checks.items())]
     # Individually unmeasured facts do not block - several have honest causes

@@ -195,9 +195,69 @@ def test_only_the_trusted_job_can_run_the_network_gated_check(workflow: dict) ->
 
     assert fork["env"]["CI_SECURE_GH_IMPOSTOR"] == "off", (
         "the fork twin must turn it off explicitly, not leave it to a default")
-    assert not any("TOKEN" in key.upper() for key in fork.get("env", {})), (
-        "the fork job runs pull-request-authored code and must not be handed a "
-        "token of any kind")
+    # Checked at all THREE scopes a variable can be set at, because they all
+    # reach the same step. Asserting only on the step's own `env:` let a
+    # job-level `GH_TOKEN` — the identical exposure — through.
+    for scope, env in (("workflow", workflow.get("env") or {}),
+                       ("job", workflow["jobs"]["scan-fork"].get("env") or {}),
+                       ("step", fork.get("env") or {})):
+        assert not any("TOKEN" in key.upper() for key in env), (
+            f"a token-shaped variable is set at {scope} scope and reaches the "
+            "fork job, which runs pull-request-authored code and must not be "
+            "handed a credential of any kind")
+
+    # Belt and braces: no `secrets.` reference anywhere in the fork job,
+    # whatever the variable happens to be named.
+    fork_yaml = yaml.safe_dump(workflow["jobs"]["scan-fork"])
+    assert "secrets." not in fork_yaml, (
+        f"the fork job references a secret:\n{fork_yaml}")
+
+
+def test_the_scan_jobs_do_not_leave_the_job_token_in_the_checkout(
+        workflow: dict) -> None:
+    """This workflow gets the same credential scoping it enforces on everyone else.
+
+    The gate is a Python program reading the checked-out tree, and on a fork PR
+    the author wrote that tree. GitHub's default checkout leaves the job token
+    in `.git/config`; nothing here needs it, so nothing here should carry it.
+    The engine's own `sec.checkout.credentials-scoped` fact is scoped to
+    untrusted triggers and passes either way, so only this test holds the line —
+    which is why removing both `persist-credentials: false` lines was previously
+    green everywhere.
+    """
+    for name in ("scan", "scan-fork"):
+        checkouts = [step for step in workflow["jobs"][name]["steps"]
+                     if "actions/checkout" in str(step.get("uses", ""))]
+        assert checkouts, f"{name} checks nothing out"
+        for step in checkouts:
+            assert step.get("with", {}).get("persist-credentials") is False, (
+                f"{name}'s checkout persists the job token into .git/config")
+
+
+def test_the_engine_timeout_stays_inside_the_jobs_own_clock() -> None:
+    """A timeout at parity with the job clock can never fire.
+
+    The gate's `ENGINE_TIMEOUT_S` exists so a hung engine fails with a STATED
+    cause instead of an unexplained job cancellation. That only works while it
+    is strictly shorter than the job's `timeout-minutes` — and it must clear it
+    by enough to cover checkout and pip, which have already spent part of that
+    clock before the gate starts. This is the regression that shipped once
+    already, and nothing but arithmetic catches it.
+    """
+    gate = (_REPO / ".github" / "scripts" / "ci_secure_gate.py").read_text(
+        encoding="utf-8")
+    match = re.search(r"or (\d+)\)\n", gate) or re.search(
+        r"ENGINE_TIMEOUT_S = (\d+)", gate)
+    assert match, "ENGINE_TIMEOUT_S is not a readable literal any more"
+    engine_timeout = int(match.group(1))
+
+    workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    for name in ("scan", "scan-fork"):
+        job_budget = workflow["jobs"][name]["timeout-minutes"] * 60
+        assert engine_timeout < job_budget, (
+            f"{name}: the engine timeout ({engine_timeout}s) is not shorter than "
+            f"the job's own budget ({job_budget}s), so it can never fire and a "
+            "hung engine reaches the check run as an unexplained cancellation")
 
 
 def test_a_weekly_run_rechecks_the_default_branch_and_demands_completeness(
@@ -223,8 +283,12 @@ def test_a_weekly_run_rechecks_the_default_branch_and_demands_completeness(
 
     env = workflow["jobs"]["scan"]["steps"][-1]["env"]
     strict = " ".join(str(env["CI_SECURE_GH_STRICT"]).split())
-    assert "schedule" in strict, (
-        "the scheduled run must demand a complete network check; strict mode is "
+    # Both branches, not a substring. `"schedule" in strict` is satisfied by the
+    # exact INVERSION of this policy — strict on every pull request and lax on
+    # the weekly run — which would block PRs on somebody else's rate limit while
+    # muting the one run that catches rot.
+    assert strict == "${{ github.event_name == 'schedule' && '1' || '0' }}", (
+        "strict mode must be ON for the scheduled run and OFF elsewhere; it is "
         f"wired as {strict!r}")
 
     # The concurrency key separates events, so the weekly run cannot be
@@ -311,3 +375,34 @@ def test_actions_are_pinned_to_full_shas(workflow: dict) -> None:
             _, _, version = ref.partition("@")
             assert re.fullmatch(r"[0-9a-f]{40}", version), f"{ref} is not pinned to a commit SHA"
             assert re.search(rf"{re.escape(ref)}\s+# v", text), f"{ref} has no `# vX.Y.Z` comment"
+
+
+def test_codeowners_covers_every_path_that_could_forge_a_pass() -> None:
+    """The three paths the workflow's own comments say review must watch.
+
+    On a fork pull request the gate script, the engine and this workflow all
+    come from the head ref, so nothing inside CI can vouch for the scan. What
+    closes that is a human reading the diff, and CODEOWNERS is what routes it.
+    The engine's `sec.codeowners.workflows` fact only asks whether
+    `.github/workflows/` is covered, so deleting the other rules is green
+    everywhere else — including in the gate's own scan of this repo.
+
+    `pyproject.toml` is here because it is the off-switch for the tests: its
+    `testpaths` list is what makes the suites below run at all, and removing an
+    entry disables them without touching an owned path.
+    """
+    codeowners = _REPO / ".github" / "CODEOWNERS"
+    assert codeowners.is_file(), "CODEOWNERS is missing; the fork caveat rests on it"
+    rules = [line.split() for line in
+             codeowners.read_text(encoding="utf-8").splitlines()
+             if line.strip() and not line.lstrip().startswith("#")]
+    owned = {parts[0]: parts[1:] for parts in rules if len(parts) > 1}
+
+    for path in ("/.github/", "/skills/ci-secure/", "/tests/", "/pyproject.toml"):
+        assert path in owned, (
+            f"{path} has no CODEOWNERS rule. A pull request can edit the code "
+            "that judges it, so every path that could forge a pass — the "
+            "workflow, the engine, the tests that pin the rules, and the file "
+            "that decides which tests run — must route to a human reviewer.")
+        assert any(owner.startswith("@") for owner in owned[path]), (
+            f"{path} has a CODEOWNERS rule with no owner")
