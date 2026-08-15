@@ -194,6 +194,29 @@ def coverage_is_complete(
     return set(blocking) <= set(known) <= set(marks)
 
 
+def flatten_scanned(value: object) -> str:
+    """Flatten and neutralize an ATTACKER-CONTROLLED scanned string.
+
+    Everything ci-secure reports about is read out of the repository under
+    audit — workflow file names, job names, fact evidence — and on a fork pull
+    request an attacker writes all of it. Three characters carry structure in
+    the Markdown these values land in:
+
+      newline   starts a row the tool did not write, which can read as a pass
+      backtick  closes an inline code span (or a fence) early, so whatever
+                follows renders as live Markdown on the same line
+      pipe      splits a table row into phantom columns
+
+    Collapsing all whitespace kills the first, replacing the backtick kills the
+    second, escaping the pipe kills the third. This is the single definition of
+    that rule: the report renderer and the CI gate both use it, so a value that
+    is safe in one surface cannot be unsafe in the other.
+    """
+    if value is None:
+        return ""
+    return " ".join(str(value).split()).replace("`", "'").replace("|", "\\|")
+
+
 # =============================================================================
 # VERSION
 # =============================================================================

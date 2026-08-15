@@ -59,6 +59,7 @@ from config import (  # noqa: E402
     ACTIVITY_RUN_LIMIT,
     DORMANT_DAYS,
     __version__ as SKILL_VERSION,
+    flatten_scanned as _flatten_rule,
     setup_logging,
 )
 
@@ -1647,11 +1648,13 @@ def _flatten_scanned(value: Any) -> str:
     heading/fence-break injection; replacing the backtick kills inline-code and
     fence-character breakout. Pipes are escaped too, so the result is also
     table-cell safe.
+
+    The rule itself lives in ``config.py`` so that the CI gate — which cannot
+    import this module, being stdlib-only — neutralizes scanned strings the
+    same way. Two copies of this rule would eventually differ, and the surface
+    with the weaker copy is the one an attacker would aim at.
     """
-    if value is None:
-        return ""
-    flat = " ".join(str(value).split())
-    return flat.replace("`", "'").replace("|", "\\|")
+    return _flatten_rule(value)
 
 
 def _fence_safe(text: str) -> str:

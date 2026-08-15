@@ -23,6 +23,14 @@ entries are dated (UTC). Format loosely follows
   new failure state as a pass. Anything running ci-secure as a CI gate imports
   these instead of hardcoding a copy that can drift from the engine's.
 
+- **2026-08-15** — **`config.py` now owns the one definition of how a scanned
+  string is neutralized.** `flatten_scanned()` collapses whitespace, replaces
+  the backtick and escapes the pipe — the rule the report renderer already
+  applied, moved somewhere a stdlib-only CI gate can import it too. The
+  renderer delegates to it rather than keeping a copy: two copies of an
+  escaping rule eventually differ, and the surface with the weaker copy is the
+  one an attacker aims at.
+
 ### Changed
 
 - **2026-08-14** — **P14.24's rendered finding title is now "Unverified remote

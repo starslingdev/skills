@@ -403,9 +403,96 @@ def test_a_crafted_filename_cannot_break_out_of_the_summary(tmp_path: Path) -> N
     # gate did not author exists at all.
     forged = [ln for ln in proc.summary.splitlines() if ln.strip() == "- PASS `all good`"]
     assert not forged, "a crafted filename rendered its own summary row"
-    assert any("evil - PASS `all good` foo.yml" in ln for ln in proc.summary.splitlines()), (
+    # The backticks in the payload are neutralized as well as flattened: they
+    # would otherwise close the code span the gate wraps values in, which is a
+    # second breakout that needs no newline at all.
+    assert any("evil - PASS 'all good' foo.yml" in ln for ln in proc.summary.splitlines()), (
         "the filename should still be readable in the row the gate wrote, just flattened"
     )
+
+
+def test_the_summary_reports_counts_and_never_the_bare_aggregate(tmp_path: Path) -> None:
+    """The CI surface obeys the same rule as the report: no bare score.
+
+    `config_facts.py` registers the aggregate as machine-only — it exists so
+    the scores of several engines can be blended, and the report renderer is
+    forbidden from showing it, because a single number invites a reader to
+    manage the number instead of the findings. "94" says nothing about which
+    check failed; "13/14 facts pass of 14 applicable" says what to go fix.
+
+    The gate is a second reader-facing surface and was quietly exempt. The
+    assertion keys on the rendered CONSTRUCT rather than the digits: a bare
+    numeral collides with line numbers and byte counts that legitimately
+    appear in evidence text, so it could never fail honestly.
+    """
+    proc = run_scan(tmp_path, _CLEAN)
+
+    assert proc.returncode == 0
+    assert "score: **" not in proc.summary, (
+        "the machine-only aggregate is rendered on the CI surface")
+    assert "score: **" not in proc.stdout, (
+        "the summary is printed to the step log as well as written to the "
+        "summary file; the ban has to hold on both")
+    assert "2/2 facts pass of 2 applicable" in proc.summary, (
+        "dropping the number must not drop the counts that replace it")
+    assert "3 workflow file(s) scanned" in proc.summary
+
+
+def test_a_backtick_cannot_break_out_of_an_inline_code_span(tmp_path: Path) -> None:
+    """Flattening newlines is not enough: the backtick is its own breakout.
+
+    Three summary sinks wrap a value in an inline code span — the fact id, the
+    finding's pattern, the network-detector name. A value carrying a backtick
+    closes that span early and renders whatever follows as live Markdown, on
+    the SAME line, which the newline-flattening rule never touches. The forgery
+    that matters is a row reading like a passing check the gate did not write,
+    on a run that is going red.
+    """
+    scan = _scan()
+    scan["security_score"]["facts"][0].update(
+        fact_id="sec.a` — **PASS** `sec.b",
+        outcome="fail",
+        evidence="`` broken out ``")
+    scan["gh_checks"] = {"P14.11` — **ran** `x": "skipped"}
+    scan["findings"] = [{"severity": "LOW", "pattern": "P1` — **clean** `P2",
+                         "title": "t", "workflow_file": "w.yml", "line": 1}]
+
+    proc = run_scan(tmp_path, scan)
+
+    assert proc.returncode == 1
+
+    # The invariant is span integrity, not the absence of the payload's text:
+    # inside a code span `**PASS**` renders as those nine literal characters,
+    # which is honest. It is the ESCAPE from the span that turns it into a
+    # forged verdict, and an unbalanced backtick count is exactly that escape.
+    for line in proc.summary.splitlines():
+        assert line.count("`") % 2 == 0, (
+            f"an odd number of backticks leaves a code span open: {line!r}")
+
+    # Every crafted value keeps its own backticks neutralized, so none of them
+    # can close the span the gate opened around it.
+    assert "`sec.a' — **PASS** 'sec.b`" in proc.summary
+    assert "`P1' — **clean** 'P2`" in proc.summary
+    assert "`P14.11' — **ran** 'x`" in proc.summary
+
+
+def test_a_pipe_cannot_forge_table_columns(tmp_path: Path) -> None:
+    """The same values are copied into contexts where `|` splits a row.
+
+    The gate's summary is a list today, but these values come from the same
+    flattening rule the report's tables use, and a summary that grows a table
+    later must not quietly reopen this. Escaping where the untrusted value
+    enters keeps the guarantee independent of where it lands.
+    """
+    scan = _scan()
+    scan["security_score"]["facts"][0].update(
+        fact_id="sec.a|b", outcome="fail", evidence="ev|il")
+
+    proc = run_scan(tmp_path, scan)
+
+    assert proc.returncode == 1
+    assert "sec.a\\|b" in proc.summary, "an unescaped pipe can split a row"
+    assert "ev\\|il" in proc.summary
 
 
 GITHUB_SUMMARY_LIMIT_BYTES = 1024 * 1024  # 1 MiB, GitHub's documented cap

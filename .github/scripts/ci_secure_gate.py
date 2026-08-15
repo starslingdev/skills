@@ -136,13 +136,20 @@ def esc(value: object, *, prop: bool = False) -> str:
 
 
 def flat(value: object) -> str:
-    """Collapse untrusted text to one line for the Markdown job summary.
+    """Neutralize untrusted text for the Markdown job summary.
 
     Same attacker-controlled source as `esc`, different sink: a newline here does
     not run a command, it breaks out of the list item and lets a crafted filename
-    render its own Markdown - a summary that reads as a clean pass.
+    render its own Markdown - a summary that reads as a clean pass. A backtick
+    does the same thing without a newline, by closing one of the inline code
+    spans this summary wraps ids in, and a pipe splits a table row.
+
+    The rule comes from the skill's config.py rather than being spelled out
+    here, because the engine's report renderer neutralizes the same strings for
+    the same reason: two copies would drift, and the weaker one is the surface
+    an attacker aims at.
     """
-    return " ".join(str(value).split())
+    return CONFIG.flatten_scanned(value)
 
 
 def budget(body: str) -> str:
@@ -193,7 +200,8 @@ def main() -> int:
             f"{ENGINE.parent} nor at {_CONFIG_FALLBACK} - the gate cannot decide "
             "what blocks without one")
     missing = [name for name in
-               ("BLOCKING_OUTCOMES", "KNOWN_OUTCOMES", "OUTCOME_MARKS")
+               ("BLOCKING_OUTCOMES", "KNOWN_OUTCOMES", "OUTCOME_MARKS",
+                "flatten_scanned")
                if not hasattr(CONFIG, name)]
     if missing:
         return fail(f"ci-secure rule at {CONFIG_PATH} defines no {', '.join(missing)} "
@@ -268,22 +276,26 @@ def main() -> int:
     failed = [f for f in facts if f["outcome"] in CONFIG.BLOCKING_OUTCOMES]
     unmeasured = [f for f in facts if f["outcome"] == "unmeasured"]
 
+    # Counts, never the bare aggregate. `config_facts.py` registers the score as
+    # machine-only - it exists so several engines' scores can be blended, and the
+    # report renderer is forbidden from showing it, because one number invites a
+    # reader to manage the number rather than the findings. This is a second
+    # reader-facing surface and it was quietly exempt.
+    #
     # `applicable_count` is in the headline, not just `scored_count`: when a fact
     # cannot be measured the engine drops it from BOTH sides of the ratio, so a
     # repo with one measurable fact and eleven unmeasurable ones still reads
-    # "1/1 facts pass" at a score of 100. True, and rhetorically false - the
-    # denominator shrank to hide the gap. The engine states the gap in `caveat`,
-    # which is rendered below.
+    # "1/1 facts pass". True, and rhetorically false - the denominator shrank to
+    # hide the gap. The engine states the gap in `caveat`, rendered below.
     #
-    # Every interpolation here is flattened. These four fields come out of the
+    # Every interpolation here is flattened. These fields come out of the
     # engine's JSON, and on a fork pull request the engine is attacker code: a
     # newline in any of them would start a new line in `body`, which is printed
     # to stdout where Actions parses `::workflow commands::`.
     lines = ["## ci-secure", "",
-             f"score: **{flat(score.get('score'))}** "
-             f"({flat(score.get('passed'))}/{flat(score.get('scored_count'))} facts pass"
+             f"{flat(score.get('passed'))}/{flat(score.get('scored_count'))} facts pass"
              f" of {flat(score.get('applicable_count'))} applicable, "
-             f"{flat(scan.get('scanned_workflows'))} workflow file(s) scanned)", ""]
+             f"{flat(scan.get('scanned_workflows'))} workflow file(s) scanned", ""]
     if score.get("caveat"):
         lines += [f"> {flat(score['caveat'])}", ""]
 

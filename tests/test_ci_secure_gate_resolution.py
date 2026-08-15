@@ -60,6 +60,10 @@ OUTCOME_MARKS = {"pass": "PASS", "fail": "**FAIL**",
 
 def coverage_is_complete() -> bool:
     return True
+
+
+def flatten_scanned(value):
+    return " ".join(str(value).split()).replace("`", "'").replace("|", "\\\\|")
 '''
 
 
