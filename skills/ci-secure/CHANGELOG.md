@@ -71,6 +71,16 @@ entries are dated (UTC). Format loosely follows
   into a destination wins; a genuine pin of that surviving fetch still
   suppresses.
 
+- **2026-08-14** — **P14.24: a trailing re-clone nothing runs from no longer
+  buries an earlier clone that WAS executed.** The last-unpinned-fetch-wins rule
+  (above) overwrote the destination with a re-clone even when nothing ran from
+  it; the ordering guard then found no execution after that trailing fetch and
+  the job went silent while an earlier clone had already been executed —
+  `clone → run → re-clone` read as clean. Overwritten clones are now kept as
+  fall-back candidates: the surviving fetch is tried first, and the earlier tree
+  a command actually ran from still fires (and still suppresses when it was
+  pinned before it ran).
+
 - **2026-08-14** — **P14.24: a single-line `run:` value written with YAML quotes
   is read as the parser saw it.** `run: "git clone … && bash x.sh"` was scraped
   raw, so the quotes reached the shell tokenizer and the whole line came back as

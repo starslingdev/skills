@@ -3689,6 +3689,11 @@ def _mutable_fetch_executions(
     """
     fetches: dict[str, _RemoteFetch] = {
         f.dest: f for f in reversed(extra_fetches or [])}
+    # Clones a later re-clone into the same destination overwrote (last-wins).
+    # They stay as fall-back candidates: the LAST unpinned fetch is the tree
+    # that ran only when a command actually ran from it — a trailing re-clone
+    # that nothing executes must not bury an earlier clone that WAS executed.
+    shadowed: dict[str, list[_RemoteFetch]] = {}
     pending_fetch_head: dict[str, _RemoteFetch] = {}
     # destination -> the EARLIEST position a full-40-hex pin was applied to it.
     # Position matters: pinning is a claim about the code that ran, and a pin
@@ -3829,6 +3834,9 @@ def _mutable_fetch_executions(
                     # and the execution) and the job went silent while it ran
                     # the unpinned re-clone. The `pinned` list still holds every
                     # pin, so a genuine pin of the surviving fetch suppresses.
+                    prev = fetches.get(dest)
+                    if prev is not None:
+                        shadowed.setdefault(dest, []).append(prev)
                     fetches[dest] = _RemoteFetch(line_no, _raw, dest, ref, pos)
                     continue
                 if sub == "fetch":
@@ -3878,50 +3886,65 @@ def _mutable_fetch_executions(
 
     pairs: list[tuple[_RemoteFetch, int, str]] = []
     for dest, fetch in fetches.items():
-        hit = next(
-            (
-                (at, line, written)
-                for at, line, resolved, written in executions
-                # A shell fetch is ordered by position in the command stream
-                # (both halves can share a line); a checkout step has no
-                # position there, so it is ordered by line.
-                if (line > fetch.line if fetch.pos < 0 else at > fetch.pos)
-                and _under(dest, resolved)
-            ),
-            None,
-        )
-        if hit is None:
-            continue
-        # ANY pin between the fetch and the execution suppresses — not just the
-        # first one seen. Keeping only the earliest hid the pin a repository
-        # actually applied when an older one landed on a tree it then
-        # discarded, and told it that it executes unpinned remote code.
-        #
-        # A checkout-step fetch has no position in the command stream, so its
-        # window opens just before the first shell command AFTER its step —
-        # ANY command. Two ways to get this wrong, and this code has had both:
-        # opening at -1 let every pin in the job count, including one applied
-        # to a tree the checkout then replaced; opening at the first
-        # EXECUTION-shaped command left the window empty whenever that
-        # execution was the reported hit, so the fix recipe's own shape
-        # (checkout, pin, run) could never suppress and an unrelated command
-        # sitting in between decided the verdict.
-        window_start = fetch.pos
-        if window_start < 0:
-            window_start = next(
-                (at for at, line in command_lines if line > fetch.line),
-                hit[0] + 1) - 1
-        pin_at = next((p for p in pinned.get(dest, ())
-                       if window_start < p < hit[0]), None)
-        if pin_at is not None:
+        # The last unpinned fetch into a destination is the tree that ran — but
+        # only when a command actually ran from it. A trailing re-clone nothing
+        # executes leaves the last fetch with no hit; the earlier clone a
+        # command DID run from is still live, so the shadowed fetches stay as
+        # fall-back candidates, tried latest-first. A candidate that is
+        # pin-suppressed also falls through: an earlier, unpinned tree may have
+        # been executed before the pin landed.
+        candidates = [fetch, *reversed(shadowed.get(dest, ()))]
+        fired: tuple[_RemoteFetch, int, str] | None = None
+        suppressed_line: int | None = None
+        for cand in candidates:
+            hit = next(
+                (
+                    (at, line, written)
+                    for at, line, resolved, written in executions
+                    # A shell fetch is ordered by position in the command stream
+                    # (both halves can share a line); a checkout step has no
+                    # position there, so it is ordered by line.
+                    if (line > cand.line if cand.pos < 0 else at > cand.pos)
+                    and _under(dest, resolved)
+                ),
+                None,
+            )
+            if hit is None:
+                continue
+            # ANY pin between the fetch and the execution suppresses — not just
+            # the first one seen. Keeping only the earliest hid the pin a
+            # repository actually applied when an older one landed on a tree it
+            # then discarded, and told it that it executes unpinned remote code.
+            #
+            # A checkout-step fetch has no position in the command stream, so
+            # its window opens just before the first shell command AFTER its
+            # step — ANY command. Two ways to get this wrong, and this code has
+            # had both: opening at -1 let every pin in the job count, including
+            # one applied to a tree the checkout then replaced; opening at the
+            # first EXECUTION-shaped command left the window empty whenever that
+            # execution was the reported hit, so the fix recipe's own shape
+            # (checkout, pin, run) could never suppress and an unrelated command
+            # sitting in between decided the verdict.
+            window_start = cand.pos
+            if window_start < 0:
+                window_start = next(
+                    (at for at, line in command_lines if line > cand.line),
+                    hit[0] + 1) - 1
+            pin_at = next((p for p in pinned.get(dest, ())
+                           if window_start < p < hit[0]), None)
+            if pin_at is not None:
+                suppressed_line = cand.line
+                continue
+            fired = (cand, hit[1], hit[2])
+            break
+        if fired is not None:
+            pairs.append(fired)
+        elif suppressed_line is not None and gap is not None:
             # Pinned before it ran: the fix this entry recommends, applied.
-            if gap is not None:
-                gap(f"a fetch into `{_as_written(dest)}` on line {fetch.line} was pinned to "
-                    f"a full commit id before anything ran from it, so it is "
-                    f"deliberately not reported",
-                    kind=_KIND_SUPPRESSED)
-            continue
-        pairs.append((fetch, hit[1], hit[2]))
+            gap(f"a fetch into `{_as_written(dest)}` on line {suppressed_line} was pinned to "
+                f"a full commit id before anything ran from it, so it is "
+                f"deliberately not reported",
+                kind=_KIND_SUPPRESSED)
     return sorted(pairs, key=lambda p: p[0].line)
 
 

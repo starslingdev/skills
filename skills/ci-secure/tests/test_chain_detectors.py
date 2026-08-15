@@ -4809,6 +4809,28 @@ def test_p1424_a_genuine_pin_of_the_surviving_reclone_still_suppresses(
     """) == []
 
 
+def test_p1424_a_trailing_reclone_does_not_shadow_a_real_execution(tmp_path):
+    """last-fetch-wins must not let a re-clone that nothing runs from bury an
+    earlier clone that WAS executed. clone → run → re-clone (with nothing after
+    it) overwrote the destination with the trailing, unexecuted fetch; the
+    ordering guard then found no execution after it and the job went silent
+    while it had already run unpinned remote code. The earlier fetch a command
+    actually ran from stays a candidate and still fires."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: |
+                  git clone "$TOOLS_URL" tools
+                  python3 tools/setup.py
+                  git clone "$TOOLS_URL" tools
+    """)
+    assert len(hits) == 1
+
+
 def test_p1424_a_quoted_single_line_run_scalar_is_read_as_shell(tmp_path):
     """A single-line `run:` value written with YAML quotes was scraped raw, so
     the quotes reached the shell tokenizer and `run: "git clone … && bash
