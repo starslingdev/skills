@@ -475,11 +475,79 @@ def test_the_installer_installs_exactly_the_files_under_test(
 
 
 def test_the_template_verifies_its_own_vendored_copy(template: dict) -> None:
-    """Drift in the vendored gate must be loud, not discovered at the next refresh."""
-    runs = [s.get("run", "") for s in template["jobs"]["scan"]["steps"]]
-    assert any("vendor.py --verify" in r for r in runs), (
+    """Drift in the vendored gate must be loud, not discovered at the next refresh.
+
+    Asserted as "this line RUNS the checker", not "this line mentions it". A
+    substring test is satisfied by `echo python3 ... --verify`, and the drift
+    check is the only thing between an edited `config.py` — the rule that says
+    which outcomes block — and a green required check: with the step inert, a
+    tampered rule makes the gate exit 0 while its own summary still prints
+    **FAIL** for the fact that failed.
+    """
+    steps = template["jobs"]["scan"]["steps"]
+    verify = [s for s in steps if "vendor.py --verify" in s.get("run", "")]
+    assert len(verify) == 1, (
         "nothing checks the vendored files against VENDORED.json, so a local "
         "edit to the gate would weaken it invisibly")
+    run = verify[0]["run"].strip()
+    assert run.startswith("python3 ci-secure/scripts/vendor.py --verify"), (
+        f"the drift check has to be the command, not a word inside one: {run!r}")
+
+
+def test_the_scan_job_runs_exactly_the_steps_it_declares(template: dict) -> None:
+    """No step may be inserted between the drift check and the gate.
+
+    Everything else here pins what individual steps say. None of it constrains
+    the LIST, and the drift check has already passed by the time a later step
+    runs - so a step slipped in between them can edit the vendored tree with
+    the manifest no longer looking, and the gate then runs the edited rule.
+    Pinning the sequence is what makes the drift check mean "the tree the gate
+    is about to read" rather than "the tree at some earlier moment".
+    """
+    steps = template["jobs"]["scan"]["steps"]
+    shape = [s.get("uses", "").split("@")[0] or s.get("run", "").split()[0]
+             for s in steps]
+    assert shape == ["actions/checkout", "actions/setup-python", "pip",
+                     "python3", "python3"], (
+        f"the scan job's step list changed: {shape}. Every step here runs "
+        "before a verdict that judges the tree, so an addition is a decision, "
+        "not a detail - add it to this list deliberately")
+
+    assert "vendor.py --verify" in steps[-2].get("run", ""), (
+        "the drift check must be the step IMMEDIATELY before the gate")
+    assert steps[-1]["run"].strip().startswith(
+        "python3 ci-secure/scripts/gate.py"), "the gate must be the last step"
+
+
+def test_the_template_keeps_the_pins_and_hardening_it_argues_for(
+        template: dict) -> None:
+    """Three values the file's own comments call load-bearing, and nothing held.
+
+    Each of these could be changed to its weaker form with the whole suite
+    green, while the header went on explaining why it mattered: the weekly run
+    is the only one that demands a COMPLETE network check ("the run that must
+    not be mutable by exhausting API quota"), PyYAML sits "inside the verdict's
+    trust path" because the engine parses workflows with it, and the checkout
+    has no reason to carry a credential.
+    """
+    scan = template["jobs"]["scan"]
+    gate_env = scan["steps"][-1]["env"]
+
+    strict = gate_env["CI_SECURE_GH_STRICT"]
+    assert "github.event_name == 'schedule'" in strict and "'1'" in strict, (
+        "the weekly run must demand a complete network check; a constant here "
+        f"silences it on every trigger: {strict!r}")
+
+    pip = next(s["run"] for s in scan["steps"] if "pip install" in s.get("run", ""))
+    assert "pyyaml==" in pip, (
+        f"PyYAML is what the engine parses workflows with - pin it: {pip!r}")
+
+    checkout = next(s for s in scan["steps"]
+                    if "actions/checkout" in s.get("uses", ""))
+    assert checkout["with"]["persist-credentials"] is False, (
+        "the scan reads the tree and has no reason to hold a credential - and "
+        "the scan itself will not tell you if this is flipped, because the "
+        "credentials fact only looks at untrusted triggers")
 
 
 # --------------------------------------------------------------------------
@@ -1219,3 +1287,108 @@ def test_the_installer_ignores_an_ambient_git_environment(tmp_path: Path) -> Non
     assert (repo / "ci-secure" / "VENDORED.json").is_file()
     assert not (elsewhere / "ci-secure").exists(), (
         "the install must never touch the repository GIT_DIR pointed at")
+
+
+def test_a_file_planted_under_the_vendored_tree_is_drift(tmp_path: Path) -> None:
+    """The manifest says what belongs there, so an ADDITION is drift too.
+
+    This arm is what two of the installer's refusals are built on - the
+    occupied-directory refusal exists precisely because `--verify` reds on
+    anything the manifest does not list. Without it a pull request can add a
+    second `config.py`, or a shim beside the engine, and the drift check that
+    exists to notice the copy is not what was reviewed says it matches.
+    """
+    repo = tmp_path / "acme-app"
+    repo.mkdir()
+    assert _vendor(repo).returncode == 0
+    vendored = repo / "ci-secure"
+
+    (vendored / "scripts" / "sitecustomize.py").write_text(
+        "# not ours\n", encoding="utf-8")
+
+    check = _verify(vendored)
+    assert check.returncode == 1, (
+        "a file added under the vendored tree verified clean:\n" + check.stdout)
+    assert "scripts/sitecustomize.py" in check.stdout
+    assert "not in the manifest" in check.stdout
+
+
+def test_a_bare_pyc_beside_its_source_is_drift(tmp_path: Path) -> None:
+    """Bytecode does not have to sit in `__pycache__` to be loaded first.
+
+    The existing cases all plant under `__pycache__`, so the `.pyc` SUFFIX arm
+    of the same test carried nothing: a manifest-listed
+    `ci-secure/scripts/config.pyc` would have been covered by neither.
+    """
+    repo = tmp_path / "acme-app"
+    repo.mkdir()
+    assert _vendor(repo).returncode == 0
+    vendored = repo / "ci-secure"
+
+    (vendored / "scripts" / "config.pyc").write_bytes(b"\x00compiled")
+
+    check = _verify(vendored)
+    assert check.returncode == 1, check.stdout
+    assert "config.pyc" in check.stdout
+    assert "bytecode" in check.stdout, (
+        "a bare .pyc has to be reported as bytecode that can override its "
+        "source, not merely as an unexpected file")
+
+
+def test_a_manifest_entry_that_escapes_through_a_symlink_is_not_deleted(
+        tmp_path: Path) -> None:
+    """The prune loop's two guards are separate, and each needs its own case.
+
+    The `..`/absolute test and the resolve-containment test were only ever
+    exercised together, so either could be deleted silently. This entry has no
+    `..` and is not absolute - it escapes because a directory in the middle of
+    it is a symlink - so only the second guard can stop it.
+    """
+    repo = tmp_path / "acme-app"
+    repo.mkdir()
+    assert _vendor(repo).returncode == 0
+    vendored = repo / "ci-secure"
+
+    outside = tmp_path / "precious"
+    outside.mkdir()
+    victim = outside / "release.yml"
+    victim.write_text("name: theirs\n", encoding="utf-8")
+    (vendored / "escape").symlink_to(outside, target_is_directory=True)
+
+    manifest_path = vendored / "VENDORED.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["escape/release.yml"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                             encoding="utf-8")
+
+    refresh = _vendor(repo)
+
+    assert victim.is_file(), (
+        "a manifest entry deleted a file outside the vendored tree, reached "
+        "through a symlinked directory rather than through `..`:\n"
+        + refresh.stdout)
+    assert victim.read_text(encoding="utf-8") == "name: theirs\n"
+
+
+def test_the_recorded_source_commit_is_a_sha_or_says_why_it_is_not(
+        tmp_path: Path) -> None:
+    """"Which commit is this copy from?" is the manifest's stated reason to exist.
+
+    Asserting only that the field is truthy accepts every `unknown (...)`
+    marker, so provenance could silently become unavailable for every adopter
+    with the suite green - and this repo's rule is that provenance is honest,
+    including the `-dirty` suffix, or it is not recorded at all.
+    """
+    import re
+    repo = tmp_path / "acme-app"
+    repo.mkdir()
+    assert _vendor(repo).returncode == 0
+
+    manifest = json.loads(
+        (repo / "ci-secure" / "VENDORED.json").read_text(encoding="utf-8"))
+    recorded = manifest["source_commit"]
+
+    assert re.fullmatch(r"[0-9a-f]{40}(-dirty| \(working tree state unknown\))?",
+                        recorded), (
+        "vendoring from this source checkout must record its real commit, "
+        f"not a marker: {recorded!r}")
