@@ -31,7 +31,22 @@ entries are dated (UTC). Format loosely follows
   escaping rule eventually differ, and the surface with the weaker copy is the
   one an attacker aims at.
 
+### Fixed
+
+- **2026-08-15** — **The skill imports again on Python 3.9**, the floor
+  `pyproject.toml` declares. `config.py` was the only module under `scripts/`
+  without `from __future__ import annotations`, so the PEP 604 (`X | Y`)
+  annotations added alongside the outcome tables were evaluated at definition
+  time and raised `TypeError` on import — taking `scan.py`, `report.py` and any
+  CI gate down with it for every 3.9 user. Every workflow in this repository
+  pins 3.12, so CI could not see the break. A test now asserts the rule for
+  every module under `scripts/` rather than leaving it to habit.
+
 ### Changed
+
+- **2026-08-15** — **`__version__` / `VERSION` bumped to 0.2.0** for the
+  changes in this entry. The constant is stamped into the report's Scanner row,
+  so an installed skill carries it as its provenance marker.
 
 - **2026-08-14** — **P14.24's rendered finding title is now "Unverified remote
   code execution", not "Unverified remote script execution".** The entry covers

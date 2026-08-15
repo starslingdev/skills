@@ -2,6 +2,14 @@
 
 Centralizes the constants used by gh_utils, scan, and report.
 """
+# Defers annotation evaluation, which is what makes PEP 604 (`X | Y`) safe on
+# Python 3.9 - the floor `pyproject.toml` declares. Without it, an annotation on
+# a parameter that carries a default is evaluated when the `def` runs, so 3.9
+# raises TypeError at IMPORT time and takes the whole scanner down with it. This
+# is an INSTALLED skill: it runs under whatever python3 a user has, while every
+# workflow here pins 3.12, so CI cannot catch that break for you. Every other
+# module under scripts/ carries this line for the same reason.
+from __future__ import annotations
 
 import logging
 import os
