@@ -24,57 +24,33 @@ entries are dated (UTC). Format loosely follows
   these instead of hardcoding a copy that can drift from the engine's.
 
 - **2026-08-15** — **You can now set ci-secure up as a CI check in your own
-  repository.** Say *"install ci-secure as a CI check"* and it does four things,
-  in this order: (1) COPIES the engine, the gate and the licence into your
-  repository — under `ci-secure/`, plus one workflow whose always-running
-  verdict job carries the `ci-secure` check — and hands you a pull request to
-  review and merge; (2) the first run REPORTS WITHOUT BLOCKING, because a
-  repository that has never been scanned usually has two or three findings and
-  the setup pull request should not brick your merge path on day one; (3) once
-  you have fixed those, YOU make it blocking by deleting the `--advisory` flag
-  and adding `ci-secure` to your required checks; (4) if you ever need out, you
-  remove it from your required checks — one reversible settings change, not
-  deleting the workflow. Nothing here happens on its own: it runs when you ask,
-  and it blocks a merge only after you make it required. No
-  ci-secure code is fetched and executed at CI time: a pin can be moved or
-  deleted in a repository you do not control, and we ship a
-  detector for that shape (P14.24). `scripts/vendor.py` does the copying, writes
-  a `VENDORED.json` of per-file hashes, and re-checks them from your own CI, so
-  a local edit to the vendored gate is loud instead of invisible. The workflow
-  ships in `--advisory` mode, which downgrades failed FACTS only — a crashed
-  engine, zero workflows scanned, an unrecognised outcome or an incomplete scan
-  stay red, because a ramp for findings must never become a mute button for a
-  broken scan. Refreshing replaces the vendored code and drops what a newer
-  version no longer ships, but never rewrites your workflow file: the runner,
-  the triggers and the `--advisory` flag you deleted when you went blocking are
-  yours, and an update that quietly put advisory back would be the worst thing
-  this could do. Ships alongside the skill's own `LICENSE`. The gate program
-  gained an `--advisory` flag for this; our own workflow still runs it without
-  the flag, and the vendored gate is held byte-identical to ours so a weaker
-  copy cannot ship. Every
-  destination is checked to be inside the repository before anything is
-  written, so a symlink committed at `ci-secure/`, at any directory beneath it,
-  or at `.github/` makes the install refuse rather than quietly write the gate
-  and a live workflow somewhere your pull requests would never see them. The
-  same check refuses a symlink aimed at another file INSIDE your repository,
-  which stays contained and would still have written the licence text over
-  whatever it pointed at. The install also refuses `--into` a subdirectory of a
-  repository rather than its root (a workflow written there is one GitHub never
-  runs, and it looked like it had worked), and refuses a `ci-secure/` directory
-  that already holds files of yours — the workflow re-checks that directory
-  against the manifest every run, so merging into it would have red every run
-  from the first, with an error about drift that named your own files. A
-  refresh now writes no workflow at all: re-adding the advisory template beside
-  a copy you had renamed or deleted reached the same "quietly back to advisory"
-  outcome by adding rather than overwriting. `--verify` treats compiled
-  bytecode as drift even when `VENDORED.json` lists it, and treats any symlink
-  under the vendored tree as drift — the manifest is repository content and
-  cannot exempt a `.pyc`, and a symlinked `__pycache__` hid one from the walk
-  entirely. A malformed `VENDORED.json` reds with a stated reason instead of a
-  stack trace. The gate also now refuses arguments other than `--advisory`
-  rather than ignoring them, and its refusal message for an unset
-  `CI_SECURE_GH_IMPOSTOR` no longer claims that unset is a supported, disclosed
-  setting — it is refused, which is the entire point of having no default.
+  repository.** Say *"install ci-secure as a CI check"* and it (1) COPIES the
+  engine, gate and licence into your repo plus one workflow, as a pull request
+  you review and merge; (2) REPORTS WITHOUT BLOCKING on the first run, so the
+  setup does not brick your merge path on day one; (3) becomes blocking when
+  YOU delete the `--advisory` flag and add `ci-secure` to your required checks;
+  (4) is undone by removing that required check, never by deleting the
+  workflow. Nothing happens on its own, and it blocks only after you make it
+  required.
+
+  Nothing is fetched and executed at CI time — a pin can be moved or deleted in
+  a repository you do not control, and we ship a detector for that shape
+  (P14.24). `scripts/vendor.py` does the copying and writes a `VENDORED.json`
+  of per-file hashes that your own CI re-checks every run, so a local edit to
+  the copied gate is loud instead of invisible. `--advisory` downgrades failed
+  FACTS only: a crashed engine, zero workflows scanned, an unrecognised outcome
+  or an incomplete scan stay red, because a ramp for findings must never become
+  a mute button for a broken scan. Updating re-copies the code and never
+  rewrites your workflow file — the runner, the triggers and the flag you
+  deleted are yours. The copied gate is held byte-identical to the one this
+  repo runs on itself, so a weaker copy cannot ship.
+
+  Setup refuses anything that is not plainly your repository rather than
+  writing and hoping: a destination that resolves outside it, a subdirectory
+  rather than the root, or a `ci-secure/` directory already holding files of
+  yours. `--verify` treats compiled bytecode and symlinks under the copied tree
+  as drift even when the manifest lists them, since the manifest is repository
+  content and cannot exempt them.
 
 - **2026-08-15** — **`config.py` now owns the one definition of how a scanned
   string is neutralized.** `flatten_scanned()` collapses whitespace, replaces
