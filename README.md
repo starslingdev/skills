@@ -92,6 +92,34 @@ The scan runs locally in seconds from your checkout; `gh` is optional and used
 only for the impostor-SHA check and for noting which findings sit in dormant
 workflows.
 
+### Keeping it fixed: ci-secure as a CI check
+
+A scan tells you what is wrong today. It does nothing about next week, which is
+when the workflow gets edited. Ask for the check and ci-secure sets itself up to
+run on every pull request:
+
+> install ci-secure as a CI check
+
+1. It **copies** the scanner into your repository — under `ci-secure/`, plus one
+   workflow — and hands you a pull request to review and merge. Nothing is
+   downloaded at build time, so the code judging your pull requests is code you
+   can read, and it changes only when you ask for an update.
+2. The **first run reports without blocking**. A repository that has never been
+   scanned usually has two or three findings, and the setup pull request should
+   not brick your merge path on day one.
+3. When you have fixed those, **you** make it blocking: delete the `--advisory`
+   flag from the workflow and add `ci-secure` to your required checks. From then
+   on a failed security check stops the merge.
+4. If you ever need out, remove `ci-secure` from your required checks — one
+   settings change, reversible. Not deleting the workflow, which would leave you
+   believing you have a check you do not.
+
+Your CI re-checks the copied files against a manifest of hashes on every run, so
+a local edit somebody made while debugging and never removed shows up instead of
+quietly weakening the check. Asking for an update re-copies the code and leaves
+your workflow file alone — the runner, the triggers and the flag you deleted are
+yours.
+
 ## Install
 
 ```bash

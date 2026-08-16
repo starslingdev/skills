@@ -24,12 +24,18 @@ entries are dated (UTC). Format loosely follows
   these instead of hardcoding a copy that can drift from the engine's.
 
 - **2026-08-15** — **You can now set ci-secure up as a CI check in your own
-  repository.** Ask for it by name, and ci-secure VENDORS the engine, the gate
-  and the licence into your repository — copied in, reviewed as a pull request
-  you merge, updated only when you ask — plus one workflow whose always-running
-  verdict job carries the `ci-secure` check. Nothing happens on its own: the
-  setup runs when you ask for it, the check ships in `--advisory` mode, and it
-  blocks a merge only once YOU add `ci-secure` to your required checks. No
+  repository.** Say *"install ci-secure as a CI check"* and it does four things,
+  in this order: (1) COPIES the engine, the gate and the licence into your
+  repository — under `ci-secure/`, plus one workflow whose always-running
+  verdict job carries the `ci-secure` check — and hands you a pull request to
+  review and merge; (2) the first run REPORTS WITHOUT BLOCKING, because a
+  repository that has never been scanned usually has two or three findings and
+  the setup pull request should not brick your merge path on day one; (3) once
+  you have fixed those, YOU make it blocking by deleting the `--advisory` flag
+  and adding `ci-secure` to your required checks; (4) if you ever need out, you
+  remove it from your required checks — one reversible settings change, not
+  deleting the workflow. Nothing here happens on its own: it runs when you ask,
+  and it blocks a merge only after you make it required. No
   ci-secure code is fetched and executed at CI time: a pin can be moved or
   deleted in a repository you do not control, and we ship a
   detector for that shape (P14.24). `scripts/vendor.py` does the copying, writes
