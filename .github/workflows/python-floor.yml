@@ -1,0 +1,72 @@
+# Import every shipped module on the OLDEST Python this repo supports.
+#
+# `pyproject.toml` declares `requires-python = ">=3.9"` and the README promises
+# "python3 (3.9 or newer)". Every other workflow here pins 3.12, so the one
+# version that can break is the one version CI never runs — and these skills are
+# publicly installed, executing against whatever `python3` a user happens to
+# have. Three separate floor breaks were found by hand on 2026-08-15, each one
+# invisible to a full green suite.
+#
+# There is an AST-based guard too (`skills/*/tests/test_python_compat.py`) and it
+# is not a substitute: it catches what 3.9 cannot PARSE, while every one of those
+# three breaks parsed fine and failed when the module body EXECUTED. Only a real
+# import on a real 3.9 interpreter finds those, which is what this job does.
+#
+# ONE hosted job, deliberately, where the rest of this repo splits fork from
+# non-fork:
+#   - it needs no secrets and no token, so there is nothing a fork PR could take;
+#   - it must behave IDENTICALLY for fork and non-fork, since the floor does not
+#     care who wrote the code;
+#   - a single unconditional job is safe to require in branch protection as-is.
+#     A fork/non-fork split would need a third always-run verdict job to be
+#     requireable at all, which is a lot of machinery for a check that reads
+#     files and imports them.
+# It does not dogfood StarSling runners for that last reason, and that is the
+# only place it departs from the convention in ci.yml.
+name: Python floor
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # A floor break can also arrive without a commit of ours — a dependency that
+  # drops 3.9 support, or a runner image change. The weekly run notices.
+  schedule:
+    - cron: "31 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  # `github.event_name` in the key so an ordinary push cannot cancel the weekly
+  # run, which is the only one that catches a break nobody committed.
+  group: python-floor-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  floor:
+    name: python floor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      # THE point of this job. Pinned to the documented floor exactly, not to
+      # "3.9 or newer" — if this ever silently resolved to 3.12 the job would
+      # pass while checking nothing, which is the failure mode it exists to
+      # prevent.
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.9"
+      # The engines import PyYAML; without it every module fails for a reason
+      # that has nothing to do with the floor.
+      - run: pip install pyyaml
+      - name: Confirm the version really is the floor
+        run: |
+          set -euo pipefail
+          python3 -c "import sys; assert sys.version_info[:2] == (3, 9), sys.version; print(sys.version)"
+      - name: Import every shipped module
+        run: python3 .github/scripts/check_python_floor.py
