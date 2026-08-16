@@ -1,16 +1,22 @@
 # Import every shipped module on the OLDEST Python this repo supports.
 #
 # `pyproject.toml` declares `requires-python = ">=3.9"` and the README promises
-# "python3 (3.9 or newer)". Every other workflow here pins 3.12, so the one
-# version that can break is the one version CI never runs — and these skills are
-# publicly installed, executing against whatever `python3` a user happens to
-# have. Three separate floor breaks were found by hand on 2026-08-15, each one
-# invisible to a full green suite.
+# "python3 (3.9 or newer)". Every other workflow here that installs Python pins
+# 3.12, so the one version that can break is the one version CI never runs — and
+# these skills are publicly installed, executing against whatever `python3` a
+# user happens to have. Breaks of this kind have been found by reading the code
+# by hand, each one invisible to a full green suite.
 #
-# There is an AST-based guard too (`skills/*/tests/test_python_compat.py`) and it
-# is not a substitute: it catches what 3.9 cannot PARSE, while every one of those
-# three breaks parsed fine and failed when the module body EXECUTED. Only a real
-# import on a real 3.9 interpreter finds those, which is what this job does.
+# There is an AST-based guard too (`skills/ci-secure/tests/test_python_compat.py`)
+# and it is not a substitute, for two reasons: it reads only ci-secure, and it
+# catches what 3.9 cannot PARSE, while the breaks that motivated this job parsed
+# fine and failed when the module body EXECUTED. Only a real import on a real 3.9
+# interpreter finds those, which is what this job does. The static guard keeps
+# its own value — it needs no 3.9 installed, so it answers on any machine.
+#
+# Running the whole pytest suite on 3.9 is not the alternative: the suite itself
+# uses newer syntax. Importing the shipped modules is the part that must happen
+# on the floor.
 #
 # ONE hosted job, deliberately, where the rest of this repo splits fork from
 # non-fork:
@@ -21,8 +27,14 @@
 #     A fork/non-fork split would need a third always-run verdict job to be
 #     requireable at all, which is a lot of machinery for a check that reads
 #     files and imports them.
-# It does not dogfood StarSling runners for that last reason, and that is the
-# only place it departs from the convention in ci.yml.
+# That is also why it does not run on StarSling runners, and the runner is the
+# only convention it departs from — the added schedule and timeout aside.
+#
+# Being one unconditional job, it also needs no merge-queue handling beyond
+# adding the trigger, unlike the split workflows beside it.
+#
+# To enforce it, add the check named "python floor" to the required status
+# checks on main. Until someone does, it reports but does not block.
 name: Python floor
 
 on:
@@ -30,7 +42,9 @@ on:
   push:
     branches: [main]
   # A floor break can also arrive without a commit of ours — a dependency that
-  # drops 3.9 support, or a runner image change. The weekly run notices.
+  # drops 3.9 support, or a runner image change. The weekly run catches those,
+  # though it only records the red in the Actions tab; nothing here pages
+  # anyone, the same as the other scheduled workflow beside it.
   schedule:
     - cron: "31 5 * * 1"
   workflow_dispatch:
@@ -47,7 +61,11 @@ permissions:
 jobs:
   floor:
     name: python floor
-    runs-on: ubuntu-latest
+    # Pinned rather than `ubuntu-latest`: 3.9 is past end of life, so no build
+    # of it is being produced for newer images. When `ubuntu-latest` advances,
+    # an unpinned job would stop being able to install the floor at all and
+    # fail on the runner image instead of on anything about our code.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -61,12 +79,17 @@ jobs:
       - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.9"
-      # The engines import PyYAML; without it every module fails for a reason
-      # that has nothing to do with the floor.
-      - run: pip install pyyaml
+      # Some engine modules import PyYAML and exit if it is absent; without it
+      # they fail for a reason that has nothing to do with the floor. It is the
+      # only third-party package anything shipped here needs.
+      - name: Install the one dependency the engines need
+        run: pip install pyyaml
       - name: Confirm the version really is the floor
         run: |
           set -euo pipefail
           python3 -c "import sys; assert sys.version_info[:2] == (3, 9), sys.version; print(sys.version)"
+      # A per-module budget well under this job's own, so that even several
+      # modules hanging at once still reach the end and report. Importing a
+      # module takes hundredths of a second; 30 is already generous.
       - name: Import every shipped module
-        run: python3 .github/scripts/check_python_floor.py
+        run: python3 .github/scripts/check_python_floor.py --timeout 30
