@@ -1598,3 +1598,107 @@ def test_react_author_association_is_a_closed_enum_not_attacker_text() -> None:
     for ctx in ("issue", "comment", "pull_request"):
         assert scan._is_shape_safe_expression(
             "${{ github.event." + ctx + ".author_association }}"), ctx
+
+
+def test_inert_gate_is_named_as_inert(tmp_path: Path) -> None:
+    """snowflakedb/snowflake-connector-net `jira_issue.yml` shape (Wiz, Jun
+    2026): the injection finding was already reported, but the job's `if:`
+    gate referenced `github.event.pull_request` under `issues`/`issue_comment`
+    triggers — neither of which populates it. The comparison reduced to
+    `null != '...'`, so the gate admitted every GitHub user.
+
+    The generic "verify it" wording is wrong here: there is nothing to verify.
+    """
+    _write_workflow(tmp_path, "jira_issue.yml", (
+        "on:\n"
+        "  issues:\n"
+        "    types: [opened]\n"
+        "  issue_comment:\n"
+        "    types: [created]\n"
+        "jobs:\n"
+        "  create-issue:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    if: github.event.pull_request.user.login != 'dependabot[bot]'\n"
+        "    steps:\n"
+        "      - run: echo '${{ github.event.issue.title }}'\n"
+    ))
+    data = _scan_dir(tmp_path)
+    hits = [f for f in data["findings"] if f["pattern"] == "P14.10"]
+    assert hits, "expected the P14.10 injection finding"
+    evidence = hits[0]["evidence"]
+    assert "github.event.pull_request" in evidence, (
+        f"the gate is missing from the evidence entirely: {evidence!r}"
+    )
+    assert "inert" in evidence.lower(), (
+        f"the gate is inert but the evidence does not say so: {evidence!r}"
+    )
+
+
+def test_live_gate_is_not_called_inert(tmp_path: Path) -> None:
+    """The same gate under a trigger that DOES populate the object is a real
+    control — it keeps the "verify it" wording and must never read as inert."""
+    _write_workflow(tmp_path, "pr.yml", (
+        "on:\n"
+        "  pull_request_target:\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    if: github.event.pull_request.user.login != 'dependabot[bot]'\n"
+        "    steps:\n"
+        "      - run: echo '${{ github.event.pull_request.title }}'\n"
+    ))
+    data = _scan_dir(tmp_path)
+    hits = [f for f in data["findings"] if f["pattern"] == "P14.10"]
+    assert hits, "expected the P14.10 injection finding"
+    assert "inert" not in hits[0]["evidence"].lower(), (
+        f"a live gate was reported as inert: {hits[0]['evidence']!r}"
+    )
+
+
+def test_gate_live_under_any_one_declared_trigger_is_not_inert(
+    tmp_path: Path,
+) -> None:
+    """A workflow on several triggers references an object only ONE of them
+    populates. That gate is live whenever that trigger fires, so the rule is
+    "no declared trigger populates it" — not "this trigger doesn't"."""
+    _write_workflow(tmp_path, "mixed.yml", (
+        "on:\n"
+        "  issues:\n"
+        "  pull_request_target:\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    if: github.event.pull_request.user.login != 'dependabot[bot]'\n"
+        "    steps:\n"
+        "      - run: echo '${{ github.event.issue.title }}'\n"
+    ))
+    data = _scan_dir(tmp_path)
+    hits = [f for f in data["findings"] if f["pattern"] == "P14.10"]
+    assert hits, "expected the P14.10 injection finding"
+    assert "inert" not in hits[0]["evidence"].lower(), (
+        f"a gate live under one declared trigger was called inert: "
+        f"{hits[0]['evidence']!r}"
+    )
+
+
+def test_unknown_trigger_never_yields_an_inert_verdict(tmp_path: Path) -> None:
+    """`workflow_call` carries the CALLER's event payload, which this file
+    cannot see. Unknown payload → no verdict, never a guess."""
+    _write_workflow(tmp_path, "reusable.yml", (
+        "on:\n"
+        "  workflow_call:\n"
+        "  issues:\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    if: github.event.pull_request.user.login != 'dependabot[bot]'\n"
+        "    steps:\n"
+        "      - run: echo '${{ github.event.issue.title }}'\n"
+    ))
+    data = _scan_dir(tmp_path)
+    hits = [f for f in data["findings"] if f["pattern"] == "P14.10"]
+    assert hits, "expected the P14.10 injection finding"
+    assert "inert" not in hits[0]["evidence"].lower(), (
+        f"an unknowable payload produced an inert verdict: "
+        f"{hits[0]['evidence']!r}"
+    )

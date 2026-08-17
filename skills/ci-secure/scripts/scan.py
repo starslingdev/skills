@@ -913,6 +913,7 @@ def detect_yaml_run_injection(
         return
     compiled = re.compile(pattern)
     lines = text.splitlines()
+    triggers = _on_trigger_names(_get_on_node(doc))
     file_cursor = 0
     unanchored_reported = False
     for job in jobs.values():
@@ -1003,7 +1004,7 @@ def detect_yaml_run_injection(
                     f"{i + 1:>4}: {lines[i]}"
                     f"{' <-- here' if i == lidx else ''}"
                     for i in range(start, stop)
-                )
+                ) + _gate_note(job, triggers)
                 yield RawHit(line=line_no, evidence=evidence, match_text=snippet)
 
 
@@ -4043,14 +4044,91 @@ def _correlation_untrusted_trigger_writes_cache(
                 evidence=(
                     f"{line:>4}: workflow runs on `pull_request_target` AND "
                     f"jobs.{job_name} writes the shared cache <-- here"
-                    + _gate_note(job)
+                    + _gate_note(job, triggers)
                 ),
                 match_text=job_name,
                 derived=True,
             )
 
 
-def _gate_note(job: Any) -> str:
+# Which top-level `github.event.*` objects each trigger's payload populates.
+# Deliberately partial in BOTH directions: a trigger absent from this table
+# makes the whole verdict unknowable (see `_inert_gate_objects`), and an object
+# absent from `_GATE_CHECKED_OBJECTS` is never judged at all. Both omissions
+# fail toward silence, which is the only safe direction for a check whose
+# false-positive would read "your security gate does nothing".
+_TRIGGER_EVENT_OBJECTS: dict[str, frozenset[str]] = {
+    "issues": frozenset({"issue", "label"}),
+    "issue_comment": frozenset({"issue", "comment"}),
+    "pull_request": frozenset({"pull_request", "label"}),
+    "pull_request_target": frozenset({"pull_request", "label"}),
+    "pull_request_review": frozenset({"pull_request", "review"}),
+    "pull_request_review_comment": frozenset({"pull_request", "comment"}),
+    "push": frozenset({"head_commit", "commits", "pusher"}),
+    "discussion": frozenset({"discussion"}),
+    "discussion_comment": frozenset({"discussion", "comment"}),
+    "workflow_run": frozenset({"workflow_run", "workflow"}),
+    "workflow_dispatch": frozenset({"inputs"}),
+    "repository_dispatch": frozenset({"client_payload"}),
+    "release": frozenset({"release"}),
+    "fork": frozenset({"forkee"}),
+    "label": frozenset({"label"}),
+    "milestone": frozenset({"milestone"}),
+    "deployment": frozenset({"deployment"}),
+    "deployment_status": frozenset({"deployment", "deployment_status"}),
+    "check_run": frozenset({"check_run"}),
+    "check_suite": frozenset({"check_suite"}),
+    "registry_package": frozenset({"registry_package"}),
+    "schedule": frozenset(),
+}
+
+# The objects a gate is actually judged on. Restricted to the ones that carry a
+# real trust decision and whose payload membership is unambiguous.
+_GATE_CHECKED_OBJECTS = frozenset({
+    "pull_request", "issue", "comment", "discussion", "workflow_run",
+    "head_commit", "release", "client_payload", "review", "forkee",
+})
+
+_GATE_EVENT_REF_RE = re.compile(r"github\.event\.([a-zA-Z_][a-zA-Z_0-9]*)")
+
+
+def _inert_gate_objects(condition: str, triggers: list[str]) -> list[str]:
+    """`github.event.*` objects this gate reads that NO declared trigger fills.
+
+    snowflakedb/snowflake-connector-net's `jira_issue.yml` (Wiz, Jun 2026)
+    gated on `github.event.pull_request.user.login != '...'` while triggering
+    on `issues` and `issue_comment`. Neither payload has a `pull_request`, so
+    the comparison was `null != '...'` — always true. The gate looked like it
+    restricted the job to one bot account; it admitted every GitHub user, and
+    the job interpolated the issue title into a shell step holding a Jira API
+    token.
+
+    The rule is "no DECLARED trigger populates it", not "this trigger doesn't":
+    a workflow on both `issues` and `pull_request_target` reading
+    `github.event.pull_request` has a gate that is live half the time, which is
+    an ordinary bypass question and not this check's business.
+
+    Returns [] — no verdict — whenever any declared trigger is missing from
+    `_TRIGGER_EVENT_OBJECTS`. `workflow_call` is the load-bearing case: a
+    reusable workflow runs on the CALLER's payload, which this file cannot see,
+    so its event objects are unknowable rather than absent.
+    """
+    if not triggers:
+        return []
+    populated: set[str] = set()
+    for trigger in triggers:
+        if trigger not in _TRIGGER_EVENT_OBJECTS:
+            return []
+        populated |= _TRIGGER_EVENT_OBJECTS[trigger]
+    referenced = {
+        m.group(1) for m in _GATE_EVENT_REF_RE.finditer(condition)
+    }
+    return sorted(
+        (referenced & _GATE_CHECKED_OBJECTS) - populated
+    )
+
+
+def _gate_note(job: Any, triggers: list[str] | None = None) -> str:
     """A sentence naming this job's own `if:` condition, or "".
 
     cal.com's `pr.yml` gates its cache-writing job behind
@@ -4059,6 +4137,12 @@ def _gate_note(job: Any) -> str:
     suppression — trust gates are routinely bypassable, and deciding that here
     would be guessing — but a reader who cannot see it cannot triage the
     finding.
+
+    The one case we DO decide is a gate that cannot restrict anything under any
+    trigger the workflow declares (`_inert_gate_objects`). "Verify it" is the
+    wrong instruction there — there is nothing to verify — and the reader most
+    likely to miss it is the one who does not know which payload carries which
+    object. That is a lookup, not a judgement call.
     """
     if not isinstance(job, dict):
         return ""
@@ -4068,6 +4152,17 @@ def _gate_note(job: Any) -> str:
     text = " ".join(str(condition).split())
     if not text:
         return ""
+    inert = _inert_gate_objects(text, triggers or [])
+    if inert:
+        names = ", ".join(f"`github.event.{obj}`" for obj in inert)
+        trigger_list = ", ".join(f"`{t}`" for t in sorted(set(triggers or [])))
+        return (
+            f"\n      this job carries a gate condition: {text} — it reads "
+            f"{names}, which no trigger this workflow declares "
+            f"({trigger_list}) ever populates, so that comparison is against "
+            f"an empty value and the gate is INERT: it does not restrict who "
+            f"reaches this job"
+        )
     return (
         f"\n      this job carries a gate condition: {text} — the finding "
         f"stands only if that gate can be bypassed; verify it"
@@ -4161,7 +4256,7 @@ def _correlation_untrusted_checkout_executes(file_path: Path) -> Iterator[RawHit
             evidence=(
                 f"{line:>4}: job `{job_name}` on `{trig}` checks out "
                 f"`{ref_text}` then executes from the tree <-- here"
-                + _gate_note(job)
+                + _gate_note(job, sorted(triggers))
             ),
             match_text=job_name,
             derived=True,

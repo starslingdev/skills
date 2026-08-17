@@ -13,6 +13,23 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- **2026-08-17** — **A finding whose job sits behind a security gate that
+  cannot work now says so.** Previously every gate got the same sentence —
+  *"the finding stands only if that gate can be bypassed; verify it"* — which
+  is the wrong instruction when the gate compares against an event field the
+  workflow's own triggers never populate. Snowflake's `jira_issue.yml` (Wiz,
+  Jun 2026) gated on `github.event.pull_request.user.login` under an `issues`
+  trigger, where there is no pull request: the comparison ran against an empty
+  value, so the gate admitted every GitHub user while reading like it admitted
+  one bot. The evidence now names that as INERT. Deciding this is a lookup of
+  which trigger fills which event object, not a judgement about bypassability —
+  a gate is only called inert when NO trigger the workflow declares could
+  populate the field, and a trigger whose payload we cannot know (`workflow_call`
+  runs on the caller's event) yields no verdict at all. Injection findings
+  (P14.10) also carry the gate sentence now; previously only P14.9 and P14.7
+  did. No finding is added, removed, or re-scored by this — it changes what the
+  evidence tells you about findings the scan already reports.
+
 - **2026-08-15** — **The blocking rule is now part of the skill, as three
   independent names in `config.py`.** `BLOCKING_OUTCOMES` (which fact outcomes
   fail a build), `KNOWN_OUTCOMES` (which are recognised at all) and
