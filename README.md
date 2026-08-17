@@ -5,9 +5,9 @@ Each skill is self-contained and installs on its own — take one, or all three.
 
 | Skill | What it answers | Install |
 |---|---|---|
-| [**ci-secure**](#ci-secure) | Can someone take over my CI? | [jump ↓](#ci-secure) |
-| [**ci-speedup**](#ci-speedup) | Why is my CI slow, and what does it cost? | [jump ↓](#ci-speedup) |
-| [**ci-score**](#ci-score) | Is my CI config following best practices? | [jump ↓](#ci-score) |
+| [**ci-secure**](#ci-secure) | Can someone attack me through my CI? | [jump ↓](#ci-secure) |
+| [**ci-speedup**](#ci-speedup) | Why is my CI slow? | [jump ↓](#ci-speedup) |
+| [**ci-score**](#ci-score) | Is my CI following best practices? | [jump ↓](#ci-score) |
 
 Every skill runs from a local checkout of the repo you want audited, and none of
 them send your code, logs, or findings to StarSling or anyone else.
