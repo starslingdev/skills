@@ -87,6 +87,9 @@ passed over checks applicable; every failed check gets one ranked fix.
 **It measures adherence, not speed**, and it is **not a security audit**: two
 of the eleven checks are security-adjacent, and it claims nothing further.
 
+Example report from a real run:
+[`pallets/flask`](examples/pallets-flask/ci-score-report.md), scoring 89/100.
+
 Learn more: [starsling.dev/ci-score](https://starsling.dev/ci-score)
 
 ---
@@ -118,6 +121,13 @@ vectors, each a full outsider → compromise chain with a real incident behind i
 ([why these ten](skills/ci-secure/references/why-these-ten.md)). **Zero findings
 is a first-class result**, and a check that could not run says *did not run*,
 never "pass".
+
+Example reports from real runs over one workflow file in
+`snowflakedb/snowflake-connector-net`, scanned at two commits:
+[3 findings before the vendor's
+fix](examples/snowflakedb-snowflake-connector-net/ci-secure-report-4a1b8ce.md),
+and [0 findings
+after](examples/snowflakedb-snowflake-connector-net/ci-secure-report-1dc7766.md).
 
 Learn more: [starsling.dev/ci-secure](https://starsling.dev/ci-secure)
 

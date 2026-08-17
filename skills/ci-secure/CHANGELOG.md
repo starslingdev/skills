@@ -11,6 +11,26 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **2026-08-17** — **A partial checkout no longer reports as complete
+  coverage.** Every detector reasons about the files it can see on disk, so a
+  `git sparse-checkout`, a partial clone, or a locally-deleted workflow was
+  invisible to the scanner: it ran on what was present, found nothing in what
+  was absent, and rendered `Coverage | ✅ complete — every workflow file was
+  scanned`. On a checkout holding 1 of a repository's 8 workflow files that
+  sentence reads as a clean bill of health for a repository the scan never
+  looked at, and it let the config facts assert *"all 1 workflow(s) declare
+  `permissions:`"* about seven files nobody opened. The scan now asks git for
+  the audited commit's own tree (`git ls-tree` reads the object database, so it
+  sees files a sparse checkout left out of the working tree) and folds every
+  absentee into `scan_incomplete`, which flips Coverage to **PARTIAL**, raises
+  the incomplete-coverage banner naming each unscanned file, and degrades the
+  affected config facts to `unmeasured`. This is the impostor check's rule
+  ("a check that could not run is NOT a pass") applied one layer down, to a
+  file that was never read. An inconclusive probe — not a git checkout, or git
+  cannot answer — reports no gap, so ordinary runs are unaffected.
+
 ### Added
 
 - **2026-08-17** — **A finding whose job sits behind a security gate that

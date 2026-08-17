@@ -1327,6 +1327,57 @@ def _git_commit_sha(root: Path) -> str | None:
     return None
 
 
+def _workflow_files_absent_from_tree(root: Path) -> list[str]:
+    """Workflow files that exist in the audited COMMIT but not in the working tree.
+
+    Everything else in this scanner reasons about the files it can see on disk, so
+    a **partial** checkout (``git sparse-checkout``, a partial clone, a file deleted
+    without committing) is invisible to it: the detectors run on what is present,
+    find nothing in what is absent, and the report renders
+    ``✅ complete — every workflow file was scanned``. That is the single most
+    dangerous sentence this tool can emit, because it reads as a clean bill of
+    health for a repository the scan never looked at. It is the same failure the
+    network-gated impostor check already refuses to commit ("a skipped check is
+    NOT a pass"), one layer down.
+
+    Asking git for the commit's own tree is the only reliable way to see the gap:
+    ``git ls-tree`` reads the object database, so it lists files a sparse checkout
+    left out of the working tree entirely. Files that ARE present are handled by
+    ``_probe_scannability``; this only reports absence.
+
+    Returns repo-relative paths, sorted. Empty when the tree is complete, when
+    ``root`` is not a git checkout, or when git cannot answer — an inconclusive
+    probe must never manufacture a coverage gap, since that would degrade every
+    report run outside a git checkout.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "ls-tree", "-r", "--name-only", "-z",
+             "HEAD", "--", ".github/workflows"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    absent = []
+    for rel in result.stdout.split("\0"):
+        rel = rel.strip()
+        # Match the discovery surface: only files `all_workflow_files` would have
+        # picked up, so a stray README in .github/workflows/ is not a "gap".
+        if not rel or not rel.endswith((".yml", ".yaml")):
+            continue
+        if not (root / rel).is_file():
+            absent.append(rel)
+    if absent:
+        logger.warning(
+            "coverage gap: %d workflow file(s) in the audited commit are absent "
+            "from the working tree (partial/sparse checkout) and were NOT scanned",
+            len(absent),
+        )
+    return sorted(absent)
+
+
 def _skill_commit_sha() -> str | None:
     """Return the HEAD SHA of the git repo containing this script.
 
@@ -5362,6 +5413,19 @@ def scan(
             rel = str(wf.relative_to(root))
             logger.warning("coverage gap: %s — %s", rel, reason)
             scan_incomplete.append({"workflow_file": rel, "reason": reason})
+    # A file that is not in the working tree AT ALL is the same coverage gap as one
+    # that could not be parsed — the detectors never ran on it — so it rides the
+    # same channel, which is what flips the report's Coverage row to PARTIAL, raises
+    # the incomplete-coverage banner, and (via config_facts) stops the config facts
+    # from claiming "all N workflow(s) declare permissions" when N is a fraction of
+    # the repository. A partial checkout must not read as a clean repository.
+    for rel in _workflow_files_absent_from_tree(root):
+        scan_incomplete.append({
+            "workflow_file": rel,
+            "reason": "present in the audited commit but absent from the scanned "
+                      "working tree (partial or sparse checkout) — never read, so "
+                      "its absence from the findings is NOT a pass",
+        })
     # A match a detector found but could not anchor to a line is a coverage gap
     # too — but a DIFFERENT one, kept in its own list. See `_DROPPED_MATCHES`:
     # the file here read and parsed fine, so its config facts are perfectly
