@@ -13,6 +13,36 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- **2026-08-17** — **Installing the gate now proves it can fail, before it is
+  handed back.** The gate ships in `--advisory` mode, so its first runs are
+  green by construction, and the runbook then asks for `--advisory` to come off
+  and the check to be made required — a blocking check trusted on the strength
+  of never having been seen go red, which is the failure this skill's own
+  reports preach against one level up. `vendor.py --into` now fires the freshly
+  vendored gate at a throwaway workflow that fails a named security fact
+  (`sec.permissions.workflow-declares`) and requires a non-zero exit that names
+  it, then at the same workflow with the hole closed and requires a 0 — a gate
+  wedged red reds on everything and proves nothing. It then reports what the
+  gate makes of the adopter's real tree, so "can it block" and "would it block
+  me" are both answered before anything is committed. **Nothing is written into
+  the adopter's repository to do this**: both fixtures are temporary files,
+  deleted afterwards, and no workflow of theirs is broken to stage a red. The
+  three outcomes are kept apart — proved, FAILED (do not report a working
+  install), and could-not-run (the engine needs Python 3.12 and PyYAML; the
+  installer needs neither) — because a missing interpreter and a gate that
+  cannot fail must never read as the same thing. Refreshes re-prove on the same
+  fixtures, there is no flag to skip the proof, and `vendor.py --self-test
+  <vendored dir>` re-runs it on demand. The proof also runs with bytecode
+  writing disabled, so it cannot leave a `__pycache__` that the adopter's own
+  drift check would then red on forever.
+- **2026-08-17** — **An install into a repository that documents a
+  guard-registration convention says the new gate is not registered with it.**
+  A repository keeping a register of its build-breaking checks — a harness that
+  mutates each one and asserts it fires — gains, on install, a check that
+  register does not cover, and nothing said so. `CLAUDE.md`, `AGENTS.md` and
+  `CONTRIBUTING.md` are read for that convention and the matching line is
+  quoted back. Detection only: registering into an arbitrary repository's
+  harness means writing into files the installer knows nothing about.
 - **2026-08-17** — **A finding whose job sits behind a security gate that
   cannot work now says so.** Previously every gate got the same sentence —
   *"the finding stands only if that gate can be bypassed; verify it"* — which

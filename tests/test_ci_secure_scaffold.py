@@ -1392,3 +1392,240 @@ def test_the_recorded_source_commit_is_a_sha_or_says_why_it_is_not(
                         recorded), (
         "vendoring from this source checkout must record its real commit, "
         f"not a marker: {recorded!r}")
+
+
+# --------------------------------------------------------------------------
+# 4. The self-proof: the install watches the gate fail before reporting success
+# --------------------------------------------------------------------------
+#
+# The gate ships in `--advisory` mode, so an adopter's first runs are green by
+# construction, and the runbook then asks them to drop that flag and make it a
+# required check. Until this section existed, that was a request to trust a
+# blocking check nobody had ever seen go red. The engine's own reports say a
+# check that did not run is not a check that passed; these tests hold the
+# installer to it.
+
+
+def _self_test(vendored: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(vendored / "scripts" / "vendor.py"),
+         "--self-test", str(vendored)],
+        capture_output=True, text=True)
+
+
+def _census(root: Path) -> dict:
+    """Every file under `root`, by path and content hash."""
+    return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def _stub_gate(vendored: Path, body: str) -> None:
+    """Replace the vendored gate with one whose verdict the test dictates."""
+    (vendored / "scripts" / "gate.py").write_text(
+        "import sys\n" + body, encoding="utf-8")
+
+
+def test_the_install_proves_the_gate_can_fail_before_reporting_success(
+        tmp_path: Path) -> None:
+    """Red on a vulnerable fixture, green on the same fixture repaired.
+
+    Both halves are load-bearing. Without the red the adopter is asked to
+    require a check that has only ever been observed passing; without the green
+    a gate wedged red - one that reds on everything, protects nothing and
+    blocks every pull request - would read as a successful proof.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+
+    install = _vendor(repo)
+
+    assert install.returncode == 0, install.stdout + install.stderr
+    assert "self-proof PASSED" in install.stdout, (
+        "the install reported success without ever watching the gate fail:\n"
+        + install.stdout)
+    assert "sec.permissions.workflow-declares" in install.stdout, (
+        "the proof must name the fact it made the gate fail on - 'it exited "
+        "non-zero' is also what a crashed engine looks like:\n" + install.stdout)
+
+
+def test_the_install_says_what_the_gate_makes_of_this_repository(
+        tmp_path: Path) -> None:
+    """The second half of the handover: proved it can fail, now what does it say?
+
+    A proof against a fixture answers "can this ever go red". It does not
+    answer "will it go red on MY code", which is the question that decides
+    whether dropping `--advisory` is a five-minute change or a week of work.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+
+    install = _vendor(repo)
+
+    assert "on THIS repository" in install.stdout, install.stdout
+    assert "facts pass" in install.stdout, (
+        "the install did not say what the gate found in the adopter's own "
+        "tree:\n" + install.stdout)
+
+
+def test_the_self_proof_writes_nothing_into_the_adopters_repository(
+        tmp_path: Path) -> None:
+    """The demonstration must not cost the adopter a single byte of their tree.
+
+    Two ways to get this wrong, and both were on the table: break one of their
+    workflows so a real build goes red, or drop a deliberately vulnerable
+    fixture under their `.github/`, where it outlives the install and their own
+    scanners find it. The fixtures are temporary files instead, and the vendored
+    copy still verifies afterwards - which also catches the subtle one, the
+    `__pycache__` a proof run leaves beside the engine it just executed and the
+    adopter's own drift check then reds on forever.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    assert _vendor(repo).returncode == 0
+    before = _census(repo)
+
+    proof = _self_test(repo / "ci-secure")
+
+    assert proof.returncode == 0, proof.stdout + proof.stderr
+    assert _census(repo) == before, (
+        "the self-proof changed the adopter's tree: "
+        f"{sorted(set(_census(repo)) ^ set(before))}")
+    assert not list((repo / "ci-secure").rglob("__pycache__")), (
+        "the proof left bytecode in the vendored tree, which the adopter's own "
+        "drift check reds on")
+    assert _verify(repo / "ci-secure").returncode == 0, (
+        "the vendored copy no longer matches its manifest after a self-proof")
+
+
+def test_a_gate_that_cannot_fail_is_reported_as_a_broken_install(
+        tmp_path: Path) -> None:
+    """The whole point: a permanently-green gate must not pass for a working one.
+
+    This is the regression the website install actually hit - a build-breaking
+    verdict that nothing ever exercised, so a change making it green forever
+    would ship unnoticed. Here the gate is replaced with one that always exits
+    0, which is what that regression looks like from outside.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    assert _vendor(repo).returncode == 0
+    _stub_gate(repo / "ci-secure", "sys.exit(0)\n")
+
+    proof = _self_test(repo / "ci-secure")
+
+    assert proof.returncode == 1, (
+        "a gate that passes a workflow with no `permissions:` block was "
+        "accepted as a working install:\n" + proof.stdout + proof.stderr)
+    assert "self-proof FAILED" in proof.stdout, proof.stdout
+    assert "self-proof PASSED" not in proof.stdout
+
+
+def test_a_gate_wedged_red_is_not_accepted_as_proof(tmp_path: Path) -> None:
+    """Red on everything is not the same as red on the right thing.
+
+    A gate that fails whatever it is pointed at satisfies "watch it go red" and
+    would then block every pull request in the repository the moment it became
+    a required check. The green control is what separates the two, so it is
+    tested with a gate that cannot produce one.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    assert _vendor(repo).returncode == 0
+    _stub_gate(repo / "ci-secure",
+               "print('::error::ci-secure fact failed: "
+               "sec.permissions.workflow-declares - stub')\nsys.exit(1)\n")
+
+    proof = _self_test(repo / "ci-secure")
+
+    assert proof.returncode == 1, (
+        "a gate that reds on a clean fixture too was accepted as proved:\n"
+        + proof.stdout + proof.stderr)
+    assert "self-proof FAILED" in proof.stdout, proof.stdout
+    assert "hole CLOSED" in proof.stdout, (
+        "the failure must say which half of the proof failed:\n" + proof.stdout)
+
+
+def test_a_red_for_a_reason_that_is_not_the_check_is_never_a_proof(
+        tmp_path: Path) -> None:
+    """"Exited non-zero" is also what a missing PyYAML looks like.
+
+    The engine needs Python 3.12 and PyYAML; this installer needs neither, so
+    an install can land on a machine where the engine cannot start. That reds
+    the gate - for a reason that says nothing whatsoever about the security
+    check - and must be reported as a proof that could not be run, distinct
+    from both a proved gate and a broken one.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    assert _vendor(repo).returncode == 0
+    _stub_gate(repo / "ci-secure",
+               "print('::error::ci-secure engine failed to run')\nsys.exit(1)\n")
+
+    proof = _self_test(repo / "ci-secure")
+
+    assert proof.returncode == 2, (
+        "an engine that could not start was scored as a proved gate, a broken "
+        "one, or nothing at all:\n" + proof.stdout + proof.stderr)
+    assert "COULD NOT RUN" in proof.stdout, proof.stdout
+    assert "self-proof PASSED" not in proof.stdout
+
+
+def test_a_refresh_re_proves_the_gate(tmp_path: Path) -> None:
+    """A refresh replaces the engine, the gate and the rule. Prove it again.
+
+    That is precisely a moment when a gate can stop being able to fail, and the
+    adopter has no other signal: a refresh writes no workflow and its `git diff`
+    shows code, not behaviour.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    assert _vendor(repo).returncode == 0
+
+    refresh = _vendor(repo)
+
+    assert refresh.returncode == 0, refresh.stdout + refresh.stderr
+    assert "this is a refresh" in refresh.stdout, refresh.stdout
+    assert "self-proof PASSED" in refresh.stdout, (
+        "a refresh handed back a gate it never watched fail:\n" + refresh.stdout)
+
+
+@pytest.mark.parametrize("doc", ["CLAUDE.md", "AGENTS.md", "CONTRIBUTING.md"])
+def test_a_documented_guard_register_is_named_as_unregistered(
+        tmp_path: Path, doc: str) -> None:
+    """Say plainly that the new gate is not in their register, rather than walk past.
+
+    A repository that keeps a register of its build-breaking checks - a harness
+    that mutates each one and asserts it fires - gains a check that register
+    does not cover. Nothing here edits their harness: the install has no idea
+    what shape it takes, and guessing would write into files it knows nothing
+    about.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / doc).write_text(
+        "# acme\n\nEvery build-breaking guard must be registered with the "
+        "mutation harness.\n", encoding="utf-8")
+
+    install = _vendor(repo)
+
+    assert install.returncode == 0, install.stdout + install.stderr
+    assert "guard-registration convention" in install.stdout, (
+        f"the convention declared in {doc} was walked past in silence:\n"
+        + install.stdout)
+    assert "has NOT been registered" in install.stdout, install.stdout
+    assert f"{doc}:3" in install.stdout, (
+        "the notice must quote the line it read, so a false hit costs the "
+        "adopter one glance:\n" + install.stdout)
+
+
+def test_a_repository_with_no_such_convention_is_not_told_it_has_one(
+        tmp_path: Path) -> None:
+    """The negative control. A notice on every install is a notice nobody reads."""
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / "CLAUDE.md").write_text(
+        "# acme\n\nRun the tests before you push.\n", encoding="utf-8")
+
+    install = _vendor(repo)
+
+    assert "guard-registration convention" not in install.stdout, install.stdout

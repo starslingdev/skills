@@ -606,10 +606,42 @@ That writes, all under `<repo-root>`:
 - `.github/workflows/ci-secure.yml`, only if it does not already exist
   (see Refresh).
 
+Then, before it reports the install complete, it **proves the gate can
+fail**. The freshly vendored gate is pointed at a throwaway workflow
+that fails a named security fact (`sec.permissions.workflow-declares`),
+and must exit non-zero AND name that fact; then at the same workflow
+with the hole closed, where it must exit 0 — because a gate wedged red
+reds on everything and proves nothing. Both fixtures are temporary files
+that are deleted afterwards: **nothing is written into the user's tree
+for the proof, and no workflow of theirs is broken to demonstrate it.**
+It then runs the gate on their real tree and prints what it found. Read
+those lines and relay both to the user:
+
+- `self-proof PASSED` — the gate has been observed failing and passing.
+  Only then is this a working install.
+- `self-proof FAILED` — the gate passed a vulnerable fixture, or redded
+  a clean one. **Do not report a working install.** Say the gate is not
+  usable, and do not walk them through going blocking.
+- `self-proof COULD NOT RUN` — the engine could not start here (it needs
+  Python 3.12 and PyYAML; the installer needs neither). The gate is
+  installed and **unproven**: say so, and tell them to re-run
+  `<repo-root>/ci-secure/scripts/vendor.py --self-test <repo-root>/ci-secure`
+  somewhere the engine runs. That command is theirs to re-run at any
+  time; it writes nothing.
+
+It also reads their `CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` for a
+guard-registration convention (a register of build-breaking checks, a
+mutation harness) and, if it finds one, says the new gate has NOT been
+registered with it, quoting the line. It never edits their harness —
+pass that to the user as work they own. The check is a keyword read: it
+misses conventions phrased other ways, and a false hit costs one glance.
+
 Everything that can refuse refuses before the first byte is written, and
-the workflow is written last, after the manifest. So a non-zero exit
-means at worst a partly-copied `ci-secure/`, never a live workflow with
-no gate behind it. It refuses on: a vendored copy trying to install, a
+the workflow is written last, after the manifest. So a refusal means at
+worst a partly-copied `ci-secure/`, never a live workflow with no gate
+behind it. A non-zero exit is now two different things, and the output
+says which: a refusal (nothing wired up) or a complete install whose
+self-proof failed (files on disk, gate not to be trusted). It refuses on: a vendored copy trying to install, a
 missing licence, an incomplete skill, a `<repo-root>` that is a
 subdirectory of a repository rather than its root, a destination
 redirected by a symlink, a `ci-secure` that exists and is not a
@@ -653,6 +685,10 @@ to an install PR as much as to a fix PR:
    engine, zero workflows scanned, an unrecognised outcome or an
    incomplete scan stay red, because a ramp for findings must never
    become a mute button for a broken scan.
+   The install's self-proof already showed the gate failing on a
+   throwaway fixture, so "will this ever actually block?" is answered
+   before they commit anything — and `vendor.py --self-test` re-answers
+   it whenever they want, without touching their tree.
 3. **Going blocking**, once those are burned down: drop `--advisory`
    from the "Run ci-secure" step in
    `.github/workflows/ci-secure.yml`, then require **`ci-secure`** — the
@@ -721,6 +757,11 @@ only if they ask for one.
   downstream would catch that. If the template has changed in a way they
   want, show them the diff against `<ci-secure>/scaffold/ci-secure.yml`
   and let them choose.
+- **A refresh re-proves the gate**, on the same throwaway fixtures and
+  with the same three outcomes as an install. It replaces the engine,
+  the gate and the rule, which is exactly when a gate can stop being
+  able to fail — and their `git diff` shows code, not behaviour. Relay
+  the proof line as you would on an install.
 - There is no dry run, and `--verify` compares their copy against its own
   manifest, not against this skill — so "is it already current?" can only
   be answered after the refresh, from `git diff`. If that diff is empty,
