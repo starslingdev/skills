@@ -1808,7 +1808,7 @@ def test_the_gate_verdict_is_not_dressed_as_quoted_source(
         "on:\n  issues:\n    types: [opened]\n" + _SNOWFLAKE_JOB,
     )
     for line in hit["evidence"].splitlines():
-        assert re.match(r"\s*\d+: ", line), (
+        assert re.match(r"\s*\d+:(?: |$)", line), (
             f"non-source line inside verbatim evidence: {line!r}"
         )
     assert "inert" in (hit.get("derived_note") or "").lower(), (
@@ -1889,6 +1889,9 @@ def test_a_literal_that_casts_to_zero_declines_the_verdict() -> None:
     assert "never runs" not in note.lower(), note
     assert "always false" not in note.lower(), note
     assert "no trigger this workflow declares" in note, note
+    # And it must not invent a remainder: `== '0'` IS the whole condition.
+    assert "the rest of the condition decides" not in note, note
+    assert "which is not evaluated here — verify it" in note, note
 
 
 def test_ubiquitous_event_fields_are_never_judged_inert(tmp_path: Path) -> None:
@@ -1952,7 +1955,7 @@ def test_two_dead_objects_read_as_a_plural_sentence() -> None:
     assert "that comparison is" not in note, note
 
 
-def test_every_gate_note_call_site_passes_the_declared_triggers() -> None:
+def test_the_gate_note_trigger_list_stays_a_required_argument() -> None:
     """`triggers` is a required parameter precisely so a call site that
     forgets it is a TypeError rather than a check that silently stops
     reporting. Pin the signature so nobody restores the default."""
@@ -2035,3 +2038,45 @@ def test_an_object_named_inside_a_string_literal_is_not_read_by_the_gate(
     assert "`github.event.discussion`" not in note, note
     assert "no trigger this workflow declares" not in note, note
     assert "verify it" in note, note
+
+
+def test_only_a_legal_json_number_worth_zero_declines_the_verdict() -> None:
+    """GitHub parses a string "from any legal JSON number format, otherwise
+    NaN". `'+0'` and `' 0 '` are not legal JSON numbers, so GitHub reads NaN,
+    the comparison is not equal to an absent value, and a verdict IS
+    available. Python's `float()` accepts all three, so using it as the parser
+    threw those verdicts away."""
+    for literal in ("+0", " 0 "):
+        note = scan._gate_note(
+            {"if": f"github.event.pull_request.number != '{literal}'"},
+            ["issues"],
+        )
+        assert "INERT" in note, (literal, note)
+    for literal in ("0", "0.0", "-0", "0e5", ""):
+        note = scan._gate_note(
+            {"if": f"github.event.pull_request.number != '{literal}'"},
+            ["issues"],
+        )
+        assert "INERT" not in note, (literal, note)
+
+
+def test_evidence_gutter_check_tolerates_a_blank_source_line(
+    tmp_path: Path,
+) -> None:
+    """A blank line inside the quoted excerpt renders as a bare `NN:`. Any
+    assertion about evidence shape has to allow it, or it only passes on
+    fixtures that happen to have no blank lines."""
+    hit = _p14_10_hit(
+        tmp_path, "blank.yml",
+        "on:\n  issues:\n    types: [opened]\n"
+        "jobs:\n  create-issue:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - name: file\n"
+        "        run: echo '${{ github.event.issue.title }}'\n"
+        "\n"
+        "      - run: true\n",
+    )
+    for line in hit["evidence"].splitlines():
+        assert re.match(r"\s*\d+:(?: |$)", line), (
+            f"non-source line inside verbatim evidence: {line!r}"
+        )

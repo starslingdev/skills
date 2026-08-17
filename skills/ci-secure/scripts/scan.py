@@ -4122,6 +4122,11 @@ _GATE_EVENT_REF_RE = re.compile(r"github\.event\.([a-zA-Z_][a-zA-Z_0-9]*)")
 # A whole `if:` that is nothing but one comparison of a `github.event.*` path
 # against a quoted literal. Anything else — a second term, a negation, a
 # function call, a comparison to another expression — is left undecided.
+# JSON's number grammar, which is what GitHub uses to decide whether a string
+# becomes a number or NaN. Deliberately stricter than `float()`: no leading
+# `+`, no surrounding space, no `inf`/`nan`, no underscores, no hex.
+_JSON_NUMBER_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
+
 _GATE_LONE_COMPARISON_RE = re.compile(
     r"^\s*(?:\$\{\{\s*)?"
     r"github\.event\.(?P<obj>[a-zA-Z_][a-zA-Z_0-9]*)"
@@ -4203,13 +4208,17 @@ def _dead_comparison_verdict(condition: str, dead: list[str]) -> str:
     literal = match.group("lit")[1:-1]
     # GitHub casts both sides to a number when the types differ, and an absent
     # value casts to 0. So it compares EQUAL to `''`, to `'0'`, to `'0.0'` —
-    # any literal worth zero inverts the whole operator table. Rather than
-    # encode that, decline whenever the literal is numeric-and-zero.
-    try:
-        if float(literal or "0") == 0:
-            return ""
-    except ValueError:
-        pass
+    # any literal worth zero inverts the whole operator table. Decline those.
+    #
+    # The parser has to be GitHub's, not Python's: a string becomes a number
+    # only "from any legal JSON number format, otherwise NaN". `'+0'` and
+    # `' 0 '` are NOT legal JSON, so GitHub reads NaN and the comparison is
+    # not equal to an absent value — a verdict is available. `float()` accepts
+    # both and would have thrown those verdicts away.
+    if not literal:
+        return ""
+    if _JSON_NUMBER_RE.fullmatch(literal) and float(literal) == 0:
+        return ""
     return "open" if match.group("op") == "!=" else "closed"
 
 
