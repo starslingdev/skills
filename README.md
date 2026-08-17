@@ -47,7 +47,8 @@ npx skills add starslingdev/skills --skill ci-speedup
 Or paste this into your agent:
 
 ```text
-Install the ci-speedup skill from https://github.com/starslingdev/skills
+Run `npx skills add starslingdev/skills --skill ci-speedup` to install or
+update the ci-speedup skill.
 ```
 
 Then invoke it by name (**`/ci-speedup`**, or `$ci-speedup` in Codex), or just
@@ -85,7 +86,8 @@ npx skills add starslingdev/skills --skill ci-score
 Or paste this into your agent:
 
 ```text
-Install the ci-score skill from https://github.com/starslingdev/skills
+Run `npx skills add starslingdev/skills --skill ci-score` to install or
+update the ci-score skill.
 ```
 
 Then invoke it by name (**`/ci-score`**, or `$ci-score` in Codex), or just ask
@@ -118,7 +120,8 @@ npx skills add starslingdev/skills --skill ci-secure
 Or paste this into your agent:
 
 ```text
-Install the ci-secure skill from https://github.com/starslingdev/skills
+Run `npx skills add starslingdev/skills --skill ci-secure` to install or
+update the ci-secure skill.
 ```
 
 Then invoke it by name (**`/ci-secure`**, or `$ci-secure` in Codex), or just
@@ -153,8 +156,8 @@ A scan says what is wrong today. The CI check runs the same engine on every
 pull request, so the findings do not come back. Paste this:
 
 ```text
-Install the ci-secure skill from https://github.com/starslingdev/skills
-if it is not already installed, then install ci-secure as a CI check.
+Run `npx skills add starslingdev/skills --skill ci-secure` to install or
+update the ci-secure skill, then install ci-secure as a CI check in this repo.
 ```
 
 It is **vendored, never fetched**: the engine, the gate and the licence are
