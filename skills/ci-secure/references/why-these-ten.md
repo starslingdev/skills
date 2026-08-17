@@ -123,7 +123,7 @@ versions (P5.1), workflow-level permission scoping (P14.3), no CODEOWNERS on
 workflows (P14.20), no scanner installed (P14.5), tag-pin audit hygiene
 (P14.2), release-environment gating (P8.4), checkout credential persistence
 (P14.16), `secrets: inherit` (P14.17), broad artifact upload (P14.22),
-malformed `if:` (P14.23), and the manual-review checklist entries (P14.6).
+malformed `if:` (P14.23), and the manual-review checklist entries (P14.6). (P14.23's rejection still stands and is not reconsidered by the scanner naming a dead `github.event.*` field in an existing finding's evidence: that raises no finding and changes no count — it tells the reader whether the gate they can see on a vector already in the ten is capable of restricting anything.)
 These either became scored config facts — where a one-line
 pass/fail is the honest weight for a presence fact — or were dropped.
 

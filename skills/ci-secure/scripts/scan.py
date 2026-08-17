@@ -1004,8 +1004,30 @@ def detect_yaml_run_injection(
                     f"{i + 1:>4}: {lines[i]}"
                     f"{' <-- here' if i == lidx else ''}"
                     for i in range(start, stop)
-                ) + _gate_note(job, triggers)
-                yield RawHit(line=line_no, evidence=evidence, match_text=snippet)
+                )
+                # The gate note is a claim the SCANNER assembled, and this
+                # detector's evidence is a verbatim excerpt — concatenating
+                # them would render scanner prose inside the report's ```yaml
+                # source fence. `derived_note` is the channel for exactly
+                # this shape (see RawHit).
+                #
+                # Only the dead-field verdict is carried here. The generic
+                # "stands only if that gate can be bypassed" is true of the
+                # correlated chains, whose payoff leg IS the untrusted
+                # trigger; it is false of an injection, which this catalog
+                # entry says is worth fixing even on a trusted trigger. And a
+                # step with its own `if:` withdraws the verdict entirely: the
+                # finding is the STEP, so a statement about who reaches the
+                # JOB would talk past the live control.
+                gate = "" if step.get("if") is not None else _gate_note(
+                    job, triggers, dead_field_only=True,
+                )
+                yield RawHit(
+                    line=line_no,
+                    evidence=evidence,
+                    match_text=snippet,
+                    derived_note=gate.strip() or None,
+                )
 
 
 def detect_yaml_path_absent(
@@ -4074,8 +4096,16 @@ _TRIGGER_EVENT_OBJECTS: dict[str, frozenset[str]] = {
     "fork": frozenset({"forkee"}),
     "label": frozenset({"label"}),
     "milestone": frozenset({"milestone"}),
-    "deployment": frozenset({"deployment"}),
-    "deployment_status": frozenset({"deployment", "deployment_status"}),
+    # `deployment` and `deployment_status` carry a top-level `workflow_run`
+    # (and `workflow`, `check_run`) whenever the deployment came from a
+    # workflow — the normal case, and exactly what such a job gates on.
+    "deployment": frozenset({
+        "deployment", "workflow", "workflow_run", "check_run",
+    }),
+    "deployment_status": frozenset({
+        "deployment", "deployment_status", "workflow", "workflow_run",
+        "check_run",
+    }),
     "check_run": frozenset({"check_run"}),
     "check_suite": frozenset({"check_suite"}),
     "registry_package": frozenset({"registry_package"}),
@@ -4158,15 +4188,24 @@ def _dead_comparison_verdict(condition: str, dead: list[str]) -> str:
     match = _GATE_LONE_COMPARISON_RE.match(condition)
     if match is None or match.group("obj") not in dead:
         return ""
-    if not match.group("lit")[1:-1]:
-        # GitHub casts both sides to a number when the types differ, so an
-        # absent value compares EQUAL to `''` (both cast to 0). The empty
-        # literal inverts the whole table; not worth encoding, so decline.
-        return ""
+    literal = match.group("lit")[1:-1]
+    # GitHub casts both sides to a number when the types differ, and an absent
+    # value casts to 0. So it compares EQUAL to `''`, to `'0'`, to `'0.0'` —
+    # any literal worth zero inverts the whole operator table. Rather than
+    # encode that, decline whenever the literal is numeric-and-zero.
+    try:
+        if float(literal or "0") == 0:
+            return ""
+    except ValueError:
+        pass
     return "open" if match.group("op") == "!=" else "closed"
 
 
-def _gate_note(job: Any, triggers: list[str] | None = None) -> str:
+def _gate_note(
+    job: Any,
+    triggers: list[str],
+    dead_field_only: bool = False,
+) -> str:
     """A sentence naming this job's own `if:` condition, or "".
 
     cal.com's `pr.yml` gates its cache-writing job behind
@@ -4188,6 +4227,12 @@ def _gate_note(job: Any, triggers: list[str] | None = None) -> str:
     nobody, and a second conjunct can make it moot either way. When the shape
     does not settle that, the note reports the dead term as a fact and keeps
     the ordinary "verify it" rather than guessing a direction.
+
+    `dead_field_only` drops the generic "verify it" half and returns "" unless
+    there is a dead field to report. P14.10 asks for that: an injection is
+    worth fixing whether or not its gate holds, so telling an injection's
+    reader the finding "stands only if that gate can be bypassed" would
+    contradict the catalog entry the finding cites.
     """
     if not isinstance(job, dict):
         return ""
@@ -4197,25 +4242,29 @@ def _gate_note(job: Any, triggers: list[str] | None = None) -> str:
     text = " ".join(str(condition).split())
     if not text:
         return ""
-    dead = _inert_gate_objects(text, triggers or [])
+    dead = _inert_gate_objects(text, triggers)
     if dead:
         names = ", ".join(f"`github.event.{obj}`" for obj in dead)
-        trigger_list = ", ".join(f"`{t}`" for t in sorted(set(triggers or [])))
+        trigger_list = ", ".join(f"`{t}`" for t in sorted(set(triggers)))
+        plural = len(dead) > 1
         lookup = (
             f"\n      this job carries a gate condition: {text} — it reads "
             f"{names}, which no trigger this workflow declares "
-            f"({trigger_list}) ever populates, so that comparison is against "
-            f"an empty value"
+            f"({trigger_list}) ever populates, so "
+            + ("those comparisons are" if plural else "that comparison is")
+            + " against an empty value"
         )
         verdict = _dead_comparison_verdict(text, dead)
         if verdict == "open":
             return (
-                f"{lookup} and is always true: the gate is INERT — it does "
+                f"{lookup} and " + ("are" if plural else "is")
+            + " always true: the gate is INERT — it does "
                 f"not restrict who reaches this job"
             )
         if verdict == "closed":
             return (
-                f"{lookup} and is always false: the gate is INERT as a trust "
+                f"{lookup} and " + ("are" if plural else "is")
+            + " always false: the gate is INERT as a trust "
                 f"control — rather than restricting who reaches this job it "
                 f"blocks every run of it, so this job never runs under any "
                 f"trigger the workflow declares"
@@ -4225,6 +4274,8 @@ def _gate_note(job: Any, triggers: list[str] | None = None) -> str:
             f"the condition decides who reaches this job, so the finding "
             f"stands only if that remainder can be bypassed — verify it"
         )
+    if dead_field_only:
+        return ""
     return (
         f"\n      this job carries a gate condition: {text} — the finding "
         f"stands only if that gate can be bypassed; verify it"

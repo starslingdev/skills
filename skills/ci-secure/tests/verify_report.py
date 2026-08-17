@@ -974,6 +974,46 @@ _ALLOWED_H2 = (
 )
 
 
+def check_source_fences_quote_only_source(report: str) -> Check:
+    """A ```yaml evidence fence must contain nothing but numbered source lines.
+
+    report.py reserves the fenced, line-numbered block for text quoted
+    verbatim from the workflow file. A sentence the scanner assembled that
+    lands in there is dressed as source, and a reader who opens the file
+    looking for it never finds it — the exact defect `_derived_evidence_block`
+    was introduced to fix, and nothing enforced it until a later change put
+    scanner prose back inside a fence.
+    """
+    name = "```yaml evidence fences quote only numbered source lines"
+    gutter = re.compile(r"\d+: ")
+    bad: list[str] = []
+    fence: list[str] | None = None
+    for raw in report.splitlines():
+        line = raw.strip()
+        if fence is None:
+            if line == "```yaml":
+                fence = []
+            continue
+        if line == "```":
+            # An EVIDENCE fence is one whose first line carries the
+            # line-number gutter. The catalog's fix recipes are also ```yaml
+            # and are legitimately gutter-free, so identify by the first line
+            # and then require every line to match it.
+            if fence and gutter.match(fence[0]):
+                bad += [ln[:110] for ln in fence[1:] if not gutter.match(ln)]
+            fence = None
+            continue
+        if line:
+            fence.append(line)
+    if bad:
+        return Check(
+            name, False,
+            f"{len(bad)} non-source line(s) inside a yaml evidence fence — "
+            f"first: {bad[0]!r}",
+        )
+    return Check(name, True, "every fenced evidence line carries a gutter")
+
+
 def check_no_forged_headings(report: str) -> Check:
     """Every `## ` heading (outside code fences) is one the renderer emits.
 
@@ -1034,6 +1074,7 @@ def run_checks(
         check_no_scanner_internal_markers(report),
         check_config_hygiene_facts_rendered(report, findings_path),
         check_no_forged_headings(report),
+        check_source_fences_quote_only_source(report),
     ]
 
 

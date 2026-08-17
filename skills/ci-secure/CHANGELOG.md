@@ -21,7 +21,8 @@ entries are dated (UTC). Format loosely follows
   Jun 2026) gated on `github.event.pull_request.user.login` under an `issues`
   trigger, where there is no pull request: the comparison ran against an empty
   value, so the gate admitted every GitHub user while reading like it admitted
-  one bot. The evidence now names that as INERT. Deciding this is a lookup of
+  one bot. The evidence now names the dead field, and calls the gate INERT
+  where the condition is that comparison and nothing else. Deciding this is a lookup of
   which trigger fills which event object, not a judgement about bypassability —
   a gate is only called inert when NO trigger the workflow declares could
   populate the field, and a trigger whose payload we cannot know (`workflow_call`

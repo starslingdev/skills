@@ -766,3 +766,40 @@ def test_catalog_link_check_also_flags_the_relative_scheme() -> None:
         "Public catalog at `skills/ci-secure/references/security-patterns.md` "
         "— the critical exploit-chain patterns."
     ).ok
+
+
+def test_source_fences_quote_only_source_can_actually_fail() -> None:
+    """The invariant that keeps scanner prose out of the verbatim-source
+    fence. It exists because a change did exactly that: an appended gate
+    verdict rendered inside the ```yaml block with a line-number gutter above
+    it, so it read as a quote from the workflow file that is not in the file.
+    """
+    clean = (
+        "  ```yaml\n"
+        "    10:     steps:\n"
+        "    11:       - run: echo '${{ github.event.issue.title }}' <-- here\n"
+        "  ```\n"
+    )
+    assert vr.check_source_fences_quote_only_source(clean).ok
+
+    dressed = (
+        "  ```yaml\n"
+        "    10:     steps:\n"
+        "    11:       - run: echo '${{ github.event.issue.title }}' <-- here\n"
+        "        this job carries a gate condition: ... the gate is INERT\n"
+        "  ```\n"
+    )
+    result = vr.check_source_fences_quote_only_source(dressed)
+    assert not result.ok, result
+    assert "gate condition" in result.detail
+
+    # A fix recipe's ```yaml block has no gutter at all and is not evidence —
+    # the check must not police it, or every report fails on the catalog.
+    recipe = (
+        "  ```yaml\n"
+        "  - name: Build\n"
+        "    env:\n"
+        "      PR_TITLE: ${{ github.event.pull_request.title }}\n"
+        "  ```\n"
+    )
+    assert vr.check_source_fences_quote_only_source(recipe).ok
