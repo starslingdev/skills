@@ -10,11 +10,11 @@ Pick the skills you want and your agent (Claude Code, Codex, Cursor, …). Add
 `-g` to install for every project instead of just this one. Each section below
 gives the one-line command for that skill on its own.
 
-| Skill | What it answers | |
-|---|---|---|
-| [**ci-secure**](#ci-secure) | Can someone attack me through my CI? | [jump ↓](#ci-secure) |
-| [**ci-speedup**](#ci-speedup) | Why is my CI slow? | [jump ↓](#ci-speedup) |
-| [**ci-score**](#ci-score) | Is my CI following best practices? | [jump ↓](#ci-score) |
+| Skill | What it answers | | |
+|---|---|---|---|
+| [**ci-secure**](#ci-secure) | Can someone attack me through my CI? | [jump ↓](#ci-secure) | [overview](https://starsling.dev/ci-secure) |
+| [**ci-speedup**](#ci-speedup) | Why is my CI slow? | [jump ↓](#ci-speedup) | [overview](https://starsling.dev/ci-speedup) |
+| [**ci-score**](#ci-score) | Is my CI following best practices? | [jump ↓](#ci-score) | [overview](https://starsling.dev/ci-score) |
 
 All three run from a local checkout and send your code, logs, and findings
 nowhere. They need **`python3` 3.9+** and **PyYAML** (`pip install pyyaml`);
@@ -29,10 +29,11 @@ history.
 your secrets.**
 
 ```bash
-npx skills add starslingdev/skills --skill ci-secure --agent claude-code -y
+npx skills add starslingdev/skills --skill ci-secure
 ```
 
-Then ask your agent **`/ci-secure`**, or just *"is my CI secure?"*
+Then invoke it by name (**`/ci-secure`**, or `$ci-secure` in Codex), or just
+ask *"is my CI secure?"*
 
 It scans your workflows for the [ten critical CI/CD attack
 vectors](skills/ci-secure/references/security-patterns.md) — template injection
@@ -60,6 +61,9 @@ a grade. **Zero findings is a first-class result**, and a check that could not
 run is reported as *did not run*, never as a pass. Runs in seconds; `gh` is
 optional, used only for the impostor-SHA check and dormant-workflow notes.
 
+What a run looks like, without installing anything:
+[starsling.dev/ci-secure](https://starsling.dev/ci-secure).
+
 ---
 
 ## ci-speedup
@@ -67,10 +71,11 @@ optional, used only for the impostor-SHA check and dormant-workflow notes.
 **Measures what actually makes your CI slow, from your own run history.**
 
 ```bash
-npx skills add starslingdev/skills --skill ci-speedup --agent claude-code -y
+npx skills add starslingdev/skills --skill ci-speedup
 ```
 
-Then ask your agent **`/ci-speedup`**, or just *"why is my CI slow?"*
+Then invoke it by name (**`/ci-speedup`**, or `$ci-speedup` in Codex), or just
+ask *"why is my CI slow?"*
 
 It reports on two measured axes, never blended into one number:
 
@@ -91,7 +96,7 @@ ready-to-paste **agent prompt** that hands the measured root cause to your own
 coding agent, which reads the real logs and git history before shaping a change.
 Detection, ranking, and every measured number are deterministic.
 
-Walkthrough of a full run, no cloning required:
+What a run looks like, without installing anything:
 [starsling.dev/ci-speedup](https://starsling.dev/ci-speedup).
 
 ---
@@ -102,11 +107,11 @@ Walkthrough of a full run, no cloning required:
 fixes.**
 
 ```bash
-npx skills add starslingdev/skills --skill ci-score --agent claude-code -y
+npx skills add starslingdev/skills --skill ci-score
 ```
 
-Then ask your agent **`/ci-score`**, or just *"grade my CI"*. Runs fully
-offline.
+Then invoke it by name (**`/ci-score`**, or `$ci-score` in Codex), or just ask
+*"grade my CI"*. Runs fully offline.
 
 Eleven configuration facts — dependency caching, shallow checkout, test
 sharding, concurrency cancellation, path filters, job timeouts, action pinning,
@@ -120,6 +125,9 @@ the report says so beside the card. It is **not a security audit** either: two
 of the eleven checks happen to be security-related, and it claims nothing
 further. For speed use [`ci-speedup`](#ci-speedup); for security,
 [`ci-secure`](#ci-secure).
+
+What a run looks like, without installing anything:
+[starsling.dev/ci-score](https://starsling.dev/ci-score).
 
 ---
 
