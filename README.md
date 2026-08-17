@@ -6,7 +6,7 @@ Agent skills from StarSling, for optimizing your GitHub Actions.
 
 [![skills.sh](https://skills.sh/b/starslingdev/skills)](https://skills.sh/starslingdev/skills)
 
-[Website](https://starsling.dev)
+[Website](https://starsling.dev/skills)
 
 </div>
 
