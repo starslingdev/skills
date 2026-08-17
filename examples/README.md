@@ -64,6 +64,14 @@ party's current code. This finding is the exception that is safe to show: it was
 found by Wiz Research, reported through HackerOne, fixed by Snowflake, and
 [written up publicly](https://www.wiz.io/blog/red-agent-snowflake-copilot-cicd-bug).
 The scan is scoped to the single workflow file that write-up concerns, so the
-example reports nothing about the rest of that repository. Both reports also show
-what an honest coverage gap looks like: the network-gated impostor-SHA check was
-disabled for the run and renders as `SKIPPED — NOT a pass`, never as a green row.
+example reports nothing about the rest of that repository.
+
+That scoping also makes the pair a worked example of an honest coverage gap.
+Neither report claims a clean repository: scanning one file of the commit's
+eight leaves seven unread, so both carry `Coverage ⚠️ PARTIAL` and a banner
+naming every file that was never opened, and the config hygiene facts render
+`unmeasured` rather than passing. The network-gated impostor-SHA check was
+disabled for the run and renders as `SKIPPED — NOT a pass`, never as a green
+row. So the clean report says "zero findings in the one file scanned", not
+"this repository is secure" — which is the distinction the whole coverage
+machinery exists to protect.

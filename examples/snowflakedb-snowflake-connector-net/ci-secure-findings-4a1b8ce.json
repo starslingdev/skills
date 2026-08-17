@@ -1,20 +1,17 @@
 {
-  "scanned_at": "2026-08-17T21:24:57Z",
+  "scanned_at": "2026-08-17T22:46:27Z",
   "scanned_workflows": 1,
   "repo_root": "/local/snowflake-connector-net",
   "repo": null,
   "commit_sha": "4a1b8cecd65b899540e4324715557d6b080ddeb5",
   "repo_tree_dirty": false,
-  "skill_commit_sha": "a43d237d35910b0c7c6c87f287db7a6c6098b729",
+  "skill_commit_sha": "553baad54b3b412856f208d4c39275fa7e10115c",
   "skill_tree_dirty": false,
   "timings": {
-    "run_start_epoch": 1787001897.883,
+    "run_start_epoch": 1787006787.087,
     "activity_enrich_s": 0.0,
-    "scan_total_s": 0.03,
-    "scripted_end_epoch": 1787001898.041,
-    "scripted_total_s": 0.23,
-    "total_run_s": 12.64,
-    "risk_scenario_s": 12.41
+    "scan_total_s": 0.04,
+    "total_run_s": 8.3
   },
   "gh_checks": {
     "P14.11": "skipped: disabled via --gh-impostor=off (network-gated check did NOT run)"
@@ -88,7 +85,36 @@
       "attacker_scenario": "Anyone with a GitHub account can open an issue on the repo \u2014 no prior access needed. The `create-issue` job substitutes the issue's title and body into its `run:` script before the shell parses it, so a title or body containing `$(...)` or backticks executes as commands in a job that holds `JIRA_BASE_URL`, `JIRA_USER_EMAIL` and `JIRA_API_TOKEN`; the `sed` quote-escaping on lines 24-25 runs after the substitution and cannot stop it. From there the attacker can print or exfiltrate the Jira service-account credentials and the job's `issues: write` token."
     }
   ],
-  "scan_incomplete": [],
+  "scan_incomplete": [
+    {
+      "workflow_file": ".github/workflows/changelog.yml",
+      "reason": "present in the audited commit but absent from the scanned working tree (partial or sparse checkout) \u2014 never read, so its absence from the findings is NOT a pass"
+    },
+    {
+      "workflow_file": ".github/workflows/cla_bot.yml",
+      "reason": "present in the audited commit but absent from the scanned working tree (partial or sparse checkout) \u2014 never read, so its absence from the findings is NOT a pass"
+    },
+    {
+      "workflow_file": ".github/workflows/jira_close.yml",
+      "reason": "present in the audited commit but absent from the scanned working tree (partial or sparse checkout) \u2014 never read, so its absence from the findings is NOT a pass"
+    },
+    {
+      "workflow_file": ".github/workflows/jira_comment.yml",
+      "reason": "present in the audited commit but absent from the scanned working tree (partial or sparse checkout) \u2014 never read, so its absence from the findings is NOT a pass"
+    },
+    {
+      "workflow_file": ".github/workflows/linter.yml",
+      "reason": "present in the audited commit but absent from the scanned working tree (partial or sparse checkout) \u2014 never read, so its absence from the findings is NOT a pass"
+    },
+    {
+      "workflow_file": ".github/workflows/main.yml",
+      "reason": "present in the audited commit but absent from the scanned working tree (partial or sparse checkout) \u2014 never read, so its absence from the findings is NOT a pass"
+    },
+    {
+      "workflow_file": ".github/workflows/semgrep.yml",
+      "reason": "present in the audited commit but absent from the scanned working tree (partial or sparse checkout) \u2014 never read, so its absence from the findings is NOT a pass"
+    }
+  ],
   "dropped_matches": [],
   "coverage_notes": [],
   "suppressed_findings": [],
@@ -97,14 +123,14 @@
       {
         "fact_id": "sec.permissions.workflow-declares",
         "fact": "every workflow declares `permissions:` (top level, or on every job)",
-        "outcome": "pass",
-        "evidence": "all 1 workflow(s) declare permissions"
+        "outcome": "unmeasured",
+        "evidence": "unmeasured: 7 workflow file(s) could not be scanned (.github/workflows/changelog.yml, .github/workflows/cla_bot.yml, .github/workflows/jira_close.yml \u2014 and 4 more), and this fact is a claim about every workflow"
       },
       {
         "fact_id": "sec.permissions.write-scoped",
         "fact": "no workflow-level write permission other than id-token (writes belong on the jobs that need them)",
-        "outcome": "pass",
-        "evidence": "no workflow-level write grants (id-token is excluded by construction; ci-score's scoped-id-token owns that scope)"
+        "outcome": "unmeasured",
+        "evidence": "unmeasured: 7 workflow file(s) could not be scanned (.github/workflows/changelog.yml, .github/workflows/cla_bot.yml, .github/workflows/jira_close.yml \u2014 and 4 more), and this fact is a claim about every workflow"
       },
       {
         "fact_id": "sec.codeowners.workflows",
@@ -115,20 +141,20 @@
       {
         "fact_id": "sec.trigger.fork-code-uncleared",
         "fact": "no untrusted-trigger workflow checks out the attacker's head ref (a bare untrusted trigger passes; the full trigger, checkout and execute chain is reported separately as a fork-code-execution finding, not as a hygiene check here)",
-        "outcome": "pass",
-        "evidence": "every untrusted trigger is clear of attacker-head checkouts"
+        "outcome": "unmeasured",
+        "evidence": "unmeasured: 7 workflow file(s) could not be scanned (.github/workflows/changelog.yml, .github/workflows/cla_bot.yml, .github/workflows/jira_close.yml \u2014 and 4 more), and this fact is a claim about every workflow"
       },
       {
         "fact_id": "sec.secrets.no-blanket-inherit",
         "fact": "no reusable-workflow call passes `secrets: inherit`",
-        "outcome": "pass",
-        "evidence": "no blanket secret inheritance"
+        "outcome": "unmeasured",
+        "evidence": "unmeasured: 7 workflow file(s) could not be scanned (.github/workflows/changelog.yml, .github/workflows/cla_bot.yml, .github/workflows/jira_close.yml \u2014 and 4 more), and this fact is a claim about every workflow"
       },
       {
         "fact_id": "sec.required-checks.skippable",
         "fact": "every required status check is produced by a job that always runs (GitHub counts a SKIPPED required check as a pass, so a check only a conditional job reports can be satisfied without running)",
         "outcome": "unmeasured",
-        "evidence": "unmeasured: which status checks the branch requires is an API fact, and this scan had no repository to read it from \u2014 that needs `gh` authenticated (`gh auth login`) and a GitHub remote to derive `owner/name` from"
+        "evidence": "unmeasured: 7 workflow file(s) could not be scanned (.github/workflows/changelog.yml, .github/workflows/cla_bot.yml, .github/workflows/jira_close.yml \u2014 and 4 more), and this fact is a claim about every workflow"
       },
       {
         "fact_id": "sec.fork-approval.effective",
@@ -139,22 +165,27 @@
       {
         "fact_id": "sec.checkout.credentials-scoped",
         "fact": "on untrusted-trigger workflows, every checkout sets persist-credentials: false (GitHub's default persists the token into .git/config where later steps can read it)",
-        "outcome": "pass",
-        "evidence": "no untrusted-trigger checkout persists credentials"
+        "outcome": "unmeasured",
+        "evidence": "unmeasured: 7 workflow file(s) could not be scanned (.github/workflows/changelog.yml, .github/workflows/cla_bot.yml, .github/workflows/jira_close.yml \u2014 and 4 more), and this fact is a claim about every workflow"
       }
     ],
-    "score": 83.3,
-    "passed": 5,
-    "scored_count": 6,
+    "score": 0.0,
+    "passed": 0,
+    "scored_count": 1,
     "applicable_count": 8,
     "unmeasured": [
+      "sec.permissions.workflow-declares",
+      "sec.permissions.write-scoped",
+      "sec.trigger.fork-code-uncleared",
+      "sec.secrets.no-blanket-inherit",
       "sec.required-checks.skippable",
-      "sec.fork-approval.effective"
+      "sec.fork-approval.effective",
+      "sec.checkout.credentials-scoped"
     ],
     "constants": {
       "rule": "100 * passed / scored; pass/fail only, no weights, no partial credit"
     },
     "registered": "2026-08-03",
-    "caveat": "scored over 6 of 8 applicable facts: sec.required-checks.skippable, sec.fork-approval.effective could not be measured; this is a COVERAGE GAP, not a clean result"
+    "caveat": "scored over 1 of 8 applicable facts: sec.permissions.workflow-declares, sec.permissions.write-scoped, sec.trigger.fork-code-uncleared, sec.secrets.no-blanket-inherit, sec.required-checks.skippable, sec.fork-approval.effective, sec.checkout.credentials-scoped could not be measured; this is a COVERAGE GAP, not a clean result"
   }
 }

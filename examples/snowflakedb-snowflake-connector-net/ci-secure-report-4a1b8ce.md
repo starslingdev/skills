@@ -6,9 +6,9 @@
 | **Workflows scanned** | 1 workflow file(s) under `.github/workflows/` |
 | **Catalog** | ten critical attack vectors (critical-only — not a comprehensive audit) |
 | **Severity breakdown (by occurrence)** | HIGH: 3 |
-| **Coverage** | ✅ complete — every workflow file was scanned |
+| **Coverage** | ⚠️ **PARTIAL** — not every workflow was fully scanned; see the Incomplete-coverage warning below |
 | **Scanned** | 2026-08-17 (UTC) |
-| **Scanner** | ci-secure (skill commit `a43d237`) — 3 finding(s) |
+| **Scanner** | ci-secure (skill commit `553baad`) — 3 finding(s) |
 
 ```
 CI Secure   3 critical findings  ▏1 of 10 vectors hit▕  1 workflow · impostor check SKIPPED
@@ -22,6 +22,18 @@ CI Secure   3 critical findings  ▏1 of 10 vectors hit▕  1 workflow · impost
 > - **P14.11 impostor-SHA check: SKIPPED — disabled via --gh-impostor=off (network-gated check did NOT run); this is NOT a pass.**
 >
 > Re-run once the check can complete to close this gap.
+
+> [!WARNING]
+> **Incomplete coverage — 7 workflow file(s) could not be statically scanned.** This is **not** a clean result — fix the cause and re-run before relying on this report.
+>
+> _Static scan could not read/parse:_
+> - **.github/workflows/changelog.yml**: present in the audited commit but absent from the scanned working tree (partial or sparse checkout) — never read, so its absence from the findings is NOT a pass
+> - **.github/workflows/cla_bot.yml**: present in the audited commit but absent from the scanned working tree (partial or sparse checkout) — never read, so its absence from the findings is NOT a pass
+> - **.github/workflows/jira_close.yml**: present in the audited commit but absent from the scanned working tree (partial or sparse checkout) — never read, so its absence from the findings is NOT a pass
+> - **.github/workflows/jira_comment.yml**: present in the audited commit but absent from the scanned working tree (partial or sparse checkout) — never read, so its absence from the findings is NOT a pass
+> - **.github/workflows/linter.yml**: present in the audited commit but absent from the scanned working tree (partial or sparse checkout) — never read, so its absence from the findings is NOT a pass
+> - **.github/workflows/main.yml**: present in the audited commit but absent from the scanned working tree (partial or sparse checkout) — never read, so its absence from the findings is NOT a pass
+> - **.github/workflows/semgrep.yml**: present in the audited commit but absent from the scanned working tree (partial or sparse checkout) — never read, so its absence from the findings is NOT a pass
 
 ## Critical findings: **3** — 1 of 10 vectors hit
 
@@ -50,18 +62,18 @@ Every hit vector renders in full below — no vector is trimmed, tiered, or topp
 
 Hygiene and armor observations about how these workflows are configured. They are **not attack vectors** and they are **not scored, graded, or totalled anywhere in this report** — each row is an independently fixable fact, and a failing row does not make the vector scan above less clean (or a passing row make it safer).
 
-2 check(s) could not be measured (sec.required-checks.skippable, sec.fork-approval.effective) — a coverage gap, not a pass.
+7 check(s) could not be measured (sec.permissions.workflow-declares, sec.permissions.write-scoped, sec.trigger.fork-code-uncleared, sec.secrets.no-blanket-inherit, sec.required-checks.skippable, sec.fork-approval.effective, sec.checkout.credentials-scoped) — a coverage gap, not a pass.
 
 | | Check | Evidence |
 |---|---|---|
-| ✅ pass | every workflow declares `permissions:` (top level, or on every job) | all 1 workflow(s) declare permissions |
-| ✅ pass | no workflow-level write permission other than id-token (writes belong on the jobs that need them) | no workflow-level write grants (id-token is excluded by construction; ci-score's scoped-id-token owns that scope) |
+| ⚠️ unmeasured | every workflow declares `permissions:` (top level, or on every job) | unmeasured: 7 workflow file(s) could not be scanned (.github/workflows/changelog.yml, .github/workflows/cla_bot.yml, .github/workflows/jira_close.yml — and 4 more), and this fact is a claim about every workflow |
+| ⚠️ unmeasured | no workflow-level write permission other than id-token (writes belong on the jobs that need them) | unmeasured: 7 workflow file(s) could not be scanned (.github/workflows/changelog.yml, .github/workflows/cla_bot.yml, .github/workflows/jira_close.yml — and 4 more), and this fact is a claim about every workflow |
 | ❌ fail | a CODEOWNERS entry covers `.github/workflows/` | no CODEOWNERS file at .github/CODEOWNERS, CODEOWNERS, or docs/CODEOWNERS, so workflow changes merge with the same approvals as any other change |
-| ✅ pass | no untrusted-trigger workflow checks out the attacker's head ref (a bare untrusted trigger passes; the full trigger, checkout and execute chain is reported separately as a fork-code-execution finding, not as a hygiene check here) | every untrusted trigger is clear of attacker-head checkouts |
-| ✅ pass | no reusable-workflow call passes `secrets: inherit` | no blanket secret inheritance |
-| ⚠️ unmeasured | every required status check is produced by a job that always runs (GitHub counts a SKIPPED required check as a pass, so a check only a conditional job reports can be satisfied without running) | unmeasured: which status checks the branch requires is an API fact, and this scan had no repository to read it from — that needs `gh` authenticated (`gh auth login`) and a GitHub remote to derive `owner/name` from |
+| ⚠️ unmeasured | no untrusted-trigger workflow checks out the attacker's head ref (a bare untrusted trigger passes; the full trigger, checkout and execute chain is reported separately as a fork-code-execution finding, not as a hygiene check here) | unmeasured: 7 workflow file(s) could not be scanned (.github/workflows/changelog.yml, .github/workflows/cla_bot.yml, .github/workflows/jira_close.yml — and 4 more), and this fact is a claim about every workflow |
+| ⚠️ unmeasured | no reusable-workflow call passes `secrets: inherit` | unmeasured: 7 workflow file(s) could not be scanned (.github/workflows/changelog.yml, .github/workflows/cla_bot.yml, .github/workflows/jira_close.yml — and 4 more), and this fact is a claim about every workflow |
+| ⚠️ unmeasured | every required status check is produced by a job that always runs (GitHub counts a SKIPPED required check as a pass, so a check only a conditional job reports can be satisfied without running) | unmeasured: 7 workflow file(s) could not be scanned (.github/workflows/changelog.yml, .github/workflows/cla_bot.yml, .github/workflows/jira_close.yml — and 4 more), and this fact is a claim about every workflow |
 | ⚠️ unmeasured | fork-PR workflow approval gates more than accounts new to GitHub (the weakest setting lets any aged outside account start CI unapproved; requiring approval from first-time contributors to this repo passes) | unmeasured: the fork-PR approval policy is a repository setting read over the API, and this scan had no repository to read it from — that needs `gh` authenticated (`gh auth login`) and a GitHub remote to derive `owner/name` from |
-| ✅ pass | on untrusted-trigger workflows, every checkout sets persist-credentials: false (GitHub's default persists the token into .git/config where later steps can read it) | no untrusted-trigger checkout persists credentials |
+| ⚠️ unmeasured | on untrusted-trigger workflows, every checkout sets persist-credentials: false (GitHub's default persists the token into .git/config where later steps can read it) | unmeasured: 7 workflow file(s) could not be scanned (.github/workflows/changelog.yml, .github/workflows/cla_bot.yml, .github/workflows/jira_close.yml — and 4 more), and this fact is a claim about every workflow |
 
 ---
 
@@ -209,10 +221,10 @@ One line per vector, taken from the catalog entry each detector is built from.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-secure scanner at commit `a43d237` | Every `.github/workflows/` file ending `.yml` or `.yaml`, dot-prefixed names included, under the audited tree (4a1b8ce) | Critical exploit-chain pattern detection (see the catalog) |
+| ci-secure scanner at commit `553baad` | Every `.github/workflows/` file ending `.yml` or `.yaml`, dot-prefixed names included, under the audited tree (4a1b8ce) | Critical exploit-chain pattern detection (see the catalog) |
 | GitHub API — run activity | not queried (no `--repo`) | Pass `--repo owner/repo` to enrich findings with workflow activity |
 
-**Data freshness.** Scanner ran at `2026-08-17T21:24:57Z`. Workflow YAML is read from the audited tree at commit `4a1b8ce`. Activity counts (when `--repo` is supplied) reflect a rolling 30-day window at scan time.
+**Data freshness.** Scanner ran at `2026-08-17T22:46:27Z`. Workflow YAML is read from the audited tree at commit `4a1b8ce`. Activity counts (when `--repo` is supplied) reflect a rolling 30-day window at scan time.
 
 ---
 
