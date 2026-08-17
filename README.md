@@ -7,6 +7,7 @@
 [![skills.sh](https://skills.sh/b/starslingdev/skills)](https://skills.sh/starslingdev/skills)
 [![CI](https://github.com/starslingdev/skills/actions/workflows/ci.yml/badge.svg)](https://github.com/starslingdev/skills/actions/workflows/ci.yml)
 [![Registry scan](https://github.com/starslingdev/skills/actions/workflows/registry-scan.yml/badge.svg)](https://github.com/starslingdev/skills/actions/workflows/registry-scan.yml)
+[![License: MIT](https://img.shields.io/github/license/starslingdev/skills)](LICENSE)
 
 🏎️ **[ci-speedup](#ci-speedup)** · 📋 **[ci-score](#ci-score)** · 🔒 **[ci-secure](#ci-secure)**
 
@@ -23,13 +24,14 @@ gives the one-line command for that skill on its own.
 | Skill | What it answers |
 |---|---|
 | 🏎️ [**ci-speedup**](#ci-speedup) | Why is my CI slow? |
-| 📋 [**ci-score**](#ci-score) | Is my CI following best practices? |
+| 📋 [**ci-score**](#ci-score) | Is my CI config following best practices? |
 | 🔒 [**ci-secure**](#ci-secure) | Can someone attack me through my CI? |
 
-All three run from a local checkout and send your code, logs, and findings
-nowhere ([data handling](SECURITY.md)). They need **`python3` 3.9+** and
-**PyYAML** (`pip install pyyaml`); `ci-speedup` also needs **`gh auth login`**,
-because it reads your real run history.
+All three run from a local checkout and need **`python3` 3.9+** and **PyYAML**
+(`pip install pyyaml`). `ci-speedup` also needs **`gh auth login`**, because it
+reads your run history over the GitHub API. That data stays on your machine:
+**nothing is sent to StarSling**, and nothing is sent to any third party
+([data handling](SECURITY.md)).
 
 ---
 
