@@ -390,6 +390,30 @@ def test_ci_secure_example_matches_its_findings_json(report: Path):
         f"{findings_json.name} records {data.get('skill_commit_sha')!r} — the report was "
         "not rendered from the run it ships beside"
     )
+    # Coverage row vs the raw coverage-gap keys. Counts and SHAs alone would let a
+    # report that claims "✅ complete — every workflow file was scanned" ship beside
+    # findings whose own JSON records unscanned files (greptile P1 on #60): a stale
+    # report rendered before the partial-checkout fix, or a hand-restored row. The
+    # predicate mirrors report.py's own: coverage is complete iff no gap channel
+    # carries anything.
+    text = report.read_text(encoding="utf-8")
+    has_gap = any(data.get(k) for k in
+                  ("scan_incomplete", "dropped_matches", "coverage_notes"))
+    claims_complete = "✅ complete" in text
+    claims_partial = "⚠️ **PARTIAL**" in text
+    assert claims_complete != claims_partial, (
+        f"{_rel(report)}: the Coverage row is neither clearly complete nor clearly "
+        "PARTIAL; a reader cannot tell what the scan covered")
+    assert claims_complete == (not has_gap), (
+        f"{_rel(report)}: the report's Coverage row claims "
+        f"{'complete' if claims_complete else 'PARTIAL'} but {findings_json.name} "
+        f"records {'a coverage gap' if has_gap else 'no coverage gap'} "
+        f"(scan_incomplete={len(data.get('scan_incomplete') or [])}, "
+        f"dropped_matches={len(data.get('dropped_matches') or [])}, "
+        f"coverage_notes={len(data.get('coverage_notes') or [])}). A report that "
+        "claims complete coverage over a partial checkout is a clean bill of health "
+        "the scan never established — regenerate it from the current engine."
+    )
     audited = _SECURE_AUDITED_COMMIT_RE.search(report.read_text(encoding="utf-8"))
     assert audited, f"{_rel(report)}: no `Audited commit` row"
     assert data.get("commit_sha", "").startswith(audited.group(1)), (
@@ -476,15 +500,19 @@ def test_the_other_engines_legs_actually_reject_tampering(tmp_path, monkeypatch)
     def _write_secure(count: int, findings: int, stamp: str = "a43d237",
                       skill_sha: str = "a43d237d35910b0c7c6c87f287db7a6c6098b729",
                       audited: str = "4a1b8ce", commit: str = "4a1b8cecd65b899540e4324715557d6b080ddeb5",
-                      tag: str = "4a1b8ce", body_extra: str = "") -> Path:
+                      tag: str = "4a1b8ce", body_extra: str = "",
+                      coverage: str = "✅ complete", gaps: int = 0) -> Path:
         rep = d / f"ci-secure-report-{tag}.md"
         rep.write_text(
             f"| **Audited commit** | `{audited}` — anchored to this tree |\n"
+            f"| **Coverage** | {coverage} |\n"
             f"| **Scanner** | ci-secure (skill commit `{stamp}`) — {count} finding(s) |\n"
             f"{body_extra}", encoding="utf-8")
         (d / f"ci-secure-findings-{tag}.json").write_text(json.dumps({
             "commit_sha": commit, "skill_commit_sha": skill_sha,
             "findings": [{"id": f"f{i}"} for i in range(findings)],
+            "scan_incomplete": [{"workflow_file": f"w{i}.yml", "reason": "absent"}
+                                for i in range(gaps)],
         }), encoding="utf-8")
         return rep
 
@@ -501,6 +529,23 @@ def test_the_other_engines_legs_actually_reject_tampering(tmp_path, monkeypatch)
         test_ci_secure_example_matches_its_findings_json(
             _write_secure(0, 0, audited="1dc7766", commit="1dc7766c5aa4b07da3cf3416e501364d3bc827a0",
                           tag="dead123"))
+    # A truthful PARTIAL pair also passes (the shape the sparse examples ship in).
+    test_ci_secure_example_matches_its_findings_json(
+        _write_secure(3, 3, coverage="⚠️ **PARTIAL** — see the warning below", gaps=7))
+    # THE DRIFT greptile P1 names: a report claiming complete coverage beside findings
+    # whose own JSON records unscanned files. A stale pre-fix report looks exactly
+    # like this, and the count/SHA legs alone wave it through.
+    with pytest.raises(AssertionError, match="claims complete"):
+        test_ci_secure_example_matches_its_findings_json(_write_secure(3, 3, gaps=7))
+    # A Coverage row that states neither verdict (a renamed marker, a reworded row)
+    # must fail rather than silently disabling the comparison above.
+    with pytest.raises(AssertionError, match="neither clearly complete"):
+        test_ci_secure_example_matches_its_findings_json(
+            _write_secure(3, 3, coverage="scanned the tree", gaps=0))
+    # And the inverse: a PARTIAL row over a JSON with no gap is equally incoherent.
+    with pytest.raises(AssertionError, match="claims PARTIAL"):
+        test_ci_secure_example_matches_its_findings_json(
+            _write_secure(3, 3, coverage="⚠️ **PARTIAL** — see the warning below", gaps=0))
     # An un-sanitized machine path anywhere in the artifact pair.
     leaky = _write_secure(3, 3, body_extra="scanned /Users/someone/checkouts/vendor-repo\n")
     with pytest.raises(AssertionError, match="un-sanitized local filesystem path"):
