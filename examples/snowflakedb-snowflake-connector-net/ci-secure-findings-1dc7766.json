@@ -1,0 +1,104 @@
+{
+  "scanned_at": "2026-08-17T21:24:58Z",
+  "scanned_workflows": 1,
+  "repo_root": "/local/snowflake-connector-net",
+  "repo": null,
+  "commit_sha": "1dc7766c5aa4b07da3cf3416e501364d3bc827a0",
+  "repo_tree_dirty": false,
+  "skill_commit_sha": "a43d237d35910b0c7c6c87f287db7a6c6098b729",
+  "skill_tree_dirty": false,
+  "timings": {
+    "run_start_epoch": 1787001898.145,
+    "activity_enrich_s": 0.0,
+    "scan_total_s": 0.04,
+    "scripted_end_epoch": 1787001898.238,
+    "scripted_total_s": 0.15,
+    "total_run_s": 12.41
+  },
+  "gh_checks": {
+    "P14.11": "skipped: disabled via --gh-impostor=off (network-gated check did NOT run)"
+  },
+  "gh_check_details": {},
+  "catalog_patterns_evaluated": [
+    "P14.10",
+    "P14.11",
+    "P14.14",
+    "P14.15",
+    "P14.18",
+    "P14.19",
+    "P14.24",
+    "P14.25",
+    "P14.7",
+    "P14.9"
+  ],
+  "findings": [],
+  "scan_incomplete": [],
+  "dropped_matches": [],
+  "coverage_notes": [],
+  "suppressed_findings": [],
+  "security_score": {
+    "facts": [
+      {
+        "fact_id": "sec.permissions.workflow-declares",
+        "fact": "every workflow declares `permissions:` (top level, or on every job)",
+        "outcome": "pass",
+        "evidence": "all 1 workflow(s) declare permissions"
+      },
+      {
+        "fact_id": "sec.permissions.write-scoped",
+        "fact": "no workflow-level write permission other than id-token (writes belong on the jobs that need them)",
+        "outcome": "pass",
+        "evidence": "no workflow-level write grants (id-token is excluded by construction; ci-score's scoped-id-token owns that scope)"
+      },
+      {
+        "fact_id": "sec.codeowners.workflows",
+        "fact": "a CODEOWNERS entry covers `.github/workflows/`",
+        "outcome": "fail",
+        "evidence": "no CODEOWNERS file at .github/CODEOWNERS, CODEOWNERS, or docs/CODEOWNERS, so workflow changes merge with the same approvals as any other change"
+      },
+      {
+        "fact_id": "sec.trigger.fork-code-uncleared",
+        "fact": "no untrusted-trigger workflow checks out the attacker's head ref (a bare untrusted trigger passes; the full trigger, checkout and execute chain is reported separately as a fork-code-execution finding, not as a hygiene check here)",
+        "outcome": "pass",
+        "evidence": "every untrusted trigger is clear of attacker-head checkouts"
+      },
+      {
+        "fact_id": "sec.secrets.no-blanket-inherit",
+        "fact": "no reusable-workflow call passes `secrets: inherit`",
+        "outcome": "pass",
+        "evidence": "no blanket secret inheritance"
+      },
+      {
+        "fact_id": "sec.required-checks.skippable",
+        "fact": "every required status check is produced by a job that always runs (GitHub counts a SKIPPED required check as a pass, so a check only a conditional job reports can be satisfied without running)",
+        "outcome": "unmeasured",
+        "evidence": "unmeasured: which status checks the branch requires is an API fact, and this scan had no repository to read it from \u2014 that needs `gh` authenticated (`gh auth login`) and a GitHub remote to derive `owner/name` from"
+      },
+      {
+        "fact_id": "sec.fork-approval.effective",
+        "fact": "fork-PR workflow approval gates more than accounts new to GitHub (the weakest setting lets any aged outside account start CI unapproved; requiring approval from first-time contributors to this repo passes)",
+        "outcome": "unmeasured",
+        "evidence": "unmeasured: the fork-PR approval policy is a repository setting read over the API, and this scan had no repository to read it from \u2014 that needs `gh` authenticated (`gh auth login`) and a GitHub remote to derive `owner/name` from"
+      },
+      {
+        "fact_id": "sec.checkout.credentials-scoped",
+        "fact": "on untrusted-trigger workflows, every checkout sets persist-credentials: false (GitHub's default persists the token into .git/config where later steps can read it)",
+        "outcome": "pass",
+        "evidence": "no untrusted-trigger checkout persists credentials"
+      }
+    ],
+    "score": 83.3,
+    "passed": 5,
+    "scored_count": 6,
+    "applicable_count": 8,
+    "unmeasured": [
+      "sec.required-checks.skippable",
+      "sec.fork-approval.effective"
+    ],
+    "constants": {
+      "rule": "100 * passed / scored; pass/fail only, no weights, no partial credit"
+    },
+    "registered": "2026-08-03",
+    "caveat": "scored over 6 of 8 applicable facts: sec.required-checks.skippable, sec.fork-approval.effective could not be measured; this is a COVERAGE GAP, not a clean result"
+  }
+}

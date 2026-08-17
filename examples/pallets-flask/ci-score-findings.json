@@ -1,0 +1,220 @@
+{
+ "generator": "ci-score/collect_config.py",
+ "generated_at": "2026-08-17T21:25:20+00:00",
+ "repo_root": "/local/flask",
+ "data_sources": {
+  "mode": "local-checkout",
+  "spec_path": "/local/engine/skills/ci-score/references/ci-score-spec.json"
+ },
+ "repo_slug": "pallets/flask",
+ "commit_sha": "d318b683471101618febed18996405ad26462110",
+ "scanned_workflows": 5,
+ "workflow_files": [
+  ".github/workflows/lock.yaml",
+  ".github/workflows/pre-commit.yaml",
+  ".github/workflows/publish.yaml",
+  ".github/workflows/tests.yaml",
+  ".github/workflows/zizmor.yaml"
+ ],
+ "practice_facts": {
+  "ci.cache.dependency-cache": {
+   "state": "pass",
+   "evidence": "dependency caching configured in 2 workflow/action file(s)",
+   "files": [
+    ".github/workflows/pre-commit.yaml",
+    ".github/workflows/tests.yaml"
+   ]
+  },
+  "ci.cache.build-cache": {
+   "state": "not_applicable",
+   "evidence": "no build tool with a cache detected in the repo tree",
+   "files": []
+  },
+  "ci.checkout.shallow-clone": {
+   "state": "pass",
+   "evidence": "no PR-gating workflow checks out full history (post-merge automation like backport/changelog jobs is exempt - it needs history and gates nobody)",
+   "files": []
+  },
+  "ci.parallel.test-sharding": {
+   "state": "pass",
+   "evidence": "shard/matrix strategy on test job(s) in 1 workflow(s)",
+   "files": [
+    ".github/workflows/tests.yaml"
+   ]
+  },
+  "ci.build.change-scoped": {
+   "state": "not_applicable",
+   "evidence": "no turbo/nx task graph detected (change-scoping is not checkable here)",
+   "files": []
+  },
+  "ci.trigger.concurrency-groups": {
+   "state": "pass",
+   "evidence": "concurrency group declared on 3 of 3 PR workflow(s)",
+   "files": [
+    ".github/workflows/pre-commit.yaml",
+    ".github/workflows/tests.yaml",
+    ".github/workflows/zizmor.yaml"
+   ]
+  },
+  "ci.trigger.cancel-superseded": {
+   "state": "pass",
+   "evidence": "concurrency + cancel-in-progress on 3 of 3 PR workflow(s)",
+   "files": [
+    ".github/workflows/pre-commit.yaml",
+    ".github/workflows/tests.yaml",
+    ".github/workflows/zizmor.yaml"
+   ]
+  },
+  "ci.trigger.path-filter": {
+   "state": "pass",
+   "evidence": "paths filters on 2 of 3 PR workflow(s)",
+   "files": [
+    ".github/workflows/tests.yaml",
+    ".github/workflows/zizmor.yaml"
+   ]
+  },
+  "ci.hygiene.job-timeouts": {
+   "state": "fail",
+   "evidence": "no job sets timeout-minutes (GitHub's default is 360 minutes)",
+   "files": [
+    ".github/workflows/lock.yaml",
+    ".github/workflows/pre-commit.yaml",
+    ".github/workflows/publish.yaml"
+   ]
+  },
+  "ci.security.scoped-id-token": {
+   "state": "pass",
+   "evidence": "id-token: write scoped at job level in 1 workflow(s)",
+   "files": [
+    ".github/workflows/publish.yaml"
+   ]
+  },
+  "ci.security.pinned-action-shas": {
+   "state": "pass",
+   "evidence": "21 of 21 remote action references SHA-pinned (workflow + local composite action files; passes at >=95%)",
+   "files": []
+  }
+ },
+ "automation_only": false,
+ "ci_score": {
+  "spec_version": "ci-score-v0.1.3",
+  "scope_statement": "CI Score gauges best-practice adherence on CI speed and gate hygiene: a straightforward pass/fail rubric of best-practice checks computed from a repo's workflow configuration.",
+  "value": 89,
+  "grade": "A-",
+  "refusal": null,
+  "checks": [
+   {
+    "check_id": "ci.cache.dependency-cache",
+    "label": "Dependency caching",
+    "state": "pass",
+    "evidence": "dependency caching configured in 2 workflow/action file(s)",
+    "files": [
+     ".github/workflows/pre-commit.yaml",
+     ".github/workflows/tests.yaml"
+    ],
+    "measured_note": null
+   },
+   {
+    "check_id": "ci.cache.build-cache",
+    "label": "Build caching",
+    "state": "not_applicable",
+    "evidence": "no build tool with a cache detected in the repo tree",
+    "files": [],
+    "measured_note": null
+   },
+   {
+    "check_id": "ci.checkout.shallow-clone",
+    "label": "Shallow checkout",
+    "state": "pass",
+    "evidence": "no PR-gating workflow checks out full history (post-merge automation like backport/changelog jobs is exempt - it needs history and gates nobody)",
+    "files": [],
+    "measured_note": null
+   },
+   {
+    "check_id": "ci.parallel.test-sharding",
+    "label": "Test sharding / matrix",
+    "state": "pass",
+    "evidence": "shard/matrix strategy on test job(s) in 1 workflow(s)",
+    "files": [
+     ".github/workflows/tests.yaml"
+    ],
+    "measured_note": null
+   },
+   {
+    "check_id": "ci.build.change-scoped",
+    "label": "Change-scoped builds",
+    "state": "not_applicable",
+    "evidence": "no turbo/nx task graph detected (change-scoping is not checkable here)",
+    "files": [],
+    "measured_note": null
+   },
+   {
+    "check_id": "ci.trigger.concurrency-groups",
+    "label": "Concurrency groups",
+    "state": "pass",
+    "evidence": "concurrency group declared on 3 of 3 PR workflow(s)",
+    "files": [
+     ".github/workflows/pre-commit.yaml",
+     ".github/workflows/tests.yaml",
+     ".github/workflows/zizmor.yaml"
+    ],
+    "measured_note": null
+   },
+   {
+    "check_id": "ci.trigger.cancel-superseded",
+    "label": "Superseded runs cancelled",
+    "state": "pass",
+    "evidence": "concurrency + cancel-in-progress on 3 of 3 PR workflow(s)",
+    "files": [
+     ".github/workflows/pre-commit.yaml",
+     ".github/workflows/tests.yaml",
+     ".github/workflows/zizmor.yaml"
+    ],
+    "measured_note": null
+   },
+   {
+    "check_id": "ci.trigger.path-filter",
+    "label": "Path filters",
+    "state": "pass",
+    "evidence": "paths filters on 2 of 3 PR workflow(s)",
+    "files": [
+     ".github/workflows/tests.yaml",
+     ".github/workflows/zizmor.yaml"
+    ],
+    "measured_note": null
+   },
+   {
+    "check_id": "ci.hygiene.job-timeouts",
+    "label": "Job timeouts",
+    "state": "fail",
+    "evidence": "no job sets timeout-minutes (GitHub's default is 360 minutes)",
+    "files": [
+     ".github/workflows/lock.yaml",
+     ".github/workflows/pre-commit.yaml",
+     ".github/workflows/publish.yaml"
+    ],
+    "measured_note": null
+   },
+   {
+    "check_id": "ci.security.scoped-id-token",
+    "label": "Scoped OIDC id-token",
+    "state": "pass",
+    "evidence": "id-token: write scoped at job level in 1 workflow(s)",
+    "files": [
+     ".github/workflows/publish.yaml"
+    ],
+    "measured_note": null
+   },
+   {
+    "check_id": "ci.security.pinned-action-shas",
+    "label": "Pinned action SHAs",
+    "state": "pass",
+    "evidence": "21 of 21 remote action references SHA-pinned (workflow + local composite action files; passes at >=95%)",
+    "files": [],
+    "measured_note": null
+   }
+  ],
+  "checks_passed": 8,
+  "checks_applicable": 9
+ }
+}
