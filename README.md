@@ -27,7 +27,7 @@ gives the one-line command for that skill on its own.
 | 🔒 [**ci-secure**](#ci-secure) | Can someone attack me through my CI? |
 
 All three run from a local checkout and send your code, logs, and findings
-nowhere. They need **`python3` 3.9+** and **PyYAML** (`pip install pyyaml`);
+nowhere ([data handling](SECURITY.md)). They need **`python3` 3.9+** and **PyYAML** (`pip install pyyaml`);
 `ci-speedup` also needs **`gh auth login`**, because it reads your real run
 history.
 
@@ -56,7 +56,7 @@ from wasteful, so each finding ships a ready-to-paste prompt handing the root
 cause to your own agent, which reads the logs and git history before changing
 anything.
 
-[See a run →](https://starsling.dev/ci-speedup)
+Learn more: [starsling.dev/ci-speedup](https://starsling.dev/ci-speedup)
 
 ---
 
@@ -80,7 +80,7 @@ passed over checks applicable; every failed check gets one ranked fix.
 **It measures adherence, not speed**, and it is **not a security audit** — two
 of the eleven checks are security-adjacent and it claims nothing further.
 
-[See a run →](https://starsling.dev/ci-score)
+Learn more: [starsling.dev/ci-score](https://starsling.dev/ci-score)
 
 ---
 
@@ -112,18 +112,7 @@ vectors, each a full outsider → compromise chain with a real incident behind i
 is a first-class result**, and a check that could not run says *did not run*,
 never "pass".
 
-[See a run →](https://starsling.dev/ci-secure)
-
----
-
-## What a ci-speedup run costs
-
-It defaults to the repo you're in, confirms the target first, then samples your
-recent runs. Measured: **314 `gh` API calls in ~51s** on `pallets/flask`; 824
-calls in ~3m on `microsoft/playwright`; ~1,800 in ~8m on a next.js-sized
-monorepo. The full markdown report is **opt-in** — pick *"Save the full report"*
-and it writes `./ci-speedup-findings-report.md`. See
-[SECURITY.md](SECURITY.md) for the data-handling model.
+Learn more: [starsling.dev/ci-secure](https://starsling.dev/ci-secure)
 
 ## For maintainers
 
