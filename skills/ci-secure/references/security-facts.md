@@ -34,6 +34,11 @@ API-gated facts, no repository and no token — is **unmeasured, never a silent
 pass**: it scores nothing, stays in the applicable count as a
 named coverage gap, and the block says so.
 
+## Contents
+
+- [The disjointness census](#the-disjointness-census)
+- [What each fact asks, exactly](#what-each-fact-asks-exactly)
+
 ## The disjointness census
 
 Every fact is checked against ci-score's shipped 11-check registry before

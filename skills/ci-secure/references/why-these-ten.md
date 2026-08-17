@@ -8,6 +8,15 @@ future "shouldn't we add pattern X?" is tested against a written criterion
 instead of instinct. A census test binds the list below to the scanner's
 active pattern set: they cannot drift apart.
 
+## Contents
+
+- [The filter](#the-filter)
+- [The ten, with their incident grounding](#the-ten-with-their-incident-grounding)
+- [The rejection record — what the filter removed, and why](#the-rejection-record--what-the-filter-removed-and-why)
+- [What "critical" means here](#what-critical-means-here)
+- [Platform mitigations — dated, and scoped to what they actually close](#platform-mitigations--dated-and-scoped-to-what-they-actually-close)
+- [Adding a pattern — the mechanical checklist](#adding-a-pattern--the-mechanical-checklist)
+
 ## The filter
 
 A pattern is in the catalog **only if it describes a complete outsider →
@@ -162,3 +171,23 @@ not retire the vector — Enterprise Server, third-party backends, opt-outs and
 pinned action versions keep it live — so the detectors and severities are
 unchanged, and the finding says which of those residuals applies to the
 reader.
+
+## Adding a pattern — the mechanical checklist
+
+A candidate that passes all three tests above is a deliberate catalog change,
+not a drift; the census test (`tests/test_census_why_these_ten.py`) fails any
+catalog/doc mismatch. Mechanically, in ONE change:
+
+- append a `### Pxx.y` section to `security-patterns.md` with a METADATA
+  block (schema in the catalog's `## METADATA schema` section) and the five
+  prose markers — `**TL;DR.**`, `**What an attacker can do.**`,
+  `**Anti-pattern**:`, `**Fix recipe**`, `**Risk of the change.**`.
+  `tests/test_census_why_these_ten.py` pins all five, and `**Anti-pattern**:`
+  is pinned WITH its trailing colon;
+- add a fixture the detector fires on, at
+  `tests/fixtures/dot-github/workflows/pXX_Y_*.yml.fixture` — the
+  `.yml.fixture` suffix and `dot-github/` directory keep fixtures out of the
+  scanner's own workflow scans and off registry scanners — and register its
+  hash in `tests/fixtures/cloak-manifest.json`, or the cloak-prune step drops
+  it;
+- update the list and rejection record in THIS document in the same change.

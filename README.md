@@ -18,11 +18,11 @@ Pick the skills you want and your agent (Claude Code, Codex, Cursor, …). Add
 `-g` to install for every project instead of just this one. Each section below
 gives the one-line command for that skill on its own.
 
-| Skill | What it answers |
-|---|---|
-| 🏎️ [**ci-speedup**](#ci-speedup) | Why is my CI slow? |
-| 📋 [**ci-score**](#ci-score) | Is my CI config following best practices? |
-| 🔒 [**ci-secure**](#ci-secure) | Can someone attack me through my CI? |
+| Skill | What it answers | Source |
+|---|---|---|
+| 🏎️ [**ci-speedup**](#ci-speedup) | Why is my CI slow? | [`skills/ci-speedup/`](skills/ci-speedup/) |
+| 📋 [**ci-score**](#ci-score) | Is my CI config following best practices? | [`skills/ci-score/`](skills/ci-score/) |
+| 🔒 [**ci-secure**](#ci-secure) | Can someone attack me through my CI? | [`skills/ci-secure/`](skills/ci-secure/) |
 
 Each run ends the same way: your agent offers to fix the findings you pick, or
 to just save the full report as markdown. Fixes land in your working tree for
@@ -70,7 +70,7 @@ Example reports from real runs:
 [`pallets/flask`](examples/pallets-flask/ci-speedup-findings-report.md) and
 [`microsoft/playwright`](examples/microsoft-playwright/ci-speedup-findings-report.md).
 
-Learn more: [starsling.dev/ci-speedup](https://starsling.dev/ci-speedup)
+Source: [`skills/ci-speedup/`](skills/ci-speedup/) · [SKILL.md](skills/ci-speedup/SKILL.md) · Learn more: [starsling.dev/ci-speedup](https://starsling.dev/ci-speedup)
 
 ---
 
@@ -104,7 +104,7 @@ of the eleven checks are security-adjacent, and it claims nothing further.
 Example report from a real run:
 [`pallets/flask`](examples/pallets-flask/ci-score-report.md), scoring 89/100.
 
-Learn more: [starsling.dev/ci-score](https://starsling.dev/ci-score)
+Source: [`skills/ci-score/`](skills/ci-score/) · [SKILL.md](skills/ci-score/SKILL.md) · Learn more: [starsling.dev/ci-score](https://starsling.dev/ci-score)
 
 ---
 
@@ -174,7 +174,7 @@ It ships in `--advisory` mode, so it does not affect your merge path on day
 one. It becomes blocking when you drop `--advisory` and add the check to your
 repository's required checks.
 
-Learn more: [starsling.dev/ci-secure](https://starsling.dev/ci-secure)
+Source: [`skills/ci-secure/`](skills/ci-secure/) · [SKILL.md](skills/ci-secure/SKILL.md) · Learn more: [starsling.dev/ci-secure](https://starsling.dev/ci-secure)
 
 ---
 

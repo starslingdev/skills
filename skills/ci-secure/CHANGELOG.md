@@ -37,6 +37,22 @@ entries are dated (UTC). Format loosely follows
   workflows there, reported no gap, and silently restored the "complete
   coverage" claim this fix exists to remove.
 
+### Changed
+
+- **2026-08-17** — **SKILL.md is about a third shorter, with the detail moved
+  into reference files.** Anthropic's skill-authoring guidance puts the ceiling
+  for a SKILL.md body at 500 lines, and ci-secure's had grown to 781. The
+  runbook for adding ci-secure as a CI gate, the terminal summary's provenance
+  table, the findings-JSON shape, and the troubleshooting table now live in
+  `references/ci-gate.md`, `references/terminal-summary.md`,
+  `references/scan-output.md` and `references/troubleshooting.md`, each linked
+  from the point in SKILL.md that used to carry them. No rule the skill obeys at
+  runtime moved: the phase sequence, every close-question option and its
+  ordering, the honesty invariants and all eight NEVER rules stay in SKILL.md
+  verbatim. `references/security-facts.md` and `references/why-these-ten.md`
+  gained tables of contents, which the same guidance asks for on reference files
+  over 100 lines.
+
 ### Added
 
 - **2026-08-17** — **Installing the gate now proves it can fail, before it is
