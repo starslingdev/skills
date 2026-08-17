@@ -1,6 +1,6 @@
 <div align="center">
 
-# StarSling Skills - Self-Driving CI using your own AI agents
+# StarSling Skills - speed, security, and best practices for your GitHub Actions
 
 **Agent skills from StarSling, for optimizing your GitHub Actions.**
 
