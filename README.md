@@ -16,57 +16,14 @@ gives the one-line command for that skill on its own.
 
 | Skill | What it answers | | |
 |---|---|---|---|
-| [**ci-secure**](#ci-secure) | Can someone attack me through my CI? | [jump ↓](#ci-secure) | [overview](https://starsling.dev/ci-secure) |
 | [**ci-speedup**](#ci-speedup) | Why is my CI slow? | [jump ↓](#ci-speedup) | [overview](https://starsling.dev/ci-speedup) |
 | [**ci-score**](#ci-score) | Is my CI following best practices? | [jump ↓](#ci-score) | [overview](https://starsling.dev/ci-score) |
+| [**ci-secure**](#ci-secure) | Can someone attack me through my CI? | [jump ↓](#ci-secure) | [overview](https://starsling.dev/ci-secure) |
 
 All three run from a local checkout and send your code, logs, and findings
 nowhere. They need **`python3` 3.9+** and **PyYAML** (`pip install pyyaml`);
 `ci-speedup` also needs **`gh auth login`**, because it reads your real run
 history.
-
----
-
-## ci-secure
-
-**Finds the ten ways an outsider can take over your GitHub Actions and steal
-your secrets.**
-
-```bash
-npx skills add starslingdev/skills --skill ci-secure
-```
-
-Then invoke it by name (**`/ci-secure`**, or `$ci-secure` in Codex), or just
-ask *"is my CI secure?"*
-
-It scans your workflows for the [ten critical CI/CD attack
-vectors](skills/ci-secure/references/security-patterns.md) — template injection
-in `run:` blocks, fork code executed with privileges (pwn requests),
-`pull_request_target` jobs that poison the shared cache, impostor action SHAs,
-whole-context secret dumps, `$GITHUB_ENV` / `$GITHUB_PATH` hijack,
-`pull-requests: write` on untrusted triggers, credential files swept into caches
-and artifacts, unverified remote code execution (`curl | bash` and mutable
-fetch-and-run), and dependency install scripts running in a job that holds
-secrets.
-
-Every finding names the file and line, quotes the evidence from your own
-workflow, and explains in plain English **what an attacker could do** with it.
-Then the skill offers to fix the ones you pick, leaving the diff in your working
-tree to review — it never commits, pushes, or opens a PR. It also reports
-pass/fail **config hygiene checks** (declared `permissions:`, CODEOWNERS on
-`.github/workflows/`, `secrets: inherit`, credential-persisting checkouts).
-
-**It is deliberately not comprehensive, and renders no security score.** The
-catalog is a closed set of ten, each a complete outsider → compromise chain with
-a real incident behind it — the admission test and what was rejected are in
-[why-these-ten.md](skills/ci-secure/references/why-these-ten.md). Findings are
-open doors and hygiene checks are armor; they move independently, so neither is
-a grade. **Zero findings is a first-class result**, and a check that could not
-run is reported as *did not run*, never as a pass. Runs in seconds; `gh` is
-optional, used only for the impostor-SHA check and dormant-workflow notes.
-
-What a run looks like, without installing anything:
-[starsling.dev/ci-secure](https://starsling.dev/ci-secure).
 
 ---
 
@@ -135,6 +92,49 @@ What a run looks like, without installing anything:
 
 ---
 
+## ci-secure
+
+**Finds the ten ways an outsider can take over your GitHub Actions and steal
+your secrets.**
+
+```bash
+npx skills add starslingdev/skills --skill ci-secure
+```
+
+Then invoke it by name (**`/ci-secure`**, or `$ci-secure` in Codex), or just
+ask *"is my CI secure?"*
+
+It scans your workflows for the [ten critical CI/CD attack
+vectors](skills/ci-secure/references/security-patterns.md) — template injection
+in `run:` blocks, fork code executed with privileges (pwn requests),
+`pull_request_target` jobs that poison the shared cache, impostor action SHAs,
+whole-context secret dumps, `$GITHUB_ENV` / `$GITHUB_PATH` hijack,
+`pull-requests: write` on untrusted triggers, credential files swept into caches
+and artifacts, unverified remote code execution (`curl | bash` and mutable
+fetch-and-run), and dependency install scripts running in a job that holds
+secrets.
+
+Every finding names the file and line, quotes the evidence from your own
+workflow, and explains in plain English **what an attacker could do** with it.
+Then the skill offers to fix the ones you pick, leaving the diff in your working
+tree to review — it never commits, pushes, or opens a PR. It also reports
+pass/fail **config hygiene checks** (declared `permissions:`, CODEOWNERS on
+`.github/workflows/`, `secrets: inherit`, credential-persisting checkouts).
+
+**It is deliberately not comprehensive, and renders no security score.** The
+catalog is a closed set of ten, each a complete outsider → compromise chain with
+a real incident behind it — the admission test and what was rejected are in
+[why-these-ten.md](skills/ci-secure/references/why-these-ten.md). Findings are
+open doors and hygiene checks are armor; they move independently, so neither is
+a grade. **Zero findings is a first-class result**, and a check that could not
+run is reported as *did not run*, never as a pass. Runs in seconds; `gh` is
+optional, used only for the impostor-SHA check and dormant-workflow notes.
+
+What a run looks like, without installing anything:
+[starsling.dev/ci-secure](https://starsling.dev/ci-secure).
+
+---
+
 ## What a ci-speedup run costs
 
 It defaults to the repo you're in, confirms the target first, then samples your
@@ -146,10 +146,6 @@ and it writes `./ci-speedup-findings-report.md`. See
 
 ## Learn more
 
-**ci-secure** — [SKILL.md](skills/ci-secure/SKILL.md) ·
-[the ten-vector catalog](skills/ci-secure/references/security-patterns.md) ·
-[why these ten](skills/ci-secure/references/why-these-ten.md)
-
 **ci-speedup** — [SKILL.md](skills/ci-speedup/SKILL.md) ·
 [methodology](docs/methodology.md) ·
 [pattern catalog](skills/ci-speedup/references/optimization-patterns.md) ·
@@ -158,6 +154,10 @@ and it writes `./ci-speedup-findings-report.md`. See
 **ci-score** — [SKILL.md](skills/ci-score/SKILL.md) ·
 [rubric write-up](skills/ci-score/references/ci-score-methodology.md) ·
 [frozen registry (v0.1.3)](skills/ci-score/references/ci-score-spec.json)
+
+**ci-secure** — [SKILL.md](skills/ci-secure/SKILL.md) ·
+[the ten-vector catalog](skills/ci-secure/references/security-patterns.md) ·
+[why these ten](skills/ci-secure/references/why-these-ten.md)
 
 ## For maintainers
 
