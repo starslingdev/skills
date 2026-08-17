@@ -1,17 +1,100 @@
 # StarSling Skills
 
-Public agent skills from StarSling. Each skill lives in its own self-contained
-directory under `skills/<name>/` and installs individually.
+Public agent skills from StarSling, for auditing your **GitHub Actions** CI.
+Each skill is self-contained and installs on its own — take one, or all three.
 
-This repo ships three skills: **`ci-speedup`**
-([overview](https://starsling.dev/ci-speedup)), **`ci-score`**, and
-**`ci-secure`**.
+| Skill | What it answers | Install |
+|---|---|---|
+| [**ci-secure**](#ci-secure) | Can someone take over my CI? | [jump ↓](#ci-secure) |
+| [**ci-speedup**](#ci-speedup) | Why is my CI slow, and what does it cost? | [jump ↓](#ci-speedup) |
+| [**ci-score**](#ci-score) | Is my CI config following best practices? | [jump ↓](#ci-score) |
 
-## ci-speedup: measured CI audits for GitHub Actions
+Every skill runs from a local checkout of the repo you want audited, and none of
+them send your code, logs, or findings to StarSling or anyone else.
 
-`ci-speedup` audits a repository's GitHub Actions workflows and produces a
-**root-cause-analysis report** of what actually makes your CI slow, on two
-measured axes:
+**Installing works the same for all three** — one command, no account, nothing to
+configure:
+
+```bash
+npx skills add starslingdev/skills --skill <name> --agent claude-code -y
+```
+
+- **`--agent`** — swap in your own: `codex`, `cursor`, `github-copilot`,
+  `gemini-cli`, `windsurf`, `zed`, `opencode`, and
+  [many more](https://github.com/vercel-labs/skills). Use `--agent '*'` to
+  install for every agent you have.
+- **`-g`** — install once for every project instead of just this one. Without
+  it, the skill lands in `./.claude/skills/` (or your agent's equivalent) and
+  only applies here.
+- The [`skills`](https://github.com/vercel-labs/skills) CLI is Vercel's, fetched
+  fresh by `npx`, so you always get the current version.
+
+**What you need**, whichever you install: **`python3` 3.9+** and **PyYAML**
+(`pip install pyyaml`) to read your workflow files. `ci-speedup` additionally
+needs an authenticated **GitHub CLI** (`gh auth login`) because it reads your
+real run history; for `ci-secure` that is optional, and `ci-score` never touches
+the network.
+
+---
+
+## ci-secure
+
+**Finds the ten ways an outsider can take over your GitHub Actions and steal
+your secrets.**
+
+```bash
+npx skills add starslingdev/skills --skill ci-secure --agent claude-code -y
+```
+
+Then ask your agent **`/ci-secure`**, or just *"is my CI secure?"*
+
+`ci-secure` scans your workflows for the **ten critical CI/CD attack vectors** —
+template injection in `run:` blocks, fork code executed with privileges (pwn
+requests), `pull_request_target` jobs that poison the shared cache, impostor
+action SHAs, whole-context secret dumps, `$GITHUB_ENV` / `$GITHUB_PATH` hijack,
+`pull-requests: write` granted to untrusted triggers, credential files swept into
+caches and artifacts, unverified `curl | bash`, and dependency install scripts
+running in a job that holds secrets. Every finding comes with the exact file and
+line, evidence taken from your own workflow, and a plain-English **"what an
+attacker could do"** scenario — then the skill offers to fix the ones you pick,
+dispatching a subagent per finding group that applies the
+[catalog](skills/ci-secure/references/security-patterns.md) recipe and leaves the
+diff in your working tree to review. It never commits, pushes, or opens a PR on
+its own. Alongside the findings it reports a short set of pass/fail **config
+hygiene checks** (declared `permissions:`, CODEOWNERS coverage of
+`.github/workflows/`, `secrets: inherit`, credential-persisting checkouts, and
+more).
+
+**It is deliberately not comprehensive, and it renders no security score.** The
+catalog is a closed set of ten vectors, each a complete outsider → compromise
+chain with a real incident behind it (the admission test and the rejection record
+are in
+[references/why-these-ten.md](skills/ci-secure/references/why-these-ten.md));
+every report repeats *"critical exploit-chain checks only — this is not a
+comprehensive audit."* There is no grade, ratio, or `N/100` anywhere a reader
+sees: findings are open doors and hygiene checks are armor, they move
+independently, and neither is a score. **Zero findings is a first-class result**
+— a clean run says so plainly instead of padding with lesser observations, and a
+check that could not run is always reported as *did not run*, never as a pass.
+The scan runs locally in seconds from your checkout; `gh` is optional and used
+only for the impostor-SHA check and for noting which findings sit in dormant
+workflows.
+
+---
+
+## ci-speedup
+
+**Measures what actually makes your CI slow, from your own run history.**
+
+```bash
+npx skills add starslingdev/skills --skill ci-speedup --agent claude-code -y
+```
+
+Then ask your agent **`/ci-speedup`**, or just *"why is my CI slow?"*
+Needs `gh auth login` — this one reads your real runs.
+
+`ci-speedup` produces a **root-cause-analysis report** of what makes your CI
+slow, on two measured axes:
 
 - **Developer wall-clock wait**: the merge-gating critical path, the slowest
   checks a pull request waits on before it can go green. This is the ranking
@@ -37,108 +120,40 @@ the file's git history before shaping a safe change. Detection, ranking, and
 every measured number are deterministic; the only place an LLM steps in is a
 log-grounded gap-fill when a drilled pole matches no catalog detector.
 
-## ci-score: a best-practice grade for your CI config
+There is a walkthrough of a full run, without cloning anything, at
+[starsling.dev/ci-speedup](https://starsling.dev/ci-speedup).
+
+---
+
+## ci-score
+
+**Grades your CI configuration against best practices, and hands back the
+fixes.**
+
+```bash
+npx skills add starslingdev/skills --skill ci-score --agent claude-code -y
+```
+
+Then ask your agent **`/ci-score`**, or just *"grade my CI"*.
+Runs fully offline — no network access at all.
 
 `ci-score` grades a repository's GitHub Actions **configuration** against CI best
-practices and hands back concrete fixes for every gap. The **CI Score** is a
-plain pass/fail rubric — eleven configuration facts (dependency caching,
-shallow checkout, test sharding, concurrency cancellation, path filters, job
-timeouts, action pinning, OIDC token scoping, and more), each self-verifiable in
-the repo's own workflow YAML in under a minute. The score is checks passed over
-checks applicable; the report ranks one fix per failed check by impact × risk,
-each with a fix recipe and a ready-to-paste **agent prompt**.
+practices and hands back concrete fixes for every gap: eleven configuration facts
+(dependency caching, shallow checkout, test sharding, concurrency cancellation,
+path filters, job timeouts, action pinning, OIDC token scoping, and more), each
+self-verifiable in the repo's own workflow YAML in under a minute. The score is
+checks passed over checks applicable; the report ranks one fix per failed check
+by impact × risk, each with a fix recipe and a ready-to-paste **agent prompt**.
 
 **It measures adherence, not speed.** A faster repo can hold a lower score, and
 the report says so beside the card — never read the score as a speed verdict.
 It is also **not a security audit**: exactly two of the eleven checks (action
 pinning, job-scoped OIDC tokens) happen to be security-related, and it claims
-nothing further. Everything runs locally from a checkout — **no network access,
-nothing sent anywhere.** For measured wall-clock and runner-minute audits, that
-is a different question — use `ci-speedup`.
+nothing further. For measured wall-clock and runner-minute audits, that is a
+different question — use [`ci-speedup`](#ci-speedup). For an actual security
+review, use [`ci-secure`](#ci-secure).
 
-## ci-secure: the ten critical CI/CD attack vectors
-
-`ci-secure` scans a repository's GitHub Actions workflows for the **ten critical
-CI/CD attack vectors** — template injection in `run:` blocks, fork code executed
-with privileges (pwn requests), `pull_request_target` jobs that poison the shared
-cache, impostor action SHAs, whole-context secret dumps, `$GITHUB_ENV` /
-`$GITHUB_PATH` hijack, `pull-requests: write` granted to untrusted triggers,
-credential files swept into caches and artifacts, unverified remote code
-execution (an installer piped straight into a shell, or a git tree fetched at
-a branch or tag and then run), and dependency install scripts running in a job
-that holds secrets.
-Every finding comes with the exact file and line, evidence taken from your
-own workflow, and a plain-English **"what an attacker could do"** scenario —
-then the skill offers to fix the ones you pick, dispatching a subagent per
-finding group that applies the
-[catalog](skills/ci-secure/references/security-patterns.md) recipe
-and leaves the diff in your working tree to review. It never commits, pushes, or
-opens a PR on its own. Alongside the findings it reports a short set of pass/fail **config hygiene
-checks** (declared `permissions:`, CODEOWNERS coverage of `.github/workflows/`,
-`secrets: inherit`, credential-persisting checkouts, and more).
-
-**It is deliberately not comprehensive, and it renders no security score.** The
-catalog is a closed set of ten vectors, each a complete outsider → compromise
-chain with a real incident behind it (the admission test and the rejection record
-are in
-[references/why-these-ten.md](skills/ci-secure/references/why-these-ten.md));
-every report repeats *"critical exploit-chain checks only — this is not a
-comprehensive audit."* There is no grade, ratio, or `N/100` anywhere a reader
-sees: findings are open doors and hygiene checks are armor, they move
-independently, and neither is a score. **Zero findings is a first-class result**
-— a clean run says so plainly instead of padding with lesser observations, and a
-check that could not run is always reported as *did not run*, never as a pass.
-The scan runs locally in seconds from your checkout; `gh` is optional and used
-only for the impostor-SHA check and for noting which findings sit in dormant
-workflows.
-
-### Keeping it fixed: ci-secure as a CI check
-
-A scan tells you what is wrong today. It does nothing about next week, which is
-when the workflow gets edited. Ask for the check and ci-secure sets itself up to
-run on every pull request:
-
-> install ci-secure as a CI check
-
-1. It **copies** the scanner into your repository — under `ci-secure/`, plus one
-   workflow — and hands you a pull request to review and merge. Nothing is
-   downloaded at build time, so the code judging your pull requests is code you
-   can read, and it changes only when you ask for an update.
-2. The **first run reports without blocking**. A repository that has never been
-   scanned usually has two or three findings, and the setup pull request should
-   not brick your merge path on day one.
-3. When you have fixed those, **you** make it blocking: delete the `--advisory`
-   flag from the workflow and add `ci-secure` to your required checks. From then
-   on a failed security check stops the merge.
-4. If you ever need out, remove `ci-secure` from your required checks — one
-   settings change, reversible. Not deleting the workflow, which would leave you
-   believing you have a check you do not.
-
-Your CI re-checks the copied files against a manifest of hashes on every run, so
-a local edit somebody made while debugging and never removed shows up instead of
-quietly weakening the check. Asking for an update re-copies the code and leaves
-your workflow file alone — the runner, the triggers and the flag you deleted are
-yours.
-
-## Install
-
-```bash
-npx skills add starslingdev/skills
-```
-
-Select the skill, your agent (Claude Code, Codex, Cursor, …), and an install
-scope. The [`skills`](https://github.com/vercel-labs/skills) CLI (built by
-Vercel) is fetched fresh via `npx`, so you always get its latest version.
-
-Then invoke it with your agent:
-
-```bash
-# Claude Code
-/ci-speedup      # or /ci-score, /ci-secure
-
-# Codex
-$ci-speedup      # or $ci-score, $ci-secure
-```
+---
 
 ## First run
 
