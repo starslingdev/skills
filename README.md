@@ -180,11 +180,19 @@ Learn more: [starsling.dev/ci-secure](https://starsling.dev/ci-secure)
 
 ## For maintainers
 
-The self-improvement loop infrastructure lives **outside** the installable
-skill, under [`maintainers/ci-speedup/`](maintainers/ci-speedup/), so the
-`skills` CLI never copies it into an install; it runs locally via Claude Code,
-never as a GitHub Action. See
-[MAINTAINERS.md](maintainers/ci-speedup/MAINTAINERS.md).
+Maintainer-only infrastructure lives **outside** the installable skill trees,
+under `maintainers/`, so the `skills` CLI never copies it into an install:
+
+- [`maintainers/ci-speedup/`](maintainers/ci-speedup/): the self-improvement
+  loops, which run locally via Claude Code and never as a GitHub Action.
+  See [MAINTAINERS.md](maintainers/ci-speedup/MAINTAINERS.md).
+- [`maintainers/ci-score/`](maintainers/ci-score/): maintainer notes for
+  ci-score, including what was deliberately left out of the shipped skill.
+  See [MAINTAINERS.md](maintainers/ci-score/MAINTAINERS.md).
+- [`maintainers/skills-registry-security/`](maintainers/skills-registry-security/):
+  triage for a failing registry security audit, answering whether a finding
+  describes the skill as it is today or a stale copy.
+  See [README.md](maintainers/skills-registry-security/README.md).
 
 This repo's CI runs on [StarSling Runners](https://starsling.dev/). Fork PRs run
 the identical suite on GitHub-hosted runners, so untrusted code never executes
