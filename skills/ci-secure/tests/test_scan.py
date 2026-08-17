@@ -1601,13 +1601,21 @@ def test_react_author_association_is_a_closed_enum_not_attacker_text() -> None:
 
 
 def test_inert_gate_is_named_as_inert(tmp_path: Path) -> None:
-    """snowflakedb/snowflake-connector-net `jira_issue.yml` shape (Wiz, Jun
-    2026): the injection finding was already reported, but the job's `if:`
-    gate referenced `github.event.pull_request` under `issues`/`issue_comment`
-    triggers — neither of which populates it. The comparison reduced to
-    `null != '...'`, so the gate admitted every GitHub user.
+    """The Snowflake bug (Wiz, Jun 2026) reduced to its single live term.
 
-    The generic "verify it" wording is wrong here: there is nothing to verify.
+    `snowflakedb/snowflake-connector-net`'s `jira_issue.yml` gated on
+    `github.event.pull_request.user.login != '...'` under `issues` /
+    `issue_comment`, neither of which populates a `pull_request`, so the
+    comparison was `null != '...'` — always true, and the gate admitted every
+    GitHub user.
+
+    The gate in the real file is that term OR'd with another, so the scanner
+    declines a whole-gate verdict there and only names the dead field; that
+    disjunction is covered by
+    `test_compound_gate_with_one_dead_term_keeps_the_verify_wording`. This
+    fixture is the bare comparison, which is the shape a verdict IS offered
+    for: the generic "verify it" wording is wrong here, because there is no
+    remainder to verify.
     """
     _write_workflow(tmp_path, "jira_issue.yml", (
         "on:\n"
