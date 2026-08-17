@@ -1629,3 +1629,44 @@ def test_a_repository_with_no_such_convention_is_not_told_it_has_one(
     install = _vendor(repo)
 
     assert "guard-registration convention" not in install.stdout, install.stdout
+
+
+def test_advisory_is_only_claimed_over_the_failures_it_actually_downgrades(
+        tmp_path: Path) -> None:
+    """`--advisory` downgrades failed FACTS. Nothing else, and the report must agree.
+
+    The workflow this installer writes passes that flag, so the report of what
+    the gate makes of the adopter's own tree has to say which of its reds the
+    flag will silence. Every red is not that set: a crashed engine, a workflow
+    that could not be scanned, a dropped match and an unrecognised outcome stay
+    red in advisory mode on purpose - a ramp for findings must never become a
+    mute button for a broken scan. Telling an adopter their first run will be
+    green when it will be red is the same class of false reassurance this whole
+    change exists to remove.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    assert _vendor(repo).returncode == 0
+    _stub_gate(repo / "ci-secure",
+               "print('::error::ci-secure fact failed: sec.codeowners.workflows"
+               " - no CODEOWNERS file')\n"
+               "print('::error::ci-secure scan incomplete: 1 workflow file(s) "
+               "could not be parsed')\nsys.exit(1)\n")
+
+    proof = _self_test(repo / "ci-secure")
+    report = proof.stdout
+
+    assert "sec.codeowners.workflows" in report and "scan incomplete" in report, (
+        "both reds must reach the adopter:\n" + report)
+    section = report.split("on THIS repository", 1)[1].splitlines()
+    ramped = [line for line in section if "REPORTED and do not block" in line]
+    assert ramped, (
+        "the report must say which reds the shipped flag silences:\n" + report)
+    downgraded = [line for line in section[:section.index(ramped[0])]
+                  if "would block:" in line]
+    assert downgraded and all("fact failed" in line for line in downgraded), (
+        "a red that is not a failed fact was described as downgraded by "
+        "`--advisory`, which it is not - it stays red and the adopter's first "
+        f"run will be red with it: {downgraded}\n" + report)
+    assert "blocks even in --advisory" in report, (
+        "the report must name the reds that survive the ramp:\n" + report)

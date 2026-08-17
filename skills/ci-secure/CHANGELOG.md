@@ -34,7 +34,10 @@ entries are dated (UTC). Format loosely follows
   fixtures, there is no flag to skip the proof, and `vendor.py --self-test
   <vendored dir>` re-runs it on demand. The proof also runs with bytecode
   writing disabled, so it cannot leave a `__pycache__` that the adopter's own
-  drift check would then red on forever.
+  drift check would then red on forever. The report of what the gate makes of
+  the adopter's real tree keeps the two kinds of red apart: failed facts, which
+  the shipped `--advisory` reports without blocking, and scan-integrity
+  failures, which survive the ramp and make the very first run red.
 - **2026-08-17** — **An install into a repository that documents a
   guard-registration convention says the new gate is not registered with it.**
   A repository keeping a register of its build-breaking checks — a harness that

@@ -614,8 +614,13 @@ with the hole closed, where it must exit 0 — because a gate wedged red
 reds on everything and proves nothing. Both fixtures are temporary files
 that are deleted afterwards: **nothing is written into the user's tree
 for the proof, and no workflow of theirs is broken to demonstrate it.**
-It then runs the gate on their real tree and prints what it found. Read
-those lines and relay both to the user:
+It then runs the gate on their real tree and prints what it found,
+keeping the two kinds of red apart: failed FACTS, which the shipped
+`--advisory` reports without blocking, and everything else — a crashed
+engine, an unscannable workflow, a dropped match — which stays red even
+in advisory, so their very first run will be red until it is resolved.
+Relay that distinction; it is the difference between "green on day one"
+and "red on day one". Read the proof line too, and relay it:
 
 - `self-proof PASSED` — the gate has been observed failing and passing.
   Only then is this a working install.

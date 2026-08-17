@@ -763,16 +763,32 @@ def report_on_this_repo(dest: Path, repo: Path) -> None:
               f"within {SELF_TEST_TIMEOUT_S}s, so what it will say about your "
               "code is not known yet.")
         return
-    failed = [line.split("::error::", 1)[1] for line in run.stdout.splitlines()
-              if line.startswith("::error::")]
+    reds = [line.split("::error::", 1)[1] for line in run.stdout.splitlines()
+            if line.startswith("::error::")]
+    # `--advisory` downgrades failed FACTS and nothing else. Every other red -
+    # a crashed engine, a workflow that could not be scanned, a dropped match,
+    # an outcome the gate cannot classify - survives the ramp, because a ramp
+    # for findings must never become a mute button for a broken scan. Reporting
+    # the two together under the advisory sentence would tell an adopter their
+    # first run is green when it is red, which is the same false reassurance
+    # this whole self-proof exists to remove.
+    facts = [item for item in reds if item.startswith("ci-secure fact failed:")]
+    integrity = [item for item in reds if item not in facts]
     print(f"on THIS repository, blocking (no --advisory): "
           f"{_headline(run.stdout)}")
-    for item in failed:
+    for item in facts:
         print(f"  would block: {item}")
-    if failed:
+    if facts:
         print("  The workflow this install writes passes `--advisory`, so "
               "those are REPORTED and do not block until that flag is "
               "removed.")
+    for item in integrity:
+        print(f"  blocks even in --advisory mode: {item}")
+    if integrity:
+        print("  `--advisory` downgrades failed FACTS only. These say the scan "
+              "itself could not be trusted, so they stay red - the first run "
+              "of this gate on this repository will be RED until they are "
+              "resolved.")
 
 
 # --------------------------------------------------------------------------
