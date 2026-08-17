@@ -5,6 +5,11 @@ The full runbook for the gate mode summarised in
 before running `vendor.py`; SKILL.md carries only the trigger and the
 consent rule.
 
+`<ci-secure>` in the commands below is a PLACEHOLDER for this skill's own
+install directory — always expand it to the absolute path before running
+anything. Pasted literally, the shell reads `<` as input redirection and the
+command fails.
+
 ## Contents
 
 - [What the gate is](#what-the-gate-is)

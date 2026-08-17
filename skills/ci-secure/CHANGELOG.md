@@ -46,10 +46,16 @@ entries are dated (UTC). Format loosely follows
   table, the findings-JSON shape, and the troubleshooting table now live in
   `references/ci-gate.md`, `references/terminal-summary.md`,
   `references/scan-output.md` and `references/troubleshooting.md`, each linked
-  from the point in SKILL.md that used to carry them. No rule the skill obeys at
-  runtime moved: the phase sequence, every close-question option and its
-  ordering, the honesty invariants and all eight NEVER rules stay in SKILL.md
-  verbatim. `references/security-facts.md` and `references/why-these-ten.md`
+  from the point in SKILL.md that used to carry them. The scan-and-report
+  contract keeps every rule it had: the phase sequence, every close-question
+  option string and its ordering, the honesty invariants and all eight NEVER
+  rules are still in SKILL.md, re-wrapped and tightened but unchanged in what
+  they oblige — the incident anecdotes that motivated some of them were cut.
+  The gate mode is the exception: its rules moved wholesale into
+  `references/ci-gate.md`, which SKILL.md directs the agent to read before it
+  does anything. `references/troubleshooting.md` also gains a row SKILL.md
+  never had, for a `run.py` argv failure.
+  `references/security-facts.md` and `references/why-these-ten.md`
   gained tables of contents, which the same guidance asks for on reference files
   over 100 lines.
 
@@ -228,6 +234,17 @@ entries are dated (UTC). Format loosely follows
   any grader".
 
 ### Fixed
+
+- **2026-08-17** — **The terminal summary can no longer be read as three
+  lines total.** Trimming SKILL.md left "three lines, no fourth" standing on
+  its own where an inline example used to scope it to the header block, so it
+  contradicted the mandatory contract lines twenty lines below — including
+  the ten-row vector receipt the summary exists to deliver. Both SKILL.md and
+  `references/terminal-summary.md` now say HEADER BLOCK, and state that the
+  contract lines follow it and are not optional. The body-length ceiling that
+  motivated the trim is now pinned by a test
+  (`tests/test_skill_body_budget.py`, with a red-proof), so it cannot regrow
+  unnoticed the way it did to 781 lines.
 
 - **2026-08-15** — **The gate setup instructions cover the paths a real
   session actually takes.** Setup and refresh are the same command, and which

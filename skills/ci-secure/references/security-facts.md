@@ -1,5 +1,12 @@
 # The security config facts — machine-only inputs, and why each is disjoint from ci-score
 
+## Contents
+
+- [The disjointness census](#the-disjointness-census)
+- [What each fact asks, exactly](#what-each-fact-asks-exactly)
+
+---
+
 ci-secure computes eight deterministic, pass/fail configuration facts as
 MACHINE-ONLY inputs for a future blended score (the ci-advisor door, not yet
 public). They are aggregated `100 × passed / scored` with no weights and no
@@ -33,11 +40,6 @@ A fact that cannot be measured — an unscannable workflow file, or, for the two
 API-gated facts, no repository and no token — is **unmeasured, never a silent
 pass**: it scores nothing, stays in the applicable count as a
 named coverage gap, and the block says so.
-
-## Contents
-
-- [The disjointness census](#the-disjointness-census)
-- [What each fact asks, exactly](#what-each-fact-asks-exactly)
 
 ## The disjointness census
 
