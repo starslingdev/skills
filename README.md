@@ -96,8 +96,8 @@ Learn more: [starsling.dev/ci-score](https://starsling.dev/ci-score)
 
 ## ci-secure
 
-🔒 **Finds the ten ways an outsider can take over your GitHub Actions and steal
-your secrets.**
+🔒 **Finds ten critical attack vectors an outsider could exploit, and fixes
+them.**
 
 ```bash
 npx skills add starslingdev/skills --skill ci-secure
