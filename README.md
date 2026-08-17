@@ -44,6 +44,12 @@ reads your run history over the GitHub API. That data stays on your machine:
 npx skills add starslingdev/skills --skill ci-speedup
 ```
 
+Or paste this into Claude Code, Codex, or Cursor:
+
+```text
+Install the ci-speedup skill from https://github.com/starslingdev/skills
+```
+
 Then invoke it by name (**`/ci-speedup`**, or `$ci-speedup` in Codex), or just
 ask *"why is my CI slow?"*
 
@@ -76,6 +82,12 @@ fixes.**
 npx skills add starslingdev/skills --skill ci-score
 ```
 
+Or paste this into Claude Code, Codex, or Cursor:
+
+```text
+Install the ci-score skill from https://github.com/starslingdev/skills
+```
+
 Then invoke it by name (**`/ci-score`**, or `$ci-score` in Codex), or just ask
 *"grade my CI"*. Runs fully offline.
 
@@ -103,6 +115,12 @@ them.**
 npx skills add starslingdev/skills --skill ci-secure
 ```
 
+Or paste this into Claude Code, Codex, or Cursor:
+
+```text
+Install the ci-secure skill from https://github.com/starslingdev/skills
+```
+
 Then invoke it by name (**`/ci-secure`**, or `$ci-secure` in Codex), or just
 ask *"is my CI secure?"*
 
@@ -128,6 +146,26 @@ Example reports from real runs over one workflow file in
 fix](examples/snowflakedb-snowflake-connector-net/ci-secure-report-4a1b8ce.md),
 and [0 findings
 after](examples/snowflakedb-snowflake-connector-net/ci-secure-report-1dc7766.md).
+
+### Set up the ci-secure CI check
+
+A scan says what is wrong today. The CI check runs the same engine on every
+pull request, so the findings do not come back. Paste this:
+
+```text
+Install the ci-secure skill from https://github.com/starslingdev/skills
+if it is not already installed, then install ci-secure as a CI check.
+```
+
+It is **vendored, never fetched**: the engine, the gate and the licence are
+copied into your repository, so the code judging your PRs is code you can read
+and it cannot change underneath you. Because that writes into your working
+tree, the skill says exactly what it will write and asks for a yes first, works
+on a branch as one setup PR, and never pushes without asking.
+
+It ships in `--advisory` mode, so it does not affect your merge path on day
+one. It becomes blocking when you drop `--advisory` and add the check to your
+repository's required checks.
 
 Learn more: [starsling.dev/ci-secure](https://starsling.dev/ci-secure)
 
