@@ -17,12 +17,12 @@ true things. These two examples are the pair:
 
 - **It measures precisely at scale — and gives you a bounded number, not a windfall.**
   [`microsoft-playwright/`](./microsoft-playwright/) — `ci-speedup` first run against
-  [`microsoft/playwright`](https://github.com/microsoft/playwright) (2026-07-21), one
-  of the heaviest CI matrices in open source. A typical PR waits **39m 58s** for all
-  checks; the check most PRs gate on is `ubuntu-22.04 (webkit - Node.js 20)` (gates
-  14/20 sampled PRs), and the most a fix could save is **~2m 56s** off that same check.
+  [`microsoft/playwright`](https://github.com/microsoft/playwright) (2026-07-25), one
+  of the heaviest CI matrices in open source. A typical PR waits **41m 12s** for all
+  checks; the check most PRs gate on is `ubuntu-22.04 (webkit - Node.js 20)`, and the
+  most a fix could save is **~1m 06s** off that same check.
   Because its matrix legs run in parallel and share one config, speeding a single leg
-  buys only ~2m 56s, but one shared-config fix to the `Run ./.github/actions/run-test`
+  buys only ~1m 06s, but one shared-config fix to the `Run ./.github/actions/run-test`
   step drops the whole `tests_primary.yml` cluster toward the next check in lockstep. A
   dense, well-tuned pipeline gets an honest ceiling and the exact root cause, not an
   invented inefficiency. See the
@@ -30,9 +30,9 @@ true things. These two examples are the pair:
 
 - **It tells you the truth when your CI is already lean.**
   [`pallets-flask/`](./pallets-flask/) — `ci-speedup` first run against
-  [`pallets/flask`](https://github.com/pallets/flask) (2026-07-21). A typical PR
-  waits just **34s** for all checks; the biggest measured win is only **~8s** off
-  the slowest check, `Windows`. No inflated numbers, no invented lever — a small
+  [`pallets/flask`](https://github.com/pallets/flask) (2026-07-24). A typical PR
+  waits just **34s** for all checks; the biggest measured win is only **~7s** off
+  the slowest fixable check, `Windows`. No inflated numbers, no invented lever — a small
   CI gets a small, honest answer. See the
   [report](./pallets-flask/ci-speedup-findings-report.md).
 
@@ -40,15 +40,15 @@ true things. These two examples are the pair:
 
 [`pallets-flask/ci-score-report.md`](./pallets-flask/ci-score-report.md) —
 `ci-score` against [`pallets/flask`](https://github.com/pallets/flask) at commit
-`d318b68` (2026-08-17). **89/100 — 8 of 9 applicable checks pass** across 5
+`d318b68`, scored 2026-08-17. **89/100 — 8 of 9 applicable checks pass** across 5
 workflow files; the one gap is job timeouts (no job sets `timeout-minutes`, so a
 hung job bills GitHub's 6-hour default), and two checks are not applicable to this
 repo. The scorer is offline: it reads the local checkout and fetches nothing.
 
 Same repo as the lean `ci-speedup` run above, on purpose — that is what makes the
 disclosure printed beside the card concrete. A near-perfect configuration grade
-and a 34-second gate are both true at once; adherence and measured speed move
-independently, and neither predicts the other.
+sits beside a 34-second gate (measured at an earlier commit, `36e4a82`); adherence
+and measured speed move independently, and neither predicts the other.
 
 ## ci-secure — 3 findings before the fix, 0 after
 
