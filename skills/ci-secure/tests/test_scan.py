@@ -1702,3 +1702,68 @@ def test_unknown_trigger_never_yields_an_inert_verdict(tmp_path: Path) -> None:
         f"an unknowable payload produced an inert verdict: "
         f"{hits[0]['evidence']!r}"
     )
+
+
+def _p14_10_evidence(tmp_path: Path, name: str, body: str) -> str:
+    _write_workflow(tmp_path, name, body)
+    data = _scan_dir(tmp_path)
+    hits = [f for f in data["findings"] if f["pattern"] == "P14.10"]
+    assert hits, "expected the P14.10 injection finding"
+    return hits[0]["evidence"]
+
+
+def test_equality_gate_against_an_empty_value_never_reads_as_wide_open(
+    tmp_path: Path,
+) -> None:
+    """`==` flips the verdict. `null != 'bot'` is always TRUE and admits
+    everyone; `null == 'bot'` is always FALSE and admits nobody. Both are
+    broken gates, but reporting the second as "does not restrict who reaches
+    this job" tells the reader the exact opposite of what the gate does."""
+    evidence = _p14_10_evidence(tmp_path, "eq.yml", (
+        "on:\n"
+        "  issues:\n"
+        "    types: [opened]\n"
+        "jobs:\n"
+        "  create-issue:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    if: github.event.pull_request.user.login == 'dependabot[bot]'\n"
+        "    steps:\n"
+        "      - run: echo '${{ github.event.issue.title }}'\n"
+    ))
+    assert "does not restrict who reaches this job" not in evidence, (
+        f"an always-false gate was described as admitting everyone: "
+        f"{evidence!r}"
+    )
+    assert "never runs" in evidence, (
+        f"an always-false gate should say the job never runs: {evidence!r}"
+    )
+
+
+def test_compound_gate_with_one_dead_term_keeps_the_verify_wording(
+    tmp_path: Path,
+) -> None:
+    """The dead term is only one conjunct. The gate as a whole still restricts
+    who reaches the job — via the live term — so no INERT verdict is available,
+    only the lookup fact plus the ordinary "verify it"."""
+    evidence = _p14_10_evidence(tmp_path, "compound.yml", (
+        "on:\n"
+        "  issues:\n"
+        "    types: [opened]\n"
+        "jobs:\n"
+        "  create-issue:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    if: >-\n"
+        "      github.event.pull_request.user.login != 'dependabot[bot]'\n"
+        "      && github.event.issue.user.login == 'trusted-owner'\n"
+        "    steps:\n"
+        "      - run: echo '${{ github.event.issue.title }}'\n"
+    ))
+    assert "does not restrict who reaches this job" not in evidence, (
+        f"a compound gate with a live term was called wide open: {evidence!r}"
+    )
+    assert "verify it" in evidence, (
+        f"an undecidable gate must keep the verify wording: {evidence!r}"
+    )
+    assert "no trigger this workflow declares" in evidence, (
+        f"the dead term is still worth naming: {evidence!r}"
+    )

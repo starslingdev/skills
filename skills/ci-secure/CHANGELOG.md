@@ -25,7 +25,11 @@ entries are dated (UTC). Format loosely follows
   which trigger fills which event object, not a judgement about bypassability —
   a gate is only called inert when NO trigger the workflow declares could
   populate the field, and a trigger whose payload we cannot know (`workflow_call`
-  runs on the caller's event) yields no verdict at all. Injection findings
+  runs on the caller's event) yields no verdict at all. The direction is read
+  off the condition rather than assumed: the same dead comparison written with
+  `==` admits *nobody* instead of everybody, and a dead term sitting next to a
+  live one settles nothing, so those get the dead-field fact and the ordinary
+  "verify it" instead of a verdict. Injection findings
   (P14.10) also carry the gate sentence now; previously only P14.9 and P14.7
   did. No finding is added, removed, or re-scored by this — it changes what the
   evidence tells you about findings the scan already reports.

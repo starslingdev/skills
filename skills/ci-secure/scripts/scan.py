@@ -4091,6 +4091,18 @@ _GATE_CHECKED_OBJECTS = frozenset({
 
 _GATE_EVENT_REF_RE = re.compile(r"github\.event\.([a-zA-Z_][a-zA-Z_0-9]*)")
 
+# A whole `if:` that is nothing but one comparison of a `github.event.*` path
+# against a quoted literal. Anything else — a second term, a negation, a
+# function call, a comparison to another expression — is left undecided.
+_GATE_LONE_COMPARISON_RE = re.compile(
+    r"^\s*(?:\$\{\{\s*)?"
+    r"github\.event\.(?P<obj>[a-zA-Z_][a-zA-Z_0-9]*)"
+    r"(?:\.[a-zA-Z_][a-zA-Z_0-9]*)*"
+    r"\s*(?P<op>==|!=)\s*"
+    r"(?P<lit>'[^']*'|\"[^\"]*\")"
+    r"\s*(?:\}\}\s*)?$"
+)
+
 
 def _inert_gate_objects(condition: str, triggers: list[str]) -> list[str]:
     """`github.event.*` objects this gate reads that NO declared trigger fills.
@@ -4128,6 +4140,32 @@ def _inert_gate_objects(condition: str, triggers: list[str]) -> list[str]:
     )
 
 
+def _dead_comparison_verdict(condition: str, dead: list[str]) -> str:
+    """`"open"`, `"closed"`, or `""` for a gate built from one dead comparison.
+
+    Knowing that a term always compares against an empty value does NOT say
+    which way the gate falls. `null != 'bot'` is always true and admits
+    everyone — Snowflake's bug. `null == 'bot'` is always false and admits
+    nobody: still a broken gate, but describing it as "does not restrict who
+    reaches this job" tells the reader the exact opposite of what it does.
+    And a dead term inside `a && b` decides nothing at all, because the live
+    conjunct still restricts.
+
+    So a verdict is only offered when the ENTIRE condition is that one
+    comparison, and the operator settles the direction. Everything else falls
+    through to the neutral wording, which states the lookup fact and stops.
+    """
+    match = _GATE_LONE_COMPARISON_RE.match(condition)
+    if match is None or match.group("obj") not in dead:
+        return ""
+    if not match.group("lit")[1:-1]:
+        # GitHub casts both sides to a number when the types differ, so an
+        # absent value compares EQUAL to `''` (both cast to 0). The empty
+        # literal inverts the whole table; not worth encoding, so decline.
+        return ""
+    return "open" if match.group("op") == "!=" else "closed"
+
+
 def _gate_note(job: Any, triggers: list[str] | None = None) -> str:
     """A sentence naming this job's own `if:` condition, or "".
 
@@ -4138,11 +4176,18 @@ def _gate_note(job: Any, triggers: list[str] | None = None) -> str:
     would be guessing — but a reader who cannot see it cannot triage the
     finding.
 
-    The one case we DO decide is a gate that cannot restrict anything under any
-    trigger the workflow declares (`_inert_gate_objects`). "Verify it" is the
+    The one case we DO decide is a gate whose whole condition is a comparison
+    against an event object no declared trigger populates
+    (`_inert_gate_objects` + `_dead_comparison_verdict`). "Verify it" is the
     wrong instruction there — there is nothing to verify — and the reader most
     likely to miss it is the one who does not know which payload carries which
     object. That is a lookup, not a judgement call.
+
+    The lookup alone is not the verdict, though. It says the comparison runs
+    against an empty value; the operator says whether that admits everyone or
+    nobody, and a second conjunct can make it moot either way. When the shape
+    does not settle that, the note reports the dead term as a fact and keeps
+    the ordinary "verify it" rather than guessing a direction.
     """
     if not isinstance(job, dict):
         return ""
@@ -4152,16 +4197,33 @@ def _gate_note(job: Any, triggers: list[str] | None = None) -> str:
     text = " ".join(str(condition).split())
     if not text:
         return ""
-    inert = _inert_gate_objects(text, triggers or [])
-    if inert:
-        names = ", ".join(f"`github.event.{obj}`" for obj in inert)
+    dead = _inert_gate_objects(text, triggers or [])
+    if dead:
+        names = ", ".join(f"`github.event.{obj}`" for obj in dead)
         trigger_list = ", ".join(f"`{t}`" for t in sorted(set(triggers or [])))
-        return (
+        lookup = (
             f"\n      this job carries a gate condition: {text} — it reads "
             f"{names}, which no trigger this workflow declares "
             f"({trigger_list}) ever populates, so that comparison is against "
-            f"an empty value and the gate is INERT: it does not restrict who "
-            f"reaches this job"
+            f"an empty value"
+        )
+        verdict = _dead_comparison_verdict(text, dead)
+        if verdict == "open":
+            return (
+                f"{lookup} and is always true: the gate is INERT — it does "
+                f"not restrict who reaches this job"
+            )
+        if verdict == "closed":
+            return (
+                f"{lookup} and is always false: the gate is INERT as a trust "
+                f"control — rather than restricting who reaches this job it "
+                f"blocks every run of it, so this job never runs under any "
+                f"trigger the workflow declares"
+            )
+        return (
+            f"{lookup} and cannot restrict anything on its own; the rest of "
+            f"the condition decides who reaches this job, so the finding "
+            f"stands only if that remainder can be bypassed — verify it"
         )
     return (
         f"\n      this job carries a gate condition: {text} — the finding "
