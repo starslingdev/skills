@@ -29,7 +29,13 @@ entries are dated (UTC). Format loosely follows
   affected config facts to `unmeasured`. This is the impostor check's rule
   ("a check that could not run is NOT a pass") applied one layer down, to a
   file that was never read. An inconclusive probe — not a git checkout, or git
-  cannot answer — reports no gap, so ordinary runs are unaffected.
+  cannot answer — reports no gap, so ordinary runs are unaffected. The probe
+  clears every git repository-selection variable (`GIT_DIR`, `GIT_WORK_TREE`
+  and friends) before running: `git -C <dir>` chooses a working directory, not
+  a repository, so an inherited `GIT_DIR` — which git hooks and `git worktree`
+  both export — would have pointed the probe at another repository, found no
+  workflows there, reported no gap, and silently restored the "complete
+  coverage" claim this fix exists to remove.
 
 ### Added
 

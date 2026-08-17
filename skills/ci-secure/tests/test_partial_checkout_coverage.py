@@ -105,6 +105,39 @@ def test_a_workflow_missing_from_the_working_tree_is_reported_absent(two_workflo
     )
 
 
+def test_an_inherited_git_dir_cannot_redirect_the_probe(two_workflow_repo, tmp_path,
+                                                        monkeypatch):
+    # greptile P1 on #60. `git -C <root>` selects a working directory, NOT a
+    # repository: an inherited absolute GIT_DIR / GIT_WORK_TREE outranks it, so the
+    # probe would list some OTHER repository's tree. Every path it named would then
+    # be missing from <root>, or — the dangerous direction — that repository has no
+    # workflows at all, the probe returns nothing, and a partial checkout renders as
+    # "✅ complete — every workflow file was scanned" again. This is not exotic: git
+    # hooks and `git worktree` commands both export GIT_DIR, and this repo runs its
+    # own suite from a pre-commit hook.
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    assert _git(decoy, "init", "-q", "-b", "main").returncode == 0
+    (decoy / "readme.md").write_text("no workflows here\n", encoding="utf-8")
+    assert _git(decoy, "add", "readme.md").returncode == 0
+    assert _git(decoy, "commit", "-qm", "decoy").returncode == 0
+
+    sparse = _git(two_workflow_repo, "sparse-checkout", "set", "--no-cone",
+                  ".github/workflows/alpha.yml")
+    if sparse.returncode != 0:  # pragma: no cover
+        pytest.skip(f"git sparse-checkout unavailable: {sparse.stderr.strip()!r}")
+
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    absent = scan._workflow_files_absent_from_tree(two_workflow_repo)
+    assert absent == [".github/workflows/beta.yml"], (
+        "an inherited GIT_DIR/GIT_WORK_TREE must not redirect the coverage probe to "
+        f"another repository; got {absent!r}. Reading the decoy repo's tree finds no "
+        "workflows, so the probe reports no gap and the partial checkout renders as "
+        "complete coverage — the exact bug this probe exists to prevent."
+    )
+
+
 def test_a_non_git_directory_never_manufactures_a_coverage_gap(tmp_path):
     # An inconclusive probe must report NO gap: degrading every scan run outside a
     # git checkout to PARTIAL would make the honest signal meaningless.

@@ -1327,6 +1327,16 @@ def _git_commit_sha(root: Path) -> str | None:
     return None
 
 
+# Every environment variable that can override which repository a git command acts
+# on. `git -C <dir>` does NOT outrank them, so any probe that must read a specific
+# checkout has to clear them first.
+_GIT_REPO_SELECT_ENV = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+})
+
+
 def _workflow_files_absent_from_tree(root: Path) -> list[str]:
     """Workflow files that exist in the audited COMMIT but not in the working tree.
 
@@ -1350,11 +1360,19 @@ def _workflow_files_absent_from_tree(root: Path) -> list[str]:
     probe must never manufacture a coverage gap, since that would degrade every
     report run outside a git checkout.
     """
+    # `git -C` selects a working DIRECTORY, not a repository: an inherited absolute
+    # GIT_DIR / GIT_WORK_TREE outranks it and would point this probe at some other
+    # repository entirely. That repo's tree lists no workflows, the probe reports no
+    # gap, and a partial checkout renders "complete coverage" again — the very bug
+    # this function exists to prevent, restored silently by an environment variable.
+    # git hooks and `git worktree` commands both export these, so scrub every
+    # repository-selection variable and let `-C` decide.
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_REPO_SELECT_ENV}
     try:
         result = subprocess.run(
             ["git", "-C", str(root), "ls-tree", "-r", "--name-only", "-z",
              "HEAD", "--", ".github/workflows"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, env=env,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
