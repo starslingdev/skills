@@ -1,6 +1,6 @@
 <div align="center">
 
-# StarSling Skills — Self-Driving CI using your own AI agents
+# StarSling Skills - Self-Driving CI using your own AI agents
 
 **Public agent skills from StarSling, for auditing your GitHub Actions CI.**
 
@@ -27,9 +27,9 @@ gives the one-line command for that skill on its own.
 | 🔒 [**ci-secure**](#ci-secure) | Can someone attack me through my CI? |
 
 All three run from a local checkout and send your code, logs, and findings
-nowhere ([data handling](SECURITY.md)). They need **`python3` 3.9+** and **PyYAML** (`pip install pyyaml`);
-`ci-speedup` also needs **`gh auth login`**, because it reads your real run
-history.
+nowhere ([data handling](SECURITY.md)). They need **`python3` 3.9+** and
+**PyYAML** (`pip install pyyaml`); `ci-speedup` also needs **`gh auth login`**,
+because it reads your real run history.
 
 ---
 
@@ -45,10 +45,10 @@ Then invoke it by name (**`/ci-speedup`**, or `$ci-speedup` in Codex), or just
 ask *"why is my CI slow?"*
 
 It reports two axes, never blended: **developer wall-clock wait** (the
-merge-gating critical path — the ranking axis, the thing engineers feel) and
-**runner-minutes** (the bill). The numbers come from real runs — per-job P50/P95
-sampled over the `gh` API, the critical path re-derived from your actual job
-graph — matched against a
+merge-gating critical path, and the axis findings rank on, because it is what
+engineers feel) and **runner-minutes** (the bill). The numbers come from real
+runs: per-job P50/P95 sampled over the `gh` API, with the critical path
+re-derived from your actual job graph, then matched against a
 [catalog](skills/ci-speedup/references/optimization-patterns.md) of 70+ patterns.
 
 **It diagnoses; it does not prescribe.** A generic tool can't tell deliberate
@@ -72,13 +72,13 @@ npx skills add starslingdev/skills --skill ci-score
 Then invoke it by name (**`/ci-score`**, or `$ci-score` in Codex), or just ask
 *"grade my CI"*. Runs fully offline.
 
-Eleven configuration facts — caching, shallow checkout, sharding, concurrency
-cancellation, path filters, timeouts, action pinning, OIDC scoping and more —
+Eleven configuration facts (caching, shallow checkout, sharding, concurrency
+cancellation, path filters, timeouts, action pinning, OIDC scoping and more),
 each checkable in your own workflow YAML in under a minute. The score is checks
 passed over checks applicable; every failed check gets one ranked fix.
 
-**It measures adherence, not speed**, and it is **not a security audit** — two
-of the eleven checks are security-adjacent and it claims nothing further.
+**It measures adherence, not speed**, and it is **not a security audit**: two
+of the eleven checks are security-adjacent, and it claims nothing further.
 
 Learn more: [starsling.dev/ci-score](https://starsling.dev/ci-score)
 
@@ -97,13 +97,13 @@ Then invoke it by name (**`/ci-secure`**, or `$ci-secure` in Codex), or just
 ask *"is my CI secure?"*
 
 It scans for the [ten critical attack
-vectors](skills/ci-secure/references/security-patterns.md) — template injection,
+vectors](skills/ci-secure/references/security-patterns.md): template injection,
 fork code run with privileges, cache poisoning, impostor action SHAs, secret
 dumps, `$GITHUB_ENV` hijack, write tokens on untrusted triggers, credentials in
 caches and artifacts, unverified remote code execution, and install scripts
 running beside secrets. Each finding names the file and line, quotes your own
 workflow, and says in plain English **what an attacker could do**. It then
-offers to fix the ones you pick, leaving the diff in your tree — it never
+offers to fix the ones you pick, leaving the diff in your tree. It never
 commits, pushes, or opens a PR.
 
 **Deliberately not comprehensive, and no security score.** Ten closed-set
@@ -113,6 +113,8 @@ is a first-class result**, and a check that could not run says *did not run*,
 never "pass".
 
 Learn more: [starsling.dev/ci-secure](https://starsling.dev/ci-secure)
+
+---
 
 ## For maintainers
 
