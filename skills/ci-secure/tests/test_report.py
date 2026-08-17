@@ -2170,7 +2170,7 @@ def _render_many_vector_report() -> str:
     })
 
 
-@pytest.mark.parametrize("needle", ["P14", "Coverage", "Incomplete coverage"])
+@pytest.mark.parametrize("needle", ["CI Secure", "P14", "Coverage", "Incomplete coverage"])
 def test_skill_md_extraction_recipes_match_a_rendered_report(
     tmp_path: Path, needle: str,
 ) -> None:

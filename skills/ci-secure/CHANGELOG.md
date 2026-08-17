@@ -41,7 +41,7 @@ entries are dated (UTC). Format loosely follows
 
 - **2026-08-17** — **SKILL.md is about a third shorter, with the detail moved
   into reference files.** Anthropic's skill-authoring guidance puts the ceiling
-  for a SKILL.md body at 500 lines, and ci-secure's had grown to 781. The
+  for a SKILL.md body at 500 lines, and ci-secure's had grown to 780. The
   runbook for adding ci-secure as a CI gate, the terminal summary's provenance
   table, the findings-JSON shape, and the troubleshooting table now live in
   `references/ci-gate.md`, `references/terminal-summary.md`,
@@ -244,7 +244,14 @@ entries are dated (UTC). Format loosely follows
   contract lines follow it and are not optional. The body-length ceiling that
   motivated the trim is now pinned by a test
   (`tests/test_skill_body_budget.py`, with a red-proof), so it cannot regrow
-  unnoticed the way it did to 781 lines.
+  unnoticed the way it did to 780 lines. Two more gaps the same review found
+  are closed alongside it: `tests/test_reference_links.py` fails if a
+  reference file SKILL.md links has been renamed or dropped (deleting
+  `references/terminal-summary.md` used to leave the suite fully green — the
+  risk this PR creates by moving four runbooks behind links), and
+  `tests/test_report.py`'s recipe check now covers the `^CI Secure` banner
+  recipe, which its needle list never selected: mangling the one line SKILL.md
+  orders copied VERBATIM also used to pass.
 
 - **2026-08-15** — **The gate setup instructions cover the paths a real
   session actually takes.** Setup and refresh are the same command, and which

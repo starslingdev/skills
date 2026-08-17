@@ -212,19 +212,21 @@ Contract lines, all mandatory:
   it cannot be read as a grade, and give every one of the ten vectors a row,
   in the report's row order, with its catalog id: ✅ evaluated-clean, 🟥/🟧 a
   HIT (HIGH/MEDIUM) with its site count, ⚠️ did-not-run keeping its reason
-  and NEVER promoted to ✅. Plain text only, in the receipt and in the
-  question text that carries it. Exact numbering, alignment and icon format:
-  [references/terminal-summary.md](references/terminal-summary.md).
-  **Delivery caveat:** prose printed in the same turn as a structured
-  question is PREEMPTED by the question UI and never seen. Whenever the very
-  next act is a structured question (the zero-findings save offer, or Phase
-  4's selection), the banner and these receipt lines go INSIDE that
+  and NEVER promoted to ✅. Plain text only, here and in the question text
+  carrying it. **Derive rows from the report's "Vector map", never from
+  `$FINDINGS`; numbering and alignment:
+  [references/terminal-summary.md](references/terminal-summary.md) — read it
+  before printing.** **Delivery caveat:** prose printed in the same turn as a
+  structured question is PREEMPTED by the question UI and never seen. Whenever
+  the next act is a structured question (the zero-findings save offer, or
+  Phase 4's selection), the banner and these receipt lines go INSIDE that
   question's own text. Prose-then-ask counts as NOT delivered.
 - **`Coverage:`** must be honest: `complete` only when every workflow file was
   scanned, otherwise `PARTIAL —` plus what was not checked. Never print
   `complete` over a coverage gap.
-- **The impostor-SHA status**, from `gh_checks`, in all four states and never
-  dressed up as a pass: `ran` — every pin resolved; `partial` — **print the
+- **The impostor-SHA status** in all four states, never dressed up as a pass
+  — three from `gh_checks`, the fourth being its ABSENCE (read the banner's
+  last token too): `ran` — every pin resolved; `partial` — **print the
   UNVERIFIED count** (`PARTIAL — 12 of 14 pins verified, 2 UNVERIFIED
   (network/rate-limit); this is NOT a pass`), never reported as `ran`;
   `skipped` — say so in words with the reason scan.py recorded (`disabled via
@@ -399,17 +401,17 @@ the user before moving on.
    `<ci-secure>/scripts/record_timing.py --findings "$FINDINGS" --phase fixes_s
    --seconds "$FIXES"`. If total ≫ the scripted spans, the remainder is
    orchestrator thinking time — say so rather than hiding it.
-4. **Close BY ASKING ONE structured question** — the same options, verbatim
-   text, ordering and slot sizing as Phase 4, recomputed over the groups
-   still UNFIXED: two named **Fix Finding N — {short title}** slots
-   (highest-severity first; each description carrying the same three things
-   — files touched, what the fix could break, how it is verified), then the
-   overflow slot sized to what remains (**A different selection** at three
-   or more, **Fix both** at exactly two, omitted at one), then verbatim and
-   always last **None, just save the report (.md)**, which copies the report
-   to `./ci-secure-report.md` and is the ONLY thing that writes it into the
-   working tree. The close re-offers open work: a close that fixes one group
-   and stops leaves the user's remaining findings stranded.
+4. **Close BY ASKING ONE structured question** — same convention, ordering
+   and slot sizing as Phase 4, recomputed over the groups still UNFIXED: two
+   named **Fix Finding N — {short title}** slots (highest-severity first,
+   each description carrying the same three things — files touched, what the
+   fix could break, how it is verified), then the overflow slot sized to what
+   remains (**A different selection** at three or more, **Fix both** at
+   exactly two, omitted at one), then verbatim and always last **None, just
+   save the report (.md)**, which copies the report to
+   `./ci-secure-report.md` and is the ONLY thing that writes it into the
+   working tree. The close re-offers open work: fixing one group and stopping
+   leaves the user's remaining findings stranded.
 
    Name the offered findings; never a bare "anything else?". The save pick is
    **terminal**: close on the saved report's absolute path, do not re-offer or

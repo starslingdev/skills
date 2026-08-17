@@ -52,7 +52,16 @@ The one non-scripted field. Written once per pattern group and merged onto
   `partial` / `skipped` plus the detail (pin counts, or the reason). An
   ABSENT `P14.11` key is the "not recorded" state — a coverage hole, never a
   pass.
+- `gh_check_details` — the per-check detail a `partial` status refers to,
+  including the unresolved-pin list. `gh_checks` gives the status word; this
+  is where the specifics live.
 - `scan_incomplete` — workflow files skipped or unreadable, with a reason
   each. Non-empty means coverage is PARTIAL.
-- `timings` — script-owned spans, `total_run_s` leading; `record_timing.py`
-  appends the orchestrator-measured `fixes_s`.
+- `timings` — script-owned spans. As `run.py --out` writes them at Phase 2:
+  `run_start_epoch`, `activity_enrich_s`, `scan_total_s`, `scripted_end_epoch`,
+  `scripted_total_s`. **`total_run_s` is NOT there yet** — `report.py` computes
+  and writes it back at Phase 3, which is why Phase 6 reads the `Timing:` line
+  after the render. `record_timing.py` appends the orchestrator-measured
+  `fixes_s`.
+- Provenance, also top-level: `commit_sha`, `repo_tree_dirty`,
+  `skill_commit_sha`, `skill_tree_dirty` and `catalog_patterns_evaluated`.
