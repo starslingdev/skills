@@ -44,7 +44,7 @@ reads your run history over the GitHub API. That data stays on your machine:
 npx skills add starslingdev/skills --skill ci-speedup
 ```
 
-Or paste this into Claude Code, Codex, or Cursor:
+Or paste this into your agent:
 
 ```text
 Install the ci-speedup skill from https://github.com/starslingdev/skills
@@ -82,7 +82,7 @@ fixes.**
 npx skills add starslingdev/skills --skill ci-score
 ```
 
-Or paste this into Claude Code, Codex, or Cursor:
+Or paste this into your agent:
 
 ```text
 Install the ci-score skill from https://github.com/starslingdev/skills
@@ -115,7 +115,7 @@ them.**
 npx skills add starslingdev/skills --skill ci-secure
 ```
 
-Or paste this into Claude Code, Codex, or Cursor:
+Or paste this into your agent:
 
 ```text
 Install the ci-secure skill from https://github.com/starslingdev/skills
