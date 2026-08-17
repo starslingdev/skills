@@ -4099,9 +4099,7 @@ _TRIGGER_EVENT_OBJECTS: dict[str, frozenset[str]] = {
     # `deployment` and `deployment_status` carry a top-level `workflow_run`
     # (and `workflow`, `check_run`) whenever the deployment came from a
     # workflow — the normal case, and exactly what such a job gates on.
-    "deployment": frozenset({
-        "deployment", "workflow", "workflow_run", "check_run",
-    }),
+    "deployment": frozenset({"deployment", "workflow", "workflow_run"}),
     "deployment_status": frozenset({
         "deployment", "deployment_status", "workflow", "workflow_run",
         "check_run",
@@ -4134,6 +4132,19 @@ _GATE_LONE_COMPARISON_RE = re.compile(
 )
 
 
+_QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _strip_quoted(condition: str) -> str:
+    """`condition` with string literals blanked out.
+
+    A gate reading `github.event.pull_request.user.login != 'filed by
+    github.event.discussion bot'` does not read `github.event.discussion` —
+    that text is data. Counting it made a live gate report a dead field.
+    """
+    return _QUOTED_SPAN_RE.sub(lambda m: " " * len(m.group(0)), condition)
+
+
 def _inert_gate_objects(condition: str, triggers: list[str]) -> list[str]:
     """`github.event.*` objects this gate reads that NO declared trigger fills.
 
@@ -4163,7 +4174,8 @@ def _inert_gate_objects(condition: str, triggers: list[str]) -> list[str]:
             return []
         populated |= _TRIGGER_EVENT_OBJECTS[trigger]
     referenced = {
-        m.group(1) for m in _GATE_EVENT_REF_RE.finditer(condition)
+        m.group(1)
+        for m in _GATE_EVENT_REF_RE.finditer(_strip_quoted(condition))
     }
     return sorted(
         (referenced & _GATE_CHECKED_OBJECTS) - populated
@@ -4270,9 +4282,9 @@ def _gate_note(
                 f"trigger the workflow declares"
             )
         return (
-            f"{lookup} and cannot restrict anything on its own; the rest of "
-            f"the condition decides who reaches this job, so the finding "
-            f"stands only if that remainder can be bypassed — verify it"
+            f"{lookup} and cannot restrict anything. Whether the gate as a "
+            f"whole still restricts who reaches this job depends on the rest "
+            f"of the condition, which is not evaluated here — verify it"
         )
     if dead_field_only:
         return ""

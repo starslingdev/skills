@@ -985,7 +985,10 @@ def check_source_fences_quote_only_source(report: str) -> Check:
     scanner prose back inside a fence.
     """
     name = "```yaml evidence fences quote only numbered source lines"
-    gutter = re.compile(r"\d+: ")
+    # A blank quoted line renders as a bare `NN:` with nothing after it, so
+    # the space is optional. Requiring it failed the self-check on any report
+    # quoting a workflow with a blank line in the excerpt — which is most.
+    gutter = re.compile(r"\d+:(?: |$)")
     bad: list[str] = []
     fence: list[str] | None = None
     for raw in report.splitlines():
@@ -995,12 +998,13 @@ def check_source_fences_quote_only_source(report: str) -> Check:
                 fence = []
             continue
         if line == "```":
-            # An EVIDENCE fence is one whose first line carries the
+            # An EVIDENCE fence is one where ANY line carries the
             # line-number gutter. The catalog's fix recipes are also ```yaml
-            # and are legitimately gutter-free, so identify by the first line
-            # and then require every line to match it.
-            if fence and gutter.match(fence[0]):
-                bad += [ln[:110] for ln in fence[1:] if not gutter.match(ln)]
+            # and are legitimately gutter-free, so they are not policed. Keying
+            # off the FIRST line instead would let a fence whose excerpt opens
+            # on a blank source line smuggle prose through unchecked.
+            if any(gutter.match(ln) for ln in fence):
+                bad += [ln[:110] for ln in fence if not gutter.match(ln)]
             fence = None
             continue
         if line:

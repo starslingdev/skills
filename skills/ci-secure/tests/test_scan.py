@@ -1987,3 +1987,51 @@ def test_the_untrusted_checkout_chain_also_names_an_inert_gate(
     hits = [f for f in data["findings"] if f["pattern"] == "P14.9"]
     assert hits, "expected the P14.9 untrusted-checkout chain finding"
     assert "INERT" in hits[0]["evidence"], hits[0]["evidence"]
+
+
+def test_a_dead_term_in_a_disjunction_claims_no_remainder() -> None:
+    """The neutral wording used to say "the rest of the condition decides who
+    reaches this job". That assumes AND. Under OR the dead term can decide the
+    whole gate by itself — snowflakedb's real gate is a disjunction, and there
+    "verify the remainder" points the reader away from the live problem. There
+    is no evaluator here, so the honest note claims nothing about the rest."""
+    real = (
+        "((github.event_name == 'issue_comment' && "
+        "github.event.comment.user.login == 'sfc-gh-mkeller') || "
+        "(github.event_name == 'issues' && "
+        "github.event.pull_request.user.login != 'wss[bot]'))"
+    )
+    note = scan._gate_note({"if": real}, ["issues", "issue_comment"])
+    assert "the rest of the condition decides" not in note, note
+    assert "stands only if that remainder can be bypassed" not in note, note
+    assert "no trigger this workflow declares" in note, note
+
+
+def test_a_lone_declined_comparison_claims_no_remainder() -> None:
+    """`!= 0` is unquoted and `!(...)` is a negation, so neither settles a
+    direction — but both ARE the whole condition. Saying "the rest of the
+    condition decides" invents a remainder that does not exist."""
+    for cond in (
+        "github.event.pull_request.number != 0",
+        "!(github.event.pull_request.user.login == 'bot')",
+        "github.event.pull_request.number == '0'",
+    ):
+        note = scan._gate_note({"if": cond}, ["issues"])
+        assert "the rest of the condition decides" not in note, (cond, note)
+
+
+def test_an_object_named_inside_a_string_literal_is_not_read_by_the_gate(
+) -> None:
+    """`_GATE_EVENT_REF_RE` scans the raw condition text, so a `github.event.`
+    mention inside a quoted string counted as an object the gate reads. That
+    turned a perfectly live gate into a dead-field report."""
+    note = scan._gate_note(
+        {"if": "github.event.pull_request.user.login != "
+               "'filed by github.event.discussion bot'"},
+        ["pull_request_target"],
+    )
+    # The note quotes the condition verbatim, so the literal's text appears;
+    # what must NOT appear is the claim that the gate READS that object.
+    assert "`github.event.discussion`" not in note, note
+    assert "no trigger this workflow declares" not in note, note
+    assert "verify it" in note, note

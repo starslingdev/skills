@@ -803,3 +803,26 @@ def test_source_fences_quote_only_source_can_actually_fail() -> None:
         "  ```\n"
     )
     assert vr.check_source_fences_quote_only_source(recipe).ok
+
+    # A blank line in the quoted workflow renders as a bare gutter with
+    # nothing after the colon. Real workflows are full of them, and a
+    # self-check that fails on a correct report is worse than no check.
+    blank_line = (
+        "  ```yaml\n"
+        "     9:       - name: file\n"
+        "    10:         run: echo x <-- here\n"
+        "    11: \n"
+        "  ```\n"
+    )
+    assert vr.check_source_fences_quote_only_source(blank_line).ok
+
+    # ...and when the blank line comes FIRST, the fence must still be
+    # recognised as evidence rather than waved through as a fix recipe.
+    blank_first = (
+        "  ```yaml\n"
+        "     9: \n"
+        "    10:         run: echo x <-- here\n"
+        "        this job carries a gate condition: the gate is INERT\n"
+        "  ```\n"
+    )
+    assert not vr.check_source_fences_quote_only_source(blank_first).ok

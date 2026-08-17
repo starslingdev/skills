@@ -31,8 +31,13 @@ entries are dated (UTC). Format loosely follows
   `==` admits *nobody* instead of everybody, and a dead term sitting next to a
   live one settles nothing, so those get the dead-field fact and the ordinary
   "verify it" instead of a verdict. Injection findings
-  (P14.10) also carry the gate sentence now; previously only P14.9 and P14.7
-  did. No finding is added, removed, or re-scored by this — it changes what the
+  (P14.10) carry the gate note now — the dead-field half of it only, since an
+  injection is worth fixing whether or not its gate holds — and carry it
+  alongside the quoted excerpt rather than inside it, so the scanner's own
+  conclusion is never rendered as a line of your workflow file. Two payload
+  corrections ride along: `deployment` and `deployment_status` do populate
+  `github.event.workflow_run`, and a step with its own `if:` withdraws a
+  verdict about who reaches the job. No finding is added, removed, or re-scored by this — it changes what the
   evidence tells you about findings the scan already reports.
 
 - **2026-08-15** — **The blocking rule is now part of the skill, as three
