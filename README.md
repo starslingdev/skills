@@ -2,14 +2,11 @@
 
 # StarSling Skills
 
-**Agent skills from [StarSling](https://starsling.dev), for optimizing your
-GitHub Actions.**
+Agent skills from StarSling, for optimizing your GitHub Actions.
 
 [![skills.sh](https://skills.sh/b/starslingdev/skills)](https://skills.sh/starslingdev/skills)
-[![CI](https://github.com/starslingdev/skills/actions/workflows/ci.yml/badge.svg)](https://github.com/starslingdev/skills/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/github/license/starslingdev/skills)](LICENSE)
 
-🏎️ **[ci-speedup](#ci-speedup)** · 📋 **[ci-score](#ci-score)** · 🔒 **[ci-secure](#ci-secure)**
+[Website](https://starsling.dev)
 
 </div>
 
