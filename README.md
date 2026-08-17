@@ -1,5 +1,9 @@
 # StarSling Skills
 
+[![skills.sh](https://skills.sh/b/starslingdev/skills)](https://skills.sh/starslingdev/skills)
+[![CI](https://github.com/starslingdev/skills/actions/workflows/ci.yml/badge.svg)](https://github.com/starslingdev/skills/actions/workflows/ci.yml)
+[![Registry scan](https://github.com/starslingdev/skills/actions/workflows/registry-scan.yml/badge.svg)](https://github.com/starslingdev/skills/actions/workflows/registry-scan.yml)
+
 Public agent skills from StarSling, for auditing your **GitHub Actions** CI.
 
 ```bash
