@@ -1786,6 +1786,50 @@ def test_compound_gate_with_one_dead_term_keeps_the_verify_wording(
     )
 
 
+def test_a_dead_term_in_a_compound_gate_is_not_called_harmless(
+    tmp_path: Path,
+) -> None:
+    """Declining a whole-gate verdict must not become a claim that the dead
+    term does nothing.
+
+    A dead term is a CONSTANT, and a constant is the opposite of harmless in a
+    compound: `A && (null == 'bot')` is always false, so that comparison closes
+    the entire gate on its own, and `A || (null != 'bot')` is always true, so it
+    opens the gate no matter what `A` says. Telling the reader the comparison
+    "cannot restrict anything" is exactly backwards in the first case and
+    understates the second.
+    """
+    for name, operator, joiner in (
+        ("and_eq.yml", "==", "&&"),
+        ("or_ne.yml", "!=", "||"),
+    ):
+        evidence = _p14_10_evidence(tmp_path, name, (
+            "on:\n"
+            "  issues:\n"
+            "    types: [opened]\n"
+            "jobs:\n"
+            "  create-issue:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    if: >-\n"
+            "      github.event.issue.user.login == 'trusted-owner'\n"
+            f"      {joiner} github.event.pull_request.user.login "
+            f"{operator} 'dependabot[bot]'\n"
+            "    steps:\n"
+            "      - run: echo '${{ github.event.issue.title }}'\n"
+        ))
+        assert "cannot restrict anything" not in evidence, (
+            f"{name}: a constant term that can decide the whole gate was "
+            f"described as unable to restrict anything: {evidence!r}"
+        )
+        assert "no trigger this workflow declares" in evidence, (
+            f"{name}: the dead term is still worth naming: {evidence!r}"
+        )
+        assert "verify it" in evidence, (
+            f"{name}: an undecidable gate must keep the verify wording: "
+            f"{evidence!r}"
+        )
+
+
 def _p14_10_hit(tmp_path: Path, name: str, body: str) -> dict:
     _write_workflow(tmp_path, name, body)
     data = _scan_dir(tmp_path)

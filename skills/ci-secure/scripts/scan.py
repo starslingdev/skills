@@ -4290,10 +4290,21 @@ def _gate_note(
                 f"blocks every run of it, so this job never runs under any "
                 f"trigger the workflow declares"
             )
+        # NOT "cannot restrict anything". A dead comparison is a CONSTANT, and
+        # a constant is the opposite of harmless once other terms are in play:
+        # `A && (null == 'x')` is always false, so the dead term closes the
+        # whole gate by itself, and `A || (null != 'x')` is always true, so it
+        # opens the gate whatever `A` says. Nothing here evaluates a compound
+        # condition, so the honest statement is that the term is fixed and the
+        # gate's overall behaviour is unexamined — never that the term is inert
+        # on its own.
         return (
-            f"{lookup} and cannot restrict anything. Whether the gate as a "
-            f"whole still restricts who reaches this job depends on the rest "
-            f"of the condition, which is not evaluated here — verify it"
+            f"{lookup} and therefore always "
+            + ("evaluate" if plural else "evaluates")
+            + " the same way, whoever triggered the workflow. What "
+            f"the gate as a whole then does — including whether a fixed term "
+            f"decides it outright — depends on the rest of the condition, "
+            f"which is not evaluated here — verify it"
         )
     if dead_field_only:
         return ""

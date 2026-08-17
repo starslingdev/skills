@@ -37,7 +37,12 @@ entries are dated (UTC). Format loosely follows
   conclusion is never rendered as a line of your workflow file. Two payload
   corrections ride along: `deployment` and `deployment_status` do populate
   `github.event.workflow_run`, and a step with its own `if:` withdraws a
-  verdict about who reaches the job. No finding is added, removed, or re-scored by this — it changes what the
+  verdict about who reaches the job. Where no verdict is available, the note
+  says the dead comparison always evaluates the same way and stops there — it
+  does not call the term harmless, because a constant is the opposite of
+  harmless beside another term: `A && (empty == 'x')` is always false and shuts
+  the gate on its own, and `A || (empty != 'x')` is always true and opens it
+  whatever `A` says. No finding is added, removed, or re-scored by this — it changes what the
   evidence tells you about findings the scan already reports.
 
 - **2026-08-15** — **The blocking rule is now part of the skill, as three
