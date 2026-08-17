@@ -2,7 +2,7 @@
 
 # StarSling Skills - Self-Driving CI using your own AI agents
 
-**Public agent skills from StarSling, for auditing your GitHub Actions CI.**
+**Agent skills from StarSling, for optimizing your GitHub Actions.**
 
 [![skills.sh](https://skills.sh/b/starslingdev/skills)](https://skills.sh/starslingdev/skills)
 [![CI](https://github.com/starslingdev/skills/actions/workflows/ci.yml/badge.svg)](https://github.com/starslingdev/skills/actions/workflows/ci.yml)
@@ -26,6 +26,10 @@ gives the one-line command for that skill on its own.
 | 🏎️ [**ci-speedup**](#ci-speedup) | Why is my CI slow? |
 | 📋 [**ci-score**](#ci-score) | Is my CI config following best practices? |
 | 🔒 [**ci-secure**](#ci-secure) | Can someone attack me through my CI? |
+
+Each run ends the same way: your agent offers to fix the findings you pick, or
+to just save the full report as markdown. Fixes land in your working tree for
+you to review, and nothing is ever committed, pushed, or opened as a PR.
 
 All three run from a local checkout and need **`python3` 3.9+** and **PyYAML**
 (`pip install pyyaml`). `ci-speedup` also needs **`gh auth login`**, because it
@@ -57,6 +61,10 @@ re-derived from your actual job graph, then matched against a
 from wasteful, so each finding ships a ready-to-paste prompt handing the root
 cause to your own agent, which reads the logs and git history before changing
 anything.
+
+Example reports from real runs:
+[`pallets/flask`](examples/pallets-flask/ci-speedup-findings-report.md) and
+[`microsoft/playwright`](examples/microsoft-playwright/ci-speedup-findings-report.md).
 
 Learn more: [starsling.dev/ci-speedup](https://starsling.dev/ci-speedup)
 
