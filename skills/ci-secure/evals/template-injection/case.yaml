@@ -1,0 +1,121 @@
+schema_version: "1.1"
+name: template-injection
+description: >-
+  A single workflow carries one template-injection surface: a
+  `pull_request_target` job that interpolates the PR title straight into a
+  `run:` block. The skill must run its own scanner rather than eyeballing the
+  YAML, report P14.10 at the exact file and line, explain in plain English what
+  an attacker could do with it, and change nothing in git.
+tags: [ci-secure, scan, findings, template-injection]
+
+# `skills/ci-secure/` is a bare skill folder with no plugin.json, so the harness
+# cannot auto-detect the plugin under test. Without this the ablation arm would
+# compare nothing to nothing and the case would be dropped up front.
+plugins: ["../.."]
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  # Deliberately the ordinary shape of the ask: no path, no skill name, no hint
+  # about where the scanner lives. The second sentence is what makes the
+  # file:line and the attacker scenario part of the answer instead of details
+  # buried in a report file the graders cannot reach.
+  prompt: |
+    Run a CI security audit on the GitHub Actions workflows in this repository.
+
+    For each finding, quote the exact file and line it sits on, and explain in
+    plain English what an attacker could actually do with it.
+  max_turns: 60
+  timeout_seconds: 900
+  # Effective tools are this list intersected with the harness's read-only set,
+  # plus whatever the operator grants. Bash is NOT read-only: the run needs
+  # `--allow-tools Bash` or the scanner can never execute. See evals/README.md.
+  allowed_tools: [Read, Glob, Grep, Skill, Task, Agent, AskUserQuestion, TodoWrite, Bash]
+
+runs: 3
+
+graders:
+  # -- mechanism -------------------------------------------------------------
+  - type: tool_used
+    name: ci-secure-skill-fired
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?ci-secure"'
+    min: 1
+    # `arm: both` is load-bearing. A `tool_used` grader on `Skill` with no
+    # explicit arm is auto-demoted to an unscored "the plugin fired" indicator,
+    # which would quietly remove this assertion from the score in BOTH arms.
+    arm: both
+
+  - type: tool_used
+    name: deterministic-engine-actually-ran
+    tool: Bash
+    # The central expectation of the original eval: the verdict comes from the
+    # skill's own scanner, not from an LLM reading YAML. This is also the
+    # sharpest ablation signal in the suite -- the without-arm has no such
+    # script anywhere it can reach.
+    input_match: 'run\.py|scan\.py'
+    min: 1
+
+  # -- outcome ---------------------------------------------------------------
+  - type: regex
+    name: injection-reported-at-its-real-file-and-line
+    target: trace
+    # Ground truth, re-derived from the engine while authoring this case:
+    # P14.10 at .github/workflows/ci.yml line 11. Tolerant of the report's own
+    # `ci.yml:11` rendering and of prose ("ci.yml, line 11") alike, because the
+    # contract fixes the fact and not the phrasing.
+    pattern: 'ci\.yml[^\n]{0,30}?\b11\b'
+    match: contains
+
+  - type: llm
+    name: finding-carries-an-attacker-scenario
+    focus: trace
+    criteria: |
+      The transcript reports a template-injection finding in a GitHub Actions
+      workflow AND explains, in plain English, what an attacker could do with
+      it.
+
+      PASS requires the explanation to name all three of:
+        - who the attacker is and what access they need (anyone who can set the
+          text of a pull request / issue / comment -- no write access to the
+          repository);
+        - the mechanism (the untrusted text is substituted into the shell
+          command before the shell parses it, so it becomes commands);
+        - what they gain (running commands with the workflow's privileges --
+          stealing secrets, using the repository token, tampering with builds).
+
+      FAIL if the finding is reported with only a rule name, a severity, a
+      catalog id, or a generic "this is a security risk" sentence; FAIL if the
+      explanation is copied catalog boilerplate that never connects to this
+      workflow; FAIL if no finding is reported at all.
+
+  # -- negatives -------------------------------------------------------------
+  # These need no tool grant to be meaningful: if Bash is granted the agent
+  # could commit and must not, and if it is not granted they hold trivially.
+  - type: tool_used
+    name: nothing-was-committed
+    tool: Bash
+    input_match: 'git\s+(-\S+\s+\S+\s+)*commit'
+    min: 0
+    max: 0
+
+  - type: tool_used
+    name: nothing-was-pushed
+    tool: Bash
+    input_match: 'git\s+(-\S+\s+\S+\s+)*push'
+    min: 0
+    max: 0
+
+  - type: tool_used
+    name: no-pull-request-was-opened
+    tool: Bash
+    input_match: 'gh\s+pr\s+create'
+    min: 0
+    max: 0
+
+expected_outcome: >-
+  ci-secure scans the workflow and reports a template-injection finding (P14.10)
+  for the untrusted ${{ github.event.pull_request.title }} expression used in a
+  run: block, with a plain-English attacker scenario. A markdown report is
+  produced only on the user's save pick. Nothing is committed or pushed.

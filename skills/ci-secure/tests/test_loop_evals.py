@@ -1,11 +1,13 @@
 """Scanner-substrate guards for the behavioral eval fixtures added by the
 ci-secure self-improvement loop.
 
-``evals/evals.json`` cases 2-4 are graded by the behavioral eval harness
-(an agent runs the whole skill), which ``pytest`` does not execute. These
-tests pin the *deterministic* scanner output each of those cases depends on,
-so a detector regression that would invalidate an eval is caught by
-``pytest -v`` in CI — not silently discovered the next time the harness runs.
+The behavioral cases under ``evals/`` (``clean-repo``, ``pwn-request``,
+``many-findings``) are graded by ``claude plugin eval``, which runs an agent
+through the whole skill and which ``pytest`` does not execute. These tests pin
+the *deterministic* scanner output each of those cases depends on, so a detector
+regression that would invalidate an eval is caught by ``pytest -v`` in CI — not
+silently discovered the next time the harness runs. The cases themselves are
+validated statically by ``test_evals_cases.py``.
 
 Each test runs ``scripts/scan.py`` as a subprocess (mirroring real
 invocation) against the matching ``evals/files/<slug>/`` fixture.
@@ -65,7 +67,7 @@ def test_pwn_request_p14_9_fires_on_vulnerable_only() -> None:
     chain (vulnerable.yml) and NOT on the identical build under plain
     pull_request (safe.yml).
 
-    Backs evals.json case 3. If the detector relaxes to trigger-presence, the
+    Backs the ``pwn-request`` eval case. If the detector relaxes to trigger-presence, the
     safe file starts firing and the eval's negative is invalidated; if it
     breaks, the vulnerable file goes silent. Both directions pin here.
     """
@@ -79,7 +81,7 @@ def test_pwn_request_p14_9_fires_on_vulnerable_only() -> None:
 
 
 def test_clean_fixture_produces_zero_findings() -> None:
-    """Backs evals.json case 2: zero findings is a first-class result, and
+    """Backs the ``clean-repo`` eval case: zero findings is a first-class result, and
     the clean fixture must actually be clean under the ten-vector catalog —
     the loud gh_checks skip note must still be present (a skipped
     network-gated check is never silently dropped from the output)."""
@@ -94,7 +96,7 @@ def test_many_findings_exceeds_capped_prompt() -> None:
     """The many-findings fixture must trip well past four distinct pattern
     groups, so the selection step cannot be represented by a 4-option widget.
 
-    Backs evals.json case 4. The behavioral eval asserts the skill presents a
+    Backs the ``many-findings`` eval case. The behavioral eval asserts the skill presents a
     full numbered free-text table rather than a capped multiple-choice prompt;
     that assertion is only meaningful while the fixture genuinely produces
     more groups than the cap. This pins the >= 6 substrate.

@@ -78,6 +78,33 @@ entries are dated (UTC). Format loosely follows
   `CONTRIBUTING.md` are read for that convention and the matching line is
   quoted back. Detection only: registering into an arbitrary repository's
   harness means writing into files the installer knows nothing about.
+- **2026-08-17** — **The five behavioral eval cases are now runnable instead of
+  being documentation.** `evals/evals.json` described five scenarios in prose
+  and nothing executed them; the only test that referenced them said so in its
+  own docstring, pinning the deterministic scanner output underneath because
+  the behavioral layer could not run. So a regression in the agent-facing
+  contract — the engine skipped in favour of eyeballing YAML, a skipped
+  network-gated check rendered as a pass, the complete finding table collapsing
+  into a capped four-option widget — was caught by nothing. The five cases are
+  now `evals/<case>/case.yaml` in the format `claude plugin eval` consumes,
+  each with a scaffold that materializes its cloaked fixtures into a real
+  `.github/workflows/` tree (and `git init`s it, so the skill's Phase 1 resolves
+  the sandbox rather than the harness's parent repository). Graders are
+  mechanical wherever the expectation allows: `tool_used` on the engine scripts,
+  and regexes anchored on strings only `run.py` or `report.py` can produce —
+  the scanner's string-sorted group list, the renderer's pre-drawn banner —
+  rather than on prose an agent could produce having merely read `SKILL.md`.
+  `evals.json` is retired; the case files are now the single source of truth.
+  **The suite has never been executed** — `claude plugin eval` is in early
+  access and gated on the authoring machine — and `evals/README.md` states
+  exactly what is and is not verified. `tests/test_evals_cases.py` validates
+  everything checkable without the runner, including a vacuity guard that fails
+  any trace regex matching the skill's own prose (four graders were re-anchored
+  after it caught them) and guards for the two schema traps that fail silently:
+  a `Skill` `tool_used` grader demoted to unscored without `arm: both`, and
+  `max: 0` without `min: 0`. `evals/results/` is gitignored and now blocked from
+  the install surface by `tests/test_ci_secure_install_surface.py`, since the
+  installer honours no ignore file.
 - **2026-08-17** — **A finding whose job sits behind a security gate that
   cannot work now says so.** Previously every gate got the same sentence —
   *"the finding stands only if that gate can be bypassed; verify it"* — which

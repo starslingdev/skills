@@ -78,3 +78,12 @@ uv.lock
 # strings in the repo tree.
 skills/ci-secure/tests/fixtures/.github/
 skills/ci-secure/evals/files/*/.github/
+
+# `claude plugin eval` writes its run artifacts (aggregate-result.json,
+# report.html, kept sandboxes) to `<discovery root>/evals/results/` by default —
+# which for ci-secure is INSIDE the installable skill. Gitignoring them keeps
+# them out of history, but note that gitignore does NOT protect the install
+# surface: the `skills` CLI copies `skills/<name>/` recursively and would ship
+# whatever sits there. Always pass `--output-dir` somewhere outside the skill;
+# `tests/test_ci_secure_install_surface.py` fails if results land here anyway.
+skills/ci-secure/evals/results/

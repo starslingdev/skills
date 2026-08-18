@@ -1,0 +1,114 @@
+schema_version: "1.1"
+name: clean-repo
+description: >-
+  A workflow with nothing wrong with it: read-only permissions, SHA-pinned
+  actions, a plain `push` trigger. Zero findings is a first-class result, so the
+  skill must say so plainly and positively, state the scope honestly, report
+  whether the network-gated impostor-SHA check ran, and resist the urge to
+  invent lesser observations to have something to show.
+tags: [ci-secure, scan, zero-findings, negative]
+
+plugins: ["../.."]
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  prompt: |
+    Run a CI security audit on the GitHub Actions workflows in this repository.
+  max_turns: 60
+  timeout_seconds: 900
+  allowed_tools: [Read, Glob, Grep, Skill, Task, Agent, AskUserQuestion, TodoWrite, Bash]
+
+runs: 3
+
+graders:
+  - type: tool_used
+    name: ci-secure-skill-fired
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?ci-secure"'
+    min: 1
+    arm: both
+
+  - type: tool_used
+    name: deterministic-engine-actually-ran
+    tool: Bash
+    input_match: 'run\.py|scan\.py'
+    min: 1
+
+  # The pre-drawn banner. SKILL.md mandates it be grepped out of the rendered
+  # report and pasted verbatim, so it reaches the transcript through a
+  # contract-mandated tool call. Both halves are counts only report.py can
+  # compute, and neither string appears anywhere in the skill's own prose --
+  # the worked example in SKILL.md says "3 critical findings" and "2 of 10
+  # vectors hit", so an agent that merely read SKILL.md cannot match this.
+  - type: regex
+    name: banner-reports-zero-findings
+    target: trace
+    pattern: '0 critical findings'
+    match: contains
+
+  - type: regex
+    name: banner-reports-zero-of-ten-vectors-hit
+    target: trace
+    pattern: '0 of 10 vectors hit'
+    match: contains
+
+  # The impostor-SHA check is the one vector that cannot be answered from YAML
+  # alone. Whether it RAN here depends on the operator's machine (an
+  # authenticated `gh` runs it; a bare CI runner does not), so the assertion is
+  # that its state is reported at all -- never that it came back a particular
+  # way. The alternation covers all four states scan.py can record, using its
+  # own wording for each. The obvious pattern here -- `impostor check ran` --
+  # is a quotation from SKILL.md's worked example, so it would have passed
+  # whether or not the check was ever mentioned; the vacuity test in
+  # tests/test_evals_cases.py caught exactly that and is why this reads the way
+  # it does.
+  - type: regex
+    name: impostor-check-state-is-reported
+    target: trace
+    pattern: 'unique pin\(s\) verified|no sha-pinned actions found|\(network-gated check did NOT run\)|impostor check not recorded'
+    match: contains
+
+  - type: llm
+    name: zero-findings-reported-plainly-and-not-padded
+    focus: trace
+    criteria: |
+      The run found zero critical attack vectors and reports that as a result in
+      its own right.
+
+      PASS requires all of:
+        - the zero result is stated plainly and positively (e.g. "no critical
+          attack vectors detected"), not as an apology, a hedge, a disclaimer
+          about the scanner's reliability, or a suggestion that the run failed;
+        - the scope is stated honestly -- that this covers critical exploit
+          chains only and is not a comprehensive security audit;
+        - no invented findings. Pass/fail CONFIG HYGIENE checks (missing
+          `permissions:`, no CODEOWNERS entry, unmeasured API-gated facts) are a
+          documented, expected part of the output and are NOT padding.
+
+      FAIL if the run downgrades to informal "lower-severity observations",
+      "things worth noting", or similar filler in order to have something to
+      show; FAIL if it treats zero findings as a problem, an error, or an
+      incomplete run; FAIL if it claims the repository is secure overall rather
+      than clean on the ten vectors it checked.
+
+  - type: tool_used
+    name: nothing-was-committed
+    tool: Bash
+    input_match: 'git\s+(-\S+\s+\S+\s+)*commit'
+    min: 0
+    max: 0
+
+  - type: tool_used
+    name: nothing-was-pushed
+    tool: Bash
+    input_match: 'git\s+(-\S+\s+\S+\s+)*push'
+    min: 0
+    max: 0
+
+expected_outcome: >-
+  ci-secure scans and finds ZERO critical attack vectors. It says so plainly and
+  positively -- zero findings is a first-class result, not an error -- while
+  stating the scope honestly (critical-only, not a comprehensive audit) and
+  reporting whether the network-gated impostor-SHA check ran or was skipped.

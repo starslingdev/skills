@@ -1,0 +1,134 @@
+schema_version: "1.1"
+name: many-findings
+description: >-
+  Two badly written workflows that trip nine of the ten catalog vectors at once
+  -- more finding groups than any fixed-option question widget can hold. The
+  contract says the complete numbered table is printed as free text FIRST and
+  the capped structured question only comes after it, so this case exists to
+  catch the day the table quietly becomes the widget and six groups stop being
+  offered at all.
+tags: [ci-secure, scan, findings, selection, interaction-contract]
+
+plugins: ["../.."]
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  prompt: |
+    Run a CI security audit on the GitHub Actions workflows in this repository
+    and walk me through which findings to fix.
+  # Nine groups, each needing its own attacker scenario, plus the render plan
+  # and the selection table. The turn cap is generous on purpose: an exhausted
+  # cap is a run error and would depress the score for the wrong reason.
+  max_turns: 90
+  timeout_seconds: 1500
+  allowed_tools: [Read, Glob, Grep, Skill, Task, Agent, AskUserQuestion, TodoWrite, Bash]
+
+runs: 3
+
+graders:
+  - type: tool_used
+    name: ci-secure-skill-fired
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?ci-secure"'
+    min: 1
+    arm: both
+
+  - type: tool_used
+    name: deterministic-engine-actually-ran
+    tool: Bash
+    input_match: 'run\.py|scan\.py'
+    min: 1
+
+  # The engine's own group list for this fixture, in the string sort order
+  # run.py emits (note .24 and .25 landing before .7 and .9). Nine ids in that
+  # exact sequence is a string only the scanner produces on this fixture: it
+  # pins "all nine statically-detectable groups were found", the order proves
+  # it came from the engine rather than from prose, and no shorter subset of
+  # the catalog can satisfy it.
+  - type: regex
+    name: engine-found-all-nine-static-groups
+    target: trace
+    pattern: 'P14\.10.{2,10}P14\.14.{2,10}P14\.15.{2,10}P14\.18.{2,10}P14\.19.{2,10}P14\.24.{2,10}P14\.25.{2,10}P14\.7.{2,10}P14\.9'
+    match: contains
+
+  - type: regex
+    name: banner-reports-nine-of-ten-vectors-hit
+    target: trace
+    pattern: '9 of 10 vectors hit'
+    match: contains
+
+  # The selection step is required to be built from report.py's render plan --
+  # that is what keeps the table's numbering identical to the report's, instead
+  # of the orchestrator inventing an order of its own.
+  - type: tool_used
+    name: selection-table-built-from-the-render-plan
+    tool: Bash
+    input_match: '--render-plan'
+    min: 1
+
+  - type: llm
+    name: every-group-offered-in-a-complete-numbered-table
+    focus: trace
+    criteria: |
+      The run presents ALL of the finding groups it found as a complete
+      numbered list or table in ordinary text, before or alongside any
+      multiple-choice question it asks.
+
+      PASS requires:
+        - a numbered row for every finding group found (there are nine here),
+          each row identifying the finding -- a title, a severity, or a catalog
+          id -- so the user can pick it by number;
+        - nothing truncated, capped, ranked-and-cut, or summarized as "and
+          others"; a row for every group, including any marked dormant.
+
+      A structured multiple-choice question AFTER the full table is expected and
+      correct, and is not a failure.
+
+      FAIL if the groups are offered ONLY through a fixed-option question widget
+      (which would silently drop most of them); FAIL if fewer than nine groups
+      are listed; FAIL if the list is described as a top-N, a shortlist, or the
+      "most important" subset.
+
+  - type: llm
+    name: every-group-carries-its-own-attacker-scenario
+    focus: trace
+    criteria: |
+      Each distinct finding group reported by the run is accompanied by its own
+      plain-English statement of what an attacker could do with THAT finding.
+
+      PASS if the scenarios are per-group and distinguishable from one another
+      -- the secrets-dump scenario is not the same sentence as the cache
+      scenario. FAIL if scenarios are written for only some groups, if a single
+      generic paragraph is reused for all of them, or if groups are listed with
+      severities and rule names but no attacker consequence.
+
+  - type: tool_used
+    name: nothing-was-committed
+    tool: Bash
+    input_match: 'git\s+(-\S+\s+\S+\s+)*commit'
+    min: 0
+    max: 0
+
+  - type: tool_used
+    name: nothing-was-pushed
+    tool: Bash
+    input_match: 'git\s+(-\S+\s+\S+\s+)*push'
+    min: 0
+    max: 0
+
+  - type: tool_used
+    name: no-pull-request-was-opened
+    tool: Bash
+    input_match: 'gh\s+pr\s+create'
+    min: 0
+    max: 0
+
+expected_outcome: >-
+  ci-secure produces a report with nine distinct finding groups -- the nine
+  statically-detectable vectors (P14.7, P14.9, P14.10, P14.14, P14.15, P14.18,
+  P14.19, P14.24, P14.25); the tenth, P14.11, is network-gated. At the
+  finding-selection step the skill presents a full numbered free-text table of
+  every group -- never a capped 4-option widget -- and dispatches one fix
+  subagent per selected group.

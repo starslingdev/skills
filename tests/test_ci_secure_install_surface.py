@@ -105,6 +105,46 @@ def test_no_maintainer_only_files_under_skill():
     )
 
 
+def test_no_eval_results_under_skill():
+    """`claude plugin eval` writes `aggregate-result.json`, `report.html` and
+    kept sandbox copies to `<discovery root>/evals/results/` unless the operator
+    passes `--output-dir`. For ci-secure the discovery root IS the installable
+    skill, so the default lands run artifacts inside the tree the `skills` CLI
+    copies wholesale into every end-user install.
+
+    Gitignoring the path (which `.gitignore` also does) is NOT sufficient on its
+    own: the installer honours no ignore file, so an ignored directory ships
+    exactly like a tracked one. Those artifacts embed full prompts, transcript
+    excerpts and grader evidence from whatever repository the maintainer ran
+    against, which makes this a disclosure leak and not just clutter. The
+    remedy is `--output-dir` outside the skill; `evals/README.md` documents the
+    invocation.
+    """
+    results = _SKILL / "evals" / "results"
+    assert not results.exists(), (
+        f"{results.relative_to(_REPO)} exists and would ship into every "
+        "end-user install (gitignore does not stop the installer) — delete it "
+        "and re-run with `--output-dir` pointing outside skills/ci-secure/")
+
+
+def test_no_tracked_eval_results():
+    """The same directory, from the other side: nothing under it may be tracked.
+    The disk check above only fires on the machine that ran the suite, so this
+    is what stops a run artifact reaching `main` from someone else's checkout."""
+    import subprocess
+
+    out = subprocess.run(
+        ["git", "-C", str(_REPO), "ls-files", "-z",
+         "skills/ci-secure/evals/results"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    leaked = sorted(rel for rel in out.split("\0") if rel)
+    assert not leaked, (
+        "eval run artifacts are tracked under the installable skill: "
+        + ", ".join(leaked)
+    )
+
+
 def test_no_maintainer_only_dirs_under_skill():
     """Catch the same infra when it arrives as a whole directory."""
     leaked = sorted(

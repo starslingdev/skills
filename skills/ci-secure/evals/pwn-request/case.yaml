@@ -1,0 +1,121 @@
+schema_version: "1.1"
+name: pwn-request
+description: >-
+  Two workflows run the same build. `vulnerable.yml` runs it on
+  `pull_request_target` and checks out the pull request's own head, so a fork's
+  code executes holding the repository's write token; `safe.yml` runs it on
+  plain `pull_request`, where it does not. The discrimination is the whole
+  point: the finding must land on one file and the other must come back clean,
+  as a real negative rather than a coverage gap.
+tags: [ci-secure, scan, findings, pwn-request, discrimination]
+
+plugins: ["../.."]
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  prompt: |
+    Check this repository for GitHub Actions security problems. Name the
+    workflow file each problem is in, and tell me what an attacker could do.
+  max_turns: 60
+  timeout_seconds: 900
+  allowed_tools: [Read, Glob, Grep, Skill, Task, Agent, AskUserQuestion, TodoWrite, Bash]
+
+runs: 3
+
+graders:
+  - type: tool_used
+    name: ci-secure-skill-fired
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?ci-secure"'
+    min: 1
+    arm: both
+
+  - type: tool_used
+    name: deterministic-engine-actually-ran
+    tool: Bash
+    input_match: 'run\.py|scan\.py'
+    min: 1
+
+  # run.py prints the group list to stdout -- the pattern ids present, sorted as
+  # STRINGS. On this fixture that is exactly ["P14.25", "P14.9"], and the
+  # string sort is the tell: P14.25 before P14.9 is an ordering a person or a
+  # model writing the ids out by hand would not produce. So this single pattern
+  # asserts the engine ran, ran on THIS fixture, and produced exactly these two
+  # groups and no others.
+  - type: regex
+    name: engine-group-list-is-exactly-p14-25-then-p14-9
+    target: trace
+    pattern: 'P14\.25.{2,10}P14\.9'
+    match: contains
+
+  - type: regex
+    name: finding-lands-on-the-vulnerable-workflow
+    target: trace
+    pattern: 'vulnerable\.yml'
+    match: contains
+
+  # The negative half, and the reason this case exists. Every occurrence the
+  # skill reports is rendered as `<workflow file>:<line>`, so a `safe.yml:` with
+  # a line number after it means a finding was attributed to the file that is
+  # supposed to be clean. Merely reading or listing safe.yml does not match.
+  - type: regex
+    name: safe-workflow-produces-no-finding
+    target: trace
+    pattern: 'safe\.yml:\d+'
+    match: not_contains
+
+  - type: llm
+    name: attacker-scenario-names-the-fork-pr-entry-point
+    focus: trace
+    criteria: |
+      The run reports that fork code is executed with privileges in one of the
+      two workflows, and explains the attack in plain English.
+
+      PASS requires the explanation to make clear that the attacker is any
+      GitHub user who opens a pull request from a fork -- someone with NO prior
+      access to, and no permissions on, the repository being audited -- and that
+      what they gain is execution holding the repository's own token or secrets.
+
+      FAIL if the scenario assumes the attacker is already a collaborator, has
+      commit or write access, or has some existing foothold; FAIL if it never
+      says who can trigger it; FAIL if no such finding is reported.
+
+  - type: llm
+    name: safe-workflow-was-scanned-and-cleared
+    focus: trace
+    criteria: |
+      Both workflow files in the repository were scanned, and the one that runs
+      the build under a plain `pull_request` trigger is reported as having no
+      finding.
+
+      PASS if the output shows the clean file was covered -- e.g. a scanned-file
+      or workflow count that accounts for both files, a coverage statement that
+      every workflow was scanned, or an explicit statement that the
+      `pull_request` version is not vulnerable.
+
+      FAIL if the clean file is never accounted for, is described as skipped or
+      unreadable, or if coverage is reported as partial or incomplete. A silent
+      omission is a coverage gap, and a coverage gap is not the same as a clean
+      result -- that distinction is what this criterion tests.
+
+  - type: tool_used
+    name: nothing-was-committed
+    tool: Bash
+    input_match: 'git\s+(-\S+\s+\S+\s+)*commit'
+    min: 0
+    max: 0
+
+  - type: tool_used
+    name: nothing-was-pushed
+    tool: Bash
+    input_match: 'git\s+(-\S+\s+\S+\s+)*push'
+    min: 0
+    max: 0
+
+expected_outcome: >-
+  ci-secure reports P14.9 (fork code executed with privileges) on
+  vulnerable.yml -- pull_request_target + checkout of the PR head + execution --
+  and reports NOTHING on safe.yml, which runs the same build under plain
+  pull_request. The fix recipe recommends the pull_request trigger split.
