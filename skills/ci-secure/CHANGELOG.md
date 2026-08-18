@@ -13,6 +13,21 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-18** — **A grader that pins a finding to its real file and line is
+  read against the report, not against whatever the session happened to print.**
+  Three graders are anchored on `report.py`'s `<file>:<line> — jobs:` evidence
+  bullet, deliberately: a model can paraphrase its summary a dozen ways, but
+  that bullet is byte-identical every run. The skill renders it into a report
+  file and prints a summary, and the harness graded only the transcript — so
+  `pwn-request` and `impostor-check-skipped` failed on runs where the scan had
+  found the right thing, at the right line, and written exactly the asserted
+  text, while `template-injection` passed on the same pattern only because that
+  session happened to run `grep -n`. Those three now declare `target: files`,
+  and the harness collects what the session wrote off disk alongside the
+  transcript, keeping the two corpora separate. The vacuity rule extends to
+  `files` graders, because `report.py` inlines catalog prose into the report it
+  renders.
+
 - **2026-08-18** — **The behavioral eval cases are executed, and a session that
   never started no longer reads as a skill regression.** The five cases in
   `evals/` were written for `claude plugin eval`, which is gated behind early

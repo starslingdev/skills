@@ -9,8 +9,12 @@ primitives instead:
                  an empty temp directory and makes it a git repo;
   2. run       - `claude -p ... --plugin-dir <skill> --output-format stream-json`
                  drives one headless session against that directory;
-  3. collect   - every tool call and message is read back out of the stream;
-  4. grade     - the case's own graders are applied to that record.
+  3. collect   - every tool call and message is read back out of the stream,
+                 and every file the session WROTE is read off disk: the skill
+                 renders its report to a file and prints a summary, so the
+                 transcript alone is only half of what the run produced;
+  4. grade     - the case's own graders are applied to that record, each regex
+                 against the corpus its `target` names.
 
 Maintainer-only, and deliberately outside `skills/`: it spends real tokens, so
 it is never part of `pytest`. Run it before shipping a change to SKILL.md, the
@@ -42,8 +46,11 @@ WHAT THIS HARNESS DOES NOT YET DO, and `claude plugin eval` does:
     checked against a session without the skill loaded.
   - `execution.model` and `runs: 3` in the case files are not honoured; the
     model is whatever the CLI defaults to and the run count comes from `--runs`.
-  - `target` (`trace` / `last_message` / `files`) and regex `flags` are ignored:
-    every regex grader is matched against the whole decoded transcript.
+  - regex `flags` are ignored; every pattern is matched case-sensitively.
+  - a `target` given as `{source: file, path: ...}` is not implemented. The
+    three word targets are: `trace` (the decoded transcript), `files` (what the
+    session wrote — see `_files_corpus`), and `last_message`. An unimplemented
+    target stops the harness rather than quietly grading another corpus.
 
 Each of those makes a pass weaker than the case author asked for. None of them
 makes a failure wrong.
@@ -52,6 +59,7 @@ makes a failure wrong.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -75,8 +83,13 @@ _PLUGIN_EXCLUDE = ("evals", "tests")
 # run that failed can be read rather than reproduced.
 _LOGS = Path("skill-eval-logs")
 
+# A ceiling on any single file entering the graded corpus. A report is tens of
+# kilobytes; anything past this is a lockfile, a cache or a binary the agent
+# happened to create, and reading it in would bloat every regex match.
+_MAX_CORPUS_FILE = 4 * 1024 * 1024
 
-def _env() -> dict:
+
+def _env(tmpdir: Path | None = None) -> dict:
     """A deliberately small environment for every subprocess.
 
     Inherited `GIT_DIR` / `GIT_WORK_TREE` are the hazard: the scaffold's own
@@ -86,6 +99,12 @@ def _env() -> dict:
     real repository — and what it commits is intentionally vulnerable workflow
     YAML. `_scaffold_common.sh` documents the minimal environment it is built
     against; this is that environment.
+
+    `tmpdir` points the session's TMPDIR at a directory this harness owns.
+    SKILL.md renders the report to `${TMPDIR:-/tmp}/ci-secure-report-<slug>.md`
+    and the findings to the matching `ci-secure-findings-<slug>.json`, so
+    setting it is what turns "collect what the run produced" into a contract
+    rather than a guess at where the files landed.
     """
     keep = ("PATH", "HOME", "TMPDIR", "TERM", "LANG", "LC_ALL",
             "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "IS_SANDBOX",
@@ -93,6 +112,8 @@ def _env() -> dict:
     env = {k: v for k, v in os.environ.items() if k in keep and v is not None}
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
     env["GIT_CONFIG_NOSYSTEM"] = "1"
+    if tmpdir is not None:
+        env["TMPDIR"] = str(tmpdir)
     return env
 
 
@@ -150,7 +171,7 @@ def _plugin_dir(into: Path) -> Path:
 
 
 def _run_agent(prompt: str, sandbox: Path, plugin: Path, max_turns: int,
-               timeout: int) -> str:
+               timeout: int, tmpdir: Path | None = None) -> str:
     """One headless session against the sandbox. Returns the raw stream.
 
     Exits 2 rather than returning a stream no session produced. `claude` has
@@ -169,7 +190,7 @@ def _run_agent(prompt: str, sandbox: Path, plugin: Path, max_turns: int,
     try:
         r = subprocess.run(
             cmd, cwd=sandbox, capture_output=True, text=True, timeout=timeout,
-            env=_env(),
+            env=_env(tmpdir),
         )
     except subprocess.TimeoutExpired:
         _die(f"agent run exceeded {timeout}s", 2)
@@ -262,8 +283,98 @@ def _transcript(stream: str) -> str:
     return "\n".join(parts)
 
 
-def _grade(graders: list[dict], stream: str, tools: list[tuple[str, str]]) -> tuple[list, list]:
-    """(scored results, unscored llm graders)."""
+def _last_message(stream: str) -> str:
+    """The final assistant turn — what the session left on the reader's screen."""
+    texts = []
+    for ev in _events(stream):
+        if ev.get("type") != "assistant":
+            continue
+        content = (ev.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        turn = [str(c.get("text", "")) for c in content
+                if isinstance(c, dict) and c.get("type") == "text"]
+        if turn:
+            texts = turn
+    return "\n".join(texts)
+
+
+def _snapshot(roots: list[Path]) -> dict[str, str]:
+    """path -> content digest, for every readable file under `roots`."""
+    return {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in _corpus_files(roots)}
+
+
+def _corpus_files(roots: list[Path]) -> list[Path]:
+    """Every regular, non-`.git`, non-symlink file under `roots`, sorted.
+
+    Symlinks are skipped rather than followed: the sandbox is a directory an
+    agent had write access to, and a link out of it would pull an arbitrary file
+    into the graded corpus.
+    """
+    out = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for p in sorted(root.rglob("*")):
+            if p.is_symlink() or not p.is_file():
+                continue
+            if ".git" in p.relative_to(root).parts:
+                continue
+            out.append(p)
+    return out
+
+
+def _files_corpus(roots: list[Path], before: dict[str, str]) -> str:
+    """The files the SESSION produced, as one greppable text.
+
+    Not the whole sandbox. The scaffold hands the agent intentionally
+    vulnerable workflow YAML naming the very files several graders assert on,
+    so grading what the agent was handed would give those graders their answer
+    for free — the same trap `_PLUGIN_EXCLUDE` closes for `evals/` and
+    `tests/`. A file is in only if it did not exist before the session or its
+    contents changed during it.
+
+    Each file is introduced by a `=== <path> ===` header, relative to its root
+    so the corpus does not carry this run's temp directory name.
+    """
+    parts: list[str] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for p in _corpus_files([root]):
+            try:
+                raw = p.read_bytes()
+            except OSError:
+                continue
+            if before.get(str(p)) == hashlib.sha256(raw).hexdigest():
+                continue  # handed to the session, not written by it
+            rel = p.relative_to(root).as_posix()
+            if len(raw) > _MAX_CORPUS_FILE:
+                # Never drop a file silently — a grader that cannot see its
+                # evidence must say so, not fail as though the run misbehaved.
+                parts.append(f"=== {rel} (NOT READ: {len(raw)} bytes) ===")
+                continue
+            try:
+                parts.append(f"=== {rel} ===\n{raw.decode('utf-8')}")
+            except UnicodeDecodeError:
+                parts.append(f"=== {rel} (NOT READ: not UTF-8 text) ===")
+    return "\n".join(parts)
+
+
+def _grade(graders: list[dict], stream: str, tools: list[tuple[str, str]],
+           files: str = "", last_message: str = "") -> tuple[list, list]:
+    """(scored results, unscored llm graders).
+
+    `stream` is the decoded transcript; `files` is what the session wrote.
+    A regex grader reads whichever its `target` names — the two corpora are
+    kept apart deliberately. `files` exists because the graders that pin a
+    finding to its real file and line are anchored on `report.py`'s evidence
+    bullets, which the skill renders into a file and does not print; grading
+    them against the transcript scored whether the agent happened to `cat` its
+    own report.
+    """
+    corpora = {"trace": stream, "files": files, "last_message": last_message}
     scored, unscored = [], []
     for g in graders:
         kind, name = g.get("type"), g.get("name", "?")
@@ -277,7 +388,23 @@ def _grade(graders: list[dict], stream: str, tools: list[tuple[str, str]]) -> tu
             scored.append((name, n >= lo and (hi is None or n <= hi), f"count={n}"))
         elif kind == "regex":
             pat, mode = g.get("pattern", ""), g.get("match", "contains")
-            found = bool(re.search(pat, stream))
+            # `target` used to be ignored outright, so a grader that said
+            # `files` was silently matched against the transcript — the wrong
+            # corpus, reported as a verdict. An unimplemented target is a hole
+            # in the suite, and a suite with a hole in it did not pass.
+            target = g.get("target", "trace")
+            if target not in corpora:
+                _die(f"{name}: grader target {target!r} is not implemented — "
+                     "this harness cannot score the case, so it must not "
+                     "report one")
+            if target == "files" and not files:
+                # An empty corpus scores every `contains` as a failure and every
+                # `not_contains` as a pass: the session's own behaviour reported
+                # from evidence that was never collected.
+                _die(f"{name}: targets `files`, but the session produced no "
+                     "readable file — nothing was graded, and that is not a "
+                     "behavioural failure")
+            found = bool(re.search(pat, corpora[target]))
             if mode == "not_contains":
                 scored.append((name, not found, "absent" if not found else "PRESENT"))
             elif mode.startswith("count:"):
@@ -330,15 +457,24 @@ def main() -> int:
         for run in range(1, args.runs + 1):
             sandbox = Path(tempfile.mkdtemp(prefix=f"skill-eval-{case.name}-"))
             plugin_root = Path(tempfile.mkdtemp(prefix=f"skill-eval-plugin-{case.name}-"))
+            # The session's TMPDIR, and the second half of the graded corpus:
+            # SKILL.md renders the report and the findings JSON under it.
+            artifacts = Path(tempfile.mkdtemp(prefix=f"skill-eval-out-{case.name}-"))
             try:
                 _scaffold(case, sandbox)
+                # AFTER the scaffold: what the fixture put there is what the
+                # agent was handed, and must not count as what it produced.
+                before = _snapshot([sandbox, artifacts])
                 stream = _run_agent(
                     prompt, sandbox, _plugin_dir(plugin_root),
                     ex.get("max_turns", 60), ex.get("timeout_seconds", 900),
+                    artifacts,
                 )
                 tools = _tool_calls(stream)
                 scored, unscored = _grade(
-                    spec.get("graders", []), _transcript(stream), tools)
+                    spec.get("graders", []), _transcript(stream), tools,
+                    files=_files_corpus([sandbox, artifacts], before),
+                    last_message=_last_message(stream))
                 # `all([])` is True. A case whose graders all fell through to
                 # unscored would otherwise print PASS over nothing at all.
                 if not scored:
@@ -363,12 +499,21 @@ def main() -> int:
                     log.parent.mkdir(parents=True, exist_ok=True)
                     log.write_text(stream, encoding="utf-8")
                     print(f"    session recorded: {log}")
+                    # A `files` grader failed on something the transcript does
+                    # not contain, so the transcript alone cannot explain it.
+                    corpus_log = _LOGS / f"{case.name}-run{run}.files.txt"
+                    corpus_log.write_text(
+                        _files_corpus([sandbox, artifacts], before),
+                        encoding="utf-8")
+                    print(f"    files the run produced: {corpus_log}")
             finally:
                 shutil.rmtree(plugin_root, ignore_errors=True)
                 if not args.keep:
                     shutil.rmtree(sandbox, ignore_errors=True)
+                    shutil.rmtree(artifacts, ignore_errors=True)
                 else:
                     print(f"    sandbox kept: {sandbox}")
+                    print(f"    session output kept: {artifacts}")
 
     return 1 if failed else 0
 

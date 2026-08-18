@@ -61,9 +61,14 @@ graders:
   # entirely would still have passed. The occurrence LINES are what only the
   # engine knows: P14.9 at :8 and P14.25 at :14, each rendered by report.py with
   # the job list after it.
+  #
+  # `files`, not `trace`, because that bullet is rendered INTO the report file
+  # and the skill prints a summary rather than the evidence section. Graded
+  # against the transcript this asserted that the agent happened to `cat` its
+  # own report, and it failed a run where the report said exactly this.
   - type: regex
     name: finding-lands-on-the-vulnerable-workflow
-    target: trace
+    target: files
     pattern: 'vulnerable\.yml:(?:8|14)\b[^\n]{0,20}jobs'
     match: contains
 
@@ -76,6 +81,12 @@ graders:
   # and this case's sibling llm grader actively rewards the agent for showing it
   # inspected safe.yml -- so the two graders pulled against each other and a
   # correct run could fail this one on a `grep -n` it was praised for.
+  #
+  # Deliberately still `trace` while its positive twin above moved to `files`.
+  # The two halves guard different things: the positive asks what the RENDERER
+  # attributed, which only the report holds, while a false clean-file finding
+  # reaching the user is something the agent SAYS. Moving this one too would
+  # stop covering the summary the reader actually gets.
   - type: regex
     name: safe-workflow-produces-no-finding
     target: trace

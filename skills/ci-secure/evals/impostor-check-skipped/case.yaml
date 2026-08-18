@@ -50,9 +50,14 @@ graders:
   # "The scan completes without gh": the nine static vectors need no network, so
   # the template injection in this fixture must still be found, at its real
   # file and line. A degraded run that quietly produced nothing would fail here.
+  #
+  # `files`: report.py renders `ci.yml:11` into the report, and the skill's
+  # terminal summary carries the file without the line. Against the transcript
+  # this passed only when the agent happened to `grep -n` -- luck on a correct
+  # run, and it came up tails.
   - type: regex
     name: static-scan-still-completed-and-found-the-injection
-    target: trace
+    target: files
     pattern: 'ci\.yml[^\n]{0,30}?\b11\b'
     match: contains
 

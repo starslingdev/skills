@@ -335,19 +335,26 @@ def test_no_trace_regex_matches_the_skills_own_prose() -> None:
     so a trace-targeted pattern that matches the skill's own prose asserts
     nothing about behavior: ``contains`` passes for free, ``not_contains`` can
     never pass. Both are silent failures of the suite, which is why this is a
-    test and not a review note."""
+    test and not a review note.
+
+    ``files``-targeted regexes are held to the same rule, and for a reason that
+    is easy to miss: ``report.py`` INLINES catalog text into the report it
+    renders, so the skill's own shipped prose is inside the file corpus too. A
+    ``files`` pattern quoting the catalog would pass on the report having been
+    rendered at all, never mind what the scan found."""
     prose = _agent_readable_text()
     offenders = []
     for case_dir, case in _all_cases():
         for grader in _graders(case):
-            if grader.get("type") != "regex" or grader.get("target") != "trace":
+            if (grader.get("type") != "regex"
+                    or grader.get("target") not in {"trace", "files"}):
                 continue
             pattern = grader["pattern"]
             if re.search(pattern, prose):
                 offenders.append(f"{case_dir.name}/{grader['name']}: {pattern!r}")
     assert not offenders, (
-        "these trace regexes match the skill's own shipped prose, so they grade "
-        "the agent having READ the skill rather than the agent having RUN it -- "
+        "these regexes match the skill's own shipped prose, so they grade the "
+        "agent having READ the skill rather than the agent having RUN it -- "
         "re-anchor each on a string only the scanner or the renderer produces:\n  "
         + "\n  ".join(offenders))
 
@@ -525,9 +532,9 @@ def test_scaffold_still_materializes_the_tree_in_an_empty_sandbox(
 @pytest.mark.parametrize("case_dir", _case_dirs(), ids=lambda p: p.name)
 def test_regex_graders_declare_a_target(case_dir: Path) -> None:
     """``target`` is optional in the harness's schema, and the vacuity rule only
-    inspects graders whose target is ``trace``. So omitting the line is a
-    one-token bypass of the rule: a verbatim ``SKILL.md`` quotation with no
-    ``target:`` passes every test in this file. Requiring it here closes that."""
+    inspects graders that name one. So omitting the line is a one-token bypass
+    of the rule: a verbatim ``SKILL.md`` quotation with no ``target:`` passes
+    every test in this file. Requiring it here closes that."""
     for grader in _graders(_load(case_dir)):
         if grader.get("type") != "regex":
             continue

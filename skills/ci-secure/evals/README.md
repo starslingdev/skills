@@ -151,6 +151,12 @@ already appears there passes for free, and a `not_contains` pattern that appears
 there can never pass at all. `tests/test_evals_cases.py::test_no_trace_regex_matches_the_skills_own_prose`
 makes that a hard failure.
 
+`files` graders are held to the same rule, for a reason that is easy to miss:
+`report.py` **inlines catalog text** into the report it renders, so the skill's
+own shipped prose is inside the file corpus too. A `files` pattern quoting the
+catalog would pass on the report having been rendered at all, whatever the scan
+found.
+
 It is not a theoretical concern. Three of the first drafts of these graders
 (`P14.10`, `did NOT run`, `Impostor-SHA check (P14.11): ran`) are quotations
 from `SKILL.md` and were flagged by that test; a fourth (`No critical attack
@@ -275,10 +281,16 @@ off a real run of `run.py` and `report.py` against these fixtures, not assumed.
   grants `Write` or `Edit`, and Phase 5 subagents edit workflow YAML. No grader
   asserts it, so it would fail as a stated-but-unreachable outcome rather than
   as a red case;
-- whether the graders' assertions actually land in the `trace`. Several depend
-  on contract-mandated `grep`/`python3` calls surfacing report content into the
-  transcript; that is what `SKILL.md` says happens, but it has not been observed
-  here;
+- ~~whether the graders' assertions actually land in the `trace`~~ — **observed,
+  and they did not.** Three graders anchored on `report.py`'s `<file>:<line> —
+  jobs:` evidence bullet assumed the agent would surface the report into the
+  transcript. It renders the report to a file and prints a summary instead, so
+  two cases failed on runs where the skill had behaved correctly and written
+  exactly the asserted bullet, and the third passed only because that session
+  happened to `grep -n`. Those three now say `target: files`, and the harness
+  reads what the session wrote off disk rather than only what it printed. What
+  remains unobserved is narrower: whether the `trace`-targeted graders that
+  quote the terminal banner keep landing there across runs;
 - whether the `llm` graders' rubrics discriminate in practice, and whether they
   also pass in the no-plugin arm. All seven are `focus: trace` and none is
   covered by the vacuity rule, which filters on `type == "regex"` — they are 7

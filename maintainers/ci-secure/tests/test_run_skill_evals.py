@@ -14,6 +14,7 @@ for a suite that executed nothing.
 import importlib.util
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -178,3 +179,169 @@ def test_the_plugin_copy_withholds_the_answer_key(tmp_path):
     assert (plugin / "scripts").is_dir() and (plugin / "references").is_dir()
     assert not (plugin / "evals").exists()
     assert not (plugin / "tests").exists()
+
+
+# --- the graded corpus is everything the run produced, not only what it printed
+#
+# ci-secure writes its report to a file and prints a summary. The graders that
+# pin a finding to its real file and line are anchored on `report.py`'s evidence
+# bullets — `vulnerable.yml:8 — jobs: bench` — which is deliberate: a model can
+# paraphrase its summary a dozen ways, but that bullet is byte-identical every
+# run. Grading only the transcript threw that surface away, so two cases failed
+# on runs where the skill had behaved correctly and written the right report.
+
+
+def test_a_files_targeted_regex_reads_what_the_session_wrote(tmp_path):
+    """The report is output. A grader anchored on the renderer must be able to
+    see it, or it grades whether the agent happened to `cat` the file."""
+    report = tmp_path / "ci-secure-report-abc.md"
+    report.write_text("- `.github/workflows/vulnerable.yml:8` — jobs: `bench`\n",
+                      encoding="utf-8")
+    corpus = harness._files_corpus([tmp_path], {})
+    graders = [{"type": "regex", "name": "finding-lands-on-the-vulnerable-workflow",
+                "target": "files",
+                "pattern": r"vulnerable\.yml:(?:8|14)\b[^\n]{0,20}jobs",
+                "match": "contains"}]
+    scored, _ = harness._grade(graders, "", [], files=corpus)
+    assert scored[0][1] is True, (
+        "the run rendered the evidence bullet; the grader must see the file")
+
+
+def test_a_files_targeted_regex_does_not_read_the_transcript(tmp_path):
+    """The two corpora stay separate in both directions. A `files` grader that
+    silently fell back to the trace would pass on the agent's prose — exactly
+    the model-phrasing dependence these anchors exist to avoid."""
+    corpus = harness._files_corpus([tmp_path], {})
+    graders = [{"type": "regex", "name": "report-only", "target": "files",
+                "pattern": r"ONLY-IN-THE-TRANSCRIPT", "match": "contains"}]
+    with pytest.raises(SystemExit) as exc:
+        harness._grade(graders, "ONLY-IN-THE-TRANSCRIPT", [], files=corpus)
+    assert exc.value.code == 2, (
+        "an empty files corpus under a files-targeted grader is a corpus that "
+        "could not be collected — not a behavioural failure")
+
+
+def test_a_trace_targeted_regex_does_not_read_the_files(tmp_path):
+    """And the other direction: the transcript grader must not be satisfiable
+    by a file the agent wrote but never showed."""
+    (tmp_path / "report.md").write_text("ONLY-IN-THE-REPORT\n", encoding="utf-8")
+    corpus = harness._files_corpus([tmp_path], {})
+    graders = [{"type": "regex", "name": "trace-only", "target": "trace",
+                "pattern": r"ONLY-IN-THE-REPORT", "match": "contains"}]
+    scored, _ = harness._grade(graders, "", [], files=corpus)
+    assert scored[0][1] is False
+
+
+def test_an_unknown_grader_target_is_not_graded_against_the_trace():
+    """`target` used to be ignored outright, so `files` silently meant `trace`.
+    Whatever the next unimplemented target is, it must stop the harness rather
+    than quietly grade the wrong corpus."""
+    graders = [{"type": "regex", "name": "bogus", "target": "sandbox",
+                "pattern": "x", "match": "contains"}]
+    with pytest.raises(SystemExit) as exc:
+        harness._grade(graders, "x", [], files="x")
+    assert exc.value.code == 2
+
+
+def test_the_files_corpus_holds_only_what_the_session_created(tmp_path):
+    """The fixture the agent was HANDED is not evidence of what it did. The
+    scaffold writes intentionally vulnerable workflow YAML naming the very files
+    the graders assert on, so grading the whole sandbox would hand several
+    graders their answer the way `evals/` and `tests/` would."""
+    fixture = tmp_path / "handed.yml"
+    fixture.write_text("on: pull_request_target\n", encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text("before\n", encoding="utf-8")
+    before = harness._snapshot([tmp_path])
+
+    (tmp_path / "written-by-the-run.md").write_text("NEW\n", encoding="utf-8")
+    edited.write_text("AFTER\n", encoding="utf-8")
+
+    corpus = harness._files_corpus([tmp_path], before)
+    assert "NEW" in corpus, "a file the session created belongs in the corpus"
+    assert "AFTER" in corpus, "a file the session rewrote belongs in the corpus"
+    assert "pull_request_target" not in corpus, (
+        "the untouched fixture is what the agent was handed, not what it produced")
+
+
+def test_the_files_corpus_names_each_file_relative_to_its_root(tmp_path):
+    """The corpus carries path headers so a grader can anchor on the file a
+    finding landed in. They must be the paths the run used, not the harness's
+    temp directory, which changes every run."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "ci-secure-report-abc.md").write_text("x\n", encoding="utf-8")
+    corpus = harness._files_corpus([tmp_path], {})
+    assert "sub/ci-secure-report-abc.md" in corpus
+    assert str(tmp_path) not in corpus
+
+
+def test_the_agent_writes_its_report_where_the_harness_can_read_it(tmp_path):
+    """SKILL.md line 194 renders to `${TMPDIR:-/tmp}/ci-secure-report-<slug>.md`.
+    Pointing TMPDIR at a directory the harness owns is what makes collecting the
+    report a contract rather than a guess at where it landed."""
+    env = harness._env(tmp_path)
+    assert env["TMPDIR"] == str(tmp_path)
+
+
+def test_skill_md_still_renders_its_report_under_tmpdir():
+    """The other half of that contract, and the half that can rot silently.
+
+    Collecting the report works only because SKILL.md keys its output paths to
+    `${TMPDIR:-/tmp}`. If that ever becomes a fixed `/tmp` or a path under the
+    repository, the harness would go on collecting an empty directory — and an
+    empty corpus fails every `files` grader as though the skill had regressed.
+    """
+    skill = (harness._SKILL / "SKILL.md").read_text(encoding="utf-8")
+    for artifact in ("ci-secure-findings-", "ci-secure-report-"):
+        assert f'"${{TMPDIR:-/tmp}}/{artifact}' in skill, (
+            f"SKILL.md no longer writes {artifact}* under TMPDIR; the eval "
+            "harness collects the session's output from there")
+
+
+def test_the_report_the_engine_renders_satisfies_the_graders_anchored_on_it(tmp_path):
+    """End to end over everything but the model.
+
+    Scaffold a real fixture, run the real engine the way SKILL.md tells the
+    agent to — output under TMPDIR — and check that the corpus the harness
+    would build satisfies the case's own `files` grader. This is what failed in
+    CI: the assertion was true of the run's output the whole time, and the
+    harness was reading somewhere else.
+    """
+    import subprocess as sp
+    import yaml
+
+    case = harness._EVALS / "pwn-request"
+    sandbox, artifacts = tmp_path / "repo", tmp_path / "out"
+    sandbox.mkdir()
+    artifacts.mkdir()
+    harness._scaffold(case, sandbox)
+    before = harness._snapshot([sandbox, artifacts])
+
+    scripts = harness._SKILL / "scripts"
+    findings = artifacts / "ci-secure-findings-deadbeef.json"
+    r = sp.run([sys.executable, str(scripts / "scan.py"), "--root", str(sandbox),
+                "--gh-impostor", "off"], capture_output=True, text=True,
+               env=harness._env(artifacts))
+    assert r.returncode == 0, r.stderr[-400:]
+    findings.write_text(r.stdout, encoding="utf-8")
+    r = sp.run([sys.executable, str(scripts / "report.py"), "--in", str(findings),
+                "--out", str(artifacts / "ci-secure-report-deadbeef.md")],
+               capture_output=True, text=True, env=harness._env(artifacts))
+    assert r.returncode == 0, r.stderr[-400:]
+
+    corpus = harness._files_corpus([sandbox, artifacts], before)
+    spec = yaml.safe_load((case / "case.yaml").read_text(encoding="utf-8"))
+    graders = [g for g in spec["graders"]
+               if g.get("type") == "regex" and g.get("target") == "files"]
+    assert graders, "pwn-request no longer has a files-targeted grader to check"
+    scored, _ = harness._grade(graders, "", [], files=corpus)
+    for name, passed, detail in scored:
+        assert passed, f"{name} does not match the report the engine renders ({detail})"
+
+    # The fixture FILES stay out. Their content still appears, quoted back by
+    # the engine's own evidence lines — that is the scanner's output, which is
+    # exactly what the corpus is for, and it is why the exclusion is checked on
+    # the corpus's file headers rather than on the text.
+    assert "=== .github/workflows/vulnerable.yml ===" not in corpus, (
+        "the fixture the agent was handed must not enter the graded corpus")
+    assert "=== ci-secure-report-deadbeef.md ===" in corpus
