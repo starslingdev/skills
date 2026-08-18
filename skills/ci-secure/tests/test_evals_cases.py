@@ -613,6 +613,93 @@ def test_allowed_tools_name_tools_the_runner_can_actually_grant(
         "it does not recognise are dropped and reported as an ungranted tool")
 
 
+def _engine_output_for(case_dir: Path, tmp: Path) -> str:
+    """Scaffold the case's fixture and return what the engine actually emits:
+    ``run.py``'s stdout followed by the rendered report. Both reach the
+    transcript through tool results on the calls ``SKILL.md`` mandates."""
+    import subprocess
+
+    sandbox = tmp / case_dir.name
+    sandbox.mkdir(parents=True)
+    scaffold = _run_scaffold(case_dir, sandbox)
+    assert scaffold.returncode == 0, scaffold.stderr
+
+    scripts = _SKILL / "scripts"
+    findings = sandbox / "findings.json"
+    run = subprocess.run(
+        ["python3", str(scripts / "run.py"), "--root", str(sandbox),
+         "--out", str(findings), "--gh-impostor", "off"],
+        capture_output=True, text=True, cwd=str(sandbox), timeout=120,
+    )
+    assert run.returncode == 0, run.stderr
+    report = subprocess.run(
+        ["python3", str(scripts / "report.py"), "--in", str(findings)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert report.returncode == 0, report.stderr
+    return run.stdout + "\n" + report.stdout
+
+
+@pytest.mark.parametrize("case_dir", _case_dirs(), ids=lambda p: p.name)
+def test_every_case_anchors_on_output_the_agent_could_not_have_written(
+    case_dir: Path, tmp_path: Path,
+) -> None:
+    """Each case needs at least one grader that only a COMPLETED engine run can
+    satisfy -- matching the engine's real output while matching nothing the
+    skill ships.
+
+    ``tool_used`` cannot be that grader. It sees a Bash command that mentioned
+    ``run.py``; a command that mentioned it and exited 1 looks identical. And a
+    banner regex is not automatically it either: the banner's *format* is
+    documented in ``SKILL.md``, so on a fixture with one finding an agent that
+    eyeballed the YAML can write the count itself. What it cannot invent is the
+    engine's own serialization -- ``run.py`` prints its group list as a JSON
+    array of string-sorted ids, and the report renders occurrences at lines only
+    the scanner computed.
+
+    Without this, a scanner that crashed and an agent that guessed well score
+    identically, which is the failure mode the whole suite exists to rule out."""
+    produced = _engine_output_for(case_dir, tmp_path)
+
+    # Everything the agent can reach WITHOUT a working engine: the skill's own
+    # shipped text, plus the fixture workflows it was handed -- both as raw
+    # content and as `grep -n` renders them, since `path:lineno:text` is how a
+    # file:line lands in a transcript. This is what disqualifies the
+    # occurrence-line graders from counting as completion anchors: on an
+    # 11-line fixture, `ci.yml:11` is one grep away and says nothing about
+    # whether the scanner ever finished.
+    reachable = [_agent_readable_text()]
+    slug = re.search(r"^FIXTURE_SLUG=(\S+)",
+                     (case_dir / "scaffold.sh").read_text(encoding="utf-8"),
+                     flags=re.M).group(1)
+    for fixture in sorted(
+        (_EVALS / "files" / slug / "dot-github" / "workflows").glob("*.yml.fixture")
+    ):
+        name = fixture.name[: -len(".fixture")]
+        body = fixture.read_text(encoding="utf-8")
+        reachable.append(body)
+        for lineno, line in enumerate(body.splitlines(), start=1):
+            for path in (name, f".github/workflows/{name}"):
+                reachable.append(f"{path}:{lineno}:{line}")
+                reachable.append(f"{path}:{lineno} {line}")
+    corpus = "\n".join(reachable)
+
+    anchors = [
+        g["name"] for g in _graders(_load(case_dir))
+        if g.get("type") == "regex"
+        and g.get("target") == "trace"
+        and g.get("match") != "not_contains"
+        and re.search(g["pattern"], produced)
+        and not re.search(g["pattern"], corpus)
+    ]
+    assert anchors, (
+        f"{case_dir.name} has no grader that a completed engine run satisfies "
+        "and a failed one does not. Every positive trace regex here either "
+        "fails to match the engine's real output or is a string the skill "
+        "already ships. Anchor one on run.py's printed group list or on a "
+        "rendered occurrence line.")
+
+
 def test_no_stray_case_files_among_the_fixtures() -> None:
     """Any file named ``case.yaml`` or ``prompt.md`` anywhere below ``evals/``
     is picked up as a case. The fixture trees under ``evals/files/`` are shared

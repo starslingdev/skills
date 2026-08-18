@@ -182,7 +182,16 @@ Verified, and re-checkable with `python3 -m pytest skills/ci-secure/tests/test_e
   `target`/`focus`, JavaScript-legal regex flags, patterns that compile,
   `min`/`max` pairs that are satisfiable;
 - no grader relies on a known trap (unscored `Skill` grader, unsatisfiable
-  `max: 0`, vacuous trace regex);
+  `max: 0`, vacuous trace regex, untargeted regex, a count that matches inside a
+  larger number, a negative that matches its own declaration, an
+  ungrantable `allowed_tools` entry);
+- every case carries at least one grader that a *completed* engine run
+  satisfies and a failed one does not — matching `run.py`'s or `report.py`'s
+  real output on that fixture while matching neither the skill's shipped text
+  nor the fixture as `grep -n` would render it. `tool_used` cannot serve as
+  that anchor: a Bash command that mentioned `run.py` and exited 1 looks
+  identical to one that succeeded. The test scaffolds each fixture and runs the
+  real engine, so it also fails if the fixtures drift;
 - every referenced scaffold, fixture directory and `plugins:` path exists and
   resolves where the case says it does;
 - no stray `case.yaml` / `prompt.md` under `files/`, which would be silently
@@ -229,7 +238,7 @@ off a real run of `run.py` and `report.py` against these fixtures, not assumed.
 - whether the `llm` graders' rubrics discriminate in practice, and whether they
   also pass in the no-plugin arm. All seven are `focus: trace` and none is
   covered by the vacuity rule, which filters on `type == "regex"` — they are 7
-  of the 44 graders and they carry every prose-quality assertion in the suite,
+  of the 45 graders and they carry every prose-quality assertion in the suite,
   so the first real run should be read grader-by-grader, not as one score;
 - that the harness accepts `plugins: ["../.."]` as a loadable plugin. There is
   no `plugin.json` or `.claude-plugin/` anywhere in this repository;

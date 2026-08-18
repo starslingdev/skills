@@ -117,7 +117,11 @@ entries are dated (UTC). Format loosely follows
   matched inside a longer number — `0 critical findings` is contained in `10
   critical findings`, so the zero-findings case passed under the one regression
   it exists to catch. `allowed_tools` entries are now checked against the names
-  the runner can actually grant.
+  the runner can actually grant. And every case must carry an anchor that a
+  *completed* engine run satisfies and a failed one does not: `tool_used` sees
+  only that a command mentioned `run.py`, and an occurrence line on a short
+  fixture is one `grep -n` away, so `template-injection` gains the engine's own
+  printed group list alongside them.
 
 - **2026-08-17** — **A finding whose job sits behind a security gate that
   cannot work now says so.** Previously every gate got the same sentence —

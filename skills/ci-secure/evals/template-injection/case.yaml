@@ -73,11 +73,28 @@ graders:
     pattern: 'ci\.yml[^\n]{0,30}?\b11\b'
     match: contains
 
-  # The engine-produced half of the same expectation. `tool_used` above shows a
-  # Bash command that MENTIONED run.py, which a failed invocation also does; the
-  # renderer's pre-drawn banner shows the engine ran to completion AND agreed on
-  # the count, and there is no path to this string other than a real render of
-  # this run. Ground truth: `1 critical finding  ▏1 of 10 vectors hit▕`.
+  # The engine-completion anchor, and the only grader in this case a failed
+  # scanner cannot satisfy. `tool_used` above sees a Bash command that MENTIONED
+  # run.py -- one that mentioned it and exited 1 looks identical -- and the
+  # occurrence line above is one `grep -n` away from an agent eyeballing an
+  # 11-line fixture. What neither produces is the engine's own serialization:
+  # run.py prints its group list to stdout as a JSON array of string-sorted ids.
+  #
+  # The closing `"]` is load-bearing. SKILL.md:104 carries `["P14.10", "P14.9"]`
+  # as a worked example, so a pattern ending at the id would be a quotation from
+  # the skill; requiring the bracket immediately after makes it a single-group
+  # result, which only this fixture's run produces.
+  - type: regex
+    name: engine-group-list-is-exactly-p14-10
+    target: trace
+    pattern: '\["P14\.10"\]'
+    match: contains
+
+  # The renderer's pre-drawn banner. Weaker than the group list and kept as
+  # corroboration rather than proof: the banner's FORMAT is documented in
+  # SKILL.md, so on a one-finding fixture an agent could write the count itself.
+  # It earns its place by pinning the count the renderer computed against the
+  # finding the case asserts, not by proving the engine ran.
   - type: regex
     name: banner-reports-one-of-ten-vectors-hit
     target: trace
