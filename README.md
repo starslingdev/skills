@@ -150,7 +150,7 @@ fix](examples/snowflakedb-snowflake-connector-net/ci-secure-report-4a1b8ce.md),
 and [0 findings
 after](examples/snowflakedb-snowflake-connector-net/ci-secure-report-1dc7766.md).
 
-### Set up the ci-secure CI check
+### ci-secure CI check
 
 A scan says what is wrong today. The CI check runs the same engine on every
 pull request, so the findings do not come back. Paste this:
