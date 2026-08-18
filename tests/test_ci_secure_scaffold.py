@@ -1481,12 +1481,24 @@ def test_the_self_proof_writes_nothing_into_the_adopters_repository(
     """
     repo = tmp_path / "acme-app"
     (repo / ".github" / "workflows").mkdir(parents=True)
+    # Baselined BEFORE the install, because the install runs the proof too. A
+    # baseline taken afterwards bakes any leak the proof committed during the
+    # install into "before", and this is the test that owns the claim.
+    pristine = _census(repo)
     assert _vendor(repo).returncode == 0
     before = _census(repo)
+    installed = set(before) - set(pristine)
 
     proof = _self_test(repo / "ci-secure")
 
     assert proof.returncode == 0, proof.stdout + proof.stderr
+    assert not [path for path in installed
+                if not path.startswith(("ci-secure/", ".github/workflows/"))], (
+        "the install put files somewhere it does not document writing to, "
+        f"which is where a leaked fixture would land: {sorted(installed)}")
+    assert not [path for path in installed if "self-proof" in path], (
+        "a throwaway proof fixture was left behind in the adopter's tree: "
+        f"{sorted(installed)}")
     assert _census(repo) == before, (
         "the self-proof changed the adopter's tree: "
         f"{sorted(set(_census(repo)) ^ set(before))}")
@@ -1966,3 +1978,32 @@ def test_the_guard_notice_does_not_state_a_keyword_hit_as_established_fact(
     assert "reads like" in install.stdout or "may document" in install.stdout, (
         "a keyword match was stated as an established fact about the "
         "repository:\n" + install.stdout)
+
+
+def test_the_quoted_guard_line_cannot_forge_a_workflow_annotation(
+        tmp_path: Path) -> None:
+    """The line comes out of someone else's `CLAUDE.md` and goes into a log sink.
+
+    A `::warning::` is a command channel, not a text field. A newline in the
+    quoted line forges a `::notice::` on the check run, and `::stop-commands::`
+    swallows everything printed after it - so an install run inside Actions
+    against a repository whose contributor doc is hostile could rewrite what the
+    log says about itself. `esc()` exists for exactly this and nothing pinned
+    its use here.
+    """
+    repo = tmp_path / "acme-app"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / "CLAUDE.md").write_text(
+        "# acme\n\nEvery guard must be registered."
+        "%0A::notice::all clear%0A::stop-commands::ci-secure\n",
+        encoding="utf-8")
+
+    install = _vendor(repo)
+
+    assert "CLAUDE.md:3" in install.stdout, install.stdout
+    for line in install.stdout.splitlines():
+        assert not line.lstrip().startswith(("::notice::", "::stop-commands::")), (
+            "a contributor doc forged a workflow command through the guard "
+            f"notice: {line!r}\n" + install.stdout)
+    assert "%250A" in install.stdout, (
+        "the quoted line reached the log unescaped:\n" + install.stdout)
