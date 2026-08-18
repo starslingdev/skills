@@ -36,9 +36,11 @@ are not optional.
 | `Impostor-SHA check (P14.11): …` | **Assembled** from the **banner's** own impostor-check word (`ran` / `partial` / `SKIPPED` / `not recorded` — the last token of the pre-drawn line) plus the `gh_checks["P14.11"]` status/detail in `$FINDINGS` (the pin counts — "14 unique pins verified, 0 flagged", or the UNVERIFIED count on a partial — live there, NOT in any report row). On a run that did NOT fully complete, add the reason from the report's `> [!WARNING]` gh-checks blockquote (or the ⚠️ `P14.11` vector-map row). Do NOT read the pin counts off the vector-map row: when the check ran clean that row is a generic ✅ "no match" like every other clean vector and carries none of them. Always say `PARTIAL … NOT a pass` / `SKIPPED … this check did NOT run` verbatim when it did not run. |
 | `Coverage: …` | **Assembled** from the **Coverage** ROW of the provenance table at the top of the report — NOT from any sentence under the banner, where nothing of the kind is rendered. The row reads `✅ complete — every workflow file was scanned` or `⚠️ **PARTIAL** — not every workflow was fully scanned`, and on PARTIAL it does **not** say what was missed: that lives in the separate `> [!WARNING] **Incomplete coverage — …**` blockquote further down, and your line must carry it. |
 
-The extraction commands are in SKILL.md Phase 3, together with the caveat
-about matching the P14.11 id. Run them as written; do not re-derive them
-here.
+The extraction commands are in SKILL.md Phase 3. Run them as written; do not
+re-derive them here. The one to be careful with is the P14.11 vector-map row:
+the id renders in backticks with **no space before it**, so a pattern
+expecting `| ` immediately ahead of the id matches nothing and silently drops
+the line.
 
 ## The vector-map receipt format
 

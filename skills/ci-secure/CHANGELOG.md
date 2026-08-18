@@ -57,7 +57,12 @@ entries are dated (UTC). Format loosely follows
   never had, for a `run.py` argv failure.
   `references/security-facts.md` and `references/why-these-ten.md`
   gained tables of contents, which the same guidance asks for on reference files
-  over 100 lines.
+  over 100 lines. The install-time self-proof moved with the gate runbook: its
+  three outcomes, the two-fixture minimal pair, the "nothing is written into
+  your tree" guarantee and the re-prove-on-refresh rule are all in
+  `references/ci-gate.md`, while what the agent must DO on `self-proof FAILED`
+  — never report a working install, stop before the hand-over, say what is on
+  disk — stays in SKILL.md, where a rule that binds every run belongs.
 
 ### Added
 
