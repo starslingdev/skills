@@ -597,11 +597,17 @@ jobs:
       - run: echo self-proof
 """
 
-# The same workflow with the hole closed. `permissions:` declared, and a
-# CODEOWNERS entry so the other file-scoped fact passes too.
+# The same workflow with the hole closed, and NOTHING else different. The
+# green half's whole argument is minimal delta - the gate passed this workflow
+# and failed the same one with a hole in it, so the red was about the hole -
+# and any second difference is a second explanation for the green. A gate
+# wedged red on `pull_request` workflows specifically would pass a proof whose
+# control quietly switched to `push`, while blocking every pull request in the
+# adopter's repository: exactly what the control exists to exclude. Both
+# fixture trees get the same CODEOWNERS for the same reason.
 _PROOF_WORKFLOW_SAFE = """\
 name: ci-secure self-proof (throwaway fixture, not part of any repository)
-on: [push]
+on: [pull_request]
 permissions:
   contents: read
 jobs:
@@ -665,6 +671,27 @@ def _write_proof_tree(root: Path, workflow: str, codeowners: str = "") -> Path:
     return root
 
 
+def _unproven_cause(run) -> str:
+    """One sentence about WHY a proof run is unusable - only if we observed it.
+
+    "Could not run" covers an environment the engine cannot start in AND a
+    vendored copy that is structurally broken, and they want opposite remedies:
+    re-run this elsewhere, versus this copy will never work anywhere. Asserting
+    the first for both - "the usual cause is Python and PyYAML" - sends someone
+    holding a corrupt install off to change their interpreter. The engine says
+    which it is when it can; when it cannot, saying so is the honest answer.
+    """
+    if "PyYAML is required" in run.stdout + run.stderr:
+        return ("The engine needs PyYAML and could not import it here; CI "
+                "installs it.")
+    if "engine failed to run" in run.stdout:
+        return ("The engine could not start here - most often its own "
+                "requirements are missing on this machine, which CI installs.")
+    return ("The cause is not diagnosed here: the gate's own output is quoted "
+            "above, and it distinguishes an engine that cannot start on this "
+            "machine from a vendored copy that is broken everywhere.")
+
+
 def _headline(output: str) -> str:
     for line in output.splitlines():
         if "facts pass" in line:
@@ -687,12 +714,27 @@ def self_test(dest: Path) -> int:
               "prove. This copy is not a working install.")
         return 1
 
-    with tempfile.TemporaryDirectory(prefix="ci-secure-self-proof-") as tmp:
-        unsafe = _write_proof_tree(Path(tmp) / "unsafe", _PROOF_WORKFLOW_UNSAFE)
-        safe = _write_proof_tree(Path(tmp) / "safe", _PROOF_WORKFLOW_SAFE,
-                                 _PROOF_CODEOWNERS)
-        red = _run_gate(dest, unsafe)
-        green = _run_gate(dest, safe)
+    try:
+        with tempfile.TemporaryDirectory(prefix="ci-secure-self-proof-") as tmp:
+            unsafe = _write_proof_tree(Path(tmp) / "unsafe",
+                                       _PROOF_WORKFLOW_UNSAFE,
+                                       _PROOF_CODEOWNERS)
+            safe = _write_proof_tree(Path(tmp) / "safe", _PROOF_WORKFLOW_SAFE,
+                                     _PROOF_CODEOWNERS)
+            red = _run_gate(dest, unsafe)
+            green = _run_gate(dest, safe)
+    except OSError as exc:
+        # A full disk, a read-only or absent temp filesystem, a teardown race.
+        # Left to propagate this is a bare traceback and exit 1 - the code that
+        # means "the gate cannot go red, do not rely on this install" - so an
+        # environment that could not host the fixtures would be reported as a
+        # broken gate. That is the inversion the docstring above promises not
+        # to make.
+        print(f"::warning::self-proof COULD NOT RUN: the throwaway fixtures "
+              f"could not be created or cleaned up here ({exc!r}). The gate is "
+              f"installed and UNPROVEN - re-run `vendor.py --self-test {dest}` "
+              "somewhere with a usable temporary directory.")
+        return 2
 
     if red is None or green is None:
         print("::warning::self-proof COULD NOT RUN: the gate did not finish "
@@ -701,21 +743,28 @@ def self_test(dest: Path) -> int:
               f"`vendor.py --self-test {dest}` somewhere it can run.")
         return 2
 
-    expected = f"ci-secure fact failed: {PROOF_FACT}"
+    # Anchored with the separator the gate always prints after the id. An
+    # unanchored substring reintroduces a smaller version of the hole this
+    # assertion exists to close: any id the expected one is a prefix of would
+    # satisfy it, so a fact renamed upstream - the case where the proof most
+    # needs to speak up - would read as proved.
+    expected = f"ci-secure fact failed: {PROOF_FACT} -"
     if red.returncode != 0 and expected not in red.stdout:
-        # Red for a reason that is not the security check: almost always the
-        # engine, which needs Python 3.12 and PyYAML while this script needs
-        # neither. Reporting that as a successful proof is the exact vacuous
-        # pass this whole function exists to prevent.
+        # Red for a reason that is not the security check. Reporting that as a
+        # successful proof is the exact vacuous pass this whole function exists
+        # to prevent - but it is equally wrong to name a cause we have not
+        # observed. A missing PyYAML, a vendored file that no longer parses,
+        # and a `PROOF_FACT` that upstream renamed all land here and want
+        # different remedies, so the gate's own words are quoted above and the
+        # cause is only asserted when the engine says it is the engine.
         for line in (red.stdout + red.stderr).splitlines()[-20:]:
             print(f"gate| {line}")
         print("::warning::self-proof COULD NOT RUN: the gate went red on the "
               "throwaway vulnerable workflow, but not because a security fact "
               f"failed ({PROOF_FACT} was never reported), so it proves nothing "
-              "about the check. The usual cause is the engine's own "
-              "requirements - Python 3.12 and PyYAML - missing on this "
-              "machine; CI installs them. The gate is installed and UNPROVEN: "
-              f"re-run `vendor.py --self-test {dest}` where the engine can run.")
+              f"about the check. {_unproven_cause(red)} The gate is installed "
+              f"and UNPROVEN: re-run `vendor.py --self-test {dest}` once that "
+              "is resolved.")
         return 2
 
     if red.returncode == 0:
@@ -725,13 +774,30 @@ def self_test(dest: Path) -> int:
               f"fails `{PROOF_FACT}` - it declares no `permissions:` block. A "
               "gate that cannot go red is not a gate, and making this a "
               "required check would add a green tick and no protection. Do not "
-              "rely on this install; the files are on disk, so review them, or "
-              "ask ci-secure to refresh the copy.")
+              "rely on this install. The files are already on disk - including "
+              f"`{WORKFLOW_DEST}`, which runs on every pull request from the "
+              "next push - so revert them or ask ci-secure to refresh the copy "
+              "before committing anything.")
         return 1
 
     if green.returncode != 0:
-        for line in green.stdout.splitlines()[-20:]:
+        for line in (green.stdout + green.stderr).splitlines()[-20:]:
             print(f"gate| {line}")
+        if "ci-secure fact failed:" not in green.stdout:
+            # The same classifier the red half gets, for the same reason. A red
+            # on the clean fixture that is not a failed fact - a crashed
+            # engine, an unscannable file, an outcome the gate could not
+            # classify - says nothing about whether this gate reds
+            # indiscriminately, and convicting a working install on it would
+            # send the adopter away from a gate that was never disproved.
+            print("::warning::self-proof COULD NOT RUN: the gate went red on "
+                  "the throwaway workflow with the hole CLOSED, but not "
+                  "because a security fact failed, so it says nothing about "
+                  f"whether this gate reds indiscriminately. "
+                  f"{_unproven_cause(green)} The gate is installed and "
+                  f"UNPROVEN: re-run `vendor.py --self-test {dest}` once that "
+                  "is resolved.")
+            return 2
         print("::error::self-proof FAILED: the gate went red on the throwaway "
               "workflow with the hole CLOSED, so its red on the vulnerable one "
               "proves nothing - a gate wedged red reds on everything, and "
@@ -748,7 +814,7 @@ def self_test(dest: Path) -> int:
     return 0
 
 
-def report_on_this_repo(dest: Path, repo: Path) -> None:
+def report_on_this_repo(dest: Path, repo: Path, proved: int = 0) -> None:
     """Run the installed gate on the adopter's own tree and say what it found.
 
     Read-only, and informational only: this NEVER decides whether the install
@@ -756,7 +822,29 @@ def report_on_this_repo(dest: Path, repo: Path) -> None:
     three on its first run, which is what `--advisory` is for. What the adopter
     must not be left guessing at is which of the two they are looking at when
     the check first appears on a pull request.
+
+    `proved` is what the self-proof just concluded about this gate, and it
+    gates this whole section, because a verdict is only worth as much as the
+    thing that produced it. A gate that FAILED its proof reports every
+    repository the way its defect dictates - a permanently-green one calls this
+    tree clean - and printing that under the failure reads as "the gate is
+    broken, and also your code is fine". A gate that could not run here reds on
+    this tree for that same local reason, and the integrity sentence below
+    would then promise a RED first CI run over something CI does not have.
+    Neither is an observation about the adopter's code, so neither is offered
+    as one.
     """
+    if proved == 1:
+        print("Not reporting what this gate makes of your code: it just failed "
+              "its own proof, so its verdict on any repository - including a "
+              "clean bill of health - is worth exactly nothing.")
+        return
+    if proved == 2:
+        print("What the gate will say about your code is NOT KNOWN YET: the "
+              "proof could not run on this machine, so a run against your tree "
+              "here would fail for that same local reason and say nothing "
+              "about CI.")
+        return
     run = _run_gate(dest, repo)
     if run is None:
         print("::warning::the gate could not be run against this repository "
@@ -765,6 +853,20 @@ def report_on_this_repo(dest: Path, repo: Path) -> None:
         return
     reds = [line.split("::error::", 1)[1] for line in run.stdout.splitlines()
             if line.startswith("::error::")]
+    if run.returncode != 0 and not reds:
+        # A crash is not a clean scan. The whole classifier below is built from
+        # `::error::` lines on stdout, and a gate that dies before it prints
+        # one - an unparseable vendored file, an interpreter that cannot load
+        # it, a kill on a large repository - leaves an empty red list that
+        # renders as a repository with nothing to block. That is the same false
+        # reassurance this change exists to remove, one level further in.
+        for line in (run.stdout + run.stderr).splitlines()[-20:]:
+            print(f"gate| {line}")
+        print(f"::warning::the gate exited {run.returncode} on this repository "
+              "and did not report a single finding, so the scan of your code "
+              "produced no usable result. Its own output is above. What it "
+              "will say about your code is not known yet.")
+        return
     # `--advisory` downgrades failed FACTS and nothing else. Every other red -
     # a crashed engine, a workflow that could not be scanned, a dropped match,
     # an outcome the gate cannot classify - survives the ramp, because a ramp
@@ -812,8 +914,16 @@ def report_on_this_repo(dest: Path, repo: Path) -> None:
 _GUARD_DOCS = ("CLAUDE.md", "AGENTS.md", "CONTRIBUTING.md",
                ".github/CONTRIBUTING.md", "docs/CONTRIBUTING.md")
 _GUARD_DOC_BYTES = 400_000
+# A contributor doc is adopter-controlled input, so the pattern has to be safe
+# on any of it. `guard[\w.:-]*` next to `[^\n]{0,60}` let the two quantifiers
+# compete for the same characters, which backtracks quadratically: one 400 KB
+# line of the right shape took three minutes to scan, five doc paths of it a
+# quarter of an hour, with no timeout and nothing on screen. `\w*` cannot
+# overlap the separator run in the same way, and absurd lines are skipped
+# outright below - a convention nobody could read is not one to quote.
+_GUARD_LINE_CHARS = 2_000
 _GUARD_CONVENTION = re.compile(
-    r"guard[\w.:-]*\b[^\n]{0,60}\bregist"      # "every guard ... registered"
+    r"guard\w*\b[^\n]{0,60}\bregist"           # "every guard ... registered"
     r"|regist\w*\b[^\n]{0,60}\bguard\b"        # "register ... guard"
     r"|\bguard:[a-z][\w-]*",                   # a `guard:verify`-style task
     re.IGNORECASE)
@@ -832,8 +942,16 @@ def guard_convention_notice(repo: Path) -> list[str]:
         except OSError:                          # pragma: no cover - defensive
             continue
         for number, line in enumerate(text.splitlines(), 1):
+            if len(line) > _GUARD_LINE_CHARS:
+                continue
             if _GUARD_CONVENTION.search(line):
-                notices.append(f"{rel}:{number}: {esc(line.strip()[:160])}")
+                quote = line.strip()
+                # A quote cut mid-word, presented as the whole line, defeats
+                # the bargain this check is sold on: a false hit is supposed to
+                # cost one glance, which it only does if the glance sees what
+                # the file actually says.
+                clipped = quote[:160] + ("..." if len(quote) > 160 else "")
+                notices.append(f"{rel}:{number}: {esc(clipped)}")
                 break                            # one quote per file is enough
     return notices
 
@@ -856,7 +974,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_test:
         dest = Path(args.self_test).resolve()
         outcome = self_test(dest)
-        report_on_this_repo(dest, dest.parent)
+        report_on_this_repo(dest, dest.parent, outcome)
         return outcome
 
     repo = Path(args.into).resolve()
@@ -864,9 +982,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"vendored ci-secure into {dest}")
 
     for notice in guard_convention_notice(repo):
-        print(f"::warning::this repository documents a guard-registration "
-              f"convention and the ci-secure gate has NOT been registered "
-              f"with it - {notice}")
+        # Hedged on purpose, because the evidence is a keyword match on one
+        # line. "This repository documents X" is a confident claim about
+        # someone's project, and the same match fires on a line saying they
+        # removed the convention. The quoted line is what settles it, so the
+        # sentence points at the line rather than asserting over it.
+        print(f"::warning::a line here reads like a guard-registration "
+              f"convention, and if it is one, the ci-secure gate has NOT been "
+              f"registered with it - {notice}")
 
     # The proof runs on a refresh too, and there is no flag to skip it. A
     # refresh replaces the engine, the gate and the rule, so it is exactly a
@@ -874,7 +997,7 @@ def main(argv: list[str] | None = None) -> int:
     # turned off is one that gets turned off in the script that automates the
     # install, which is where it was most needed.
     outcome = self_test(dest)
-    report_on_this_repo(dest, repo)
+    report_on_this_repo(dest, repo, outcome)
     # Files are written either way, and the exit code says which of the two
     # things happened: 0 the gate was proved able to fail, 1 it was not. An
     # environment that could not run the proof (2 above) is a warning, not a

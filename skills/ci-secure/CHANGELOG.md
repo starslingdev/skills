@@ -37,7 +37,13 @@ entries are dated (UTC). Format loosely follows
   drift check would then red on forever. The report of what the gate makes of
   the adopter's real tree keeps the two kinds of red apart: failed facts, which
   the shipped `--advisory` reports without blocking, and scan-integrity
-  failures, which survive the ramp and make the very first run red.
+  failures, which survive the ramp and make the very first run red. That report
+  is withheld entirely unless the proof passed — a verdict from a gate that
+  just failed its own proof, or that could not run at all, is not an
+  observation about the adopter's code and is not offered as one — and a gate
+  that exits non-zero on their tree without naming a single finding is reported
+  as a scan that produced no usable result, never as a repository with nothing
+  to block.
 - **2026-08-17** — **An install into a repository that documents a
   guard-registration convention says the new gate is not registered with it.**
   A repository keeping a register of its build-breaking checks — a harness that
