@@ -162,7 +162,11 @@ update the ci-secure skill, then install ci-secure as a CI check in this repo.
 
 It is **vendored, never fetched**: the engine, the gate and the licence are
 copied into your repository, so the code judging your PRs is code you can read
-and it cannot change underneath you. Because that writes into your working
+and it cannot change underneath you. It is two files plus the engine:
+[`scaffold/gate.py`](skills/ci-secure/scaffold/gate.py), which decides pass or
+fail, and [`scaffold/ci-secure.yml`](skills/ci-secure/scaffold/ci-secure.yml),
+the workflow that runs it. [`scripts/vendor.py`](skills/ci-secure/scripts/vendor.py)
+is what copies them in. Because that writes into your working
 tree, the skill says exactly what it will write and asks for a yes first, works
 on a branch as one setup PR, and never pushes without asking.
 
