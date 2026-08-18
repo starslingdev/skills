@@ -53,6 +53,10 @@ _FORBIDDEN_FILE_NAMES = {
     "loop-summary.schema.json",
     "draft_detector.py",
     "aggregate_lessons.py",
+    # The behavioral-eval harness. It drives a real, billed agent session per
+    # case, so it must never reach an end user's install and must never be
+    # collected by the ordinary `pytest` run.
+    "run_skill_evals.py",
 }
 
 # Directory names that mark the same thing.

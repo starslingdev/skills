@@ -322,7 +322,7 @@ def test_the_agent_readable_corpus_spans_more_than_the_prose_files() -> None:
     for literal, why in (
         ("ran: no sha-pinned actions found", "scripts/scan.py"),
         ("Critical exploit-chain checks only", "scripts/report.py"),
-        ("This suite has never been executed", "evals/README.md"),
+        ("These cases run, on a harness that is not", "evals/README.md"),
     ):
         assert literal in corpus, (
             f"the agent-readable corpus no longer reaches {why} -- the vacuity "

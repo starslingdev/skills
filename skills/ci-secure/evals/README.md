@@ -6,17 +6,37 @@ agent-facing contract in `SKILL.md`, which no other test in this repository
 covers: `pytest` exercises the deterministic scanner underneath the skill, not
 the behavior the skill promises on top of it.
 
-> ## This suite has never been executed
+> ## These cases run, on a harness that is not `claude plugin eval`
 >
 > `claude plugin eval` is in early access and is not enabled on the machine
 > these cases were written on — it prints ``` `plugin eval` is currently in
-> early access ``` and exits before running anything. **No case here has ever
-> produced a score.** Treat the suite as an unvalidated first draft, not as a
-> gate that is passing. What has and has not been checked is spelled out under
-> [What is verified](#what-is-verified) below; read it before quoting a result
-> from this directory.
+> early access ``` and exits before running anything. So the cases are executed
+> instead by `maintainers/ci-secure/scripts/run_skill_evals.py`, which scaffolds
+> each case, drives one headless `claude -p` session against it, and applies
+> that case's own mechanical graders. `.github/workflows/skill-evals.yml` runs
+> it on every pull request that touches this skill's contract.
+>
+> **That harness is narrower than the runner these cases were written for.** It
+> does not score `llm` graders, does not apply `execution.allowed_tools`, does
+> not run the no-plugin ablation arm, and does not honour `execution.model` or
+> the `runs: 3` each case declares. A pass under it is weaker than a pass under
+> `claude plugin eval` — read the harness's own docstring for the current list
+> before quoting a result from this directory.
 
 ## Running them
+
+```bash
+# from the repository root — the harness that actually runs today
+python3 maintainers/ci-secure/scripts/run_skill_evals.py --case clean-repo
+```
+
+Exit 0 means every scored grader passed; 1 means a case ran and failed one; 2
+means the harness could not run at all, which is never a pass.
+
+### The runner these cases were written for
+
+Once `claude plugin eval` is enabled, this is the invocation the case files are
+shaped around:
 
 ```bash
 # from the repository root

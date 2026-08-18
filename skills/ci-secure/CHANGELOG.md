@@ -13,6 +13,19 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-18** — **The behavioral eval cases are executed, and a session that
+  never started no longer reads as a skill regression.** The five cases in
+  `evals/` were written for `claude plugin eval`, which is gated behind early
+  access, so nothing ran them and `evals/README.md` opened by saying so. They
+  now run on every pull request that touches this skill's contract, driven by a
+  maintainer-side harness. The README records what that harness does *not* do —
+  `llm` graders are reported rather than scored, and the cases' `allowed_tools`,
+  ablation arm, model pin and run count are not yet applied — so a pass under it
+  is not quoted as a pass under the runner the cases were written for. The
+  harness mounts a copy of the skill with `evals/` and `tests/` removed, closing
+  the free-pass half of the answer-key risk the vacuity rule documents: a graded
+  session can no longer read the expected strings out of the case files.
+
 - **2026-08-17** — **A partial checkout no longer reports as complete
   coverage.** Every detector reasons about the files it can see on disk, so a
   `git sparse-checkout`, a partial clone, or a locally-deleted workflow was
