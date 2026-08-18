@@ -1420,24 +1420,26 @@ def test_p147_silent_when_setup_node_has_no_cache_input(tmp_path: Path) -> None:
 
 
 # -----------------------------------------------------------------------------
-# Eval substrate: the evals/ fixtures must actually produce what evals.json
-# claims, or every eval scores against a fiction.
+# Eval substrate: the evals/ fixtures must actually produce what the case files
+# under evals/*/case.yaml grade on, or every eval scores against a fiction.
 # -----------------------------------------------------------------------------
 
 _EVALS = _SKILL_DIR / "evals" / "files"
 
 
 def test_eval_inject_fixture_fires_p1410() -> None:
-    """Evals 1 and 5 both assert a P14.10 finding on `inject/ci.yml`."""
+    """`template-injection` and `impostor-check-skipped` both assert a P14.10
+    finding on `inject/ci.yml`."""
     patterns = _patterns_for_file(_scan_dir(_EVALS / "inject"), "ci.yml")
     assert "P14.10" in patterns, (
-        "the inject eval fixture no longer produces the finding evals 1 and 5 "
-        f"are graded on; it produced {sorted(patterns)}"
+        "the inject eval fixture no longer produces the finding the "
+        "template-injection and impostor-check-skipped cases are graded on; "
+        f"it produced {sorted(patterns)}"
     )
 
 
 def test_eval_clean_fixture_is_actually_clean() -> None:
-    """Eval 2 grades a zero-findings run; the fixture must have none."""
+    """`clean-repo` grades a zero-findings run; the fixture must have none."""
     data = _scan_dir(_EVALS / "clean")
     assert data["findings"] == [], (
         f"the clean eval fixture now produces findings: "
@@ -1447,18 +1449,18 @@ def test_eval_clean_fixture_is_actually_clean() -> None:
 
 
 def test_eval_pwn_request_fires_only_on_the_vulnerable_workflow() -> None:
-    """Eval 3 asserts P14.9 on vulnerable.yml and silence on safe.yml."""
+    """`pwn-request` asserts P14.9 on vulnerable.yml and silence on safe.yml."""
     data = _scan_dir(_EVALS / "pwn-request")
     assert "P14.9" in _patterns_for_file(data, "vulnerable.yml")
     assert _patterns_for_file(data, "safe.yml") == set()
 
 
 def test_eval_many_findings_produces_the_exact_pattern_set() -> None:
-    """Eval 4's expected output claims "9 of the 10 vectors".
+    """`many-findings` asserts that 9 of the 10 vectors are hit.
 
     Asserted as exact set equality, not a floor: a drifted fixture that
     produced six would still satisfy "at least six distinct groups" while the
-    eval's stated expectation quietly became false.
+    case's stated expectation quietly became false.
     """
     patterns = _all_patterns(_scan_dir(_EVALS / "many-findings"))
     assert patterns == {

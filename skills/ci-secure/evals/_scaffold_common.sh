@@ -26,6 +26,36 @@ set -euo pipefail
 
 : "${FIXTURE_SLUG:?scaffold: the calling scaffold.sh must set FIXTURE_SLUG}"
 
+# REFUSE ANY WORKING DIRECTORY THAT IS NOT AN EMPTY EVAL SANDBOX.
+#
+# What this script does next -- overwrite `.github/workflows/` with deliberately
+# vulnerable YAML and commit it -- is correct in the sandbox the harness hands
+# it and destructive everywhere else. Run by hand from a real checkout (the
+# obvious thing to do while authoring a case) it replaces that repository's live
+# CI workflow with a `pull_request_target` template-injection workflow and
+# commits the result to the current branch: the exact tracked-vulnerable-
+# workflow condition the `dot-github/*.yml.fixture` cloak exists to prevent.
+#
+# Nothing downstream notices on its own. `git init` on an existing repository is
+# a silent re-init, `cp` overwrites without complaint, and
+# `tests/test_ci_secure_install_surface.py` only inspects paths under
+# `skills/ci-secure/`, so a repository-root clobber is invisible to it. The
+# refusal has to happen here, before the first `cp`.
+# The test is EMPTINESS, not "am I inside a git repository". The harness's
+# sandbox working directory already sits inside a repository one level up (see
+# the `git init` note below), so a `git rev-parse --is-inside-work-tree` guard
+# would refuse every legitimate run. An empty directory is the one condition
+# that is both true of the sandbox and false of any checkout worth protecting.
+if [ -n "$(ls -A . 2>/dev/null)" ]; then
+  echo "scaffold: refusing to run — '$PWD' is not empty." >&2
+  echo "scaffold: this script overwrites and COMMITS .github/workflows/ with" >&2
+  echo "scaffold: intentionally vulnerable workflow fixtures, which is only" >&2
+  echo "scaffold: ever safe in an empty eval sandbox. Run the suite through" >&2
+  echo "scaffold: 'claude plugin eval --scaffold' (see evals/README.md), or cd" >&2
+  echo "scaffold: to an empty directory first." >&2
+  exit 1
+fi
+
 evals_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 src="$evals_root/files/$FIXTURE_SLUG/dot-github/workflows"
 

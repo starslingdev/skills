@@ -31,7 +31,7 @@ execution:
   # Effective tools are this list intersected with the harness's read-only set,
   # plus whatever the operator grants. Bash is NOT read-only: the run needs
   # `--allow-tools Bash` or the scanner can never execute. See evals/README.md.
-  allowed_tools: [Read, Glob, Grep, Skill, Task, Agent, AskUserQuestion, TodoWrite, Bash]
+  allowed_tools: [Read, Glob, Grep, Skill, Agent, AskUserQuestion, TodoWrite, Bash]
 
 runs: 3
 
@@ -65,7 +65,23 @@ graders:
     # P14.10 at .github/workflows/ci.yml line 11. Tolerant of the report's own
     # `ci.yml:11` rendering and of prose ("ci.yml, line 11") alike, because the
     # contract fixes the fact and not the phrasing.
+    #
+    # This one is falsifiable but carries NO ablation signal, and the grader
+    # below is why it is not left to stand alone: the injection is on line 11 of
+    # an 11-line fixture, so `grep -n` over the workflow prints `ci.yml:11:` and
+    # an agent with no skill loaded, eyeballing the YAML, matches it too.
     pattern: 'ci\.yml[^\n]{0,30}?\b11\b'
+    match: contains
+
+  # The engine-produced half of the same expectation. `tool_used` above shows a
+  # Bash command that MENTIONED run.py, which a failed invocation also does; the
+  # renderer's pre-drawn banner shows the engine ran to completion AND agreed on
+  # the count, and there is no path to this string other than a real render of
+  # this run. Ground truth: `1 critical finding  ▏1 of 10 vectors hit▕`.
+  - type: regex
+    name: banner-reports-one-of-ten-vectors-hit
+    target: trace
+    pattern: '1 of 10 vectors hit'
     match: contains
 
   - type: llm
@@ -117,5 +133,9 @@ graders:
 expected_outcome: >-
   ci-secure scans the workflow and reports a template-injection finding (P14.10)
   for the untrusted ${{ github.event.pull_request.title }} expression used in a
-  run: block, with a plain-English attacker scenario. A markdown report is
-  produced only on the user's save pick. Nothing is committed or pushed.
+  run: block, with a plain-English attacker scenario, and the report carries the
+  scope-honesty line (critical exploit-chain checks only, not a comprehensive
+  audit). A markdown report is produced only on the user's save pick. Nothing is
+  committed or pushed. NOTE: the scope-honesty expectation carried over from the
+  retired evals.json and no grader here checks it -- only clean-repo's llm
+  criteria do. See "Not covered by any grader" in evals/README.md.

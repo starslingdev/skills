@@ -16,11 +16,15 @@ of any reference file the agent opened. So a ``contains`` pattern that already
 appears in the skill's own prose passes without the skill ever having done
 anything, and a ``not_contains`` pattern that appears there can never pass at
 all. Both directions collapse to one rule: a trace-targeted regex must not match
-the skill's shipped prose. This is not hypothetical -- half a dozen natural
-choices for these graders (``P14.10``, ``did NOT run``, ``No critical attack
-vectors``, ``Impostor-SHA check (P14.11): ran``) are all quotations from
-``SKILL.md``, and every one of them was replaced with a scanner-produced string
-after this test flagged it.
+the skill's shipped text. This is not hypothetical -- natural choices for these
+graders (``P14.10``, ``did NOT run``, ``Impostor-SHA check (P14.11): ran``) are
+quotations from ``SKILL.md``, and each was replaced with a scanner- or
+renderer-produced string after this test flagged it.
+
+The corpus the rule reads is defined by ``_agent_readable_sources()`` and is
+deliberately wider than the prose files -- ``scripts/*.py`` ships too, and a
+``not_contains`` grader anchored on a literal in ``scan.py`` is the silent,
+never-passing direction of the same trap.
 
 Patterns are compiled with Python's ``re`` while the harness uses JavaScript's
 ``RegExp``. The suite deliberately stays inside the syntax both accept
@@ -262,6 +266,59 @@ def test_cases_declare_the_tools_their_graders_require(case_dir: Path) -> None:
             f"in this case's allowed_tools ({sorted(declared)})")
 
 
+def _agent_readable_sources() -> list[Path]:
+    """The shipped files a run of the skill realistically puts into the trace.
+
+    Wider than ``SKILL.md`` on purpose. The ``skills`` CLI copies
+    ``skills/ci-secure/`` recursively, so the engine sources sit on disk beside
+    the ``scripts/run.py`` path ``SKILL.md`` directs the agent to resolve and
+    execute, and one ``Grep`` over the skill directory pulls any of them into the
+    transcript. Checking only the prose files is what let a ``not_contains``
+    grader be written against ``ran: no sha-pinned actions found`` -- a literal
+    in ``scripts/scan.py`` -- where it can never pass.
+
+    Two shipped surfaces are deliberately OUT of the corpus, because including
+    them would forbid the only anchors the suite has rather than improve them:
+
+    * ``tests/`` -- the oracle tests assert the renderer's exact output, so every
+      banner string is a literal there by construction. Nothing in ``SKILL.md``
+      sends the agent to them and they are not part of any audit it performs.
+    * ``evals/files/`` -- the fixture workflows ARE the input under audit. A
+      grader that pins a finding to its real ``file:line`` necessarily quotes
+      them; that is the assertion, not a leak.
+
+    Both exclusions are why the ``file:line`` graders are backed by a separate
+    renderer-produced anchor in the same case rather than standing alone."""
+    roots = [
+        _SKILL / "SKILL.md",
+        *sorted((_SKILL / "references").glob("*.md")),
+        *sorted((_SKILL / "scripts").glob("*.py")),
+        *sorted(_EVALS.glob("*.md")),
+        *sorted(_EVALS.glob("*.sh")),
+    ]
+    return [p for p in roots if p.is_file()]
+
+
+def _agent_readable_text() -> str:
+    return "\n".join(p.read_text(encoding="utf-8") for p in _agent_readable_sources())
+
+
+def test_the_agent_readable_corpus_spans_more_than_the_prose_files() -> None:
+    """Positive control for the corpus above. If it ever stops reaching the
+    engine sources or the eval documentation, the vacuity rule silently narrows
+    back to the hole this widening was written to close, every grader passes
+    again, and nothing anywhere says so."""
+    corpus = _agent_readable_text()
+    for literal, why in (
+        ("ran: no sha-pinned actions found", "scripts/scan.py"),
+        ("Critical exploit-chain checks only", "scripts/report.py"),
+        ("This suite has never been executed", "evals/README.md"),
+    ):
+        assert literal in corpus, (
+            f"the agent-readable corpus no longer reaches {why} -- the vacuity "
+            "rule is checking a narrower surface than it claims to")
+
+
 def test_no_trace_regex_matches_the_skills_own_prose() -> None:
     """The vacuity rule -- see the module docstring. A run with the skill loaded
     puts SKILL.md (and any reference file the agent opens) into the transcript,
@@ -269,10 +326,7 @@ def test_no_trace_regex_matches_the_skills_own_prose() -> None:
     nothing about behavior: ``contains`` passes for free, ``not_contains`` can
     never pass. Both are silent failures of the suite, which is why this is a
     test and not a review note."""
-    prose = "\n".join(
-        p.read_text(encoding="utf-8")
-        for p in [_SKILL / "SKILL.md", *sorted((_SKILL / "references").glob("*.md"))]
-    )
+    prose = _agent_readable_text()
     offenders = []
     for case_dir, case in _all_cases():
         for grader in _graders(case):
@@ -336,6 +390,86 @@ def test_plugins_entry_resolves_to_this_skill(case_dir: Path) -> None:
         assert (case_dir / entry).resolve() == _SKILL, (
             f"plugins entry {entry!r} resolves to {(case_dir / entry).resolve()}, "
             f"not to the skill root {_SKILL}")
+
+
+def _run_scaffold(case_dir: Path, cwd: Path):
+    """Invoke a case's ``scaffold.sh`` the way the harness does: ``bash <script>``
+    with the sandbox working directory as cwd and the harness's minimal env."""
+    import os
+    import subprocess
+
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(cwd),
+        "TMPDIR": str(cwd),
+        "TERM": "dumb",
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    return subprocess.run(
+        ["bash", str(case_dir / "scaffold.sh")],
+        cwd=str(cwd), env=env, capture_output=True, text=True, timeout=120,
+    )
+
+
+@pytest.mark.parametrize("case_dir", _case_dirs(), ids=lambda p: p.name)
+def test_scaffold_refuses_to_run_over_an_existing_checkout(
+    case_dir: Path, tmp_path: Path,
+) -> None:
+    """The scaffold's whole job is to overwrite ``.github/workflows/`` with
+    deliberately vulnerable YAML and ``git commit`` it. That is correct in an
+    empty eval sandbox and catastrophic anywhere else: run by hand from a real
+    checkout it destroys that repository's live CI workflow, replaces it with a
+    ``pull_request_target`` template-injection workflow, and commits the result
+    to the current branch -- which is exactly the tracked-vulnerable-workflow
+    condition the ``dot-github/*.yml.fixture`` cloak exists to prevent, and which
+    ``tests/test_ci_secure_install_surface.py`` cannot see because it only
+    inspects paths under ``skills/ci-secure/``.
+
+    ``git init`` on an existing repository is a silent re-init, so nothing in the
+    script's own control flow notices. The scaffold must therefore refuse the
+    unsafe cwd itself, loudly, before it copies anything."""
+    victim = tmp_path / "victim"
+    (victim / ".github" / "workflows").mkdir(parents=True)
+    live = victim / ".github" / "workflows" / "ci.yml"
+    live.write_text("name: real ci\non: push\n", encoding="utf-8")
+
+    import subprocess
+    subprocess.run(["git", "init", "-q", "."], cwd=str(victim), check=True)
+
+    done = _run_scaffold(case_dir, victim)
+
+    assert done.returncode != 0, (
+        "the scaffold ran to completion inside an existing git checkout; it "
+        "must refuse a non-empty working directory instead of overwriting it")
+    assert live.read_text(encoding="utf-8") == "name: real ci\non: push\n", (
+        "the scaffold overwrote a real workflow file outside the eval sandbox")
+    log = subprocess.run(
+        ["git", "log", "--oneline"], cwd=str(victim),
+        capture_output=True, text=True,
+    ).stdout
+    assert not log.strip(), (
+        f"the scaffold committed to a repository it did not create: {log!r}")
+
+
+@pytest.mark.parametrize("case_dir", _case_dirs(), ids=lambda p: p.name)
+def test_scaffold_still_materializes_the_tree_in_an_empty_sandbox(
+    case_dir: Path, tmp_path: Path,
+) -> None:
+    """The other side of the guard above: the refusal must be scoped to unsafe
+    working directories, not so broad that the scaffold stops working in the
+    empty sandbox every case depends on."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+
+    done = _run_scaffold(case_dir, sandbox)
+
+    assert done.returncode == 0, (
+        f"scaffold failed in an empty sandbox:\n{done.stdout}\n{done.stderr}")
+    made = sorted(p.name for p in (sandbox / ".github" / "workflows").glob("*.yml"))
+    assert made, "scaffold produced no .github/workflows/*.yml in the sandbox"
+    assert not any(p.name.endswith(".fixture") for p in
+                   (sandbox / ".github" / "workflows").iterdir()), (
+        "the cloaked .fixture suffix survived into the materialized tree")
 
 
 def test_no_stray_case_files_among_the_fixtures() -> None:

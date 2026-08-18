@@ -20,7 +20,7 @@ execution:
     workflow file each problem is in, and tell me what an attacker could do.
   max_turns: 60
   timeout_seconds: 900
-  allowed_tools: [Read, Glob, Grep, Skill, Task, Agent, AskUserQuestion, TodoWrite, Bash]
+  allowed_tools: [Read, Glob, Grep, Skill, Agent, AskUserQuestion, TodoWrite, Bash]
 
 runs: 3
 
@@ -41,29 +41,45 @@ graders:
   # run.py prints the group list to stdout -- the pattern ids present, sorted as
   # STRINGS. On this fixture that is exactly ["P14.25", "P14.9"], and the
   # string sort is the tell: P14.25 before P14.9 is an ordering a person or a
-  # model writing the ids out by hand would not produce. So this single pattern
-  # asserts the engine ran, ran on THIS fixture, and produced exactly these two
-  # groups and no others.
+  # model writing the ids out by hand would not produce. So this pattern asserts
+  # the engine ran, ran on THIS fixture, and reported those two groups
+  # adjacently. It is `contains`, so it does NOT assert exclusivity: a run that
+  # also emitted a spurious third group would still match. The engine produces
+  # exactly two here, but the grader is not what proves it.
   - type: regex
     name: engine-group-list-is-exactly-p14-25-then-p14-9
     target: trace
     pattern: 'P14\.25.{2,10}P14\.9'
     match: contains
 
+  # The positive half of the discrimination pair, and it has to be anchored as
+  # tightly as the negative below or the case grades nothing. A bare
+  # `vulnerable\.yml` was the first draft and it is free: the filename is in the
+  # workspace the scaffold just created, so any Glob, ls or Read of
+  # .github/workflows/ produces it -- as do three config-hygiene rows that fire
+  # independently of the pwn-request detector. A run with that detector deleted
+  # entirely would still have passed. The occurrence LINES are what only the
+  # engine knows: P14.9 at :8 and P14.25 at :14, each rendered by report.py with
+  # the job list after it.
   - type: regex
     name: finding-lands-on-the-vulnerable-workflow
     target: trace
-    pattern: 'vulnerable\.yml'
+    pattern: 'vulnerable\.yml:(?:8|14)\b[^\n]{0,20}jobs'
     match: contains
 
   # The negative half, and the reason this case exists. Every occurrence the
-  # skill reports is rendered as `<workflow file>:<line>`, so a `safe.yml:` with
-  # a line number after it means a finding was attributed to the file that is
-  # supposed to be clean. Merely reading or listing safe.yml does not match.
+  # skill reports is rendered as `<workflow file>:<line> — jobs: ...`, so this
+  # means a finding was attributed to the file that is supposed to be clean.
+  #
+  # The `jobs` tail is load-bearing rather than decoration. A bare
+  # `safe\.yml:\d+` also matches the Grep tool's own `path:line:text` output,
+  # and this case's sibling llm grader actively rewards the agent for showing it
+  # inspected safe.yml -- so the two graders pulled against each other and a
+  # correct run could fail this one on a `grep -n` it was praised for.
   - type: regex
     name: safe-workflow-produces-no-finding
     target: trace
-    pattern: 'safe\.yml:\d+'
+    pattern: 'safe\.yml:\d+[^\n]{0,20}jobs'
     match: not_contains
 
   - type: llm
@@ -116,6 +132,8 @@ graders:
 
 expected_outcome: >-
   ci-secure reports P14.9 (fork code executed with privileges) on
-  vulnerable.yml -- pull_request_target + checkout of the PR head + execution --
-  and reports NOTHING on safe.yml, which runs the same build under plain
-  pull_request. The fix recipe recommends the pull_request trigger split.
+  vulnerable.yml -- pull_request_target + checkout of the PR head + execution,
+  at line 8 -- and reports NOTHING on safe.yml, which runs the same build under
+  plain pull_request. The engine also reports P14.25 on vulnerable.yml at line
+  14 on this fixture; two groups on the one file is the expected result, not a
+  regression. The fix recipe recommends the pull_request trigger split.

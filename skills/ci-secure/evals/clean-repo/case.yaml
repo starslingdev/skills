@@ -18,7 +18,7 @@ execution:
     Run a CI security audit on the GitHub Actions workflows in this repository.
   max_turns: 60
   timeout_seconds: 900
-  allowed_tools: [Read, Glob, Grep, Skill, Task, Agent, AskUserQuestion, TodoWrite, Bash]
+  allowed_tools: [Read, Glob, Grep, Skill, Agent, AskUserQuestion, TodoWrite, Bash]
 
 runs: 3
 
@@ -58,16 +58,21 @@ graders:
   # alone. Whether it RAN here depends on the operator's machine (an
   # authenticated `gh` runs it; a bare CI runner does not), so the assertion is
   # that its state is reported at all -- never that it came back a particular
-  # way. The alternation covers all four states scan.py can record, using its
-  # own wording for each. The obvious pattern here -- `impostor check ran` --
-  # is a quotation from SKILL.md's worked example, so it would have passed
-  # whether or not the check was ever mentioned; the vacuity test in
-  # tests/test_evals_cases.py caught exactly that and is why this reads the way
-  # it does.
+  # way, since the sandbox has no credentials and the state is not ours to fix.
+  #
+  # Two anchors were rejected before this one, both by the vacuity test in
+  # tests/test_evals_cases.py: `impostor check ran` is a quotation from
+  # SKILL.md's worked banner (SKILL.md:204), and the four raw status strings
+  # scan.py records -- `no sha-pinned actions found` and friends -- are literals
+  # in scripts/scan.py, which ships inside the skill and which one Grep over the
+  # skill directory puts into the trace. What is left is the composition: the
+  # vector count and the impostor word are written by two separate f-strings in
+  # report.py and only ever appear on one line in a real render, with THIS run's
+  # count in front. Nothing on disk contains it.
   - type: regex
     name: impostor-check-state-is-reported
     target: trace
-    pattern: 'unique pin\(s\) verified|no sha-pinned actions found|\(network-gated check did NOT run\)|impostor check not recorded'
+    pattern: '0 of 10 vectors hit▕[^\n]{0,40}· impostor check'
     match: contains
 
   - type: llm

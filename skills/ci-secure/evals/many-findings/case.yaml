@@ -23,7 +23,7 @@ execution:
   # cap is a run error and would depress the score for the wrong reason.
   max_turns: 90
   timeout_seconds: 1500
-  allowed_tools: [Read, Glob, Grep, Skill, Task, Agent, AskUserQuestion, TodoWrite, Bash]
+  allowed_tools: [Read, Glob, Grep, Skill, Agent, AskUserQuestion, TodoWrite, Bash]
 
 runs: 3
 
@@ -77,9 +77,12 @@ graders:
       multiple-choice question it asks.
 
       PASS requires:
-        - a numbered row for every finding group found (there are nine here),
-          each row identifying the finding -- a title, a severity, or a catalog
-          id -- so the user can pick it by number;
+        - a numbered row for every finding GROUP found. There are nine groups
+          here; note that the banner in the same transcript counts individual
+          findings and reads "10 critical findings", which is not a
+          contradiction -- one group holds two occurrences. Grade the group
+          rows, not the banner. Each row must identify the finding -- a title, a
+          severity, or a catalog id -- so the user can pick it by number;
         - nothing truncated, capped, ranked-and-cut, or summarized as "and
           others"; a row for every group, including any marked dormant.
 
@@ -131,4 +134,8 @@ expected_outcome: >-
   P14.19, P14.24, P14.25); the tenth, P14.11, is network-gated. At the
   finding-selection step the skill presents a full numbered free-text table of
   every group -- never a capped 4-option widget -- and dispatches one fix
-  subagent per selected group.
+  subagent per selected group, each constrained to its own finding's
+  workflow_file and editing nothing outside it. NOTE: that last containment
+  expectation carried over from the retired evals.json and no grader here checks
+  it -- the case stops at the selection table. See "Not covered by any grader"
+  in evals/README.md.

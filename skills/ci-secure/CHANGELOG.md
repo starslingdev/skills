@@ -80,9 +80,9 @@ entries are dated (UTC). Format loosely follows
   harness means writing into files the installer knows nothing about.
 - **2026-08-17** — **The five behavioral eval cases are now runnable instead of
   being documentation.** `evals/evals.json` described five scenarios in prose
-  and nothing executed them; the only test that referenced them said so in its
-  own docstring, pinning the deterministic scanner output underneath because
-  the behavioral layer could not run. So a regression in the agent-facing
+  and nothing executed them; the tests that referenced them (`test_loop_evals.py`
+  and `test_scan.py`) said so in their own docstrings, pinning the deterministic
+  scanner output underneath because the behavioral layer could not run. So a regression in the agent-facing
   contract — the engine skipped in favour of eyeballing YAML, a skipped
   network-gated check rendered as a pass, the complete finding table collapsing
   into a capped four-option widget — was caught by nothing. The five cases are
@@ -99,12 +99,20 @@ entries are dated (UTC). Format loosely follows
   access and gated on the authoring machine — and `evals/README.md` states
   exactly what is and is not verified. `tests/test_evals_cases.py` validates
   everything checkable without the runner, including a vacuity guard that fails
-  any trace regex matching the skill's own prose (four graders were re-anchored
-  after it caught them) and guards for the two schema traps that fail silently:
+  any trace regex matching text the skill itself ships — `SKILL.md`,
+  `references/`, `scripts/*.py` and `evals/README.md`, since the installer
+  copies all of them and one `Grep` puts any into the transcript (six graders
+  were re-anchored after it caught them, three of them `scan.py` literals a
+  `not_contains` could never have passed against) — and guards for the two
+  schema traps that fail silently:
   a `Skill` `tool_used` grader demoted to unscored without `arm: both`, and
   `max: 0` without `min: 0`. `evals/results/` is gitignored and now blocked from
   the install surface by `tests/test_ci_secure_install_surface.py`, since the
-  installer honours no ignore file.
+  installer honours no ignore file. The shared scaffold now refuses any working
+  directory that is not empty: run by hand from a checkout it would otherwise
+  overwrite that repository's live `.github/workflows/` with the vulnerable
+  fixtures and commit them to the current branch.
+
 - **2026-08-17** — **A finding whose job sits behind a security gate that
   cannot work now says so.** Previously every gate got the same sentence —
   *"the finding stands only if that gate can be bypassed; verify it"* — which
@@ -183,6 +191,15 @@ entries are dated (UTC). Format loosely follows
   renderer delegates to it rather than keeping a copy: two copies of an
   escaping rule eventually differ, and the surface with the weaker copy is the
   one an attacker aims at.
+
+### Changed
+
+- **2026-08-17** — **`evals/evals.json` is retired.** Its prose moved into each
+  case's `description` and `expected_outcome` so the case files are the single
+  source of truth. Two expectations it carried are now documented rather than
+  graded — fix subagents staying inside their one target file, and the report's
+  scope-honesty line — and `evals/README.md` names both under "Not covered by
+  any grader".
 
 ### Fixed
 

@@ -25,6 +25,7 @@ claude plugin eval skills/ci-secure \
   --allow-tools Bash \
   --ablation with-without \
   --output-dir /tmp/ci-secure-evals \
+  --no-publish \
   --model <pin a model> --judge-model <pin a model>
 ```
 
@@ -34,17 +35,29 @@ Every flag above is load-bearing:
 |---|---|
 | `--scaffold` | Scaffolds are **off by default**. Without it no case gets a `.github/workflows/` tree, the skill correctly reports that there is nothing to scan, and all five cases fail for a reason that has nothing to do with the skill. |
 | `--allow-tools Bash` | `Bash` is not in the harness's read-only set and a case cannot self-grant it. Without the grant the scanner can never execute and every case fails. The cases list `Bash` in `allowed_tools`, so an ungranted run is reported per case on stderr. |
-| `--ablation with-without` | A path target defaults to `--ablation none`. The delta against a no-plugin arm is the point of several graders. |
+| `--ablation with-without` | Passed explicitly so the arm structure never depends on whether the target happened to resolve as a plugin. The delta against a no-plugin arm is the point of several graders. |
+| `--no-publish` | Publishing the HTML report to claude.ai is the **default** where the account supports it, and that report carries full prompts, transcript excerpts and grader evidence from whatever repository was scanned. That is the same disclosure the `--output-dir` row guards against on disk; guarding one and not the other guards neither. |
 | `--output-dir` | Results default to `skills/ci-secure/evals/results/` — **inside the installable skill**, which the `skills` CLI copies wholesale into end-user installs. `tests/test_ci_secure_install_surface.py` fails if they land there. |
 | `--model` / `--judge-model` | Pin both, or a model rollout reads as a skill regression. |
 
-Cost is roughly `cases × runs × arms` agent runs (5 × 3 × 2 = 30) plus three
-judge calls per `llm` grader. Pilot with `--runs 1 --ablation none` first.
+`--allow-tools Bash` is an **unscoped** grant, and the plugin under test is your
+real checkout rather than a copy — nothing is sandboxed away from it. That is 30
+agent runs holding unrestricted `Bash` while `SKILL.md` Phase 5 is a phase whose
+job is to edit files. `--allow-tools` accepts `Tool(pattern:*)` syntax; scope it,
+or run the suite from a throwaway clone.
 
-Preconditions on the machine: `python3` on `PATH` with **PyYAML** importable
-(the scanner's one third-party dependency) and `git` available to the scaffold.
-The sandbox gives the scaffold only `PATH`, `HOME`, `TMPDIR`, `TERM` and
-`GIT_CONFIG_NOSYSTEM`.
+Cost is roughly `cases × runs × arms` agent runs (5 × 3 × 2 = 30) plus three
+judge calls per `llm` grader. Pilot with `--case template-injection --runs 1
+--ablation none` first: by this file's own framing the first execution is suite
+debugging, and one case is enough to find out.
+
+Preconditions on the machine: `git` available to the scaffold, and `python3` on
+`PATH` with **PyYAML** importable — the scanner's one third-party dependency,
+which hard-exits 1 without it and fails every findings grader for a reason that
+is not the skill. The child gets a scrubbed env, so a venv-only PyYAML may not be
+visible to the `python3` it finds; check with `env -i PATH="$PATH" python3 -c
+'import yaml'` before spending on a run. The sandbox gives the scaffold only
+`PATH`, `HOME`, `TMPDIR`, `TERM` and `GIT_CONFIG_NOSYSTEM`.
 
 ## The cases
 
@@ -52,7 +65,7 @@ The sandbox gives the scaffold only `PATH`, `HOME`, `TMPDIR`, `TERM` and
 |---|---|---|
 | `template-injection` | `files/inject` | The engine is run rather than the YAML eyeballed; P14.10 is reported at its real file and line; the finding carries an attacker scenario; nothing is committed. |
 | `clean-repo` | `files/clean` | Zero findings is reported plainly and positively, with the scope stated honestly, the impostor-check state named, and no invented lesser observations. |
-| `pwn-request` | `files/pwn-request` | The finding lands on `vulnerable.yml` and `safe.yml` comes back clean — a real negative, not a coverage gap — and the scenario names the fork-PR entry point. |
+| `pwn-request` | `files/pwn-request` | The findings land on `vulnerable.yml` at their real lines and `safe.yml` comes back clean — a real negative, not a coverage gap — and the scenario names the fork-PR entry point. (Two groups fire on `vulnerable.yml`, not one.) |
 | `many-findings` | `files/many-findings` | All nine statically-detectable groups are found and offered as a complete numbered table built from the render plan, rather than through a capped question widget. |
 | `impostor-check-skipped` | `files/inject` | The nine static vectors still complete with the network-gated check disabled, and the skipped check is named loudly and never presented as a pass. |
 
@@ -93,27 +106,46 @@ Three anchors do most of the work:
   without-arm can reach, so this is both the "the engine actually ran, it was
   not YAML eyeballing" assertion and the sharpest ablation signal in the suite.
 - **`run.py`'s printed group list.** It emits the pattern ids present, sorted as
-  *strings* — `["P14.25", "P14.9"]`, or the full nine with `.24`/`.25` landing
-  before `.7`/`.9`. That ordering is one no person or model writing the ids out
-  by hand produces, so a single regex asserts the engine ran, ran on *this*
-  fixture, and produced exactly those groups.
-- **`report.py`'s pre-drawn banner.** `0 of 10 vectors hit`, `9 of 10 vectors
-  hit`, `impostor check SKIPPED` are counts and states only the renderer can
-  compute, and `SKILL.md` mandates the banner be grepped out of the report and
-  pasted verbatim — so they reach the transcript through a contract-mandated
-  tool call.
+  *strings*, which puts the two-digit suffixes ahead of the one-digit ones. That
+  ordering is one no person or model writing the ids out by hand produces, so a
+  single regex asserts the engine ran and ran on *this* fixture. Note it is a
+  `contains` match: it does **not** assert that no other group was reported.
+- **`report.py`'s pre-drawn banner.** The vector count and the impostor-check
+  state are computed by the renderer and written by separate f-strings, so they
+  are adjacent on one line only in a real render. `SKILL.md` mandates the banner
+  be grepped out of the report and pasted verbatim, so it reaches the transcript
+  through a contract-mandated tool call.
+
+The expected strings themselves are deliberately **not** written out here.
+`evals/` ships inside the installable skill and is therefore on disk, readable,
+in the sandbox the agent under test is running in — a worked answer key in this
+file is an answer key the subject can read. The ground truth lives in each
+`case.yaml`'s patterns and in the fixtures; regenerate it by running
+`scripts/run.py` and `scripts/report.py` against a scaffolded fixture tree.
 
 ### The vacuity rule
 
 A `trace` grader reads the whole transcript, and the transcript of a run *with*
-the skill contains the text of `SKILL.md`. So a `contains` pattern that already
-appears in the skill's own prose passes for free, and a `not_contains` pattern
-that appears there can never pass at all. `tests/test_evals_cases.py::test_no_trace_regex_matches_the_skills_own_prose`
-makes that a hard failure. It is not a theoretical concern — the first drafts of
-these graders used `P14.10`, `did NOT run`, `No critical attack vectors` and
-`Impostor-SHA check (P14.11): ran`, and **every one of them is a quotation from
-`SKILL.md`**. Each was re-anchored on a scanner- or renderer-produced string
-after the test flagged it.
+the skill contains text the skill itself shipped. So a `contains` pattern that
+already appears there passes for free, and a `not_contains` pattern that appears
+there can never pass at all. `tests/test_evals_cases.py::test_no_trace_regex_matches_the_skills_own_prose`
+makes that a hard failure.
+
+It is not a theoretical concern. Three of the first drafts of these graders
+(`P14.10`, `did NOT run`, `Impostor-SHA check (P14.11): ran`) are quotations
+from `SKILL.md` and were flagged by that test; a fourth (`No critical attack
+vectors`) was re-anchored for other reasons and the test does *not* flag it.
+
+The corpus the rule checks is wider than `SKILL.md`. The `skills` CLI copies
+`skills/ci-secure/` recursively, so `scripts/*.py` and this file sit on disk
+beside the `scripts/run.py` path `SKILL.md` tells the agent to resolve, and one
+`Grep` over the skill directory pulls any of them into the trace. Checking only
+the prose files is what let a `not_contains` grader be written against a literal
+in `scripts/scan.py`, where it could never pass. Two shipped surfaces stay out
+of the corpus on purpose, both documented at `_agent_readable_sources()`:
+`tests/`, whose oracle assertions quote the renderer's exact output by
+construction, and `evals/files/`, which *is* the input under audit — a grader
+pinning a finding to its real `file:line` has to quote it.
 
 Two schema traps are also pinned by that test file, because both fail silently:
 a `tool_used` grader on the `Skill` tool is demoted to an *unscored* indicator
@@ -140,30 +172,71 @@ Verified, and re-checkable with `python3 -m pytest skills/ci-secure/tests/test_e
 Verified by hand while authoring: the scaffold was executed under a mock of the
 sandbox's exact minimal environment and directory layout, and `git rev-parse
 --show-toplevel` was confirmed to resolve to the working directory rather than
-the harness's parent repository. Every expected finding — pattern ids, files,
+the harness's parent repository.
+
+Verified by hand during review, and previously listed here as the largest
+untested assumption: **the agent under test can resolve `<ci-secure>`, the
+skill's own install directory.** `SKILL.md` needs an absolute path to it for
+every scripted phase, and if it could not be resolved all five cases would fail
+together. It can: the `Skill` tool result carries the skill's base directory in
+its own header, so the path arrives on the very tool call the
+`ci-secure-skill-fired` grader already requires. The bare skill folder was also
+confirmed to load as a plugin (`--plugin-dir skills/ci-secure` exposes
+`ci-secure:ci-secure`, which that grader's `input_match` accepts). Every expected finding — pattern ids, files,
 line numbers, banner text, group-list ordering, `gh_checks` strings — was read
 off a real run of `run.py` and `report.py` against these fixtures, not assumed.
 
 **Not verified, because the runner is gated:**
 
 - that any case scores anything at all — no case has been executed;
-- that the agent under test can resolve `<ci-secure>`, the skill's own install
-  directory, from inside the sandbox. `SKILL.md` requires an absolute path to
-  it for every scripted phase. The harness passes the plugin as `--plugin-dir`
-  pointing at the real checkout, so the directory is present, but whether the
-  agent locates it unaided is untested. **If this does not hold, all five cases
-  fail together** — that is the first thing to check against a red suite;
+- whether the interaction contract survives having no user. `AskUserQuestion`
+  is auto-allowed, so the skill *will* ask — and `SKILL.md` Phase 3 puts the
+  banner and receipt lines INSIDE that question's text whenever a question is
+  the next act. On `clean-repo` that is where the banner graders expect their
+  strings to come from, and on `many-findings` the whole selection contract
+  sits there. Whether the tool returns, errors, or burns the turn cap in an
+  eval child is unknown;
+- whether `many-findings`' promised fix dispatch can happen at all: no case
+  grants `Write` or `Edit`, and Phase 5 subagents edit workflow YAML. No grader
+  asserts it, so it would fail as a stated-but-unreachable outcome rather than
+  as a red case;
 - whether the graders' assertions actually land in the `trace`. Several depend
   on contract-mandated `grep`/`python3` calls surfacing report content into the
   transcript; that is what `SKILL.md` says happens, but it has not been observed
   here;
 - whether the `llm` graders' rubrics discriminate in practice, and whether they
-  also pass in the no-plugin arm;
+  also pass in the no-plugin arm. All seven are `focus: trace` and none is
+  covered by the vacuity rule, which filters on `type == "regex"` — they are 7
+  of the 44 graders and they carry every prose-quality assertion in the suite,
+  so the first real run should be read grader-by-grader, not as one score;
+- that the harness accepts `plugins: ["../.."]` as a loadable plugin. There is
+  no `plugin.json` or `.claude-plugin/` anywhere in this repository;
+  `test_plugins_entry_resolves_to_this_skill` proves only that the *path*
+  resolves to the skill root, not that the runner will load it. If it does not,
+  the with-arm loads nothing and the ablation delta is meaningless;
 - whether `max_turns` (60, and 90 for `many-findings`) is generous enough. An
   exhausted turn cap is a run error and depresses the score for a reason
   unrelated to the skill;
 - score stability across the three runs per case. The default pass threshold is
   **1.0**: every scored grader must pass on every run.
+
+**Not covered by any grader, and named here so the gap is not mistaken for
+coverage:**
+
+- **Fix subagents staying inside their one target file.** `SKILL.md` Phase 5
+  requires a fix subagent not to edit anything outside its finding's
+  `workflow_file`. The retired `evals.json` asserted it; nothing grades it now,
+  and `many-findings` only reaches the selection table.
+- **The report's scope-honesty line** (`Critical exploit-chain checks only …`).
+  It is emitted on every report and the skill's positioning rests on it, but it
+  survives only inside `clean-repo`'s `llm` criteria — so a regression on a
+  finding-bearing repo, where padding pressure actually exists, keeps four of
+  five cases green.
+- **The scanner's own degradation path.** `impostor-check-skipped` tells the
+  agent to pass `--gh-impostor off`, so it grades honest *reporting* of a
+  disabled check, not the `auto` mode discovering `gh` is absent and degrading
+  by itself. The prompt cannot change `PATH` (`execution.env` accepts only
+  `EVAL_*` keys), which is why it is written this way.
 
 The first real execution should be treated as suite debugging, not as a
 measurement of the skill.

@@ -29,7 +29,7 @@ execution:
     impostor-SHA check disabled.
   max_turns: 60
   timeout_seconds: 900
-  allowed_tools: [Read, Glob, Grep, Skill, Task, Agent, AskUserQuestion, TodoWrite, Bash]
+  allowed_tools: [Read, Glob, Grep, Skill, Agent, AskUserQuestion, TodoWrite, Bash]
 
 runs: 3
 
@@ -57,13 +57,16 @@ graders:
     match: contains
 
   # report.py's pre-drawn banner, whose last token is the impostor check's
-  # state. SKILL.md's worked example shows this banner ending in "ran", so the
-  # word SKIPPED here cannot have come from reading the skill -- only from a
-  # render of this run.
+  # state. The bare phrase `impostor check SKIPPED` is documented in
+  # evals/README.md, which ships inside the skill and sits in the sandbox the
+  # agent can read, so it is anchored here on the whole composition instead:
+  # this run's vector count and the impostor word, written by two separate
+  # f-strings in report.py and adjacent only in a real render. SKILL.md's worked
+  # banner shows `2 of 10 ... ran`, so neither half of this can be quoted.
   - type: regex
     name: banner-names-the-check-as-skipped
     target: trace
-    pattern: 'impostor check SKIPPED'
+    pattern: '1 of 10 vectors hit▕[^\n]{0,40}· impostor check SKIPPED'
     match: contains
 
   # scan.py's recorded reason, verbatim, reached through the `gh_checks` lookup
@@ -75,17 +78,22 @@ graders:
     pattern: 'gh-impostor=off \(network-gated check did NOT run\)'
     match: contains
 
-  # The negative that matters: the disabled check must stay disabled. `ran:` is
-  # the prefix scan.py writes into `gh_checks` when the impostor check DID
-  # execute, so this fires if the scan is quietly re-run without the flag and a
-  # completed status is what ends up in front of the user. Anchored on the
-  # prefix rather than on a pin count because this fixture pins no actions at
-  # all -- a count-based pattern would be unfalsifiable here, passing whether
-  # or not the check ran.
+  # The negative that matters: the disabled check must stay disabled. It fires
+  # if the scan is quietly re-run without the flag and a completed status is
+  # what ends up in front of the user.
+  #
+  # The first draft matched scan.py's raw `ran:` status strings, and that is the
+  # worse half of the vacuity trap rather than the harmless half: `ran: no
+  # sha-pinned actions found` is a literal at scripts/scan.py:4976, which ships
+  # inside the skill, so one Grep of the engine while working out what the
+  # recorded skip reason means would have made this grader UNPASSABLE on a run
+  # that behaved perfectly -- and a not_contains that can never pass fails
+  # silently. It is anchored on the rendered banner instead, which exists only
+  # as output.
   - type: regex
     name: disabled-check-was-not-quietly-re-run
     target: trace
-    pattern: 'ran: no sha-pinned actions found|ran: \d+ unique pin'
+    pattern: '1 of 10 vectors hit▕[^\n]{0,40}· impostor check ran'
     match: not_contains
 
   - type: llm
