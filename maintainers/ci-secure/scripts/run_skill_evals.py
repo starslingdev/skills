@@ -173,16 +173,34 @@ def _run_agent(prompt: str, sandbox: Path, plugin: Path, max_turns: int,
         )
     except subprocess.TimeoutExpired:
         _die(f"agent run exceeded {timeout}s", 2)
-    if "early access" in r.stdout or "early access" in r.stderr:
-        _die("claude refused the run (early access gate)")
+
+    def _no_session(reason: str) -> None:
+        """Report a run that produced no session, verbatim.
+
+        Nothing here is special-cased to a known message. The first CI run of
+        this suite failed for a reason nobody could read, because the harness
+        kept only a substring test for "early access" and discarded the rest of
+        what `claude` said. Whatever the next non-start is, it lands in the log.
+        """
+        _die("\n".join([
+            reason,
+            f"  claude exit code: {r.returncode}",
+            f"  claude stderr: {r.stderr.strip()[-2000:] or '(empty)'}",
+            f"  claude stdout: {r.stdout.strip()[-2000:] or '(empty)'}",
+        ]))
+
     if r.returncode != 0:
-        _die(f"claude exited {r.returncode} — the session never ran. "
-             f"claude said: {(r.stderr.strip() or r.stdout.strip())[-600:]}")
+        _no_session("claude exited non-zero — the session never ran.")
     events = _events(r.stdout)
     if not any(e.get("type") == "system" and e.get("subtype") == "init"
                for e in events):
-        _die("claude exited 0 but the stream carries no session — nothing to "
-             f"grade. stderr: {r.stderr.strip()[-600:] or '(empty)'}")
+        _no_session("claude exited 0 but the stream carries no session.")
+    if not _tool_calls(r.stdout):
+        # Every case drives the agent to read files and execute the scanner. A
+        # completed session that called no tool at all did not do the work; it
+        # is a session that ended before it started, and grading it scores each
+        # negative grader as a pass while blaming the contract for the rest.
+        _no_session("the session completed without calling a single tool.")
     for e in events:
         if e.get("type") != "result":
             continue
@@ -190,8 +208,7 @@ def _run_agent(prompt: str, sandbox: Path, plugin: Path, max_turns: int,
             _die(f"the session hit its {max_turns}-turn cap; a truncated run is "
                  "not a graded run")
         if e.get("is_error"):
-            _die(f"the session ended in an error: "
-                 f"{str(e.get('result', ''))[:400]}")
+            _no_session("the session ended in an error result.")
     return r.stdout
 
 

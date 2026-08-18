@@ -39,6 +39,8 @@ def _completed(returncode=0, stdout="", stderr=""):
 
 _GOOD_STREAM = (
     '{"type":"system","subtype":"init","session_id":"s"}\n'
+    '{"type":"assistant","message":{"content":['
+    '{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}\n'
     '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}\n'
 )
 
@@ -67,6 +69,22 @@ def test_an_empty_stream_from_a_zero_exit_is_still_a_harness_failure(monkeypatch
         harness._run_agent("prompt", tmp_path, tmp_path, 60, 900)
     assert exc.value.code == 2
     assert "no session" in capsys.readouterr().err.lower()
+
+
+def test_a_completed_session_that_called_no_tool_is_a_harness_failure(monkeypatch, capsys, tmp_path):
+    """Every case drives the agent to read files and run the scanner. Zero tool
+    calls in a completed run is the signature of a session that ended before it
+    started — an authentication rejection, say — and grading it scores every
+    negative grader as a pass."""
+    stream = ('{"type":"system","subtype":"init","session_id":"s"}\n'
+              '{"type":"result","subtype":"success","is_error":false}\n')
+    monkeypatch.setattr(harness.subprocess, "run", lambda *a, **k: _completed(
+        stdout=stream, stderr="Invalid API key · Fix external API key"))
+    with pytest.raises(SystemExit) as exc:
+        harness._run_agent("prompt", tmp_path, tmp_path, 60, 900)
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "Invalid API key" in err, "claude's own words must reach the log"
 
 
 def test_a_real_stream_is_returned_unchanged(monkeypatch, tmp_path):
