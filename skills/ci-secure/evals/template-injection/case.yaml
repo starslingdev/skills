@@ -80,10 +80,25 @@ graders:
   # 11-line fixture. What neither produces is the engine's own serialization:
   # run.py prints its group list to stdout as a JSON array of string-sorted ids.
   #
-  # The closing `"]` is load-bearing. SKILL.md:104 carries `["P14.10", "P14.9"]`
+  # The closing bracket is load-bearing. SKILL.md:104 carries a two-group array
   # as a worked example, so a pattern ending at the id would be a quotation from
   # the skill; requiring the bracket immediately after makes it a single-group
   # result, which only this fixture's run produces.
+  #
+  # THE LIMIT OF THIS, stated because it is a real one and a reviewer raised it:
+  # no trace grader can prove PROVENANCE. This asserts the engine's exact
+  # serialization appeared; it cannot rule out an agent that ran the scanner,
+  # watched it fail, and then wrote that string itself. The harness offers no
+  # grader that observes a tool's exit status or its output -- `tool_used`
+  # matches the invocation's INPUT only, and `file_exists` cannot reach the one
+  # artifact whose absence would prove failure, because SKILL.md keys the
+  # findings path to a hash of the repository root and the sandbox's root is
+  # different every run. Closing this properly needs either a harness grader
+  # that reads tool results, or a prompt that names a fixed output path -- and
+  # the second would trade away this case's realism, since the report is
+  # supposed to be written only on a user's save pick. Until then the suite
+  # asserts invocation plus output shape, and this residual is accepted, not
+  # solved. evals/README.md lists it under what is not verified.
   - type: regex
     name: engine-group-list-is-exactly-p14-10
     target: trace

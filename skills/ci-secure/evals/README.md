@@ -231,6 +231,19 @@ off a real run of `run.py` and `report.py` against these fixtures, not assumed.
 **Not verified, because the runner is gated:**
 
 - that any case scores anything at all — no case has been executed;
+- **that the scanner exited successfully, as opposed to having been invoked and
+  then described.** No grader type in this harness observes a tool's exit
+  status or its output: `tool_used` matches the invocation's *input*, and
+  `file_exists` cannot reach the one artifact whose absence would prove failure
+  — `run.py` clears its output path before scanning, so absence-after-failure
+  is a real contract, but `SKILL.md` keys that path to a hash of the repository
+  root, and the sandbox's root differs every run. Each case therefore asserts
+  invocation *plus* output shape, anchored on serializations an eyeballing
+  agent does not produce. The residual — an agent that runs the scanner,
+  watches it fail, and writes the expected string itself — is **accepted, not
+  solved.** Closing it needs either a harness grader that reads tool results,
+  or a prompt naming a fixed output path, which would trade away the cases'
+  realism since the report is written only on a user's save pick;
 - whether the interaction contract survives having no user. `AskUserQuestion`
   is auto-allowed, so the skill *will* ask — and `SKILL.md` Phase 3 puts the
   banner and receipt lines INSIDE that question's text whenever a question is
