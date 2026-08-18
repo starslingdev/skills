@@ -189,9 +189,9 @@ under `maintainers/`, so the `skills` CLI never copies it into an install:
 - [`maintainers/ci-score/`](maintainers/ci-score/): maintainer notes for
   ci-score, including what was deliberately left out of the shipped skill.
   See [MAINTAINERS.md](maintainers/ci-score/MAINTAINERS.md).
-- [`maintainers/ci-secure/`](maintainers/ci-secure/): how the ten-vector
-  catalog is governed, and the disclosure rule for a scan of a repo you do not
-  own. See [MAINTAINERS.md](maintainers/ci-secure/MAINTAINERS.md).
+- [`maintainers/ci-secure/`](maintainers/ci-secure/): the disclosure rule for
+  findings from a scan of a repository you do not own, and the guard that
+  enforces it. See [MAINTAINERS.md](maintainers/ci-secure/MAINTAINERS.md).
 - [`maintainers/skills-registry-security/`](maintainers/skills-registry-security/):
   triage for a failing registry security audit, answering whether a finding
   describes the skill as it is today or a stale copy.
