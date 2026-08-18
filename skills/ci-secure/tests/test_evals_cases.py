@@ -668,7 +668,14 @@ def test_every_case_anchors_on_output_the_agent_could_not_have_written(
     # occurrence-line graders from counting as completion anchors: on an
     # 11-line fixture, `ci.yml:11` is one grep away and says nothing about
     # whether the scanner ever finished.
-    reachable = [_agent_readable_text()]
+    # The case file itself belongs in this corpus even though the vacuity rule
+    # excludes it, because `evals/` ships: an agent that greps the eval
+    # directory reads the answer key. A grader whose own declaration satisfies
+    # it is not evidence the engine ran. Most graders cannot avoid this -- a
+    # plain literal always matches its own `pattern:` line -- which is precisely
+    # why the COMPLETION anchor must be one that does, and why an anchor must
+    # never be a string the surrounding comment quotes in full.
+    reachable = [_agent_readable_text(), (case_dir / "case.yaml").read_text(encoding="utf-8")]
     slug = re.search(r"^FIXTURE_SLUG=(\S+)",
                      (case_dir / "scaffold.sh").read_text(encoding="utf-8"),
                      flags=re.M).group(1)

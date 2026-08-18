@@ -159,6 +159,17 @@ it outright. The free-pass half is accepted and named here rather than papered
 over; the honest fix is to stop shipping `evals/` to end users at all, which is
 a larger change than this suite.
 
+One consequence is worth stating plainly rather than leaving to be discovered.
+A pattern that is a plain literal — the banner-count graders are — necessarily
+matches its own `pattern:` line, so four of them are satisfiable by text
+copied from the case file that declares them. This cannot be fixed by
+re-anchoring; it is a property of shipping the definitions next to the subject.
+What *is* enforced is that no case's **completion anchor** has this shape: the
+graders that carry the "the engine actually finished" assertion are checked
+against their own case file along with everything else the agent can reach, and
+the comments around them no longer quote the expected output in full. So a run
+that copied the whole eval directory into its answer still fails every case.
+
 Two smaller bypasses are closed alongside it. A regex grader with no `target:`
 line is invisible to the rule, so `target` is now required. And a pattern
 opening with a bare digit matches inside a longer number — `0 critical

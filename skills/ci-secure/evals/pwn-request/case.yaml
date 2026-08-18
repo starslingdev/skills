@@ -39,9 +39,9 @@ graders:
     min: 1
 
   # run.py prints the group list to stdout -- the pattern ids present, sorted as
-  # STRINGS. On this fixture that is exactly ["P14.25", "P14.9"], and the
-  # string sort is the tell: P14.25 before P14.9 is an ordering a person or a
-  # model writing the ids out by hand would not produce. So this pattern asserts
+  # STRINGS, which puts the two-digit suffix ahead of the one-digit one. That
+  # ordering is the tell: it is not one a person or a model writing the ids out
+  # by hand produces. So this pattern asserts
   # the engine ran, ran on THIS fixture, and reported those two groups
   # adjacently. It is `contains`, so it does NOT assert exclusivity: a run that
   # also emitted a spurious third group would still match. The engine produces
