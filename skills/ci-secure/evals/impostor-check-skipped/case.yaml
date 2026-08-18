@@ -57,16 +57,18 @@ graders:
     match: contains
 
   # report.py's pre-drawn banner, whose last token is the impostor check's
-  # state. The bare phrase `impostor check SKIPPED` is documented in
-  # evals/README.md, which ships inside the skill and sits in the sandbox the
-  # agent can read, so it is anchored here on the whole composition instead:
-  # this run's vector count and the impostor word, written by two separate
-  # f-strings in report.py and adjacent only in a real render. SKILL.md's worked
-  # banner shows `2 of 10 ... ran`, so neither half of this can be quoted.
+  # state. Anchored on the whole composition rather than the bare word: this
+  # run's vector count and the impostor state, written by two separate f-strings
+  # in report.py and adjacent only in a real render. SKILL.md's worked banner
+  # shows `2 of 10 ... ran`, so neither half of this can be quoted from it.
+  #
+  # The leading (?<![\d.]) is not decoration -- without it `1 of 10` matches
+  # inside `11 of 10`. The bridge is [ \w] rather than [^\n] so the pattern
+  # cannot match its own declaration in this file, which ships too.
   - type: regex
     name: banner-names-the-check-as-skipped
     target: trace
-    pattern: '1 of 10 vectors hit▕[^\n]{0,40}· impostor check SKIPPED'
+    pattern: '(?<![\d.])1 of 10 vectors hit▕[ \w]{0,40}· impostor check SKIPPED'
     match: contains
 
   # scan.py's recorded reason, verbatim, reached through the `gh_checks` lookup
@@ -84,7 +86,7 @@ graders:
   #
   # The first draft matched scan.py's raw `ran:` status strings, and that is the
   # worse half of the vacuity trap rather than the harmless half: `ran: no
-  # sha-pinned actions found` is a literal at scripts/scan.py:4976, which ships
+  # sha-pinned actions found` is a literal in scripts/scan.py, which ships
   # inside the skill, so one Grep of the engine while working out what the
   # recorded skip reason means would have made this grader UNPASSABLE on a run
   # that behaved perfectly -- and a not_contains that can never pass fails
@@ -93,7 +95,7 @@ graders:
   - type: regex
     name: disabled-check-was-not-quietly-re-run
     target: trace
-    pattern: '1 of 10 vectors hit▕[^\n]{0,40}· impostor check ran'
+    pattern: '(?<![\d.])1 of 10 vectors hit▕[ \w]{0,40}· impostor check ran'
     match: not_contains
 
   - type: llm

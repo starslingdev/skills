@@ -81,7 +81,7 @@ graders:
   - type: regex
     name: banner-reports-one-of-ten-vectors-hit
     target: trace
-    pattern: '1 of 10 vectors hit'
+    pattern: '(?<![\d.])1 of 10 vectors hit'
     match: contains
 
   - type: llm

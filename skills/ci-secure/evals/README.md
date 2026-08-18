@@ -142,10 +142,29 @@ beside the `scripts/run.py` path `SKILL.md` tells the agent to resolve, and one
 `Grep` over the skill directory pulls any of them into the trace. Checking only
 the prose files is what let a `not_contains` grader be written against a literal
 in `scripts/scan.py`, where it could never pass. Two shipped surfaces stay out
-of the corpus on purpose, both documented at `_agent_readable_sources()`:
-`tests/`, whose oracle assertions quote the renderer's exact output by
-construction, and `evals/files/`, which *is* the input under audit — a grader
-pinning a finding to its real `file:line` has to quote it.
+of the corpus on purpose, and a third with a caveat — all documented at
+`_agent_readable_sources()`. `tests/`, whose oracle assertions quote the
+renderer's exact output by construction; `evals/files/`, which *is* the input
+under audit, so a grader pinning a finding to its real `file:line` has to quote
+it; and the `case.yaml` files themselves, since every pattern is a literal in
+its own case file and including them would flag all fourteen trace regexes
+against themselves.
+
+That third exclusion carries real residual risk, because `evals/` ships: an
+agent that greps the eval directory sees the answer key. The *fatal* half of it
+is covered unconditionally by a separate test — a `not_contains` pattern that
+matches its own declaration can never pass, and that is a silent failure, so
+`test_negative_regexes_do_not_match_the_case_file_that_declares_them` forbids
+it outright. The free-pass half is accepted and named here rather than papered
+over; the honest fix is to stop shipping `evals/` to end users at all, which is
+a larger change than this suite.
+
+Two smaller bypasses are closed alongside it. A regex grader with no `target:`
+line is invisible to the rule, so `target` is now required. And a pattern
+opening with a bare digit matches inside a longer number — `0 critical
+findings` is contained in `10 critical findings`, so the zero-findings case
+would have passed under the single worst regression it exists to catch — so
+count-bearing patterns must carry a `(?<![\d.])` guard.
 
 Two schema traps are also pinned by that test file, because both fail silently:
 a `tool_used` grader on the `Skill` tool is demoted to an *unscored* indicator
@@ -169,10 +188,13 @@ Verified, and re-checkable with `python3 -m pytest skills/ci-secure/tests/test_e
 - no stray `case.yaml` / `prompt.md` under `files/`, which would be silently
   discovered and run with real API spend.
 
-Verified by hand while authoring: the scaffold was executed under a mock of the
-sandbox's exact minimal environment and directory layout, and `git rev-parse
---show-toplevel` was confirmed to resolve to the working directory rather than
-the harness's parent repository.
+The same command also covers the scaffold, which is no longer hand-checked:
+`test_scaffold_still_materializes_the_tree_in_an_empty_sandbox` drives each
+`scaffold.sh` under a mock of the sandbox's minimal environment and asserts the
+tree it produces, and two sibling tests assert it REFUSES a non-empty working
+directory and one it cannot list. `git rev-parse --show-toplevel` resolving to
+the working directory rather than the harness's parent repository was confirmed
+by hand while authoring.
 
 Verified by hand during review, and previously listed here as the largest
 untested assumption: **the agent under test can resolve `<ci-secure>`, the

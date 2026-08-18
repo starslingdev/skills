@@ -286,8 +286,18 @@ def _agent_readable_sources() -> list[Path]:
     * ``evals/files/`` -- the fixture workflows ARE the input under audit. A
       grader that pins a finding to its real ``file:line`` necessarily quotes
       them; that is the assertion, not a leak.
+    * ``evals/*/case.yaml`` -- every pattern is a literal in its own case file,
+      so including them would flag all fourteen trace regexes against
+      themselves and the rule would have to be deleted rather than obeyed.
+      This exclusion has a real residual risk, since ``evals/`` ships: an agent
+      that greps the eval directory sees the answer key. The fatal HALF of that
+      risk is covered separately and unconditionally by
+      ``test_negative_regexes_do_not_match_the_case_file_that_declares_them``,
+      because a ``not_contains`` that matches its own declaration can never
+      pass. The free-pass half is accepted, and the honest fix for it is to
+      stop shipping ``evals/`` at all.
 
-    Both exclusions are why the ``file:line`` graders are backed by a separate
+    These exclusions are why the ``file:line`` graders are backed by a separate
     renderer-produced anchor in the same case rather than standing alone."""
     roots = [
         _SKILL / "SKILL.md",
@@ -443,12 +453,52 @@ def test_scaffold_refuses_to_run_over_an_existing_checkout(
         "must refuse a non-empty working directory instead of overwriting it")
     assert live.read_text(encoding="utf-8") == "name: real ci\non: push\n", (
         "the scaffold overwrote a real workflow file outside the eval sandbox")
-    log = subprocess.run(
-        ["git", "log", "--oneline"], cwd=str(victim),
-        capture_output=True, text=True,
-    ).stdout
-    assert not log.strip(), (
-        f"the scaffold committed to a repository it did not create: {log!r}")
+    # check=True matters here: this is the assertion that nothing was committed,
+    # and a git command that failed to run would otherwise return empty stdout
+    # and read as "no commits" on precisely the outcome the guard exists to
+    # prevent. `rev-list --count --all` is used rather than `log` because it
+    # succeeds with "0" on a repository that has no commits yet, where `git log`
+    # exits non-zero and would make the happy path indistinguishable from a
+    # broken subprocess.
+    count = subprocess.run(
+        ["git", "rev-list", "--count", "--all"], cwd=str(victim),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert count == "0", (
+        f"the scaffold committed to a repository it did not create: {count} "
+        "commit(s) present")
+
+
+@pytest.mark.parametrize("case_dir", _case_dirs(), ids=lambda p: p.name)
+def test_scaffold_refuses_when_it_cannot_read_the_directory(
+    case_dir: Path, tmp_path: Path,
+) -> None:
+    """The emptiness check must not FAIL OPEN. A listing that errors produces no
+    output, and "no output" read as "the directory is empty" turns the one guard
+    standing between this script and a destroyed checkout into a no-op in
+    exactly the case where it cannot see what it is about to overwrite. Unknown
+    is not the same as empty -- the same rule the skill applies to a check that
+    could not run."""
+    import os
+    import subprocess
+
+    victim = tmp_path / "unreadable"
+    (victim / ".github" / "workflows").mkdir(parents=True)
+    live = victim / ".github" / "workflows" / "ci.yml"
+    live.write_text("name: real ci\non: push\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", "."], cwd=str(victim), check=True)
+
+    os.chmod(victim, 0o300)  # writable and traversable, NOT listable
+    try:
+        done = _run_scaffold(case_dir, victim)
+    finally:
+        os.chmod(victim, 0o700)
+
+    assert done.returncode != 0, (
+        "the scaffold treated an unreadable directory as an empty one and ran "
+        f"to completion:\n{done.stdout}\n{done.stderr}")
+    assert live.read_text(encoding="utf-8") == "name: real ci\non: push\n", (
+        "the scaffold overwrote a real workflow file it could not even list")
 
 
 @pytest.mark.parametrize("case_dir", _case_dirs(), ids=lambda p: p.name)
@@ -470,6 +520,97 @@ def test_scaffold_still_materializes_the_tree_in_an_empty_sandbox(
     assert not any(p.name.endswith(".fixture") for p in
                    (sandbox / ".github" / "workflows").iterdir()), (
         "the cloaked .fixture suffix survived into the materialized tree")
+
+
+@pytest.mark.parametrize("case_dir", _case_dirs(), ids=lambda p: p.name)
+def test_regex_graders_declare_a_target(case_dir: Path) -> None:
+    """``target`` is optional in the harness's schema, and the vacuity rule only
+    inspects graders whose target is ``trace``. So omitting the line is a
+    one-token bypass of the rule: a verbatim ``SKILL.md`` quotation with no
+    ``target:`` passes every test in this file. Requiring it here closes that."""
+    for grader in _graders(_load(case_dir)):
+        if grader.get("type") != "regex":
+            continue
+        assert "target" in grader, (
+            f"regex grader {grader.get('name')!r} declares no target. The "
+            "vacuity rule only reaches trace-targeted regexes, so an implicit "
+            "target silently exempts the grader from it -- say `target: trace`")
+
+
+@pytest.mark.parametrize("case_dir", _case_dirs(), ids=lambda p: p.name)
+def test_count_bearing_regexes_cannot_match_a_larger_count(case_dir: Path) -> None:
+    """A pattern that opens with a bare digit matches inside a longer number.
+    ``0 critical findings`` is contained in ``10 critical findings`` -- so
+    ``clean-repo``, the case whose entire job is to notice that a zero-findings
+    run stopped being zero, passes under the single worst regression it exists
+    to catch. Same for every ``N of 10 vectors hit`` banner grader.
+
+    The fix is a ``(?<![\\d.])`` guard, which both Python's ``re`` and
+    JavaScript's ``RegExp`` support. This test asserts the guard is present
+    rather than the absence of one bad match, so it also covers counts nobody
+    has thought of yet."""
+    for grader in _graders(_load(case_dir)):
+        if grader.get("type") != "regex":
+            continue
+        pattern = grader["pattern"]
+        if not re.match(r"^[0-9]", pattern):
+            continue
+        pytest.fail(
+            f"regex grader {grader.get('name')!r} starts with a bare digit: "
+            f"{pattern!r}. It will match inside a larger number, so a run "
+            "reporting ten of something satisfies a grader asserting one or "
+            "zero. Prefix it with (?<![\\d.]).")
+
+
+@pytest.mark.parametrize("case_dir", _case_dirs(), ids=lambda p: p.name)
+def test_negative_regexes_do_not_match_the_case_file_that_declares_them(
+    case_dir: Path,
+) -> None:
+    """``evals/`` ships inside the installed skill, so a ``case.yaml`` is on disk
+    in the sandbox exactly like ``scripts/scan.py`` is -- and a ``not_contains``
+    pattern that matches its own declaration can never pass once anything greps
+    the eval directory. This is the fatal direction of the vacuity trap, so it
+    is checked even though the corpus in ``_agent_readable_sources()``
+    deliberately excludes the case files (see the note there).
+
+    The trap is not obvious: a pattern containing ``[^\\n]{0,40}`` matches the
+    literal characters ``[^\\n]{0,40}`` sitting in its own source line, because
+    every one of them is a non-newline character."""
+    text = (case_dir / "case.yaml").read_text(encoding="utf-8")
+    for grader in _graders(_load(case_dir)):
+        if grader.get("type") != "regex" or grader.get("match") != "not_contains":
+            continue
+        assert not re.search(grader["pattern"], text), (
+            f"not_contains grader {grader.get('name')!r} matches the text of "
+            f"{case_dir.name}/case.yaml, which ships inside the skill. One Grep "
+            "of the eval directory makes it unpassable on a run that behaved "
+            "perfectly -- and a not_contains that can never pass fails silently")
+
+
+@pytest.mark.parametrize("case_dir", _case_dirs(), ids=lambda p: p.name)
+def test_allowed_tools_name_tools_the_runner_can_actually_grant(
+    case_dir: Path,
+) -> None:
+    """``allowed_tools`` RESTRICTS rather than grants, and an entry the runner
+    does not recognise is dropped with a per-case warning on stderr rather than
+    an error. So a plausible-looking name that is not a real tool costs nothing
+    at validation time and produces noise on the first run -- which, for a suite
+    whose first execution is by definition suite debugging, is the worst moment
+    to be reading spurious warnings. ``Task`` was in every case and is not a
+    grantable name."""
+    grantable = {
+        # Auto-allowed (read-only) set.
+        "Read", "Glob", "Grep", "NotebookRead", "Skill", "AskUserQuestion",
+        "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop",
+        "TaskOutput", "Agent", "TodoWrite",
+        # Gated, reachable only through an operator --allow-tools grant.
+        "Bash", "Write", "Edit", "WebFetch", "WebSearch",
+    }
+    tools = ((_load(case_dir).get("execution") or {}).get("allowed_tools")) or []
+    unknown = sorted(t for t in tools if t.split("(")[0] not in grantable)
+    assert not unknown, (
+        f"allowed_tools names {unknown}, which the runner cannot grant. Entries "
+        "it does not recognise are dropped and reported as an ungranted tool")
 
 
 def test_no_stray_case_files_among_the_fixtures() -> None:

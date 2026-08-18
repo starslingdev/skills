@@ -101,17 +101,23 @@ entries are dated (UTC). Format loosely follows
   everything checkable without the runner, including a vacuity guard that fails
   any trace regex matching text the skill itself ships — `SKILL.md`,
   `references/`, `scripts/*.py` and `evals/README.md`, since the installer
-  copies all of them and one `Grep` puts any into the transcript (six graders
-  were re-anchored after it caught them, three of them `scan.py` literals a
-  `not_contains` could never have passed against) — and guards for the two
-  schema traps that fail silently:
+  copies all of them and one `Grep` puts any into the transcript — and guards
+  for the traps that fail silently:
   a `Skill` `tool_used` grader demoted to unscored without `arm: both`, and
   `max: 0` without `min: 0`. `evals/results/` is gitignored and now blocked from
   the install surface by `tests/test_ci_secure_install_surface.py`, since the
   installer honours no ignore file. The shared scaffold now refuses any working
-  directory that is not empty: run by hand from a checkout it would otherwise
-  overwrite that repository's live `.github/workflows/` with the vulnerable
-  fixtures and commit them to the current branch.
+  directory that is not empty, and refuses one it cannot list rather than
+  reading an unreadable directory as an empty one: run by hand from a checkout
+  it would otherwise overwrite that repository's live `.github/workflows/` with
+  the vulnerable fixtures and commit them to the current branch. Three further
+  silent bypasses of the vacuity rule are closed: a regex grader with no
+  `target:` was exempt from it, a `not_contains` pattern could match its own
+  declaration and so never pass, and a pattern opening with a bare digit
+  matched inside a longer number — `0 critical findings` is contained in `10
+  critical findings`, so the zero-findings case passed under the one regression
+  it exists to catch. `allowed_tools` entries are now checked against the names
+  the runner can actually grant.
 
 - **2026-08-17** — **A finding whose job sits behind a security gate that
   cannot work now says so.** Previously every gate got the same sentence —

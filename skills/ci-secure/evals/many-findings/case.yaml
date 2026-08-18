@@ -56,7 +56,7 @@ graders:
   - type: regex
     name: banner-reports-nine-of-ten-vectors-hit
     target: trace
-    pattern: '9 of 10 vectors hit'
+    pattern: '(?<![\d.])9 of 10 vectors hit'
     match: contains
 
   # The selection step is required to be built from report.py's render plan --

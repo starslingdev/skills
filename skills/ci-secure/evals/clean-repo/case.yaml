@@ -45,13 +45,13 @@ graders:
   - type: regex
     name: banner-reports-zero-findings
     target: trace
-    pattern: '0 critical findings'
+    pattern: '(?<![\d.])0 critical findings'
     match: contains
 
   - type: regex
     name: banner-reports-zero-of-ten-vectors-hit
     target: trace
-    pattern: '0 of 10 vectors hit'
+    pattern: '(?<![\d.])0 of 10 vectors hit'
     match: contains
 
   # The impostor-SHA check is the one vector that cannot be answered from YAML
@@ -72,7 +72,7 @@ graders:
   - type: regex
     name: impostor-check-state-is-reported
     target: trace
-    pattern: '0 of 10 vectors hit▕[^\n]{0,40}· impostor check'
+    pattern: '(?<![\d.])0 of 10 vectors hit▕[ \w]{0,40}· impostor check'
     match: contains
 
   - type: llm

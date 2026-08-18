@@ -46,7 +46,19 @@ set -euo pipefail
 # the `git init` note below), so a `git rev-parse --is-inside-work-tree` guard
 # would refuse every legitimate run. An empty directory is the one condition
 # that is both true of the sandbox and false of any checkout worth protecting.
-if [ -n "$(ls -A . 2>/dev/null)" ]; then
+#
+# The listing's exit status is checked, not just its output. An `ls` that errors
+# prints nothing, and "no output" read as "the directory is empty" would turn
+# this guard into a no-op in exactly the case where it cannot see what it is
+# about to overwrite. Unknown is not empty — the same rule ci-secure applies to
+# a check that could not run.
+if ! contents="$(ls -A . 2>/dev/null)"; then
+  echo "scaffold: refusing to run — cannot list '$PWD' to confirm it is an" >&2
+  echo "scaffold: empty sandbox. A directory this script cannot read is not a" >&2
+  echo "scaffold: directory it may overwrite." >&2
+  exit 1
+fi
+if [ -n "$contents" ]; then
   echo "scaffold: refusing to run — '$PWD' is not empty." >&2
   echo "scaffold: this script overwrites and COMMITS .github/workflows/ with" >&2
   echo "scaffold: intentionally vulnerable workflow fixtures, which is only" >&2
