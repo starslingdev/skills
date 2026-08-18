@@ -148,6 +148,14 @@ jobs:
       # against — so nothing in this repository contains it. It runs the gate's real flags,
       # IGNORED_ISSUE_CODES included, so an ignore list that grew to swallow the anchor rule
       # would fail here rather than quietly neutering the gate.
+      # DIAGNOSTIC, temporary. The red-proof below stopped passing on 2026-08-18 without
+      # any commit of ours: the same fixture that tripped E005 and E006 at 06:52 UTC scanned
+      # clean at 22:29 UTC, and two re-runs on unmodified `main` reproduced it. This probe
+      # reports which fixture shapes the CURRENT scanner still flags, so the gate can be
+      # re-anchored to a rule that exists. It never fails the job; delete it once re-anchored.
+      - name: Probe which fixtures the scanner still flags (diagnostic)
+        run: python .github/scripts/registry_scan_probe.py
+
       - name: Prove the gate can go red
         run: python .github/scripts/registry_scan_redprove.py
 
