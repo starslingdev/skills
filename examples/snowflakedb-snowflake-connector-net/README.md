@@ -46,16 +46,17 @@ The same catalog, the same file, the same command — 3 findings before, 0 after
   `.github/workflows/jira_issue.yml` only, at the two commits above (clean tree
   in both cases — the reports' `Audited commit` rows carry no dirty marker).
 - **Scanner:** `ci-secure` at `starslingdev/skills` commit
-  [`553baad`](https://github.com/starslingdev/skills/commit/553baad), run from a
-  clean checkout of that commit. The reports stamp the same SHA, and both
-  findings JSONs record `skill_tree_dirty: false`.
+  [`3545d1b`](https://github.com/starslingdev/skills/commit/3545d1b), run from a
+  clean checkout of that commit on `main`. The reports stamp the same SHA, and
+  both findings JSONs record `skill_tree_dirty: false`.
 - **One spliced field.** Each finding's `attacker_scenario` is the prose the
   skill's own Phase 2.5 wrote for these exact findings on an earlier run at
-  commit `a43d237`, carried forward when the reports were re-rendered against
-  the partial-checkout coverage fix. Every other field, including all three
-  file:line locations and their quoted evidence, is byte-identical between the
-  two runs; nothing was hand-authored, and no number or finding was edited.
-- **Generated:** 2026-08-17 (UTC).
+  commit `a43d237`, carried forward each time the reports were re-rendered
+  (first against the partial-checkout coverage fix, then against the on-`main`
+  scanner commit above). Every other field, including all three file:line
+  locations and their quoted evidence, is byte-identical across those runs;
+  nothing was hand-authored, and no number or finding was edited.
+- **Generated:** 2026-08-18 (UTC).
 - **Coverage caveats, stated loudly in both reports.** Neither report claims a
   clean repository, and that is the second thing this pair demonstrates:
 

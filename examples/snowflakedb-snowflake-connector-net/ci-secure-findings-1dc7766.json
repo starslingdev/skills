@@ -1,17 +1,19 @@
 {
-  "scanned_at": "2026-08-17T22:46:27Z",
+  "scanned_at": "2026-08-18T00:37:44Z",
   "scanned_workflows": 1,
   "repo_root": "/local/snowflake-connector-net",
   "repo": null,
   "commit_sha": "1dc7766c5aa4b07da3cf3416e501364d3bc827a0",
   "repo_tree_dirty": false,
-  "skill_commit_sha": "553baad54b3b412856f208d4c39275fa7e10115c",
+  "skill_commit_sha": "3545d1b547178905c41dd8b2280fd9225d7df2f7",
   "skill_tree_dirty": false,
   "timings": {
-    "run_start_epoch": 1787006787.237,
+    "run_start_epoch": 1787013464.958,
     "activity_enrich_s": 0.0,
     "scan_total_s": 0.04,
-    "total_run_s": 8.2
+    "scripted_end_epoch": 1787013465.045,
+    "scripted_total_s": 0.15,
+    "total_run_s": 26.55
   },
   "gh_checks": {
     "P14.11": "skipped: disabled via --gh-impostor=off (network-gated check did NOT run)"

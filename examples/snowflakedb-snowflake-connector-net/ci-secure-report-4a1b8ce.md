@@ -7,8 +7,8 @@
 | **Catalog** | ten critical attack vectors (critical-only — not a comprehensive audit) |
 | **Severity breakdown (by occurrence)** | HIGH: 3 |
 | **Coverage** | ⚠️ **PARTIAL** — not every workflow was fully scanned; see the Incomplete-coverage warning below |
-| **Scanned** | 2026-08-17 (UTC) |
-| **Scanner** | ci-secure (skill commit `553baad`) — 3 finding(s) |
+| **Scanned** | 2026-08-18 (UTC) |
+| **Scanner** | ci-secure (skill commit `3545d1b`) — 3 finding(s) |
 
 ```
 CI Secure   3 critical findings  ▏1 of 10 vectors hit▕  1 workflow · impostor check SKIPPED
@@ -221,10 +221,10 @@ One line per vector, taken from the catalog entry each detector is built from.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-secure scanner at commit `553baad` | Every `.github/workflows/` file ending `.yml` or `.yaml`, dot-prefixed names included, under the audited tree (4a1b8ce) | Critical exploit-chain pattern detection (see the catalog) |
+| ci-secure scanner at commit `3545d1b` | Every `.github/workflows/` file ending `.yml` or `.yaml`, dot-prefixed names included, under the audited tree (4a1b8ce) | Critical exploit-chain pattern detection (see the catalog) |
 | GitHub API — run activity | not queried (no `--repo`) | Pass `--repo owner/repo` to enrich findings with workflow activity |
 
-**Data freshness.** Scanner ran at `2026-08-17T22:46:27Z`. Workflow YAML is read from the audited tree at commit `4a1b8ce`. Activity counts (when `--repo` is supplied) reflect a rolling 30-day window at scan time.
+**Data freshness.** Scanner ran at `2026-08-18T00:37:37Z`. Workflow YAML is read from the audited tree at commit `4a1b8ce`. Activity counts (when `--repo` is supplied) reflect a rolling 30-day window at scan time.
 
 ---
 
