@@ -148,7 +148,19 @@ jobs:
       # against — so nothing in this repository contains it. It runs the gate's real flags,
       # IGNORED_ISSUE_CODES included, so an ignore list that grew to swallow the anchor rule
       # would fail here rather than quietly neutering the gate.
+      #
+      # `continue-on-error` here does NOT make the control advisory — the
+      # "Report the coverage gap" step below fails the build on its outcome, and
+      # tests/test_registry_scan_workflow.py fails if that step goes missing. It
+      # exists so the steps AFTER this one still run. On 2026-08-18 a hard
+      # failure here stopped the job at this step, so a scanner that had gone
+      # blind cost us not just the gate but every finding it might still have
+      # reported: the unfiltered pass never ran and the artifact upload logged
+      # "No files were found". The report is the half that would show detection
+      # coming back, so it must survive the control failing.
       - name: Prove the gate can go red
+        id: red_proof
+        continue-on-error: true
         run: python .github/scripts/registry_scan_redprove.py
 
       # Two passes, on purpose, and exactly two — the scanner is a network service, so every
@@ -197,6 +209,47 @@ jobs:
             --verbose \
             --dangerously-run-mcp-servers \
             --ignore-issues-codes "${IGNORED_ISSUE_CODES}"
+
+      # Two red checks that mean opposite things must not look the same. A gate
+      # failure above means "a critical finding is in this tree". This step means
+      # "nothing was verified" — the scanner reported nothing on a control that
+      # is known-malicious, so its silence on the real tree carries no
+      # information either. Both are failures; only one is a finding, and the
+      # annotation title is what a human, or the checks API a review agent
+      # reads, uses to tell them apart.
+      - name: Report the coverage gap
+        if: always()
+        run: |
+          if [ "${{ steps.red_proof.outcome }}" = "success" ]; then
+            echo "Control passed: the scanner reported the anchor finding, so this run's result is meaningful."
+            exit 0
+          fi
+          echo "::error title=REGISTRY SCAN COVERAGE GAP — NOT A FINDING::The scanner reported nothing on a deliberately malicious control skill, so this run verified NOTHING about ${SCAN_PATH}. This is a coverage gap, not a clean result and not a security finding."
+          {
+            echo "## Registry scan: coverage gap"
+            echo ""
+            echo "**Nothing was verified on this run.** The control skill — built in a temp"
+            echo "directory, carrying an instruction to fetch a remote installer and pipe it"
+            echo "into a shell — came back clean, so the scanner's silence about \`${SCAN_PATH}\`"
+            echo "means nothing either."
+            echo ""
+            echo "**This is not a security finding.** A finding fails the gate step above and"
+            echo "names its issue code."
+            echo ""
+            echo "Known cause, verified against the live API on 2026-08-19: the analysis"
+            echo "endpoint answers HTTP 200 with an empty finding set on both API versions it"
+            echo "supports, on fixtures including credential exfiltration. It is not the token"
+            echo "(\`/self\` and \`/orgs\` answer 200), not the free-tier daily cap (no 429, quota"
+            echo "remaining), and not the deprecated version pin (the newer one is empty too)."
+            echo ""
+            echo "**Compensating control:** the offline shape guard in"
+            echo "\`tests/test_no_ioc_shaped_literals.py\` covers the mechanical half of the"
+            echo "malicious-code class with no vendor dependency, and it runs in \`test\`, which"
+            echo "is a required check. Prompt injection in skill instructions stays uncovered."
+            echo ""
+            echo "**When this step stops failing, detection is back.**"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit 1
 
   fork-not-scanned:
     # The name is the message: this check being green must not read as "scanned, clean".

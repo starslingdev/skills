@@ -141,9 +141,20 @@ def main() -> int:
             )
         if EXPECTED_ISSUE_CODE not in output:
             problems.append(
-                f"scanner output does not mention {EXPECTED_ISSUE_CODE}; the rule may have "
-                "been renamed or retired in a catalog revamp, so this gate is no longer "
-                "anchored to a rule that exists"
+                f"scanner output does not mention {EXPECTED_ISSUE_CODE}. Two causes "
+                "produce this, and they need opposite responses. (1) The rule was "
+                "renamed or retired in a catalog revamp, in which case re-anchor "
+                f"{EXPECTED_ISSUE_CODE} above to whatever replaced it. (2) The scanner "
+                "is not detecting, which is where this has stood since 2026-08-18: "
+                "verified against the live API, the analysis endpoint answers HTTP 200 "
+                "with an empty finding set on BOTH API versions it supports, including "
+                "on a fixture that reads credential files and posts them to a remote "
+                "endpoint. It is not the token, not the free tier's daily cap, and not "
+                "the deprecated version pin — each was tested. Nothing in this "
+                "repository can fix (2); the compensating control is the offline shape "
+                "guard in tests/test_no_ioc_shaped_literals.py, which runs in the "
+                "required `test` check. Re-anchoring the gate to a rule that does not "
+                "fire would turn this honest red into a meaningless green"
             )
 
         if problems:
