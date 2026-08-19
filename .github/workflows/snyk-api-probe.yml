@@ -11,6 +11,12 @@ name: Snyk API probe
 # is for a human diagnosing a specific incident.
 on:
   workflow_dispatch:
+  # `workflow_dispatch` only registers once a workflow is on the default branch,
+  # and this one is deliberately not merged there — it is incident diagnostics,
+  # not part of the build. The branch-scoped push trigger is what makes it
+  # runnable at all; it fires on no other branch, and never on `main`.
+  push:
+    branches: [snyk-api-probe]
 
 permissions:
   contents: read
