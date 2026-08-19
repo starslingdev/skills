@@ -13,6 +13,7 @@ for a suite that executed nothing.
 """
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -181,6 +182,46 @@ def test_the_plugin_copy_withholds_the_answer_key(tmp_path):
     assert not (plugin / "tests").exists()
 
 
+def test_no_file_the_plugin_copy_mounts_can_satisfy_a_grader(tmp_path):
+    """The name-based exclusion list is not the invariant -- this is.
+
+    `evals/` and `tests/` were excluded because someone noticed they held the
+    answer key. Nothing checked the REST of the tree, and the rest of the tree
+    grew: `CHANGELOG.md` ships inside the skill, `--plugin-dir` mounts it, and
+    it quotes banner strings verbatim while describing the graders that assert
+    on them. One `Grep` of the plugin directory then greens a grader with no
+    scan behind it -- a false PASS, which is the direction that never gets
+    investigated.
+
+    The shipped vacuity rule (`skills/ci-secure/tests/test_evals_cases.py`)
+    cannot cover this: it lives in the installed skill and has no idea what
+    this maintainer-side harness chooses to mount. So the check belongs here,
+    stated as the property rather than as a list of names, and it fails the day
+    any new file at the skill root quotes a grader's expected string.
+    """
+    import yaml
+
+    plugin = harness._plugin_dir(tmp_path)
+    mounted = {p: p.read_text(encoding="utf-8", errors="replace")
+               for p in sorted(plugin.rglob("*")) if p.is_file()}
+
+    offenders = []
+    for case in sorted((harness._SKILL / "evals").glob("*/case.yaml")):
+        for g in yaml.safe_load(case.read_text(encoding="utf-8"))["graders"]:
+            if g.get("type") != "regex" or g.get("match") == "not_contains":
+                continue
+            for path, text in mounted.items():
+                hit = re.search(g["pattern"], text)
+                if hit:
+                    offenders.append(
+                        f"{case.parent.name}/{g['name']} matches "
+                        f"{hit.group(0)!r} in {path.relative_to(plugin)}")
+    assert not offenders, (
+        "a file the harness mounts satisfies a grader without a scan behind "
+        "it -- the agent can read the answer instead of computing it:\n  "
+        + "\n  ".join(offenders))
+
+
 # --- the graded corpus is everything the run produced, not only what it printed
 #
 # ci-secure writes its report to a file and prints a summary. The graders that
@@ -207,10 +248,13 @@ def test_a_files_targeted_regex_reads_what_the_session_wrote(tmp_path):
         "the run rendered the evidence bullet; the grader must see the file")
 
 
-def test_a_files_targeted_regex_does_not_read_the_transcript(tmp_path):
-    """The two corpora stay separate in both directions. A `files` grader that
-    silently fell back to the trace would pass on the agent's prose — exactly
-    the model-phrasing dependence these anchors exist to avoid."""
+def test_an_uncollectable_corpus_is_not_scored_as_a_behavioural_failure(tmp_path):
+    """A `files` grader with no report to read is a collection failure, exit 2.
+
+    This used to be named for corpus separation, but it never tested it: the
+    empty-corpus guard fires before any corpus lookup, so it exits 2 whatever
+    `corpora["files"]` would have returned. Separation is now pinned by the test
+    below, and this one keeps the guard it actually exercises."""
     corpus = harness._files_corpus([tmp_path], {})
     graders = [{"type": "regex", "name": "report-only", "target": "files",
                 "pattern": r"ONLY-IN-THE-TRANSCRIPT", "match": "contains"}]
@@ -219,6 +263,30 @@ def test_a_files_targeted_regex_does_not_read_the_transcript(tmp_path):
     assert exc.value.code == 2, (
         "an empty files corpus under a files-targeted grader is a corpus that "
         "could not be collected — not a behavioural failure")
+
+
+def test_a_files_targeted_regex_does_not_read_the_transcript(tmp_path):
+    """The two corpora stay separate in BOTH directions.
+
+    The trace→files direction was covered; this one was not, and the asymmetry
+    was invisible because the test that claimed it only ever reached the
+    empty-corpus guard. A `files` grader that silently fell back to — or
+    concatenated in — the transcript would pass on the agent's prose, which is
+    the model-phrasing dependence these anchors exist to remove.
+
+    So the corpus here is real (it holds a report, clearing the collection
+    guard) and simply does not contain the needle, while the transcript does.
+    The grader must come back False."""
+    report = tmp_path / "ci-secure-report-abc.md"
+    report.write_text("a real report that never mentions the needle\n",
+                      encoding="utf-8")
+    corpus = harness._files_corpus([tmp_path], {})
+    graders = [{"type": "regex", "name": "report-only", "target": "files",
+                "pattern": r"ONLY-IN-THE-TRANSCRIPT", "match": "contains"}]
+    scored, _ = harness._grade(graders, "ONLY-IN-THE-TRANSCRIPT", [], files=corpus)
+    assert scored[0][1] is False, (
+        "the needle is only in the transcript; a `files` grader that saw it "
+        "read the wrong corpus")
 
 
 def test_a_trace_targeted_regex_does_not_read_the_files(tmp_path):
@@ -230,6 +298,54 @@ def test_a_trace_targeted_regex_does_not_read_the_files(tmp_path):
                 "pattern": r"ONLY-IN-THE-REPORT", "match": "contains"}]
     scored, _ = harness._grade(graders, "", [], files=corpus)
     assert scored[0][1] is False
+
+
+def test_a_corpus_without_the_report_is_a_collection_failure_not_a_red_case(tmp_path):
+    """The empty-corpus guard was written for "the report never reached the
+    harness", but it only fires when the corpus is COMPLETELY empty -- and a
+    session leaves scratch files, a fix branch, a stray note. One of those keeps
+    the corpus non-empty while the report is still missing, and then every
+    report-anchored grader fails as though the scan had misbehaved.
+
+    That is the exact wrong-diagnosis this PR exists to close, one level in: if
+    `claude` stops honouring TMPDIR, or a subprocess resets it, or SKILL.md
+    drifts to a literal path, the harness must say it could not collect the
+    evidence rather than report a behaviour change.
+    """
+    (tmp_path / "scratch-note.txt").write_text("thinking out loud\n", encoding="utf-8")
+    corpus = harness._files_corpus([tmp_path], {})
+    assert corpus, "precondition: the corpus is non-empty but holds no report"
+    graders = [{"type": "regex", "name": "finding-lands-on-the-vulnerable-workflow",
+                "target": "files",
+                "pattern": r"vulnerable\.yml:(?:8|14)\b[^\n]{0,20}jobs",
+                "match": "contains"}]
+    with pytest.raises(SystemExit) as exc:
+        harness._grade(graders, "", [], files=corpus)
+    assert exc.value.code == 2, (
+        "no report in the corpus means the graders anchored on it had no "
+        "evidence to read -- a harness failure, not a skill regression")
+
+
+def test_a_count_grader_counts_in_the_corpus_its_target_names(tmp_path):
+    """`count:` is the third match mode, and it read the transcript no matter
+    what `target` said -- the same wrong-corpus bug `contains` was just fixed
+    for, surviving in the branch beside it.
+
+    Silent, and wrong in both directions: a `files` grader counting `2` scores
+    the occurrences in the agent's prose, so a report that rendered exactly two
+    passes only if the session also happened to say it twice. No case uses
+    `count:` today, which is why it went unnoticed; the next author to write one
+    against `files` would get a verdict computed from the other corpus.
+    """
+    report = tmp_path / "ci-secure-report-abc.md"
+    report.write_text("HIT\nHIT\n", encoding="utf-8")
+    corpus = harness._files_corpus([tmp_path], {})
+    graders = [{"type": "regex", "name": "two-in-the-report", "target": "files",
+                "pattern": "HIT", "match": "count:2"}]
+    scored, _ = harness._grade(graders, "HIT", [], files=corpus)
+    assert scored[0][1] is True, (
+        "the report holds exactly two hits and the grader targets `files`; "
+        f"counting the one in the transcript instead gave {scored[0][2]}")
 
 
 def test_an_unknown_grader_target_is_not_graded_against_the_trace():

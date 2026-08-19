@@ -77,7 +77,16 @@ _EVALS = _SKILL / "evals"
 # expected string while `tests/` holds rendered report fixtures containing them.
 # An agent that greps the plugin directory would put those strings into the
 # transcript, satisfying the graders without ever running a scan.
-_PLUGIN_EXCLUDE = ("evals", "tests")
+#
+# `CHANGELOG.md` is here for the same reason and is the less obvious one: it
+# narrates the graders themselves, so it quotes their expected banner strings
+# verbatim -- `0 critical findings` sits in the entry explaining why that very
+# pattern needs its `(?<![\d.])` guard. It is also of no use to an agent
+# auditing a repository, so withholding it costs the run nothing.
+# `test_no_file_the_plugin_copy_mounts_can_satisfy_a_grader` states the property
+# this list exists to satisfy, so the next file added at the skill root cannot
+# quietly reopen the hole.
+_PLUGIN_EXCLUDE = ("evals", "tests", "CHANGELOG.md")
 
 # Where a failing session is written, relative to the working directory, so the
 # run that failed can be read rather than reproduced.
@@ -87,6 +96,14 @@ _LOGS = Path("skill-eval-logs")
 # kilobytes; anything past this is a lockfile, a cache or a binary the agent
 # happened to create, and reading it in would bloat every regex match.
 _MAX_CORPUS_FILE = 4 * 1024 * 1024
+
+# The artifact every `files` grader is anchored on. SKILL.md renders it as
+# `$TMPDIR/ci-secure-report-<slug>.md` and the save option copies it to
+# `./ci-secure-report.md`, so one glob covers both landing spots. `_grade` uses
+# the header form to tell "the report was never collected" (a harness failure)
+# apart from "the report says something else" (a real red).
+_REPORT_GLOB = "ci-secure-report*.md"
+_REPORT_HEADER = re.compile(r"^=== [^\n]*ci-secure-report[^\n]*\.md ===", re.M)
 
 
 def _env(tmpdir: Path | None = None) -> dict:
@@ -397,19 +414,30 @@ def _grade(graders: list[dict], stream: str, tools: list[tuple[str, str]],
                 _die(f"{name}: grader target {target!r} is not implemented — "
                      "this harness cannot score the case, so it must not "
                      "report one")
-            if target == "files" and not files:
-                # An empty corpus scores every `contains` as a failure and every
-                # `not_contains` as a pass: the session's own behaviour reported
-                # from evidence that was never collected.
-                _die(f"{name}: targets `files`, but the session produced no "
-                     "readable file — nothing was graded, and that is not a "
-                     "behavioural failure")
+            if target == "files" and not _REPORT_HEADER.search(files):
+                # Every `files` grader in this suite is anchored on the rendered
+                # report, so a corpus without one scores every `contains` as a
+                # failure and every `not_contains` as a pass: the session's own
+                # behaviour, reported from evidence that was never collected.
+                #
+                # Testing `not files` was too weak. A session leaves scratch
+                # notes and a fix branch, and any one of them keeps the corpus
+                # non-empty while the report is still missing — which is what
+                # happens the day `claude` stops honouring TMPDIR, a subprocess
+                # resets it, or SKILL.md drifts to a literal path. Ask for the
+                # artifact the graders actually read.
+                _die(f"{name}: targets `files`, but the session wrote no "
+                     f"{_REPORT_GLOB} the harness could collect — the graders "
+                     "anchored on the report had no evidence to read, and that "
+                     "is not a behavioural failure")
             found = bool(re.search(pat, corpora[target]))
             if mode == "not_contains":
                 scored.append((name, not found, "absent" if not found else "PRESENT"))
             elif mode.startswith("count:"):
+                # `corpora[target]`, not `stream`: counting always read the
+                # transcript, so a `files` grader scored the agent's prose.
                 want = int(mode.split(":", 1)[1])
-                n = len(re.findall(pat, stream))
+                n = len(re.findall(pat, corpora[target]))
                 scored.append((name, n == want, f"count={n}"))
             else:
                 scored.append((name, found, "found" if found else "missing"))

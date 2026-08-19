@@ -87,3 +87,10 @@ skills/ci-secure/evals/files/*/.github/
 # whatever sits there. Always pass `--output-dir` somewhere outside the skill;
 # `tests/test_ci_secure_install_surface.py` fails if results land here anyway.
 skills/ci-secure/evals/results/
+
+# The ci-secure eval harness writes a failing session's full stream-json plus
+# the file corpus it collected to `./skill-eval-logs/` (relative to the working
+# directory, so the repo root on a local run). Those hold the verbatim
+# transcript of an agent session — prompts, tool output, the rendered report.
+# Never tracked; see maintainers/ci-secure/scripts/run_skill_evals.py.
+skill-eval-logs/
