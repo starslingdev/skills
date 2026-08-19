@@ -13,6 +13,18 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-19** — **A deferred file that cannot be read is now a stop, not an
+  improvisation.** SKILL.md defers load-bearing procedure to reference files in
+  several places, each phrased as "read this before acting". While that
+  procedure was inline, an unreadable reference was not a state the contract
+  could reach; behind a pointer it is — a partial install, a packaging slip, a
+  truncated copy — and nothing said what to do about it, so the agent would
+  improvise the runbook the pointer exists to protect. A NEVER rule now says to
+  stop and name the file. It was paid for WITHOUT moving another rule behind a
+  link: two of the NEVER bullets were reflowed to reclaim exactly the two lines
+  it needed, so the body stays at 499 of 500 and no rule left the always-loaded
+  surface to make room for the rule about deferral failing.
+
 - **2026-08-19** — **Three smaller review findings, and a misinstruction in
   the impostor-status rule.** The gate runbook still said to install "as one
   setup PR" while the NEVER rules forbid opening one unless asked; on main both

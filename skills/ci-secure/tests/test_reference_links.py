@@ -329,3 +329,29 @@ def test_a_shell_comment_in_an_example_is_not_read_as_a_heading():
         "a shell comment inside a fenced block was counted as a heading — a "
         "renamed section could then resolve against an example's comment"
     )
+
+
+def test_the_contract_says_what_to_do_when_a_deferred_file_cannot_be_read():
+    """The failure mode the trim created, and the rule that answers it.
+
+    SKILL.md defers load-bearing procedure to reference files in several
+    places, each phrased as an instruction to read the file before acting. When
+    that procedure was inline, "the reference cannot be read" was not a state
+    the contract could reach; behind a pointer it is — a partial install, a
+    packaging slip, a truncated copy — and without a rule the agent improvises
+    the runbook, which is precisely what the reference exists to prevent.
+
+    Guarding the rule's PRESENCE rather than its wording: this is prose an
+    agent obeys, so no test can prove it is followed. What a test can do is
+    stop it being dropped the next time the body runs out of room.
+    """
+    skill = _SKILL_MD.read_text(encoding="utf-8")
+    never = skill[skill.index("## NEVER rules"):]
+    assert "deferred file cannot be read" in never, (
+        "SKILL.md's NEVER rules no longer say what to do when a file the "
+        "contract defers to cannot be read. Several pointers order the agent "
+        "to read a reference before acting; without this rule a missing or "
+        "truncated reference produces an improvised runbook instead of a stop. "
+        "If the wording changed, update this guard deliberately — do not "
+        "delete the rule to reclaim a line of the body budget."
+    )

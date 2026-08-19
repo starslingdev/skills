@@ -467,10 +467,9 @@ purpose — do not fill that gap with a guess.
 
 ## NEVER rules
 
-- **Never modify a file outside the one named in a finding's
-  `workflow_file` during subagent fixes.** One subagent = one group; the
-  orchestrator itself owns the report-file edits (and only those)
-  between dispatches.
+- **Never modify a file outside the one named in a finding's `workflow_file`
+  during subagent fixes.** One subagent = one group; the orchestrator itself
+  owns the report-file edits (and only those) between dispatches.
 - **Never push, commit, or open a PR from inside the skill unless the user
   explicitly asks.** By default the user reviews the working tree themselves,
   and that includes the gate install, a refresh, and the one-line
@@ -491,13 +490,14 @@ purpose — do not fill that gap with a guess.
 - **Never leave a fix silently partial or invisible.** Every occurrence fixed
   or its skip recorded with a reason; every dispatched fix appears in
   `## Fixes applied`.
-- **Never present a scan as clean or complete when coverage was
-  incomplete.** A skipped/unreadable workflow (in `scan_incomplete`), a
-  non-zero `run.py` exit, or unparseable scanner output is a coverage gap —
-  name what was not checked in both the terminal summary and the report. The
-  same rule covers the network-gated check: a skipped impostor-SHA check
-  renders as SKIPPED, never a pass. A false negative shown as "clean" is
-  worse than no scan.
+- **Never present a scan as clean or complete when coverage was incomplete.** A
+  skipped/unreadable workflow (in `scan_incomplete`), a non-zero `run.py` exit,
+  or unparseable scanner output is a coverage gap — name what was not checked
+  in both the terminal summary and the report. The same rule covers the
+  network-gated check: a skipped impostor-SHA check renders as SKIPPED, never a
+  pass. A false negative shown as "clean" is worse than no scan.
+- **Never proceed from memory when a deferred file cannot be read.** Stop and
+  name it — improvising a runbook is the failure the pointer exists to prevent.
 - **Never pad a clean result.** Zero critical findings is the product working,
   not a gap to fill — do not downgrade to informal observations to have
   something to show. The scope-honesty line is the only caveat.
