@@ -61,7 +61,13 @@ from pathlib import Path
 # The version the CLI pins, plus neighbours to test whether the pin is the
 # problem. `None` sends no version parameter at all.
 CONTROL_VERSION = "2025-09-02"
-REPLAY_VERSIONS = [CONTROL_VERSION, "2024-10-15", "2025-01-01", "2026-01-01", None]
+# `2026-07-10` is the other version the API says it supports, and it is the date
+# in the `deprecation` header the control version comes back with. The first run
+# of this probe got the list out of the server itself, by asking for a version
+# that does not exist: "Unsupported API version: 2026-01-01. Supported versions:
+# ['2025-09-02', '2026-07-10']".
+CANDIDATE_VERSION = "2026-07-10"
+REPLAY_VERSIONS = [CONTROL_VERSION, CANDIDATE_VERSION, "2026-01-01", None]
 
 REST_BASE = "https://api.snyk.io/rest"
 
