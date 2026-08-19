@@ -392,9 +392,10 @@ def test_the_files_corpus_names_each_file_relative_to_its_root(tmp_path):
 
 
 def test_the_agent_writes_its_report_where_the_harness_can_read_it(tmp_path):
-    """SKILL.md line 194 renders to `${TMPDIR:-/tmp}/ci-secure-report-<slug>.md`.
-    Pointing TMPDIR at a directory the harness owns is what makes collecting the
-    report a contract rather than a guess at where it landed."""
+    """SKILL.md's Phase 3 ("Render the report (opt-in save)") renders to
+    `${TMPDIR:-/tmp}/ci-secure-report-<slug>.md`. Pointing TMPDIR at a directory
+    the harness owns is what makes collecting the report a contract rather than
+    a guess at where it landed."""
     env = harness._env(tmp_path)
     assert env["TMPDIR"] == str(tmp_path)
 

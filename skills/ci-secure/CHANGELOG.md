@@ -303,6 +303,32 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-19** — **The `Coverage:` line is copied, not recomputed, and a
+  section link that stops resolving now fails the build.** Phase 3 defined
+  `complete` as "every workflow file was scanned", which is one of the three gap
+  channels the engine actually computes completeness from, so an agent deriving
+  its own Coverage row could print `complete` over a real gap — the one thing
+  the coverage rule forbids. It now copies the report's row. Alongside it, the
+  reference guard resolves `#section` anchors instead of stripping them: a
+  pointer into a named section is a pointer to a RULE, and renaming the heading
+  used to leave the agent at the top of a 162-line file with nothing failing.
+  `references/prompts.md` was also missing from the set of references required
+  to stay reachable — it carries Phase 5's untrusted-content containment and
+  its edit-only-this-file scope limit, and Phase 5 is the only phase that writes
+  to the user's repository. Both new guards were proven by mutation first.
+
+- **2026-08-19** — **Two corrections in the findings-JSON reference, and the
+  Phase 6 close template carries the vector id it always required.**
+  `references/scan-output.md` said Phase 6 reads a `Timing:` line after the
+  render; no such line is rendered into the report, and an agent grepping for
+  one would find nothing and either drop the timing or invent it. It composes
+  that line from the `timings` block, which is why the render has to happen
+  first. The same file documented `workflow_activity` in its enriched shape
+  only, where the engine has three and warns that an attempted-and-failed
+  enrichment must never be read as "active". Phase 6's literal close template
+  wrote `Fix Finding N — {short title}` while Phase 4 mandates the `{vector id}`
+  that bridges an option to its receipt row; the template now carries it.
+
 - **2026-08-19** — **The guard on the moved runbooks now checks that the agent
   can actually follow the pointer, and that there is something behind it.** The
   check that SKILL.md still names every reference it defers a rule to was a

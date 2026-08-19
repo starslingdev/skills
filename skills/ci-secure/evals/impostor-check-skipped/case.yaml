@@ -64,8 +64,9 @@ graders:
   # report.py's pre-drawn banner, whose last token is the impostor check's
   # state. Anchored on the whole composition rather than the bare word: this
   # run's vector count and the impostor state, written by two separate f-strings
-  # in report.py and adjacent only in a real render. SKILL.md's worked banner
-  # shows `2 of 10 ... ran`, so neither half of this can be quoted from it.
+  # in report.py and adjacent only in a real render. references/terminal-summary.md's
+  # worked banner (## The three-line header block) shows `2 of 10 ... ran`, so
+  # neither half of this can be quoted from it.
   #
   # The leading (?<![\d.]) is not decoration -- without it `1 of 10` matches
   # inside `11 of 10`. The bridge is [ \w] rather than [^\n] so the pattern

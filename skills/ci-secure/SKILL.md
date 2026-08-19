@@ -208,9 +208,9 @@ Contract lines, all mandatory:
   the next act is a structured question (the zero-findings save offer, or
   Phase 4's selection), the banner and these receipt lines go INSIDE that
   question's own text. Prose-then-ask counts as NOT delivered.
-- **`Coverage:`** must be honest: `complete` only when every workflow file was
-  scanned, otherwise `PARTIAL —` plus what was not checked. Never print
-  `complete` over a coverage gap.
+- **`Coverage:`** COPY the report's Coverage row, never recompute one:
+  completeness turns on three gap channels, not just skipped files. Never
+  print `complete` over a coverage gap.
 - **The impostor-SHA status** in all four states, never dressed up as a pass
   — three from `gh_checks`, the fourth being its ABSENCE (read the banner's
   last token too): `ran` — every pin resolved; `partial` — **print the
@@ -390,7 +390,7 @@ the user before moving on.
    is orchestrator thinking time rather than hiding it.
 4. **Close BY ASKING ONE structured question** — same convention, ordering
    and slot sizing as Phase 4, recomputed over the groups still UNFIXED: two
-   named **Fix Finding N — {short title}** slots (highest-severity first,
+   named **Fix Finding N — {short title} ({vector id})** slots (highest-severity first,
    each description carrying the same three things — files touched, what the
    fix could break, how it is verified), then the overflow slot sized to what
    remains (**A different selection** at three or more, **Fix both** at

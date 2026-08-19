@@ -34,6 +34,15 @@ decision the JSON can answer.
 }
 ```
 
+`workflow_activity` has **three** shapes, and they are not interchangeable.
+The one above is the enriched success case. `{}` means no enrichment was
+attempted — `--repo` was not passed. `{"status": "unavailable", "reason": ...}`
+means enrichment WAS attempted and failed. The last one must never be read as
+"active": the dormancy flag is simply absent, so a failed check looks identical
+to a live workflow unless the distinction is kept. Dormancy drives a mandatory
+note in the report and the `all` fix selection, so read the report's rendered
+dormancy state rather than inferring one from a missing flag.
+
 ## The attacker_scenario merged in at Phase 2.5
 
 The one non-scripted field. Written once per pattern group and merged onto
@@ -73,8 +82,10 @@ The one non-scripted field. Written once per pattern group and merged onto
 - `timings` — script-owned spans. As `run.py --out` writes them at Phase 2:
   `run_start_epoch`, `activity_enrich_s`, `scan_total_s`, `scripted_end_epoch`,
   `scripted_total_s`. **`total_run_s` is NOT there yet** — `report.py` computes
-  and writes it back at Phase 3, which is why Phase 6 reads the `Timing:` line
-  after the render. `record_timing.py` appends the orchestrator-measured
-  `fixes_s`.
+  and writes it back at Phase 3, which is why Phase 6 composes its `Timing:`
+  line from THIS block only after the render has happened. There is no
+  `Timing:` line in the rendered report to copy; the only such string in the
+  scripts is a stderr debug log. `record_timing.py` appends the
+  orchestrator-measured `fixes_s`.
 - Provenance, also top-level: `commit_sha`, `repo_tree_dirty`,
   `skill_commit_sha`, `skill_tree_dirty` and `catalog_patterns_evaluated`.

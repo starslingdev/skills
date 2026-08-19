@@ -29,6 +29,34 @@ def _relative_link_targets(text: str) -> list[str]:
     return [t for t in out if t]
 
 
+def _anchored_link_targets(text: str) -> list[tuple[str, str]]:
+    """(file, anchor) for every repo-relative link that names a section. The
+    file half may be empty for a same-document link."""
+    out = []
+    for raw in _LINK.findall(text):
+        if "://" in raw or raw.startswith("mailto:") or "#" not in raw:
+            continue
+        path, _, anchor = raw.partition("#")
+        if anchor:
+            out.append((path, anchor))
+    return out
+
+
+def _heading_slugs(text: str) -> set[str]:
+    """GitHub's heading-anchor slug rules: lowercase, drop anything that is not
+    a word character, space or hyphen, then turn EACH remaining space into a
+    hyphen. Runs are not collapsed — an em dash between two words leaves the
+    spaces that surrounded it, which is why the real anchors carry `--`."""
+    slugs = set()
+    for line in text.splitlines():
+        if not line.startswith("#"):
+            continue
+        heading = line.lstrip("#").strip()
+        slug = re.sub(r"[^\w\s-]", "", heading.lower()).strip()
+        slugs.add(re.sub(r"\s", "-", slug))
+    return slugs
+
+
 def _docs_under_test() -> list[Path]:
     return [_SKILL_MD] + sorted((_SKILL_DIR / "references").glob("*.md"))
 
@@ -38,6 +66,12 @@ def _docs_under_test() -> list[Path]:
 # each must still carry its rules — an existing-but-empty file satisfies "the
 # file is there" while the contract behind the pointer is gone.
 _REQUIRED_REFERENCES = (
+    # Phase 5's fix-subagent prompt. It is the only phase that writes to the
+    # user's repository, and this file carries the containment that makes that
+    # safe: the UNTRUSTED-REPO-CONTENT markers and the "edit ONLY the finding's
+    # workflow_file" scope limit. If any deferred reference has to be reachable,
+    # it is this one.
+    "references/prompts.md",
     "references/ci-gate.md",
     "references/terminal-summary.md",
     "references/scan-output.md",
@@ -80,6 +114,27 @@ def test_skill_md_still_links_every_reference_it_depends_on():
             "rules it holds are unreachable from the always-loaded contract. "
             f"Targets found: {sorted(targets)}"
         )
+
+
+def test_every_section_link_resolves_to_a_real_heading():
+    """A link that names a section is a pointer to a RULE, not to a file. SKILL.md
+    sends the agent to "Adding a pattern — the mechanical checklist" inside a
+    162-line reference; renaming or deleting that heading lands the agent at the
+    top of the file with no sign anything is missing, which is worse than a link
+    that visibly 404s. File existence alone does not catch it."""
+    dangling = []
+    for doc in _docs_under_test():
+        text = doc.read_text(encoding="utf-8")
+        for path, anchor in _anchored_link_targets(text):
+            target = (doc.parent / path).resolve() if path else doc
+            if not target.exists():
+                continue  # the existence guard above owns this failure
+            if anchor.lower() not in _heading_slugs(target.read_text(encoding="utf-8")):
+                dangling.append(f"{doc.relative_to(_SKILL_DIR)} -> {path}#{anchor}")
+    assert not dangling, (
+        "shipped ci-secure docs link to sections that no longer exist — the "
+        "rule behind the pointer is unreachable: " + "; ".join(dangling)
+    )
 
 
 def test_every_deferred_runbook_still_carries_its_rules():
