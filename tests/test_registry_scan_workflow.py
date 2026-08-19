@@ -452,8 +452,18 @@ def test_a_failed_control_still_fails_the_build(workflow: dict):
     assert not step.get("continue-on-error"), (
         "the enforcement step is continue-on-error, so a failed control would show green"
     )
-    assert re.search(r"\bexit\s+1\b", step["run"]), (
+    run = step["run"]
+    assert re.search(r"\bexit\s+1\b", run), (
         "the enforcement step never exits non-zero, so it cannot fail the build"
+    )
+    # Searching the whole block is not enough. The step branches, and only the
+    # LAST branch is the coverage gap itself; an edit that turned just that
+    # branch into `exit 0` would leave the earlier branches' `exit 1` in place
+    # and keep a whole-block search green — a green check over a scan that
+    # verified nothing, which is the exact regression this test exists to catch.
+    assert run.strip().endswith("exit 1"), (
+        "the enforcement step's final branch — the coverage gap — does not exit "
+        "non-zero, so an unverified scan would show a green check"
     )
 
 
