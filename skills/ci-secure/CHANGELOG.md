@@ -104,7 +104,7 @@ entries are dated (UTC). Format loosely follows
 
 - **2026-08-17** — **SKILL.md is about a third shorter, with the detail moved
   into reference files.** Anthropic's skill-authoring guidance puts the ceiling
-  for a SKILL.md body at 500 lines, and ci-secure's had grown to 780. The
+  for a SKILL.md body at 500 lines, and ci-secure's had grown to 854. The
   runbook for adding ci-secure as a CI gate, the terminal summary's provenance
   table, the findings-JSON shape, and the troubleshooting table now live in
   `references/ci-gate.md`, `references/terminal-summary.md`,
@@ -303,6 +303,31 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-19** — **The guard on the moved runbooks now checks that the agent
+  can actually follow the pointer, and that there is something behind it.** The
+  check that SKILL.md still names every reference it defers a rule to was a
+  search for the path anywhere in the page, so it was satisfied by the path
+  appearing as a link's caption, as a backticked prose mention, or as the label
+  on a link pointing at a different file — repointing the CI-gate pointer at
+  another reference left the whole suite green while the gate runbook became
+  unreachable. It now asserts the path is a real link TARGET. A second gap sat
+  beside it: the references were checked for existence only, so emptying
+  `references/ci-gate.md` to zero bytes stayed green while SKILL.md still
+  ordered the agent to read the full runbook before doing anything. Each
+  deferred runbook is now also checked for substance. Both were proven by
+  mutation before the fix.
+
+- **2026-08-19** — **Contract corrections found while trimming.** Phase 6's
+  close claimed the same options and verbatim text as Phase 4 while writing a
+  template without the vector id Phase 4 mandates; the vector receipt did not
+  say where its ten rows come from; the impostor-status bullet said all four
+  states come from `gh_checks` and then said the fourth cannot be; the honesty
+  imperative "Never print `complete` over a coverage gap" was restored;
+  `references/scan-output.md` misdescribed the `timings` block and omitted
+  `gh_check_details`; `references/ci-gate.md` used the `<ci-secure>` placeholder
+  without defining it; and the Phase 4 worked example regained the second active
+  group that makes it demonstrate the slot-sizing rules it sits under.
+
 - **2026-08-17** — **The terminal summary can no longer be read as three
   lines total.** Trimming SKILL.md left "three lines, no fourth" standing on
   its own where an inline example used to scope it to the header block, so it
@@ -312,7 +337,7 @@ entries are dated (UTC). Format loosely follows
   contract lines follow it and are not optional. The body-length ceiling that
   motivated the trim is now pinned by a test
   (`tests/test_skill_body_budget.py`, with a red-proof), so it cannot regrow
-  unnoticed the way it did to 780 lines. Two more gaps the same review found
+  unnoticed the way it did to 854 lines. Two more gaps the same review found
   are closed alongside it: `tests/test_reference_links.py` fails if a
   reference file SKILL.md links has been renamed or dropped (deleting
   `references/terminal-summary.md` used to leave the suite fully green — the

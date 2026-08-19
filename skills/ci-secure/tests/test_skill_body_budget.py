@@ -2,7 +2,7 @@
 
 SKILL.md is loaded into the agent's context on EVERY run, so Anthropic's
 skill-authoring guidance caps the body at under 500 lines. ci-secure's body
-reached 781 before anyone noticed, precisely because nothing measured it.
+reached 854 before anyone noticed, precisely because nothing measured it.
 ci-speedup has carried this guard since PR #32
 (`skills/ci-speedup/tests/test_close_guidance.py`); this is the same predicate
 applied to ci-secure so the body cannot silently regrow.

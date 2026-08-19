@@ -57,6 +57,19 @@ The one non-scripted field. Written once per pattern group and merged onto
   is where the specifics live.
 - `scan_incomplete` — workflow files skipped or unreadable, with a reason
   each. Non-empty means coverage is PARTIAL.
+- `dropped_matches` and `coverage_notes` — the other two coverage channels.
+  **Coverage is `complete` only when all THREE of `scan_incomplete`,
+  `dropped_matches` and `coverage_notes` are empty** (`report.py`'s
+  `_coverage_is_complete`). Reading `scan_incomplete` alone will call a
+  degraded run complete, which is the one thing the coverage rule forbids.
+  The rendered report already applies all three, which is why Phase 3 copies
+  its `Coverage:` line rather than recomputing one.
+- `suppressed_findings` — matches the engine deliberately withheld, with the
+  reason each was withheld. Not a coverage gap, but not nothing either.
+- `security_score` — present in the JSON and **never rendered**. Phase 3
+  forbids a score, ratio or `N/100` anywhere the user sees. It is listed here
+  so it is recognized as out of bounds rather than mistaken for a summary
+  worth surfacing.
 - `timings` — script-owned spans. As `run.py --out` writes them at Phase 2:
   `run_start_epoch`, `activity_enrich_s`, `scan_total_s`, `scripted_end_epoch`,
   `scripted_total_s`. **`total_run_s` is NOT there yet** — `report.py` computes

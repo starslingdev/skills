@@ -40,8 +40,9 @@ graders:
   # report and pasted verbatim, so it reaches the transcript through a
   # contract-mandated tool call. Both halves are counts only report.py can
   # compute, and neither string appears anywhere in the skill's own prose --
-  # the worked example in SKILL.md says "3 critical findings" and "2 of 10
-  # vectors hit", so an agent that merely read SKILL.md cannot match this.
+  # the worked example in references/terminal-summary.md's "The three-line
+  # header block" says "3 critical findings" and "2 of 10 vectors hit", so an
+  # agent that merely read SKILL.md cannot match this.
   - type: regex
     name: banner-reports-zero-findings
     target: trace
@@ -62,7 +63,8 @@ graders:
   #
   # Two anchors were rejected before this one, both by the vacuity test in
   # tests/test_evals_cases.py: `impostor check ran` is a quotation from
-  # SKILL.md's worked banner (SKILL.md:204), and the four raw status strings
+  # the worked banner in references/terminal-summary.md's "The three-line
+  # header block", and the four raw status strings
   # scan.py records -- `no sha-pinned actions found` and friends -- are literals
   # in scripts/scan.py, which ships inside the skill and which one Grep over the
   # skill directory puts into the trace. What is left is the composition: the

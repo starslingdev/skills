@@ -86,8 +86,9 @@ graders:
   # 11-line fixture. What neither produces is the engine's own serialization:
   # run.py prints its group list to stdout as a JSON array of string-sorted ids.
   #
-  # The closing bracket is load-bearing. SKILL.md:104 carries a two-group array
-  # as a worked example, so a pattern ending at the id would be a quotation from
+  # The closing bracket is load-bearing. SKILL.md's Phase 2 (Scan) section
+  # carries a two-group array as a worked example, so a pattern ending at the
+  # id would be a quotation from
   # the skill; requiring the bracket immediately after makes it a single-group
   # result, which only this fixture's run produces.
   #
