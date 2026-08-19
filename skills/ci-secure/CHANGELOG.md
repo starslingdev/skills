@@ -13,6 +13,24 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-19** — **Three smaller review findings, and a misinstruction in
+  the impostor-status rule.** The gate runbook still said to install "as one
+  setup PR" while the NEVER rules forbid opening one unless asked; on main both
+  sentences sat in one file where a reader met them together, so the trim is
+  what left the permissive one alone in a reference. It now defers to the NEVER
+  rules explicitly. The link and heading guards read a `#` shell comment inside
+  a fenced example as a markdown heading, so a renamed section could resolve
+  against an example's comment; they now skip fenced blocks, and a red-proof
+  fixture pins it. The "still has substance" floor was one global minimum of 20
+  non-blank lines, which protected the large references and almost nothing else
+  — `troubleshooting.md` has 26, so most of its failure-mode table could be
+  deleted with the suite green; each reference now carries its own floor and
+  section count, and a second guard fails if a required reference has no floor
+  of its own. Finally, three places told the agent to read the impostor word as
+  the banner's "last token", but one of the four states is the two-word `not
+  recorded`, whose last token reads as its exact opposite; all three now say the
+  word ENDS the line and may be two words.
+
 - **2026-08-19** — **Four holes the trim opened or left open, each pinned by a
   guard that was proven to fail first.** (1) The always-loaded body named
   `scan_incomplete` as the only coverage key while the engine computes

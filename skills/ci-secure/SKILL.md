@@ -167,7 +167,7 @@ Extract the assembled lines with these exact commands (the P14.11 grep is
 spacing-sensitive — see the reference above):
 
 ```bash
-grep '^CI Secure' "$REPORT"                       # the banner (its last token is the impostor word)
+grep '^CI Secure' "$REPORT"                       # the banner (ENDS with the impostor word; `not recorded` is two)
 python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("gh_checks",{}).get("P14.11",""))' "$FINDINGS"  # status + pin detail
 grep '^| .*P14\.11' "$REPORT"                      # the ⚠️ vector-map row — only carries the reason on a skip/partial
 grep '^| \*\*Coverage\*\* |' "$REPORT"               # the provenance row
@@ -213,8 +213,8 @@ Contract lines, all mandatory:
   completeness turns on three gap channels, not just skipped files. Never
   print `complete` over a coverage gap.
 - **The impostor-SHA status** in all four states, never dressed up as a pass
-  — three from `gh_checks`, the fourth being its ABSENCE (read the banner's
-  last token too): `ran` — every pin resolved; `partial` — **print the
+  — three from `gh_checks`, the fourth being its ABSENCE (the banner ENDS with
+  the word; `not recorded` is TWO): `ran` — every pin resolved; `partial` — **print the
   UNVERIFIED count** (`PARTIAL — 12 of 14 pins verified, 2 UNVERIFIED
   (network/rate-limit); this is NOT a pass`), never reported as `ran`;
   `skipped` — say so in words with the reason scan.py recorded (`disabled via

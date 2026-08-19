@@ -36,8 +36,9 @@ not ship it.
 
 This WRITES INTO their working tree, so the "never write into the user's
 tree unasked" rule binds: say exactly what will be written, get a yes,
-and only then run it. Do it on a branch, as one setup PR; never push
-without asking.
+and only then run it. Do it on a branch, as one self-contained setup change;
+never commit, push, or open a pull request unless the user asks — SKILL.md's
+NEVER rules bind here and this file does not relax them.
 
 Check three things BEFORE saying what will be written, because two of
 them change the answer and the third makes the install pointless:

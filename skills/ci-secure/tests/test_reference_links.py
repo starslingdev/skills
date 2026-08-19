@@ -42,13 +42,34 @@ def _anchored_link_targets(text: str) -> list[tuple[str, str]]:
     return out
 
 
+def _outside_code_fences(text: str) -> list[str]:
+    """Lines with fenced code blocks removed.
+
+    A `#` comment inside a ```bash example is indistinguishable from a `#`
+    markdown heading when a guard reads line by line, and these docs are full
+    of shell examples whose comments start at column 0. Counting one as a
+    heading invents an anchor: a link to `#the-self-proof` could resolve
+    against a shell comment instead of the section, so renaming the real
+    heading would pass the check by accident. Nothing collides today; the
+    guards were simply weaker than their docstrings claimed.
+    """
+    out, in_fence = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            out.append(line)
+    return out
+
+
 def _heading_slugs(text: str) -> set[str]:
     """GitHub's heading-anchor slug rules: lowercase, drop anything that is not
     a word character, space or hyphen, then turn EACH remaining space into a
     hyphen. Runs are not collapsed — an em dash between two words leaves the
     spaces that surrounded it, which is why the real anchors carry `--`."""
     slugs = set()
-    for line in text.splitlines():
+    for line in _outside_code_fences(text):
         if not line.startswith("#"):
             continue
         heading = line.lstrip("#").strip()
@@ -137,24 +158,66 @@ def test_every_section_link_resolves_to_a_real_heading():
     )
 
 
+# Per-file substance, because one global floor protects the big files and
+# almost nothing else. The old rule was "20 non-blank lines or more", and
+# `troubleshooting.md` has 26 — so most of its failure-mode table could be
+# deleted with the suite green. Each floor is 90% of what the file carried when
+# this was written, and the section count is what it had; a deliberate trim
+# below either fails once and the number is updated consciously, which is the
+# same contract the scanner's ignore list carries.
+_REFERENCE_SUBSTANCE = {
+    "references/prompts.md": (97, 2),
+    "references/ci-gate.md": (226, 8),
+    "references/terminal-summary.md": (46, 4),
+    "references/scan-output.md": (70, 4),
+    "references/troubleshooting.md": (23, 1),
+    "references/security-patterns.md": (521, 4),
+    "references/why-these-ten.md": (145, 7),
+    "references/scenario-authoring.md": (63, 2),
+}
+
+
 def test_every_deferred_runbook_still_carries_its_rules():
     """Existence is not enough. `references/ci-gate.md` can be truncated to zero
     bytes and every other guard here stays green, while SKILL.md still orders the
-    agent to "read the full runbook before doing anything". A stub or emptied
-    reference is a contract with a hole in it, so assert each deferred runbook
-    still has substance: a top-level heading and enough prose to be a runbook."""
+    agent to "read the full runbook before doing anything". A stub, an emptied
+    reference, or a file quietly stripped of half its table is a contract with a
+    hole in it, so hold each deferred runbook to its OWN floor and section
+    count rather than to one global minimum."""
     thin = []
     for required in _REQUIRED_REFERENCES:
         doc = _SKILL_DIR / required
         body = doc.read_text(encoding="utf-8") if doc.exists() else ""
+        # Fenced blocks COUNT as substance — `prompts.md` is mostly one fenced
+        # prompt, and that prompt is the containment rule. Fence-awareness is
+        # only for telling a heading from a shell comment.
         lines = [ln for ln in body.splitlines() if ln.strip()]
-        if len(lines) < 20 or not any(ln.startswith("#") for ln in lines):
-            thin.append(f"{required} ({len(lines)} non-blank lines)")
+        sections = [ln for ln in _outside_code_fences(body)
+                    if ln.startswith("## ")]
+        floor, want_sections = _REFERENCE_SUBSTANCE.get(required, (20, 0))
+        if len(lines) < floor:
+            thin.append(f"{required}: {len(lines)} substantive lines, floor {floor}")
+        elif len(sections) < want_sections:
+            thin.append(
+                f"{required}: {len(sections)} sections, had {want_sections}")
+        elif not any(ln.startswith("#") for ln in _outside_code_fences(body)):
+            thin.append(f"{required}: no headings at all")
     assert not thin, (
         "SKILL.md defers rules to these references, but they no longer carry "
-        "them (empty, stubbed, or heading-less): " + "; ".join(thin)
+        "them (emptied, stubbed, or stripped of sections): " + "; ".join(thin)
+        + ". If the trim is deliberate, update _REFERENCE_SUBSTANCE in the same "
+        "change so the reduction is a decision rather than a silent loss."
     )
 
+
+def test_the_substance_floor_is_pinned_to_every_required_reference():
+    """A floor nobody set is the 20-line default, which is the weak rule this
+    replaced. Every required reference must carry its own number."""
+    unpinned = [r for r in _REQUIRED_REFERENCES if r not in _REFERENCE_SUBSTANCE]
+    assert not unpinned, (
+        "these required references have no substance floor of their own, so "
+        "they fall back to a global minimum that protects almost nothing: "
+        + ", ".join(unpinned))
 
 def test_the_link_guard_actually_fires_on_a_missing_target():
     """Red-proof: the same extraction + existence predicate must FAIL on a doc
@@ -244,4 +307,25 @@ def test_every_shell_variable_skill_md_expands_is_bound_in_skill_md():
         "open the reference explaining them runs the command with the value "
         "empty, which degrades coverage silently instead of stopping. Bind the "
         "name in the body; the reference can still carry the derivation."
+    )
+
+
+def test_a_shell_comment_in_an_example_is_not_read_as_a_heading():
+    """Red-proof for the fence-tracking above. Without it the `# Install` line
+    inside the code block below becomes the anchor `install`, so a link to a
+    section that no longer exists would resolve against a shell comment."""
+    doc = "\n".join([
+        "## Real Heading",
+        "",
+        "```bash",
+        "# Install",
+        "make install",
+        "```",
+        "",
+    ])
+    slugs = _heading_slugs(doc)
+    assert "real-heading" in slugs, "the real heading must still be found"
+    assert "install" not in slugs, (
+        "a shell comment inside a fenced block was counted as a heading — a "
+        "renamed section could then resolve against an example's comment"
     )
