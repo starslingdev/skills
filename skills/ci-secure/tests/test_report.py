@@ -2170,7 +2170,14 @@ def _render_many_vector_report() -> str:
     })
 
 
-@pytest.mark.parametrize("needle", ["CI Secure", "P14", "Coverage", "Incomplete coverage"])
+# The summary lines SKILL.md's grep recipes exist to pull out of a report. Kept
+# as ONE list so the coverage test below cannot drift from the test above it:
+# each needle proves its recipe matches real output, and the closure test proves
+# no recipe escapes that check.
+_RECIPE_NEEDLES = ["CI Secure", "P14", "Coverage", "Incomplete coverage"]
+
+
+@pytest.mark.parametrize("needle", _RECIPE_NEEDLES)
 def test_skill_md_extraction_recipes_match_a_rendered_report(
     tmp_path: Path, needle: str,
 ) -> None:
@@ -2305,3 +2312,58 @@ def test_the_renderer_does_not_keep_its_own_copy_of_the_rule() -> None:
         assert "_flatten_rule" in body or "config.flatten_scanned" in body, (
             "report._flatten_scanned has re-inlined the escaping rule instead "
             f"of delegating to config.flatten_scanned:\n{body}")
+
+
+def test_every_skill_md_grep_recipe_is_covered_by_a_needle() -> None:
+    """Closure. The test above starts from the NEEDLES and asks which recipes
+    match them, so a recipe matching no needle is checked by nothing — add a
+    fifth `grep` line to SKILL.md that finds nothing in any report and the suite
+    stays green. That is the same hole this file already fixed by hand once
+    (`^CI Secure` was documented but never selected), so pin the direction that
+    was missing: every recipe SKILL.md publishes must be exercised by some
+    needle, and therefore run against a real rendered report.
+    """
+    recipes = _skill_md_grep_recipes()
+    assert recipes, "no grep recipes found in SKILL.md — the extractor drifted"
+    covered = {
+        r for needle in _RECIPE_NEEDLES for r in recipes
+        if needle.split()[0] in r or needle in r
+    }
+    orphans = sorted(set(recipes) - covered)
+    assert not orphans, (
+        "SKILL.md publishes grep recipe(s) that no needle exercises, so nothing "
+        "runs them against a real report and a recipe matching NOTHING would "
+        "ship green: " + "; ".join(repr(o) for o in orphans)
+        + ". Either add the summary line it pulls to _RECIPE_NEEDLES, or drop "
+        "the recipe from SKILL.md."
+    )
+
+
+def test_skill_md_names_every_coverage_channel_the_engine_reads() -> None:
+    """The ALWAYS-LOADED contract must not understate the coverage rule.
+
+    `report._coverage_is_complete` takes three independent holes, and a run is
+    complete only when all three are empty. SKILL.md's findings-key summary
+    listed `scan_incomplete` alone, so an agent reading only the always-loaded
+    body — which is this skill's whole thesis about what binds — could call a
+    degraded run complete, the one thing the coverage rule forbids. The
+    parameter names are read off the function, so adding a fourth channel to
+    the engine fails here until the contract mentions it.
+    """
+    import inspect
+
+    channels = [
+        name for name in
+        inspect.signature(report._coverage_is_complete).parameters
+    ]
+    assert len(channels) >= 3, (
+        f"expected at least three coverage channels, found {channels} — if the "
+        "engine's rule changed, change this guard deliberately"
+    )
+    missing = [c for c in channels if f"`{c}`" not in _SKILL_MD_TEXT]
+    assert not missing, (
+        "SKILL.md does not name these coverage channels, so its summary of the "
+        "findings JSON understates when a run counts as complete: "
+        + ", ".join(missing)
+        + ". Reading a subset calls a degraded run clean."
+    )

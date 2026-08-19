@@ -162,3 +162,86 @@ def test_the_link_guard_actually_fires_on_a_missing_target():
     targets = _relative_link_targets("see [x](references/does-not-exist.md) now")
     assert targets == ["references/does-not-exist.md"]
     assert not (_SKILL_DIR / targets[0]).exists()
+
+
+# --- a pointer is only as good as the section it points INTO -----------------
+
+# The line-count floor above catches an emptied file. It does not catch the
+# failure this branch was written to prevent: a merge that silently drops ONE
+# section from a reference while the rest of the file survives. Deleting `## The
+# self-proof` from `ci-gate.md` — 81 lines, the exact section this branch
+# narrates rescuing — left the whole suite green, while SKILL.md went on
+# ordering the agent through three outcomes whose mechanics no longer existed.
+#
+# So bind the pointer to its content: every branch label SKILL.md tells the
+# agent to act on must be present in the runbook that explains it. A label is a
+# string the agent matches against real output, which makes it exactly the kind
+# of anchor that cannot drift silently.
+_SELF_PROOF_LABELS = ("self-proof PASSED", "self-proof FAILED",
+                      "self-proof COULD NOT RUN")
+
+
+def test_the_self_proof_runbook_still_explains_every_outcome_skill_md_branches_on():
+    """SKILL.md branches on three self-proof outcomes and defers their mechanics
+    to `references/ci-gate.md`. If that section is dropped, the branches become
+    instructions to interpret output nothing documents."""
+    skill = _SKILL_MD.read_text(encoding="utf-8")
+    gate = (_SKILL_DIR / "references" / "ci-gate.md").read_text(encoding="utf-8")
+
+    branched_on = [lbl for lbl in _SELF_PROOF_LABELS if lbl in skill]
+    assert branched_on, (
+        "SKILL.md no longer names any self-proof outcome — if the contract "
+        "moved, move this guard with it rather than deleting it"
+    )
+    missing = [lbl for lbl in branched_on if lbl not in gate]
+    assert not missing, (
+        "SKILL.md tells the agent to act on these self-proof outcomes, but "
+        "references/ci-gate.md no longer explains them: " + ", ".join(missing)
+        + ". A section can be dropped from a reference while the file keeps "
+        "enough lines to pass the substance floor — that is how the self-proof "
+        "runbook was nearly lost once already."
+    )
+    assert "## The self-proof" in gate, (
+        "references/ci-gate.md lost its `## The self-proof` heading; the "
+        "table of contents and SKILL.md's deep link both point at it"
+    )
+
+
+# --- a command block cannot expand a name the contract never binds -----------
+
+# Phase 2 expanded `${REPO:+--repo}` while the only assignment of `REPO` had
+# moved into `references/troubleshooting.md`. An agent that did not open that
+# reference ran the scan with no `--repo`, and the four gh-gated checks
+# silently degraded to "skipped" on a repository where full coverage was
+# available. Safe direction — a skip is never a false pass — but a real
+# coverage loss, and invisible: no link was broken and every other guard was
+# green. This is the trim's characteristic failure, so it is pinned.
+#
+# The environment supplies these; the contract is not expected to assign them.
+_AMBIENT_SHELL_VARS = {"TMPDIR", "HOME", "PATH", "PWD", "USER", "SHELL"}
+_VAR_EXPANSION = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)")
+_VAR_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=", re.MULTILINE)
+
+
+def _bash_blocks(text: str) -> list[str]:
+    return re.findall(r"```bash\n(.*?)```", text, re.DOTALL)
+
+
+def test_every_shell_variable_skill_md_expands_is_bound_in_skill_md():
+    """Every name a command block expands must be assigned somewhere in the
+    always-loaded body — not behind a link. A reference can explain HOW a value
+    is derived; it cannot be the only place the name exists, or skipping the
+    reference produces a silently degraded run instead of a stop."""
+    blocks = _bash_blocks(_SKILL_MD.read_text(encoding="utf-8"))
+    assert blocks, "no ```bash blocks found in SKILL.md — the extractor drifted"
+    joined = "\n".join(blocks)
+    expanded = {v for v in _VAR_EXPANSION.findall(joined)}
+    assigned = set(_VAR_ASSIGNMENT.findall(joined))
+    unbound = sorted(expanded - assigned - _AMBIENT_SHELL_VARS)
+    assert not unbound, (
+        "SKILL.md's command blocks expand shell variable(s) that nothing in "
+        "SKILL.md assigns: " + ", ".join(unbound) + ". An agent that does not "
+        "open the reference explaining them runs the command with the value "
+        "empty, which degrades coverage silently instead of stopping. Bind the "
+        "name in the body; the reference can still carry the derivation."
+    )

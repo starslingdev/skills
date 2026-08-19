@@ -11,6 +11,29 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **2026-08-19** — **Four holes the trim opened or left open, each pinned by a
+  guard that was proven to fail first.** (1) The always-loaded body named
+  `scan_incomplete` as the only coverage key while the engine computes
+  completeness from three arrays, so an agent reading the body alone could call
+  a degraded run complete — the exact rule the coverage contract forbids, and
+  the exact bug this branch had just fixed in the deferred file. It now names
+  all three, plus `evidence_kind`, and a guard reads the channel list off
+  `report._coverage_is_complete` so a fourth channel fails the build until the
+  contract mentions it. (2) `REPO` was expanded in Phase 2 while its only
+  assignment had moved into `references/troubleshooting.md`; an agent that did
+  not open that file scanned with no `--repo` and silently degraded the four
+  gh-gated checks to skipped. It is bound in the body again, and a guard fails
+  on any shell variable the command blocks expand without binding. (3) The
+  `## The self-proof` section — the 81 lines this branch narrates rescuing —
+  could be deleted, table-of-contents line and all, with the suite green, while
+  SKILL.md still branched on three outcomes whose mechanics no longer existed;
+  the three branch labels are now bound to the runbook that explains them.
+  (4) The grep-recipe check started from its needle list, so a recipe matching
+  nothing in any report was exercised by nothing; a closure assertion now
+  requires every published recipe to be covered.
+
 ### Added
 
 - **2026-08-18** — **The behavioral eval cases are executed, and a session that

@@ -39,15 +39,14 @@ only — this is not a comprehensive audit.*
 dep). `gh` is optional, used for four things: the network-gated impostor-SHA
 check (P14.11 — the one vector that cannot be answered from YAML alone), the
 dormancy note on findings, and the two config facts read over the API
-(required-checks-skippable, fork-PR approval). Everything else runs locally
-in seconds. Troubleshooting:
-[references/troubleshooting.md](references/troubleshooting.md).
+(required-checks-skippable, fork-PR approval). Everything else runs locally in
+seconds. Troubleshooting: [references/troubleshooting.md](references/troubleshooting.md).
 
-**`<ci-secure>` in the commands below is this skill's own install
-directory** — the absolute path to the directory holding this `SKILL.md`
-(e.g. `~/.claude/skills/ci-secure`). Substitute it everywhere: Phase 1 `cd`s
-into the *audited* repo, so a relative path would not resolve, and the
-literal `<ci-secure>` is a shell redirection, not a path.
+**`<ci-secure>` in the commands below is this skill's own install directory** —
+the absolute path to the directory holding this `SKILL.md` (e.g.
+`~/.claude/skills/ci-secure`). Substitute it everywhere: Phase 1 `cd`s into the
+*audited* repo, so a relative path would not resolve, and the literal
+`<ci-secure>` is a shell redirection, not a path.
 
 ## Phase 1: Pick the repo to scan
 
@@ -58,29 +57,30 @@ By default the skill operates on the current working directory.
 2. Verify `.github/workflows/` exists. If it doesn't, stop and tell the
    user the repo has no GitHub Actions workflows to scan.
 3. If `gh auth status` succeeds AND the repo has a GitHub remote, derive
-   `owner/repo` from `git remote get-url origin` and pass it as `--repo` —
-   the four gh-gated checks above need it. The remote URL comes in two
-   shapes; the command that handles both is in
+   `owner/repo` from `git remote get-url origin` into **`REPO`** — the shell
+   variable Phase 2 expands, and what the four gh-gated checks above need.
+   The URL comes in two shapes; the command handling both is in
    [references/troubleshooting.md](references/troubleshooting.md). Confirm
-   the result is exactly `owner/repo` (one `/`, no scheme, no `.git`
-   suffix) before passing it; if it doesn't match that shape, skip the lookup
-   rather than passing it on. If gh is unavailable, proceed — the scan runs
-   without it and the report says so: the impostor-SHA check is reported as
-   skipped, and the two API-gated config facts as UNMEASURED coverage gaps,
-   never as passes.
+   it is exactly `owner/repo` (one `/`, no scheme, no `.git` suffix) before
+   passing it; on any other shape leave `REPO` empty rather than passing it
+   on. If gh is unavailable, proceed: the scan runs without it and the report
+   says so — impostor-SHA reported as skipped, the two API-gated config facts
+   as UNMEASURED coverage gaps, never as passes.
 
 ## Phase 2: Scan (one driver call)
 
 ```bash
 # Deterministic REPO-SCOPED path, NOT mktemp: each phase re-derives it in its
-# own shell with no pointer file, and repo-scoping stops two sessions on
-# DIFFERENT repos clobbering each other's findings (rendering another repo's
-# report is the false-clean class the NEVER rules ban).
+# own shell with no pointer file, so two sessions on DIFFERENT repos cannot
+# clobber each other's findings (rendering another repo's report is the
+# false-clean class the NEVER rules ban).
 ROOT="$(git rev-parse --show-toplevel)"
 SLUG="$(printf '%s' "$ROOT" | shasum | cut -c1-12)"
 FINDINGS="${TMPDIR:-/tmp}/ci-secure-findings-${SLUG}.json"
-# `${REPO:+--repo} ${REPO:+"$REPO"}` — TWO tokens on purpose; the one-token
-# form is a zsh trap (references/troubleshooting.md).
+# Phase 1 step 3's `owner/repo`, bound here because each phase runs in its own
+# shell; EMPTY skips the gh-gated checks rather than passing them. TWO tokens
+# on purpose — the one-token form is a zsh trap (references/troubleshooting.md).
+REPO="${REPO-}"
 <ci-secure>/scripts/run.py --root "$ROOT" ${REPO:+--repo} ${REPO:+"$REPO"} --out "$FINDINGS"
 ```
 
@@ -114,15 +114,16 @@ a findings file on failure, so there is nothing safe to render over.
 markdown report to make decisions.** One object per occurrence in
 `findings`, keyed `id`, `pattern`, `severity`, `title`, `workflow_file`,
 `line`, `affected_jobs`, `workflow_activity` (with `dormant`), `evidence`,
-`fix_strategy`, `fix_recipe_anchor`; top-level `gh_checks`,
-`scan_incomplete` and `timings`. Full shape with examples:
+`evidence_kind`, `fix_strategy`, `fix_recipe_anchor`; top-level `gh_checks`,
+`timings`, and the THREE coverage arrays `scan_incomplete`, `dropped_matches`
+and `coverage_notes` — coverage is `complete` only when ALL THREE are empty,
+so reading one alone calls a degraded run clean. Full shape:
 [references/scan-output.md](references/scan-output.md).
 
 ## Phase 2.5: Write the attack scenario for every group
 
 The one non-scripted field is the `attacker_scenario`: the report's "What an
-attacker could do" row. `severity` is catalog-authored; the scenario is
-repo-grounded prose.
+attacker could do" row. `severity` is catalog-authored, the scenario repo-grounded.
 
 **Write all scenarios in ONE pass — never one subagent per group.** At most
 ten groups, 2–3 sentences each, and everything needed is at hand: per group
@@ -441,8 +442,7 @@ what would stop the findings coming back, this is the answer.
 The gate vendors — never fetches — the engine into the user's repo and runs it
 on every pull request. **Read the full runbook before doing anything:
 [references/ci-gate.md](references/ci-gate.md)** — preflight checks, what
-`vendor.py` writes and refuses, the six hand-over points, the self-proof, and
-Refresh.
+`vendor.py` writes and refuses, the six hand-over points, self-proof, Refresh.
 
 Three rules are NOT deferred to that file. Install and refresh **WRITE INTO
 the user's working tree**, so say exactly what will be written, get a yes,
