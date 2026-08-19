@@ -363,14 +363,75 @@ _CRED_PATH = (
 # `nc` and `scp` are here because the opening pass named only `netcat`, the
 # spelling almost nobody types, and assumed egress meant HTTP. `scp` moves a
 # private key off the machine with no URL anywhere in the line.
+#
+# The URL alternative spans the WHOLE address rather than just its opening
+# characters, and that is load-bearing rather than cosmetic — see
+# `_Combination` below for what it buys.
 _NET_SINK = (
-    r"(?:\bcurl\b|\bwget\b|\bnetcat\b|\bnc\b|\bscp\b|/dev/tcp/|https?://[\w-])"
+    r"(?:\bcurl\b|\bwget\b|\bnetcat\b|\bnc\b|\bscp\b|/dev/tcp/"
+    r"|https?://[^\s\"'`)>\]]+)"
 )
 
-_EXFILTRATION = re.compile(
-    rf"{_CRED_PATH}[^\n]{{0,160}}?{_NET_SINK}|{_NET_SINK}[^\n]{{0,160}}?{_CRED_PATH}",
-    re.IGNORECASE,
-)
+
+class _Combination:
+    """Two DISTINCT things on one logical line, within a window of each other.
+
+    A plain `A.{0,160}B` alternation looks like it demands a combination and
+    does not: the two halves may be THE SAME TEXT. `https://example.com/certs/
+    server.pem` satisfies "a credential path" and "a network sink" with one
+    token, and linking to a vendor's docs is the most ordinary thing a
+    reference page does — so the rule that was supposed to require a pair
+    fires on a single ordinary URL, which is how these rules get deleted.
+
+    Requiring the two spans to be disjoint is what makes "combination" true.
+    It is also why `_NET_SINK` matches the whole URL: a sink span covering
+    only `https://e` would sit beside the filename rather than swallow it, and
+    the pair would read as disjoint after all.
+    """
+
+    def __init__(self, left: str, right: str, window: int = 160):
+        self._left = re.compile(left, re.IGNORECASE)
+        self._right = re.compile(right, re.IGNORECASE)
+        self._window = window
+
+    def finditer(self, text: str):
+        rights = list(self._right.finditer(text))
+        for left in self._left.finditer(text):
+            for right in rights:
+                # Disjoint spans only — an overlap means one token is being
+                # counted as both halves of the combination.
+                if left.start() < right.end() and right.start() < left.end():
+                    continue
+                if right.start() >= left.end():
+                    between = text[left.end():right.start()]
+                else:
+                    between = text[right.end():left.start()]
+                # Never stitch across a line break. The regex arms above encode
+                # the same rule as `[^\n]`, and for the same reason: a `curl` on
+                # one line paired with a credential path hundreds of lines later
+                # is an unactionable blob, not a finding.
+                if "\n" in between:
+                    continue
+                if len(between) <= self._window:
+                    lo, hi = min(left.start(), right.start()), max(left.end(), right.end())
+                    yield _Span(text[lo:hi])
+                    break
+
+    def search(self, text: str):
+        return next(iter(self.finditer(text)), None)
+
+
+class _Span:
+    """The slice of the line covering both halves, for the failure message."""
+
+    def __init__(self, text: str):
+        self._text = text
+
+    def group(self, _index: int = 0) -> str:
+        return self._text
+
+
+_EXFILTRATION = _Combination(_CRED_PATH, _NET_SINK)
 
 # Decode-then-run, and fetch-then-eval. The point of both is that the executed
 # text is not readable in the diff a human reviews.
@@ -466,6 +527,12 @@ def test_malicious_shape_detectors_fire_on_constructed_samples():
                scheme, "example.com/x"),
         "The cache.key input is compared with the curl'd manifest",
         "P14.19 flags a cache path containing server.key when the job also runs curl",
+        # A credential-shaped filename INSIDE a URL is one token, not a
+        # combination: the URL satisfies the sink and supplies the "credential
+        # path" in the same breath. Linking to a vendor's docs is the most
+        # ordinary thing a reference page does, so this must stay writable.
+        _parts(scheme, "example.com/certs/", "server.pem"),
+        _parts("see ", scheme, "docs.example.com/auth/", "credentials.json for setup"),
     ):
         for name, rx in _MALICIOUS_SHAPES:
             assert not rx.search(benign), f"false positive ({name}): {benign}"

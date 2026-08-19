@@ -258,6 +258,14 @@ jobs:
             } >> "${GITHUB_STEP_SUMMARY}"
             exit 1
           fi
+          # A SKIPPED gate is not a clean gate. The steps between the control and
+          # the gate are not all continue-on-error, so one of them failing leaves
+          # the gate unrun — and the coverage-gap text below asserts a verified
+          # cause that such a run never established.
+          if [ "${{ steps.gate.outcome }}" != "success" ]; then
+            echo "::error title=REGISTRY SCAN GATE DID NOT RUN::The gating scan did not run (outcome: ${{ steps.gate.outcome }}), so nothing was checked for critical findings. Read the failing step above. This is a coverage gap, not a clean result."
+            exit 1
+          fi
           echo "::error title=REGISTRY SCAN COVERAGE GAP — NOT A FINDING::The scanner reported nothing on a deliberately malicious control skill, so this run verified NOTHING about ${SCAN_PATH}. This is a coverage gap, not a clean result and not a security finding."
           {
             echo "## Registry scan: coverage gap"

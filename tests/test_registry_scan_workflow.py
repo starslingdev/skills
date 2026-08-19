@@ -522,6 +522,26 @@ def test_a_real_finding_is_never_labelled_not_a_finding(workflow: dict):
     )
 
 
+def test_the_coverage_gap_is_not_claimed_when_the_gate_never_ran(workflow: dict):
+    """A skipped gate is not a clean gate.
+
+    The steps between the control and the gate are not all `continue-on-error`;
+    if one of them fails, the gate is SKIPPED and its outcome is neither
+    `success` nor `failure`. Falling through to the coverage-gap text there
+    would publish a verified-cause narrative over a run whose gate never
+    executed. The control's outcome already gets this guard; the gate's needs
+    the same one.
+    """
+    gate_id = _gate_step(workflow).get("id")
+    run = _enforcement_step(workflow)["run"]
+    assert re.search(
+        rf'steps\.{re.escape(gate_id)}\.outcome\s*\}}\}}"\s*!=\s*"success"', run
+    ), (
+        "the enforcement step has no branch for the gate not having run, so a "
+        "skipped gate is reported as a plain coverage gap"
+    )
+
+
 def test_the_coverage_gap_is_not_claimed_on_a_cancelled_run(workflow: dict):
     """`always()` also means "and when someone cancelled the job".
 
