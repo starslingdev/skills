@@ -444,8 +444,10 @@ def test_a_failed_control_still_fails_the_build(workflow: dict):
     unconditionality and its non-zero exit are all asserted.
     """
     step = _enforcement_step(workflow)
-    assert step.get("if") in (None, "always()", "${{ always() }}"), (
-        "the enforcement step must run whatever else failed"
+    condition = str(step.get("if") or "")
+    assert condition == "" or "cancelled()" in condition or "always()" in condition, (
+        "the enforcement step must run whatever else failed — a plain success "
+        "condition would skip it in exactly the case it exists for"
     )
     assert not step.get("continue-on-error"), (
         "the enforcement step is continue-on-error, so a failed control would show green"
@@ -490,6 +492,51 @@ def test_the_coverage_gap_is_labelled_distinctly_from_a_finding(workflow: dict):
     lowered = run.lower()
     assert "coverage" in lowered and "not a finding" in lowered, (
         "the annotation must say this is a coverage gap and NOT a security finding"
+    )
+
+
+def test_a_real_finding_is_never_labelled_not_a_finding(workflow: dict):
+    """The scenario the split itself can get wrong.
+
+    The control failing and the gate finding a real critical are not exclusive —
+    a blind scanner is exactly when a malicious change is most likely to be
+    sitting in the tree, and the unfiltered pass behind the control can still
+    surface one. If the enforcement step reads only the control's outcome, that
+    run goes red carrying `NOT A FINDING` in capitals over a run that found
+    something. The one case where a human most needs to look would wear the
+    label that most discourages looking.
+
+    So the enforcement step must consult the GATE's outcome too, and the gate
+    needs an `id:` for it to be readable.
+    """
+    gate_id = _gate_step(workflow).get("id")
+    assert gate_id, (
+        "the gating scan step needs an `id:` so the enforcement step can tell "
+        "'we could not look' apart from 'we looked and found something'"
+    )
+    run = _enforcement_step(workflow)["run"]
+    assert f"steps.{gate_id}.outcome" in run, (
+        "the enforcement step never reads the gate's outcome, so a run where the "
+        "control failed AND a critical finding was reported is annotated "
+        "'COVERAGE GAP — NOT A FINDING' over a real finding"
+    )
+
+
+def test_the_coverage_gap_is_not_claimed_on_a_cancelled_run(workflow: dict):
+    """`always()` also means "and when someone cancelled the job".
+
+    A cancelled run has verified nothing, but it has also not established that
+    the scanner is blind — and the coverage-gap text asserts a specific verified
+    cause. Claiming it on a cancellation invents a diagnosis.
+    """
+    condition = str(_enforcement_step(workflow).get("if") or "")
+    assert "always()" not in condition, (
+        "the enforcement step runs under always(), so a cancelled job emits the "
+        "coverage-gap annotation and its verified-cause narrative"
+    )
+    assert "cancelled()" in condition, (
+        "the enforcement step must still run after the gate fails, so it needs "
+        "`!cancelled()` rather than a bare success condition"
     )
 
 
