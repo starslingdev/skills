@@ -6,17 +6,37 @@ agent-facing contract in `SKILL.md`, which no other test in this repository
 covers: `pytest` exercises the deterministic scanner underneath the skill, not
 the behavior the skill promises on top of it.
 
-> ## This suite has never been executed
+> ## These cases run, on a harness that is not `claude plugin eval`
 >
 > `claude plugin eval` is in early access and is not enabled on the machine
 > these cases were written on — it prints ``` `plugin eval` is currently in
-> early access ``` and exits before running anything. **No case here has ever
-> produced a score.** Treat the suite as an unvalidated first draft, not as a
-> gate that is passing. What has and has not been checked is spelled out under
-> [What is verified](#what-is-verified) below; read it before quoting a result
-> from this directory.
+> early access ``` and exits before running anything. So the cases are executed
+> instead by `maintainers/ci-secure/scripts/run_skill_evals.py`, which scaffolds
+> each case, drives one headless `claude -p` session against it, and applies
+> that case's own mechanical graders. `.github/workflows/skill-evals.yml` runs
+> it on every pull request that touches this skill's contract.
+>
+> **That harness is narrower than the runner these cases were written for.** It
+> does not score `llm` graders, does not apply `execution.allowed_tools`, does
+> not run the no-plugin ablation arm, and does not honour `execution.model` or
+> the `runs: 3` each case declares. A pass under it is weaker than a pass under
+> `claude plugin eval` — read the harness's own docstring for the current list
+> before quoting a result from this directory.
 
 ## Running them
+
+```bash
+# from the repository root — the harness that actually runs today
+python3 maintainers/ci-secure/scripts/run_skill_evals.py --case clean-repo
+```
+
+Exit 0 means every scored grader passed; 1 means a case ran and failed one; 2
+means the harness could not run at all, which is never a pass.
+
+### The runner these cases were written for
+
+Once `claude plugin eval` is enabled, this is the invocation the case files are
+shaped around:
 
 ```bash
 # from the repository root
@@ -131,6 +151,12 @@ already appears there passes for free, and a `not_contains` pattern that appears
 there can never pass at all. `tests/test_evals_cases.py::test_no_trace_regex_matches_the_skills_own_prose`
 makes that a hard failure.
 
+`files` graders are held to the same rule, for a reason that is easy to miss:
+`report.py` **inlines catalog text** into the report it renders, so the skill's
+own shipped prose is inside the file corpus too. A `files` pattern quoting the
+catalog would pass on the report having been rendered at all, whatever the scan
+found.
+
 It is not a theoretical concern. Three of the first drafts of these graders
 (`P14.10`, `did NOT run`, `Impostor-SHA check (P14.11): ran`) are quotations
 from `SKILL.md` and were flagged by that test; a fourth (`No critical attack
@@ -147,17 +173,28 @@ of the corpus on purpose, and a third with a caveat — all documented at
 renderer's exact output by construction; `evals/files/`, which *is* the input
 under audit, so a grader pinning a finding to its real `file:line` has to quote
 it; and the `case.yaml` files themselves, since every pattern is a literal in
-its own case file and including them would flag all fourteen trace regexes
-against themselves.
+its own case file and including them would flag all fifteen regexes against
+themselves.
 
 That third exclusion carries real residual risk, because `evals/` ships: an
 agent that greps the eval directory sees the answer key. The *fatal* half of it
 is covered unconditionally by a separate test — a `not_contains` pattern that
 matches its own declaration can never pass, and that is a silent failure, so
 `test_negative_regexes_do_not_match_the_case_file_that_declares_them` forbids
-it outright. The free-pass half is accepted and named here rather than papered
-over; the honest fix is to stop shipping `evals/` to end users at all, which is
-a larger change than this suite.
+it outright.
+
+The free-pass half now depends on **which runner you are on**, and the
+difference is worth stating precisely:
+
+- under `maintainers/ci-secure/scripts/run_skill_evals.py`, it is closed. The
+  harness mounts a copy of the skill with `evals/` and `tests/` removed, so
+  there is no answer key on disk for the session to grep;
+- under `claude plugin eval`, it is open and accepted rather than papered over.
+  The honest fix is to stop shipping `evals/` to end users at all, which is a
+  larger change than this suite.
+
+So the exclusion is still correct — it protects the gated runner, and it costs
+nothing on the harness.
 
 One consequence is worth stating plainly rather than leaving to be discovered.
 A pattern that is a plain literal — the banner-count graders are — necessarily
@@ -193,9 +230,10 @@ Verified, and re-checkable with `python3 -m pytest skills/ci-secure/tests/test_e
   `target`/`focus`, JavaScript-legal regex flags, patterns that compile,
   `min`/`max` pairs that are satisfiable;
 - no grader relies on a known trap (unscored `Skill` grader, unsatisfiable
-  `max: 0`, vacuous trace regex, untargeted regex, a count that matches inside a
-  larger number, a negative that matches its own declaration, an
-  ungrantable `allowed_tools` entry);
+  `max: 0`, a vacuous regex on either corpus, untargeted regex, a count that
+  matches inside a larger number, a negative that matches its own declaration,
+  a trace-targeted negative that `grep`'s own `path:line:text` output over the
+  fixtures would trip, an ungrantable `allowed_tools` entry);
 - every case carries at least one grader that a *completed* engine run
   satisfies and a failed one does not — matching `run.py`'s or `report.py`'s
   real output on that fixture while matching neither the skill's shipped text
@@ -228,9 +266,17 @@ confirmed to load as a plugin (`--plugin-dir skills/ci-secure` exposes
 line numbers, banner text, group-list ordering, `gh_checks` strings — was read
 off a real run of `run.py` and `report.py` against these fixtures, not assumed.
 
-**Not verified, because the runner is gated:**
+**Still not verified, because `claude plugin eval` itself is gated.** The list
+below was written when nothing ran at all. The harness above has since closed
+the first item and turned three others from predictions into observations
+(struck through, with what was seen); the rest stand, and every one of them
+stands *under the harness too* — a green run here is not evidence about any of
+them.
 
-- that any case scores anything at all — no case has been executed;
+- ~~that any case scores anything at all~~ — **all five now execute on every
+  pull request** that touches this skill's contract. What no run can establish
+  is the rest of this list, or anything the harness does not apply: `llm`
+  graders, `allowed_tools`, the ablation arm, `model`, and `runs: 3`;
 - **that the scanner exited successfully, as opposed to having been invoked and
   then described.** No grader type in this harness observes a tool's exit
   status or its output: `tool_used` matches the invocation's *input*, and
@@ -255,10 +301,27 @@ off a real run of `run.py` and `report.py` against these fixtures, not assumed.
   grants `Write` or `Edit`, and Phase 5 subagents edit workflow YAML. No grader
   asserts it, so it would fail as a stated-but-unreachable outcome rather than
   as a red case;
-- whether the graders' assertions actually land in the `trace`. Several depend
-  on contract-mandated `grep`/`python3` calls surfacing report content into the
-  transcript; that is what `SKILL.md` says happens, but it has not been observed
-  here;
+- ~~whether the graders' assertions actually land in the `trace`~~ — **observed,
+  and they did not.** Three graders anchored on `report.py`'s `<file>:<line> —
+  jobs:` evidence bullet assumed the agent would surface the report into the
+  transcript. It renders the report to a file and prints a summary instead, so
+  two cases failed on runs where the skill had behaved correctly and written
+  exactly the asserted bullet, and the third passed only because that session
+  happened to `grep -n`. Those three now say `target: files`, and the harness
+  reads what the session wrote off disk rather than only what it printed. What
+  remains unobserved is narrower: whether the `trace`-targeted graders that
+  quote the terminal banner keep landing there across runs;
+- ~~whether a `trace`-targeted negative can be tripped by the agent's own tool
+  output~~ — **yes, and one was.** `_transcript` folds in the output of every
+  tool the agent ran, so `pwn-request`'s `safe-workflow-produces-no-finding`
+  (shaped `<file>:<line>…jobs`) was matched by `grep`'s `<path>:<line>:<text>`
+  rendering of the clean fixture, whose line 7 is the YAML key `jobs:`. Reading
+  the file under audit is correct behaviour — and the sibling `llm` grader
+  rewards it — so the case failed good sessions in proportion to how carefully
+  they worked. That grader now says `target: files`, where no `<path>:<line>:`
+  prefix can arise, and
+  `tests/test_evals_cases.py::test_negative_trace_regexes_do_not_match_grep_output_over_the_fixtures`
+  holds every trace-targeted negative to the rule;
 - whether the `llm` graders' rubrics discriminate in practice, and whether they
   also pass in the no-plugin arm. All seven are `focus: trace` and none is
   covered by the vacuity rule, which filters on `type == "regex"` — they are 7

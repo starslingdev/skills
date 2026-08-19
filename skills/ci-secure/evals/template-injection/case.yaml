@@ -60,16 +60,22 @@ graders:
   # -- outcome ---------------------------------------------------------------
   - type: regex
     name: injection-reported-at-its-real-file-and-line
-    target: trace
+    target: files
     # Ground truth, re-derived from the engine while authoring this case.
-    # Tolerant of the report's own `<file>:<line>` rendering and of prose alike,
-    # because the contract fixes the fact and not the phrasing.
+    # Anchored on the report's own `<file>:<line>` rendering.
     #
     # This one is falsifiable but carries NO ablation signal, and the grader
     # below is why it is not left to stand alone: the occurrence sits on the
     # last line of a very short fixture, so a `grep -n` over the workflow prints
     # the same file and line, and an agent with no skill loaded, eyeballing the
     # YAML, matches it too.
+    #
+    # `files` rather than `trace` for exactly that reason. The skill renders
+    # this into the report and prints a summary that carries the file without
+    # the line, so on the transcript the grader passed or failed on whether the
+    # agent happened to `grep -n` -- it scored the tool the agent reached for,
+    # not the finding. Its sibling in impostor-check-skipped, the same pattern
+    # on the same fixture, came up tails and failed a correct run.
     pattern: 'ci\.yml[^\n]{0,30}?\b11\b'
     match: contains
 

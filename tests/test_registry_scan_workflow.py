@@ -374,22 +374,57 @@ def test_scan_path_points_at_a_tree_that_actually_holds_skills(workflow: dict):
     )
 
 
+def _red_proof_step(workflow: dict) -> dict:
+    steps = [
+        step for step in _scan_job(workflow)["steps"]
+        if "registry_scan_redprove.py" in step.get("run", "")
+    ]
+    assert len(steps) == 1, "expected exactly one red-proof step"
+    return steps[0]
+
+
+def _enforcement_step(workflow: dict) -> dict:
+    """The step that turns a failed control into a failed build.
+
+    The control is `continue-on-error` so the scan behind it still runs and still
+    reports (see `test_findings_are_surfaced_even_when_the_control_fails`). That
+    makes this step the thing standing between "the gate cannot be proven able to
+    fail" and a green check, so it is asserted by name.
+    """
+    red_proof_id = _red_proof_step(workflow).get("id")
+    assert red_proof_id, (
+        "the red-proof step needs an `id:` for a later step to read its outcome"
+    )
+    steps = [
+        step for step in _scan_job(workflow)["steps"]
+        if f"steps.{red_proof_id}.outcome" in step.get("run", "")
+    ]
+    assert len(steps) == 1, (
+        f"expected exactly one step reading `steps.{red_proof_id}.outcome` and "
+        f"failing the build on it; found {len(steps)}"
+    )
+    return steps[0]
+
+
 def test_red_proof_runs_on_every_run(workflow: dict):
     """A check that cannot fail is not a check.
 
-    Adding `if:` or `continue-on-error:` to this step disables the one guarantee the whole
-    gate rests on while leaving it plainly visible in the file, so both are asserted — and
-    it must run before the gating scan, so a broken anchor is reported as such rather than
-    as a scan result.
+    An `if:` on this step disables the one guarantee the whole gate rests on while
+    leaving it plainly visible in the file, so it is asserted — and it must run
+    before the gating scan, so a broken anchor is reported as such rather than as
+    a scan result.
+
+    `continue-on-error` is now REQUIRED here rather than banned, and the reason is
+    the 2026-08-18 outage: with a hard failure the job stopped at this step, so a
+    scanner that had gone blind cost us not only the gate but every finding it
+    might still have reported — the unfiltered pass never ran and the artifact
+    uploaded nothing. The guarantee moved rather than weakened: the build still
+    fails, from the enforcement step below.
     """
     assert _REDPROVE.exists(), "the red-proof script is missing"
     job = _scan_job(workflow)
-    redprove = [
-        step for step in job["steps"]
-        if "registry_scan_redprove.py" in step.get("run", "")
-    ]
-    assert len(redprove) == 1, "expected exactly one red-proof step"
-    _assert_unconditional(redprove[0], "the red-proof step")
+    red_proof = _red_proof_step(workflow)
+    assert "if" not in red_proof, "the red-proof step is conditional; it must always run"
 
     gate_index = _step_index(job, lambda s: s is _gate_step(workflow))
     redprove_index = _step_index(
@@ -398,6 +433,140 @@ def test_red_proof_runs_on_every_run(workflow: dict):
     assert redprove_index < gate_index, (
         "the red-proof must run before the gating scan, so 'the gate cannot fail' is "
         "reported as its own failure rather than hidden behind a scan result"
+    )
+
+
+def test_a_failed_control_still_fails_the_build(workflow: dict):
+    """The property `continue-on-error` would otherwise destroy.
+
+    "The gate cannot be proven able to fail" must never show a green check. The
+    enforcement step is what preserves that, so its existence, its
+    unconditionality and its non-zero exit are all asserted.
+    """
+    step = _enforcement_step(workflow)
+    condition = str(step.get("if") or "")
+    assert condition == "" or "cancelled()" in condition or "always()" in condition, (
+        "the enforcement step must run whatever else failed — a plain success "
+        "condition would skip it in exactly the case it exists for"
+    )
+    assert not step.get("continue-on-error"), (
+        "the enforcement step is continue-on-error, so a failed control would show green"
+    )
+    run = step["run"]
+    assert re.search(r"\bexit\s+1\b", run), (
+        "the enforcement step never exits non-zero, so it cannot fail the build"
+    )
+    # Searching the whole block is not enough. The step branches, and only the
+    # LAST branch is the coverage gap itself; an edit that turned just that
+    # branch into `exit 0` would leave the earlier branches' `exit 1` in place
+    # and keep a whole-block search green — a green check over a scan that
+    # verified nothing, which is the exact regression this test exists to catch.
+    assert run.strip().endswith("exit 1"), (
+        "the enforcement step's final branch — the coverage gap — does not exit "
+        "non-zero, so an unverified scan would show a green check"
+    )
+
+
+def test_findings_are_surfaced_even_when_the_control_fails(workflow: dict):
+    """The 2026-08-18 lesson, pinned.
+
+    When the control failed hard, the job stopped there: the unfiltered scan never
+    ran, no annotation was written, and the artifact step uploaded nothing —
+    "No files were found with the provided path". A blind scanner cost us the
+    report as well as the gate, and the report is the half that would show
+    detection coming back.
+    """
+    job = _scan_job(workflow)
+    red_proof = _red_proof_step(workflow)
+    assert red_proof.get("continue-on-error") is True, (
+        "the control must be continue-on-error, or the steps after it never run "
+        "and a blind scanner also costs us every finding it might still report"
+    )
+    for step in (_visibility_step(workflow), _gate_step(workflow)):
+        index = _step_index(job, lambda s, t=step: s is t)
+        assert index > _step_index(
+            job, lambda s: "registry_scan_redprove.py" in s.get("run", "")
+        ), "the scan steps must come after the control, not replace it"
+
+
+def test_the_coverage_gap_is_labelled_distinctly_from_a_finding(workflow: dict):
+    """A red check that means "we could not look" and a red check that means "we
+    found something" are opposite situations, and for one day in August 2026 they
+    wore the same badge. The annotation title is what a human — or the checks API
+    a review agent reads — uses to tell them apart, so the enforcement step must
+    carry one and must say it is not a finding."""
+    run = _enforcement_step(workflow)["run"]
+    assert "::error title=" in run, (
+        "the coverage gap must be annotated, not just printed into the log"
+    )
+    lowered = run.lower()
+    assert "coverage" in lowered and "not a finding" in lowered, (
+        "the annotation must say this is a coverage gap and NOT a security finding"
+    )
+
+
+def test_a_real_finding_is_never_labelled_not_a_finding(workflow: dict):
+    """The scenario the split itself can get wrong.
+
+    The control failing and the gate finding a real critical are not exclusive —
+    a blind scanner is exactly when a malicious change is most likely to be
+    sitting in the tree, and the unfiltered pass behind the control can still
+    surface one. If the enforcement step reads only the control's outcome, that
+    run goes red carrying `NOT A FINDING` in capitals over a run that found
+    something. The one case where a human most needs to look would wear the
+    label that most discourages looking.
+
+    So the enforcement step must consult the GATE's outcome too, and the gate
+    needs an `id:` for it to be readable.
+    """
+    gate_id = _gate_step(workflow).get("id")
+    assert gate_id, (
+        "the gating scan step needs an `id:` so the enforcement step can tell "
+        "'we could not look' apart from 'we looked and found something'"
+    )
+    run = _enforcement_step(workflow)["run"]
+    assert f"steps.{gate_id}.outcome" in run, (
+        "the enforcement step never reads the gate's outcome, so a run where the "
+        "control failed AND a critical finding was reported is annotated "
+        "'COVERAGE GAP — NOT A FINDING' over a real finding"
+    )
+
+
+def test_the_coverage_gap_is_not_claimed_when_the_gate_never_ran(workflow: dict):
+    """A skipped gate is not a clean gate.
+
+    The steps between the control and the gate are not all `continue-on-error`;
+    if one of them fails, the gate is SKIPPED and its outcome is neither
+    `success` nor `failure`. Falling through to the coverage-gap text there
+    would publish a verified-cause narrative over a run whose gate never
+    executed. The control's outcome already gets this guard; the gate's needs
+    the same one.
+    """
+    gate_id = _gate_step(workflow).get("id")
+    run = _enforcement_step(workflow)["run"]
+    assert re.search(
+        rf'steps\.{re.escape(gate_id)}\.outcome\s*\}}\}}"\s*!=\s*"success"', run
+    ), (
+        "the enforcement step has no branch for the gate not having run, so a "
+        "skipped gate is reported as a plain coverage gap"
+    )
+
+
+def test_the_coverage_gap_is_not_claimed_on_a_cancelled_run(workflow: dict):
+    """`always()` also means "and when someone cancelled the job".
+
+    A cancelled run has verified nothing, but it has also not established that
+    the scanner is blind — and the coverage-gap text asserts a specific verified
+    cause. Claiming it on a cancellation invents a diagnosis.
+    """
+    condition = str(_enforcement_step(workflow).get("if") or "")
+    assert "always()" not in condition, (
+        "the enforcement step runs under always(), so a cancelled job emits the "
+        "coverage-gap annotation and its verified-cause narrative"
+    )
+    assert "cancelled()" in condition, (
+        "the enforcement step must still run after the gate fails, so it needs "
+        "`!cancelled()` rather than a bare success condition"
     )
 
 

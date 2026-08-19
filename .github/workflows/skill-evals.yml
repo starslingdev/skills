@@ -1,0 +1,202 @@
+# Behavioral eval suite for the ci-secure skill.
+#
+# The rest of CI tests the scanner: deterministic Python, every push, every PR. This tests the
+# CONTRACT — the instructions in SKILL.md that a live agent reads and executes. A refactor can
+# leave every unit test green while changing what the agent actually does, and nothing else in
+# this repository would notice.
+#
+# Each case scaffolds fixture workflows into a throwaway directory, drives one headless
+# `claude -p` session against it, and applies the case's own graders to the recorded tool calls
+# and output. See skills/ci-secure/evals/README.md for the cases and
+# maintainers/ci-secure/scripts/run_skill_evals.py for the harness.
+#
+# WHY THIS IS NOT THE `test` GATE, and is not required:
+#
+#   - It spends real tokens. One session per case, so it is path-filtered to the files that can
+#     actually change agent behaviour. A README or example PR never pays for it.
+#   - It is non-deterministic. An agent can reach a correct outcome by a different route, so a
+#     required check here would be flaky, and a flaky gate gets disabled or ignored.
+#   - It cannot run on fork PRs at all: `pull_request` from a fork has no access to
+#     ANTHROPIC_API_KEY. A fork PR therefore gets no `skill evals` check and a separate check
+#     whose NAME is the message — `skill evals NOT RUN (fork PR — no agent session)` — exactly
+#     as registry-scan.yml reports its own fork gap. A green check called "skill evals" must
+#     never appear over a session that did not happen.
+#     `.github/workflows/claude.yml` shows the other pattern (comment-triggered, base-repo
+#     context) if on-demand fork coverage is ever wanted.
+#
+# Start advisory, exactly as the ci-secure gate itself ships advisory: let it report on a few
+# contract PRs, then decide whether it has earned being required.
+name: Skill evals
+
+on:
+  # Automatic: any PR that touches something able to change agent behaviour.
+  pull_request:
+    paths:
+      - "skills/ci-secure/SKILL.md"
+      - "skills/ci-secure/references/**"
+      - "skills/ci-secure/scripts/**"
+      - "skills/ci-secure/evals/**"
+      - "maintainers/ci-secure/scripts/run_skill_evals.py"
+      - ".github/workflows/skill-evals.yml"
+
+  # Manual: run it against any branch on demand, from the Actions tab or
+  # `gh workflow run skill-evals.yml --ref <branch>`. This is the escape hatch for a PR that
+  # changed behaviour without touching a filtered path, and for re-running after a flake
+  # without pushing an empty commit.
+  workflow_dispatch:
+    inputs:
+      case:
+        description: "Single case to run (blank = all five)"
+        required: false
+        type: string
+      runs:
+        description: "Runs per case"
+        required: false
+        default: "1"
+        type: string
+
+# A superseded run is wasted tokens, not just wasted minutes.
+concurrency:
+  group: skill-evals-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    name: skill evals (self-hosted)
+    # Same-repo PRs only. A fork PR cannot see ANTHROPIC_API_KEY, and running fork-authored
+    # workflow fixtures through an agent on the self-hosted pool is not something to do for a
+    # convenience. The verdict job below reports the gap rather than hiding it.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: starsling-ubuntu-24.04
+    # Above the harness's own worst case: five cases at the 900s per-run cap the case files
+    # declare is 75 minutes, so a lower budget here would kill a slow-but-healthy suite and
+    # report it as a behaviour change. A hung session must still not hold the pool: self-hosted
+    # jobs otherwise queue for hours with no signal.
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install harness dependencies
+        run: pip install pyyaml
+
+      # Pinned. A contract-regression suite whose failure message says "the agent's behaviour
+      # changed" must hold the runtime still; on `latest`, an upstream CLI release would read
+      # as a skill regression. Bump this deliberately, and expect to re-baseline when you do.
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.235
+
+      # One run per case. Bump --runs only if the suite proves flaky in practice: every extra
+      # run is another full agent session.
+      - name: Run the eval cases
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CASE: ${{ inputs.case }}
+          RUNS: ${{ inputs.runs }}
+          # The runner executes as root, and `claude` refuses `--permission-mode
+          # bypassPermissions` under uid 0 unless a deliberate sandbox is declared: it prints
+          # "cannot be used with root/sudo privileges" and exits before the first turn. That is
+          # what happened on this workflow's first run — five cases failed every grader in 1.6
+          # seconds with zero tool calls. This declares what is already true: the job runs in a
+          # throwaway repo checkout on an ephemeral runner, and the agent's own working
+          # directory is a temp dir the harness creates and deletes.
+          IS_SANDBOX: "1"
+        # The harness separates "a case ran and failed" (1) from "the harness could not run at
+        # all" (2), so preserve the distinction here rather than collapsing both into a red
+        # check that asserts a cause the workflow cannot know.
+        run: |
+          set -uo pipefail
+          status=0
+          python3 maintainers/ci-secure/scripts/run_skill_evals.py \
+            --runs "${RUNS:-1}" ${CASE:+--case "$CASE"} || status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "::error title=SKILL EVALS DID NOT RUN::The harness could not run (exit 2). Nothing was verified — this is a coverage gap, not a behaviour change. The reason is on the line above."
+          elif [ "$status" -ne 0 ]; then
+            echo "::error title=SKILL EVALS FAILED::A case ran and failed a grader (exit ${status})."
+          fi
+          exit "$status"
+        # Defaults keep the automatic path unchanged: one run, every case.
+
+      # The harness writes the session of any case that failed. Grader names
+      # alone do not explain a failure, and "read the job log" is only useful
+      # advice if the log has the run in it.
+      - name: Keep the sessions that failed
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: skill-eval-sessions
+          path: skill-eval-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+
+  # ONE check name, always reported, mirroring `test`'s verdict job in ci.yml. The evals job is
+  # conditional, and GitHub counts a skipped check as a pass — so a skip must be turned into a
+  # visible statement here instead. `always()` rather than `!cancelled()` for the same reason it
+  # is used there: a cancelled run reports skipped, and skipped reads as green.
+  verdict:
+    name: skill evals
+    needs: [evals]
+    # `always()` so a skipped or cancelled evals job still gets a verdict — but NOT on a fork
+    # PR, where the check would be green over a session that could not happen. The fork job
+    # below carries that case under a name that says so. The two conditions are exact
+    # complements on purpose, and tests/test_skill_evals_workflow.py pins that they stay so.
+    if: >-
+      always() &&
+      !(github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report
+        env:
+          RESULT: ${{ needs.evals.result }}
+        run: |
+          set -euo pipefail
+          echo "evals job: ${RESULT}"
+          case "${RESULT}" in
+            success)   echo "Skill evals passed."; exit 0 ;;
+            failure)   echo "::error::Skill evals FAILED. Read the job log: the harness prints whether a case ran and failed a grader, or whether it could not run at all."; exit 1 ;;
+            cancelled) echo "::warning::Skill evals were cancelled; nothing was verified."; exit 1 ;;
+            *)         echo "::error::Skill evals did not run (${RESULT}); that is not a pass."; exit 1 ;;
+          esac
+
+  # The name is the message: this check being green must not read as "the contract was
+  # verified". Failing an external contributor's PR for a secret they have no way to reach
+  # would be hostile, so this reports rather than blocks — the same trade registry-scan.yml
+  # makes for its own fork gap — but a maintainer must run the evals on an internal branch
+  # before merging a fork change to SKILL.md, the references, or the scripts.
+  fork-did-not-run:
+    name: skill evals NOT RUN (fork PR — no agent session)
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report the coverage gap
+        run: |
+          echo "::warning title=SKILL EVALS DID NOT RUN::Fork PRs have no access to ANTHROPIC_API_KEY, so no agent session ran on this PR. The contract's behaviour is unverified here — a coverage gap, not a pass."
+          echo "================================================================"
+          echo "  SKILL EVALS DID NOT RUN — NO AGENT SESSION HAPPENED"
+          echo ""
+          echo "  This pull request comes from a fork. Fork runs cannot reach"
+          echo "  ANTHROPIC_API_KEY, so no headless session could be started and"
+          echo "  none of the five behavioural cases was executed."
+          echo ""
+          echo "  This is a coverage gap, NOT a pass. Before merging a fork"
+          echo "  change to SKILL.md, references/, scripts/ or evals/, push the"
+          echo "  branch to this repository and let 'skill evals' run."
+          echo "================================================================"

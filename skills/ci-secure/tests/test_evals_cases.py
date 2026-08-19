@@ -15,8 +15,10 @@ transcript of a run WITH the skill loaded contains the text of ``SKILL.md`` and
 of any reference file the agent opened. So a ``contains`` pattern that already
 appears in the skill's own prose passes without the skill ever having done
 anything, and a ``not_contains`` pattern that appears there can never pass at
-all. Both directions collapse to one rule: a trace-targeted regex must not match
-the skill's shipped text. This is not hypothetical -- natural choices for these
+all. Both directions collapse to one rule: the regex must not match the skill's
+shipped text. It binds ``files``-targeted graders too, because ``report.py``
+inlines catalog prose into the report it renders, so shipped text reaches that
+corpus as well. This is not hypothetical -- natural choices for these
 graders (``P14.10``, ``did NOT run``, ``Impostor-SHA check (P14.11): ran``) are
 quotations from ``SKILL.md``, and each was replaced with a scanner- or
 renderer-produced string after this test flagged it.
@@ -25,6 +27,15 @@ The corpus the rule reads is defined by ``_agent_readable_sources()`` and is
 deliberately wider than the prose files -- ``scripts/*.py`` ships too, and a
 ``not_contains`` grader anchored on a literal in ``scan.py`` is the silent,
 never-passing direction of the same trap.
+
+A third face of the trap has its own test
+(``test_negative_trace_regexes_do_not_match_grep_output_over_the_fixtures``) and
+is the nastiest, because it fires on a run that did everything right: the
+transcript carries the output of every TOOL the agent ran, so a trace-targeted
+``not_contains`` shaped like ``<file>:<line>...<word>`` is matched by ``grep``'s
+own ``<path>:<line>:<text>`` rendering of the fixture the agent was told to
+audit. The more carefully a session inspects the file it is supposed to clear,
+the likelier it fails.
 
 Patterns are compiled with Python's ``re`` while the harness uses JavaScript's
 ``RegExp``. The suite deliberately stays inside the syntax both accept
@@ -322,7 +333,7 @@ def test_the_agent_readable_corpus_spans_more_than_the_prose_files() -> None:
     for literal, why in (
         ("ran: no sha-pinned actions found", "scripts/scan.py"),
         ("Critical exploit-chain checks only", "scripts/report.py"),
-        ("This suite has never been executed", "evals/README.md"),
+        ("These cases run, on a harness that is not", "evals/README.md"),
     ):
         assert literal in corpus, (
             f"the agent-readable corpus no longer reaches {why} -- the vacuity "
@@ -335,19 +346,26 @@ def test_no_trace_regex_matches_the_skills_own_prose() -> None:
     so a trace-targeted pattern that matches the skill's own prose asserts
     nothing about behavior: ``contains`` passes for free, ``not_contains`` can
     never pass. Both are silent failures of the suite, which is why this is a
-    test and not a review note."""
+    test and not a review note.
+
+    ``files``-targeted regexes are held to the same rule, and for a reason that
+    is easy to miss: ``report.py`` INLINES catalog text into the report it
+    renders, so the skill's own shipped prose is inside the file corpus too. A
+    ``files`` pattern quoting the catalog would pass on the report having been
+    rendered at all, never mind what the scan found."""
     prose = _agent_readable_text()
     offenders = []
     for case_dir, case in _all_cases():
         for grader in _graders(case):
-            if grader.get("type") != "regex" or grader.get("target") != "trace":
+            if (grader.get("type") != "regex"
+                    or grader.get("target") not in {"trace", "files"}):
                 continue
             pattern = grader["pattern"]
             if re.search(pattern, prose):
                 offenders.append(f"{case_dir.name}/{grader['name']}: {pattern!r}")
     assert not offenders, (
-        "these trace regexes match the skill's own shipped prose, so they grade "
-        "the agent having READ the skill rather than the agent having RUN it -- "
+        "these regexes match the skill's own shipped prose, so they grade the "
+        "agent having READ the skill rather than the agent having RUN it -- "
         "re-anchor each on a string only the scanner or the renderer produces:\n  "
         + "\n  ".join(offenders))
 
@@ -525,9 +543,9 @@ def test_scaffold_still_materializes_the_tree_in_an_empty_sandbox(
 @pytest.mark.parametrize("case_dir", _case_dirs(), ids=lambda p: p.name)
 def test_regex_graders_declare_a_target(case_dir: Path) -> None:
     """``target`` is optional in the harness's schema, and the vacuity rule only
-    inspects graders whose target is ``trace``. So omitting the line is a
-    one-token bypass of the rule: a verbatim ``SKILL.md`` quotation with no
-    ``target:`` passes every test in this file. Requiring it here closes that."""
+    inspects graders that name one. So omitting the line is a one-token bypass
+    of the rule: a verbatim ``SKILL.md`` quotation with no ``target:`` passes
+    every test in this file. Requiring it here closes that."""
     for grader in _graders(_load(case_dir)):
         if grader.get("type") != "regex":
             continue
@@ -585,6 +603,76 @@ def test_negative_regexes_do_not_match_the_case_file_that_declares_them(
             f"{case_dir.name}/case.yaml, which ships inside the skill. One Grep "
             "of the eval directory makes it unpassable on a run that behaved "
             "perfectly -- and a not_contains that can never pass fails silently")
+
+
+def _grep_shaped_fixture_output(case_dir: Path) -> str:
+    """The fixture workflows re-rendered the way a `grep -n` prints them.
+
+    ``grep`` writes one line per hit as ``<path>:<line>:<text>``, and the agent
+    reaches the fixtures at two paths depending on where it runs: bare
+    bare from inside the workflows directory and prefixed with
+    ``.github/workflows/`` from the repository root. Both are rendered, because
+    a pattern can be safe against one and not the other.
+
+    Deliberately NARROWER than the reachable-text corpus in
+    ``test_every_case_anchors_on_output_the_agent_could_not_have_written``,
+    which serves the opposite direction (disqualifying weak POSITIVE anchors)
+    and so casts the widest net it can, including a ``<path>:<line> <text>``
+    variant. Only grep's true ``<path>:<line>:<text>`` shape belongs here: it is
+    a shape tools emit and ``report.py`` never does, which is what makes a match
+    proof of contamination rather than of a real finding. Widening this one
+    would forbid negatives that legitimately quote the renderer.
+    """
+    case = _load(case_dir)
+    script = case_dir / (case.get("context") or {}).get("scaffold_script", "")
+    slugs = re.findall(r"^FIXTURE_SLUG=(\S+)", script.read_text(encoding="utf-8"),
+                       flags=re.M)
+    workflows = _EVALS / "files" / slugs[0] / "dot-github" / "workflows"
+    lines = []
+    for fixture in sorted(workflows.glob("*.yml.fixture")):
+        name = fixture.name[: -len(".fixture")]
+        for n, text in enumerate(fixture.read_text(encoding="utf-8").splitlines(), 1):
+            lines.append(f"{name}:{n}:{text}")
+            lines.append(f".github/workflows/{name}:{n}:{text}")
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("case_dir", _case_dirs(), ids=lambda p: p.name)
+def test_negative_trace_regexes_do_not_match_grep_output_over_the_fixtures(
+    case_dir: Path,
+) -> None:
+    """The third face of the vacuity trap, and the one that fires on a GOOD run.
+
+    A ``trace``-targeted grader reads ``_transcript``, which folds in the output
+    of every tool the agent ran -- not just the agent's own prose. So a
+    ``not_contains`` pattern shaped like ``<file>:<line>...<word>`` is matched by
+    ``grep``'s own ``<path>:<line>:<text>`` rendering of the fixture the agent
+    was told to audit. The case then reports a behavioural regression for a
+    session that did exactly the right thing, and the harder the agent looks at
+    the file it is supposed to clear, the likelier it fails.
+
+    This is not hypothetical: ``pwn-request``'s clean fixture has the literal
+    YAML key ``jobs:`` on line 7, so ``grep -n jobs .github/workflows/*.yml`` --
+    which that case's sibling llm grader actively rewards the agent for running
+    -- emits ``safe.yml:7:jobs:``.
+
+    Only ``trace`` is held to this rule. The ``files`` corpus introduces each
+    file as ``=== <path> ===`` followed by its raw bytes, so a ``<path>:<line>:``
+    sequence cannot arise there.
+    """
+    grep_output = _grep_shaped_fixture_output(case_dir)
+    for grader in _graders(_load(case_dir)):
+        if (grader.get("type") != "regex"
+                or grader.get("match") != "not_contains"
+                or grader.get("target") != "trace"):
+            continue
+        hit = re.search(grader["pattern"], grep_output)
+        assert not hit, (
+            f"not_contains grader {grader.get('name')!r} matches {hit.group(0)!r} "
+            "-- which is what `grep -n` prints for this case's own fixture, not "
+            "anything the skill reported. Reading the file under audit is "
+            "correct behaviour, so this grader fails correct runs. Anchor it on "
+            "the renderer's shape, or move it to `target: files`")
 
 
 @pytest.mark.parametrize("case_dir", _case_dirs(), ids=lambda p: p.name)

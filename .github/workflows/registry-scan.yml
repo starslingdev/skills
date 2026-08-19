@@ -148,7 +148,19 @@ jobs:
       # against — so nothing in this repository contains it. It runs the gate's real flags,
       # IGNORED_ISSUE_CODES included, so an ignore list that grew to swallow the anchor rule
       # would fail here rather than quietly neutering the gate.
+      #
+      # `continue-on-error` here does NOT make the control advisory — the
+      # "Report the coverage gap" step below fails the build on its outcome, and
+      # tests/test_registry_scan_workflow.py fails if that step goes missing. It
+      # exists so the steps AFTER this one still run. On 2026-08-18 a hard
+      # failure here stopped the job at this step, so a scanner that had gone
+      # blind cost us not just the gate but every finding it might still have
+      # reported: the unfiltered pass never ran and the artifact upload logged
+      # "No files were found". The report is the half that would show detection
+      # coming back, so it must survive the control failing.
       - name: Prove the gate can go red
+        id: red_proof
+        continue-on-error: true
         run: python .github/scripts/registry_scan_redprove.py
 
       # Two passes, on purpose, and exactly two — the scanner is a network service, so every
@@ -190,13 +202,96 @@ jobs:
       # ignored — a scan that broke is not a scan that passed.
       # `--dangerously-run-mcp-servers` is required by `--ci`; it only affects MCP server configs,
       # and this path contains skill directories only, so nothing is executed.
+      #
+      # The `id` is what lets the step below tell "we could not look" apart from
+      # "we looked and found something". Without it that step reads only the
+      # control's outcome, and a run where the control failed AND a critical was
+      # reported goes red annotated NOT A FINDING.
       - name: Gate on critical findings
+        id: gate
         run: |
           uvx snyk-agent-scan@latest scan "${SCAN_PATH}" \
             --ci \
             --verbose \
             --dangerously-run-mcp-servers \
             --ignore-issues-codes "${IGNORED_ISSUE_CODES}"
+
+      # Two red checks that mean opposite things must not look the same. A gate
+      # failure above means "a critical finding is in this tree". This step means
+      # "nothing was verified" — the scanner reported nothing on a control that
+      # is known-malicious, so its silence on the real tree carries no
+      # information either. Both are failures; only one is a finding, and the
+      # annotation title is what a human, or the checks API a review agent
+      # reads, uses to tell them apart.
+      #
+      # `!cancelled()` rather than `always()`: this step must still run after the
+      # gate above fails (that is the whole point), but a cancelled run has not
+      # established that the scanner is blind, and the text below asserts a
+      # specific verified cause. Claiming it on a cancellation invents a diagnosis.
+      - name: Report the coverage gap
+        if: ${{ !cancelled() }}
+        run: |
+          if [ "${{ steps.red_proof.outcome }}" = "success" ]; then
+            echo "Control passed: the scanner reported the anchor finding, so this run's result is meaningful."
+            exit 0
+          fi
+          if [ "${{ steps.red_proof.outcome }}" != "failure" ]; then
+            echo "::error title=REGISTRY SCAN CONTROL DID NOT RUN::The control step did not run (outcome: ${{ steps.red_proof.outcome }}), so nothing here established whether the scanner can see. Read the failing step above."
+            exit 1
+          fi
+          # The two failures are not exclusive, and this ordering matters: a blind
+          # scanner is exactly when a malicious change is most likely to be sitting
+          # in the tree, and the unfiltered pass behind the control can still
+          # surface one. Announcing the coverage gap over that run would put
+          # "NOT A FINDING" on the one result a human most needs to read.
+          if [ "${{ steps.gate.outcome }}" = "failure" ]; then
+            echo "::error title=REGISTRY SCAN FINDING — AND THE CONTROL WAS BLIND::The gate reported a critical finding in ${SCAN_PATH}. Treat it as a real finding and read the gate step above for its issue code. Separately, the control also failed, so the scan's SILENCE elsewhere carries no information — this run is a floor on what is present, not a ceiling."
+            {
+              echo "## Registry scan: a finding, on a run that also verified nothing else"
+              echo ""
+              echo "The gating step reported a critical finding under \`${SCAN_PATH}\`."
+              echo "**This IS a security finding** — its issue code is in the gate step's log."
+              echo ""
+              echo "The control skill ALSO came back clean on this run, so everything the"
+              echo "scan did NOT report is unverified. Treat the finding above as a floor,"
+              echo "not as the complete set."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          # A SKIPPED gate is not a clean gate. The steps between the control and
+          # the gate are not all continue-on-error, so one of them failing leaves
+          # the gate unrun — and the coverage-gap text below asserts a verified
+          # cause that such a run never established.
+          if [ "${{ steps.gate.outcome }}" != "success" ]; then
+            echo "::error title=REGISTRY SCAN GATE DID NOT RUN::The gating scan did not run (outcome: ${{ steps.gate.outcome }}), so nothing was checked for critical findings. Read the failing step above. This is a coverage gap, not a clean result."
+            exit 1
+          fi
+          echo "::error title=REGISTRY SCAN COVERAGE GAP — NOT A FINDING::The scanner reported nothing on a deliberately malicious control skill, so this run verified NOTHING about ${SCAN_PATH}. This is a coverage gap, not a clean result and not a security finding."
+          {
+            echo "## Registry scan: coverage gap"
+            echo ""
+            echo "**Nothing was verified on this run.** The control skill — built in a temp"
+            echo "directory, carrying an instruction to fetch a remote installer and pipe it"
+            echo "into a shell — came back clean, so the scanner's silence about \`${SCAN_PATH}\`"
+            echo "means nothing either."
+            echo ""
+            echo "**This is not a security finding.** A finding fails the gate step above and"
+            echo "names its issue code."
+            echo ""
+            echo "Known cause, verified against the live API on 2026-08-19: the analysis"
+            echo "endpoint answers HTTP 200 with an empty finding set on both API versions it"
+            echo "supports, on fixtures including credential exfiltration. It is not the token"
+            echo "(\`/self\` and \`/orgs\` answer 200), not the free-tier daily cap (no 429, quota"
+            echo "remaining), and not the deprecated version pin (the newer one is empty too)."
+            echo ""
+            echo "**Compensating control:** the offline shape guard in"
+            echo "\`tests/test_no_ioc_shaped_literals.py\` covers the mechanical half of the"
+            echo "malicious-code class with no vendor dependency, and it runs in \`test\`, which"
+            echo "is a required check. Prompt injection in skill instructions stays uncovered."
+            echo ""
+            echo "**When this step stops failing, detection is back.**"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit 1
 
   fork-not-scanned:
     # The name is the message: this check being green must not read as "scanned, clean".

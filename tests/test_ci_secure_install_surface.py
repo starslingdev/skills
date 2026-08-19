@@ -8,13 +8,18 @@ no ``.skillignore`` / frontmatter allowlist / dotfile exclusion. So the ONLY way
 to keep maintainer-only files out of an end-user install is to keep them out of
 ``skills/ci-secure/`` entirely.
 
-This guard is FORWARD-LOOKING. ci-secure has no maintainer-loop tree in this
-repo today, so nothing here is currently leaking; the point is that the day one
-is added it lands under ``maintainers/ci-secure/`` and not under the skill. The
-leak shape to expect is ci-speedup's: self-improvement loop infra (loop prompts,
-a summary schema, drafting scripts) plus the runtime capture directories those
-loops write into, which on a maintainer's machine hold third-party job logs and
-session transcripts. Rooted under the skill, every one of them would ship.
+ci-secure now HAS a maintainer-only tree — ``maintainers/ci-secure/`` holds
+``MAINTAINERS.md`` plus the behavioral-eval harness (``scripts/run_skill_evals.py``
+and its tests), which drives real ``claude -p`` sessions and is of no use to
+someone who installed the skill. So this guard is no longer purely
+forward-looking: it pins where that tree lives, and ``run_skill_evals.py`` is a
+forbidden basename under ``skills/ci-secure/`` for exactly that reason.
+
+The leak shape still to expect is ci-speedup's: self-improvement loop infra
+(loop prompts, a summary schema, drafting scripts) plus the runtime capture
+directories those loops write into, which on a maintainer's machine hold
+third-party job logs and session transcripts. Rooted under the skill, every one
+of them would ship.
 
 Independent checks (each its own test function, so a broken assertion in one
 never silently disables the others), plus a positive control. Every other
@@ -53,6 +58,10 @@ _FORBIDDEN_FILE_NAMES = {
     "loop-summary.schema.json",
     "draft_detector.py",
     "aggregate_lessons.py",
+    # The behavioral-eval harness. It drives a real, billed agent session per
+    # case, so it must never reach an end user's install and must never be
+    # collected by the ordinary `pytest` run.
+    "run_skill_evals.py",
 }
 
 # Directory names that mark the same thing.

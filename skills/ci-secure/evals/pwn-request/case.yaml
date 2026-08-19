@@ -61,9 +61,14 @@ graders:
   # entirely would still have passed. The occurrence LINES are what only the
   # engine knows: P14.9 at :8 and P14.25 at :14, each rendered by report.py with
   # the job list after it.
+  #
+  # `files`, not `trace`, because that bullet is rendered INTO the report file
+  # and the skill prints a summary rather than the evidence section. Graded
+  # against the transcript this asserted that the agent happened to `cat` its
+  # own report, and it failed a run where the report said exactly this.
   - type: regex
     name: finding-lands-on-the-vulnerable-workflow
-    target: trace
+    target: files
     pattern: 'vulnerable\.yml:(?:8|14)\b[^\n]{0,20}jobs'
     match: contains
 
@@ -71,14 +76,34 @@ graders:
   # skill reports is rendered as `<workflow file>:<line> — jobs: ...`, so this
   # means a finding was attributed to the file that is supposed to be clean.
   #
-  # The `jobs` tail is load-bearing rather than decoration. A bare
-  # `safe\.yml:\d+` also matches the Grep tool's own `path:line:text` output,
-  # and this case's sibling llm grader actively rewards the agent for showing it
-  # inspected safe.yml -- so the two graders pulled against each other and a
-  # correct run could fail this one on a `grep -n` it was praised for.
+  # `files`, like its positive twin, and for a sharper reason than symmetry.
+  #
+  # The `jobs` tail was added here to keep a bare `safe\.yml:\d+` off the Grep
+  # tool's own `path:line:text` output, because this case's sibling llm grader
+  # actively rewards the agent for showing it inspected safe.yml. The tail does
+  # not do that job: the clean fixture's line 7 IS the literal YAML key `jobs:`,
+  # so `grep -n jobs .github/workflows/*.yml` prints that filename, that line
+  # number and that key on a single line -- and this pattern matched it.
+  # Against `trace` -- which folds in tool output -- the grader therefore failed
+  # correct sessions for reading the file they were asked to clear.
+  #
+  # The literal grep line is deliberately not written out here: a `not_contains`
+  # pattern that matches its own case file can never pass once anything greps
+  # `evals/`, which the sibling test above pins.
+  #
+  # Against `files` it cannot: that corpus introduces each file the session
+  # WROTE as `=== <path> ===` plus its raw bytes, so no `<path>:<line>:` prefix
+  # arises, and the fixture the agent was handed is excluded from it outright.
+  # What is left is exactly the question worth asking -- did the RENDERER
+  # attribute an occurrence to the file that is supposed to be clean. The
+  # summary the reader gets is still covered, by the llm grader below.
+  #
+  # `skills/ci-secure/tests/test_evals_cases.py::
+  # test_negative_trace_regexes_do_not_match_grep_output_over_the_fixtures`
+  # holds every trace-targeted negative to this rule now.
   - type: regex
     name: safe-workflow-produces-no-finding
-    target: trace
+    target: files
     pattern: 'safe\.yml:\d+[^\n]{0,20}jobs'
     match: not_contains
 

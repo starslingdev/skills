@@ -11,7 +11,70 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **2026-08-18** — **The behavioral eval cases are executed, and a session that
+  never started no longer reads as a skill regression.** The five cases in
+  `evals/` were written for `claude plugin eval`, which is gated behind early
+  access, so nothing ran them and `evals/README.md` opened by saying so. They
+  now run on every pull request that touches this skill's contract, driven by a
+  maintainer-side harness. The README records what that harness does *not* do —
+  `llm` graders are reported rather than scored, and the cases' `allowed_tools`,
+  ablation arm, model pin and run count are not yet applied — so a pass under it
+  is not quoted as a pass under the runner the cases were written for. The
+  harness mounts a copy of the skill with the answer key removed, which closes
+  the free-pass half of the risk the vacuity rule documents *for that harness*;
+  under `claude plugin eval` the case files still ship and the residual stands.
+
 ### Fixed
+
+- **2026-08-18** — **A case no longer fails because the agent read the file it
+  was asked to clear.** `pwn-request` asserts that no finding is attributed to
+  the clean workflow, and it looked for that attribution in the transcript —
+  which carries the output of every tool the session ran, not just the agent's
+  own words. The clean fixture's line 7 is the literal YAML key `jobs:`, so a
+  `grep -n` over the workflows printed the file, the line and the key on one
+  line and satisfied the pattern. A session that inspected the clean file
+  carefully — which the sibling grader rewards — was scored as having reported
+  a false finding. That grader now reads the rendered report, where no
+  `path:line:` prefix can occur, and a new invariant holds every
+  transcript-targeted negative to the same rule.
+
+- **2026-08-18** — **Counting graders count in the corpus they name.** The
+  `count:` match mode read the transcript whichever corpus its `target`
+  selected — the same wrong-corpus defect fixed for `contains`, surviving in
+  the branch beside it. No case uses `count:` today, so nothing was misreported;
+  the next one written against the report would have been.
+
+- **2026-08-18** — **A report the harness could not collect is reported as a
+  collection failure, not as a skill regression.** The guard for this only
+  fired when the session produced no file at all, and a session leaves scratch
+  files — so a missing report with any other file beside it failed every
+  report-anchored grader as though the scan had misbehaved. The guard now asks
+  for the report itself.
+
+- **2026-08-18** — **The skill's own changelog is no longer readable by a
+  graded session.** The harness mounts the skill for the agent under test and
+  withheld `evals/` and `tests/` as the answer key, but the changelog narrates
+  the graders and quotes their expected banner strings verbatim — so one read
+  of it satisfied a grader with no scan behind it. It is withheld too, and the
+  rule is now stated as a property (no mounted file may satisfy a grader)
+  rather than as a list of names.
+
+- **2026-08-18** — **A grader that pins a finding to its real file and line is
+  read against the report, not against whatever the session happened to print.**
+  Three graders are anchored on `report.py`'s `<file>:<line> — jobs:` evidence
+  bullet, deliberately: a model can paraphrase its summary a dozen ways, but
+  that bullet is byte-identical every run. The skill renders it into a report
+  file and prints a summary, and the harness graded only the transcript — so
+  `pwn-request` and `impostor-check-skipped` failed on runs where the scan had
+  found the right thing, at the right line, and written exactly the asserted
+  text, while `template-injection` passed on the same pattern only because that
+  session happened to run `grep -n`. Those three now declare `target: files`,
+  and the harness collects what the session wrote off disk alongside the
+  transcript, keeping the two corpora separate. The vacuity rule extends to
+  `files` graders, because `report.py` inlines catalog prose into the report it
+  renders.
 
 - **2026-08-17** — **A partial checkout no longer reports as complete
   coverage.** Every detector reasons about the files it can see on disk, so a
