@@ -271,10 +271,17 @@ def main() -> int:
             url = f"{base}?version={version}" if version else base
             status, headers, body = _post(url, sent, token)
             label = version or "(no version parameter)"
-            print(f"\n  version={label}  ->  HTTP {status}  |  {_issue_count(body)}")
+            counted = _issue_count(body)
+            print(f"\n  version={label}  ->  HTTP {status}  |  {counted}")
             _show_headers(headers)
-            if status != 200:
-                print(f"    body: {_scrub(body)[:600]}")
+            # Print the body whenever the count is not a plain number of
+            # findings. A 200 whose shape this probe cannot read is the most
+            # interesting answer available — it means the version is live and
+            # replies in a schema the pinned CLI would not understand — and
+            # summarising it as "no scan_path_results key" throws away the one
+            # thing worth reading.
+            if status != 200 or not counted[0].isdigit():
+                print(f"    body: {_scrub(body)[:1500]}")
 
     _rule("3. Who this token is, and what the account is entitled to")
     for path in ("/self?version=2024-10-15", "/orgs?version=2024-10-15"):
