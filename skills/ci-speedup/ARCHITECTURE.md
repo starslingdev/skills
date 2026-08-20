@@ -26,7 +26,7 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 73-pattern
+ci-speedup audits a repository's GitHub Actions workflows against a 74-pattern
 catalog — 67 **hygiene/data-driven** patterns (OPT1–OPT69, with gaps 10 and 67) plus 6 **structural /
 critical-path** patterns (OPT70–OPT75, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
@@ -2806,7 +2806,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 73-pattern catalog (METADATA + body per pattern); the source of truth for
+  the 74-pattern catalog (METADATA + body per pattern); the source of truth for
   detection and the report's TL;DR / pattern background.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.

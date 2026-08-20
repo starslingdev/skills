@@ -2888,3 +2888,211 @@ def test_catalog_pattern_count_matches_doc_claims():
             assert int(claimed) == count, (
                 f"{rel} claims a {claimed}-pattern catalog but the real count is "
                 f"{count} — reconcile the doc with optimization-patterns.md")
+
+
+# =============================================================================
+# OPT76 — Submodule / Git LFS Checkout Payload
+# =============================================================================
+
+_GITMODULES = """[submodule "vendor/protos"]
+\tpath = vendor/protos
+\turl = https://github.com/example/protos.git
+"""
+
+_GITATTRIBUTES = "*.psd filter=lfs diff=lfs merge=lfs -text\n"
+
+
+def _write_repo_file(root: Path, name: str, content: str) -> None:
+    (root / name).write_text(content, encoding="utf-8")
+
+
+def test_opt76_fires_on_submodule_checkout_no_step_reads_it(tmp_path: Path):
+    """A PR-gating job that clones every submodule but never references the
+    submodule path pays the clone on every run."""
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    pos = """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: pnpm install && pnpm test
+"""
+    assert "OPT76" in _scan_one(tmp_path, pos)
+
+
+def test_opt76_suppressed_when_a_step_builds_from_the_submodule(tmp_path: Path):
+    """The submodule payload is LOAD-BEARING when a step reads it — dropping
+    `submodules:` would break the job, so OPT76 must NOT fire."""
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    neg = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - run: make -C vendor/protos generate && pnpm build
+"""
+    assert "OPT76" not in _scan_one(tmp_path, neg)
+
+
+def test_opt76_suppressed_when_no_gitmodules_declares_a_path(tmp_path: Path):
+    """With no `.gitmodules` in the checkout we can't name a submodule the job
+    fails to read — fail CLOSED rather than assert unread payload we never saw."""
+    neg = """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: pnpm test
+"""
+    assert "OPT76" not in _scan_one(tmp_path, neg)
+
+
+def test_opt76_fails_closed_on_unreadable_local_action(tmp_path: Path):
+    """A local composite action whose file can't be read may itself read the
+    submodule — suppress rather than recommend a payload removal that breaks it."""
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    neg = """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/mystery
+"""
+    assert "OPT76" not in _scan_one(tmp_path, neg)
+
+
+def test_opt76_sees_submodule_use_inside_a_local_composite_action(tmp_path: Path):
+    """The step that reads the submodule can live in a local composite action —
+    resolve it, and suppress the finding just as if it were in the workflow."""
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    act = tmp_path / ".github" / "actions" / "gen"
+    act.mkdir(parents=True, exist_ok=True)
+    (act / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - run: make -C vendor/protos generate\n"
+        "      shell: bash\n", encoding="utf-8")
+    neg = """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/gen
+      - run: pnpm test
+"""
+    assert "OPT76" not in _scan_one(tmp_path, neg)
+
+
+def test_opt76_fires_on_lfs_checkout_no_step_reads_a_tracked_path(tmp_path: Path):
+    _write_repo_file(tmp_path, ".gitattributes", _GITATTRIBUTES)
+    pos = """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - run: pnpm test
+"""
+    assert "OPT76" in _scan_one(tmp_path, pos)
+
+
+def test_opt76_fires_on_git_lfs_pull_in_a_run_block(tmp_path: Path):
+    _write_repo_file(tmp_path, ".gitattributes", _GITATTRIBUTES)
+    pos = """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git lfs pull
+      - run: pnpm test
+"""
+    assert "OPT76" in _scan_one(tmp_path, pos)
+
+
+def test_opt76_suppressed_when_a_step_reads_an_lfs_tracked_path(tmp_path: Path):
+    _write_repo_file(tmp_path, ".gitattributes", _GITATTRIBUTES)
+    neg = """name: CI
+on: pull_request
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - run: node scripts/render.js assets/logo.psd
+"""
+    assert "OPT76" not in _scan_one(tmp_path, neg)
+
+
+def test_opt76_ignores_dispatch_only_helper_workflows(tmp_path: Path):
+    """A `workflow_dispatch`-only helper isn't dev-facing CI (runs ~0x/mo), so
+    its checkout payload is noise, not a ranked optimization (OPT28's scope)."""
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    neg = """name: helper
+on: workflow_dispatch
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: pnpm test
+"""
+    assert "OPT76" not in _scan_one(tmp_path, neg, name="helper.yml")
+
+
+def test_opt76_evidence_names_the_declared_payload_and_anchors_its_job(tmp_path: Path):
+    """The finding must cite the submodule path it read from `.gitmodules` and
+    anchor on the flagged job's OWN `submodules:` line, not a file-global match."""
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    wf = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: make -C vendor/protos generate
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", wf)
+    hits = [f for f in _scan(tmp_path)["findings"] if f["pattern"] == "OPT76"]
+    # Only `test` is flagged; `build` genuinely reads the submodule.
+    assert [f["affected_jobs"] for f in hits] == [["test"]]
+    assert "vendor/protos" in hits[0]["evidence"]
+    sub_lines = [i + 1 for i, ln in enumerate(wf.splitlines())
+                 if ln.strip() == "submodules: recursive"]
+    assert hits[0]["line"] == sub_lines[1]  # test's line, not build's

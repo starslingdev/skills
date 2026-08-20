@@ -13,6 +13,25 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-08-20** — **Submodule and Git LFS checkout cost is now a catalog
+  pattern (OPT76).** The catalog priced full-history checkout (OPT28) but said
+  nothing about the other two checkout-time sinks: a job that clones every
+  submodule (`submodules: true|recursive`) or downloads every LFS object
+  (`lfs: true`, or `git lfs pull`/`fetch` in a run block) pays that download on
+  every run, even when no step reads a byte of it. The new pattern fires only
+  when the repo actually declares the payload — a `path =` in `.gitmodules`, a
+  `filter=lfs` line in `.gitattributes` — the job pulls it, and no step in that
+  job (nor a local composite action it invokes) references any declared path;
+  with nothing declared, or a local action whose file can't be read, it stays
+  silent rather than recommend a payload removal that could break the job. Scoped
+  to `pull_request`/`push`/`workflow_call` workflows like OPT28, so a
+  dispatch-only helper isn't ranked. It carries no modeled seconds: the cost is
+  the repo's own payload size, which the workflow YAML never reveals, so the
+  finding renders qualitatively unless a drilled pole's step decomposition times
+  the checkout step. The fix recipe states plainly that the workflow alone cannot
+  prove a job doesn't read the payload — a build script can — so the finding is a
+  candidate to verify, not a verdict.
+
 - **2026-07-28** — **Credential-shaped strings are masked in every quoted log
   line.** The report quotes verbatim job-log and workflow-YAML text as evidence,
   and that is the artifact users commit and share; GitHub masks only the secrets

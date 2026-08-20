@@ -38,7 +38,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 2 — Redundancy**: duplicate env, repeated setup sequences, redundant build steps.
 - **Category 3 — Docker**: sleep-based readiness, over-broad `compose up`.
 - **Category 4 — Parallelization**: needless `needs:` serialization, unsharded long jobs.
-- **Category 5 — Actions and Checkout**: stale action pins, repeated setup, full-history checkout.
+- **Category 5 — Actions and Checkout**: stale action pins, repeated setup, full-history checkout, submodule / Git LFS checkout payload.
 - **Category 6 — Conditional Execution**: merge_group step-vs-job conditions, draft-PR gating.
 - **Category 7 — Trigger and Scope**: missing path filters, no `--filter` on PR turbo, cron frequency.
 - **Category 8 — Release Workflow**: release-path caching + redundancy.
@@ -1064,6 +1064,111 @@ grep -rn 'fetch-depth' .github/workflows/
 ```
 
 **Fix**: Use `fetch-depth: 1` (default) unless the job needs git history (e.g., changelogs, blame). For PR diff detection against the merge commit's parents, `fetch-depth: 2` suffices — but change-scoped runners that diff against the BASE BRANCH (`turbo --filter=...[origin/main]`, `nx affected`, `vitest --changed` — see OPT34/OPT70) need the base ref fetched (`fetch-depth: 0` or a targeted base-ref fetch); do not shallow those jobs.
+
+---
+
+---
+
+### OPT76 — Submodule / Git LFS Checkout Payload
+
+<!-- METADATA
+pattern: OPT76
+impact: MEDIUM
+class: static
+detector: yaml-job-correlated
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: submodule-lfs-checkout-payload
+title_template: "Submodule / Git LFS Checkout Payload"
+-->
+
+**TL;DR**: The checkout clones every submodule, or downloads every Git LFS
+object, for a job whose steps never read them — a fixed download paid on every
+single run.
+
+**Anti-pattern**: `actions/checkout` with `submodules: true` / `submodules:
+recursive`, or `lfs: true` (equivalently a `git lfs pull` / `git lfs fetch` step
+in a run block), in a job that never touches the submodule paths declared in
+`.gitmodules` or the paths `.gitattributes` marks `filter=lfs`. The payload is
+usually copied wholesale from one job that genuinely needs it (a release build,
+a docs render) into every job in the workflow, so the lint job clones the vendor
+tree and the unit-test job downloads the design assets. This is the sibling of
+OPT28 (`fetch-depth: 0`): the same checkout step, a different payload — and it
+is measured, ranked, and fixed separately because removing `fetch-depth: 0` does
+nothing about a submodule or LFS clone, and vice versa.
+
+**Detection heuristic**:
+
+```bash
+# 1. What payload does the repo actually declare?
+cat .gitmodules                       # submodule paths
+grep -n 'filter=lfs' .gitattributes   # LFS-tracked path patterns
+
+# 2. Which jobs pull it?
+grep -rn -e 'submodules:' -e 'lfs:' -e 'git lfs \(pull\|fetch\)' .github/workflows/
+
+# 3. Which of those jobs never reference a declared path (the finding)?
+```
+
+A finding requires all three: a declared payload (step 1), a job that pulls it
+(step 2), and **no** reference to any declared path anywhere in that job — its
+`run` blocks, `working-directory`, `with:` values, and the body of any local
+composite action the job invokes (step 3). With no `.gitmodules` (or no
+`filter=lfs` line), there is no declared path to prove unread, so nothing is
+flagged. When a local composite action the job invokes cannot be read, the
+pattern fails **closed** and stays silent — the same conservative stance OPT28
+takes: the cost of a miss is a lost finding, never a fix that breaks a job.
+
+Scoped, like OPT28, to workflows that run on `pull_request` / `push` /
+`workflow_call`. A `workflow_dispatch`- or `schedule`-only helper runs ~0×/mo,
+so its checkout payload is noise rather than a ranked optimization.
+
+**Fix**: Pull the payload only in the jobs that read it. Drop `submodules:` /
+`lfs:` from the other jobs' checkout, or scope the payload down where part of it
+is genuinely needed — `submodules: false` plus a targeted `git submodule update
+--init --depth 1 <path>` for the one submodule that is read, or `lfs: false`
+plus `git lfs pull --include='<path>'` for the assets that are read. Where every
+job in a cluster needs the same payload, the lever is OPT73 (a shared sub-step
+across the critical-path cluster), not this pattern.
+
+**Core evidence, and its honest limit**: the recipe rests on "this job does not
+reference anything under the submodule / does not read the LFS-tracked paths."
+The workflow YAML **cannot settle that on its own.** The detector proves only
+that no path declared in `.gitmodules` / `.gitattributes` appears in the job's
+own YAML or in the local composite actions it invokes. A build script, a
+Makefile target, a test fixture, or a config file the job invokes can read the
+payload without ever naming the path in CI config — and a `git submodule` /
+`git lfs` consumer inside a container image is invisible here too. So the
+finding is a **candidate, not a verdict**: before removing the payload, grep the
+scripts the job actually runs for the declared paths, and confirm on one run
+(the fix is trivially revertible — restore the `with:` key). If the submodule
+carries build inputs resolved by path at build time, treat the payload as
+load-bearing and skip the finding.
+
+**Sizing**: no static default seconds. The cost is the repo's own payload — the
+submodule tree's size and the LFS objects' bytes — which the workflow YAML never
+reveals, so the catalog gives this pattern no `_SIZING` model and no modeled
+saving; it renders **qualitatively** rather than carrying an invented number
+(the same honest path any un-modeled pattern takes; see
+`savings-methodology.md`). It is sized only where the measured checkout step
+duration is available from a drilled pole's step decomposition — there the
+addressable amount is that step's own p50, bounded as always by the critical-path
+headroom.
+
+**Risk**: **MEDIUM**. Removing a payload a job silently depends on fails the job
+— loudly (a missing path, a missing file), not silently, which is why the
+rollout below is cheap. The dangerous variant is an LFS-tracked file that is
+present-but-a-pointer when `lfs:` is dropped: a tool can read the ~130-byte
+pointer text and produce a wrong output instead of an error. Only drop `lfs:`
+for jobs that read no tracked path at all.
+
+**Guardrail**: Never recommend dropping the payload for a job whose steps, or
+whose invoked local actions, reference a declared path. Never recommend it at all
+when the declared payload can't be read (no `.gitmodules` / `.gitattributes`) —
+absence of a declaration is not evidence of unread payload.
+
+**Rollout**: Change one job, re-run the workflow once, and compare that job's
+checkout step duration before and after. Revert by restoring the single `with:`
+key.
 
 ---
 
