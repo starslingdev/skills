@@ -3226,6 +3226,25 @@ def test_set_plus_e_without_an_exit_code_recheck_fails(tmp_path):
     assert "set +e" in f["evidence"], f["evidence"]
 
 
+def test_errexit_relaxed_on_the_same_line_as_the_suite_fails(tmp_path):
+    """`set +e; pytest -q` is the two-line shape with a semicolon instead of a
+    newline: errexit is off, the suite runs under it, and nothing raises the
+    status afterwards. Ordering the two by LINE alone put them at the same
+    index and read the swallow as a pass."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e; pytest -q\n          echo done\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "set +e" in f["evidence"], f["evidence"]
+
+
+def test_errexit_relaxed_and_rechecked_on_one_line_passes(tmp_path):
+    """The guard against over-correcting it: the same line that relaxes
+    errexit also captures and re-raises the status, so the suite is fatal."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e; pytest -q; rc=$?; exit $rc\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
 def test_set_plus_e_that_rechecks_the_exit_code_passes(tmp_path):
     """The legitimate shape: relax `errexit` to capture the status, then
     re-raise it. Failing this would punish a job that DOES fail."""

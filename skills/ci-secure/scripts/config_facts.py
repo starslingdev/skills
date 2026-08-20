@@ -684,8 +684,15 @@ def _swallow_reason(run: str) -> str | None:
     for i, line in enumerate(code):
         if not _RELAX_ERREXIT.match(line):
             continue
-        after = [j for j in suite_at if j > i]
-        if not after or rescued_from(i + 1):
+        # `>= i`, not `> i`: `set +e; pytest -q` puts both on one line and so
+        # at one index. `_RELAX_ERREXIT` is anchored to the start of the line,
+        # so where the two share an index the relaxation is necessarily the
+        # earlier command and the suite runs under it.
+        after = [j for j in suite_at if j >= i]
+        # A rescue on that shared line counts too — `set +e; pytest; rc=$?;
+        # exit $rc` re-raises the status it captured — so the same-line
+        # remainder is searched before the lines below it.
+        if not after or _RERAISES_STATUS.search(line) or rescued_from(i + 1):
             continue
         # `set -e` restored BEFORE the suite runs puts the suite back under
         # `errexit`, so its failure still fails the job. Restored after, it

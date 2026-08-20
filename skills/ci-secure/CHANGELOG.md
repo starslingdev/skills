@@ -24,6 +24,9 @@ entries are dated (UTC). Format loosely follows
   (`bash ci/test.sh || true`) is now UNMEASURED with the steps named — a
   coverage gap that stays in the denominator — instead of not-applicable,
   which would have claimed no gap existed. (2026-08-20)
+- ci-secure: `set +e` and the suite written on one line (`set +e; pytest -q`)
+  is recognised as the same swallow as the two-line form; ordering the two by
+  line alone put them at one index and read it as a pass. (2026-08-20)
 - ci-secure: two more swallow shapes are recognised — `exit 0` followed by an
   inline comment, and a one-line `npm test; exit 0` — and a `set -e` that
   lands AFTER the suite already ran no longer counts as restoring its status.
