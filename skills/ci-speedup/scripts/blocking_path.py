@@ -2223,6 +2223,51 @@ def _parse_log(text: str) -> dict[str, Any] | None:
 # from the prompt alone - without prescribing one.
 # --------------------------------------------------------------------------- #
 
+# The no-weakening rail. The fastest CI is one that tests nothing, and every
+# shape below reads as a win in exactly the numbers this report measures — so
+# every prompt-emitting surface (catalog, generic, LLM gap-fill, hygiene/Tier-2/
+# queue-wait) carries these lines verbatim. tests/test_no_weakening_rail.py pins
+# that, including the polarity (a rail that keeps every noun and flips `do not:`
+# into `you may:` must fail).
+#
+# TWO clauses are load-bearing, and both exist because the rail otherwise
+# forbids the skill's own recommendations:
+#   1. "Unless the finding above IS that reduction" — a pole whose RCA named an
+#      over-broad matrix or a swallowed exit code must still be fixable.
+#   2. The legitimate-skip carve-out — the catalog fix for OPT32/33/34/39/40/47
+#      and for the structural levers IS a conditional skip (a `paths:` filter, a
+#      draft `if:`, changed-scope selection). Those prompts link that recipe and
+#      then order the agent to apply it, so a rail with no carve-out contradicts
+#      its own fenced block and the agent's correct reading is "say so and stop"
+#      — a real finding rendered un-actionable. The line the carve-out must not
+#      cross is what the MERGING commit gets verified against.
+#
+# The rail names no section of the enclosing prompt: only two of the five paths
+# emit a "ceiling"/"THE MEASURED CAUSE" heading, so a pointer at one would dangle
+# on the rest.
+_NO_WEAKENING_LINES = [
+    "NEVER BUY SPEED BY CHECKING LESS",
+    "- The commit that merges must still be verified by exactly what verifies",
+    "  it today. Unless the finding above IS that reduction, do not: delete or",
+    "  narrow matrix legs so fewer configurations are tested; add",
+    "  `continue-on-error`, `|| true`, or any other exit-code suppression;",
+    "  narrow or remove a required status check, or change a job so a required",
+    "  check stops reporting; skip tests behind a path/branch filter that do",
+    "  cover the change; or cut test counts, timeouts, or retries in a way",
+    "  that weakens the signal rather than the cost.",
+    "- Not running a check against a change it cannot fail on is NOT checking",
+    "  less, and several catalog fixes work exactly that way: a `paths:` /",
+    "  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test",
+    "  selection. Those stay in bounds as long as the commit that merges is",
+    "  still verified by every check its own change could fail - follow the",
+    "  guardrail on the catalog recipe where this prompt links one, because",
+    "  that is the half it exists to protect.",
+    "- A pipeline that finishes sooner because it verifies less is a",
+    "  regression, not a win. If that is the only way to make this faster, say",
+    "  so and stop.",
+]
+
+
 _FIX_META: dict[str, dict[str, Any]] = {
     "prisma-migrate-once": {
         "cause": "Most of each test file's wall time is repeated schema rebuilds, not "
@@ -2857,6 +2902,7 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
     out += ["WHERE TO LOOK", f"- {meta['look'].format(wf=wf)}", "",
             "CONSTRAINTS / FAILURE MODE TO GUARD"] + constraints + [
             "", "READ FIRST"] + [f"- {d}" for d in meta["docs"]] + [
+            "", *_NO_WEAKENING_LINES,
             "", "DELIVER & VERIFY", f"- {meta['deliver']}"]
     return ("#### 🤖 Prompt for your coding agent\n\n```text\n"
             + _fence_body(out) + "\n```\n")
@@ -2922,7 +2968,9 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             "- Capture this workflow on a pull_request, pull_request_target, or "
             "merge_group run and rerun ci-speedup before changing workflow steps. "
             "Once developer-event job timing exists, optimize the measured dominant "
-            "step from the refreshed report."
+            "step from the refreshed report.",
+            "",
+            *_NO_WEAKENING_LINES,
         ]
         return ("#### 🤖 Prompt for your coding agent\n\n```text\n"
                 + _fence_body(out) + "\n```\n")
@@ -3008,6 +3056,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             f"- The `{wf}` workflow definition for {look_step}, and the tool/config it "
             "invokes (build tool, test runner, or install) - that's where its time is "
             "spent.", "",
+            *_NO_WEAKENING_LINES, "",
             "DELIVER & VERIFY",
             f"- A change that cuts {look_step}'s wall time without dropping coverage; "
             "re-measure the step on a PR run to confirm the reduction."]
@@ -3060,6 +3109,39 @@ def _llm_analysis_block(a: dict[str, Any], cross_run_rendered: bool = False) -> 
     return out
 
 
+def _strip_rail_echo(body: str) -> str:
+    """Drop the model's own copy of the no-weakening rail from a gap-fill body.
+
+    A line CONTAINING the rail heading counts as an echo whatever decoration carries
+    it (`**…**`, `## …`, a stray trailing space), because the guarantee this buys is
+    textual: once this returns, no line of the body holds the heading, so the block
+    the renderer appends is the only one in the prompt — which is exactly what
+    `verify_report` counts.
+
+    What travels with the heading is ONLY the rail's own lines (matched ignoring
+    line endings and trailing space, which is how a reproduced rail misses an exact
+    comparison) plus blanks. A bullet the model wrote itself is not the rail and
+    stays: the body is the analysis the agent works from, and a de-duplication that
+    silently ate the cause, the evidence or the file to look at would buy the rail
+    count at the price of the hand-off. A paraphrase left standing is harmless —
+    the canonical rail follows it.
+    """
+    lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    rail_body = {line.strip() for line in _NO_WEAKENING_LINES[1:]}
+    kept: list[str] = []
+    i = 0
+    while i < len(lines):
+        if _NO_WEAKENING_LINES[0] in lines[i]:
+            i += 1
+            while i < len(lines) and (not lines[i].strip()
+                                      or lines[i].strip() in rail_body):
+                i += 1
+            continue
+        kept.append(lines[i])
+        i += 1
+    return "\n".join(kept).rstrip("\n")
+
+
 def _llm_agent_prompt(body: str) -> str:
     """Wrap an LLM-authored, log-tailored agent prompt (from the analysis JSON) in the
     same copy-paste block matched/generic prompts use, **prepending the standard
@@ -3079,6 +3161,21 @@ def _llm_agent_prompt(body: str) -> str:
         # follows — so a locator word here would point at the wrong thing.
         body = ("ci-speedup read the captured job log but does NOT prescribe the "
                 "fix - investigate it in the repo and apply a safe change.\n\n" + body)
+    # The no-weakening rail is the renderer's too, for the same reason the disclaimer
+    # is: the gap-fill body is LLM-authored, so the one rule the hand-off cannot afford
+    # to have paraphrased away is appended here, not left to the author. The canonical
+    # block is appended UNCONDITIONALLY, after any rail-shaped text the model wrote is
+    # excised. `references/gap-fill.md` names the rail to the model writing this body,
+    # so a body that echoes the heading over a paraphrased list — or reproduces the
+    # whole rail with CRLF endings or trailing spaces — is a realistic body, and both
+    # ways of handling one in place are wrong: keying on the heading would let a
+    # paraphrase suppress the canonical block (a rail that forbids nothing), while an
+    # exact-substring check appends a SECOND heading beside the model's, which fails
+    # `verify_report`'s one-rail-per-prompt count with a misleading "renderer bug"
+    # message. Excise-then-append leaves exactly one canonical rail whatever the model
+    # wrote, and is unchanged (idempotent) on a body already ending in that block.
+    body = _strip_rail_echo(body)
+    body = body.rstrip("\n") + "\n\n" + "\n".join(_NO_WEAKENING_LINES)
     # The LLM-authored body is model output grounded in the repo log — it can echo a repo
     # name / log line carrying a ``` run. Fence-safe it PER-LINE (its own line breaks survive)
     # so a model-emitted stray fence can't close this ```text block.
@@ -5797,7 +5894,8 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
         # §8.1 landmine 1 — mandatory on every skip-family / trigger-scope
         # prompt, whichever framing branch built the saving line above.
         body += _PENDING_CAVEAT_LINES + [""]
-    body += [
+    body += _NO_WEAKENING_LINES + [
+        "",
         "Do: confirm the pattern at each location above, recover the intent from git",
         "history, and apply the catalog's fix recipe where it is safe. State the",
         "failure mode and how you have guarded it before shipping.",

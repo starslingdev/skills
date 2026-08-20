@@ -105,7 +105,12 @@ regardless, so opting in only copies an already-verified `.md`.
 **There is no fix-generation phase.** ci-speedup stops
 at the measured root cause; the report's per-pole agent prompts are the
 hand-off — the user pastes one into their own coding agent, which sees the repo
-and reasons out the fix. Detection + the measured report are deterministic and
+and reasons out the fix. Because that prompt is the entire contract, the
+renderer owns two blocks in it that no builder may omit or paraphrase: the
+"does NOT prescribe the fix" disclaimer and the no-weakening rail
+(`_NO_WEAKENING_LINES`). Any new prompt builder must emit both —
+`verify_report.py` counts each once per rendered prompt, so a rail-free path
+fails the gate on a real audit, not just in unit tests. Detection + the measured report are deterministic and
 reproducible from the findings JSON; the only non-deterministic step is the
 phase-4a LLM gap-fill for poles the catalog can't analyse (labelled + log-
 grounded, never touching the measured numbers). `record_timing.py` lets the orchestrator

@@ -182,6 +182,8 @@ Where the job's ~4m 15s goes - every step, slowest first.
 ```text
 ci-speedup measured the root cause below but does NOT prescribe the fix -
 investigate it in the repo and apply a safe change.
+
+NEVER BUY SPEED BY CHECKING LESS
 ```
 
 ## 🗄️ Data sources
@@ -917,6 +919,25 @@ def test_rca_check_fails_on_prescription_deadend_and_missing_disclaimer(tmp_path
         "investigate it in the repo and apply a safe change.",
         "Here is the fix to apply.")
     assert _tag_for(bad_prompt, _RCA, tmp_path) == "FAIL"
+
+
+def test_rca_check_fails_on_a_prompt_missing_the_no_weakening_rail(tmp_path: Path):
+    """The prompt is the whole hand-off, and the cheapest way to satisfy "make this
+    faster" is to make it verify less. The rail is counted per rendered prompt for the
+    same reason the no-prescription disclaimer is — and at the ARTIFACT level, so a
+    prompt builder added after tests/test_no_weakening_rail.py's hand-enumerated five
+    cannot ship rail-free and pass a customer's audit green."""
+    rail = "NEVER BUY SPEED BY CHECKING LESS"
+    # A prompt block stripped of its rail -> FAIL.
+    assert _tag_for(_good().replace(rail, "Go fast."), _RCA, tmp_path) == "FAIL"
+    # A second prompt that carries no rail (the "sixth builder" case) -> FAIL.
+    unrailed = ("#### \U0001f916 Prompt for your coding agent\n\n```text\n"
+                "ci-speedup measured the root cause below but does NOT prescribe the fix -\n"
+                "investigate it in the repo and apply a safe change.\n```\n")
+    assert _tag_for(_good() + "\n" + unrailed, _RCA, tmp_path) == "FAIL"
+    # A second prompt that DOES carry the rail keeps the counts balanced -> PASS.
+    assert _tag_for(_good() + "\n" + unrailed.replace(
+        "```\n", rail + "\n```\n", 1), _RCA, tmp_path) == "PASS"
 
 
 def test_rca_check_fails_on_dangling_cross_run_reference(tmp_path: Path):

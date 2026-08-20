@@ -128,6 +128,43 @@ unversioned and updates by reinstall from `main`.
   than third-party, but it is the same class and worth knowing. Masking (#12) is
   unchanged; this is additive, not a replacement.
 
+- **2026-08-20** — **Every hand-off forbids buying speed by checking less.** The
+  skill hands a downstream coding agent an RCA plus a prompt rather than an
+  applied, re-verified fix, so the prompt is the entire contract — and the
+  cheapest way to satisfy "make this job faster" is to make it verify less, which
+  scores as a win in exactly the wall-clock numbers this report measures. Every
+  prompt-emitting surface in `blocking_path.py` now carries the same rail
+  (`_NO_WEAKENING_LINES`): the catalog prompt, the generic no-catalog prompt and
+  its no-job-timing variant, the LLM gap-fill prompt (appended by the renderer,
+  like the no-prescription disclaimer, so an LLM-authored body cannot paraphrase
+  it away), and the per-pattern hygiene / Tier-2 / queue-wait prompt. It names the
+  forbidden edits outright — deleted or narrowed matrix legs, `continue-on-error`
+  / `|| true` / other exit-code suppression, a narrowed or removed required status
+  check (or a job changed so a required check stops reporting), tests that cover
+  the change skipped behind a path/branch filter, and reduced test counts, timeouts
+  or retries that weaken the signal rather than the cost. Two carve-outs are as
+  load-bearing as the prohibition: a reduction the finding itself measured, and a
+  conditional skip of a check the change cannot fail on — a `paths`/`paths-ignore`
+  filter, a draft or job-level `if:`, changed-scope selection — which is precisely
+  the catalog's own fix recipe for OPT32/33/34/39/40/47 and the structural levers,
+  so long as the commit that merges is still verified by the full set. Without it
+  the rail forbade, in the same fenced block, the recipe the prompt hands over.
+  `tests/test_no_weakening_rail.py` pins the rail on all five paths — its content,
+  its carve-outs, and its polarity, so a rail keeping every noun while inverting
+  "do not" into "you may" fails — and pins the matching eval case
+  (`evals/evals.json` #8), and `tests/verify_report.py` now counts one rail per
+  rendered prompt exactly as it already counts the disclaimer — so a prompt path
+  added later fails a real audit rather than shipping rail-free and green. On the
+  gap-fill path the renderer excises the model's own copy of the rail — its
+  heading line and the rail's own lines only, never a bullet the model wrote, so
+  the analysis the agent works from survives intact — before appending the
+  canonical block, so a body that echoes the rail's heading
+  over a paraphrased list — or reproduces the rail with CRLF endings or trailing
+  spaces, which no exact-substring check recognises — yields exactly one rail
+  instead of two, which would have failed that same one-rail-per-prompt audit with
+  a misleading "renderer bug" message. The two committed worked examples were
+  re-rendered. (#72)
+
 ### Changed
 
 - **2026-08-20** — **The storage boundary is stated instead of implied.**

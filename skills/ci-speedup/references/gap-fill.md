@@ -24,7 +24,8 @@ lines], prompt}`. Then re-render passing it as `--analysis KEY=PATH` (KEY keyed 
 `--log`). It renders as a clearly-labelled **🤖 LLM root-cause analysis** + a
 tailored agent prompt in place of the dead-end. `prompt` is just the log-grounded
 body (the cause + the intent check + options) — **the renderer prepends the standard
-"does NOT prescribe the fix" disclaimer**, so don't add it yourself, and never edit
+"does NOT prescribe the fix" disclaimer and appends the no-weakening rail** (speed is
+never bought by reducing what CI verifies), so don't add either yourself, and never edit
 the renderer to make the verify gate pass (a gate failure on an audit means fix your
 analysis, not the skill's scripts).
 

@@ -12,15 +12,15 @@
 >
 > **41m 12s until all checks finish** - the slowest check a typical PR waits on is `Windows (firefox)` (~72m 57s), but it ran on only 4/20 sampled PRs, so a typical PR finishes in 41m 12s; `ubuntu-22.04 (webkit - Node.js 20)` is the check most PRs gate on (drilled below). (`Test chrome on macos-latest` is slower (~59m 33s) but it ran on only 5/20 sampled PRs - it looks opt-in / conditional (e.g. label-gated), so a typical PR doesn't wait on it and its time is throughput/cost, not merge-wait; unless it's a *required* status check it isn't the gate here. See its long pole below.) 
 >
-> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~36 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
+> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~44 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
 >
-> **`.github/workflows/fix-flakes.yml` changed ~26 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/fix-flakes.yml` changed ~34 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/publish_release.yml` changed ~28 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/publish_release.yml` changed ~36 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_bidi.yml` changed ~33 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_bidi.yml` changed ~40 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_secondary.yml` changed ~40 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_secondary.yml` changed ~48 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **After the gate.** 73,441 min/mo of wall-clock-neutral runner minutes is recoverable (10 neutral findings; none can slow a merge).
 
@@ -135,6 +135,26 @@ WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 WHERE TO LOOK
 - The `tests_primary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -192,6 +212,26 @@ WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 WHERE TO LOOK
 - The `tests_secondary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -248,6 +288,26 @@ WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 
 WHERE TO LOOK
 - The `tests_mcp.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
+
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -307,6 +367,26 @@ WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 WHERE TO LOOK
 - The `tests_secondary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -365,6 +445,26 @@ WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 WHERE TO LOOK
 - The `tests_secondary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -402,6 +502,26 @@ Cost: developer WALL-CLOCK wait before the job starts (queue / wait-to-start) - 
 
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt43--excessive-queue-time
+
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -475,6 +595,26 @@ Saving: 71,644 min/mo of runner capacity - a bill/capacity reduction, not a merg
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -513,6 +653,26 @@ Saving: 1,072 min/mo of runner capacity - a bill/capacity reduction, not a merge
 
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
+
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -558,6 +718,26 @@ Saving: 268 min/mo of runner capacity - a bill/capacity reduction, not a merge-w
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -597,6 +777,26 @@ Saving: 159 min/mo of runner capacity - a bill/capacity reduction, not a merge-w
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -635,6 +835,26 @@ Saving: 141 min/mo of runner capacity - a bill/capacity reduction, not a merge-w
 
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
+
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -677,6 +897,26 @@ Saving: 82 min/mo of runner capacity - a bill/capacity reduction, not a merge-wa
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -716,6 +956,26 @@ Saving: 54 min/mo of runner capacity - a bill/capacity reduction, not a merge-wa
 
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -757,6 +1017,26 @@ Saving: 13 min/mo of runner capacity - a bill/capacity reduction, not a merge-wa
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -795,6 +1075,26 @@ Saving: 8 min/mo of runner capacity - a bill/capacity reduction, not a merge-wai
 
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
+
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -835,6 +1135,26 @@ Saving: 0.7 min/mo of runner capacity - a bill/capacity reduction, not a merge-w
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -872,6 +1192,26 @@ Saving: developer WALL-CLOCK (~6m 51s) - this job is a long pole ON the merge-ga
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt24--long-test-job-without-sharding
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -901,6 +1241,26 @@ Saving: developer WALL-CLOCK (~3m 21s) - this job is a long pole ON the merge-ga
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt25--shard-imbalance
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -928,6 +1288,26 @@ Saving: ~109,114 runner-min/mo - off the merge-gating critical path, so ~0 devel
 
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -957,6 +1337,26 @@ Saving: ~101,710 runner-min/mo - off the merge-gating critical path, so ~0 devel
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -984,6 +1384,26 @@ Saving: ~59,226 runner-min/mo - off the merge-gating critical path, so ~0 develo
 
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1014,6 +1434,26 @@ Saving: ~5,230 runner-min/mo - off the merge-gating critical path, so ~0 develop
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt35--missing-fail-fast-on-non-diagnostic-matrix-dimensions
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1043,6 +1483,26 @@ Saving: ~2,451 runner-min/mo - off the merge-gating critical path, so ~0 develop
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1070,6 +1530,26 @@ Saving: ~1,315 runner-min/mo - off the merge-gating critical path, so ~0 develop
 
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt2--uncached-large-downloads
+
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1100,6 +1580,26 @@ Saving: ~1,240 runner-min/mo - off the merge-gating critical path, so ~0 develop
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt14--repeated-checkoutsetup-without-artifact-handoff-and-slow-tool-replacement
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1127,6 +1627,26 @@ Saving: ~1,098 runner-min/mo - off the merge-gating critical path, so ~0 develop
 
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
+
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1156,6 +1676,26 @@ Saving: ~72 runner-min/mo - off the merge-gating critical path, so ~0 developer 
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1184,6 +1724,26 @@ Saving: ~33 runner-min/mo - off the merge-gating critical path, so ~0 developer 
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1205,7 +1765,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `021bb07`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (OPT1-OPT69 catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `d9c4cb6`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (OPT1-OPT69 catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |
