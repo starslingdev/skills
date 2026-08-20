@@ -5590,7 +5590,7 @@ def _compute_security_score(
         # which path produced the block — a `constants` KeyError that fires
         # only on the failure path is the worst place to discover the gap.
         return {"facts": [], "score": None, "passed": 0, "scored_count": 0,
-                "applicable_count": 0, "unmeasured": [],
+                "applicable_count": 0, "unmeasured": [], "not_applicable": [],
                 "constants": {"rule": "100 * passed / scored; pass/fail only, "
                                       "no weights, no partial credit"},
                 # `reason` is READER-VISIBLE: report.py prints it in the

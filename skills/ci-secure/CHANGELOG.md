@@ -11,6 +11,102 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- ci-secure: `set +e; set -e; pytest -q` is recognised as a correctly wired
+  suite. Reading the restore by physical line left an empty slice where all
+  three share one line, failing a suite whose failure does end the job.
+  (2026-08-20)
+- ci-secure: printing the exit status no longer counts as re-raising it. An
+  `echo "rc=$?"` after a swallowed suite was read as a rescue and reported
+  the swallow as a pass. (2026-08-20)
+- ci-secure: `sec.gate.test-failure-fatal` matches the COMMAND a step runs,
+  not any occurrence of a tool's name on the line. An allowlisted name inside
+  an image tag, a process pattern, a directory, a filename, a message body or
+  an install argument — `docker pull ghcr.io/org/mypy:latest || true`,
+  `pkill -f karma || true`, `tar czf out.tgz .tox || true`,
+  `git checkout -- jest.config.js || true`,
+  `gh pr comment --body "eslint found 3 issues" || true`,
+  `npx playwright install --with-deps || true`, `npm i -D jest || true` —
+  was failing the check on repositories whose tests are perfectly fatal.
+  Interpreter runners and leading paths (`python -m pytest`,
+  `poetry run pytest`, `./mvnw test`) are still recognised. (2026-08-20)
+- ci-secure: `workflow_call` counts as a merge-gate trigger. A reusable
+  workflow is where a large repository usually keeps its suite, and out of
+  scope it left the denominator entirely rather than being judged.
+  (2026-08-20)
+- ci-secure: `|| exit 0` and `|| /bin/true` are recognised as the discards
+  they are; `|| exit 0` had been reported as a clean bill. (2026-08-20)
+- ci-secure: `sec.gate.test-failure-fatal` now judges only workflows that can
+  report a check on a pull request. A nightly `schedule` job or a
+  `workflow_dispatch`-only smoke run reports on no pull request, so a tolerant
+  `|| true` there is not the decorative merge gate the fact describes and is
+  no longer failed for one. (2026-08-20)
+- ci-secure: `sec.gate.test-failure-fatal` separates "nothing here to check"
+  from "nothing here this scan recognises". A repository whose only discarded
+  exit status sits on a command the allowlist cannot identify
+  (`bash ci/test.sh || true`) is now UNMEASURED with the steps named — a
+  coverage gap that stays in the denominator — instead of not-applicable,
+  which would have claimed no gap existed. (2026-08-20)
+- ci-secure: `set +e` and the suite written on one line (`set +e; pytest -q`)
+  is recognised as the same swallow as the two-line form; ordering the two by
+  line alone put them at one index and read it as a pass. (2026-08-20)
+- ci-secure: two more swallow shapes are recognised — `exit 0` followed by an
+  inline comment, and a one-line `npm test; exit 0` — and a `set -e` that
+  lands AFTER the suite already ran no longer counts as restoring its status.
+  (2026-08-20)
+- ci-secure: the trailing-`exit 0` swallow shape is now judged against the
+  step's effective shell. GitHub's default `run` shell carries errexit
+  (`bash -e {0}`), so a failing suite aborts the step before a trailing
+  `exit 0` is reached — flagging it was a false accusation against a job
+  that already fails. The arm now fires only where the discard is real:
+  `pwsh`, `powershell`, or `cmd`, declared on the step, the job or workflow
+  `defaults.run.shell`, or implied by a `windows-*` runner's `pwsh` default.
+  Every arm of the suite-command allowlist is also now pinned by a test, so
+  a dropped arm cannot silently flip a repository from fail to
+  not-applicable. (2026-08-20)
+- ci-secure: a check that does not apply is now disclosed in words on both
+  reader surfaces — a sentence in the report's hygiene section and a
+  `(1 not applicable)` note in the gate headline — so the count line can be
+  reconciled against the rows above it. (2026-08-20)
+- ci-secure: swallowed-suite evidence names the offending step by its `name:`
+  as well as its position, and reports `|| :` as `|| :` rather than as
+  `|| true`, so the string in the evidence is the string in the file.
+  (2026-08-20)
+- **2026-08-20** — **A test suite whose failure cannot fail its job is now a
+  config fact.** `sec.gate.test-failure-fatal` fails when a job that runs the
+  test or lint suite discards the suite's exit code — `|| true`, `|| :`,
+  `|| echo …`, a trailing `exit 0`, `set +e` with no later re-check, or
+  `continue-on-error: true` on the suite's own step or its job. It is the
+  sibling of `sec.required-checks.skippable`: that fact catches a required
+  check that reports green because it was SKIPPED, this one catches a check
+  that RAN and reports green whatever the tests did. Same consequence — the
+  merge gate is decorative — same reader, same fix. Scope is an ALLOWLIST of
+  recognised suite commands, so a `run:` block whose purpose the YAML cannot
+  establish is never failed, and `continue-on-error` on an upload, report, or
+  notification step (codecov, `upload-artifact`, `upload-sarif`, a webhook
+  curl) does not reach it, because a step is judged only by its own `run:`
+  line — that shape belongs to ci-speedup, and billing one configuration to
+  two engines would be a defect. A repository whose workflows run no suite at
+  all is NOT APPLICABLE, never a pass: it
+  leaves the denominator rather than earning a green for having no tests,
+  which is the shape ci-score settled on for the same question. The facts
+  block therefore gained a `not_applicable` list beside `unmeasured`, and
+  `applicable_count` now excludes a fact that does not apply — an unmeasured
+  fact is a coverage gap and stays in the count; a not-applicable one is not a
+  gap and does not. The report renders the not-applicable row rather than
+  dropping it, and SKILL.md's spoken close says it as itself — a row that
+  vanishes, or one folded into "all checks pass", reads as a pass. **The
+  config-fact aggregate this skill hands ci-advisor
+  changes shape**: nine facts instead of eight, so the blended CI Score's
+  security third moves for any repository that has a suite. What counts as
+  running the suite is read as a COMMAND, past any wrapper, interpreter,
+  leading path or shell keyword — `if ! pytest -q; then` and `for … do pytest`
+  run it, and missing them would drop the whole repository out of the fact's
+  denominator — while a here-doc body is text on its way to a file, so writing
+  a tolerant wrapper script is never read as swallowing a suite. Census row
+  and full scope statement in `references/security-facts.md`.
+
 ### Changed
 
 - **2026-08-20** — **Build provenance and artifact attestation now have a

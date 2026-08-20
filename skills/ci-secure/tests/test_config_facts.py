@@ -115,7 +115,7 @@ def test_a_well_configured_repo_passes_every_fact(tmp_path):
         required_contexts_fetcher=lambda repo: ([], "branch `main`"),
         fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
     assert out["score"] == 100.0
-    assert out["passed"] == out["scored_count"] == 8
+    assert out["passed"] == out["scored_count"] == 9
     for f in out["facts"]:
         assert f["outcome"] == "pass", f"{f['fact_id']} failed: {f['evidence']}"
 
@@ -128,7 +128,7 @@ def test_the_api_gated_facts_are_the_only_unmeasured_ones_offline(tmp_path):
     out = cf.compute_config_facts(root, files, [])
     assert sorted(out["unmeasured"]) == ["sec.fork-approval.effective",
                                          "sec.required-checks.skippable"]
-    assert out["scored_count"] == 6 and out["applicable_count"] == 8
+    assert out["scored_count"] == 7 and out["applicable_count"] == 9
     assert "COVERAGE GAP" in out["caveat"]
 
 
@@ -533,9 +533,9 @@ def test_codeowners_undecodable_file_is_unmeasured_not_a_fail(tmp_path):
     assert "unmeasured" in f["evidence"], f
     assert "sec.codeowners.workflows" in out["unmeasured"]
     # ...and it is a coverage gap, not a silent pass. `applicable_count` stays
-    # 8 — every fact is still applicable — while only 5 score: this one plus
+    # 9 — every fact is still applicable — while only 6 score: this one plus
     # both API-gated facts, which are unmeasured offline too.
-    assert out["scored_count"] == 5 and out["applicable_count"] == 8
+    assert out["scored_count"] == 6 and out["applicable_count"] == 9
     assert "COVERAGE GAP" in out["caveat"]
 
 
@@ -562,7 +562,7 @@ def test_codeowners_unreadable_directory_is_one_unmeasured_row(tmp_path):
     f = _outcome(out, "sec.codeowners.workflows")
     assert f["outcome"] == "unmeasured", f
     # The OTHER facts still resolved — the failure is contained to this row.
-    assert out["scored_count"] == 5, out
+    assert out["scored_count"] == 6, out
 
 
 # --- F4: the sharpened trigger fact -----------------------------------
@@ -685,7 +685,7 @@ def test_unscannable_workflow_forces_workflow_facts_to_unmeasured(tmp_path):
             )
             assert "broken.yml" in f["evidence"]
     assert out["scored_count"] == 1
-    assert out["applicable_count"] == 8
+    assert out["applicable_count"] == 9
     assert "COVERAGE GAP" in out["caveat"]
     # The ratio must be over RESOLVED facts only. If unmeasured facts leaked
     # into the numerator, 5 unmeasured + 1 pass over scored=1 would read 600 —
@@ -716,9 +716,9 @@ def test_score_is_the_registered_ratio_with_no_weights(tmp_path):
         root, files, [], repo="owner/repo",
         required_contexts_fetcher=lambda repo: ([], "branch `main`"),
         fork_approval_fetcher=lambda repo: ("first_time_contributors", "x"))
-    # bad.yml fails exactly one fact (permissions-declares); 7/8 pass.
-    assert out["passed"] == 7 and out["scored_count"] == 8
-    assert out["score"] == pytest.approx(round(100 * 7 / 8, 1))
+    # bad.yml fails exactly one fact (permissions-declares); 8/9 pass.
+    assert out["passed"] == 8 and out["scored_count"] == 9
+    assert out["score"] == pytest.approx(round(100 * 8 / 9, 1))
     assert out["registered"]
     assert "no weights" in out["constants"]["rule"]
 
@@ -743,8 +743,18 @@ def test_degraded_block_has_the_same_keys_as_a_real_one(tmp_path, monkeypatch):
     degraded = scan._compute_security_score(root, files, [])
 
     assert set(degraded) - {"reason"} <= set(real) | {"caveat"}
+    # And the direction that catches an OMISSION. The subset above only fires
+    # on a key the degraded path invented; a key the real path grew and the
+    # fallback never learned about slips straight through it, which is how a
+    # consumer ends up with a KeyError that fires on the failure path only.
+    # Enumerating names by hand had the same blind spot — the list is the
+    # thing that goes stale — so compare the key sets themselves.
+    assert set(real) - {"caveat"} <= set(degraded) | {"reason"}, (
+        "degraded block is missing %r"
+        % sorted(set(real) - {"caveat"} - set(degraded)))
     for key in ("facts", "score", "passed", "scored_count",
-                "applicable_count", "unmeasured", "constants", "registered"):
+                "applicable_count", "unmeasured", "not_applicable",
+                "constants", "registered"):
         assert key in degraded, f"degraded block is missing {key!r}"
     assert degraded["score"] is None
     # Same reader-visibility rule as facts_to_score: this string is what the
@@ -1124,8 +1134,8 @@ def test_a_scan_gap_forces_the_fact_unmeasured(tmp_path):
 
 def test_the_fact_table_carries_both_api_gated_facts(tmp_path):
     out = _facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN}, ["test"])
-    assert out["applicable_count"] == 8
-    assert out["scored_count"] == 8
+    assert out["applicable_count"] == 9
+    assert out["scored_count"] == 9
 
 
 # --- F8: sec.fork-approval.effective -----------------------------------------
@@ -1207,10 +1217,10 @@ def test_a_scan_gap_does_not_unmeasure_the_fork_approval_fact(tmp_path):
     assert _outcome(out, _FORK_FACT)["outcome"] == "pass"
 
 
-def test_the_fact_table_carries_eight_facts(tmp_path):
+def test_the_fact_table_carries_nine_facts(tmp_path):
     out = _fork_facts(tmp_path, "all_external_contributors")
-    assert out["applicable_count"] == 8
-    assert out["scored_count"] == 8
+    assert out["applicable_count"] == 9
+    assert out["scored_count"] == 9
 
 
 # ---------------------------------------------------------------------------
@@ -2013,7 +2023,7 @@ def test_a_branch_protection_fetcher_that_raises_becomes_one_unmeasured_row(
     assert "gh subprocess died" in f["evidence"], f["evidence"]
     assert _FACT in out["unmeasured"]
     # The rest of the table still resolved — the failure is contained.
-    assert out["scored_count"] == 7 and out["applicable_count"] == 8
+    assert out["scored_count"] == 8 and out["applicable_count"] == 9
 
 
 def test_a_fork_approval_fetcher_that_raises_becomes_one_unmeasured_row(
@@ -2031,7 +2041,7 @@ def test_a_fork_approval_fetcher_that_raises_becomes_one_unmeasured_row(
     assert f["outcome"] == "unmeasured", f
     assert "gh subprocess died" in f["evidence"], f["evidence"]
     assert _FORK_FACT in out["unmeasured"]
-    assert out["scored_count"] == 7 and out["applicable_count"] == 8
+    assert out["scored_count"] == 8 and out["applicable_count"] == 9
 
 
 # ---------------------------------------------------------------------------
@@ -3082,3 +3092,611 @@ def test_a_bypass_found_on_a_partially_read_protection_discloses_the_gap(
         _FACT)
     assert f["outcome"] == "fail", f["evidence"]
     assert "read from rulesets only" in f["evidence"], f["evidence"]
+
+
+# ---------------------------------------------------------------------------
+# F9 — a test/lint suite whose failure cannot fail its job.
+#
+# Sibling of `sec.required-checks.skippable`: that fact is "a SKIPPED required
+# check reports green"; this one is "a check that RAN reports green whatever
+# the suite did". Same consequence — the merge gate is decorative — so the
+# tests below pin both directions: every swallow shape fails, and everything
+# the fact deliberately does not claim (uploads, unrecognized commands,
+# expression-valued continue-on-error) stays green.
+# ---------------------------------------------------------------------------
+
+_FATAL = "sec.gate.test-failure-fatal"
+
+
+def _wf(steps: str, job_extra: str = "") -> str:
+    return ("name: ci\non: [pull_request]\npermissions:\n  contents: read\n"
+            "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+            + job_extra + "    steps:\n" + steps)
+
+
+def _fatal(tmp_path, workflows, **kw):
+    root, files = _repo(tmp_path, workflows)
+    return _outcome(cf.compute_config_facts(
+        root, files, kw.pop("scan_incomplete", []), **kw), _FATAL)
+
+
+def test_a_suite_that_can_fail_its_job_passes(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _SAFE_WF})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_or_true_after_the_suite_fails_and_names_file_and_job(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _wf("      - run: pytest -q || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "ci.yml" in f["evidence"], f["evidence"]
+    assert "`test`" in f["evidence"], f["evidence"]
+    assert "|| true" in f["evidence"], f["evidence"]
+
+
+def test_or_colon_after_the_suite_fails(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        '      - run: "npm run lint || :"\n')})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_or_colon_with_a_trailing_comment_still_fails(tmp_path):
+    """A comment after `|| :` does not un-swallow the suite.
+
+    `|| :` is recognised by what FOLLOWS the colon, since a bare `:` is also
+    the start of `:=`-style expansions and of a `::` group. The shape it is
+    most often written in carries the author's reason on the same line —
+    `pytest || :  # tolerate flakes` — and a comment is exactly as much a
+    terminator as the `;` and `&&` already accepted. Left out, the one form
+    of this shape a repository actually writes reads as a pass."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        '      - run: "pytest -q || :  # tolerate flakes"\n')})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_or_echo_after_the_suite_fails(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        '      - run: go test ./... || echo "tests failed"\n')})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_or_echo_that_still_exits_nonzero_passes(tmp_path):
+    """`|| { echo …; exit 1; }` reports the failure AND fails the job. Reading
+    the `|| echo` prefix alone would red a correct guard."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        '      - run: go test ./... || { echo "tests failed"; exit 1; }\n')})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_or_echo_then_a_same_line_exit_one_passes(tmp_path):
+    """The same-line rescue, on a shape that actually reaches it. The sibling
+    test above uses `|| { echo …; exit 1; }`, which no swallow pattern matches
+    at all, so it never exercises this branch. `|| echo "failed"; exit 1`
+    does: the swallow fires, and the rest of the same line re-raises."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        '      - run: pytest -q || echo "failed"; exit 1\n')})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_trailing_exit_zero_after_the_suite_fails_where_no_errexit(tmp_path):
+    """On a step whose shell has no errexit — `pwsh`, `powershell`, `cmd` —
+    a trailing `exit 0` really does run after a failed suite and discards
+    it."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - shell: pwsh\n"
+        "        run: |\n          cargo test --all\n          exit 0\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "exit 0" in f["evidence"], f["evidence"]
+
+
+def test_trailing_exit_zero_with_an_inline_comment_fails(tmp_path):
+    """`exit 0 # always succeed` is the same discard with a comment after it.
+    Requiring the `0` to end the line would read a self-documented swallow as
+    a pass."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - shell: cmd\n"
+        "        run: |\n          cargo test --all\n"
+        "          exit 0 # always succeed\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "exit 0" in f["evidence"], f["evidence"]
+
+
+def test_trailing_exit_zero_under_default_errexit_shell_passes(tmp_path):
+    """GitHub's default `run` shell on Linux and macOS is `bash -e {0}`
+    (and an explicit `shell: bash` gets `-eo pipefail`): a failing suite
+    aborts the step before a trailing `exit 0` is ever reached, so the step
+    already fails and nothing is swallowed. Flagging it is a false accusation
+    on a fatally wired job — exactly what this fact promises never to make."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          pytest -q\n          exit 0\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_trailing_exit_zero_on_a_windows_default_shell_fails(tmp_path):
+    """With no `shell:` anywhere, a `windows-*` runner defaults to `pwsh`,
+    which carries no errexit — the discard is real there."""
+    f = _fatal(tmp_path, {"ci.yml": (
+        "name: ci\non: [pull_request]\npermissions:\n  contents: read\n"
+        "jobs:\n  test:\n    runs-on: windows-latest\n    steps:\n"
+        "      - run: |\n          dotnet test\n          exit 0\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_trailing_exit_zero_under_a_job_default_pwsh_fails(tmp_path):
+    """`defaults.run.shell` on the job (or the workflow) sets the step's
+    effective shell, so a job-wide `pwsh` makes the discard real on every
+    step that does not override it."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          pytest -q\n          exit 0\n",
+        job_extra="    defaults:\n      run:\n        shell: pwsh\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+_ALLOWLIST_SAMPLES = (
+    "pytest -q", "py.test", "tox", "nox", "pre-commit run --all-files",
+    "npm test", "pnpm run lint", "yarn typecheck", "bun run check",
+    "npx jest", "npx playwright", "jest", "vitest run", "mocha", "karma",
+    "playwright test", "cypress run", "go test ./...", "go vet ./...",
+    "golangci-lint run", "cargo test", "cargo clippy",
+    "mvn -B verify", "./gradlew build check", "dotnet test", "swift test",
+    "ctest", "bazel test //...", "bundle exec rspec", "rubocop",
+    "rake test", "phpunit", "composer test", "make test", "make lint",
+    "ruff check .", "flake8", "pylint src", "mypy src", "pyright",
+    "eslint .", "stylelint styles.css", "shellcheck run.sh",
+    "hadolint Dockerfile", "actionlint", "tflint", "black --check .",
+)
+
+
+@pytest.mark.parametrize("cmd", _ALLOWLIST_SAMPLES)
+def test_every_allowlisted_suite_command_is_guarded(tmp_path, cmd):
+    """One representative spelling per arm of the suite-command allowlist,
+    each swallowed with `|| true`, each of which must fail the fact.
+    Deleting any arm silently flips a repository whose only suite uses it
+    from *fail* to *not_applicable* — this pins every arm to a red."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        f'      - run: "{cmd} || true"\n')})
+    assert f["outcome"] == "fail", (cmd, f["evidence"])
+
+
+def test_a_later_set_dash_e_does_not_rescue_an_already_discarded_suite(
+        tmp_path):
+    """`set -e` changes what happens NEXT. It cannot restore the status of a
+    command that already ran and had its failure thrown away, so a `set -e`
+    after `pytest || true` leaves the suite exactly as swallowed as before."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          pytest -q || true\n          set -e\n"
+        "          echo done\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "|| true" in f["evidence"], f["evidence"]
+
+
+def test_errexit_restored_only_after_the_suite_ran_fails(tmp_path):
+    """`set +e` / suite / `set -e` with no read of the status in between: the
+    suite ran with `errexit` off, its failure was never raised, and restoring
+    `errexit` afterwards raises nothing retroactively."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e\n          pytest -q\n"
+        "          set -e\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "set +e" in f["evidence"], f["evidence"]
+
+
+def test_errexit_relaxed_and_restored_before_the_suite_passes(tmp_path):
+    """The other side of the same line: `errexit` was off for a cleanup and
+    back on before the suite ran, so the suite's failure still fails the job.
+    Failing this would punish a job whose tests ARE fatal."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e\n          rm -rf .cache\n"
+        "          set -e\n          pytest -q\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_set_plus_e_without_an_exit_code_recheck_fails(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e\n          pytest -q\n"
+        "          echo done\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "set +e" in f["evidence"], f["evidence"]
+
+
+def test_errexit_relaxed_on_the_same_line_as_the_suite_fails(tmp_path):
+    """`set +e; pytest -q` is the two-line shape with a semicolon instead of a
+    newline: errexit is off, the suite runs under it, and nothing raises the
+    status afterwards. Ordering the two by LINE alone put them at the same
+    index and read the swallow as a pass."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e; pytest -q\n          echo done\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "set +e" in f["evidence"], f["evidence"]
+
+
+def test_errexit_relaxed_and_rechecked_on_one_line_passes(tmp_path):
+    """The guard against over-correcting it: the same line that relaxes
+    errexit also captures and re-raises the status, so the suite is fatal."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e; pytest -q; rc=$?; exit $rc\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_set_plus_e_that_rechecks_the_exit_code_passes(tmp_path):
+    """The legitimate shape: relax `errexit` to capture the status, then
+    re-raise it. Failing this would punish a job that DOES fail."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e\n          pytest -q\n"
+        "          rc=$?\n          echo done\n          exit $rc\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_one_line_suite_then_exit_zero_fails(tmp_path):
+    """`npm test; exit 0` is the two-line shape with a semicolon instead of a
+    newline. The documented shape is "a trailing `exit 0`"; which whitespace
+    separates it from the suite is not part of the claim. On an errexit
+    shell the semicolon form aborts at the failing suite exactly like the
+    newline form, so the discard is only real where the shell has no
+    errexit."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - shell: powershell\n"
+        "        run: npm test; exit 0\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "exit 0" in f["evidence"], f["evidence"]
+
+
+def test_evidence_names_the_step_not_only_its_position(tmp_path):
+    """A step ordinal alone sends the maintainer counting steps by hand, and
+    the Actions UI labels steps by name. The name is in the YAML already."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - name: Unit tests\n        run: pytest -q || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "Unit tests" in f["evidence"], f["evidence"]
+
+
+def test_or_colon_evidence_quotes_the_shape_that_is_in_the_file(tmp_path):
+    """Reporting `|| :` as `|| true` sends the maintainer grepping for a
+    string their workflow does not contain."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        '      - run: "npm run lint || :"\n')})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "|| :" in f["evidence"], f["evidence"]
+
+
+def test_a_schedule_only_workflow_is_not_a_merge_gate(tmp_path):
+    """This fact's whole claim is about a MERGE GATE reporting green. A
+    nightly job cannot report on a pull request, so a deliberately tolerant
+    nightly lint is not the configuration being described — failing it is the
+    false accusation the fact's own scope statement rules out."""
+    f = _fatal(tmp_path, {"nightly.yml": (
+        "name: nightly\non:\n  schedule:\n    - cron: '0 3 * * *'\n"
+        "permissions:\n  contents: read\njobs:\n  lint:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n"
+        "      - run: npx eslint . --fix || true\n")})
+    assert f["outcome"] == "not_applicable", f["evidence"]
+
+
+def test_a_manual_dispatch_only_workflow_is_not_a_merge_gate(tmp_path):
+    """Same reason: a `workflow_dispatch`-only workflow runs when a human asks
+    it to, and reports on no pull request."""
+    f = _fatal(tmp_path, {"manual.yml": (
+        "name: manual\non:\n  workflow_dispatch:\n"
+        "permissions:\n  contents: read\njobs:\n  smoke:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n"
+        "      - run: pytest tests/smoke.py || true\n")})
+    assert f["outcome"] == "not_applicable", f["evidence"]
+
+
+def test_a_gate_shaped_workflow_beside_a_nightly_one_is_still_judged(tmp_path):
+    """The scope narrowing must not become a way out: a repo whose PR workflow
+    swallows its suite still fails, whatever its nightly workflow does."""
+    f = _fatal(tmp_path, {
+        "nightly.yml": ("name: nightly\non:\n  schedule:\n"
+                        "    - cron: '0 3 * * *'\npermissions:\n"
+                        "  contents: read\njobs:\n  lint:\n"
+                        "    runs-on: ubuntu-latest\n    steps:\n"
+                        "      - run: npx eslint . || true\n"),
+        "ci.yml": _wf("      - run: pytest -q || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "ci.yml" in f["evidence"], f["evidence"]
+    assert "nightly.yml" not in f["evidence"], f["evidence"]
+
+
+def test_an_unrecognised_command_that_swallows_is_a_gap_not_not_applicable(
+        tmp_path):
+    """`bash ci/test.sh || true` is the ambiguous case, and the two honest
+    readings are opposite: a swallowed suite, or a tolerated cleanup. What it
+    is NOT is "there is nothing here to check" — that claims no coverage gap
+    exists, on the one shape where one demonstrably does. It is unmeasured."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: bash ci/test.sh || true\n")})
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "ci.yml" in f["evidence"], f["evidence"]
+
+
+def test_an_unrecognised_command_that_swallows_nothing_stays_not_applicable(
+        tmp_path):
+    """The other side: nothing recognised AND nothing discarded means there
+    genuinely is nothing to check, and calling that a coverage gap would
+    invent one."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: bash ci/deploy.sh\n")})
+    assert f["outcome"] == "not_applicable", f["evidence"]
+
+
+# The false-accusation battery. Every line below is ordinary GitHub Actions
+# YAML that names a suite tool WITHOUT running one — in a path, an image tag,
+# a message body, a filename, a process pattern, or an install argument. The
+# fact's own scope statement says a false accusation against a stranger's
+# repository costs more than a miss, so each of these must stay green.
+_NOT_A_SUITE = {
+    "browser deps install": "npx playwright install --with-deps || true",
+    "chat notification naming the suite":
+        'curl -X POST -d \'{"text":"pytest failed"}\' "$SLACK" || true',
+    "npm i shorthand": "npm i -D jest || true",
+    "image tag containing a tool name":
+        "docker pull ghcr.io/org/mypy:latest || true",
+    "a message body quoting a tool":
+        'gh pr comment 1 --body "eslint found 3 issues" || true',
+    "a directory named after a tool": "tar czf out.tgz .tox || true",
+    "a process pattern naming a tool": "pkill -f karma || true",
+    "making a tool's cache directory": "mkdir -p .tox || true",
+    "restoring a config file": "git checkout -- jest.config.js || true",
+}
+
+
+@pytest.mark.parametrize("label", sorted(_NOT_A_SUITE))
+def test_naming_a_suite_tool_is_not_running_one(tmp_path, label):
+    """A tool name in an argument is not a suite. Reading it as one fails the
+    check on a repository whose tests are perfectly fatal — the exact false
+    accusation this fact is built to avoid."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        f"      - run: {_NOT_A_SUITE[label]}\n"
+        "      - run: pytest -q\n")})
+    assert f["outcome"] == "pass", f"{label}: {f['evidence']}"
+
+
+def test_or_exit_zero_after_the_suite_fails(tmp_path):
+    """`|| exit 0` is the discard stated outright — more explicit than
+    `|| true`, and it was the one shape reported as a clean bill."""
+    f = _fatal(tmp_path, {"ci.yml": _wf("      - run: pytest -q || exit 0\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_or_bin_true_after_the_suite_fails(tmp_path):
+    """`/bin/true` is `true` by absolute path."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: pytest -q || /bin/true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_reusable_workflow_holding_the_suite_is_in_scope(tmp_path):
+    """`workflow_call` is where a large repository usually keeps its suite,
+    and the caller reports the called job's status into the pull request. Out
+    of scope it was not merely missed — it left the denominator, certifying a
+    repository whose gate is exactly the one this fact describes."""
+    f = _fatal(tmp_path, {"reusable.yml": (
+        "name: tests\non:\n  workflow_call:\npermissions:\n"
+        "  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: pytest -q || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_commented_out_suite_is_not_a_suite(tmp_path):
+    """A commented `# pytest -q` line runs nothing, so the `exit 0` under it
+    discards no suite. Reading comments as code would invent a suite — and
+    then a swallowed one — out of a note, and fail a repository whose real
+    tests are fatal."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          echo hi\n          # pytest -q\n"
+        "          exit 0\n"
+        "      - run: pytest -q\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_an_unreadable_trigger_block_stays_in_scope(tmp_path):
+    """The stated never-silent-pass direction: a workflow whose `on:` cannot
+    be read is judged, because dropping it would let an unreadable trigger
+    certify a swallowed suite."""
+    f = _fatal(tmp_path, {"ci.yml": (
+        "name: ci\npermissions:\n  contents: read\njobs:\n  test:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n"
+        "      - run: pytest -q || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_merge_group_is_a_gate_trigger(tmp_path):
+    """A merge queue is a merge gate by definition."""
+    f = _fatal(tmp_path, {"ci.yml": (
+        "name: ci\non:\n  merge_group:\npermissions:\n  contents: read\n"
+        "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - run: pytest -q || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_errexit_relaxed_and_restored_before_the_suite_on_one_line_passes(
+        tmp_path):
+    """`set +e; set -e; pytest -q` restores errexit BEFORE the suite runs, so
+    the suite is fatal. Ordering by physical line put all three at one index,
+    leaving the restore search an empty slice — and failing a correctly wired
+    suite, which is the direction this fact must never get wrong."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e; set -e; pytest -q\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_merely_printing_the_status_does_not_rescue_a_swallowed_suite(
+        tmp_path):
+    """Echoing `$?` reports the status; it does not re-raise it. Counting a
+    mention as a rescue certifies a job that still exits zero."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          pytest -q || true\n"
+        '          echo "exit code was $?"\n')})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "|| true" in f["evidence"], f["evidence"]
+
+
+def test_capturing_the_status_and_exiting_it_still_rescues(tmp_path):
+    """The guard against over-correcting: `rc=$?` captures and `exit $rc`
+    re-raises, across lines, and that is a correctly wired suite."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e\n          pytest -q\n"
+        "          rc=$?\n"
+        '          echo "suite exited $rc"\n          exit $rc\n')})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_continue_on_error_on_the_test_step_fails(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: pytest -q\n        continue-on-error: true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "continue-on-error" in f["evidence"], f["evidence"]
+
+
+def test_continue_on_error_on_the_job_running_the_suite_fails(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: pytest -q\n", job_extra="    continue-on-error: true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_continue_on_error_from_an_expression_is_not_judged(tmp_path):
+    """`continue-on-error: ${{ matrix.experimental }}` is true for some matrix
+    legs and false for others; the YAML cannot say which. Not a literal true,
+    so not a fail — a miss beats a false accusation here."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: pytest -q\n"
+        "        continue-on-error: ${{ matrix.experimental }}\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_continue_on_error_on_an_upload_step_is_not_this_facts_business(
+        tmp_path):
+    """Deliberately EXEMPT: a non-fatal coverage upload, artifact upload, SARIF
+    upload or chat notification is another engine's business, not a swallowed
+    test result. Double-reporting it here would be a defect."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: pytest -q\n"
+        "      - uses: codecov/codecov-action@v4\n"
+        "        continue-on-error: true\n"
+        "      - uses: actions/upload-artifact@v4\n"
+        "        continue-on-error: true\n"
+        "      - uses: github/codeql-action/upload-sarif@v3\n"
+        "        continue-on-error: true\n"
+        "      - run: curl -sf -X POST $SLACK_WEBHOOK || true\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_an_unrecognized_command_is_never_failed(tmp_path):
+    """When the scan cannot tell what a `run:` block does, it does not fail the
+    fact. `./scripts/ci.sh || true` may be swallowing a suite or a cleanup —
+    accusing a repo on a guess is worse than missing one."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: pytest -q\n      - run: ./scripts/ci.sh || true\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_swallowed_utility_line_beside_the_suite_is_not_a_fail(tmp_path):
+    """`grep … || true` in the same block as the suite swallows the grep, not
+    the tests. Only a line that RUNS the suite counts."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          grep -c TODO src/*.py || true\n"
+        "          pytest -q\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_installing_a_test_runner_is_not_running_one(tmp_path):
+    """`pip install pytest || true` tolerates a failed install; it swallows no
+    test result. Reading the runner's NAME as a run would fail the fact on a
+    repository whose tests are perfectly fatal."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          pip install pytest || true\n"
+        "          cat tox.ini || true\n          pytest -q\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_repo_with_no_suite_at_all_is_not_applicable_not_a_pass(tmp_path):
+    """The applicability gate, following the shape ci-score's test-sharding
+    check uses: a repo whose workflows run no test, lint or build-verification
+    suite has nothing to swallow, so the fact leaves the denominator rather
+    than handing out a free green."""
+    root, files = _repo(tmp_path, {"ci.yml": _wf("      - run: echo hello\n")})
+    out = cf.compute_config_facts(root, files, [])
+    f = _outcome(out, _FATAL)
+    assert f["outcome"] == "not_applicable", f["evidence"]
+    # The evidence says WHY it does not apply. "no step discards its exit
+    # status" would be true and would read as a clean bill for a suite that
+    # does not exist.
+    assert "runs a test" in f["evidence"], f["evidence"]
+    assert "merge gate" in f["evidence"], f["evidence"]
+    assert _FATAL in out["not_applicable"]
+    assert _FATAL not in out["unmeasured"]
+
+
+def test_not_applicable_leaves_the_applicable_count(tmp_path):
+    """`not_applicable` is OUT of the denominator — the same treatment
+    ci-score gives an n/a check, and the opposite of `unmeasured`, which stays
+    in as a named coverage gap."""
+    root, files = _repo(tmp_path, {"ci.yml": _wf("      - run: echo hello\n")})
+    out = cf.compute_config_facts(root, files, [])
+    # Eight other facts: six measurable offline, two API-gated and unmeasured.
+    assert out["applicable_count"] == 8
+    assert out["scored_count"] == 6
+
+
+def test_a_scan_gap_unmeasures_the_fatal_fact(tmp_path):
+    """A universal claim over every workflow: an unreadable file could be the
+    one holding the swallow, so the fact is unmeasured, never a pass."""
+    f = _fatal(tmp_path, {"ci.yml": _SAFE_WF},
+               scan_incomplete=[{"workflow_file": "broken.yml"}])
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_a_not_applicable_fact_still_renders_a_row(tmp_path):
+    """ARTIFACT-LEVEL: a row that quietly vanishes reads as a pass. The n/a
+    outcome must reach the page with a mark of its own, distinguishable from
+    both a green and a coverage gap."""
+    root, files = _repo(tmp_path, {"ci.yml": _wf("      - run: echo hello\n")})
+    md = _load_report().render({
+        "findings": [], "repo": "x/y", "scanned_workflows": 1,
+        "security_score": cf.compute_config_facts(root, files, []),
+    })
+    # The TABLE row specifically. The fact id also appears in the prose line
+    # that discloses the count, and matching that instead would let the row
+    # itself vanish while this test stayed green.
+    row = next((ln for ln in md.splitlines()
+                if ln.startswith("|") and (_FATAL in ln
+                                           or "swallows its own exit code"
+                                           in ln)), None)
+    assert row is not None, "the not-applicable fact rendered no row at all"
+    assert "n/a" in row, row
+    assert "pass" not in row and "unmeasured" not in row, row
+
+
+def test_a_heredoc_body_is_written_text_not_a_run(tmp_path):
+    """A step that WRITES a wrapper script is not a step that runs one. The
+    here-doc body is data on its way to a file; reading `pytest -q || true`
+    there as a swallowed suite fails a job whose own suite is fatal — the
+    false-accusation direction this fact refuses to take."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n"
+        "          cat > run.sh <<'EOF'\n"
+        "          pytest -q || true\n"
+        "          EOF\n"
+        "          pytest -q\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_suite_under_a_shell_keyword_still_counts_as_a_suite(tmp_path):
+    """`if ! pytest -q; then …` runs the suite; `if` is a keyword in front of
+    the command, not the command. Missing it hands a repository that tests on
+    every PR the n/a outcome, which quietly removes it from the denominator."""
+    root, files = _repo(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n"
+        "          if ! pytest -q; then echo 'suite failed'; exit 1; fi\n")})
+    out = cf.compute_config_facts(root, files, [])
+    f = _outcome(out, _FATAL)
+    assert f["outcome"] == "pass", f["evidence"]
+    assert _FATAL not in out["not_applicable"]
+
+
+def test_a_swallow_inside_a_loop_body_is_still_a_swallow(tmp_path):
+    """`for … do pytest || true; done` discards every run's status. The `do`
+    in front of the suite is a keyword; it must not hide the swallow."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: for m in a b; do pytest -q; done || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]

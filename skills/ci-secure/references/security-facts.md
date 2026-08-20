@@ -7,7 +7,7 @@
 
 ---
 
-ci-secure computes eight deterministic, pass/fail configuration facts as
+ci-secure computes nine deterministic, pass/fail configuration facts as
 MACHINE-ONLY inputs for a future blended score (the ci-advisor door, not yet
 public). They are aggregated `100 × passed / scored` with no weights and no
 partial credit (registered 2026-08-03) — but **that aggregate is never a number
@@ -18,9 +18,12 @@ vector detectors are lexical rather than confirmed exploit proofs, and a public
 number must not grade a stranger's repo down on an unconfirmed match.
 
 **The denominator is token-dependent, so the aggregate is not comparable
-across scans run under different auth.** Two of the eight facts read the GitHub
-API. A scan with no repository or no token measures six of eight and scores
-`100 × passed / 6`; the same repository scanned with a token scores over eight.
+across scans run under different auth.** Two of the nine facts read the GitHub
+API. In a repository where every fact applies, a scan with no repository or no
+token measures seven of nine and scores `100 × passed / 7`; the same repository
+scanned with a token scores over nine. A fact that does not apply to the
+repository at all leaves the denominator on top of that (see below), so both
+numbers drop by one in a repository whose workflows run no suite.
 The unmeasured ids are named in the block's `unmeasured` list and the caveat, so
 a consumer — ci-advisor above all — can tell the two apart, but only if it
 checks: comparing the raw numbers across differently-authenticated scans
@@ -28,7 +31,7 @@ compares different measurements.
 
 **The aggregate is machine-only.** ci-secure's own report and close render
 these facts as a pass/fail table and **no number** by design: a hygiene
-aggregate labelled "Security score" overclaims what eight config observations
+aggregate labelled "Security score" overclaims what nine config observations
 can say, and printed beside a ten-vector scan it read as a contradiction. The
 `security_score` block in the findings JSON keeps its shape — same keys, same `fact_id`s, same outcomes, same aggregate; only prose the
 report prints was reworded so it stops naming a score the reader never sees.
@@ -40,6 +43,17 @@ A fact that cannot be measured — an unscannable workflow file, or, for the two
 API-gated facts, no repository and no token — is **unmeasured, never a silent
 pass**: it scores nothing, stays in the applicable count as a
 named coverage gap, and the block says so.
+
+A fact that **does not apply** is a different state and is treated differently.
+"This could not be checked" is a coverage gap; "there is nothing here to check"
+is not, and counting it as one would report a gap that does not exist. A
+not-applicable fact scores nothing and leaves the applicable count entirely —
+the same treatment ci-score gives a check it rules not applicable — while its
+row still renders, because a row that quietly vanishes reads as a pass. Its id
+is listed in the block's `not_applicable` list, separate from `unmeasured`, so
+a consumer never has to guess which of the two it is looking at. Only
+`sec.gate.test-failure-fatal` can reach that state today, and only in a
+repository whose workflows run no test or lint suite at all.
 
 ## The disjointness census
 
@@ -59,6 +73,7 @@ instead of shipping.
 | `sec.secrets.no-blanket-inherit` | — none | No ci-score check reads `secrets:` on reusable-workflow calls. |
 | `sec.required-checks.skippable` | — none | Branch protection is not workflow YAML; no ci-score check reads the API. The workflow-side edit this fact asks for (add an always-running verdict job that `needs:` the conditional ones) touches no key any ci-score check reads. |
 | `sec.fork-approval.effective` | — none | A repository Actions setting, not workflow YAML at all; no ci-score check reads it, and no YAML edit can move it. |
+| `sec.gate.test-failure-fatal` | `ci.parallel.test-sharding` | Both look at the jobs that run the suite, and neither edit moves the other: sharding is a `strategy.matrix` on the job, this fact is the `run:` line's exit code and the step's `continue-on-error`. A sharded suite can still swallow every shard's failure, and an unsharded one can be perfectly fatal. Also bounded against the OTHER engine: `continue-on-error` on an upload, report, or notification step is a speed and reliability question that ci-speedup owns, and it does not reach this fact, because only a step whose own `run:` command the allowlist recognises as a suite is in scope — a `uses:` upload action has no `run:` line at all. Residual, disclosed: a reporting step whose command *does* match the allowlist is in scope here too, as is a suite step carrying `continue-on-error: true` that has been red for every run (ci-speedup's OPT68); the bound is on the command, not on the step's stated purpose. |
 | `sec.checkout.credentials-scoped` | `ci.checkout.shallow-clone` | Both read checkout steps, but different keys: `fetch-depth` there, `persist-credentials` here — two `with:` entries, two edits. This fact also applies only on untrusted-trigger workflows (excluding the payload-less `fork`/`watch` notification events); shallow-clone applies on PR-gating ones. |
 
 **Residual correlation, disclosed:** a repo with careless
@@ -157,3 +172,105 @@ two moved numbers.
   can read it. Trusted-trigger workflows are not this fact's business — nor are
   the payload-less `fork`/`watch` notification events, which carry no
   attacker-influenced execution that could read a persisted token.
+- **`sec.gate.test-failure-fatal`** — no job that runs the test or lint suite
+  swallows its own exit code. This is the sibling of
+  `sec.required-checks.skippable`, and it belongs here for the same reason that
+  one does: that fact is "a required check that was SKIPPED reports green"; this
+  one is "a check that RAN reports green regardless of what the suite did."
+  The failure mode is identical — the merge gate is decorative, and the repo
+  believes it is gated — the reader is the same person, and so is the fix:
+  let the failure reach the job's exit status. It is a pass/fail configuration
+  fact, not an attack vector: nothing here is an exploit chain, no finding is
+  raised, and it is not a candidate for the ten (`why-these-ten.md` governs
+  those, and this is not one of them).
+
+  The failing shapes are `|| true`, `|| :`, `|| echo …`, a trailing `exit 0`,
+  `set +e` with no later re-check of the status it stopped enforcing, and
+  `continue-on-error: true` on the suite's own step (or on the job that runs
+  it). A quoted `'true'` counts; an expression like
+  `continue-on-error: ${{ matrix.experimental }}` does not — it is true on some
+  matrix legs and false on others, and the YAML cannot say which.
+
+  The trailing-`exit 0` shape is judged against the step's **effective
+  shell**, resolved the way GitHub resolves it — the step's `shell:`, then
+  the job's `defaults.run.shell`, then the workflow's, then the runner
+  default. Where errexit applies — the platform default `bash -e {0}` on
+  Linux and macOS, `sh -e`, an explicit `shell: bash` (invoked with
+  `-eo pipefail`) — a failing suite aborts the step before a trailing
+  `exit 0` is ever reached, so the step already fails and flagging it would
+  be a false accusation against a fatally wired job. The arm therefore fires
+  only where the discard is real: `pwsh`, `powershell`, or `cmd`, declared
+  at any of those levels or implied by a `windows-*` runner's `pwsh`
+  default. A shell expression or a template this list does not recognise
+  resolves to errexit-bearing, for the same miss-beats-accusation reason.
+  The other shapes need no such gate: `|| true` and `|| :` succeed under
+  any shell, and `set +e` is itself the act of turning errexit off.
+
+  **Scope, deliberately narrow.** Only a workflow that can report a check on a
+  pull request is judged at all — a `pull_request`, `pull_request_target`,
+  `push` or `merge_group` trigger. A nightly `schedule` job or a
+  `workflow_dispatch`-only smoke run reports on no pull request, so a tolerant
+  `|| true` there is not the decorative merge gate this fact describes, and
+  failing it would be the false accusation the rest of this paragraph rules
+  out. An `on:` block that cannot be read stays in scope: dropping it would
+  turn an unreadable trigger into a silent pass.
+
+  Within those workflows, only a `run:` line whose COMMAND a shipped allowlist
+  recognises as a test, lint, or build-verification suite can fail this fact.
+  The command, not the line: `docker pull ghcr.io/org/mypy:latest || true`,
+  `pkill -f karma || true`, `tar czf out.tgz .tox || true` and
+  `gh pr comment --body "eslint found 3 issues" || true` each carry an
+  allowlisted name in an image tag, a process pattern, a directory and a
+  message body, and none of them runs a suite. The allowlist is therefore
+  anchored to the head of the command, after any environment assignment,
+  privilege or timing wrapper, interpreter runner (`python -m pytest`,
+  `poetry run pytest`), leading path (`./mvnw test`) and shell keyword. The
+  keyword matters as much as the wrappers do: `if ! pytest -q; then` and
+  `for m in $MODULES; do pytest -q; done` run the suite exactly as a bare line
+  does, and a suite the anchor cannot see does not merely go unjudged — it
+  takes the whole repository out of this fact's denominator as not applicable,
+  which is a silent loss of coverage rather than a miss on one line.
+  Two things follow,
+  both intended. A `run:` block the allowlist does not
+  recognise — `./scripts/ci.sh || true` — is never failed: it may be swallowing
+  a suite or a cleanup, the YAML cannot say which, and a false accusation
+  against a stranger's repository costs more than a miss in a fact that feeds a
+  published score. And `continue-on-error: true` on an **upload, report, or
+  notification** step — codecov, `upload-artifact`, `upload-sarif`, a Slack
+  webhook — does not reach this fact, because a step is judged only by its own
+  `run:` line: a `uses:` action has no `run:` line at all, and a webhook `curl`
+  matches nothing on the allowlist. Making a reporting step non-fatal is a
+  deliberate, usually correct choice about speed and reliability, and it is
+  already ci-speedup's business; billing one configuration to two engines would
+  be a defect, not thoroughness. **Residual, disclosed:** that exemption is a
+  property of the COMMAND, not of the step's name or intent, so a reporting
+  step whose `run:` line does match the allowlist — `npm run
+  test:upload-coverage`, `make check-links || true` — is in scope here and can
+  be billed by both engines. A `|| true` on a utility line sitting beside the
+  suite (`grep … || true`) swallows the grep, not the tests, and is not this
+  fact's business either. Neither is a **here-doc body**: the lines between
+  `cat > run.sh <<'EOF'` and its closing delimiter are text on its way to a
+  file, so a step that WRITES a tolerant wrapper script is not a step that
+  runs one, and judging that text as shell would fail a job whose own suite is
+  fatal.
+
+  **A repository with nothing to check is NOT APPLICABLE, not a pass.** There
+  is nothing to swallow, so there is nothing to certify: a green here would
+  read as "this repo's tests are wired to fail the build" about a repo with no
+  tests. It leaves the denominator, which is the shape ci-score settled on for
+  the same question (its test-sharding check is not applicable when no
+  test-like job exists).
+
+  **"Nothing to check" is a stronger claim than "nothing recognised", and the
+  fact does not confuse the two.** Not-applicable requires BOTH that no
+  recognised suite ran AND that no step threw an exit status away. Where the
+  allowlist recognised nothing but something *did* discard a status —
+  `bash ci/test.sh || true`, the canonical unknown-purpose shape — the two
+  readings are opposite (a swallowed suite, or a tolerated cleanup) and the
+  YAML settles neither. That is UNMEASURED, with the steps named: a coverage
+  gap that stays in the denominator, because "there is nothing here to check"
+  would assert no gap exists on the one shape where one demonstrably does.
+  **To fix a fail**: drop the swallow so the suite's exit status reaches the
+  job — and if the intent was to see the failure without blocking, keep the
+  reporting and re-raise the status (`… || { echo "suite failed"; exit 1; }`,
+  or capture `$?` under `set +e` and `exit` it at the end).

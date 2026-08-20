@@ -1691,6 +1691,37 @@ def test_the_config_facts_render_as_a_pass_fail_table_with_NO_aggregate(
     assert md.index("## 🔗 Vector map") < md.index("## 🧰 Config hygiene checks")
 
 
+def test_a_not_applicable_check_is_disclosed_in_prose_not_only_as_a_mark(
+) -> None:
+    """`unmeasured` gets a sentence telling the reader it is a coverage gap.
+    A check that does not apply leaves the denominator instead, and the reader
+    is owed the same disclosure in the other direction — otherwise the only
+    trace of it is an unexplained mark in a table whose count line does not
+    add up against the rows above it."""
+    score = dict(_SCORE_JSON)
+    score["facts"] = list(_SCORE_JSON["facts"]) + [
+        {"fact_id": "sec.gate.test-failure-fatal",
+         "fact": "no job that runs the test or lint suite swallows its own "
+                 "exit code",
+         "outcome": "not_applicable",
+         "evidence": "not applicable: no workflow that can report a check on "
+                     "a pull request runs a suite this scan recognises"},
+    ]
+    score["not_applicable"] = ["sec.gate.test-failure-fatal"]
+    md = report.render({
+        "findings": [], "repo": "x/y", "scanned_workflows": 3,
+        "security_score": score,
+    })
+    assert "sec.gate.test-failure-fatal" in md
+    assert "do not apply" in md or "does not apply" in md, md
+    # And it must not borrow the coverage-gap wording: the whole point of the
+    # separate outcome is that this is NOT a gap.
+    na_line = [ln for ln in md.splitlines()
+               if "apply" in ln and "check" in ln]
+    assert na_line, md
+    assert "coverage gap" not in na_line[0], na_line[0]
+
+
 def test_security_score_evidence_pipes_do_not_break_the_table() -> None:
     """Evidence carrying a `|` would otherwise split the row into phantom
     columns."""

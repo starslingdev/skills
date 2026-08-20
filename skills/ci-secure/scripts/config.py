@@ -173,12 +173,17 @@ def setup_logging(
 
 BLOCKING_OUTCOMES: Final[frozenset[str]] = frozenset({"fail"})
 
-KNOWN_OUTCOMES: Final[frozenset[str]] = frozenset({"pass", "fail", "unmeasured"})
+KNOWN_OUTCOMES: Final[frozenset[str]] = frozenset(
+    {"pass", "fail", "unmeasured", "not_applicable"})
 
 OUTCOME_MARKS: Final[dict[str, str]] = {
     "pass": "PASS",
     "fail": "**FAIL**",
     "unmeasured": "UNMEASURED",
+    # Distinct from UNMEASURED on purpose: "this could not be checked" and
+    # "there is nothing here to check" read the same to a maintainer only
+    # until they go looking for the gap that does not exist.
+    "not_applicable": "N/A",
 }
 
 

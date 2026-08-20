@@ -192,8 +192,8 @@ Contract lines, all mandatory:
   report's `## 🧰 Config hygiene checks — pass/fail` table and NAME what
   failed: `One hygiene gap: no reviewer rule covers your workflow files.` Two
   or more: name each, one short clause apiece. All passing: `All config
-  hygiene checks pass.` Anything the report marks unmeasured is a coverage
-  gap and is said as one, never folded into "pass".
+  hygiene checks pass.` Unmeasured is a coverage gap, n/a did not apply to
+  this repo: say each as itself, never as a pass and never as nothing.
 - **Then the vector map** — the line-item receipt, so the user sees what they
   are good on and what did not run without opening the file. Head it exactly
   `Vector scan — 10 attack vectors checked, N hit:` (N from the banner), so
