@@ -1179,8 +1179,6 @@ key.
 
 ---
 
----
-
 ### OPT29 — Merge Queue Skip at Step Level Only
 
 <!-- METADATA

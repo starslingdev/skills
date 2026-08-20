@@ -3406,3 +3406,23 @@ jobs:
       - run: node scripts/render.js assets/LOGO.PSD
 """
     assert "OPT76" not in _scan_one(tmp_path, neg)
+
+
+def test_opt76_suppressed_when_a_git_lfs_run_step_job_reads_a_tracked_path(tmp_path: Path):
+    """The run-block branch needs its OWN suppression case: the `lfs: true`
+    negatives all go through the `with:`-key path, so a mutant that drops the
+    "no step reads a tracked path" condition from the `git lfs pull` branch
+    alone leaves the suite green while the detector fires on a job whose whole
+    purpose is reading the payload it just pulled."""
+    _write_repo_file(tmp_path, ".gitattributes", _GITATTRIBUTES)
+    neg = """name: CI
+on: pull_request
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git lfs pull
+      - run: node scripts/render.js assets/logo.psd
+"""
+    assert "OPT76" not in _scan_one(tmp_path, neg)
