@@ -3150,6 +3150,50 @@ def test_trailing_exit_zero_after_the_suite_fails(tmp_path):
     assert "exit 0" in f["evidence"], f["evidence"]
 
 
+def test_trailing_exit_zero_with_an_inline_comment_fails(tmp_path):
+    """`exit 0 # always succeed` is the same discard with a comment after it.
+    Requiring the `0` to end the line would read a self-documented swallow as
+    a pass."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          cargo test --all\n"
+        "          exit 0 # always succeed\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "exit 0" in f["evidence"], f["evidence"]
+
+
+def test_a_later_set_dash_e_does_not_rescue_an_already_discarded_suite(
+        tmp_path):
+    """`set -e` changes what happens NEXT. It cannot restore the status of a
+    command that already ran and had its failure thrown away, so a `set -e`
+    after `pytest || true` leaves the suite exactly as swallowed as before."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          pytest -q || true\n          set -e\n"
+        "          echo done\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "|| true" in f["evidence"], f["evidence"]
+
+
+def test_errexit_restored_only_after_the_suite_ran_fails(tmp_path):
+    """`set +e` / suite / `set -e` with no read of the status in between: the
+    suite ran with `errexit` off, its failure was never raised, and restoring
+    `errexit` afterwards raises nothing retroactively."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e\n          pytest -q\n"
+        "          set -e\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "set +e" in f["evidence"], f["evidence"]
+
+
+def test_errexit_relaxed_and_restored_before_the_suite_passes(tmp_path):
+    """The other side of the same line: `errexit` was off for a cleanup and
+    back on before the suite ran, so the suite's failure still fails the job.
+    Failing this would punish a job whose tests ARE fatal."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e\n          rm -rf .cache\n"
+        "          set -e\n          pytest -q\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
 def test_set_plus_e_without_an_exit_code_recheck_fails(tmp_path):
     f = _fatal(tmp_path, {"ci.yml": _wf(
         "      - run: |\n          set +e\n          pytest -q\n"

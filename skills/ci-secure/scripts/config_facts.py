@@ -585,14 +585,18 @@ _MENTIONS_BUT_DOES_NOT_RUN = re.compile(
 # required check — reports success.
 _SWALLOW_OR_TRUE = re.compile(r"\|\|\s*(?:true\b|:(?=\s*(?:$|[;&|)}])))")
 _SWALLOW_OR_ECHO = re.compile(r"\|\|\s*echo\b")
-_EXIT_ZERO = re.compile(r"(?:^|;)\s*exit\s+0\s*$")
+_EXIT_ZERO = re.compile(r"(?:^|;)\s*exit\s+0\s*(?:#.*)?$")
 _RELAX_ERREXIT = re.compile(r"^set\s+\+[a-z]*e[a-z]*\b")
 # What RESCUES a swallow: the block still re-raises a failure afterwards.
-# `exit 1`, `exit $rc`, a restored `set -e`, or any read of `$?` means the
-# author kept a path to a non-zero exit, and this fact does not second-guess
-# it — the shapes below are the ones with no such path left.
-_RERAISES_FAILURE = re.compile(
-    r"""\$\?|\bexit\s+(?:[1-9]|\$|["']\$)|^set\s+-[a-z]*e[a-z]*\b""")
+# `exit 1`, `exit $rc`, or any read of `$?` means the author kept a path to a
+# non-zero exit — a junit report parsed after a tolerated run is the common
+# case — and this fact does not second-guess it.
+_RERAISES_STATUS = re.compile(
+    r"""\$\?|\bexit\s+(?:[1-9]|\$|["']\$)""")
+# Restoring `errexit` is a rescue only where it can still act: `set -e`
+# changes what happens NEXT, so it rescues a suite it PRECEDES and does
+# nothing at all for a failure that already ran and was thrown away.
+_RESTORES_ERREXIT = re.compile(r"^set\s+-[a-z]*e[a-z]*\b")
 
 
 _SEGMENT_SPLIT = re.compile(r"\|\||&&|[;|]")
@@ -640,7 +644,7 @@ def _swallow_reason(run: str) -> str | None:
         return None
 
     def rescued_from(index: int) -> bool:
-        return any(_RERAISES_FAILURE.search(ln) for ln in code[index:])
+        return any(_RERAISES_STATUS.search(ln) for ln in code[index:])
 
     for i in suite_at:
         line = code[i]
@@ -651,7 +655,7 @@ def _swallow_reason(run: str) -> str | None:
                 continue
             # The rest of the SAME line counts too: `… || { echo …; exit 1; }`
             # reports the failure and still fails the job.
-            if _RERAISES_FAILURE.search(line[match.end():]):
+            if _RERAISES_STATUS.search(line[match.end():]):
                 continue
             if rescued_from(i + 1):
                 continue
@@ -667,8 +671,15 @@ def _swallow_reason(run: str) -> str | None:
     for i, line in enumerate(code):
         if not _RELAX_ERREXIT.match(line):
             continue
-        if any(j > i for j in suite_at) and not rescued_from(i + 1):
-            return "set +e"
+        after = [j for j in suite_at if j > i]
+        if not after or rescued_from(i + 1):
+            continue
+        # `set -e` restored BEFORE the suite runs puts the suite back under
+        # `errexit`, so its failure still fails the job. Restored after, it
+        # arrives too late to raise anything.
+        if any(_RESTORES_ERREXIT.match(ln) for ln in code[i + 1:after[0]]):
+            continue
+        return "set +e"
     return None
 
 
