@@ -1613,7 +1613,11 @@ def _chain_status_block(
     return "\n".join(out)
 
 
-_OUTCOME_MARKS = {"pass": "✅ pass", "fail": "❌ fail", "unmeasured": "⚠️ unmeasured"}
+_OUTCOME_MARKS = {"pass": "✅ pass", "fail": "❌ fail",
+                  "unmeasured": "⚠️ unmeasured",
+                  # A fact with nothing to check in this repository. Rendered,
+                  # never dropped: a row that vanishes reads as a pass.
+                  "not_applicable": "➖ n/a"}
 
 
 def _abbreviate_home(path: str) -> str:

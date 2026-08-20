@@ -14,7 +14,7 @@ of ci-score's check ids. The one near-collision the review found is handled by
 construction: ci-score's `ci.security.scoped-id-token` owns `id-token:` scoping,
 so the per-job-scoping fact here covers permissions OTHER than `id-token` only.
 
-THE EIGHT FACTS
+THE FACTS
 
   F1 sec.permissions.workflow-declares    every workflow declares `permissions:`
                                           (top level, or on every job)
@@ -35,6 +35,9 @@ THE EIGHT FACTS
                                           (API-gated)
   F8 sec.fork-approval.effective          fork-PR CI approval gates more than
                                           accounts new to GitHub (API-gated)
+  F9 sec.gate.test-failure-fatal          no job that runs the test/lint suite
+                                          swallows its own exit code (n/a when
+                                          no workflow runs one)
 
 F7 and F8 read the GitHub API, not workflow YAML, so they are TOKEN-GATED: no
 repo or no token means UNMEASURED with the reason stated — the same contract
@@ -51,7 +54,7 @@ this number. P14.9's own docstring reserves the middle tier for exactly this
 fact ("the bare trigger without the head checkout ... belongs to the scored
 config checks").
 
-WHAT IS NEVER A SILENT PASS. Facts F1/F2/F4/F5/F6/F7 are universal claims
+WHAT IS NEVER A SILENT PASS. Facts F1/F2/F4/F5/F6/F7/F9 are universal claims
 over
 every workflow file, so ANY unscannable workflow (`scan_incomplete`) forces
 them to UNMEASURED — no pass, no fail, a stated reason, and they stay in the
@@ -519,6 +522,197 @@ def _unpersisted_checkout_violations(doc: dict) -> list[str]:
                 out.append(name)
                 break
     return out
+
+
+# --- F9: a verification suite whose failure cannot fail its job --------------
+#
+# The sibling of `sec.required-checks.skippable`. That fact catches a required
+# check that reports green because the job was SKIPPED; this one catches a
+# check that RAN and reports green whatever the suite did. Same consequence —
+# the merge gate is decorative — and the same fix shape: let the failure reach
+# the job's exit status.
+#
+# ALLOWLIST, NOT A HEURISTIC. Only a `run:` line this list recognises as a
+# test, lint, or build-verification suite can fail the fact. Two consequences,
+# both deliberate:
+#
+#   * a `run:` block the list does not recognise (`./scripts/ci.sh || true`) is
+#     never failed. It may be swallowing a suite or a cleanup, and the YAML
+#     cannot say which — accusing a stranger's repo on a guess is worse than
+#     missing a case, especially for a fact that feeds a published score;
+#   * `continue-on-error: true` on an UPLOAD, REPORT, or NOTIFICATION step —
+#     codecov, upload-artifact, upload-sarif, a Slack curl — is EXEMPT by
+#     construction, because no such step runs a suite. Non-fatal reporting
+#     steps are a speed and reliability question another engine already owns;
+#     reporting them here too would bill one configuration to two engines.
+_VERIFICATION_CMDS = (
+    r"pytest\b", r"py\.test\b", r"\btox\b", r"\bnox\b", r"pre-commit\s+run\b",
+    r"\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|lint|typecheck|check)\b",
+    r"\bnpx\s+(?:jest|vitest|eslint|playwright|tsc)\b",
+    r"\b(?:jest|vitest|mocha|karma)\b",
+    r"\bplaywright\s+test\b", r"\bcypress\s+run\b",
+    r"\bgo\s+(?:test|vet)\b", r"\bgolangci-lint\s+run\b",
+    r"\bcargo\s+(?:test|clippy)\b",
+    r"\bmvnw?\b[^|&;]*\s(?:test|verify)\b",
+    r"\bgradlew?\b[^|&;]*\s(?:test|check)\b",
+    r"\bdotnet\s+test\b", r"\bswift\s+test\b", r"\bctest\b",
+    r"\bbazel\s+test\b",
+    r"\b(?:bundle\s+exec\s+)?(?:rspec|rubocop)\b",
+    r"\brake\s+(?:test|spec)\b",
+    r"\bphpunit\b", r"\bcomposer\s+(?:test|lint)\b",
+    r"\bmake\s+[^|&;]*\b(?:test|tests|lint|check|checks|verify)\b",
+    r"\b(?:ruff|flake8|pylint|mypy|pyright|eslint|stylelint|shellcheck|"
+    r"hadolint|actionlint|tflint)\b",
+    r"\bblack\b[^|&;]*--check\b",
+)
+_VERIFICATION_RE = re.compile("|".join(_VERIFICATION_CMDS))
+
+# Commands that MENTION a suite without running one. `pip install pytest || true`
+# and `cat tox.ini || true` both carry a name from the list above, and neither
+# swallows a test result — the first tolerates a failed install, the second a
+# missing file. Reading them as suite runs would fail the fact on a repository
+# whose tests are perfectly fatal, which is the false accusation this fact is
+# built to avoid. A line that both installs and runs (rare, and usually a
+# `&&` chain) is therefore missed rather than guessed at.
+_MENTIONS_BUT_DOES_NOT_RUN = re.compile(
+    r"\b(?:pip3?|uv|pipx|npm|pnpm|yarn|bun|apt|apt-get|brew|gem|go|cargo|"
+    r"dotnet|conda|poetry|asdf)\s+(?:pip\s+)?(?:install|add|get)\b"
+    r"|\b(?:cat|echo|ls|rm|cp|mv|head|tail|touch|grep|sed|awk|which|"
+    r"printf)\b")
+
+# The swallow shapes. Each leaves the shell's last exit status at 0 for a
+# command that failed, so the step — and with it the job, and with it the
+# required check — reports success.
+_SWALLOW_OR_TRUE = re.compile(r"\|\|\s*(?:true\b|:(?=\s*(?:$|[;&|)}])))")
+_SWALLOW_OR_ECHO = re.compile(r"\|\|\s*echo\b")
+_EXIT_ZERO = re.compile(r"(?:^|;)\s*exit\s+0\s*$")
+_RELAX_ERREXIT = re.compile(r"^set\s+\+[a-z]*e[a-z]*\b")
+# What RESCUES a swallow: the block still re-raises a failure afterwards.
+# `exit 1`, `exit $rc`, a restored `set -e`, or any read of `$?` means the
+# author kept a path to a non-zero exit, and this fact does not second-guess
+# it — the shapes below are the ones with no such path left.
+_RERAISES_FAILURE = re.compile(
+    r"""\$\?|\bexit\s+(?:[1-9]|\$|["']\$)|^set\s+-[a-z]*e[a-z]*\b""")
+
+
+_SEGMENT_SPLIT = re.compile(r"\|\||&&|[;|]")
+
+
+def _runs_verification_suite(line: str) -> bool:
+    """True when one COMMAND on this line runs a suite.
+
+    Segment by segment, because a line is usually several commands: the
+    `echo` in `go test ./... || echo failed` must not clear the `go test`
+    beside it, and the `tox.ini` in `cat tox.ini` must not be read as a run
+    just because the line also ends in `|| true`.
+    """
+    return any(_VERIFICATION_RE.search(part)
+               and not _MENTIONS_BUT_DOES_NOT_RUN.search(part)
+               for part in _SEGMENT_SPLIT.split(line))
+
+
+def _block_runs_verification_suite(run: str) -> bool:
+    """Whether ANY executable line of a `run:` block runs a suite.
+
+    Line by line, never over the joined text: the exclusions above are
+    line-scoped, so an `echo` on one line would otherwise clear the `pytest`
+    on the next.
+    """
+    return any(_runs_verification_suite(ln) for ln in _code_lines(run))
+
+
+def _code_lines(run: str) -> list[str]:
+    """Executable lines of a `run:` block — comments and blanks dropped."""
+    return [ln.strip() for ln in run.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
+def _swallow_reason(run: str) -> str | None:
+    """How this block swallows its suite's exit code, or None if it does not.
+
+    Scoped to the SUITE line: `grep … || true` sitting beside `pytest` swallows
+    the grep, not the tests, and failing the fact on it would be a false
+    accusation about a shape that is usually correct.
+    """
+    code = _code_lines(run)
+    suite_at = [i for i, ln in enumerate(code) if _runs_verification_suite(ln)]
+    if not suite_at:
+        return None
+
+    def rescued_from(index: int) -> bool:
+        return any(_RERAISES_FAILURE.search(ln) for ln in code[index:])
+
+    for i in suite_at:
+        line = code[i]
+        for pattern, shown in ((_SWALLOW_OR_TRUE, "|| true"),
+                               (_SWALLOW_OR_ECHO, "|| echo")):
+            match = pattern.search(line)
+            if not match:
+                continue
+            # The rest of the SAME line counts too: `… || { echo …; exit 1; }`
+            # reports the failure and still fails the job.
+            if _RERAISES_FAILURE.search(line[match.end():]):
+                continue
+            if rescued_from(i + 1):
+                continue
+            return shown
+
+    # `exit 0` as the block's last word: everything above it, suite included,
+    # is discarded.
+    if _EXIT_ZERO.search(code[-1]) and suite_at[0] < len(code) - 1:
+        return "exit 0"
+
+    # `set +e` before the suite, and nothing afterwards that re-raises the
+    # status it stopped enforcing.
+    for i, line in enumerate(code):
+        if not _RELAX_ERREXIT.match(line):
+            continue
+        if any(j > i for j in suite_at) and not rescued_from(i + 1):
+            return "set +e"
+    return None
+
+
+def _continue_on_error_is_literally_true(node: dict) -> bool:
+    """A literal `true` only.
+
+    `continue-on-error: ${{ matrix.experimental }}` is true on some matrix legs
+    and false on others, and the YAML cannot say which — an expression is
+    therefore not judged. GitHub also accepts the quoted string, which parses
+    as a str and means the same thing, so that counts.
+    """
+    value = node.get("continue-on-error")
+    return value is True or (isinstance(value, str)
+                             and value.strip().lower() == "true")
+
+
+def _suite_failure_swallowed(rel: str, doc: dict) -> tuple[list[str], bool]:
+    """(offences, whether this workflow runs any verification suite at all)."""
+    offences: list[str] = []
+    saw_suite = False
+    for job_name, job in _jobs(doc):
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            continue
+        job_runs_suite = False
+        for position, step in enumerate(steps, 1):
+            if not isinstance(step, dict):
+                continue
+            run = step.get("run")
+            if not isinstance(run, str) or \
+                    not _block_runs_verification_suite(run):
+                continue
+            job_runs_suite = saw_suite = True
+            where = f"{rel}: job `{job_name}` step {position}"
+            if _continue_on_error_is_literally_true(step):
+                offences.append(f"{where} — `continue-on-error: true`")
+                continue
+            reason = _swallow_reason(run)
+            if reason:
+                offences.append(f"{where} — `{reason}`")
+        if job_runs_suite and _continue_on_error_is_literally_true(job):
+            offences.append(f"{rel}: job `{job_name}` — job-level "
+                            "`continue-on-error: true`")
+    return offences, saw_suite
 
 
 # --- F7: required checks that a job can skip ---------------------------------
@@ -1505,6 +1699,31 @@ def compute_config_facts(
         "repo passes)",
         False, fa_outcome == "pass", fa_evidence, outcome=fa_outcome)
 
+    swallowed: list[str] = []
+    any_suite = False
+    for rel, doc in docs:
+        offences, saw_suite = _suite_failure_swallowed(rel, doc)
+        swallowed += offences
+        any_suite = any_suite or saw_suite
+    add("sec.gate.test-failure-fatal",
+        "no job that runs the test or lint suite swallows its own exit code "
+        "(a suite whose failure cannot fail its job leaves the merge gate "
+        "green whatever the tests did)",
+        True, not swallowed,
+        (_capped(swallowed, 4) if swallowed else
+         ("no test or lint step discards its exit status" if any_suite else
+          "not applicable: no workflow step runs a test, lint, or "
+          "build-verification suite this scan recognises, so there is no "
+          "exit code to swallow")),
+        # Applicability, following the shape ci-score's test-sharding check
+        # uses: a repository whose workflows run no recognised suite has
+        # nothing to swallow. That is NOT a pass — a free green for having no
+        # tests would reward the very absence the fact is about — and it is
+        # not unmeasured either, which claims a coverage gap where there is
+        # none. It leaves the denominator, exactly as an n/a check does in
+        # ci-score.
+        outcome=None if any_suite else "not_applicable")
+
     add("sec.checkout.credentials-scoped",
         "on untrusted-trigger workflows, every checkout sets "
         "persist-credentials: false (GitHub's default persists the token into "
@@ -1527,14 +1746,24 @@ def facts_to_score(facts: list[dict[str, Any]]) -> dict[str, Any]:
     """
     scored = [f for f in facts if f["outcome"] in ("pass", "fail")]
     unmeasured = [f["fact_id"] for f in facts if f["outcome"] == "unmeasured"]
+    # NOT APPLICABLE IS NOT A COVERAGE GAP. An unmeasured fact stays in the
+    # applicable count as a named gap ("this could not be checked"); a fact
+    # that does not apply to this repository ("there is nothing here to
+    # check") leaves the count entirely, the same treatment ci-score gives an
+    # n/a check. Collapsing the two would either invent a gap or hand out a
+    # free pass, and both distort the aggregate ci-advisor blends.
+    not_applicable = [f["fact_id"] for f in facts
+                      if f["outcome"] == "not_applicable"]
+    applicable = [f for f in facts if f["outcome"] != "not_applicable"]
     passed = sum(1 for f in scored if f["outcome"] == "pass")
     out: dict[str, Any] = {
         "facts": facts,
         "score": round(100.0 * passed / len(scored), 1) if scored else None,
         "passed": passed,
         "scored_count": len(scored),
-        "applicable_count": len(facts),
+        "applicable_count": len(applicable),
         "unmeasured": unmeasured,
+        "not_applicable": not_applicable,
         "constants": {"rule": "100 * passed / scored; pass/fail only, "
                               "no weights, no partial credit"},
         "registered": REGISTERED,
@@ -1552,5 +1781,5 @@ def facts_to_score(facts: list[dict[str, Any]]) -> dict[str, Any]:
         out["caveat"] = (
             "scored over %d of %d applicable facts: %s could not be "
             "measured; this is a COVERAGE GAP, not a clean result"
-            % (len(scored), len(facts), ", ".join(unmeasured)))
+            % (len(scored), len(applicable), ", ".join(unmeasured)))
     return out

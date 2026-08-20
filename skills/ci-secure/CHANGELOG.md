@@ -11,6 +11,33 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **2026-08-20** — **A test suite whose failure cannot fail its job is now a
+  config fact.** `sec.gate.test-failure-fatal` fails when a job that runs the
+  test or lint suite discards the suite's exit code — `|| true`, `|| :`,
+  `|| echo …`, a trailing `exit 0`, `set +e` with no later re-check, or
+  `continue-on-error: true` on the suite's own step or its job. It is the
+  sibling of `sec.required-checks.skippable`: that fact catches a required
+  check that reports green because it was SKIPPED, this one catches a check
+  that RAN and reports green whatever the tests did. Same consequence — the
+  merge gate is decorative — same reader, same fix. Scope is an ALLOWLIST of
+  recognised suite commands, so a `run:` block whose purpose the YAML cannot
+  establish is never failed, and `continue-on-error` on an upload, report, or
+  notification step (codecov, `upload-artifact`, `upload-sarif`, a webhook
+  curl) is exempt by construction — that shape belongs to ci-speedup, and
+  billing one configuration to two engines would be a defect. A repository
+  whose workflows run no suite at all is NOT APPLICABLE, never a pass: it
+  leaves the denominator rather than earning a green for having no tests,
+  which is the shape ci-score settled on for the same question. The facts
+  block therefore gained a `not_applicable` list beside `unmeasured`, and
+  `applicable_count` now excludes a fact that does not apply — an unmeasured
+  fact is a coverage gap and stays in the count; a not-applicable one is not a
+  gap and does not. **The config-fact aggregate this skill hands ci-advisor
+  changes shape**: nine facts instead of eight, so the blended CI Score's
+  security third moves for any repository that has a suite. Census row and
+  full scope statement in `references/security-facts.md`.
+
 ### Changed
 
 - **2026-08-20** — **Build provenance and artifact attestation now have a

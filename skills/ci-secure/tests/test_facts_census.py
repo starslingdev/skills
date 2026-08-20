@@ -53,6 +53,7 @@ _EXPECTED_FACTS = frozenset({
     "sec.checkout.credentials-scoped",
     "sec.required-checks.skippable",
     "sec.fork-approval.effective",
+    "sec.gate.test-failure-fatal",
 })
 
 

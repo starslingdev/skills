@@ -115,7 +115,7 @@ def test_a_well_configured_repo_passes_every_fact(tmp_path):
         required_contexts_fetcher=lambda repo: ([], "branch `main`"),
         fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
     assert out["score"] == 100.0
-    assert out["passed"] == out["scored_count"] == 8
+    assert out["passed"] == out["scored_count"] == 9
     for f in out["facts"]:
         assert f["outcome"] == "pass", f"{f['fact_id']} failed: {f['evidence']}"
 
@@ -128,7 +128,7 @@ def test_the_api_gated_facts_are_the_only_unmeasured_ones_offline(tmp_path):
     out = cf.compute_config_facts(root, files, [])
     assert sorted(out["unmeasured"]) == ["sec.fork-approval.effective",
                                          "sec.required-checks.skippable"]
-    assert out["scored_count"] == 6 and out["applicable_count"] == 8
+    assert out["scored_count"] == 7 and out["applicable_count"] == 9
     assert "COVERAGE GAP" in out["caveat"]
 
 
@@ -533,9 +533,9 @@ def test_codeowners_undecodable_file_is_unmeasured_not_a_fail(tmp_path):
     assert "unmeasured" in f["evidence"], f
     assert "sec.codeowners.workflows" in out["unmeasured"]
     # ...and it is a coverage gap, not a silent pass. `applicable_count` stays
-    # 8 — every fact is still applicable — while only 5 score: this one plus
+    # 9 — every fact is still applicable — while only 6 score: this one plus
     # both API-gated facts, which are unmeasured offline too.
-    assert out["scored_count"] == 5 and out["applicable_count"] == 8
+    assert out["scored_count"] == 6 and out["applicable_count"] == 9
     assert "COVERAGE GAP" in out["caveat"]
 
 
@@ -562,7 +562,7 @@ def test_codeowners_unreadable_directory_is_one_unmeasured_row(tmp_path):
     f = _outcome(out, "sec.codeowners.workflows")
     assert f["outcome"] == "unmeasured", f
     # The OTHER facts still resolved — the failure is contained to this row.
-    assert out["scored_count"] == 5, out
+    assert out["scored_count"] == 6, out
 
 
 # --- F4: the sharpened trigger fact -----------------------------------
@@ -685,7 +685,7 @@ def test_unscannable_workflow_forces_workflow_facts_to_unmeasured(tmp_path):
             )
             assert "broken.yml" in f["evidence"]
     assert out["scored_count"] == 1
-    assert out["applicable_count"] == 8
+    assert out["applicable_count"] == 9
     assert "COVERAGE GAP" in out["caveat"]
     # The ratio must be over RESOLVED facts only. If unmeasured facts leaked
     # into the numerator, 5 unmeasured + 1 pass over scored=1 would read 600 —
@@ -716,9 +716,9 @@ def test_score_is_the_registered_ratio_with_no_weights(tmp_path):
         root, files, [], repo="owner/repo",
         required_contexts_fetcher=lambda repo: ([], "branch `main`"),
         fork_approval_fetcher=lambda repo: ("first_time_contributors", "x"))
-    # bad.yml fails exactly one fact (permissions-declares); 7/8 pass.
-    assert out["passed"] == 7 and out["scored_count"] == 8
-    assert out["score"] == pytest.approx(round(100 * 7 / 8, 1))
+    # bad.yml fails exactly one fact (permissions-declares); 8/9 pass.
+    assert out["passed"] == 8 and out["scored_count"] == 9
+    assert out["score"] == pytest.approx(round(100 * 8 / 9, 1))
     assert out["registered"]
     assert "no weights" in out["constants"]["rule"]
 
@@ -1124,8 +1124,8 @@ def test_a_scan_gap_forces_the_fact_unmeasured(tmp_path):
 
 def test_the_fact_table_carries_both_api_gated_facts(tmp_path):
     out = _facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN}, ["test"])
-    assert out["applicable_count"] == 8
-    assert out["scored_count"] == 8
+    assert out["applicable_count"] == 9
+    assert out["scored_count"] == 9
 
 
 # --- F8: sec.fork-approval.effective -----------------------------------------
@@ -1207,10 +1207,10 @@ def test_a_scan_gap_does_not_unmeasure_the_fork_approval_fact(tmp_path):
     assert _outcome(out, _FORK_FACT)["outcome"] == "pass"
 
 
-def test_the_fact_table_carries_eight_facts(tmp_path):
+def test_the_fact_table_carries_nine_facts(tmp_path):
     out = _fork_facts(tmp_path, "all_external_contributors")
-    assert out["applicable_count"] == 8
-    assert out["scored_count"] == 8
+    assert out["applicable_count"] == 9
+    assert out["scored_count"] == 9
 
 
 # ---------------------------------------------------------------------------
@@ -2013,7 +2013,7 @@ def test_a_branch_protection_fetcher_that_raises_becomes_one_unmeasured_row(
     assert "gh subprocess died" in f["evidence"], f["evidence"]
     assert _FACT in out["unmeasured"]
     # The rest of the table still resolved — the failure is contained.
-    assert out["scored_count"] == 7 and out["applicable_count"] == 8
+    assert out["scored_count"] == 8 and out["applicable_count"] == 9
 
 
 def test_a_fork_approval_fetcher_that_raises_becomes_one_unmeasured_row(
@@ -2031,7 +2031,7 @@ def test_a_fork_approval_fetcher_that_raises_becomes_one_unmeasured_row(
     assert f["outcome"] == "unmeasured", f
     assert "gh subprocess died" in f["evidence"], f["evidence"]
     assert _FORK_FACT in out["unmeasured"]
-    assert out["scored_count"] == 7 and out["applicable_count"] == 8
+    assert out["scored_count"] == 8 and out["applicable_count"] == 9
 
 
 # ---------------------------------------------------------------------------
@@ -3082,3 +3082,206 @@ def test_a_bypass_found_on_a_partially_read_protection_discloses_the_gap(
         _FACT)
     assert f["outcome"] == "fail", f["evidence"]
     assert "read from rulesets only" in f["evidence"], f["evidence"]
+
+
+# ---------------------------------------------------------------------------
+# F9 — a test/lint suite whose failure cannot fail its job.
+#
+# Sibling of `sec.required-checks.skippable`: that fact is "a SKIPPED required
+# check reports green"; this one is "a check that RAN reports green whatever
+# the suite did". Same consequence — the merge gate is decorative — so the
+# tests below pin both directions: every swallow shape fails, and everything
+# the fact deliberately does not claim (uploads, unrecognized commands,
+# expression-valued continue-on-error) stays green.
+# ---------------------------------------------------------------------------
+
+_FATAL = "sec.gate.test-failure-fatal"
+
+
+def _wf(steps: str, job_extra: str = "") -> str:
+    return ("name: ci\non: [pull_request]\npermissions:\n  contents: read\n"
+            "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+            + job_extra + "    steps:\n" + steps)
+
+
+def _fatal(tmp_path, workflows, **kw):
+    root, files = _repo(tmp_path, workflows)
+    return _outcome(cf.compute_config_facts(
+        root, files, kw.pop("scan_incomplete", []), **kw), _FATAL)
+
+
+def test_a_suite_that_can_fail_its_job_passes(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _SAFE_WF})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_or_true_after_the_suite_fails_and_names_file_and_job(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _wf("      - run: pytest -q || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "ci.yml" in f["evidence"], f["evidence"]
+    assert "`test`" in f["evidence"], f["evidence"]
+    assert "|| true" in f["evidence"], f["evidence"]
+
+
+def test_or_colon_after_the_suite_fails(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        '      - run: "npm run lint || :"\n')})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_or_echo_after_the_suite_fails(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        '      - run: go test ./... || echo "tests failed"\n')})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_or_echo_that_still_exits_nonzero_passes(tmp_path):
+    """`|| { echo …; exit 1; }` reports the failure AND fails the job. Reading
+    the `|| echo` prefix alone would red a correct guard."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        '      - run: go test ./... || { echo "tests failed"; exit 1; }\n')})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_trailing_exit_zero_after_the_suite_fails(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          cargo test --all\n          exit 0\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "exit 0" in f["evidence"], f["evidence"]
+
+
+def test_set_plus_e_without_an_exit_code_recheck_fails(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e\n          pytest -q\n"
+        "          echo done\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "set +e" in f["evidence"], f["evidence"]
+
+
+def test_set_plus_e_that_rechecks_the_exit_code_passes(tmp_path):
+    """The legitimate shape: relax `errexit` to capture the status, then
+    re-raise it. Failing this would punish a job that DOES fail."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e\n          pytest -q\n"
+        "          rc=$?\n          echo done\n          exit $rc\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_continue_on_error_on_the_test_step_fails(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: pytest -q\n        continue-on-error: true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "continue-on-error" in f["evidence"], f["evidence"]
+
+
+def test_continue_on_error_on_the_job_running_the_suite_fails(tmp_path):
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: pytest -q\n", job_extra="    continue-on-error: true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_continue_on_error_from_an_expression_is_not_judged(tmp_path):
+    """`continue-on-error: ${{ matrix.experimental }}` is true for some matrix
+    legs and false for others; the YAML cannot say which. Not a literal true,
+    so not a fail — a miss beats a false accusation here."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: pytest -q\n"
+        "        continue-on-error: ${{ matrix.experimental }}\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_continue_on_error_on_an_upload_step_is_not_this_facts_business(
+        tmp_path):
+    """Deliberately EXEMPT: a non-fatal coverage upload, artifact upload, SARIF
+    upload or chat notification is another engine's business, not a swallowed
+    test result. Double-reporting it here would be a defect."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: pytest -q\n"
+        "      - uses: codecov/codecov-action@v4\n"
+        "        continue-on-error: true\n"
+        "      - uses: actions/upload-artifact@v4\n"
+        "        continue-on-error: true\n"
+        "      - uses: github/codeql-action/upload-sarif@v3\n"
+        "        continue-on-error: true\n"
+        "      - run: curl -sf -X POST $SLACK_WEBHOOK || true\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_an_unrecognized_command_is_never_failed(tmp_path):
+    """When the scan cannot tell what a `run:` block does, it does not fail the
+    fact. `./scripts/ci.sh || true` may be swallowing a suite or a cleanup —
+    accusing a repo on a guess is worse than missing one."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: pytest -q\n      - run: ./scripts/ci.sh || true\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_swallowed_utility_line_beside_the_suite_is_not_a_fail(tmp_path):
+    """`grep … || true` in the same block as the suite swallows the grep, not
+    the tests. Only a line that RUNS the suite counts."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          grep -c TODO src/*.py || true\n"
+        "          pytest -q\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_installing_a_test_runner_is_not_running_one(tmp_path):
+    """`pip install pytest || true` tolerates a failed install; it swallows no
+    test result. Reading the runner's NAME as a run would fail the fact on a
+    repository whose tests are perfectly fatal."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          pip install pytest || true\n"
+        "          cat tox.ini || true\n          pytest -q\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_repo_with_no_suite_at_all_is_not_applicable_not_a_pass(tmp_path):
+    """The applicability gate, following the shape ci-score's test-sharding
+    check uses: a repo whose workflows run no test, lint or build-verification
+    suite has nothing to swallow, so the fact leaves the denominator rather
+    than handing out a free green."""
+    root, files = _repo(tmp_path, {"ci.yml": _wf("      - run: echo hello\n")})
+    out = cf.compute_config_facts(root, files, [])
+    f = _outcome(out, _FATAL)
+    assert f["outcome"] == "not_applicable", f["evidence"]
+    # The evidence says WHY it does not apply. "no step discards its exit
+    # status" would be true and would read as a clean bill for a suite that
+    # does not exist.
+    assert "no workflow step runs a test" in f["evidence"], f["evidence"]
+    assert _FATAL in out["not_applicable"]
+    assert _FATAL not in out["unmeasured"]
+
+
+def test_not_applicable_leaves_the_applicable_count(tmp_path):
+    """`not_applicable` is OUT of the denominator — the same treatment
+    ci-score gives an n/a check, and the opposite of `unmeasured`, which stays
+    in as a named coverage gap."""
+    root, files = _repo(tmp_path, {"ci.yml": _wf("      - run: echo hello\n")})
+    out = cf.compute_config_facts(root, files, [])
+    # Eight other facts: six measurable offline, two API-gated and unmeasured.
+    assert out["applicable_count"] == 8
+    assert out["scored_count"] == 6
+
+
+def test_a_scan_gap_unmeasures_the_fatal_fact(tmp_path):
+    """A universal claim over every workflow: an unreadable file could be the
+    one holding the swallow, so the fact is unmeasured, never a pass."""
+    f = _fatal(tmp_path, {"ci.yml": _SAFE_WF},
+               scan_incomplete=[{"workflow_file": "broken.yml"}])
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_a_not_applicable_fact_still_renders_a_row(tmp_path):
+    """ARTIFACT-LEVEL: a row that quietly vanishes reads as a pass. The n/a
+    outcome must reach the page with a mark of its own, distinguishable from
+    both a green and a coverage gap."""
+    root, files = _repo(tmp_path, {"ci.yml": _wf("      - run: echo hello\n")})
+    md = _load_report().render({
+        "findings": [], "repo": "x/y", "scanned_workflows": 1,
+        "security_score": cf.compute_config_facts(root, files, []),
+    })
+    row = next((ln for ln in md.splitlines() if _FATAL in ln
+                or "swallows its own exit code" in ln), None)
+    assert row is not None, "the not-applicable fact rendered no row at all"
+    assert "n/a" in row, row
+    assert "pass" not in row and "unmeasured" not in row, row
