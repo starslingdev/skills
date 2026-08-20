@@ -99,6 +99,18 @@ def test_llm_gap_fill_rail_is_not_doubled() -> None:
     assert twice.count(_RAIL_HEADING) == 1
 
 
+def test_llm_gap_fill_partial_rail_does_not_suppress_the_canonical_block() -> None:
+    """A model-authored body that merely ECHOES the rail's heading must not
+    suppress the renderer-owned block. `gap-fill.md` names the rail to the model
+    writing that body, so an echoed heading is a realistic body; if the heading
+    alone counted as "already carries it", the hand-off would ship a rail
+    naming none of the forbidden edits."""
+    out = bp._llm_agent_prompt(
+        "The install step re-resolves the lockfile every run.\n\n"
+        + _RAIL_HEADING + "\n- keep an eye on coverage.")
+    _assert_rail(out, "gap-fill prompt with a partial model-authored rail")
+
+
 def test_hygiene_prompt_carries_the_rail() -> None:
     members = [{"pattern": "OPT24", "title": "Long test job without sharding",
                 "workflow_file": ".github/workflows/ci.yml", "job": "test",

@@ -3108,9 +3108,15 @@ def _llm_agent_prompt(body: str) -> str:
                 "fix - investigate it in the repo and apply a safe change.\n\n" + body)
     # The no-weakening rail is the renderer's too, for the same reason the disclaimer
     # is: the gap-fill body is LLM-authored, so the one rule the hand-off cannot afford
-    # to have paraphrased away is appended here, not left to the author. Idempotent.
-    if _NO_WEAKENING_LINES[0] not in body:
-        body = body.rstrip("\n") + "\n\n" + "\n".join(_NO_WEAKENING_LINES)
+    # to have paraphrased away is appended here, not left to the author. Idempotent on
+    # the WHOLE block, not on its heading: `references/gap-fill.md` names the rail to
+    # the model writing this body, so an echoed heading over a paraphrased (or absent)
+    # list of forbidden edits is a realistic body — and keying on the heading alone
+    # would let exactly that suppress the canonical block, shipping a rail that forbids
+    # nothing.
+    _rail = "\n".join(_NO_WEAKENING_LINES)
+    if _rail not in body:
+        body = body.rstrip("\n") + "\n\n" + _rail
     # The LLM-authored body is model output grounded in the repo log — it can echo a repo
     # name / log line carrying a ``` run. Fence-safe it PER-LINE (its own line breaks survive)
     # so a model-emitted stray fence can't close this ```text block.
