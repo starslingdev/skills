@@ -417,6 +417,17 @@ def check_rca_hands_off_never_prescribes(report: str) -> Check:
                      "no-prescription disclaimer(s) - a prompt builder in blocking_path.py is "
                      "missing/doubling its disclaimer (renderer bug; fix the builder, do NOT "
                      "hand-edit the report or the analysis to balance the count)")
+    rails = report.count("NEVER BUY SPEED BY CHECKING LESS")
+    if prompts and rails != prompts:
+        # Same contract as the disclaimer above, and for a stronger reason: the prompt is
+        # the WHOLE hand-off, and the cheapest way to satisfy "make this faster" is to make
+        # it verify less. Counting at the ARTIFACT level (not per-builder) is what covers a
+        # prompt path added later: the unit guard in tests/test_no_weakening_rail.py only
+        # knows the builders that exist today, so a sixth one would ship rail-free and green.
+        return Check(name, False, f"{prompts} agent prompt(s) but {rails} no-weakening "
+                     "rail(s) - a prompt builder in blocking_path.py is missing/doubling "
+                     "the rail (renderer bug; fix the builder, do NOT hand-edit the report "
+                     "or the analysis to balance the count)")
     dangling = [f"`{wf}` ▸ {check}"
                 for wf, check, body in _pole_header_sections(report)
                 if _CROSS_RUN_REF_RE.search(body)

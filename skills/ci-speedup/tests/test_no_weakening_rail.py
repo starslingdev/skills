@@ -50,7 +50,7 @@ _CARVE_OUT_MARKERS = (
     "cannot fail on",        # the principle: skipping what cannot catch anything
     "paths-ignore",          # the catalog's OPT32 recipe
     "job-level `if:`",       # the catalog's OPT33 recipe, the documented-safe shape
-    "verified by the full set",  # the line the carve-out must not cross
+    "could fail",            # the line the carve-out must not cross
 )
 
 _RAIL_HEADING = "NEVER BUY SPEED BY CHECKING LESS"

@@ -152,7 +152,10 @@ unversioned and updates by reinstall from `main`.
   `tests/test_no_weakening_rail.py` pins the rail on all five paths — its content,
   its carve-outs, and its polarity, so a rail keeping every noun while inverting
   "do not" into "you may" fails — and pins the matching eval case
-  (`evals/evals.json` #8); the two committed worked examples were re-rendered. (#72)
+  (`evals/evals.json` #8), and `tests/verify_report.py` now counts one rail per
+  rendered prompt exactly as it already counts the disclaimer — so a prompt path
+  added later fails a real audit rather than shipping rail-free and green. The two
+  committed worked examples were re-rendered. (#72)
 
 ### Changed
 

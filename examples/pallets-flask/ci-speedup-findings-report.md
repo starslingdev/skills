@@ -127,9 +127,9 @@ NEVER BUY SPEED BY CHECKING LESS
   less, and several catalog fixes work exactly that way: a `paths:` /
   `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
   selection. Those stay in bounds as long as the commit that merges is
-  still verified by the full set - follow the guardrail on the catalog
-  recipe where this prompt links one, because that is the half it exists
-  to protect.
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
@@ -202,9 +202,9 @@ NEVER BUY SPEED BY CHECKING LESS
   less, and several catalog fixes work exactly that way: a `paths:` /
   `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
   selection. Those stay in bounds as long as the commit that merges is
-  still verified by the full set - follow the guardrail on the catalog
-  recipe where this prompt links one, because that is the half it exists
-  to protect.
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
@@ -276,9 +276,9 @@ NEVER BUY SPEED BY CHECKING LESS
   less, and several catalog fixes work exactly that way: a `paths:` /
   `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
   selection. Those stay in bounds as long as the commit that merges is
-  still verified by the full set - follow the guardrail on the catalog
-  recipe where this prompt links one, because that is the half it exists
-  to protect.
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
@@ -351,9 +351,9 @@ NEVER BUY SPEED BY CHECKING LESS
   less, and several catalog fixes work exactly that way: a `paths:` /
   `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
   selection. Those stay in bounds as long as the commit that merges is
-  still verified by the full set - follow the guardrail on the catalog
-  recipe where this prompt links one, because that is the half it exists
-  to protect.
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
@@ -424,9 +424,9 @@ NEVER BUY SPEED BY CHECKING LESS
   less, and several catalog fixes work exactly that way: a `paths:` /
   `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
   selection. Those stay in bounds as long as the commit that merges is
-  still verified by the full set - follow the guardrail on the catalog
-  recipe where this prompt links one, because that is the half it exists
-  to protect.
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
@@ -515,9 +515,9 @@ NEVER BUY SPEED BY CHECKING LESS
   less, and several catalog fixes work exactly that way: a `paths:` /
   `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
   selection. Those stay in bounds as long as the commit that merges is
-  still verified by the full set - follow the guardrail on the catalog
-  recipe where this prompt links one, because that is the half it exists
-  to protect.
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
@@ -584,9 +584,9 @@ NEVER BUY SPEED BY CHECKING LESS
   less, and several catalog fixes work exactly that way: a `paths:` /
   `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
   selection. Those stay in bounds as long as the commit that merges is
-  still verified by the full set - follow the guardrail on the catalog
-  recipe where this prompt links one, because that is the half it exists
-  to protect.
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
@@ -645,9 +645,9 @@ NEVER BUY SPEED BY CHECKING LESS
   less, and several catalog fixes work exactly that way: a `paths:` /
   `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
   selection. Those stay in bounds as long as the commit that merges is
-  still verified by the full set - follow the guardrail on the catalog
-  recipe where this prompt links one, because that is the half it exists
-  to protect.
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
@@ -670,7 +670,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `4c2724e-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (OPT1-OPT69 catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `0172966-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (OPT1-OPT69 catalog) |
 | gh runs/jobs API (timestamps) | 47 runs / 152 jobs sampled | Critical-path + per-step P50 |
 | job logs | 1 job log(s) sampled | Step internals + cross-run magnitude (deeper levels) |
 | workflow YAML | 5 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |
