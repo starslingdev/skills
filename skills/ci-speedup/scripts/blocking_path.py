@@ -3116,19 +3116,25 @@ def _strip_rail_echo(body: str) -> str:
     it (`**…**`, `## …`, a stray trailing space), because the guarantee this buys is
     textual: once this returns, no line of the body holds the heading, so the block
     the renderer appends is the only one in the prompt — which is exactly what
-    `verify_report` counts. The lines an echo leads (blank, bullet, or indented
-    continuation) go with it; the first line that is none of those ends the excision,
-    so RCA prose written after a mid-body rail survives.
+    `verify_report` counts.
+
+    What travels with the heading is ONLY the rail's own lines (matched ignoring
+    line endings and trailing space, which is how a reproduced rail misses an exact
+    comparison) plus blanks. A bullet the model wrote itself is not the rail and
+    stays: the body is the analysis the agent works from, and a de-duplication that
+    silently ate the cause, the evidence or the file to look at would buy the rail
+    count at the price of the hand-off. A paraphrase left standing is harmless —
+    the canonical rail follows it.
     """
     lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    rail_body = {line.strip() for line in _NO_WEAKENING_LINES[1:]}
     kept: list[str] = []
     i = 0
     while i < len(lines):
         if _NO_WEAKENING_LINES[0] in lines[i]:
             i += 1
             while i < len(lines) and (not lines[i].strip()
-                                      or lines[i].lstrip().startswith("-")
-                                      or lines[i].startswith("  ")):
+                                      or lines[i].strip() in rail_body):
                 i += 1
             continue
         kept.append(lines[i])

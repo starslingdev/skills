@@ -194,3 +194,26 @@ def test_llm_gap_fill_emits_exactly_one_rail_heading() -> None:
         _assert_rail(out, f"gap-fill prompt ({where})")
         # The RCA the model actually authored survives the de-duplication.
         assert "re-resolves the lockfile" in out, f"{where}: RCA body was lost"
+
+
+def test_llm_gap_fill_rail_de_duplication_keeps_the_rca() -> None:
+    """De-duplicating the rail must never cost the hand-off its analysis.
+
+    A model that echoes the rail's heading mid-body and then carries on with
+    its root-cause bullets still owns everything after the echo: dropping those
+    lines would leave a prompt that passes every rail count while silently
+    missing the cause, the evidence and the remediation the agent needs. Only
+    the rail's OWN lines travel with the heading."""
+    body = ("The install step re-resolves the lockfile every run.\n\n"
+            + _RAIL_HEADING + "\n- keep an eye on coverage.\n\n"
+            "- Evidence: `npm ci` re-resolves for 42s in every matrix leg.\n"
+            "- Look at `.github/workflows/ci.yml`, the `install` step.\n"
+            "  The lockfile is present, so the resolve is redundant.")
+    out = bp._llm_agent_prompt(body)
+    assert out.count(_RAIL_HEADING) == 1, "rail heading doubled"
+    for kept in ("re-resolves the lockfile every run",
+                 "Evidence: `npm ci` re-resolves for 42s",
+                 "Look at `.github/workflows/ci.yml`",
+                 "The lockfile is present"):
+        assert kept in out, f"RCA line dropped by rail de-duplication: {kept!r}"
+    _assert_rail(out, "gap-fill prompt with a mid-body rail echo")

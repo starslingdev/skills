@@ -155,8 +155,10 @@ unversioned and updates by reinstall from `main`.
   (`evals/evals.json` #8), and `tests/verify_report.py` now counts one rail per
   rendered prompt exactly as it already counts the disclaimer — so a prompt path
   added later fails a real audit rather than shipping rail-free and green. On the
-  gap-fill path the renderer excises whatever rail-shaped text the model wrote
-  before appending the canonical block, so a body that echoes the rail's heading
+  gap-fill path the renderer excises the model's own copy of the rail — its
+  heading line and the rail's own lines only, never a bullet the model wrote, so
+  the analysis the agent works from survives intact — before appending the
+  canonical block, so a body that echoes the rail's heading
   over a paraphrased list — or reproduces the rail with CRLF endings or trailing
   spaces, which no exact-substring check recognises — yields exactly one rail
   instead of two, which would have failed that same one-rail-per-prompt audit with
