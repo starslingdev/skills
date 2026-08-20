@@ -177,6 +177,32 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-08-16** — **The verifier's `_fence_safe` twin masks credentials the
+  same way the renderer does, so a credential-bearing evidence line stops
+  tripping a bogus `check_gap_fill_evidence_grounded` failure** (issue #16,
+  continuing the #12/#15 masking lineage). Since #12 the renderer redacts
+  credential-shaped strings inside `_fence_safe`, so a quoted gap-fill evidence
+  line reaches the report as `[REDACTED:<kind>]` while the captured job log the
+  grounding gate compares it against still holds the raw token. The verifier's
+  free-hand `_fence_safe` twin had never been updated, so the two sides
+  normalized the same line differently and the substring compare could never
+  match — a correct report FAILed. `verify_report.py` now carries a byte-for-byte
+  copy of `_SECRET_PATTERNS`, `_ASSIGN_SECRET_RE`, `_ASSIGN_VAR_REF_RE` and
+  `_redact_secrets`, wired into both `_fence_safe` and `_flatten_cell`, and
+  `test_s1a_fence_safe_stays_coupled_to_the_engine` gained credential-shaped
+  battery inputs plus pattern-table equality asserts — the drift guard passed
+  before only because nothing in its battery had a credential shape. The
+  `_flatten_cell` twin was doubly stale and, unlike `_fence_safe`, feeds a
+  string-EXACT comparator (`check_tier2_source_block`): it also lacked the
+  renderer's `>=3`-backtick defusal, so a workflow path carrying either shape
+  false-FAILed the Tier-2 source-line compare. Both transforms are now applied
+  in the renderer's order and a new
+  `test_s1a_flatten_cell_stays_coupled_to_the_engine` pins that twin too.
+  Accepted residual: because both sides mask before comparing, a fabrication
+  confined ENTIRELY to a masked span (a different token value behind the same
+  `[REDACTED:<kind>]`) now grounds successfully. That is unavoidable while the
+  renderer masks first, and the masked value was never the diagnostic — a
+  fabrication anywhere in the surrounding words still FAILs.
 - **2026-08-15** — **Three detection bypasses in the untrusted-log marker scan,
   and a verifier that died on a broken sibling** (issue #29 follow-up; found by
   `/code-review` of PR #43). (1) `_run_start` required the delimiter run to be

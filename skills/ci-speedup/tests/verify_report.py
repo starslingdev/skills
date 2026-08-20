@@ -2185,22 +2185,63 @@ def _headline_slowest_label(report: str) -> str | None:
     return None
 
 
-# Verbatim twin of `blocking_path._fence_safe` (+ `_defuse_backtick_runs`). The renderer
-# fence-safes every NAME through `_clean_label`, so `_strip_scope` (the comparator's identity
-# basis) must apply the IDENTICAL transform or a hostile name would normalize differently on the
-# two sides and the on-path / dropped-check / floor comparators would false-positive/negative.
+# Verbatim twin of `blocking_path._fence_safe` (+ `_defuse_backtick_runs` AND the credential
+# masking it applies — `_SECRET_PATTERNS` / `_ASSIGN_SECRET_RE` / `_ASSIGN_VAR_REF_RE` /
+# `_redact_secrets`, copied byte-for-byte from `blocking_path.py`). The renderer fence-safes every
+# NAME through `_clean_label`, so `_strip_scope` (the comparator's identity basis) must apply the
+# IDENTICAL transform or a hostile name would normalize differently on the two sides and the
+# on-path / dropped-check / floor comparators would false-positive/negative. Redaction is part of
+# that twin (#16): the renderer masks a credential-shaped evidence line BEFORE it reaches the
+# report, so a verifier that compared the report's masked line against an UNMASKED captured log
+# line would fail `check_gap_fill_evidence_grounded` on a report that is in fact correct.
+# `test_s1a_fence_safe_stays_coupled_to_the_engine` is the drift guard on all of it.
 _FENCE_RUN_RE = re.compile(r"`{3,}")
 _FENCE_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_SECRET_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"
+                                r"|\bgithub_pat_[A-Za-z0-9_]{20,}")),
+    ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("slack-token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
+    ("google-api-key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}")),
+    ("private-key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("npm-token", re.compile(r"\bnpm_[A-Za-z0-9]{30,}")),
+    ("docker-token", re.compile(r"\bdckr_pat_[A-Za-z0-9_-]{20,}")),
+    # OpenAI / Anthropic style. Anchored on the `sk-` prefix AND a >=20-char alphanumeric
+    # tail, so a hyphenated step name can't reach it.
+    ("llm-api-key", re.compile(r"\bsk-(?:proj-|ant-[a-z0-9]+-|live-|test-)?[A-Za-z0-9]{20,}")),
+)
+_ASSIGN_SECRET_RE = re.compile(
+    r"(?i)\b(?:[A-Za-z0-9]+[._-])*"
+    r"(?:token|secret|password|passwd|api[_-]?key|authorization|bearer)\b\s*[=:]\s*"
+    r"(?:(?:bearer|basic|token)\s+)?"
+    r"(?!\[REDACTED:)(\S{8,})")
+_ASSIGN_VAR_REF_RE = re.compile(r"^(?:\$\{\{?[^}]*\}?\}|\$[A-Za-z_][A-Za-z0-9_]*|%[^%]+%)")
 
 
 def _defuse_backtick_runs(s: str) -> str:
     return _FENCE_RUN_RE.sub(lambda m: "'" * len(m.group(0)), s)
 
 
+def _redact_secrets(s: str) -> str:
+    for kind, pat in _SECRET_PATTERNS:
+        s = pat.sub(f"[REDACTED:{kind}]", s)
+
+    def _assign(m: "re.Match[str]") -> str:
+        val = m.group(1)
+        if not (len(val) >= 16 or any(c.isdigit() for c in val)):
+            return m.group(0)          # `password: changeme` — prose, not a credential
+        if _ASSIGN_VAR_REF_RE.match(val):
+            return m.group(0)          # `TOKEN: ${{secrets.X}}` — a reference, not a value
+        return m.group(0)[: m.start(1) - m.start(0)] + "[REDACTED:credential]"
+
+    return _ASSIGN_SECRET_RE.sub(_assign, s)
+
+
 def _fence_safe(s: object) -> str:
     s = _FENCE_CTRL_RE.sub("", str(s))
     s = re.sub(r"[\r\n]+", " ", s)
-    return _defuse_backtick_runs(s)
+    return _redact_secrets(_defuse_backtick_runs(s))
 
 
 def _strip_scope(s: str) -> str:
@@ -4723,7 +4764,14 @@ def _fmt_tier2_saved_min(value: float | None) -> str:
 
 
 def _flatten_cell(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text)).replace("|", "\\|").strip()
+    # Twin of `blocking_path._flatten_cell` — and a LOAD-BEARING one: the string this builds
+    # via `_tier2_expected_source_line` is compared EXACTLY against the rendered Source-block
+    # line. So it must apply the renderer's full transform, backtick defusal (which this copy
+    # was missing) as well as the #16 redaction, or a workflow path carrying either shape
+    # normalizes differently on the two sides and the Tier-2 source-line comparator
+    # false-FAILs. `test_s1a_flatten_cell_stays_coupled_to_the_engine` is the drift guard.
+    return _redact_secrets(_defuse_backtick_runs(
+        re.sub(r"\s+", " ", str(text)).replace("|", "\\|").strip()))
 
 
 def _strict_job_p50(job: str, job_p50: dict) -> float | None:

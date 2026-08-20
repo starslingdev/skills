@@ -1633,6 +1633,50 @@ def test_gap_fill_evidence_grounded_fails_on_a_fabricated_line(tmp_path: Path):
     assert _tag_for(rep, _GROUND, tmp_path, findings=_gapfill_findings(str(tmp_path))) == "FAIL"
 
 
+# Credential fixtures are ASSEMBLED at runtime, never written as literals: GitHub push
+# protection rejects a push whose files CONTAIN a token-shaped string (fake or not), and
+# adjacent string literals would be constant-folded back into the very shape we're hiding.
+# Same trick, and same rationale, as `test_secret_redaction.py`'s `_fixture()`.
+def _fixture(*parts: str) -> str:
+    return "".join(parts)
+
+
+_FAKE_GHP_LOG = _fixture("ghp_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8")
+# The captured log carries the token IN THE CLEAR (an unregistered token GitHub didn't mask);
+# the rendered report carries the renderer's masked form. Both sides must transform alike.
+_GAPFILL_SECRET_LOG = (
+    "npm install running in CI\n"
+    f"fatal: could not read Password for 'https://{_FAKE_GHP_LOG}@github.com'\n"
+    "  added 1200 packages in 3m 02s\n"
+)
+_GAPFILL_SECRET_EVIDENCE = (
+    "fatal: could not read Password for "
+    "'https://[REDACTED:github-token]@github.com'")
+
+
+def test_gap_fill_evidence_grounded_passes_on_a_redacted_credential_line(tmp_path: Path):
+    # #16 (the #12/#15 lineage): the renderer masks a credential-shaped evidence line before it
+    # reaches the report, so the report's line is `[REDACTED:github-token]` while the captured log
+    # still holds the raw token. Before the verifier's `_fence_safe` twin gained the same redaction
+    # the substring compare could never match and this CORRECT report FAILed. Now both sides mask
+    # identically → PASS.
+    (tmp_path / "build.log").write_text(_GAPFILL_SECRET_LOG, encoding="utf-8")
+    rep = _with_gapfill_block(
+        "  added 1200 packages in 3m 02s\n"
+        f"{_GAPFILL_SECRET_EVIDENCE}")
+    assert _tag_for(rep, _GROUND, tmp_path, findings=_gapfill_findings(str(tmp_path))) == "PASS"
+
+
+def test_gap_fill_evidence_grounded_still_fails_a_fabricated_credential_line(tmp_path: Path):
+    # The companion: redaction must not turn the gate into a rubber stamp. A quoted line that is
+    # BOTH credential-bearing AND fabricated (no such line in the log — different host, different
+    # message) must still FAIL after both sides are masked.
+    (tmp_path / "build.log").write_text(_GAPFILL_SECRET_LOG, encoding="utf-8")
+    rep = _with_gapfill_block(
+        "  added 1200 packages in 3m 02s\n"
+        "fatal: could not read Password for "
+        "'https://[REDACTED:github-token]@evil.example.com'")
+    assert _tag_for(rep, _GROUND, tmp_path, findings=_gapfill_findings(str(tmp_path))) == "FAIL"
 def test_gap_fill_evidence_grounded_passes_on_a_neutralized_forged_marker(tmp_path: Path):
     # issue #29 regression: a raw log line the agent legitimately quotes as evidence can itself
     # contain marker-shaped text (an attacker-planted forgery in the log). The RENDERED evidence
@@ -2903,19 +2947,69 @@ def test_s1a_fence_safe_stays_coupled_to_the_engine():
         "the >=3-backtick run regex drifted between blocking_path and verify_report"
     assert bp._FENCE_CTRL_RE.pattern == vr._FENCE_CTRL_RE.pattern, \
         "the control-char regex drifted between blocking_path and verify_report"
+    # Redaction is part of the same twin (#16) — `_fence_safe` masks before it returns, so the
+    # verifier's copy of the pattern TABLES has to stay byte-equal too, or the two sides mask a
+    # credential-bearing evidence line differently and the grounding compare goes wrong again.
+    assert ([(k, p.pattern) for k, p in bp._SECRET_PATTERNS]
+            == [(k, p.pattern) for k, p in vr._SECRET_PATTERNS]), \
+        "the _SECRET_PATTERNS table drifted between blocking_path and verify_report"
+    assert bp._ASSIGN_SECRET_RE.pattern == vr._ASSIGN_SECRET_RE.pattern, \
+        "the assignment-secret regex drifted between blocking_path and verify_report"
+    assert bp._ASSIGN_VAR_REF_RE.pattern == vr._ASSIGN_VAR_REF_RE.pattern, \
+        "the variable-reference allowlist regex drifted between blocking_path and verify_report"
     battery = [
         "", "build", "Integration Test (3.13)", "npm run build",
         "```", "``", "`", "a```b", "``````", "a`b`c", "```\n```", "``\n`", "`\n``",
         "line1\nline2", "line1\r\nline2", "a\n\n\nb", "tab\tindent", "trailing ",
         "\x00nul", "\x07bel", "\x1besc", "\x7fdel", "\x85nel", "\x9fc1", "\x0bvt", "\x0cff",
         "mix\x00`` `\n```end", "~~~ tilde ~~~", "smart‘quoteˋ", "@scope/name",
+        # Credential-shaped inputs (assembled, never literal — see `_fixture` above). Without
+        # these the battery could not see the redaction half of the twin: the two `_fence_safe`s
+        # genuinely disagreed on exactly this class while every case above still matched.
+        f"fatal: could not read Password for 'https://{_FAKE_GHP_LOG}@github.com'",
+        _fixture("AKIA", "IOSFODNN7EXAMPLE") + " used for the cache bucket",
+        "TOKEN=" + _fixture("a1b2c3d4", "e5f60718"),          # opaque assignment value
+        # The `_assign` closure's own thresholds, each arm pinned SEPARATELY — the digit arm
+        # short-circuits the length arm, so without a no-digit >=16 value a retuned length
+        # bound would slip past a battery that only carries digit-bearing values.
+        "TOKEN=abcdefghijklmnop",                             # 16 chars, NO digit → masked
+        "TOKEN=abcdefghijklmno",                              # 15 chars, no digit → NOT masked
+        "TOKEN: ${{ secrets.NPM_TOKEN }}",                    # a REFERENCE — must stay unmasked
+        "TOKEN=${NPM_TOKEN}", "TOKEN=$NPM_TOKEN", "TOKEN=%NPM_TOKEN%",   # the other ref forms
+        "password: changeme",                                 # prose — must stay unmasked
+        "already masked TOKEN=[REDACTED:credential] here",    # idempotency
     ]
     for s in battery:
         assert bp._defuse_backtick_runs(s) == vr._defuse_backtick_runs(s), \
             f"_defuse_backtick_runs diverged on {s!r}"
+        assert bp._redact_secrets(s) == vr._redact_secrets(s), \
+            f"_redact_secrets diverged between the engine and the verifier on {s!r}"
         assert bp._fence_safe(s) == vr._fence_safe(s), \
             f"_fence_safe diverged between the engine and the verifier on {s!r} — re-sync the " \
             "verify_report twin (render side and comparator side must normalize identically)"
+
+
+def test_s1a_flatten_cell_stays_coupled_to_the_engine():
+    # `_flatten_cell` is the OTHER free-hand twin, and unlike `_fence_safe` it feeds a
+    # string-EXACT comparator: `_tier2_expected_source_line` builds the expected Source-block
+    # line through it and `check_tier2_source_block` compares that byte-for-byte against the
+    # rendered line. The verifier's copy silently lacked BOTH the renderer's backtick defusal
+    # and its #16 redaction — the same drift class `test_s1a` above pins for `_fence_safe`, on a
+    # function nothing was pinning at all. Same two-way pin: adversarial battery, both sides.
+    bp = _load_blocking_path()
+    vr = _load_verify_report()
+    battery = [
+        "", ".github/workflows/ci.yml", "a | b", "multi\nline\ncell", "  padded  ",
+        "```", "a```b", "``", "tab\there",
+        f"env GH_TOKEN={_FAKE_GHP_LOG} exported",
+        "```" + _FAKE_GHP_LOG + "```",                    # BOTH shapes in one cell
+        "TOKEN=" + _fixture("a1b2c3d4", "e5f60718"),
+        "TOKEN: ${{ secrets.NPM_TOKEN }}", "password: changeme",
+    ]
+    mism = [s for s in battery if bp._flatten_cell(s) != vr._flatten_cell(s)]
+    assert not mism, (
+        f"_flatten_cell diverged between the engine and the verifier on {mism!r} — re-sync the "
+        "verify_report twin (the Tier-2 source-line comparator is an EXACT string compare)")
 
 
 def test_s1b_check_requires_a_nonempty_detail():
