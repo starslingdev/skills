@@ -152,6 +152,41 @@ while it remains a critical finding by membership).
 The removed patterns are not shipped with the skill; re-admitting any entry
 means passing this document's three tests and updating the census.
 
+### Build provenance and artifact attestation — considered, excluded
+
+**Build provenance / artifact attestation** — `actions/attest-build-provenance`,
+cosign / sigstore signing, SLSA levels — was never a catalog pattern, and is
+recorded here anyway: it is the practice a reader is most likely to expect
+beside these ten, so leaving it unmentioned reads as an oversight rather than
+as a decision. Against the three tests:
+
+1. **Outsider-chain test — fails, and this is the decisive one.** Attestation
+   does not sit between an outsider and a compromise of *this* pipeline. It
+   changes nothing an attacker can do to the workflows in this repo: the fork
+   PR still runs, the poisoned cache is still restored, the interpolated title
+   still reaches the shell. What it adds is a signed statement that the
+   **consumers** of what CI emits can verify downstream — a different party,
+   defending a different chain (a substituted or forged artifact somewhere
+   between this repo and them). That is the same boundary that leaves code
+   scanning, dependency scanning and secret scanning outside the skill: each is
+   a control over what CI produces or ingests, not a link in an outsider →
+   this-pipeline chain.
+2. **Incident test — not reached.** All three tests are required, so test 1
+   already settles the verdict; and the incidents the practice answers are
+   consumer-side substitutions, downstream of the pipeline this skill scans.
+3. **Same-day-fix test — fails.** "Attest your builds" is a program, not an
+   edit: it needs a decision about which artifacts count as releases, an
+   identity to attest to, and — the load-bearing half — a verifier on the
+   consuming side. Attestations nobody verifies move no one's security posture,
+   and the consumer is usually not the maintainer reading the finding.
+
+**Verdict: excluded.** A maintainer whose repo is clean against the ten is not
+"attestation-deficient", and saying so would be exactly the unactionable noise
+the descope removed. If ci-secure ever grows a second axis for *what CI ships to
+others*, attestation belongs at the top of it; it does not belong among the ten.
+It is not a catalog pattern, carries no pattern id, and does not change the
+counts the census checks.
+
 ## What "critical" means here
 
 **Criticality is membership in this list.** The catalog's `severity` field

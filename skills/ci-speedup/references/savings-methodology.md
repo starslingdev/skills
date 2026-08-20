@@ -6,6 +6,12 @@ Every finding is sized on **two axes**: a **runner-minute axis** (billing/cost
 two different things; a finding can be large on one and zero (or negative) on
 the other.
 
+Those two axes are the whole denomination: **runner minutes and wall-clock
+seconds**. **Storage is deliberately out of scope** — artifact and cache storage
+is a separate line on the GitHub bill, governed by `retention-days` and cache
+eviction rather than by how long a job runs, so no finding here is sized in
+gigabytes and no saving claimed here reduces a storage charge.
+
 The report **ranks the findings table and drives the headline** on the
 **wall-clock axis** (developer wait — see `wall-clock-methodology.md` §1); the
 runner-minute axis is computed per finding. Measured runner-minute findings with
