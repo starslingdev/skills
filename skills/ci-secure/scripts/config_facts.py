@@ -645,6 +645,19 @@ _RESTORES_ERREXIT = re.compile(r"^set\s+-[a-z]*e[a-z]*\b")
 _SEGMENT_SPLIT = re.compile(r"\|\||&&|[;|]")
 
 
+# `echo "exit code was $?"` reports the status; it does not re-raise it.
+# Counting a mention as a rescue certifies a job that still exits zero, so a
+# `$?` that appears only inside a reporting command does not count.
+_REPORTS_ONLY = re.compile(r"^(?:echo|printf)\b")
+
+
+def _reraises_status(text: str) -> bool:
+    """Whether any COMMAND in this text re-raises a failure."""
+    return any(_RERAISES_STATUS.search(seg)
+               for seg in _SEGMENT_SPLIT.split(text)
+               if not _REPORTS_ONLY.match(_command_head(seg)))
+
+
 def _runs_verification_suite(line: str) -> bool:
     """True when one COMMAND on this line runs a suite.
 
@@ -715,6 +728,19 @@ def _exit_zero_can_swallow(step: dict, job: dict, doc: dict) -> bool:
     return "${{" not in text and "windows" in text.lower()
 
 
+def _restored_before_the_suite_on_one_line(line: str) -> bool:
+    """`set -e` sits between the `set +e` and the suite, all on one line."""
+    segments = _SEGMENT_SPLIT.split(line)
+    suite_at = next(
+        (k for k, seg in enumerate(segments)
+         if _VERIFICATION_RE.match(_command_head(seg))
+         and not _MENTIONS_BUT_DOES_NOT_RUN.search(seg)), None)
+    if suite_at is None:
+        return False
+    return any(_RESTORES_ERREXIT.match(seg.strip())
+               for seg in segments[:suite_at])
+
+
 def _swallow_reason(run: str, exit_zero_live: bool = True) -> str | None:
     """How this block swallows its suite's exit code, or None if it does not.
 
@@ -732,7 +758,7 @@ def _swallow_reason(run: str, exit_zero_live: bool = True) -> str | None:
         return None
 
     def rescued_from(index: int) -> bool:
-        return any(_RERAISES_STATUS.search(ln) for ln in code[index:])
+        return any(_reraises_status(ln) for ln in code[index:])
 
     for i in suite_at:
         line = code[i]
@@ -747,7 +773,7 @@ def _swallow_reason(run: str, exit_zero_live: bool = True) -> str | None:
             shown = shown or re.sub(r"\s+", " ", match.group(0).strip())
             # The rest of the SAME line counts too: `… || { echo …; exit 1; }`
             # reports the failure and still fails the job.
-            if _RERAISES_STATUS.search(line[match.end():]):
+            if _reraises_status(line[match.end():]):
                 continue
             if rescued_from(i + 1):
                 continue
@@ -776,7 +802,14 @@ def _swallow_reason(run: str, exit_zero_live: bool = True) -> str | None:
         # A rescue on that shared line counts too — `set +e; pytest; rc=$?;
         # exit $rc` re-raises the status it captured — so the same-line
         # remainder is searched before the lines below it.
-        if not after or _RERAISES_STATUS.search(line) or rescued_from(i + 1):
+        if not after or _reraises_status(line) or rescued_from(i + 1):
+            continue
+        # Where the relaxation and the suite share a line, the restore between
+        # them shares it too, and a slice of LINES between them is empty. Read
+        # that line's own segments in order instead: `set +e; set -e; pytest`
+        # puts errexit back before the suite runs, and failing it would red a
+        # correctly wired suite.
+        if after[0] == i and _restored_before_the_suite_on_one_line(line):
             continue
         # `set -e` restored BEFORE the suite runs puts the suite back under
         # `errexit`, so its failure still fails the job. Restored after, it

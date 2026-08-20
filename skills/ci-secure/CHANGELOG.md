@@ -13,6 +13,13 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- ci-secure: `set +e; set -e; pytest -q` is recognised as a correctly wired
+  suite. Reading the restore by physical line left an empty slice where all
+  three share one line, failing a suite whose failure does end the job.
+  (2026-08-20)
+- ci-secure: printing the exit status no longer counts as re-raising it. An
+  `echo "rc=$?"` after a swallowed suite was read as a rescue and reported
+  the swallow as a pass. (2026-08-20)
 - ci-secure: `sec.gate.test-failure-fatal` matches the COMMAND a step runs,
   not any occurrence of a tool's name on the line. An allowlisted name inside
   an image tag, a process pattern, a directory, a filename, a message body or

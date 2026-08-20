@@ -3509,6 +3509,38 @@ def test_merge_group_is_a_gate_trigger(tmp_path):
     assert f["outcome"] == "fail", f["evidence"]
 
 
+def test_errexit_relaxed_and_restored_before_the_suite_on_one_line_passes(
+        tmp_path):
+    """`set +e; set -e; pytest -q` restores errexit BEFORE the suite runs, so
+    the suite is fatal. Ordering by physical line put all three at one index,
+    leaving the restore search an empty slice — and failing a correctly wired
+    suite, which is the direction this fact must never get wrong."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e; set -e; pytest -q\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_merely_printing_the_status_does_not_rescue_a_swallowed_suite(
+        tmp_path):
+    """Echoing `$?` reports the status; it does not re-raise it. Counting a
+    mention as a rescue certifies a job that still exits zero."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          pytest -q || true\n"
+        '          echo "exit code was $?"\n')})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "|| true" in f["evidence"], f["evidence"]
+
+
+def test_capturing_the_status_and_exiting_it_still_rescues(tmp_path):
+    """The guard against over-correcting: `rc=$?` captures and `exit $rc`
+    re-raises, across lines, and that is a correctly wired suite."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          set +e\n          pytest -q\n"
+        "          rc=$?\n"
+        '          echo "suite exited $rc"\n          exit $rc\n')})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
 def test_continue_on_error_on_the_test_step_fails(tmp_path):
     f = _fatal(tmp_path, {"ci.yml": _wf(
         "      - run: pytest -q\n        continue-on-error: true\n")})
