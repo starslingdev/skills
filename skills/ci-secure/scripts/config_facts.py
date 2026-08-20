@@ -576,9 +576,45 @@ _VERIFICATION_RE = re.compile("|".join(_VERIFICATION_CMDS))
 # `&&` chain) is therefore missed rather than guessed at.
 _MENTIONS_BUT_DOES_NOT_RUN = re.compile(
     r"\b(?:pip3?|uv|pipx|npm|pnpm|yarn|bun|apt|apt-get|brew|gem|go|cargo|"
-    r"dotnet|conda|poetry|asdf)\s+(?:pip\s+)?(?:install|add|get)\b"
+    r"dotnet|conda|poetry|asdf)\s+(?:pip\s+)?(?:install|add|get|i)\b"
+    r"|\bnpx\s+\S+\s+install\b"
+    r"|\b(?:playwright|puppeteer|cypress)\s+install\b"
     r"|\b(?:cat|echo|ls|rm|cp|mv|head|tail|touch|grep|sed|awk|which|"
     r"printf)\b")
+
+# A suite is a COMMAND, not a word. `docker pull ghcr.io/org/mypy:latest`,
+# `pkill -f karma`, `tar czf out.tgz .tox`, `gh pr comment --body "eslint
+# found 3 issues"` and `git checkout -- jest.config.js` all carry a name from
+# the allowlist in an image tag, a process pattern, a directory, a message
+# body and a filename respectively. Searching the whole segment read every
+# one of them as a test run and failed the fact on repositories whose tests
+# are perfectly fatal — the false accusation this fact exists to avoid, and
+# the one direction its own scope statement rules out. So the allowlist is
+# anchored to the head of the command instead.
+#
+# What may still precede the command, because it does not change what is
+# being run: environment assignments, privilege and timing wrappers, and the
+# interpreter runners that are how a suite is normally invoked in the first
+# place (`python -m pytest`, `poetry run pytest`, `uv run pytest`).
+_COMMAND_PREFIXES = (
+    r"[A-Za-z_][A-Za-z0-9_]*=\S*",
+    r"sudo(?:\s+-\S+)*", r"command", r"exec", r"nice(?:\s+-n\s*-?\d+)?",
+    r"env(?:\s+[A-Za-z_][A-Za-z0-9_]*=\S*)*",
+    r"time", r"timeout\s+\S+", r"xvfb-run(?:\s+-a)?", r"retry(?:\s+-\S+)*",
+    r"(?:python3?|py)\s+-m", r"poetry\s+run", r"pipenv\s+run",
+    r"(?:uv|pdm|hatch|rye)\s+run", r"conda\s+run(?:\s+-n\s+\S+)?",
+    r"(?:pnpm|npm)\s+exec", r"yarn\s+dlx", r"bun\s+x",
+)
+_SEGMENT_LEAD = re.compile(r"^\s*(?:(?:%s)\s+)*" % "|".join(_COMMAND_PREFIXES))
+# A leading path is part of how the command is spelled, not part of its name:
+# `./mvnw test`, `bin/rspec`, `/usr/bin/pytest`.
+_PATH_PREFIX = re.compile(r"^(?:\.{0,2}/)?(?:[\w.-]+/)*")
+
+
+def _command_head(segment: str) -> str:
+    """The segment reduced to the command it actually runs."""
+    head = segment[_SEGMENT_LEAD.match(segment).end():]
+    return head[_PATH_PREFIX.match(head).end():]
 
 # The swallow shapes. Each leaves the shell's last exit status at 0 for a
 # command that failed, so the step — and with it the job, and with it the
@@ -586,7 +622,11 @@ _MENTIONS_BUT_DOES_NOT_RUN = re.compile(
 # `#` terminates the `:` arm alongside `;&|)}`: the form this shape is actually
 # written in carries the author's reason on the same line — `pytest || :  #
 # tolerate flakes` — and a comment ends the command exactly as those do.
-_SWALLOW_OR_TRUE = re.compile(r"\|\|\s*(?:true\b|:(?=\s*(?:$|[;&|)}#])))")
+# `|| exit 0` states the discard outright and was the one shape certified as
+# a clean bill; `/bin/true` is `true` by absolute path.
+_SWALLOW_OR_TRUE = re.compile(
+    r"\|\|\s*(?:(?:/(?:usr/)?bin/)?true\b|exit\s+0\b"
+    r"|:(?=\s*(?:$|[;&|)}#])))")
 _SWALLOW_OR_ECHO = re.compile(r"\|\|\s*echo\b")
 _EXIT_ZERO = re.compile(r"(?:^|;)\s*exit\s+0\s*(?:#.*)?$")
 _RELAX_ERREXIT = re.compile(r"^set\s+\+[a-z]*e[a-z]*\b")
@@ -613,7 +653,7 @@ def _runs_verification_suite(line: str) -> bool:
     beside it, and the `tox.ini` in `cat tox.ini` must not be read as a run
     just because the line also ends in `|| true`.
     """
-    return any(_VERIFICATION_RE.search(part)
+    return any(_VERIFICATION_RE.match(_command_head(part))
                and not _MENTIONS_BUT_DOES_NOT_RUN.search(part)
                for part in _SEGMENT_SPLIT.split(line))
 
@@ -704,8 +744,7 @@ def _swallow_reason(run: str, exit_zero_live: bool = True) -> str | None:
             # Quote the shape that is actually in the file: a maintainer told
             # their workflow says `|| true` will grep for a string it does not
             # contain.
-            shown = shown or ("|| :" if match.group(0).rstrip().endswith(":")
-                              else "|| true")
+            shown = shown or re.sub(r"\s+", " ", match.group(0).strip())
             # The rest of the SAME line counts too: `… || { echo …; exit 1; }`
             # reports the failure and still fails the job.
             if _RERAISES_STATUS.search(line[match.end():]):
@@ -761,8 +800,13 @@ def _continue_on_error_is_literally_true(node: dict) -> bool:
                              and value.strip().lower() == "true")
 
 
+# `workflow_call` is in the set because a called workflow reports its job
+# status into the calling pull-request run: it is where a large repository
+# usually keeps its suite. Leaving it out did not merely miss those repos, it
+# dropped them out of the denominator entirely — certifying, by silence, the
+# exact gate this fact describes.
 _GATE_TRIGGERS = frozenset({"pull_request", "pull_request_target", "push",
-                            "merge_group"})
+                            "merge_group", "workflow_call"})
 
 
 def _can_report_on_a_pull_request(doc: dict) -> bool:
@@ -786,7 +830,8 @@ def _can_report_on_a_pull_request(doc: dict) -> bool:
 
 
 _DISCARDS_A_STATUS = re.compile(
-    r"\|\|\s*(?:true\b|:(?=\s*(?:$|[;&|)}]))|echo\b)"
+    r"\|\|\s*(?:(?:/(?:usr/)?bin/)?true\b|exit\s+0\b"
+    r"|:(?=\s*(?:$|[;&|)}]))|echo\b)"
     r"|(?:^|;)\s*exit\s+0\s*(?:#.*)?$|^set\s+\+[a-z]*e[a-z]*\b",
     re.MULTILINE)
 

@@ -215,9 +215,17 @@ two moved numbers.
   out. An `on:` block that cannot be read stays in scope: dropping it would
   turn an unreadable trigger into a silent pass.
 
-  Within those workflows, only a `run:` line that a shipped allowlist
+  Within those workflows, only a `run:` line whose COMMAND a shipped allowlist
   recognises as a test, lint, or build-verification suite can fail this fact.
-  Two things follow, both intended. A `run:` block the allowlist does not
+  The command, not the line: `docker pull ghcr.io/org/mypy:latest || true`,
+  `pkill -f karma || true`, `tar czf out.tgz .tox || true` and
+  `gh pr comment --body "eslint found 3 issues" || true` each carry an
+  allowlisted name in an image tag, a process pattern, a directory and a
+  message body, and none of them runs a suite. The allowlist is therefore
+  anchored to the head of the command, after any environment assignment,
+  privilege or timing wrapper, interpreter runner (`python -m pytest`,
+  `poetry run pytest`) and leading path (`./mvnw test`). Two things follow,
+  both intended. A `run:` block the allowlist does not
   recognise — `./scripts/ci.sh || true` — is never failed: it may be swallowing
   a suite or a cleanup, the YAML cannot say which, and a false accusation
   against a stranger's repository costs more than a miss in a fact that feeds a

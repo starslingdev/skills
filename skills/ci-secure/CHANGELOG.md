@@ -13,6 +13,23 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- ci-secure: `sec.gate.test-failure-fatal` matches the COMMAND a step runs,
+  not any occurrence of a tool's name on the line. An allowlisted name inside
+  an image tag, a process pattern, a directory, a filename, a message body or
+  an install argument — `docker pull ghcr.io/org/mypy:latest || true`,
+  `pkill -f karma || true`, `tar czf out.tgz .tox || true`,
+  `git checkout -- jest.config.js || true`,
+  `gh pr comment --body "eslint found 3 issues" || true`,
+  `npx playwright install --with-deps || true`, `npm i -D jest || true` —
+  was failing the check on repositories whose tests are perfectly fatal.
+  Interpreter runners and leading paths (`python -m pytest`,
+  `poetry run pytest`, `./mvnw test`) are still recognised. (2026-08-20)
+- ci-secure: `workflow_call` counts as a merge-gate trigger. A reusable
+  workflow is where a large repository usually keeps its suite, and out of
+  scope it left the denominator entirely rather than being judged.
+  (2026-08-20)
+- ci-secure: `|| exit 0` and `|| /bin/true` are recognised as the discards
+  they are; `|| exit 0` had been reported as a clean bill. (2026-08-20)
 - ci-secure: `sec.gate.test-failure-fatal` now judges only workflows that can
   report a check on a pull request. A nightly `schedule` job or a
   `workflow_dispatch`-only smoke run reports on no pull request, so a tolerant

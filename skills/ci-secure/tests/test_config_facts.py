@@ -3167,6 +3167,16 @@ def test_or_echo_that_still_exits_nonzero_passes(tmp_path):
     assert f["outcome"] == "pass", f["evidence"]
 
 
+def test_or_echo_then_a_same_line_exit_one_passes(tmp_path):
+    """The same-line rescue, on a shape that actually reaches it. The sibling
+    test above uses `|| { echo …; exit 1; }`, which no swallow pattern matches
+    at all, so it never exercises this branch. `|| echo "failed"; exit 1`
+    does: the swallow fires, and the rest of the same line re-raises."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        '      - run: pytest -q || echo "failed"; exit 1\n')})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
 def test_trailing_exit_zero_after_the_suite_fails_where_no_errexit(tmp_path):
     """On a step whose shell has no errexit — `pwsh`, `powershell`, `cmd` —
     a trailing `exit 0` really does run after a failed suite and discards
@@ -3407,6 +3417,96 @@ def test_an_unrecognised_command_that_swallows_nothing_stays_not_applicable(
     f = _fatal(tmp_path, {"ci.yml": _wf(
         "      - run: bash ci/deploy.sh\n")})
     assert f["outcome"] == "not_applicable", f["evidence"]
+
+
+# The false-accusation battery. Every line below is ordinary GitHub Actions
+# YAML that names a suite tool WITHOUT running one — in a path, an image tag,
+# a message body, a filename, a process pattern, or an install argument. The
+# fact's own scope statement says a false accusation against a stranger's
+# repository costs more than a miss, so each of these must stay green.
+_NOT_A_SUITE = {
+    "browser deps install": "npx playwright install --with-deps || true",
+    "chat notification naming the suite":
+        'curl -X POST -d \'{"text":"pytest failed"}\' "$SLACK" || true',
+    "npm i shorthand": "npm i -D jest || true",
+    "image tag containing a tool name":
+        "docker pull ghcr.io/org/mypy:latest || true",
+    "a message body quoting a tool":
+        'gh pr comment 1 --body "eslint found 3 issues" || true',
+    "a directory named after a tool": "tar czf out.tgz .tox || true",
+    "a process pattern naming a tool": "pkill -f karma || true",
+    "making a tool's cache directory": "mkdir -p .tox || true",
+    "restoring a config file": "git checkout -- jest.config.js || true",
+}
+
+
+@pytest.mark.parametrize("label", sorted(_NOT_A_SUITE))
+def test_naming_a_suite_tool_is_not_running_one(tmp_path, label):
+    """A tool name in an argument is not a suite. Reading it as one fails the
+    check on a repository whose tests are perfectly fatal — the exact false
+    accusation this fact is built to avoid."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        f"      - run: {_NOT_A_SUITE[label]}\n"
+        "      - run: pytest -q\n")})
+    assert f["outcome"] == "pass", f"{label}: {f['evidence']}"
+
+
+def test_or_exit_zero_after_the_suite_fails(tmp_path):
+    """`|| exit 0` is the discard stated outright — more explicit than
+    `|| true`, and it was the one shape reported as a clean bill."""
+    f = _fatal(tmp_path, {"ci.yml": _wf("      - run: pytest -q || exit 0\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_or_bin_true_after_the_suite_fails(tmp_path):
+    """`/bin/true` is `true` by absolute path."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: pytest -q || /bin/true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_reusable_workflow_holding_the_suite_is_in_scope(tmp_path):
+    """`workflow_call` is where a large repository usually keeps its suite,
+    and the caller reports the called job's status into the pull request. Out
+    of scope it was not merely missed — it left the denominator, certifying a
+    repository whose gate is exactly the one this fact describes."""
+    f = _fatal(tmp_path, {"reusable.yml": (
+        "name: tests\non:\n  workflow_call:\npermissions:\n"
+        "  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: pytest -q || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_commented_out_suite_is_not_a_suite(tmp_path):
+    """A commented `# pytest -q` line runs nothing, so the `exit 0` under it
+    discards no suite. Reading comments as code would invent a suite — and
+    then a swallowed one — out of a note, and fail a repository whose real
+    tests are fatal."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          echo hi\n          # pytest -q\n"
+        "          exit 0\n"
+        "      - run: pytest -q\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_an_unreadable_trigger_block_stays_in_scope(tmp_path):
+    """The stated never-silent-pass direction: a workflow whose `on:` cannot
+    be read is judged, because dropping it would let an unreadable trigger
+    certify a swallowed suite."""
+    f = _fatal(tmp_path, {"ci.yml": (
+        "name: ci\npermissions:\n  contents: read\njobs:\n  test:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n"
+        "      - run: pytest -q || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_merge_group_is_a_gate_trigger(tmp_path):
+    """A merge queue is a merge gate by definition."""
+    f = _fatal(tmp_path, {"ci.yml": (
+        "name: ci\non:\n  merge_group:\npermissions:\n  contents: read\n"
+        "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - run: pytest -q || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
 
 
 def test_continue_on_error_on_the_test_step_fails(tmp_path):
