@@ -1093,7 +1093,7 @@ usually copied wholesale from one job that genuinely needs it (a release build,
 a docs render) into every job in the workflow, so the lint job clones the vendor
 tree and the unit-test job downloads the design assets. This is the sibling of
 OPT28 (`fetch-depth: 0`): the same checkout step, a different payload — and it
-is measured, ranked, and fixed separately because removing `fetch-depth: 0` does
+is ranked and fixed separately because removing `fetch-depth: 0` does
 nothing about a submodule or LFS clone, and vice versa.
 
 **Detection heuristic**:
@@ -1111,12 +1111,17 @@ grep -rn -e 'submodules:' -e 'lfs:' -e 'git lfs \(pull\|fetch\)' .github/workflo
 
 A finding requires all three: a declared payload (step 1), a job that pulls it
 (step 2), and **no** reference to any declared path anywhere in that job — its
-`run` blocks, `working-directory`, `with:` values, and the body of any local
-composite action the job invokes (step 3). With no `.gitmodules` (or no
+`run` blocks, step and job-level `working-directory`, `strategy.matrix` values,
+step `if:` and `name:`, job- and step-level `env:`, `with:` values, `uses:` refs,
+and the body of every local composite action the job invokes, followed
+transitively into the local actions those invoke (step 3). With no `.gitmodules` (or no
 `filter=lfs` line), there is no declared path to prove unread, so nothing is
-flagged. When a local composite action the job invokes cannot be read, the
-pattern fails **closed** and stays silent — the same conservative stance OPT28
-takes: the cost of a miss is a lost finding, never a fix that breaks a job.
+flagged. When a local composite action the job invokes cannot be read — at any depth in
+that chain — the pattern fails **closed** and stays silent, the same conservative
+stance OPT28 takes: the cost of a miss is a lost finding, never a fix that breaks
+a job. A checkout that names a `repository:` other than this one is skipped
+outright: it pulls that repo's submodules and LFS objects, about which this
+repo's `.gitmodules` and `.gitattributes` say nothing.
 
 Scoped, like OPT28, to workflows that run on `pull_request` / `push` /
 `workflow_call`. A `workflow_dispatch`- or `schedule`-only helper runs ~0×/mo,
@@ -1148,18 +1153,20 @@ load-bearing and skip the finding.
 submodule tree's size and the LFS objects' bytes — which the workflow YAML never
 reveals, so the catalog gives this pattern no `_SIZING` model and no modeled
 saving; it renders **qualitatively** rather than carrying an invented number
-(the same honest path any un-modeled pattern takes; see
-`savings-methodology.md`). It is sized only where the measured checkout step
-duration is available from a drilled pole's step decomposition — there the
-addressable amount is that step's own p50, bounded as always by the critical-path
-headroom.
+(the same honest path any un-modeled pattern takes — the `_SIZING`
+preamble in `collect_runs.py` states the rule: a pattern that isn't in the table
+is sized as `None`/`None` and rendered qualitatively, because the scanner never
+invents a number). Both axes therefore render empty. Where a reader wants the
+number, the measurement is the job's own checkout step duration before and after
+the change, per the rollout below — this pattern does not estimate it for them.
 
-**Risk**: **MEDIUM**. Removing a payload a job silently depends on fails the job
-— loudly (a missing path, a missing file), not silently, which is why the
-rollout below is cheap. The dangerous variant is an LFS-tracked file that is
-present-but-a-pointer when `lfs:` is dropped: a tool can read the ~130-byte
-pointer text and produce a wrong output instead of an error. Only drop `lfs:`
-for jobs that read no tracked path at all.
+**Risk**: **MEDIUM**. For a submodule, removing a payload the job depends on
+fails it loudly — a missing path, a missing file — which is why the rollout below
+is cheap. LFS is the dangerous variant, and it fails **quietly**: with `lfs:`
+dropped, a tracked file is still present as its ~130-byte pointer text, so a tool
+reads the pointer and produces a wrong output instead of an error. Only drop
+`lfs:` for jobs that read no tracked path at all, and check the job's output, not
+just its exit code.
 
 **Guardrail**: Never recommend dropping the payload for a job whose steps, or
 whose invoked local actions, reference a declared path. Never recommend it at all
