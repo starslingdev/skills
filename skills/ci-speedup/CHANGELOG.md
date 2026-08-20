@@ -154,8 +154,14 @@ unversioned and updates by reinstall from `main`.
   "do not" into "you may" fails — and pins the matching eval case
   (`evals/evals.json` #8), and `tests/verify_report.py` now counts one rail per
   rendered prompt exactly as it already counts the disclaimer — so a prompt path
-  added later fails a real audit rather than shipping rail-free and green. The two
-  committed worked examples were re-rendered. (#72)
+  added later fails a real audit rather than shipping rail-free and green. On the
+  gap-fill path the renderer excises whatever rail-shaped text the model wrote
+  before appending the canonical block, so a body that echoes the rail's heading
+  over a paraphrased list — or reproduces the rail with CRLF endings or trailing
+  spaces, which no exact-substring check recognises — yields exactly one rail
+  instead of two, which would have failed that same one-rail-per-prompt audit with
+  a misleading "renderer bug" message. The two committed worked examples were
+  re-rendered. (#72)
 
 ### Changed
 

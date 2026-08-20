@@ -164,3 +164,33 @@ def test_eval_case_pins_the_rail() -> None:
         assert marker.lower() in blob, f"eval case does not cover `{marker}`"
     for case in hits:
         assert case.get("expectations"), "eval case has no expectations list"
+
+
+def test_llm_gap_fill_emits_exactly_one_rail_heading() -> None:
+    """`verify_report` counts rail headings against prompt count at the ARTIFACT
+    level, so a gap-fill body that carries rail-shaped text of its own must not
+    leave a second heading behind when the renderer appends the canonical block.
+    Three realistic model-authored bodies, all of which used to render two
+    headings and fail the audit with a misleading "renderer bug" message: an
+    echoed heading over a paraphrased list, the complete rail with CRLF line
+    endings, and the complete rail with trailing whitespace."""
+    rail = "\n".join(bp._NO_WEAKENING_LINES)
+    bodies = {
+        "echoed heading, paraphrased list":
+            "The install step re-resolves the lockfile every run.\n\n"
+            + _RAIL_HEADING + "\n- keep an eye on coverage.",
+        "complete rail, CRLF line endings":
+            "The install step re-resolves the lockfile every run.\n\n"
+            + rail.replace("\n", "\r\n"),
+        "complete rail, trailing whitespace":
+            "The install step re-resolves the lockfile every run.\n\n"
+            + "\n".join(line + " " for line in bp._NO_WEAKENING_LINES),
+    }
+    for where, body in bodies.items():
+        out = bp._llm_agent_prompt(body)
+        assert out.count(_RAIL_HEADING) == 1, (
+            f"{where}: {out.count(_RAIL_HEADING)} rail headings in one prompt - "
+            "verify_report's one-rail-per-prompt count would fail the report")
+        _assert_rail(out, f"gap-fill prompt ({where})")
+        # The RCA the model actually authored survives the de-duplication.
+        assert "re-resolves the lockfile" in out, f"{where}: RCA body was lost"

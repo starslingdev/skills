@@ -3109,6 +3109,33 @@ def _llm_analysis_block(a: dict[str, Any], cross_run_rendered: bool = False) -> 
     return out
 
 
+def _strip_rail_echo(body: str) -> str:
+    """Drop the model's own copy of the no-weakening rail from a gap-fill body.
+
+    A line CONTAINING the rail heading counts as an echo whatever decoration carries
+    it (`**…**`, `## …`, a stray trailing space), because the guarantee this buys is
+    textual: once this returns, no line of the body holds the heading, so the block
+    the renderer appends is the only one in the prompt — which is exactly what
+    `verify_report` counts. The lines an echo leads (blank, bullet, or indented
+    continuation) go with it; the first line that is none of those ends the excision,
+    so RCA prose written after a mid-body rail survives.
+    """
+    lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    kept: list[str] = []
+    i = 0
+    while i < len(lines):
+        if _NO_WEAKENING_LINES[0] in lines[i]:
+            i += 1
+            while i < len(lines) and (not lines[i].strip()
+                                      or lines[i].lstrip().startswith("-")
+                                      or lines[i].startswith("  ")):
+                i += 1
+            continue
+        kept.append(lines[i])
+        i += 1
+    return "\n".join(kept).rstrip("\n")
+
+
 def _llm_agent_prompt(body: str) -> str:
     """Wrap an LLM-authored, log-tailored agent prompt (from the analysis JSON) in the
     same copy-paste block matched/generic prompts use, **prepending the standard
@@ -3130,15 +3157,19 @@ def _llm_agent_prompt(body: str) -> str:
                 "fix - investigate it in the repo and apply a safe change.\n\n" + body)
     # The no-weakening rail is the renderer's too, for the same reason the disclaimer
     # is: the gap-fill body is LLM-authored, so the one rule the hand-off cannot afford
-    # to have paraphrased away is appended here, not left to the author. Idempotent on
-    # the WHOLE block, not on its heading: `references/gap-fill.md` names the rail to
-    # the model writing this body, so an echoed heading over a paraphrased (or absent)
-    # list of forbidden edits is a realistic body — and keying on the heading alone
-    # would let exactly that suppress the canonical block, shipping a rail that forbids
-    # nothing.
-    _rail = "\n".join(_NO_WEAKENING_LINES)
-    if _rail not in body:
-        body = body.rstrip("\n") + "\n\n" + _rail
+    # to have paraphrased away is appended here, not left to the author. The canonical
+    # block is appended UNCONDITIONALLY, after any rail-shaped text the model wrote is
+    # excised. `references/gap-fill.md` names the rail to the model writing this body,
+    # so a body that echoes the heading over a paraphrased list — or reproduces the
+    # whole rail with CRLF endings or trailing spaces — is a realistic body, and both
+    # ways of handling one in place are wrong: keying on the heading would let a
+    # paraphrase suppress the canonical block (a rail that forbids nothing), while an
+    # exact-substring check appends a SECOND heading beside the model's, which fails
+    # `verify_report`'s one-rail-per-prompt count with a misleading "renderer bug"
+    # message. Excise-then-append leaves exactly one canonical rail whatever the model
+    # wrote, and is unchanged (idempotent) on a body already ending in that block.
+    body = _strip_rail_echo(body)
+    body = body.rstrip("\n") + "\n\n" + "\n".join(_NO_WEAKENING_LINES)
     # The LLM-authored body is model output grounded in the repo log — it can echo a repo
     # name / log line carrying a ``` run. Fence-safe it PER-LINE (its own line breaks survive)
     # so a model-emitted stray fence can't close this ```text block.
