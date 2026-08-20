@@ -743,8 +743,18 @@ def test_degraded_block_has_the_same_keys_as_a_real_one(tmp_path, monkeypatch):
     degraded = scan._compute_security_score(root, files, [])
 
     assert set(degraded) - {"reason"} <= set(real) | {"caveat"}
+    # And the direction that catches an OMISSION. The subset above only fires
+    # on a key the degraded path invented; a key the real path grew and the
+    # fallback never learned about slips straight through it, which is how a
+    # consumer ends up with a KeyError that fires on the failure path only.
+    # Enumerating names by hand had the same blind spot — the list is the
+    # thing that goes stale — so compare the key sets themselves.
+    assert set(real) - {"caveat"} <= set(degraded) | {"reason"}, (
+        "degraded block is missing %r"
+        % sorted(set(real) - {"caveat"} - set(degraded)))
     for key in ("facts", "score", "passed", "scored_count",
-                "applicable_count", "unmeasured", "constants", "registered"):
+                "applicable_count", "unmeasured", "not_applicable",
+                "constants", "registered"):
         assert key in degraded, f"degraded block is missing {key!r}"
     assert degraded["score"] is None
     # Same reader-visibility rule as facts_to_score: this string is what the
@@ -3225,6 +3235,95 @@ def test_set_plus_e_that_rechecks_the_exit_code_passes(tmp_path):
     assert f["outcome"] == "pass", f["evidence"]
 
 
+def test_a_one_line_suite_then_exit_zero_fails(tmp_path):
+    """`npm test; exit 0` is the two-line shape with a semicolon instead of a
+    newline. The documented shape is "a trailing `exit 0`"; which whitespace
+    separates it from the suite is not part of the claim."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: npm test; exit 0\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "exit 0" in f["evidence"], f["evidence"]
+
+
+def test_evidence_names_the_step_not_only_its_position(tmp_path):
+    """A step ordinal alone sends the maintainer counting steps by hand, and
+    the Actions UI labels steps by name. The name is in the YAML already."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - name: Unit tests\n        run: pytest -q || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "Unit tests" in f["evidence"], f["evidence"]
+
+
+def test_or_colon_evidence_quotes_the_shape_that_is_in_the_file(tmp_path):
+    """Reporting `|| :` as `|| true` sends the maintainer grepping for a
+    string their workflow does not contain."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        '      - run: "npm run lint || :"\n')})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "|| :" in f["evidence"], f["evidence"]
+
+
+def test_a_schedule_only_workflow_is_not_a_merge_gate(tmp_path):
+    """This fact's whole claim is about a MERGE GATE reporting green. A
+    nightly job cannot report on a pull request, so a deliberately tolerant
+    nightly lint is not the configuration being described — failing it is the
+    false accusation the fact's own scope statement rules out."""
+    f = _fatal(tmp_path, {"nightly.yml": (
+        "name: nightly\non:\n  schedule:\n    - cron: '0 3 * * *'\n"
+        "permissions:\n  contents: read\njobs:\n  lint:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n"
+        "      - run: npx eslint . --fix || true\n")})
+    assert f["outcome"] == "not_applicable", f["evidence"]
+
+
+def test_a_manual_dispatch_only_workflow_is_not_a_merge_gate(tmp_path):
+    """Same reason: a `workflow_dispatch`-only workflow runs when a human asks
+    it to, and reports on no pull request."""
+    f = _fatal(tmp_path, {"manual.yml": (
+        "name: manual\non:\n  workflow_dispatch:\n"
+        "permissions:\n  contents: read\njobs:\n  smoke:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n"
+        "      - run: pytest tests/smoke.py || true\n")})
+    assert f["outcome"] == "not_applicable", f["evidence"]
+
+
+def test_a_gate_shaped_workflow_beside_a_nightly_one_is_still_judged(tmp_path):
+    """The scope narrowing must not become a way out: a repo whose PR workflow
+    swallows its suite still fails, whatever its nightly workflow does."""
+    f = _fatal(tmp_path, {
+        "nightly.yml": ("name: nightly\non:\n  schedule:\n"
+                        "    - cron: '0 3 * * *'\npermissions:\n"
+                        "  contents: read\njobs:\n  lint:\n"
+                        "    runs-on: ubuntu-latest\n    steps:\n"
+                        "      - run: npx eslint . || true\n"),
+        "ci.yml": _wf("      - run: pytest -q || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "ci.yml" in f["evidence"], f["evidence"]
+    assert "nightly.yml" not in f["evidence"], f["evidence"]
+
+
+def test_an_unrecognised_command_that_swallows_is_a_gap_not_not_applicable(
+        tmp_path):
+    """`bash ci/test.sh || true` is the ambiguous case, and the two honest
+    readings are opposite: a swallowed suite, or a tolerated cleanup. What it
+    is NOT is "there is nothing here to check" — that claims no coverage gap
+    exists, on the one shape where one demonstrably does. It is unmeasured."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: bash ci/test.sh || true\n")})
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "ci.yml" in f["evidence"], f["evidence"]
+
+
+def test_an_unrecognised_command_that_swallows_nothing_stays_not_applicable(
+        tmp_path):
+    """The other side: nothing recognised AND nothing discarded means there
+    genuinely is nothing to check, and calling that a coverage gap would
+    invent one."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: bash ci/deploy.sh\n")})
+    assert f["outcome"] == "not_applicable", f["evidence"]
+
+
 def test_continue_on_error_on_the_test_step_fails(tmp_path):
     f = _fatal(tmp_path, {"ci.yml": _wf(
         "      - run: pytest -q\n        continue-on-error: true\n")})
@@ -3305,7 +3404,8 @@ def test_a_repo_with_no_suite_at_all_is_not_applicable_not_a_pass(tmp_path):
     # The evidence says WHY it does not apply. "no step discards its exit
     # status" would be true and would read as a clean bill for a suite that
     # does not exist.
-    assert "no workflow step runs a test" in f["evidence"], f["evidence"]
+    assert "runs a test" in f["evidence"], f["evidence"]
+    assert "merge gate" in f["evidence"], f["evidence"]
     assert _FATAL in out["not_applicable"]
     assert _FATAL not in out["unmeasured"]
 
@@ -3338,8 +3438,13 @@ def test_a_not_applicable_fact_still_renders_a_row(tmp_path):
         "findings": [], "repo": "x/y", "scanned_workflows": 1,
         "security_score": cf.compute_config_facts(root, files, []),
     })
-    row = next((ln for ln in md.splitlines() if _FATAL in ln
-                or "swallows its own exit code" in ln), None)
+    # The TABLE row specifically. The fact id also appears in the prose line
+    # that discloses the count, and matching that instead would let the row
+    # itself vanish while this test stayed green.
+    row = next((ln for ln in md.splitlines()
+                if ln.startswith("|") and (_FATAL in ln
+                                           or "swallows its own exit code"
+                                           in ln)), None)
     assert row is not None, "the not-applicable fact rendered no row at all"
     assert "n/a" in row, row
     assert "pass" not in row and "unmeasured" not in row, row

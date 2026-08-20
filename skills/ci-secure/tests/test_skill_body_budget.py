@@ -47,3 +47,21 @@ def test_skill_body_line_budget_guard_actually_fires_when_over():
     body = _skill_body_line_count(over)
     assert body == _SKILL_BODY_LINE_BUDGET          # frontmatter stripped, body isolated
     assert not (body < _SKILL_BODY_LINE_BUDGET)     # exactly at budget → the guard trips
+
+
+def test_the_spoken_close_has_a_rule_for_every_outcome_the_engine_emits():
+    """The hygiene close-out contract must name every outcome the fact table
+    can render. It enumerated pass, fail and unmeasured; the engine also emits
+    `not_applicable`, and a contract silent about it pushes the agent to the
+    one sentence the outcome exists to prevent — "All config hygiene checks
+    pass." said over a row that did not apply. The terminal close is the
+    surface most runs actually show, so a gap here outranks the table's mark.
+    """
+    body = _SKILL_MD
+    close = body[body.index("Contract lines, all mandatory:"):]
+    close = close[:close.index("**Then the vector map**")]
+    close = close.lower()
+    assert "unmeasured" in close, "close contract lost its unmeasured rule"
+    assert "n/a" in close or "not applicable" in close, (
+        "close contract has no rule for a not-applicable row, so an n/a row "
+        "gets folded into 'All config hygiene checks pass.'")

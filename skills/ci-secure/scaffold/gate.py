@@ -427,9 +427,15 @@ def main() -> int:
     # engine's JSON, and on a fork pull request the engine is attacker code: a
     # newline in any of them would start a new line in `body`, which is printed
     # to stdout where Actions parses `::workflow commands::`.
+    # A check that does not apply left `applicable_count`, so the headline
+    # would otherwise count fewer facts than the rows printed below it and
+    # give the reader no way to reconcile the two.
+    na = score.get("not_applicable")
+    na_note = (f" ({len(na)} not applicable)"
+               if isinstance(na, list) and na else "")
     lines = ["## ci-secure", "",
              f"{flat(score.get('passed'))}/{flat(score.get('scored_count'))} facts pass"
-             f" of {flat(score.get('applicable_count'))} applicable, "
+             f" of {flat(score.get('applicable_count'))} applicable{na_note}, "
              f"{flat(scan.get('scanned_workflows'))} workflow file(s) scanned", ""]
     if ADVISORY:
         lines += ["> **Advisory mode:** failed facts are reported but do not "

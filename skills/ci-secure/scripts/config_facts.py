@@ -651,11 +651,16 @@ def _swallow_reason(run: str) -> str | None:
 
     for i in suite_at:
         line = code[i]
-        for pattern, shown in ((_SWALLOW_OR_TRUE, "|| true"),
+        for pattern, shown in ((_SWALLOW_OR_TRUE, None),
                                (_SWALLOW_OR_ECHO, "|| echo")):
             match = pattern.search(line)
             if not match:
                 continue
+            # Quote the shape that is actually in the file: a maintainer told
+            # their workflow says `|| true` will grep for a string it does not
+            # contain.
+            shown = shown or ("|| :" if match.group(0).rstrip().endswith(":")
+                              else "|| true")
             # The rest of the SAME line counts too: `… || { echo …; exit 1; }`
             # reports the failure and still fails the job.
             if _RERAISES_STATUS.search(line[match.end():]):
@@ -664,9 +669,14 @@ def _swallow_reason(run: str) -> str | None:
                 continue
             return shown
 
-    # `exit 0` as the block's last word: everything above it, suite included,
-    # is discarded.
-    if _EXIT_ZERO.search(code[-1]) and suite_at[0] < len(code) - 1:
+    # `exit 0` as the block's last word: everything before it, suite
+    # included, is discarded. "Before" spans the line break AND the semicolon
+    # — `npm test; exit 0` is the same discard as the two-line form, and which
+    # whitespace separates them is no part of the shape.
+    last = code[-1]
+    zero = _EXIT_ZERO.search(last)
+    if zero and (suite_at[0] < len(code) - 1
+                 or _runs_verification_suite(last[:zero.start()])):
         return "exit 0"
 
     # `set +e` before the suite, and nothing afterwards that re-raises the
@@ -699,10 +709,63 @@ def _continue_on_error_is_literally_true(node: dict) -> bool:
                              and value.strip().lower() == "true")
 
 
-def _suite_failure_swallowed(rel: str, doc: dict) -> tuple[list[str], bool]:
-    """(offences, whether this workflow runs any verification suite at all)."""
+_GATE_TRIGGERS = frozenset({"pull_request", "pull_request_target", "push",
+                            "merge_group"})
+
+
+def _can_report_on_a_pull_request(doc: dict) -> bool:
+    """Whether this workflow's jobs can report a check on a pull request.
+
+    F9's claim is about a MERGE GATE that reports green whatever the tests
+    did, so it only holds where a gate exists. A workflow that runs on a
+    schedule, or only when a human dispatches it, reports on no pull request:
+    a deliberately tolerant nightly lint or a manual smoke job is a different
+    — and usually correct — configuration, and failing it would be exactly
+    the false accusation this fact's scope statement rules out.
+
+    An `on:` block this scanner cannot read stays IN scope. Dropping it would
+    turn an unreadable trigger into a silent pass, which is the one direction
+    this engine never trades away.
+    """
+    on = _on_mapping(doc)
+    if on is None:
+        return True
+    return bool({str(k) for k in on} & _GATE_TRIGGERS)
+
+
+_DISCARDS_A_STATUS = re.compile(
+    r"\|\|\s*(?:true\b|:(?=\s*(?:$|[;&|)}]))|echo\b)"
+    r"|(?:^|;)\s*exit\s+0\s*(?:#.*)?$|^set\s+\+[a-z]*e[a-z]*\b",
+    re.MULTILINE)
+
+
+def _discards_a_status(run: str) -> bool:
+    """Any swallow shape at all, whatever the command is.
+
+    Deliberately NOT scoped to the allowlist. It answers a different question
+    from `_swallow_reason`: not "is a suite being swallowed here" but "is
+    something being swallowed here that this scan cannot identify" — which is
+    what separates a coverage gap from a repository with nothing to check.
+    """
+    return any(_DISCARDS_A_STATUS.search(ln) for ln in _code_lines(run))
+
+
+def _suite_failure_swallowed(rel: str,
+                             doc: dict) -> tuple[list[str], bool, list[str]]:
+    """(offences, whether a suite ran at all, unidentifiable discards).
+
+    The third value is the honest-uncertainty channel. A `run:` line the
+    allowlist does not recognise which throws its exit code away — the
+    `bash ci/test.sh || true` shape — has two opposite readings, a swallowed
+    suite and a tolerated cleanup, and the YAML settles neither. What it is
+    NOT is "there is nothing here to check": that verdict asserts no coverage
+    gap exists, on the one shape where one demonstrably does.
+    """
     offences: list[str] = []
+    unidentified: list[str] = []
     saw_suite = False
+    if not _can_report_on_a_pull_request(doc):
+        return offences, saw_suite, unidentified
     for job_name, job in _jobs(doc):
         steps = job.get("steps")
         if not isinstance(steps, list):
@@ -712,11 +775,19 @@ def _suite_failure_swallowed(rel: str, doc: dict) -> tuple[list[str], bool]:
             if not isinstance(step, dict):
                 continue
             run = step.get("run")
-            if not isinstance(run, str) or \
-                    not _block_runs_verification_suite(run):
+            if not isinstance(run, str):
+                continue
+            if not _block_runs_verification_suite(run):
+                if _discards_a_status(run) or \
+                        _continue_on_error_is_literally_true(step):
+                    unidentified.append(
+                        f"{rel}: job `{job_name}` step {position}")
                 continue
             job_runs_suite = saw_suite = True
             where = f"{rel}: job `{job_name}` step {position}"
+            label = step.get("name")
+            if isinstance(label, str) and label.strip():
+                where += f" (`{label.strip()}`)"
             if _continue_on_error_is_literally_true(step):
                 offences.append(f"{where} — `continue-on-error: true`")
                 continue
@@ -726,7 +797,7 @@ def _suite_failure_swallowed(rel: str, doc: dict) -> tuple[list[str], bool]:
         if job_runs_suite and _continue_on_error_is_literally_true(job):
             offences.append(f"{rel}: job `{job_name}` — job-level "
                             "`continue-on-error: true`")
-    return offences, saw_suite
+    return offences, saw_suite, unidentified
 
 
 # --- F7: required checks that a job can skip ---------------------------------
@@ -1715,20 +1786,34 @@ def compute_config_facts(
 
     swallowed: list[str] = []
     any_suite = False
+    unidentified: list[str] = []
     for rel, doc in docs:
-        offences, saw_suite = _suite_failure_swallowed(rel, doc)
+        offences, saw_suite, unknown = _suite_failure_swallowed(rel, doc)
         swallowed += offences
         any_suite = any_suite or saw_suite
+        unidentified += unknown
+    # Three ways this fact ends without a verdict, and they are not the same
+    # claim. A suite ran: pass or fail. No suite ran, but something threw a
+    # status away that this scan could not identify: a COVERAGE GAP, named as
+    # one. Nothing ran and nothing was discarded: genuinely not applicable.
+    gap_outcome = ("unmeasured: no recognised test or lint suite, but %d "
+                   "step(s) discard an exit status this scan could not "
+                   "identify (%s) — one of them may be a suite, and this "
+                   "fact cannot tell; a COVERAGE GAP, not a clean result"
+                   % (len(unidentified), _capped(unidentified, 3, "; ")))
     add("sec.gate.test-failure-fatal",
         "no job that runs the test or lint suite swallows its own exit code "
         "(a suite whose failure cannot fail its job leaves the merge gate "
         "green whatever the tests did)",
         True, not swallowed,
         (_capped(swallowed, 4) if swallowed else
-         ("no test or lint step discards its exit status" if any_suite else
-          "not applicable: no workflow step runs a test, lint, or "
-          "build-verification suite this scan recognises, so there is no "
-          "exit code to swallow")),
+         ("no test or lint step this scan recognises discards its exit "
+          "status" if any_suite else
+          gap_outcome if unidentified else
+          "not applicable: no workflow that can report a check on a pull "
+          "request runs a test, lint, or build-verification suite this scan "
+          "recognises, and no step discards an exit status, so there is no "
+          "merge gate here whose result could be thrown away")),
         # Applicability, following the shape ci-score's test-sharding check
         # uses: a repository whose workflows run no recognised suite has
         # nothing to swallow. That is NOT a pass — a free green for having no
@@ -1736,7 +1821,8 @@ def compute_config_facts(
         # not unmeasured either, which claims a coverage gap where there is
         # none. It leaves the denominator, exactly as an n/a check does in
         # ci-score.
-        outcome=None if any_suite else "not_applicable")
+        outcome=(None if any_suite else
+                 "unmeasured" if unidentified else "not_applicable"))
 
     add("sec.checkout.credentials-scoped",
         "on untrusted-trigger workflows, every checkout sets "

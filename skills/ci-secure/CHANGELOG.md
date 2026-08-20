@@ -13,6 +13,29 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- ci-secure: `sec.gate.test-failure-fatal` now judges only workflows that can
+  report a check on a pull request. A nightly `schedule` job or a
+  `workflow_dispatch`-only smoke run reports on no pull request, so a tolerant
+  `|| true` there is not the decorative merge gate the fact describes and is
+  no longer failed for one. (2026-08-20)
+- ci-secure: `sec.gate.test-failure-fatal` separates "nothing here to check"
+  from "nothing here this scan recognises". A repository whose only discarded
+  exit status sits on a command the allowlist cannot identify
+  (`bash ci/test.sh || true`) is now UNMEASURED with the steps named — a
+  coverage gap that stays in the denominator — instead of not-applicable,
+  which would have claimed no gap existed. (2026-08-20)
+- ci-secure: two more swallow shapes are recognised — `exit 0` followed by an
+  inline comment, and a one-line `npm test; exit 0` — and a `set -e` that
+  lands AFTER the suite already ran no longer counts as restoring its status.
+  (2026-08-20)
+- ci-secure: a check that does not apply is now disclosed in words on both
+  reader surfaces — a sentence in the report's hygiene section and a
+  `(1 not applicable)` note in the gate headline — so the count line can be
+  reconciled against the rows above it. (2026-08-20)
+- ci-secure: swallowed-suite evidence names the offending step by its `name:`
+  as well as its position, and reports `|| :` as `|| :` rather than as
+  `|| true`, so the string in the evidence is the string in the file.
+  (2026-08-20)
 - **2026-08-20** — **A test suite whose failure cannot fail its job is now a
   config fact.** `sec.gate.test-failure-fatal` fails when a job that runs the
   test or lint suite discards the suite's exit code — `|| true`, `|| :`,

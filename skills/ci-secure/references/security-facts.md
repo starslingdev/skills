@@ -191,7 +191,16 @@ two moved numbers.
   `continue-on-error: ${{ matrix.experimental }}` does not — it is true on some
   matrix legs and false on others, and the YAML cannot say which.
 
-  **Scope, deliberately narrow.** Only a `run:` line that a shipped allowlist
+  **Scope, deliberately narrow.** Only a workflow that can report a check on a
+  pull request is judged at all — a `pull_request`, `pull_request_target`,
+  `push` or `merge_group` trigger. A nightly `schedule` job or a
+  `workflow_dispatch`-only smoke run reports on no pull request, so a tolerant
+  `|| true` there is not the decorative merge gate this fact describes, and
+  failing it would be the false accusation the rest of this paragraph rules
+  out. An `on:` block that cannot be read stays in scope: dropping it would
+  turn an unreadable trigger into a silent pass.
+
+  Within those workflows, only a `run:` line that a shipped allowlist
   recognises as a test, lint, or build-verification suite can fail this fact.
   Two things follow, both intended. A `run:` block the allowlist does not
   recognise — `./scripts/ci.sh || true` — is never failed: it may be swallowing
@@ -212,12 +221,22 @@ two moved numbers.
   suite (`grep … || true`) swallows the grep, not the tests, and is not this
   fact's business either.
 
-  **A repository with no suite at all is NOT APPLICABLE, not a pass.** There is
-  nothing to swallow, so there is nothing to certify: a green here would read as
-  "this repo's tests are wired to fail the build" about a repo with no tests.
-  It is not unmeasured either — nothing was unreadable. It leaves the
-  denominator, which is the shape ci-score settled on for the same question
-  (its test-sharding check is not applicable when no test-like job exists).
+  **A repository with nothing to check is NOT APPLICABLE, not a pass.** There
+  is nothing to swallow, so there is nothing to certify: a green here would
+  read as "this repo's tests are wired to fail the build" about a repo with no
+  tests. It leaves the denominator, which is the shape ci-score settled on for
+  the same question (its test-sharding check is not applicable when no
+  test-like job exists).
+
+  **"Nothing to check" is a stronger claim than "nothing recognised", and the
+  fact does not confuse the two.** Not-applicable requires BOTH that no
+  recognised suite ran AND that no step threw an exit status away. Where the
+  allowlist recognised nothing but something *did* discard a status —
+  `bash ci/test.sh || true`, the canonical unknown-purpose shape — the two
+  readings are opposite (a swallowed suite, or a tolerated cleanup) and the
+  YAML settles neither. That is UNMEASURED, with the steps named: a coverage
+  gap that stays in the denominator, because "there is nothing here to check"
+  would assert no gap exists on the one shape where one demonstrably does.
   **To fix a fail**: drop the swallow so the suite's exit status reaches the
   job — and if the intent was to see the failure without blocking, keep the
   reporting and re-raise the status (`… || { echo "suite failed"; exit 1; }`,

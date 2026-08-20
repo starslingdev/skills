@@ -1723,6 +1723,10 @@ def _security_score_block(security_score: dict[str, Any] | None) -> str:
     # absent one. `or []` / `or {}` turned both into a silent empty and the
     # report rendered as if the producer had simply said "none".
     damaged: list[str] = []
+    raw_not_applicable = security_score.get("not_applicable")
+    not_applicable = (list(raw_not_applicable or [])
+                      if raw_not_applicable is None
+                      or isinstance(raw_not_applicable, list) else [])
     raw_unmeasured = security_score.get("unmeasured")
     if raw_unmeasured is None or isinstance(raw_unmeasured, list):
         unmeasured = list(raw_unmeasured or [])
@@ -1757,6 +1761,19 @@ def _security_score_block(security_score: dict[str, Any] | None) -> str:
             "",
             f"{len(unmeasured)} check(s) could not be measured ({names}) — a "
             "coverage gap, not a pass.",
+        ]
+    if not_applicable:
+        # The other half of the same disclosure. These checks left the
+        # denominator, so the count line will not add up against the rows
+        # above unless the reader is told why — and the reason is the
+        # opposite of the unmeasured one, which is why it gets its own
+        # sentence rather than being folded into that list.
+        names = ", ".join(str(n) for n in not_applicable)
+        out += [
+            "",
+            f"{len(not_applicable)} check(s) do not apply to this repository "
+            f"({names}) — there was nothing here for them to check, which is "
+            "neither a pass nor a gap, so they are left out of the count.",
         ]
     if damaged:
         out += [
