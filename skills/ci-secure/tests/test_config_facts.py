@@ -3665,3 +3665,38 @@ def test_a_not_applicable_fact_still_renders_a_row(tmp_path):
     assert row is not None, "the not-applicable fact rendered no row at all"
     assert "n/a" in row, row
     assert "pass" not in row and "unmeasured" not in row, row
+
+
+def test_a_heredoc_body_is_written_text_not_a_run(tmp_path):
+    """A step that WRITES a wrapper script is not a step that runs one. The
+    here-doc body is data on its way to a file; reading `pytest -q || true`
+    there as a swallowed suite fails a job whose own suite is fatal — the
+    false-accusation direction this fact refuses to take."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n"
+        "          cat > run.sh <<'EOF'\n"
+        "          pytest -q || true\n"
+        "          EOF\n"
+        "          pytest -q\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_suite_under_a_shell_keyword_still_counts_as_a_suite(tmp_path):
+    """`if ! pytest -q; then …` runs the suite; `if` is a keyword in front of
+    the command, not the command. Missing it hands a repository that tests on
+    every PR the n/a outcome, which quietly removes it from the denominator."""
+    root, files = _repo(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n"
+        "          if ! pytest -q; then echo 'suite failed'; exit 1; fi\n")})
+    out = cf.compute_config_facts(root, files, [])
+    f = _outcome(out, _FATAL)
+    assert f["outcome"] == "pass", f["evidence"]
+    assert _FATAL not in out["not_applicable"]
+
+
+def test_a_swallow_inside_a_loop_body_is_still_a_swallow(tmp_path):
+    """`for … do pytest || true; done` discards every run's status. The `do`
+    in front of the suite is a keyword; it must not hide the swallow."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: for m in a b; do pytest -q; done || true\n")})
+    assert f["outcome"] == "fail", f["evidence"]

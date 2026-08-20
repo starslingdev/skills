@@ -596,7 +596,16 @@ _MENTIONS_BUT_DOES_NOT_RUN = re.compile(
 # being run: environment assignments, privilege and timing wrappers, and the
 # interpreter runners that are how a suite is normally invoked in the first
 # place (`python -m pytest`, `poetry run pytest`, `uv run pytest`).
-_COMMAND_PREFIXES = (
+# Shell KEYWORDS belong on that list too. `if ! pytest -q; then`, `while …`
+# and `for m in $MODULES; do pytest` all run the suite; the keyword in front
+# of it is grammar, not the command being run. Anchoring the allowlist to the
+# head of the segment without them stopped recognising a suite written inside
+# a conditional or a loop at all — and a suite the scan cannot see takes the
+# whole repository out of this fact's denominator as NOT APPLICABLE, which is
+# a silent loss of coverage rather than a miss on one line.
+_SHELL_KEYWORDS = (r"if", r"then", r"else", r"elif", r"do", r"while",
+                   r"until", r"!")
+_COMMAND_PREFIXES = _SHELL_KEYWORDS + (
     r"[A-Za-z_][A-Za-z0-9_]*=\S*",
     r"sudo(?:\s+-\S+)*", r"command", r"exec", r"nice(?:\s+-n\s*-?\d+)?",
     r"env(?:\s+[A-Za-z_][A-Za-z0-9_]*=\S*)*",
@@ -682,9 +691,32 @@ def _block_runs_verification_suite(run: str) -> bool:
 
 
 def _code_lines(run: str) -> list[str]:
-    """Executable lines of a `run:` block — comments and blanks dropped."""
-    return [ln.strip() for ln in run.splitlines()
-            if ln.strip() and not ln.strip().startswith("#")]
+    """Executable lines of a `run:` block — comments, blanks and here-doc
+    bodies dropped.
+
+    A here-doc body is TEXT ON ITS WAY TO A FILE, not shell the step runs:
+    `cat > run.sh <<'EOF' … pytest -q || true … EOF` writes a wrapper script,
+    and reading its body as executable failed the fact on a job whose own
+    suite is perfectly fatal — the false accusation this fact's scope rules
+    out. The opener line itself stays (it is a real command); the body and its
+    closing delimiter go. Delimiter recognition is the scan module's, quote
+    aware and `<<<`-safe, rather than a second regex here that could drift
+    from it.
+    """
+    delimiter = _scan()._heredoc_delimiter
+    lines: list[str] = []
+    ends: str | None = None
+    for raw in run.splitlines():
+        line = raw.strip()
+        if ends is not None:
+            if line == ends:
+                ends = None
+            continue
+        if not line or line.startswith("#"):
+            continue
+        lines.append(line)
+        ends = delimiter(line)
+    return lines
 
 
 # Shells with no errexit: a trailing `exit 0` after a failed command really

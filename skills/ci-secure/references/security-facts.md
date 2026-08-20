@@ -224,7 +224,13 @@ two moved numbers.
   message body, and none of them runs a suite. The allowlist is therefore
   anchored to the head of the command, after any environment assignment,
   privilege or timing wrapper, interpreter runner (`python -m pytest`,
-  `poetry run pytest`) and leading path (`./mvnw test`). Two things follow,
+  `poetry run pytest`), leading path (`./mvnw test`) and shell keyword. The
+  keyword matters as much as the wrappers do: `if ! pytest -q; then` and
+  `for m in $MODULES; do pytest -q; done` run the suite exactly as a bare line
+  does, and a suite the anchor cannot see does not merely go unjudged — it
+  takes the whole repository out of this fact's denominator as not applicable,
+  which is a silent loss of coverage rather than a miss on one line.
+  Two things follow,
   both intended. A `run:` block the allowlist does not
   recognise — `./scripts/ci.sh || true` — is never failed: it may be swallowing
   a suite or a cleanup, the YAML cannot say which, and a false accusation
@@ -242,7 +248,11 @@ two moved numbers.
   test:upload-coverage`, `make check-links || true` — is in scope here and can
   be billed by both engines. A `|| true` on a utility line sitting beside the
   suite (`grep … || true`) swallows the grep, not the tests, and is not this
-  fact's business either.
+  fact's business either. Neither is a **here-doc body**: the lines between
+  `cat > run.sh <<'EOF'` and its closing delimiter are text on its way to a
+  file, so a step that WRITES a tolerant wrapper script is not a step that
+  runs one, and judging that text as shell would fail a job whose own suite is
+  fatal.
 
   **A repository with nothing to check is NOT APPLICABLE, not a pass.** There
   is nothing to swallow, so there is nothing to certify: a green here would

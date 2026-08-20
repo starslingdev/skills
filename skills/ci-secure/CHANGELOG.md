@@ -99,8 +99,13 @@ entries are dated (UTC). Format loosely follows
   vanishes, or one folded into "all checks pass", reads as a pass. **The
   config-fact aggregate this skill hands ci-advisor
   changes shape**: nine facts instead of eight, so the blended CI Score's
-  security third moves for any repository that has a suite. Census row and
-  full scope statement in `references/security-facts.md`.
+  security third moves for any repository that has a suite. What counts as
+  running the suite is read as a COMMAND, past any wrapper, interpreter,
+  leading path or shell keyword — `if ! pytest -q; then` and `for … do pytest`
+  run it, and missing them would drop the whole repository out of the fact's
+  denominator — while a here-doc body is text on its way to a file, so writing
+  a tolerant wrapper script is never read as swallowing a suite. Census row
+  and full scope statement in `references/security-facts.md`.
 
 ### Changed
 
