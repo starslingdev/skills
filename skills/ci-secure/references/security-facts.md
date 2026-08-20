@@ -19,8 +19,11 @@ number must not grade a stranger's repo down on an unconfirmed match.
 
 **The denominator is token-dependent, so the aggregate is not comparable
 across scans run under different auth.** Two of the nine facts read the GitHub
-API. A scan with no repository or no token measures seven of nine and scores
-`100 × passed / 7`; the same repository scanned with a token scores over nine.
+API. In a repository where every fact applies, a scan with no repository or no
+token measures seven of nine and scores `100 × passed / 7`; the same repository
+scanned with a token scores over nine. A fact that does not apply to the
+repository at all leaves the denominator on top of that (see below), so both
+numbers drop by one in a repository whose workflows run no suite.
 The unmeasured ids are named in the block's `unmeasured` list and the caveat, so
 a consumer — ci-advisor above all — can tell the two apart, but only if it
 checks: comparing the raw numbers across differently-authenticated scans
@@ -70,7 +73,7 @@ instead of shipping.
 | `sec.secrets.no-blanket-inherit` | — none | No ci-score check reads `secrets:` on reusable-workflow calls. |
 | `sec.required-checks.skippable` | — none | Branch protection is not workflow YAML; no ci-score check reads the API. The workflow-side edit this fact asks for (add an always-running verdict job that `needs:` the conditional ones) touches no key any ci-score check reads. |
 | `sec.fork-approval.effective` | — none | A repository Actions setting, not workflow YAML at all; no ci-score check reads it, and no YAML edit can move it. |
-| `sec.gate.test-failure-fatal` | `ci.parallel.test-sharding` | Both look at the jobs that run the suite, and neither edit moves the other: sharding is a `strategy.matrix` on the job, this fact is the `run:` line's exit code and the step's `continue-on-error`. A sharded suite can still swallow every shard's failure, and an unsharded one can be perfectly fatal. Also bounded against the OTHER engine: `continue-on-error` on an upload, report, or notification step is a speed and reliability question that ci-speedup owns, and this fact cannot fire on one, because only a step whose command runs a recognised suite is in scope. |
+| `sec.gate.test-failure-fatal` | `ci.parallel.test-sharding` | Both look at the jobs that run the suite, and neither edit moves the other: sharding is a `strategy.matrix` on the job, this fact is the `run:` line's exit code and the step's `continue-on-error`. A sharded suite can still swallow every shard's failure, and an unsharded one can be perfectly fatal. Also bounded against the OTHER engine: `continue-on-error` on an upload, report, or notification step is a speed and reliability question that ci-speedup owns, and it does not reach this fact, because only a step whose own `run:` command the allowlist recognises as a suite is in scope — a `uses:` upload action has no `run:` line at all. Residual, disclosed: a reporting step whose command *does* match the allowlist is in scope here too, as is a suite step carrying `continue-on-error: true` that has been red for every run (ci-speedup's OPT68); the bound is on the command, not on the step's stated purpose. |
 | `sec.checkout.credentials-scoped` | `ci.checkout.shallow-clone` | Both read checkout steps, but different keys: `fetch-depth` there, `persist-credentials` here — two `with:` entries, two edits. This fact also applies only on untrusted-trigger workflows (excluding the payload-less `fork`/`watch` notification events); shallow-clone applies on PR-gating ones. |
 
 **Residual correlation, disclosed:** a repo with careless
@@ -196,12 +199,18 @@ two moved numbers.
   against a stranger's repository costs more than a miss in a fact that feeds a
   published score. And `continue-on-error: true` on an **upload, report, or
   notification** step — codecov, `upload-artifact`, `upload-sarif`, a Slack
-  webhook — is exempt by construction, since no such step runs a suite. Making
-  a reporting step non-fatal is a deliberate, usually correct choice about
-  speed and reliability, and it is already ci-speedup's business; billing one
-  configuration to two engines would be a defect, not thoroughness. A `|| true`
-  on a utility line sitting beside the suite (`grep … || true`) swallows the
-  grep, not the tests, and is not this fact's business either.
+  webhook — does not reach this fact, because a step is judged only by its own
+  `run:` line: a `uses:` action has no `run:` line at all, and a webhook `curl`
+  matches nothing on the allowlist. Making a reporting step non-fatal is a
+  deliberate, usually correct choice about speed and reliability, and it is
+  already ci-speedup's business; billing one configuration to two engines would
+  be a defect, not thoroughness. **Residual, disclosed:** that exemption is a
+  property of the COMMAND, not of the step's name or intent, so a reporting
+  step whose `run:` line does match the allowlist — `npm run
+  test:upload-coverage`, `make check-links || true` — is in scope here and can
+  be billed by both engines. A `|| true` on a utility line sitting beside the
+  suite (`grep … || true`) swallows the grep, not the tests, and is not this
+  fact's business either.
 
   **A repository with no suite at all is NOT APPLICABLE, not a pass.** There is
   nothing to swallow, so there is nothing to certify: a green here would read as

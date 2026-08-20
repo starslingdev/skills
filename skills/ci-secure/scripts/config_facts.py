@@ -583,7 +583,10 @@ _MENTIONS_BUT_DOES_NOT_RUN = re.compile(
 # The swallow shapes. Each leaves the shell's last exit status at 0 for a
 # command that failed, so the step — and with it the job, and with it the
 # required check — reports success.
-_SWALLOW_OR_TRUE = re.compile(r"\|\|\s*(?:true\b|:(?=\s*(?:$|[;&|)}])))")
+# `#` terminates the `:` arm alongside `;&|)}`: the form this shape is actually
+# written in carries the author's reason on the same line — `pytest || :  #
+# tolerate flakes` — and a comment ends the command exactly as those do.
+_SWALLOW_OR_TRUE = re.compile(r"\|\|\s*(?:true\b|:(?=\s*(?:$|[;&|)}#])))")
 _SWALLOW_OR_ECHO = re.compile(r"\|\|\s*echo\b")
 _EXIT_ZERO = re.compile(r"(?:^|;)\s*exit\s+0\s*(?:#.*)?$")
 _RELAX_ERREXIT = re.compile(r"^set\s+\+[a-z]*e[a-z]*\b")

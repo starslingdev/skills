@@ -25,15 +25,19 @@ entries are dated (UTC). Format loosely follows
   recognised suite commands, so a `run:` block whose purpose the YAML cannot
   establish is never failed, and `continue-on-error` on an upload, report, or
   notification step (codecov, `upload-artifact`, `upload-sarif`, a webhook
-  curl) is exempt by construction — that shape belongs to ci-speedup, and
-  billing one configuration to two engines would be a defect. A repository
-  whose workflows run no suite at all is NOT APPLICABLE, never a pass: it
+  curl) does not reach it, because a step is judged only by its own `run:`
+  line — that shape belongs to ci-speedup, and billing one configuration to
+  two engines would be a defect. A repository whose workflows run no suite at
+  all is NOT APPLICABLE, never a pass: it
   leaves the denominator rather than earning a green for having no tests,
   which is the shape ci-score settled on for the same question. The facts
   block therefore gained a `not_applicable` list beside `unmeasured`, and
   `applicable_count` now excludes a fact that does not apply — an unmeasured
   fact is a coverage gap and stays in the count; a not-applicable one is not a
-  gap and does not. **The config-fact aggregate this skill hands ci-advisor
+  gap and does not. The report renders the not-applicable row rather than
+  dropping it, and SKILL.md's spoken close says it as itself — a row that
+  vanishes, or one folded into "all checks pass", reads as a pass. **The
+  config-fact aggregate this skill hands ci-advisor
   changes shape**: nine facts instead of eight, so the blended CI Score's
   security third moves for any repository that has a suite. Census row and
   full scope statement in `references/security-facts.md`.

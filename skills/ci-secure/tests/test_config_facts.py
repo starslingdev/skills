@@ -3129,6 +3129,20 @@ def test_or_colon_after_the_suite_fails(tmp_path):
     assert f["outcome"] == "fail", f["evidence"]
 
 
+def test_or_colon_with_a_trailing_comment_still_fails(tmp_path):
+    """A comment after `|| :` does not un-swallow the suite.
+
+    `|| :` is recognised by what FOLLOWS the colon, since a bare `:` is also
+    the start of `:=`-style expansions and of a `::` group. The shape it is
+    most often written in carries the author's reason on the same line —
+    `pytest || :  # tolerate flakes` — and a comment is exactly as much a
+    terminator as the `;` and `&&` already accepted. Left out, the one form
+    of this shape a repository actually writes reads as a pass."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        '      - run: "pytest -q || :  # tolerate flakes"\n')})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
 def test_or_echo_after_the_suite_fails(tmp_path):
     f = _fatal(tmp_path, {"ci.yml": _wf(
         '      - run: go test ./... || echo "tests failed"\n')})
