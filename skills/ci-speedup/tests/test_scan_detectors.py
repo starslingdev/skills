@@ -3426,3 +3426,29 @@ jobs:
       - run: node scripts/render.js assets/logo.psd
 """
     assert "OPT76" not in _scan_one(tmp_path, neg)
+
+
+def test_opt76_run_block_anchors_on_the_downloading_git_lfs_command(tmp_path: Path):
+    """`git lfs install` (and `git lfs checkout`) download nothing — that is why
+    the run-block branch only fires on `pull`/`fetch`. Anchoring the finding on
+    the first `git lfs` line in the job pastes a non-downloading setup command as
+    the verbatim proof of a network payload, so the snippet must be the
+    `pull`/`fetch` line the detector actually matched."""
+    _write_repo_file(tmp_path, ".gitattributes", _GITATTRIBUTES)
+    wf = """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git lfs install
+      - run: git lfs checkout
+      - run: git lfs pull
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", wf)
+    hits = [f for f in _scan(tmp_path)["findings"] if f["pattern"] == "OPT76"]
+    assert len(hits) == 1
+    assert "git lfs pull" in hits[0]["evidence_snippet"]
+    assert "install" not in hits[0]["evidence_snippet"]

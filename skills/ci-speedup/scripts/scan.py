@@ -672,9 +672,20 @@ def _detect_opt76(doc: dict, raw: str) -> list[Hit]:
         # `git lfs pull` / `git lfs fetch` in a run block downloads the same
         # objects the `lfs:` input would — flag it on the same evidence.
         if _LFS_PATH_HINTS and not reads_lfs_path and "lfs" not in flagged:
-            if any(_LFS_RUN_RE.search(_run(s)) for s in _steps(job)):
+            matched = next(
+                (m.group(0) for m in (_LFS_RUN_RE.search(_run(s)) for s in _steps(job))
+                 if m),
+                None,
+            )
+            if matched:
                 flagged.add("lfs")
-                line = _line_of_in_job(raw, job_name, "git lfs")
+                # Anchor on the `pull`/`fetch` command we actually matched, not
+                # the job's first `git lfs` line: a job commonly runs `git lfs
+                # install` (or `checkout`) first, and those download nothing —
+                # quoting one as the verbatim proof of a network payload would
+                # cite a command this detector deliberately refuses to flag.
+                line = (_line_of_in_job(raw, job_name, matched)
+                        or _line_of_in_job(raw, job_name, "git lfs"))
                 hints = ", ".join(f"`{h}`" for h in _LFS_PATH_HINTS)
                 hits.append(Hit(
                     line=line,
