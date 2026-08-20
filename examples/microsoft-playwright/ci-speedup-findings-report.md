@@ -1765,7 +1765,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `0172966-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (OPT1-OPT69 catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `d9c4cb6`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (OPT1-OPT69 catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |
