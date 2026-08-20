@@ -7,10 +7,13 @@ two different things; a finding can be large on one and zero (or negative) on
 the other.
 
 Those two axes are the whole denomination: **runner minutes and wall-clock
-seconds**. **Storage is deliberately out of scope** — artifact and cache storage
-is a separate line on the GitHub bill, governed by `retention-days` and cache
-eviction rather than by how long a job runs, so no finding here is sized in
-gigabytes and no saving claimed here reduces a storage charge.
+seconds**. **Storage is deliberately out of scope** — artifact and cache
+storage is a separate line on the GitHub bill, governed by `retention-days`
+and cache eviction rather than by how long a job runs, so no finding here is
+sized in gigabytes and no saving claimed here reduces a storage charge. Nor is
+storage netted the other way: a fix that adds a cache or an artifact hand-off
+increases storage and cache-eviction pressure, and that cost is not subtracted
+from the minutes it saves.
 
 The report **ranks the findings table and drives the headline** on the
 **wall-clock axis** (developer wait — see `wall-clock-methodology.md` §1); the

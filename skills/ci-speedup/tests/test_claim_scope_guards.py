@@ -190,3 +190,28 @@ def test_bare_pr_scope_regex_distinguishes_qualified_from_bare():
         "every PR matching the path filter",
     ):
         assert not _BARE_PR_SCOPE.search(qualified), qualified
+
+
+def test_the_methodology_states_its_storage_boundary():
+    """A third scope-claim class, held in prose rather than in a detector: what
+    the skill's savings are DENOMINATED in. Every finding is sized in runner
+    minutes and wall-clock seconds; artifact and cache storage is a separate
+    line on the GitHub bill and is deliberately out of scope. That decision
+    lives only in `references/savings-methodology.md`, which carries no
+    substance floor of its own, so the paragraph can vanish silently and leave
+    a reader to infer the boundary from silence — the same silence the
+    paragraph was written to end. This pins the claim, not its wording beyond
+    the load-bearing phrases.
+    """
+    text = (_SKILL_DIR / "references" / "savings-methodology.md").read_text(
+        encoding="utf-8")
+    assert "Storage is deliberately out of scope" in text, (
+        "savings-methodology.md no longer states that storage is out of scope "
+        "— the two-axis denomination is back to being implied, and a reader "
+        "cannot tell an omission from a decision")
+    assert "sized in\ngigabytes" in text or "sized in gigabytes" in text, (
+        "savings-methodology.md dropped the 'no finding is sized in gigabytes' "
+        "half of the storage boundary")
+    assert "netted the other way" in text, (
+        "savings-methodology.md dropped the direction a user actually asks "
+        "about: storage a fix ADDS is not subtracted from the minutes it saves")

@@ -15,14 +15,16 @@ entries are dated (UTC). Format loosely follows
 
 - **2026-08-20** — **Build provenance and artifact attestation now have a
   recorded verdict.** The rejection record in `references/why-these-ten.md`
-  accounts for every adjacent practice that was considered and left out, and
-  attestation — `actions/attest-build-provenance`, cosign / sigstore, SLSA —
-  appeared nowhere, so a reader could only guess whether it had been weighed or
+  accounted for the patterns the descope removed, and attestation —
+  `actions/attest-build-provenance`, cosign / sigstore, SLSA — appeared
+  nowhere, so a reader could only guess whether it had been weighed or
   forgotten. It is now evaluated against the document's own three tests and
-  excluded on the record: attestation protects the consumers of what CI emits,
-  not the pipeline this skill scans, which is the same boundary that leaves code
-  scanning, dependency scanning and secret scanning outside the skill.
-  Documentation only — no detector, catalog entry, pattern id or count changes.
+  excluded on the record: attestation defends the consumers of what CI emits,
+  downstream of the pipeline this skill scans, and adopting it is a program
+  rather than a same-day edit. Because the entry carries no pattern id, the
+  census equality that pins every other rejection cannot see it, so a guard now
+  holds the verdict and its three adjudications in place. Documentation only —
+  no detector, catalog entry, pattern id or count changes.
 
 ### Fixed
 

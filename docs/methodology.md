@@ -6,7 +6,9 @@ references ship inside the skill and go one level deeper:
 - [`skills/ci-speedup/references/wall-clock-methodology.md`](../skills/ci-speedup/references/wall-clock-methodology.md)
   — the critical-path / long-pole model (the ranking axis).
 - [`skills/ci-speedup/references/savings-methodology.md`](../skills/ci-speedup/references/savings-methodology.md)
-  — the two-axis sizing rules (wall-clock vs runner-minutes).
+  — the two-axis sizing rules (wall-clock vs runner-minutes). Those two axes
+  are the whole denomination: storage is deliberately out of scope, so nothing
+  here is sized in gigabytes and no saving claimed reduces a storage charge.
 
 ## Measured, not estimated
 

@@ -140,7 +140,7 @@ def test_skill_md_still_links_every_reference_it_depends_on():
 def test_every_section_link_resolves_to_a_real_heading():
     """A link that names a section is a pointer to a RULE, not to a file. SKILL.md
     sends the agent to "Adding a pattern — the mechanical checklist" inside a
-    162-line reference; renaming or deleting that heading lands the agent at the
+    ~230-line reference; renaming or deleting that heading lands the agent at the
     top of the file with no sign anything is missing, which is worse than a link
     that visibly 404s. File existence alone does not catch it."""
     dangling = []

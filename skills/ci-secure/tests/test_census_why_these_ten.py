@@ -331,3 +331,29 @@ def test_every_incident_why_these_ten_cites_is_recorded_in_the_catalog():
             f"why-these-ten.md cites {token!r}, but no entry in the catalog's "
             "Reference incidents section is ABOUT it — the reader has no source "
             "to follow (a mention inside another entry's prose is not one)")
+
+
+def test_the_rejection_record_keeps_its_attestation_verdict():
+    """Build provenance / attestation is the practice a reader is most likely
+    to expect beside these ten, and its exclusion is the first entry in the
+    rejection record that carries no pattern id — so the census equality above
+    (`len(removed) == 15`), which pins every other entry, cannot see it. It
+    could be deleted, reversed or contradicted with the whole suite green.
+    No test can prove the reasoning is right; what a test can do is stop the
+    verdict being dropped the next time this file is trimmed, which is the
+    same contract the deferred-file rule in test_reference_links.py carries.
+    """
+    why = _WHY.read_text()
+    section = why.split("### Build provenance and artifact attestation", 1)
+    assert len(section) == 2, (
+        "why-these-ten.md no longer records a verdict for build provenance / "
+        "artifact attestation — the practice a reader most expects beside the "
+        "ten is back to unexplained silence, and the census equality above "
+        "cannot see it because the entry carries no pattern id")
+    body = section[1].split("\n## ", 1)[0]
+    for token in ("Outsider-chain test", "Incident test", "Same-day-fix test"):
+        assert token in body, (
+            f"the attestation entry no longer adjudicates the {token!r} — the "
+            "record is only auditable if every entry answers all three")
+    assert "The exclusion stands." in body, (
+        "the attestation entry no longer states its verdict")

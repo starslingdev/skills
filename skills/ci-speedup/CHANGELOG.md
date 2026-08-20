@@ -135,8 +135,11 @@ unversioned and updates by reinstall from `main`.
   minutes and wall clock — and said nothing about artifact and cache storage,
   which is a separate line on the GitHub bill governed by `retention-days` and
   cache eviction. The silence read as an oversight; it is a decision, and the
-  methodology now says so: no finding is sized in gigabytes and no saving
-  claimed reduces a storage charge. Documentation only — no behavior change.
+  methodology now says so: nothing in it is sized in gigabytes, no saving it
+  claims reduces a storage charge, and storage that a fix adds is not netted
+  against the minutes it saves. A scope-claim guard holds the boundary in
+  place, since the file carries no substance floor of its own. Documentation
+  only — no behavior change.
 
 - **2026-07-30** — **Two gating poles ⇒ both get their own menu slot.** The
   ≤4-option fold used to collapse the second pole into "Fix all," leaving no
