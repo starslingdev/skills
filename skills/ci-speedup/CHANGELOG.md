@@ -140,12 +140,19 @@ unversioned and updates by reinstall from `main`.
   it away), and the per-pattern hygiene / Tier-2 / queue-wait prompt. It names the
   forbidden edits outright — deleted or narrowed matrix legs, `continue-on-error`
   / `|| true` / other exit-code suppression, a narrowed or removed required status
-  check (or a job changed so a required check stops reporting), tests skipped
-  behind a path/branch filter, and reduced test counts, timeouts or retries that
-  weaken the signal rather than the cost — with one exception, a reduction the RCA
-  itself measured as the finding. `tests/test_no_weakening_rail.py` pins the rail
-  on all five paths and pins the matching eval case (`evals/evals.json` #8); the
-  two committed worked examples were re-rendered.
+  check (or a job changed so a required check stops reporting), tests that cover
+  the change skipped behind a path/branch filter, and reduced test counts, timeouts
+  or retries that weaken the signal rather than the cost. Two carve-outs are as
+  load-bearing as the prohibition: a reduction the finding itself measured, and a
+  conditional skip of a check the change cannot fail on — a `paths`/`paths-ignore`
+  filter, a draft or job-level `if:`, changed-scope selection — which is precisely
+  the catalog's own fix recipe for OPT32/33/34/39/40/47 and the structural levers,
+  so long as the commit that merges is still verified by the full set. Without it
+  the rail forbade, in the same fenced block, the recipe the prompt hands over.
+  `tests/test_no_weakening_rail.py` pins the rail on all five paths — its content,
+  its carve-outs, and its polarity, so a rail keeping every noun while inverting
+  "do not" into "you may" fails — and pins the matching eval case
+  (`evals/evals.json` #8); the two committed worked examples were re-rendered. (#72)
 
 ### Changed
 

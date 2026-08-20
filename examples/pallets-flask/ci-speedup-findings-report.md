@@ -115,17 +115,24 @@ WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
 
 NEVER BUY SPEED BY CHECKING LESS
-- The change must leave CI verifying exactly what it verifies today.
-  Unless the measured cause above IS that reduction, do not: delete or
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
   narrow matrix legs so fewer configurations are tested; add
   `continue-on-error`, `|| true`, or any other exit-code suppression;
   narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter; or cut
-  test counts, timeouts, or retries in a way that weakens the signal
-  rather than the cost.
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by the full set - follow the guardrail on the catalog
+  recipe where this prompt links one, because that is the half it exists
+  to protect.
 - A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to reach the ceiling
-  above, say so and stop.
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -183,17 +190,24 @@ WHERE TO LOOK
 - The `pre-commit.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
 
 NEVER BUY SPEED BY CHECKING LESS
-- The change must leave CI verifying exactly what it verifies today.
-  Unless the measured cause above IS that reduction, do not: delete or
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
   narrow matrix legs so fewer configurations are tested; add
   `continue-on-error`, `|| true`, or any other exit-code suppression;
   narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter; or cut
-  test counts, timeouts, or retries in a way that weakens the signal
-  rather than the cost.
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by the full set - follow the guardrail on the catalog
+  recipe where this prompt links one, because that is the half it exists
+  to protect.
 - A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to reach the ceiling
-  above, say so and stop.
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -250,17 +264,24 @@ WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
 
 NEVER BUY SPEED BY CHECKING LESS
-- The change must leave CI verifying exactly what it verifies today.
-  Unless the measured cause above IS that reduction, do not: delete or
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
   narrow matrix legs so fewer configurations are tested; add
   `continue-on-error`, `|| true`, or any other exit-code suppression;
   narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter; or cut
-  test counts, timeouts, or retries in a way that weakens the signal
-  rather than the cost.
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by the full set - follow the guardrail on the catalog
+  recipe where this prompt links one, because that is the half it exists
+  to protect.
 - A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to reach the ceiling
-  above, say so and stop.
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -318,17 +339,24 @@ WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
 
 NEVER BUY SPEED BY CHECKING LESS
-- The change must leave CI verifying exactly what it verifies today.
-  Unless the measured cause above IS that reduction, do not: delete or
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
   narrow matrix legs so fewer configurations are tested; add
   `continue-on-error`, `|| true`, or any other exit-code suppression;
   narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter; or cut
-  test counts, timeouts, or retries in a way that weakens the signal
-  rather than the cost.
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by the full set - follow the guardrail on the catalog
+  recipe where this prompt links one, because that is the half it exists
+  to protect.
 - A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to reach the ceiling
-  above, say so and stop.
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -384,17 +412,24 @@ WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
 
 NEVER BUY SPEED BY CHECKING LESS
-- The change must leave CI verifying exactly what it verifies today.
-  Unless the measured cause above IS that reduction, do not: delete or
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
   narrow matrix legs so fewer configurations are tested; add
   `continue-on-error`, `|| true`, or any other exit-code suppression;
   narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter; or cut
-  test counts, timeouts, or retries in a way that weakens the signal
-  rather than the cost.
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by the full set - follow the guardrail on the catalog
+  recipe where this prompt links one, because that is the half it exists
+  to protect.
 - A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to reach the ceiling
-  above, say so and stop.
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -468,17 +503,24 @@ Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
 
 NEVER BUY SPEED BY CHECKING LESS
-- The change must leave CI verifying exactly what it verifies today.
-  Unless the measured cause above IS that reduction, do not: delete or
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
   narrow matrix legs so fewer configurations are tested; add
   `continue-on-error`, `|| true`, or any other exit-code suppression;
   narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter; or cut
-  test counts, timeouts, or retries in a way that weakens the signal
-  rather than the cost.
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by the full set - follow the guardrail on the catalog
+  recipe where this prompt links one, because that is the half it exists
+  to protect.
 - A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to reach the ceiling
-  above, say so and stop.
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -530,17 +572,24 @@ if branch protection/rulesets are not readable, assume every check this
 workflow produces may be required.
 
 NEVER BUY SPEED BY CHECKING LESS
-- The change must leave CI verifying exactly what it verifies today.
-  Unless the measured cause above IS that reduction, do not: delete or
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
   narrow matrix legs so fewer configurations are tested; add
   `continue-on-error`, `|| true`, or any other exit-code suppression;
   narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter; or cut
-  test counts, timeouts, or retries in a way that weakens the signal
-  rather than the cost.
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by the full set - follow the guardrail on the catalog
+  recipe where this prompt links one, because that is the half it exists
+  to protect.
 - A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to reach the ceiling
-  above, say so and stop.
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -584,17 +633,24 @@ if branch protection/rulesets are not readable, assume every check this
 workflow produces may be required.
 
 NEVER BUY SPEED BY CHECKING LESS
-- The change must leave CI verifying exactly what it verifies today.
-  Unless the measured cause above IS that reduction, do not: delete or
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
   narrow matrix legs so fewer configurations are tested; add
   `continue-on-error`, `|| true`, or any other exit-code suppression;
   narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter; or cut
-  test counts, timeouts, or retries in a way that weakens the signal
-  rather than the cost.
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by the full set - follow the guardrail on the catalog
+  recipe where this prompt links one, because that is the half it exists
+  to protect.
 - A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to reach the ceiling
-  above, say so and stop.
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -614,7 +670,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `ea3a379-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (OPT1-OPT69 catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `4c2724e-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (OPT1-OPT69 catalog) |
 | gh runs/jobs API (timestamps) | 47 runs / 152 jobs sampled | Critical-path + per-step P50 |
 | job logs | 1 job log(s) sampled | Step internals + cross-run magnitude (deeper levels) |
 | workflow YAML | 5 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

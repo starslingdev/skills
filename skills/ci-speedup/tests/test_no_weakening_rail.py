@@ -42,6 +42,17 @@ _FORBIDDEN_MARKERS = (
     "retries",               # weakening the signal rather than the cost
 )
 
+# The catalog's own fix for six skip-family patterns (OPT32/33/34/39/40/47) and
+# for the structural levers IS a conditional skip. Without an explicit carve-out
+# the rail forbids, in the same fenced block, the recipe the prompt then orders
+# the agent to apply — so the carve-out is pinned as hard as the prohibition.
+_CARVE_OUT_MARKERS = (
+    "cannot fail on",        # the principle: skipping what cannot catch anything
+    "paths-ignore",          # the catalog's OPT32 recipe
+    "job-level `if:`",       # the catalog's OPT33 recipe, the documented-safe shape
+    "verified by the full set",  # the line the carve-out must not cross
+)
+
 _RAIL_HEADING = "NEVER BUY SPEED BY CHECKING LESS"
 
 
@@ -49,6 +60,17 @@ def _assert_rail(prompt: str, where: str) -> None:
     assert _RAIL_HEADING in prompt, f"{where}: no no-weakening rail in the prompt"
     for marker in _FORBIDDEN_MARKERS:
         assert marker in prompt, f"{where}: rail does not forbid `{marker}`"
+    for marker in _CARVE_OUT_MARKERS:
+        assert marker in prompt, (
+            f"{where}: rail lacks the legitimate-skip carve-out (`{marker}`), so it "
+            f"forbids the catalog fix recipe this same prompt hands over")
+    # Polarity, not just vocabulary. A rail keeping every marker above while
+    # inverting `do not:` into `you may:` names all the same edits and permits
+    # them; that mutant passed a keyword-presence guard.
+    assert "do not: delete or" in prompt, (
+        f"{where}: rail does not state its list as a PROHIBITION")
+    assert "regression, not a win" in prompt, (
+        f"{where}: rail does not call a pipeline that verifies less a regression")
     # The rail is an exception rule, not a blanket ban: an RCA that NAMED the
     # reduction as the finding must still be fixable.
     assert "unless" in prompt.lower(), (
@@ -138,7 +160,7 @@ def test_eval_case_pins_the_rail() -> None:
     assert hits, "evals.json has no case for the no-weakening rail"
     blob = json.dumps(hits).lower()
     for marker in ("matrix leg", "continue-on-error", "required status check",
-                   "path/branch filter"):
+                   "path/branch filter", "cannot fail on"):
         assert marker.lower() in blob, f"eval case does not cover `{marker}`"
     for case in hits:
         assert case.get("expectations"), "eval case has no expectations list"

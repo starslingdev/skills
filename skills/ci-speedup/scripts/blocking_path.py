@@ -2227,22 +2227,44 @@ def _parse_log(text: str) -> dict[str, Any] | None:
 # shape below reads as a win in exactly the numbers this report measures — so
 # every prompt-emitting surface (catalog, generic, LLM gap-fill, hygiene/Tier-2/
 # queue-wait) carries these lines verbatim. tests/test_no_weakening_rail.py pins
-# that. The "unless the measured cause above IS that reduction" clause is
-# load-bearing: a pole whose RCA named an over-broad matrix or a swallowed exit
-# code must still be fixable.
+# that, including the polarity (a rail that keeps every noun and flips `do not:`
+# into `you may:` must fail).
+#
+# TWO clauses are load-bearing, and both exist because the rail otherwise
+# forbids the skill's own recommendations:
+#   1. "Unless the finding above IS that reduction" — a pole whose RCA named an
+#      over-broad matrix or a swallowed exit code must still be fixable.
+#   2. The legitimate-skip carve-out — the catalog fix for OPT32/33/34/39/40/47
+#      and for the structural levers IS a conditional skip (a `paths:` filter, a
+#      draft `if:`, changed-scope selection). Those prompts link that recipe and
+#      then order the agent to apply it, so a rail with no carve-out contradicts
+#      its own fenced block and the agent's correct reading is "say so and stop"
+#      — a real finding rendered un-actionable. The line the carve-out must not
+#      cross is what the MERGING commit gets verified against.
+#
+# The rail names no section of the enclosing prompt: only two of the five paths
+# emit a "ceiling"/"THE MEASURED CAUSE" heading, so a pointer at one would dangle
+# on the rest.
 _NO_WEAKENING_LINES = [
     "NEVER BUY SPEED BY CHECKING LESS",
-    "- The change must leave CI verifying exactly what it verifies today.",
-    "  Unless the measured cause above IS that reduction, do not: delete or",
+    "- The commit that merges must still be verified by exactly what verifies",
+    "  it today. Unless the finding above IS that reduction, do not: delete or",
     "  narrow matrix legs so fewer configurations are tested; add",
     "  `continue-on-error`, `|| true`, or any other exit-code suppression;",
     "  narrow or remove a required status check, or change a job so a required",
-    "  check stops reporting; skip tests behind a path/branch filter; or cut",
-    "  test counts, timeouts, or retries in a way that weakens the signal",
-    "  rather than the cost.",
+    "  check stops reporting; skip tests behind a path/branch filter that do",
+    "  cover the change; or cut test counts, timeouts, or retries in a way",
+    "  that weakens the signal rather than the cost.",
+    "- Not running a check against a change it cannot fail on is NOT checking",
+    "  less, and several catalog fixes work exactly that way: a `paths:` /",
+    "  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test",
+    "  selection. Those stay in bounds as long as the commit that merges is",
+    "  still verified by the full set - follow the guardrail on the catalog",
+    "  recipe where this prompt links one, because that is the half it exists",
+    "  to protect.",
     "- A pipeline that finishes sooner because it verifies less is a",
-    "  regression, not a win. If that is the only way to reach the ceiling",
-    "  above, say so and stop.",
+    "  regression, not a win. If that is the only way to make this faster, say",
+    "  so and stop.",
 ]
 
 
