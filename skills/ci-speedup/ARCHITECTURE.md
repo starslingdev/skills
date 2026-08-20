@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 73-pattern
-catalog — 67 **hygiene/data-driven** patterns (OPT1–OPT69, with gaps 10 and 67) plus 6 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against a 74-pattern
+catalog — 68 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76) plus 6 **structural /
 critical-path** patterns (OPT70–OPT75, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -1767,8 +1767,9 @@ Tests live under `tests/` and are picked up by the repo-root `pyproject.toml`'s
 
 - **Detector unit tests** (`test_scan_detectors.py`, ~40 cases) - positive and
   **negative** (suppression) cases for the static detectors: OPT1/2/5/9/14/16/
-  18/21/27/28/29/31/33/36/39/62/63, including load-bearing carve-outs (OPT28
-  git-history jobs and local composite actions, OPT33 aggregator/change-detection
+  18/21/27/28/29/31/33/36/39/62/63/76, including load-bearing carve-outs (OPT28
+  git-history jobs and local composite actions, OPT76 declared-payload reads and
+  transitively-resolved local composite actions, OPT33 aggregator/change-detection
   suppression, and the shared **activation-fidelity** gate — a `pull_request:
   types:`-gated or job-`if:` label/activity-gated job is not "every PR", so
   OPT33/39/40 suppress it: `_pr_trigger_runs_every_pr`/`_job_runs_on_every_pr`).
@@ -1904,7 +1905,7 @@ bounds the gaps list originally named - three implemented, one deliberately not:
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -1955,7 +1956,7 @@ it is routed from the measured critical path instead of matched against YAML.
   (dominant step/category, redundancy ratio, required-status, shared substep)
   annotate the pole they came from; the catalog OPT70–OPT75 findings are
   therefore **excluded** from the off-path "Also noticed" appendix
-  (`_also_noticed_block`, which is hygiene OPT1–OPT69 only) since the pole already
+  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76 only) since the pole already
   represents them. Like every pole, a structural lever carries an agent prompt
   rather than a prescribed fix; for a HIGH-risk lever (e.g. OPT70 scope-to-
   changed) the prompt's failure-mode/guard section tells the agent to state the
@@ -2811,7 +2812,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 73-pattern catalog (METADATA + body per pattern); the source of truth for
+  the 74-pattern catalog (METADATA + body per pattern); the source of truth for
   detection and the report's TL;DR / pattern background.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.

@@ -13,6 +13,37 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-08-20** — **The shipped pattern-count breakdown is now guarded, not
+  just the total.** `SKILL.md` and `ARCHITECTURE.md` state the catalog size and
+  then break it down into hygiene plus structural patterns. The existing guard
+  checked only the headline number, so a bump could leave the breakdown adding up
+  to something else — the very sentence a reader uses to check the count
+  contradicting itself. The breakdown must now sum to the real catalog count.
+
+- **2026-08-20** — **Submodule and Git LFS checkout cost is now a catalog
+  pattern (OPT76).** The catalog priced full-history checkout (OPT28) but said
+  nothing about the other two checkout-time sinks: a job that clones every
+  submodule (`submodules: true|recursive`) or downloads every LFS object
+  (`lfs: true`, or `git lfs pull`/`fetch` in a run block) pays that download on
+  every run, even when no step reads a byte of it. The new pattern fires only
+  when the repo actually declares the payload — a `path =` in `.gitmodules`, a
+  `filter=lfs` line in `.gitattributes` — the job pulls it, and no step in that
+  job (nor a local composite action it invokes) references any declared path;
+  with nothing declared, or a local action whose file can't be read, it stays
+  silent rather than recommend a payload removal that could break the job. The
+  search for a declared path covers everywhere the job's own YAML can name one —
+  run blocks, step and job-level `working-directory`, `strategy.matrix` values,
+  step `if:`/`name:`, `env:` and `with:` values — and follows local composite
+  actions transitively, failing closed if any link in that chain can't be read. A
+  checkout of a different `repository:` is skipped, since this repo's declarations
+  say nothing about that one's payload. Scoped to
+  `pull_request`/`push`/`workflow_call` workflows like OPT28, so a dispatch-only
+  helper isn't ranked. It carries no modeled seconds: the cost is the repo's own
+  payload size, which the workflow YAML never reveals, so both savings axes render
+  empty rather than carrying an invented number. The fix recipe states plainly
+  that the workflow alone cannot prove a job doesn't read the payload — a build
+  script can — so the finding is a candidate to verify, not a verdict.
+
 - **2026-07-28** — **Credential-shaped strings are masked in every quoted log
   line.** The report quotes verbatim job-log and workflow-YAML text as evidence,
   and that is the artifact users commit and share; GitHub masks only the secrets

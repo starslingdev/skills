@@ -391,6 +391,315 @@ def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+# ---- OPT76 — Submodule / Git LFS Checkout Payload (P5.5) ---------------------
+
+# Two checkout-time payloads OPT28 does NOT cover: the submodule clone
+# (`submodules: true|recursive`) and the LFS object download (`lfs: true`, or a
+# `git lfs pull|fetch` run step). Both are paid on every run of every job that
+# asks for them, whether or not the job reads a byte of the payload.
+#
+# The finding needs THREE facts, all read from the repo — never assumed:
+#   1. the repo DECLARES a payload path (`.gitmodules` paths / `.gitattributes`
+#      `filter=lfs` patterns). No declaration → no finding: with nothing declared
+#      we cannot name a path the job fails to read, and asserting unread payload
+#      we never saw is exactly the evidence-claim class the guards forbid.
+#   2. a job PULLS it (the checkout `with:` key, or a `git lfs` run step).
+#   3. NO step in that job references any declared path — searched across the
+#      job's run blocks, working-directory, matrix values, step `if:`/`name:`,
+#      `with:` values, `uses:` refs, and the body of any LOCAL composite action
+#      it invokes (transitively).
+# When a local composite action can't be read we fail CLOSED (skip the job), the
+# same stance OPT28 takes: the cost is a missed finding, never a breaking fix.
+#
+# `git lfs checkout` is deliberately NOT here: it populates the working tree from
+# objects that are ALREADY local, so it downloads nothing and flagging it would
+# assert a network payload we never established.
+_LFS_RUN_RE = re.compile(r"git\s+lfs\s+(pull|fetch)\b", re.I)
+_LOCAL_USES_RE = re.compile(r"uses:\s*['\"]?(\./[^\s'\"#]+)")
+
+# Populated once per scan() from the repo root (see the scan() wiring below).
+_SUBMODULE_PATHS: list[str] = []
+_LFS_PATH_HINTS: list[str] = []
+# Local `uses: ./…` ref → its action file text (plus the text of every local
+# action it transitively invokes), or None when any link is unreadable.
+_LOCAL_ACTION_TEXT: dict[str, "str | None"] = {}
+
+
+def _read_repo_file(root: Path, name: str) -> str:
+    try:
+        return (root / name).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _parse_gitmodules(text: str) -> list[str]:
+    """The `path = …` values declared in `.gitmodules`. Values may be quoted (a
+    path containing a space has to be) and may carry a trailing `#` comment;
+    dropping those silently shrinks the declared payload, which would let the
+    evidence enumerate an incomplete declaration and flag a job that does read
+    the submodule it omitted."""
+    out: list[str] = []
+    for line in text.splitlines():
+        m = re.match(r"\s*path\s*=\s*(.+?)\s*(?:#.*)?$", line)
+        if not m:
+            continue
+        val = m.group(1).strip()
+        if len(val) > 1 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        val = re.sub(r"^\./", "", val).strip("/")
+        if val:
+            out.append(val)
+    return sorted(set(out))
+
+
+def _parse_lfs_attributes(text: str) -> list[str]:
+    """Searchable hints for the paths `.gitattributes` tracks with LFS. A
+    pattern like `*.psd` yields `.psd` (an extension a step would name); a path
+    pattern like `assets/**` yields its literal prefix `assets/`. Patterns that
+    reduce to nothing searchable (a bare `*`) are dropped — they would match any
+    job text and silently suppress every finding."""
+    out: list[str] = []
+    for line in text.splitlines():
+        fields = line.split()
+        # A comment line is not a declaration — and its `#` would otherwise
+        # become a hint that matches almost every run block, silently switching
+        # the whole LFS half of the pattern off. `-filter=lfs` UNSETS the
+        # attribute, and `filter=lfsfoo` is a different attribute entirely.
+        if not fields or fields[0].startswith("#"):
+            continue
+        if "filter=lfs" not in fields[1:]:
+            continue
+        pat = fields[0]
+        if pat.startswith("*.") and len(pat) > 2:
+            out.append(pat[1:])            # "*.psd" -> ".psd"
+            continue
+        literal = re.split(r"[\*\?\[]", pat)[0].strip("/")
+        if literal:
+            out.append(literal)
+    return sorted(set(out))
+
+
+def _read_local_action(root: Path, ref: str) -> "str | None":
+    """The action file's text for a local `uses: ./…` ref, or None when no
+    candidate file is readable."""
+    base = root / ref[2:]
+    candidates = [base] if base.suffix in (".yml", ".yaml") else [
+        base / "action.yml", base / "action.yaml"]
+    for cand in candidates:
+        try:
+            return cand.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return None
+
+
+def _index_local_action_text(root: Path,
+                             parsed: list[tuple[str, dict, str]]) -> dict[str, "str | None"]:
+    """Local `uses: ./…` ref → its action text CONCATENATED with the text of
+    every local action it transitively invokes; None when any link in that chain
+    is unreadable. A composite action routinely delegates to another local
+    action, and that inner one can be the step that reads the payload — reading
+    only the outer body would make the job look clean and recommend a removal
+    that breaks the build. An unreadable link anywhere fails the whole chain
+    CLOSED, the same stance a directly-unreadable action takes."""
+    refs: set[str] = set()
+    for _rel, doc, _raw in parsed:
+        for job in _jobs_from_doc(doc).values():
+            if not isinstance(job, dict):
+                continue
+            for s in _steps(job):
+                u = _uses(s).split("@")[0].strip()
+                if u.startswith("./"):
+                    refs.add(u)
+    out: dict[str, "str | None"] = {}
+    for ref in refs:
+        parts: list[str] = []
+        seen: set[str] = set()
+        queue: list[str] = [ref]
+        unreadable = False
+        while queue:
+            cur = queue.pop()
+            if cur in seen:
+                continue        # a cycle terminates instead of spinning
+            seen.add(cur)
+            text = _read_local_action(root, cur)
+            if text is None:
+                unreadable = True
+                break
+            parts.append(text)
+            queue += [m.split("@")[0].strip() for m in _LOCAL_USES_RE.findall(text)]
+        out[ref] = None if unreadable else "\n".join(parts)
+    return out
+
+
+def _job_payload_blob(job: dict) -> "str | None":
+    """Everything in the job that could name a checked-out path: run blocks,
+    step and job-level `working-directory`, matrix values, step `if:`/`name:`,
+    `uses:` refs, `with:`/`env:` values, and the body of each local composite
+    action it invokes (transitively). None when a local action can't be read —
+    the caller then skips the job (fail closed).
+
+    The blob has to cover EVERY place the job's own YAML can name a path,
+    because the finding's evidence asserts that no step in the job references a
+    declared one. A path sitting in `defaults.run.working-directory` or a matrix
+    value is in the very text the evidence claims to have searched, so missing it
+    is a false claim, not a documented blind spot."""
+    parts: list[str] = [str(job.get("name") or "")]
+    for block in ("env", "defaults", "strategy"):
+        vals = job.get(block)
+        if vals is not None:
+            parts.append(_yaml_text(vals))
+    for s in _steps(job):
+        parts.append(_run(s))
+        parts.append(str(s.get("working-directory") or ""))
+        parts.append(str(s.get("name") or ""))
+        parts.append(str(s.get("if") or ""))
+        uses = _uses(s)
+        parts.append(uses)
+        for block in ("with", "env"):
+            vals = s.get(block)
+            if isinstance(vals, dict):
+                parts += [str(v) for v in vals.values()]
+        ref = uses.split("@")[0].strip()
+        if ref.startswith("./"):
+            text = _LOCAL_ACTION_TEXT.get(ref)
+            if text is None:
+                return None     # unreadable local action — can't prove it unread
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def _yaml_text(node: Any) -> str:
+    """Every scalar reachable from `node`, flattened — used to search nested
+    blocks (`defaults`, `strategy.matrix`) whose shape varies."""
+    if isinstance(node, dict):
+        return "\n".join(f"{k}\n{_yaml_text(v)}" for k, v in node.items())
+    if isinstance(node, (list, tuple)):
+        return "\n".join(_yaml_text(v) for v in node)
+    return str(node)
+
+
+def _payload_line(raw: str, job_name: str, key: str, accepted: tuple[str, ...]) -> int:
+    """The line inside `job_name` that writes `key: <one of accepted>`. Anchoring
+    on a bare `key:` needle would cite the FIRST such line in the job, so a job
+    with two checkouts renders `submodules: false` as the verbatim proof of a
+    `submodules: true` finding. Returning 0 when no accepted literal is written
+    also suppresses the YAML-truthy-but-runner-false values: PyYAML resolves
+    `yes`/`on` to True, while actions/checkout enables submodules only for
+    `TRUE`/`RECURSIVE`, so `submodules: yes` pulls nothing at all."""
+    for value in accepted:
+        for cased in (value, value.upper(), value.capitalize()):
+            for lit in (cased, f'"{cased}"', f"'{cased}'"):
+                line = _line_of_in_job(raw, job_name, f"{key}: {lit}")
+                if line:
+                    return line
+    return 0
+
+
+def _detect_opt76(doc: dict, raw: str) -> list[Hit]:
+    """A checkout that pulls submodules or LFS objects in a job that references
+    none of the declared submodule / LFS-tracked paths."""
+    if not (_SUBMODULE_PATHS or _LFS_PATH_HINTS):
+        return []   # nothing declared in the repo — no path to prove unread
+    on = doc.get("on") or doc.get(True)
+    # Same dev-facing scope as OPT28: a dispatch-/schedule-only helper runs
+    # ~0x/mo, so its checkout payload is noise, not a ranked optimization.
+    if not _on_includes(on, ("pull_request", "push", "workflow_call")):
+        return []
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict):
+            continue
+        blob = _job_payload_blob(job)
+        if blob is None:
+            continue    # fail closed
+        # Git path matching is effectively case-insensitive on the macOS and
+        # Windows checkouts these workflows run against, so a step naming
+        # `assets/LOGO.PSD` really does read the `*.psd` payload.
+        blob_l = blob.lower()
+        reads_submodule = any(p.lower() in blob_l for p in _SUBMODULE_PATHS)
+        reads_lfs_path = any(h.lower() in blob_l for h in _LFS_PATH_HINTS)
+        # One payload is downloaded once, however many steps ask for it — a job
+        # with both `lfs: true` and `git lfs pull` must not double-count it.
+        flagged: set[str] = set()
+        for step in _steps(job):
+            if not _uses(step).startswith("actions/checkout"):
+                continue
+            with_ = step.get("with")
+            if not isinstance(with_, dict):
+                with_ = {}
+            # A `repository:` checkout clones SOMEONE ELSE's tree, whose
+            # submodules and LFS objects this repo's `.gitmodules` /
+            # `.gitattributes` say nothing about. Naming our declared paths as
+            # its unread payload would be a claim about data never observed.
+            if str(with_.get("repository") or "").strip():
+                continue
+            sub = str(with_.get("submodules", "")).lower()
+            line = (_payload_line(raw, job_name, "submodules", ("true", "recursive"))
+                    if sub in ("true", "recursive") else 0)
+            if (_SUBMODULE_PATHS and line and not reads_submodule
+                    and "submodule" not in flagged):
+                flagged.add("submodule")
+                paths = ", ".join(f"`{p}`" for p in _SUBMODULE_PATHS)
+                hits.append(Hit(
+                    line=line,
+                    affected_jobs=[job_name],
+                    evidence=(
+                        f"job `{job_name}` checks out with `submodules: {sub}`, and no "
+                        f"step in the job (nor a local composite action it invokes) "
+                        f"references the submodule path(s) declared in `.gitmodules`: "
+                        f"{paths}"),
+                    match_text=job_name,
+                    snippet=_raw_line(raw, line),
+                ))
+            lfs_line = (_payload_line(raw, job_name, "lfs", ("true",))
+                        if str(with_.get("lfs", "")).lower() == "true" else 0)
+            if (_LFS_PATH_HINTS and lfs_line and not reads_lfs_path
+                    and "lfs" not in flagged):
+                flagged.add("lfs")
+                line = lfs_line
+                hints = ", ".join(f"`{h}`" for h in _LFS_PATH_HINTS)
+                hits.append(Hit(
+                    line=line,
+                    affected_jobs=[job_name],
+                    evidence=(
+                        f"job `{job_name}` checks out with `lfs: true`, and no step in "
+                        f"the job (nor a local composite action it invokes) references "
+                        f"the LFS-tracked path(s) in `.gitattributes`: {hints}"),
+                    match_text=job_name,
+                    snippet=_raw_line(raw, line),
+                ))
+        # `git lfs pull` / `git lfs fetch` in a run block downloads the same
+        # objects the `lfs:` input would — flag it on the same evidence.
+        if _LFS_PATH_HINTS and not reads_lfs_path and "lfs" not in flagged:
+            matched = next(
+                (m.group(0) for m in (_LFS_RUN_RE.search(_run(s)) for s in _steps(job))
+                 if m),
+                None,
+            )
+            if matched:
+                flagged.add("lfs")
+                # Anchor on the `pull`/`fetch` command we actually matched, not
+                # the job's first `git lfs` line: a job commonly runs `git lfs
+                # install` (or `checkout`) first, and those download nothing —
+                # quoting one as the verbatim proof of a network payload would
+                # cite a command this detector deliberately refuses to flag.
+                line = (_line_of_in_job(raw, job_name, matched)
+                        or _line_of_in_job(raw, job_name, "git lfs"))
+                hints = ", ".join(f"`{h}`" for h in _LFS_PATH_HINTS)
+                hits.append(Hit(
+                    line=line,
+                    affected_jobs=[job_name],
+                    evidence=(
+                        f"job `{job_name}` runs `git lfs` to download LFS objects, and "
+                        f"no step in the job (nor a local composite action it invokes) "
+                        f"references the LFS-tracked path(s) in `.gitattributes`: {hints}"),
+                    match_text=job_name,
+                    snippet=_raw_line(raw, line),
+                ))
+    return hits
+
+
 # ---- OPT23 — Single-Threaded Matrix (P4.3) -----------------------------------
 
 def _detect_opt23(doc: dict, raw: str) -> list[Hit]:
@@ -1728,6 +2037,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT23": _detect_opt23,
     "OPT27": _detect_opt27,
     "OPT28": _detect_opt28,
+    "OPT76": _detect_opt76,
     "OPT29": _detect_opt29,
     "OPT31": _detect_opt31,
     "OPT32": _detect_opt32,
@@ -2659,6 +2969,14 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
     # `git checkout origin/main` hidden inside `uses: ./.github/actions/foo`.
     global _GIT_HISTORY_LOCAL_ACTIONS
     _GIT_HISTORY_LOCAL_ACTIONS = _index_local_git_actions(root, parsed)
+
+    # Index the repo's DECLARED checkout payload (submodule paths, LFS-tracked
+    # path patterns) and the text of every local composite action, so OPT76 can
+    # tell a job that pulls a payload it never reads from one that needs it.
+    global _SUBMODULE_PATHS, _LFS_PATH_HINTS, _LOCAL_ACTION_TEXT
+    _SUBMODULE_PATHS = _parse_gitmodules(_read_repo_file(root, ".gitmodules"))
+    _LFS_PATH_HINTS = _parse_lfs_attributes(_read_repo_file(root, ".gitattributes"))
+    _LOCAL_ACTION_TEXT = _index_local_action_text(root, parsed)
 
     # Coverage is a property of the catalog + the registered detectors, NOT of
     # whatever workflows happened to parse. Compute it directly so a repo with
