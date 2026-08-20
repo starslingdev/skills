@@ -191,6 +191,21 @@ two moved numbers.
   `continue-on-error: ${{ matrix.experimental }}` does not — it is true on some
   matrix legs and false on others, and the YAML cannot say which.
 
+  The trailing-`exit 0` shape is judged against the step's **effective
+  shell**, resolved the way GitHub resolves it — the step's `shell:`, then
+  the job's `defaults.run.shell`, then the workflow's, then the runner
+  default. Where errexit applies — the platform default `bash -e {0}` on
+  Linux and macOS, `sh -e`, an explicit `shell: bash` (invoked with
+  `-eo pipefail`) — a failing suite aborts the step before a trailing
+  `exit 0` is ever reached, so the step already fails and flagging it would
+  be a false accusation against a fatally wired job. The arm therefore fires
+  only where the discard is real: `pwsh`, `powershell`, or `cmd`, declared
+  at any of those levels or implied by a `windows-*` runner's `pwsh`
+  default. A shell expression or a template this list does not recognise
+  resolves to errexit-bearing, for the same miss-beats-accusation reason.
+  The other shapes need no such gate: `|| true` and `|| :` succeed under
+  any shell, and `set +e` is itself the act of turning errexit off.
+
   **Scope, deliberately narrow.** Only a workflow that can report a check on a
   pull request is judged at all — a `pull_request`, `pull_request_target`,
   `push` or `merge_group` trigger. A nightly `schedule` job or a

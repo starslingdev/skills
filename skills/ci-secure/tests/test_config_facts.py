@@ -3167,9 +3167,13 @@ def test_or_echo_that_still_exits_nonzero_passes(tmp_path):
     assert f["outcome"] == "pass", f["evidence"]
 
 
-def test_trailing_exit_zero_after_the_suite_fails(tmp_path):
+def test_trailing_exit_zero_after_the_suite_fails_where_no_errexit(tmp_path):
+    """On a step whose shell has no errexit — `pwsh`, `powershell`, `cmd` —
+    a trailing `exit 0` really does run after a failed suite and discards
+    it."""
     f = _fatal(tmp_path, {"ci.yml": _wf(
-        "      - run: |\n          cargo test --all\n          exit 0\n")})
+        "      - shell: pwsh\n"
+        "        run: |\n          cargo test --all\n          exit 0\n")})
     assert f["outcome"] == "fail", f["evidence"]
     assert "exit 0" in f["evidence"], f["evidence"]
 
@@ -3179,10 +3183,68 @@ def test_trailing_exit_zero_with_an_inline_comment_fails(tmp_path):
     Requiring the `0` to end the line would read a self-documented swallow as
     a pass."""
     f = _fatal(tmp_path, {"ci.yml": _wf(
-        "      - run: |\n          cargo test --all\n"
+        "      - shell: cmd\n"
+        "        run: |\n          cargo test --all\n"
         "          exit 0 # always succeed\n")})
     assert f["outcome"] == "fail", f["evidence"]
     assert "exit 0" in f["evidence"], f["evidence"]
+
+
+def test_trailing_exit_zero_under_default_errexit_shell_passes(tmp_path):
+    """GitHub's default `run` shell on Linux and macOS is `bash -e {0}`
+    (and an explicit `shell: bash` gets `-eo pipefail`): a failing suite
+    aborts the step before a trailing `exit 0` is ever reached, so the step
+    already fails and nothing is swallowed. Flagging it is a false accusation
+    on a fatally wired job — exactly what this fact promises never to make."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          pytest -q\n          exit 0\n")})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_trailing_exit_zero_on_a_windows_default_shell_fails(tmp_path):
+    """With no `shell:` anywhere, a `windows-*` runner defaults to `pwsh`,
+    which carries no errexit — the discard is real there."""
+    f = _fatal(tmp_path, {"ci.yml": (
+        "name: ci\non: [pull_request]\npermissions:\n  contents: read\n"
+        "jobs:\n  test:\n    runs-on: windows-latest\n    steps:\n"
+        "      - run: |\n          dotnet test\n          exit 0\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_trailing_exit_zero_under_a_job_default_pwsh_fails(tmp_path):
+    """`defaults.run.shell` on the job (or the workflow) sets the step's
+    effective shell, so a job-wide `pwsh` makes the discard real on every
+    step that does not override it."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        "      - run: |\n          pytest -q\n          exit 0\n",
+        job_extra="    defaults:\n      run:\n        shell: pwsh\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+_ALLOWLIST_SAMPLES = (
+    "pytest -q", "py.test", "tox", "nox", "pre-commit run --all-files",
+    "npm test", "pnpm run lint", "yarn typecheck", "bun run check",
+    "npx jest", "npx playwright", "jest", "vitest run", "mocha", "karma",
+    "playwright test", "cypress run", "go test ./...", "go vet ./...",
+    "golangci-lint run", "cargo test", "cargo clippy",
+    "mvn -B verify", "./gradlew build check", "dotnet test", "swift test",
+    "ctest", "bazel test //...", "bundle exec rspec", "rubocop",
+    "rake test", "phpunit", "composer test", "make test", "make lint",
+    "ruff check .", "flake8", "pylint src", "mypy src", "pyright",
+    "eslint .", "stylelint styles.css", "shellcheck run.sh",
+    "hadolint Dockerfile", "actionlint", "tflint", "black --check .",
+)
+
+
+@pytest.mark.parametrize("cmd", _ALLOWLIST_SAMPLES)
+def test_every_allowlisted_suite_command_is_guarded(tmp_path, cmd):
+    """One representative spelling per arm of the suite-command allowlist,
+    each swallowed with `|| true`, each of which must fail the fact.
+    Deleting any arm silently flips a repository whose only suite uses it
+    from *fail* to *not_applicable* — this pins every arm to a red."""
+    f = _fatal(tmp_path, {"ci.yml": _wf(
+        f'      - run: "{cmd} || true"\n')})
+    assert f["outcome"] == "fail", (cmd, f["evidence"])
 
 
 def test_a_later_set_dash_e_does_not_rescue_an_already_discarded_suite(
@@ -3257,9 +3319,13 @@ def test_set_plus_e_that_rechecks_the_exit_code_passes(tmp_path):
 def test_a_one_line_suite_then_exit_zero_fails(tmp_path):
     """`npm test; exit 0` is the two-line shape with a semicolon instead of a
     newline. The documented shape is "a trailing `exit 0`"; which whitespace
-    separates it from the suite is not part of the claim."""
+    separates it from the suite is not part of the claim. On an errexit
+    shell the semicolon form aborts at the failing suite exactly like the
+    newline form, so the discard is only real where the shell has no
+    errexit."""
     f = _fatal(tmp_path, {"ci.yml": _wf(
-        "      - run: npm test; exit 0\n")})
+        "      - shell: powershell\n"
+        "        run: npm test; exit 0\n")})
     assert f["outcome"] == "fail", f["evidence"]
     assert "exit 0" in f["evidence"], f["evidence"]
 

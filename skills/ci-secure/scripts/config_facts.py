@@ -634,12 +634,57 @@ def _code_lines(run: str) -> list[str]:
             if ln.strip() and not ln.strip().startswith("#")]
 
 
-def _swallow_reason(run: str) -> str | None:
+# Shells with no errexit: a trailing `exit 0` after a failed command really
+# runs there. Everywhere GitHub's default applies — `bash -e {0}` on Linux and
+# macOS runners, `sh -e` where bash is absent, and an explicit `shell: bash`,
+# which the runner invokes with `-eo pipefail` — a failing suite aborts the
+# step before a trailing `exit 0` is reached: the step already fails and the
+# "swallow" is unreachable code. Custom templates and shells this list does
+# not name resolve to errexit-bearing, because the failure direction of a
+# mis-read here is a false accusation against a fatally wired job, and a miss
+# beats that.
+_NO_ERREXIT_SHELLS = frozenset({"pwsh", "powershell", "cmd"})
+
+
+def _defaults_shell(node: dict) -> str | None:
+    """The `defaults.run.shell` of a job or workflow mapping, if declared."""
+    defaults = node.get("defaults")
+    if isinstance(defaults, dict) and isinstance(defaults.get("run"), dict):
+        shell = defaults["run"].get("shell")
+        if isinstance(shell, str) and shell.strip():
+            return shell
+    return None
+
+
+def _exit_zero_can_swallow(step: dict, job: dict, doc: dict) -> bool:
+    """Whether this step's effective shell lets a trailing `exit 0` run.
+
+    Resolution order is GitHub's: the step's `shell:`, then the job's
+    `defaults.run.shell`, then the workflow's, then the runner default —
+    `pwsh` on a `windows-*` runner, `bash -e` everywhere else. An
+    expression or an unrecognised value resolves to errexit-bearing
+    (see `_NO_ERREXIT_SHELLS` above).
+    """
+    raw = step.get("shell")
+    shell = (raw if isinstance(raw, str) and raw.strip()
+             else _defaults_shell(job) or _defaults_shell(doc))
+    if shell:
+        return shell.strip().split()[0].lower() in _NO_ERREXIT_SHELLS
+    runs_on = job.get("runs-on")
+    text = " ".join(str(r) for r in runs_on)         if isinstance(runs_on, list) else str(runs_on)
+    return "${{" not in text and "windows" in text.lower()
+
+
+def _swallow_reason(run: str, exit_zero_live: bool = True) -> str | None:
     """How this block swallows its suite's exit code, or None if it does not.
 
     Scoped to the SUITE line: `grep … || true` sitting beside `pytest` swallows
     the grep, not the tests, and failing the fact on it would be a false
     accusation about a shape that is usually correct.
+
+    ``exit_zero_live`` is `_exit_zero_can_swallow`'s verdict for the step
+    this block came from: the trailing-`exit 0` arm may only fire where the
+    shell would actually reach that `exit 0` after a failure.
     """
     code = _code_lines(run)
     suite_at = [i for i, ln in enumerate(code) if _runs_verification_suite(ln)]
@@ -674,7 +719,7 @@ def _swallow_reason(run: str) -> str | None:
     # — `npm test; exit 0` is the same discard as the two-line form, and which
     # whitespace separates them is no part of the shape.
     last = code[-1]
-    zero = _EXIT_ZERO.search(last)
+    zero = _EXIT_ZERO.search(last) if exit_zero_live else None
     if zero and (suite_at[0] < len(code) - 1
                  or _runs_verification_suite(last[:zero.start()])):
         return "exit 0"
@@ -798,7 +843,8 @@ def _suite_failure_swallowed(rel: str,
             if _continue_on_error_is_literally_true(step):
                 offences.append(f"{where} — `continue-on-error: true`")
                 continue
-            reason = _swallow_reason(run)
+            reason = _swallow_reason(
+                run, exit_zero_live=_exit_zero_can_swallow(step, job, doc))
             if reason:
                 offences.append(f"{where} — `{reason}`")
         if job_runs_suite and _continue_on_error_is_literally_true(job):

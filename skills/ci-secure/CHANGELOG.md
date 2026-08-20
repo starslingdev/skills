@@ -31,6 +31,16 @@ entries are dated (UTC). Format loosely follows
   inline comment, and a one-line `npm test; exit 0` — and a `set -e` that
   lands AFTER the suite already ran no longer counts as restoring its status.
   (2026-08-20)
+- ci-secure: the trailing-`exit 0` swallow shape is now judged against the
+  step's effective shell. GitHub's default `run` shell carries errexit
+  (`bash -e {0}`), so a failing suite aborts the step before a trailing
+  `exit 0` is reached — flagging it was a false accusation against a job
+  that already fails. The arm now fires only where the discard is real:
+  `pwsh`, `powershell`, or `cmd`, declared on the step, the job or workflow
+  `defaults.run.shell`, or implied by a `windows-*` runner's `pwsh` default.
+  Every arm of the suite-command allowlist is also now pinned by a test, so
+  a dropped arm cannot silently flip a repository from fail to
+  not-applicable. (2026-08-20)
 - ci-secure: a check that does not apply is now disclosed in words on both
   reader surfaces — a sentence in the report's hygiene section and a
   `(1 not applicable)` note in the gate headline — so the count line can be
