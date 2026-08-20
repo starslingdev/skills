@@ -12,9 +12,9 @@
 >
 > **34s until all checks finish** - `Windows` is the slowest check a typical PR waits on. 
 >
-> **`.github/workflows/tests.yaml` changed ~129 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests.yaml` changed ~136 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/zizmor.yaml` changed ~131 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/zizmor.yaml` changed ~138 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **After the gate.** 3 min/mo of wall-clock-neutral runner minutes is recoverable (1 neutral finding; none can slow a merge).
 
@@ -114,6 +114,19 @@ WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
 
+NEVER BUY SPEED BY CHECKING LESS
+- The change must leave CI verifying exactly what it verifies today.
+  Unless the measured cause above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter; or cut
+  test counts, timeouts, or retries in a way that weakens the signal
+  rather than the cost.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to reach the ceiling
+  above, say so and stop.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -169,6 +182,19 @@ STRUCTURAL CATALOG PATTERN MATCHED
 WHERE TO LOOK
 - The `pre-commit.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
 
+NEVER BUY SPEED BY CHECKING LESS
+- The change must leave CI verifying exactly what it verifies today.
+  Unless the measured cause above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter; or cut
+  test counts, timeouts, or retries in a way that weakens the signal
+  rather than the cost.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to reach the ceiling
+  above, say so and stop.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -222,6 +248,19 @@ STRUCTURAL CATALOG PATTERN MATCHED
 
 WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
+
+NEVER BUY SPEED BY CHECKING LESS
+- The change must leave CI verifying exactly what it verifies today.
+  Unless the measured cause above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter; or cut
+  test counts, timeouts, or retries in a way that weakens the signal
+  rather than the cost.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to reach the ceiling
+  above, say so and stop.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -278,6 +317,19 @@ STRUCTURAL CATALOG PATTERN MATCHED
 WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
 
+NEVER BUY SPEED BY CHECKING LESS
+- The change must leave CI verifying exactly what it verifies today.
+  Unless the measured cause above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter; or cut
+  test counts, timeouts, or retries in a way that weakens the signal
+  rather than the cost.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to reach the ceiling
+  above, say so and stop.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -330,6 +382,19 @@ STRUCTURAL CATALOG PATTERN MATCHED
 
 WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
+
+NEVER BUY SPEED BY CHECKING LESS
+- The change must leave CI verifying exactly what it verifies today.
+  Unless the measured cause above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter; or cut
+  test counts, timeouts, or retries in a way that weakens the signal
+  rather than the cost.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to reach the ceiling
+  above, say so and stop.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -402,6 +467,19 @@ Saving: 3 min/mo of runner capacity - a bill/capacity reduction, not a merge-wai
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
 
+NEVER BUY SPEED BY CHECKING LESS
+- The change must leave CI verifying exactly what it verifies today.
+  Unless the measured cause above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter; or cut
+  test counts, timeouts, or retries in a way that weakens the signal
+  rather than the cost.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to reach the ceiling
+  above, say so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -451,6 +529,19 @@ NOT in current GitHub docs. Treat required-status UNKNOWN as required:
 if branch protection/rulesets are not readable, assume every check this
 workflow produces may be required.
 
+NEVER BUY SPEED BY CHECKING LESS
+- The change must leave CI verifying exactly what it verifies today.
+  Unless the measured cause above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter; or cut
+  test counts, timeouts, or retries in a way that weakens the signal
+  rather than the cost.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to reach the ceiling
+  above, say so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -492,6 +583,19 @@ NOT in current GitHub docs. Treat required-status UNKNOWN as required:
 if branch protection/rulesets are not readable, assume every check this
 workflow produces may be required.
 
+NEVER BUY SPEED BY CHECKING LESS
+- The change must leave CI verifying exactly what it verifies today.
+  Unless the measured cause above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter; or cut
+  test counts, timeouts, or retries in a way that weakens the signal
+  rather than the cost.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to reach the ceiling
+  above, say so and stop.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -510,7 +614,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `021bb07`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (OPT1-OPT69 catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `ea3a379-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (OPT1-OPT69 catalog) |
 | gh runs/jobs API (timestamps) | 47 runs / 152 jobs sampled | Critical-path + per-step P50 |
 | job logs | 1 job log(s) sampled | Step internals + cross-run magnitude (deeper levels) |
 | workflow YAML | 5 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

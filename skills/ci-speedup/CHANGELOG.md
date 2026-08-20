@@ -128,6 +128,25 @@ unversioned and updates by reinstall from `main`.
   than third-party, but it is the same class and worth knowing. Masking (#12) is
   unchanged; this is additive, not a replacement.
 
+- **2026-08-20** — **Every hand-off forbids buying speed by checking less.** The
+  skill hands a downstream coding agent an RCA plus a prompt rather than an
+  applied, re-verified fix, so the prompt is the entire contract — and the
+  cheapest way to satisfy "make this job faster" is to make it verify less, which
+  scores as a win in exactly the wall-clock numbers this report measures. Every
+  prompt-emitting surface in `blocking_path.py` now carries the same rail
+  (`_NO_WEAKENING_LINES`): the catalog prompt, the generic no-catalog prompt and
+  its no-job-timing variant, the LLM gap-fill prompt (appended by the renderer,
+  like the no-prescription disclaimer, so an LLM-authored body cannot paraphrase
+  it away), and the per-pattern hygiene / Tier-2 / queue-wait prompt. It names the
+  forbidden edits outright — deleted or narrowed matrix legs, `continue-on-error`
+  / `|| true` / other exit-code suppression, a narrowed or removed required status
+  check (or a job changed so a required check stops reporting), tests skipped
+  behind a path/branch filter, and reduced test counts, timeouts or retries that
+  weaken the signal rather than the cost — with one exception, a reduction the RCA
+  itself measured as the finding. `tests/test_no_weakening_rail.py` pins the rail
+  on all five paths and pins the matching eval case (`evals/evals.json` #8); the
+  two committed worked examples were re-rendered.
+
 ### Changed
 
 - **2026-07-30** — **Two gating poles ⇒ both get their own menu slot.** The

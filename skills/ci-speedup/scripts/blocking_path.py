@@ -2223,6 +2223,29 @@ def _parse_log(text: str) -> dict[str, Any] | None:
 # from the prompt alone - without prescribing one.
 # --------------------------------------------------------------------------- #
 
+# The no-weakening rail. The fastest CI is one that tests nothing, and every
+# shape below reads as a win in exactly the numbers this report measures — so
+# every prompt-emitting surface (catalog, generic, LLM gap-fill, hygiene/Tier-2/
+# queue-wait) carries these lines verbatim. tests/test_no_weakening_rail.py pins
+# that. The "unless the measured cause above IS that reduction" clause is
+# load-bearing: a pole whose RCA named an over-broad matrix or a swallowed exit
+# code must still be fixable.
+_NO_WEAKENING_LINES = [
+    "NEVER BUY SPEED BY CHECKING LESS",
+    "- The change must leave CI verifying exactly what it verifies today.",
+    "  Unless the measured cause above IS that reduction, do not: delete or",
+    "  narrow matrix legs so fewer configurations are tested; add",
+    "  `continue-on-error`, `|| true`, or any other exit-code suppression;",
+    "  narrow or remove a required status check, or change a job so a required",
+    "  check stops reporting; skip tests behind a path/branch filter; or cut",
+    "  test counts, timeouts, or retries in a way that weakens the signal",
+    "  rather than the cost.",
+    "- A pipeline that finishes sooner because it verifies less is a",
+    "  regression, not a win. If that is the only way to reach the ceiling",
+    "  above, say so and stop.",
+]
+
+
 _FIX_META: dict[str, dict[str, Any]] = {
     "prisma-migrate-once": {
         "cause": "Most of each test file's wall time is repeated schema rebuilds, not "
@@ -2857,6 +2880,7 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
     out += ["WHERE TO LOOK", f"- {meta['look'].format(wf=wf)}", "",
             "CONSTRAINTS / FAILURE MODE TO GUARD"] + constraints + [
             "", "READ FIRST"] + [f"- {d}" for d in meta["docs"]] + [
+            "", *_NO_WEAKENING_LINES,
             "", "DELIVER & VERIFY", f"- {meta['deliver']}"]
     return ("#### 🤖 Prompt for your coding agent\n\n```text\n"
             + _fence_body(out) + "\n```\n")
@@ -2922,7 +2946,9 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             "- Capture this workflow on a pull_request, pull_request_target, or "
             "merge_group run and rerun ci-speedup before changing workflow steps. "
             "Once developer-event job timing exists, optimize the measured dominant "
-            "step from the refreshed report."
+            "step from the refreshed report.",
+            "",
+            *_NO_WEAKENING_LINES,
         ]
         return ("#### 🤖 Prompt for your coding agent\n\n```text\n"
                 + _fence_body(out) + "\n```\n")
@@ -3008,6 +3034,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             f"- The `{wf}` workflow definition for {look_step}, and the tool/config it "
             "invokes (build tool, test runner, or install) - that's where its time is "
             "spent.", "",
+            *_NO_WEAKENING_LINES, "",
             "DELIVER & VERIFY",
             f"- A change that cuts {look_step}'s wall time without dropping coverage; "
             "re-measure the step on a PR run to confirm the reduction."]
@@ -3079,6 +3106,11 @@ def _llm_agent_prompt(body: str) -> str:
         # follows — so a locator word here would point at the wrong thing.
         body = ("ci-speedup read the captured job log but does NOT prescribe the "
                 "fix - investigate it in the repo and apply a safe change.\n\n" + body)
+    # The no-weakening rail is the renderer's too, for the same reason the disclaimer
+    # is: the gap-fill body is LLM-authored, so the one rule the hand-off cannot afford
+    # to have paraphrased away is appended here, not left to the author. Idempotent.
+    if _NO_WEAKENING_LINES[0] not in body:
+        body = body.rstrip("\n") + "\n\n" + "\n".join(_NO_WEAKENING_LINES)
     # The LLM-authored body is model output grounded in the repo log — it can echo a repo
     # name / log line carrying a ``` run. Fence-safe it PER-LINE (its own line breaks survive)
     # so a model-emitted stray fence can't close this ```text block.
@@ -5797,7 +5829,8 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
         # §8.1 landmine 1 — mandatory on every skip-family / trigger-scope
         # prompt, whichever framing branch built the saving line above.
         body += _PENDING_CAVEAT_LINES + [""]
-    body += [
+    body += _NO_WEAKENING_LINES + [
+        "",
         "Do: confirm the pattern at each location above, recover the intent from git",
         "history, and apply the catalog's fix recipe where it is safe. State the",
         "failure mode and how you have guarded it before shipping.",
