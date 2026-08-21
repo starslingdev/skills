@@ -467,6 +467,55 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-08-20** — **A symlinked workflow entry can no longer make the
+  scanner read outside `.github/workflows/`.** `discover_workflow_files`
+  resolved every glob hit before reading it but never checked the resolved
+  path stayed inside the workflows directory, so a committed symlink such as
+  `.github/workflows/build.yml -> ../../../../etc/passwd` was followed like
+  any ordinary file — its content scanned and, on a HIGH finding, its path
+  and text quoted straight into the report (issue #37). Discovery now checks
+  containment before trusting a symlink: one that resolves outside
+  `.github/workflows/`, or that dangles (points at nothing), is excluded and
+  logged as a `coverage_notes` gap instead of read — named by the symlink's
+  own in-repo path, never by the target it pointed at, so the report can say
+  a file was skipped without disclosing what it would have disclosed.
+  `_undiscovered_workflows` was taught to recognize that skip so it doesn't
+  also flag the same file as a broken scan and force a `CoverageError`. A
+  latent bug in `_repo_relative` rode along: it re-resolved a path's leaf
+  component when formatting it for the report, which for a dangling symlink
+  displayed the nonexistent target's name instead of the symlink's own —
+  the same class of disclosure this fix exists to close. It now resolves
+  only the parent directory, leaving the leaf name untouched. A same-scope
+  symlink (target still inside `.github/workflows/`) is unaffected and reads
+  normally.
+
+  A follow-up review caught a gap in the fix above: it only checked
+  containment when the glob hit itself was a symlink, which misses
+  `.github/workflows/` (or `.github/`) itself being a symlink to an external
+  directory — `glob.glob` follows a symlinked ancestor directory
+  transparently, so every match it returns in that shape is already a
+  dereferenced regular file that never tests `.is_symlink()`, and the whole
+  external directory's contents would have been read and reported as
+  ordinary in-repo workflows. Containment is now checked against a boundary
+  built by joining `root.resolve()` with the literal `.github/workflows`
+  path components — never resolving them — and compared against what
+  `.github/workflows/` actually resolves to on disk; a mismatch means some
+  symlink in `.github/` or `.github/workflows/` redirected the whole
+  directory, and every match reached through it is excluded regardless of
+  its own name. A repo whose entire `.github/workflows/` resolves outside
+  itself this way has nothing left to scan, so it hits the scanner's
+  existing "zero workflows" refusal (`CoverageError`, exit 1) rather than a
+  partial report.
+
+  A second gap in the same code path: a committed symlink LOOP
+  (`a.yml -> b.yml -> a.yml`) made `Path.resolve()` raise `RuntimeError`
+  uncaught, crashing the whole scan on one attacker-committed cyclic pair
+  instead of excluding it like any other untrustworthy entry. Both resolve
+  points in `discover_workflow_files` now catch `OSError`/`RuntimeError` and
+  route a loop into the same skip-and-record path as an escaping or dangling
+  symlink — it degrades coverage on the looping files instead of aborting
+  the run.
+
 - **2026-08-19** — **The `Coverage:` line is copied, not recomputed, and a
   section link that stops resolving now fails the build.** Phase 3 defined
   `complete` as "every workflow file was scanned", which is one of the three gap

@@ -2134,3 +2134,266 @@ def test_evidence_gutter_check_tolerates_a_blank_source_line(
         assert re.match(r"\s*\d+:(?: |$)", line), (
             f"non-source line inside verbatim evidence: {line!r}"
         )
+
+
+# -----------------------------------------------------------------------------
+# symlinked workflow entries (issue #37)
+# -----------------------------------------------------------------------------
+
+
+def test_symlinked_workflow_escaping_the_directory_is_skipped_not_followed(
+    tmp_path: Path,
+) -> None:
+    """A `.github/workflows/*.yml` entry that is a symlink pointing outside
+    `.github/workflows/` must never be read: following it would surface the
+    target file's path and contents in evidence or coverage output,
+    disclosing filesystem content the scan was never scoped to touch."""
+    secret = tmp_path.parent / "outside-secret.yml"
+    secret.write_text("on: push\njobs:\n  b:\n    runs-on: x\n", encoding="utf-8")
+    _write_workflow(
+        tmp_path, "legit.yml",
+        "on: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: echo hi\n",
+    )
+    wf_dir = tmp_path / ".github" / "workflows"
+    (wf_dir / "evil.yml").symlink_to(secret)
+
+    data = _scan_dir(tmp_path)
+
+    assert data["scanned_workflows"] == 1, "the escaping symlink was followed"
+    assert not any(
+        f.get("workflow_file", "").endswith("evil.yml") for f in data["findings"]
+    ), "the escaping symlink produced findings — it was read"
+    notes = data["coverage_notes"]
+    assert any(n["workflow_file"].endswith("evil.yml") for n in notes), (
+        "the skipped symlink must be named in coverage_notes"
+    )
+    assert not any("outside-secret" in n["reason"] for n in notes), (
+        "the coverage note must name the symlink, not disclose its target"
+    )
+
+
+def test_symlinked_workflows_directory_with_no_legit_files_is_refused(
+    tmp_path: Path,
+) -> None:
+    """`.github/workflows/` itself can be a symlink to an external directory.
+    `glob.glob` follows that transparently, so every match it returns is
+    already a dereferenced REGULAR file — none of them test True for
+    `.is_symlink()`. A containment check gated on the glob hit itself being a
+    symlink would miss this entirely and let every file in the external
+    directory be read and reported as if it were an ordinary in-repo
+    workflow — the check has to apply to every match's fully resolved path,
+    not just to matches that are themselves symlinks.
+
+    Every file this repo's `.github/workflows/` resolves to lives outside it,
+    so nothing is left to scan once the escape is caught — same shape as an
+    empty or missing workflows directory, which the scanner already refuses
+    rather than reporting a vacuous clean pass
+    (`test_zero_workflows_is_refused_not_reported_clean`). The refusal
+    message must still not name the external directory it refused to read.
+
+    Exit code and empty stdout alone do not pin this: unfixed code raises an
+    uncaught `ValueError` for this exact fixture (a resolved path escaping
+    `root` reaches `f.relative_to(root)` unguarded), which also exits 1 with
+    empty stdout. The stderr text has to name the actual refusal — "no
+    workflow files found" — or this test cannot tell the intended
+    `CoverageError` apart from that crash.
+    """
+    outside = tmp_path.parent / (tmp_path.name + "-outside-workflows")
+    outside.mkdir()
+    (outside / "evil.yml").write_text(
+        "on:\n  issues:\n    types: [opened]\n"
+        "jobs:\n  b:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo '${{ github.event.issue.title }}'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "workflows").symlink_to(outside)
+
+    result = subprocess.run(
+        [sys.executable, str(_SCAN_SCRIPT), "--root", str(tmp_path),
+         "--gh-impostor", "off"],
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode == 1, (
+        "a symlinked workflows directory with no in-scope files was "
+        "reported as a clean scan"
+    )
+    assert result.stdout.strip() == "", "a refused scan must emit no findings"
+    assert "no workflow files found" in result.stderr, (
+        "must refuse via the zero-workflows CoverageError, not crash: "
+        f"{result.stderr!r}"
+    )
+    assert "outside-workflows" not in result.stderr, (
+        "the refusal must not disclose the external directory's path"
+    )
+
+
+def test_symlink_loop_is_skipped_not_a_crash(tmp_path: Path) -> None:
+    """A committed symlink LOOP (`a.yml -> b.yml -> a.yml`) makes
+    `Path.resolve()` raise `RuntimeError` rather than return a path.
+    Unguarded, that is an attacker-committed crash: one cyclic pair takes the
+    whole scan down (an uncaught traceback, exit 1) instead of being excluded
+    like any other untrustworthy entry. It must degrade to a coverage gap on
+    the looping files while a genuine sibling workflow still scans."""
+    _write_workflow(
+        tmp_path, "legit.yml",
+        "on: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: echo hi\n",
+    )
+    wf_dir = tmp_path / ".github" / "workflows"
+    (wf_dir / "b.yml").symlink_to(wf_dir / "a.yml")
+    (wf_dir / "a.yml").symlink_to(wf_dir / "b.yml")
+
+    data = _scan_dir(tmp_path)
+
+    assert data["scanned_workflows"] == 1, "the looping pair was not skipped"
+    notes = data["coverage_notes"]
+    assert any(n["workflow_file"].endswith("a.yml") for n in notes)
+    assert any(n["workflow_file"].endswith("b.yml") for n in notes)
+    assert all("loop" in n["reason"] for n in notes if n["workflow_file"]
+               in {".github/workflows/a.yml", ".github/workflows/b.yml"})
+
+
+def test_symlinked_workflows_directory_does_not_bypass_containment(
+    tmp_path: Path,
+) -> None:
+    """Same symlinked-directory shape as the refusal test above, unit-tested
+    directly against `discover_workflow_files` so the exclusion is observable
+    per-file rather than folded into a whole-repo refusal (every file a
+    symlinked `.github/workflows/` resolves to is equally out of scope, so
+    there's no way to also have a genuinely in-repo file alongside it — see
+    the sibling refusal test for why the end-to-end shape is a `CoverageError`
+    instead)."""
+    scan._DROPPED_MATCHES.clear()
+    outside = tmp_path.parent / (tmp_path.name + "-outside-workflows")
+    outside.mkdir()
+    (outside / "evil.yml").write_text(
+        "on: push\njobs:\n  b:\n    runs-on: x\n", encoding="utf-8")
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "workflows").symlink_to(outside)
+
+    discovered = scan.discover_workflow_files(
+        tmp_path, [".github/workflows/*.yml"])
+
+    assert discovered == [], (
+        "the symlinked workflows directory's contents were admitted despite "
+        "resolving outside .github/workflows/"
+    )
+    notes = [d for d in scan._DROPPED_MATCHES if d["kind"] == scan._KIND_NOT_SCANNED]
+    expected_file = str(tmp_path / ".github" / "workflows" / "evil.yml")
+    # An exact match, not `.endswith("evil.yml")`: the resolved target
+    # (`<external-dir>/evil.yml`) also ends with that name, so `endswith`
+    # would stay green even if a future change recorded the escaped target
+    # instead of the symlink's own in-repo path — exactly the leak this
+    # check exists to catch.
+    assert any(n["file"] == expected_file for n in notes), (
+        f"expected a dropped match recorded at {expected_file!r}, got "
+        f"{[n['file'] for n in notes]!r}"
+    )
+    assert not any("outside-workflows" in n["reason"] for n in notes), (
+        "the coverage note must not disclose the external directory's path"
+    )
+    scan._DROPPED_MATCHES.clear()
+
+
+def test_symlinked_workflow_inside_the_directory_is_read_normally(
+    tmp_path: Path,
+) -> None:
+    """A symlink whose target is still inside `.github/workflows/` is a
+    same-scope alias, not an escape — it must be discovered and scanned like
+    any other workflow file, not treated as suspicious merely for being a
+    symlink.
+
+    `real.yml` and `alias.yml` resolve to the same on-disk file, so they
+    collapse to one entry in `discover_workflow_files`'s de-duplicating
+    set — a pre-existing property of that dedup, not of the symlink-scope
+    check under test here. `affected_files` glob matching (each catalog
+    pattern's `.yml`/`.yaml` scope) runs against the RESOLVED path, so the
+    target also needs a `.yml` name for the detector to fire on it at all —
+    hence two `.yml` files rather than a same-scope symlink to an
+    arbitrarily-named body.
+    """
+    _write_workflow(
+        tmp_path, "real.yml",
+        "on:\n  issues:\n    types: [opened]\n"
+        "jobs:\n  b:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo '${{ github.event.issue.title }}'\n",
+    )
+    wf_dir = tmp_path / ".github" / "workflows"
+    (wf_dir / "alias.yml").symlink_to(wf_dir / "real.yml")
+
+    data = _scan_dir(tmp_path)
+
+    assert data["scanned_workflows"] == 1
+    assert not data["coverage_notes"]
+    assert any(
+        f["pattern"] == "P14.10" and f["workflow_file"].endswith("real.yml")
+        for f in data["findings"]
+    ), "the in-scope symlink's target was not read"
+
+
+def test_dangling_symlinked_workflow_is_skipped_with_a_coverage_note(
+    tmp_path: Path,
+) -> None:
+    """A symlink whose target does not exist must not vanish silently from
+    the scan the way it silently vanishes from a plain directory listing —
+    it is recorded as a coverage gap like any other unreadable workflow."""
+    _write_workflow(
+        tmp_path, "legit.yml",
+        "on: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: echo hi\n",
+    )
+    wf_dir = tmp_path / ".github" / "workflows"
+    (wf_dir / "broken.yml").symlink_to(wf_dir / "does-not-exist.yml")
+
+    data = _scan_dir(tmp_path)
+
+    assert data["scanned_workflows"] == 1
+    notes = data["coverage_notes"]
+    assert any(n["workflow_file"].endswith("broken.yml") for n in notes)
+    assert any("does not exist" in n["reason"] for n in notes)
+
+
+def test_undiscovered_workflows_excludes_recorded_symlink_skips(
+    tmp_path: Path,
+) -> None:
+    """A name `discover_workflow_files` already logged as a dropped,
+    out-of-scope symlink must not also be reported as undiscovered — that
+    would force a `CoverageError` (scan refuses to run) on the exact repo
+    this fix is meant to let scan cleanly, with a note instead of a crash."""
+    scan._DROPPED_MATCHES.clear()
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "legit.yml").write_text(
+        "on: push\njobs:\n  b:\n    runs-on: x\n", encoding="utf-8")
+    secret = tmp_path.parent / "outside.yml"
+    secret.write_text("on: push\n", encoding="utf-8")
+    (wf_dir / "evil.yml").symlink_to(secret)
+
+    discovered = scan.discover_workflow_files(
+        tmp_path, [".github/workflows/*.yml"])
+    missed = scan._undiscovered_workflows(tmp_path, discovered)
+
+    assert missed == [], f"symlink skip re-flagged as undiscovered: {missed}"
+    scan._DROPPED_MATCHES.clear()
+
+
+def test_undiscovered_workflows_still_catches_a_genuine_miss(
+    tmp_path: Path,
+) -> None:
+    """The exclusion added for recorded symlink skips must not blunt the
+    tripwire for an actual broken-discovery bug: a real file that discovery
+    silently dropped, with nothing recorded for it, must still be reported."""
+    scan._DROPPED_MATCHES.clear()
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "missed.yml").write_text(
+        "on: push\njobs:\n  b:\n    runs-on: x\n", encoding="utf-8")
+
+    missed = scan._undiscovered_workflows(tmp_path, discovered=[])
+
+    assert missed == ["missed.yml"]
