@@ -2598,7 +2598,7 @@ slow-mode representative — so its miss rate is NOT evidence the cache is a bro
 For a cache leaf (`turbo-*`, `buildx-no-cache`, `install-lifecycle-build`), `_cache_distribution`
 stamps a per-pole **`cache_dist`** onto `pr_critical_path.poles[]`: the miss rate across the sampled
 runs, split PR vs push, with fork PRs excluded from the upstream median (a fork PR runs cold — it
-can't read the repo cache), plus a re-derivable **`verdict`** (`cold | churn | miss-tail |
+can't save the repo cache, so they run colder), plus a re-derivable **`verdict`** (`cold | churn | miss-tail |
 mostly-warm | insufficient`, `_cache_verdict`). The miss metric is always the per-run
 `cache_state.miss_pct` (read by `_cache_state_of_log` uniformly), NOT the leaf's magnitude (which is
 seconds for `install-lifecycle-build`).

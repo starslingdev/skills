@@ -2898,7 +2898,8 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
             f"- Cache context: across sampled PRs the cache mostly HITS{_mtxt}; the drilled "
             "run is a cache-miss-heavy minority. Size the win on the miss-heavy tail, not the "
             "whole job, and benchmark on an upstream PR with the cache warm — NEVER a fork or "
-            "cold clone (a fork cannot read the repo cache and shows a worst-case cold build).")
+            "cold clone (a fork PR cannot SAVE the repo cache, so nothing it builds is ever "
+            "warm on the next run and it shows a worst-case cold build).")
     out += ["WHERE TO LOOK", f"- {meta['look'].format(wf=wf)}", "",
             "CONSTRAINTS / FAILURE MODE TO GUARD"] + constraints + [
             "", "READ FIRST"] + [f"- {d}" for d in meta["docs"]] + [
@@ -4087,7 +4088,7 @@ def _cache_health_block(cache_dist: dict[str, Any] | None) -> list[str]:
         pr_line += "no upstream run exposed a cache summary"
     if fork_n:
         pr_line += (f"; {fork_n} fork-PR run(s) excluded from the median "
-                    "(a fork PR cannot read the repo cache)")
+                    "(a fork PR cannot save the repo cache, so it runs colder than upstream)")
     if no_summary_n:
         pr_line += f"; {no_summary_n} run(s) exposed no cache summary"
     out.append(pr_line)
@@ -4298,7 +4299,7 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
             rid = url.rstrip("/").rsplit("/", 1)[-1]
             tag = " — drilled above" if x.get("drilled") else ""
             if x.get("fork"):
-                tag += " — fork PR (repo cache unavailable)"
+                tag += " — fork PR (cannot save the repo cache; runs cold)"
             out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
         out.append("")
         return out
@@ -4335,12 +4336,13 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
         url = str(x.get("run_url", ""))
         rid = url.rstrip("/").rsplit("/", 1)[-1]
         tag = " — drilled above" if x.get("drilled") else ""
-        # Same fork disclosure as the NOT-cross-run-validated branch above: a fork PR runs
-        # cache-cold, so its miss is a worst-case cold build, not an ordinary upstream point —
+        # Same fork disclosure as the NOT-cross-run-validated branch above: a fork PR cannot
+        # save a cache entry (it can only restore what the base branch already published), so
+        # its miss is a worst-case cold build, not an ordinary upstream point —
         # annotate it so a reader doesn't size the fix off it (the value is still listed, but the
         # cross-run median/verdict already exclude forks). Applying it in BOTH per-run loops.
         if x.get("fork"):
-            tag += " — fork PR (repo cache unavailable)"
+            tag += " — fork PR (cannot save the repo cache; runs cold)"
         out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
     out.append("")
     return out

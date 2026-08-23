@@ -3086,9 +3086,9 @@ fix_strategy: trust-boundary-cache-split
 title_template: "Untrusted fork-PR job redoes cold work it can't cache securely"
 -->
 
-**TL;DR**: Jobs triggered by PRs from forks can't use the shared cache, so they redo the full install/build from scratch every time.
+**TL;DR**: Jobs triggered by PRs from forks can't *save* the shared cache, so nothing they produce ever warms the next fork PR and they redo the full install/build from scratch every time.
 
-**Anti-pattern**: A fork-PR-triggered job on the critical path whose setup can't be warm because the trust boundary denies it: `pull_request` from a fork runs with a read-only `GITHUB_TOKEN` and no repo secrets, so it can't restore a cache the trusted side wrote (or the cache scope isolates fork branches), and every fork PR pays cold install/build. Trust-boundary-forced cold work is structural, not a missing-cache hygiene bug.
+**Anti-pattern**: A fork-PR-triggered job on the critical path whose setup can't be warm because the trust boundary denies it: `pull_request` from a fork runs with a read-only `GITHUB_TOKEN` and no repo secrets, so it **cannot save** a cache the trusted side (or a later fork PR) could restore — its own writes are scoped to the merge ref (`refs/pull/.../merge`) and are restorable only by re-runs of that same PR. It **can** restore from the base branch ("If a workflow run is triggered for a pull request, it can also restore caches created in the base branch, including base branches of forked repositories" — GitHub dependency-caching reference), so unless the trusted side has already published something under a key the fork can compute, there is nothing warm to restore and every fork PR pays cold install/build. Trust-boundary-forced cold work is structural, not a missing-cache hygiene bug.
 
 **Detection heuristic** (routed): the job runs on `pull_request` (fork-reachable, not `pull_request_target`), has a high setup/build floor, and references no secrets / uses a cache the fork can't populate. Its cold setup is the addressable cost, but the naive fix (let the fork write the shared cache) is a **cache-poisoning** vector.
 

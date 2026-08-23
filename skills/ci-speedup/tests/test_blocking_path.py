@@ -5582,7 +5582,7 @@ def test_mag_line_healthy_step_wall_still_reads_stable():
 
 
 def test_mag_line_annotates_fork_run_in_the_common_case_loop():
-    # PR #126 fresh-review (Angle A): the fork disclosure (" — fork PR (repo cache unavailable)")
+    # PR #126 fresh-review (Angle A): the fork disclosure (" — fork PR (cannot save the repo cache; runs cold)")
     # was added to only the degenerate "NOT cross-run validated" per-run loop; the common-case
     # (n>=5) loop emitted fork runs unannotated, so a fork PR's cold-cache miss read as an ordinary
     # upstream point in the range. Both loops must annotate the fork run.
@@ -5590,7 +5590,7 @@ def test_mag_line_annotates_fork_run_in_the_common_case_loop():
     vals.append({"run_url": "https://x/runs/9", "value": 95.0, "fork": True})  # cold fork run
     mag = {"unit": "%", "label": "packages rebuilt", "this_run": 12.0, "values": vals}
     out = "\n".join(bp._mag_line(mag, {"fix_key": "turbo-partial-cache"}))
-    assert "[run 9](https://x/runs/9) — 95% — fork PR (repo cache unavailable)" in out
+    assert "[run 9](https://x/runs/9) — 95% — fork PR (cannot save the repo cache; runs cold)" in out
 
 
 def test_headline_floor_is_slowest_check_not_the_frequency_gate():
