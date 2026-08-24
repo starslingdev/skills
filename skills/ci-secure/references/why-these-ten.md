@@ -1,7 +1,7 @@
 # Why these ten — the selection criterion behind the critical-only catalog
 
-ci-secure deliberately detects **ten** attack vectors, not the 25 patterns
-its catalog once held — the ten kept, and the 15 the rejection record below
+ci-secure deliberately detects **ten** attack vectors, not the 28 patterns
+its catalog once held — the ten kept, and the 18 the rejection record below
 names and accounts for, plus one adjacent practice recorded there as
 considered and excluded. This document is the reasoning, shipped with the skill
 so every finding can answer "why is this one of only ten?" — and so every
@@ -141,6 +141,29 @@ the gate they can already see, on a vector already in the ten, is capable
 of restricting anything.
 These either became scored config facts — where a one-line
 pass/fail is the honest weight for a presence fact — or were dropped.
+
+**Three more from the old catalog, named here for completeness.** A rejection
+record is only usable if it accounts for every id the old catalog carried, and
+these three were removed without being written down:
+
+- **Untrusted-event trigger presence (P14.1)** reports a precondition, not a
+  finding. `pull_request_target` and its siblings are the entry condition for
+  three vectors that ARE in the ten — the shared-cache write (P14.7), fork code
+  executed with privileges (P14.9), and `pull-requests: write` on an untrusted
+  trigger (P14.18) — so a maintainer whose repo is clean against those three has
+  nothing left to do about the trigger itself. Naming it separately restates the
+  precondition of findings the scan already raises.
+- **Secret passed on the command line (P14.21)** fails the outsider-chain test.
+  Process arguments are readable to whatever already executes on that runner, so
+  the exposure widens a breach rather than starting one. That places it with the
+  blast-radius class above: real, and not a chain that starts at outsider.
+- **Secrets accessible to jobs without environment scoping (P14.4)** is a
+  manual-review checklist entry, like P14.6. It asks a human a question rather
+  than raising a finding, and the descope removed the checklist.
+
+None of the three is shipped with the skill. Re-admitting any of them means
+passing the three tests above and updating the census, exactly as for any other
+entry in this record.
 
 Two catalog-MEDIUM patterns **passed** the filter and stayed: the fork-code
 trust chain (P14.9 — its severity was raised to HIGH with the rebuilt

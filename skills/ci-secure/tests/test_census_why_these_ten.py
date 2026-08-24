@@ -266,8 +266,19 @@ def test_the_rejection_record_accounts_for_the_catalog_size_it_claims():
     """The opening line states how big the old catalog was; the rejection
     record below it is the ONLY evidence for that number, and the two disagreed
     three ways — the prose said "~27 patterns", a sibling test said "removed
-    19", and the record itself names 15. A claim ABOUT the data has to be
-    checked AGAINST the data, so count the record instead of trusting prose.
+    19", and the record itself named only 15.
+
+    The count moved from 15 to 18 because the record was missing three ids the
+    old catalog actually carried: P14.1 (untrusted-event trigger presence),
+    P14.21 (secret passed on the command line), and P14.4 (the
+    environment-scoping manual-review entry). Those three were removed from
+    the scanner without ever being written down here, so anything citing them
+    had no document defining them. The independent check is a downstream
+    vendored copy of the old ci-secure catalog, which carries 27 ci-secure
+    ids: nine of the ten (P14.25 is absent there) plus exactly 18 non-ten
+    ids — 10 + 18 = 28, matching the corrected opening line. A claim ABOUT
+    the data has to be checked AGAINST the data, so count the record instead
+    of trusting prose.
     """
     text = _WHY.read_text()
     named = _catalog_pattern_ids(text)
@@ -275,7 +286,7 @@ def test_the_rejection_record_accounts_for_the_catalog_size_it_claims():
     assert THE_TEN <= named, (
         "why-these-ten.md must name every kept pattern: "
         f"missing {sorted(THE_TEN - named)}")
-    assert len(removed) == 15, (
+    assert len(removed) == 18, (
         "the rejection record names a different number of removed patterns "
         f"than the prose claims: {len(removed)} — {sorted(removed)}")
     assert f"not the {len(named)} patterns" in text, (
