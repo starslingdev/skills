@@ -1,0 +1,26 @@
+{
+  "_comment": "The complete set of sling subcommands, captured from `sling --help` on v0.1.2 (2026-08-25). This file exists so a test can prove SKILL.md never routes to a subcommand that does not exist. Update it, and the changelog, when a sling release adds or removes a command.",
+  "cli_version": "0.1.2",
+  "captured_utc": "2026-08-25",
+  "read_only": true,
+  "groups": {
+    "auth_and_setup": ["login", "logout", "whoami", "doctor", "org switch"],
+    "inspect": ["runs list", "runs show", "jobs list", "jobs show", "logs", "resolve"],
+    "diagnose": ["why", "time"],
+    "cost_and_capacity": ["usage", "top", "bill", "bill history", "labels list"],
+    "help": ["exit-codes"]
+  },
+  "global_flags": ["--agent", "--json", "--org", "--repo", "--version", "--help"],
+  "exit_codes": {
+    "0": "success",
+    "1": "unexpected internal error",
+    "2": "usage",
+    "3": "not found, or no stored logs",
+    "4": "auth",
+    "5": "control-plane or API error",
+    "6": "partial telemetry, result still emitted",
+    "7": "rate limited",
+    "10": "remote outcome failed (doctor unhealthy, or runs show --wait on a non-success run)"
+  },
+  "mutating_commands": []
+}

@@ -32,5 +32,5 @@ build-backend = "setuptools.build_meta"
 py-modules = []
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "skills/ci-speedup/tests", "maintainers/ci-speedup/tests", "skills/ci-score/tests", "skills/ci-secure/tests", "maintainers/ci-secure/tests", "maintainers/skills-registry-security/tests"]
+testpaths = ["tests", "skills/ci-speedup/tests", "maintainers/ci-speedup/tests", "skills/ci-score/tests", "skills/ci-secure/tests", "skills/sling-cli/tests", "maintainers/ci-secure/tests", "maintainers/skills-registry-security/tests"]
 pythonpath = [".", "skills/ci-speedup/scripts", "maintainers/ci-speedup/scripts", "skills/ci-score/scripts", "skills/ci-secure/scripts", "maintainers/skills-registry-security/scripts"]

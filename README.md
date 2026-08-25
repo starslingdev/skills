@@ -23,9 +23,12 @@ gives the one-line command for that skill on its own.
 | 🏎️ [**ci-speedup**](#ci-speedup) | Why is my CI slow? | [`skills/ci-speedup/`](skills/ci-speedup/) |
 | 📋 [**ci-score**](#ci-score) | Is my CI config following best practices? | [`skills/ci-score/`](skills/ci-score/) |
 | 🔒 [**ci-secure**](#ci-secure) | Can someone attack me through my CI? | [`skills/ci-secure/`](skills/ci-secure/) |
+| 🛰️ [**sling-cli**](#sling-cli) | Why did *this* run fail, and what did it cost? | [`skills/sling-cli/`](skills/sling-cli/) |
 
-Each run ends the same way: your agent offers to fix the findings you pick, or
-to just save the full report as markdown. Fixes land in your working tree for
+The first three audit a checkout and end the same way: your agent offers to
+fix the findings you pick, or to just save the full report as markdown.
+`sling-cli` is the odd one out — it answers questions about live runs instead
+of auditing files. Fixes land in your working tree for
 you to review, and nothing is ever committed, pushed, or opened as a PR.
 
 All three run from a local checkout and need **`python3` 3.9+** and **PyYAML**
@@ -175,6 +178,48 @@ one. It becomes blocking when you drop `--advisory` and add the check to your
 repository's required checks.
 
 Source: [`skills/ci-secure/`](skills/ci-secure/) · [SKILL.md](skills/ci-secure/SKILL.md) · Learn more: [starsling.dev/ci-secure](https://starsling.dev/ci-secure)
+
+---
+
+## sling-cli
+
+🛰️ **Answers questions about one live CI run — and knows when to reach for
+`gh` instead.**
+
+```bash
+npx skills add starslingdev/skills --skill sling-cli
+```
+
+Or paste this into your agent:
+
+```text
+Run `npx skills add starslingdev/skills --skill sling-cli` to install or
+update the sling-cli skill.
+```
+
+Then invoke it by name (**`/sling-cli`**, or `$sling-cli` in Codex), or just
+ask *"why did this job fail?"*
+
+The other three skills read your workflow files. This one reads your **live
+CI**, through [`sling`](https://docs.starsling.dev/sling-cli), StarSling's
+read-only CLI: why a job failed (classified server-side, no LLM in the loop),
+where a run's wall-clock actually went, only the log lines that matter, and
+what your runner minutes cost, broken down by repo, workflow, or label.
+
+**The routing is the point.** `sling` is read-only, so an agent that only
+knows `sling` will invent a `sling rerun` that does not exist, and an agent
+that only knows `gh` will download a whole transcript to grep it. The skill
+carries the table that decides which tool answers which ask — reads about a
+run, a job, or spend go to `sling`; anything that changes state (re-run,
+cancel, trigger, enable, disable, download an artifact) goes to `gh` — plus
+the exit-code handling and the `--agent` JSON shapes for every command,
+[read off the binary rather than the docs](skills/sling-cli/references/command-reference.md).
+
+It needs `sling` installed and signed in; the skill runs `sling doctor` first
+and walks you through `sling login` if you are not. Everything it does is a
+read, unless you ask for a state change and it tells you before making it.
+
+Source: [`skills/sling-cli/`](skills/sling-cli/) · [SKILL.md](skills/sling-cli/SKILL.md)
 
 ---
 

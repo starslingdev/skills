@@ -1,0 +1,158 @@
+{
+  "_comment": "The routing contract this skill exists to enforce. `route` is the tool or skill that must answer the prompt; `why` records the rule that decides it. Pinned by tests/test_sling_routing.py.",
+  "routings": [
+    {
+      "prompt": "why did this job fail",
+      "route": "sling",
+      "command": "sling why",
+      "why": "read, one job"
+    },
+    {
+      "prompt": "why is this run failing \u2014 here's the Actions URL",
+      "route": "sling",
+      "command": "sling why",
+      "why": "read, one run; a URL resolves"
+    },
+    {
+      "prompt": "what made this run so slow",
+      "route": "sling",
+      "command": "sling time",
+      "why": "read, one run's wall-clock"
+    },
+    {
+      "prompt": "show me the error lines from that job",
+      "route": "sling",
+      "command": "sling logs",
+      "why": "read, one job's logs"
+    },
+    {
+      "prompt": "which jobs failed in that run",
+      "route": "sling",
+      "command": "sling jobs list",
+      "why": "read, one run"
+    },
+    {
+      "prompt": "which step in this job failed",
+      "route": "sling",
+      "command": "sling jobs show",
+      "why": "read, one job's steps"
+    },
+    {
+      "prompt": "what did we spend on CI this month",
+      "route": "sling",
+      "command": "sling bill",
+      "why": "read, spend"
+    },
+    {
+      "prompt": "which workflow is costing us the most",
+      "route": "sling",
+      "command": "sling top",
+      "why": "read, spend attribution"
+    },
+    {
+      "prompt": "how many runner minutes did each repo use",
+      "route": "sling",
+      "command": "sling usage",
+      "why": "read, spend attribution"
+    },
+    {
+      "prompt": "what runner sizes can we use",
+      "route": "sling",
+      "command": "sling labels list",
+      "why": "read, capacity catalog"
+    },
+    {
+      "prompt": "am I signed in to sling",
+      "route": "sling",
+      "command": "sling whoami",
+      "why": "read, identity"
+    },
+    {
+      "prompt": "re-run the failed jobs",
+      "route": "gh",
+      "command": "gh run rerun",
+      "why": "changes state; sling is read-only"
+    },
+    {
+      "prompt": "cancel that run",
+      "route": "gh",
+      "command": "gh run cancel",
+      "why": "changes state"
+    },
+    {
+      "prompt": "kick off the release workflow",
+      "route": "gh",
+      "command": "gh workflow run",
+      "why": "changes state"
+    },
+    {
+      "prompt": "disable that workflow for now",
+      "route": "gh",
+      "command": "gh workflow disable",
+      "why": "changes state"
+    },
+    {
+      "prompt": "download the build artifact from that run",
+      "route": "gh",
+      "command": "gh run download",
+      "why": "changes local state; sling has no artifact command"
+    },
+    {
+      "prompt": "are the checks green on my PR",
+      "route": "gh",
+      "command": "gh pr checks",
+      "why": "PR-scoped; sling has no PR command"
+    },
+    {
+      "prompt": "approve the pending production deployment",
+      "route": "gh",
+      "command": "gh api",
+      "why": "changes state; no first-class gh subcommand"
+    },
+    {
+      "prompt": "grade my CI",
+      "route": "ci-score",
+      "why": "repo-wide ask about workflow configuration, not one run"
+    },
+    {
+      "prompt": "is my CI secure",
+      "route": "ci-secure",
+      "why": "repo-wide ask about workflow configuration, not one run"
+    },
+    {
+      "prompt": "why is CI slow",
+      "route": "ci-speedup",
+      "why": "repo-wide ask about workflow configuration, not one run"
+    },
+    {
+      "prompt": "run ci-score",
+      "route": "ci-score",
+      "why": "naming a skill reaches that skill"
+    },
+    {
+      "prompt": "run ci-speedup",
+      "route": "ci-speedup",
+      "why": "naming a skill reaches that skill"
+    },
+    {
+      "prompt": "run ci-secure",
+      "route": "ci-secure",
+      "why": "naming a skill reaches that skill"
+    },
+    {
+      "prompt": "add a caching step to my build job",
+      "route": "file-edit",
+      "why": "workflow authoring, no CI question"
+    },
+    {
+      "prompt": "what triggers does this workflow have",
+      "route": "file-edit",
+      "why": "YAML content, not run data"
+    },
+    {
+      "prompt": "why did my CircleCI job fail",
+      "route": "none",
+      "why": "not GitHub Actions; neither CLI covers it"
+    }
+  ]
+}
