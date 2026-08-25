@@ -268,3 +268,33 @@ def test_reference_over_100_lines_carries_a_contents_block():
         if len(text.splitlines()) > 100:
             head = "\n".join(text.splitlines()[:25]).lower()
             assert "contents" in head, f"{ref.name} is long but has no contents block"
+
+
+def _shipped_text() -> list[tuple[str, str]]:
+    out = [("SKILL.md", (_SKILL / "SKILL.md").read_text())]
+    out += [(f"references/{r.name}", r.read_text())
+            for r in sorted((_SKILL / "references").glob("*.md"))]
+    return out
+
+
+def test_login_is_never_shown_with_the_machine_mode_flag():
+    """`sling login` needs a human at a browser to approve a device code, and
+    `--agent` carries `--no-input` — so the flag turns the one command that
+    requires a person into exit `2`. Any shipped example pairing them teaches
+    an agent to hang the session on a prompt it has already refused."""
+    for where, text in _shipped_text():
+        for line in text.splitlines():
+            if "sling login" in line:
+                assert "--agent" not in line or "never" in line.lower() or "not" in line.lower(), (
+                    f"{where}: `sling login` shown with --agent — {line.strip()[:90]}")
+
+
+def test_the_skill_says_the_user_runs_login():
+    """The recovery for exit `4` has to hand the browser step back to a person.
+    An agent that runs `sling login` itself blocks until timeout and never
+    shows the code, leaving the user signed out and the session stuck."""
+    body = _BODY.lower()
+    assert "ask the user to run `sling login`" in body, (
+        "the preflight no longer hands the sign-in to the user")
+    assert "do not run it yourself" in body, (
+        "the preflight no longer tells the agent to keep its hands off login")

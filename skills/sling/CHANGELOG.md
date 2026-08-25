@@ -61,12 +61,17 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   with `--agent` attached refuses the device-code prompt, lands on the usage
   row, and loops without ever signing in. `--agent` is now scoped to data
   commands, with the two interactive ones called out.
-- **2026-08-25** — **The login step could not be carried out by the agent it
-  was written for.** It said to show the user the device code and wait, which
-  assumes streaming output; a blocking subprocess returns its output only
-  after it has finished, so the code would appear when it was already too late
-  to use. The skill now asks the user to run `sling login` in their own
-  terminal and confirms with `doctor` afterwards.
+- **2026-08-25** — **Signing in is a human step, and the skill now says so
+  everywhere.** `sling login` prints a device code, opens a browser approval
+  page, and blocks until a person approves it. An agent cannot do that: as a
+  subprocess the output arrives only once the command has finished or timed
+  out, so the code is never visible while it is still usable, and `--agent`
+  (which carries `--no-input`) refuses the prompt outright with exit `2`.
+  The preflight now asks the user to run it in their own terminal and
+  confirms with `doctor` afterwards; the exit-`4` recovery row and the
+  command reference say the same, and no shipped example pairs `sling login`
+  with `--agent`. Two tests pin it, because this is the failure that leaves a
+  user signed out and the session hung.
 - **2026-08-25** — **The invention guard missed invented subcommands under
   real commands, and never looked at the description.** It reported only the
   first word when a pair was unknown, so `sling bill export` and `sling logs

@@ -85,10 +85,16 @@ subcommand, add it to `command-surface.json` and drop this note.)
 
 ### `sling login [--force] [--clear]`
 
-GitHub device-code flow. Blocking and interactive — surface the code and
-URL to the user and wait. `--force` re-authenticates an existing session;
-`--clear` is an alias for `logout --yes`. Credential is written to
-`~/.config/sling/credentials`, per user, owner-only.
+GitHub device-code flow, and **the one command an agent should not run**:
+it prints a code, opens a browser approval page, and blocks until a human
+approves it. Ask the user to run it in their own terminal. Never pass
+`--agent` — that carries `--no-input`, so the prompt is refused with exit
+`2` rather than shown.
+
+`--force` re-authenticates an existing session; `--clear` is an alias for
+`logout --yes`. The credential is written to `~/.config/sling/credentials`,
+per user, owner-only — so one sign-in covers every agent running as that
+user.
 
 ### `sling logout`, `sling org switch [slug] [--no-input]`
 

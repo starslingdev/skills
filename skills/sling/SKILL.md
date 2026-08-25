@@ -63,12 +63,22 @@ Do this once per session, before the first `sling` command.
    [references/command-reference.md](references/command-reference.md)).
 
 3. **Not authenticated** (`doctor`'s `token` check fails, or any command
-   exits `4`): run `sling login`. It is a GitHub device-code flow —
-   **blocking and human-in-the-loop**. Show the user the device code and
-   the URL, then wait. Never try to script around it. The credential is
-   saved per user at `~/.config/sling/credentials`, so once the user has
-   signed in, an agent running as them is authenticated with no further
-   setup.
+   exits `4`): **ask the user to run `sling login` in their own terminal**,
+   then wait for them to say it is done. Do not run it yourself, and never
+   pass `--agent` to it.
+
+   Signing in needs a person at a browser: `sling login` prints a device
+   code, opens a GitHub approval page, and blocks until someone approves it.
+   Launched as a subprocess that is unworkable in both directions — the
+   output arrives only once the command has already finished or timed out,
+   so the code is never visible while it can still be used, and `--agent`
+   would refuse the prompt outright with exit `2`. There is no automated
+   path here, and pretending otherwise just hangs the session.
+
+   The credential is saved per user at `~/.config/sling/credentials`, so
+   once they have signed in, an agent running as them is authenticated with
+   no further setup. Re-run `sling doctor --agent` to confirm, then carry
+   on.
 
 4. **Wrong org** (`doctor`'s `org` check, an exit `2` naming org ambiguity,
    or an id that resolves to nothing but plausibly exists elsewhere): `sling
@@ -85,14 +95,25 @@ Do this once per session, before the first `sling` command.
 ## Always pass `--agent`
 
 `--agent` is a global machine-mode flag, exactly equivalent to `--json
---compact --no-input --no-color --yes`. Pass it on **every** invocation and
-parse stdout as JSON. Do not also pass `--json`; `--agent` already implies
-it.
+--compact --no-input --no-color --yes`. Pass it on every **data** command
+and parse stdout as JSON. Do not also pass `--json`; `--agent` already
+implies it.
 
-- **stdout carries data only.** Human chrome (spinners, summary rows,
-  prompts) goes to stderr, and only when stderr is a TTY. A failed command
-  writes nothing to stdout, so an error message arrives on **stderr as
-  plain text, not JSON** — read stderr when the exit code is non-zero.
+**Never pass `--agent` to `sling login`.** Signing in requires a human to
+open a browser and approve a device code, and `--agent` carries
+`--no-input`, which refuses the prompt rather than showing it — turning the
+one command that needs a person into exit `2`. `sling org switch` has the
+same shape: under `--agent` its picker is refused, so give it an explicit
+slug (`sling org switch acme --agent`).
+
+- **Parse stdout first, whatever the exit code.** Human chrome (spinners,
+  summary rows, prompts) goes to stderr, and only when stderr is a TTY. A
+  genuine error — `1`, `2`, `3`, `4`, `5`, `7` — writes nothing to stdout
+  and puts a plain-text message on stderr. But `6` and `10` are outcomes,
+  not errors: they emit the **full JSON payload on stdout** with stderr
+  empty. An unhealthy `sling doctor --agent` exits `10` and still returns
+  every check, which is exactly what the preflight above asks you to read.
+  So read stdout, and fall back to stderr only when stdout is empty.
 - Under `--agent`, **every** command returns JSON, `sling logs` included.
 - JSON keys are `snake_case` on every command **except `whoami`**, which
   returns camelCase (`userId`, `githubLogin`, `expiresAt`). Key a parser per
@@ -133,7 +154,7 @@ reading YAML yourself.
 | Runner-minutes and cost attributed per repo/workflow/label/day | `sling` | `sling usage [--group-by <axis>] [--window <n>d]` |
 | What is owed this period, or past invoices | `sling` | `sling bill`, `sling bill history` |
 | Which runner labels/sizes exist and what they cost | `sling` | `sling labels list` |
-| Identity, org, credential, environment health | `sling` | `sling whoami`, `sling doctor`, `sling org switch`, `sling login`, `sling logout` |
+| Identity, org, credential, environment health | `sling` | `sling whoami`, `sling doctor`, `sling org switch` — and `sling login`, which the **user** runs, not you |
 | **Re-run a run or its failed jobs** | `gh` | `gh run rerun <run-id> [--failed]` |
 | **Cancel an in-progress run** | `gh` | `gh run cancel <run-id>` |
 | **Trigger a workflow (`workflow_dispatch`)** | `gh` | `gh workflow run <workflow> [-f key=value]` |
@@ -202,7 +223,7 @@ nothing to stdout at all.
 | `1` | Unexpected internal error (a crash) | Do not retry blindly. Surface the stderr text; this is a bug report, not a routing decision |
 | `2` | Usage — bad flags, a prompt refused under `--agent`, or org ambiguity | Fix the invocation against `sling <cmd> --help`; if org-ambiguous, pass `--org` or run `sling org switch` |
 | `3` | Not found — no such run/job/attempt in this org, or a real job that stores no logs | Try `sling resolve` on the raw id or URL, confirm the org, then ask the user to confirm the id |
-| `4` | Auth — missing, expired, or under-scoped credential | `sling login`, then retry once |
+| `4` | Auth — missing, expired, or under-scoped credential | Ask the user to run `sling login` themselves (a browser approval, never `--agent`), then retry once |
 | `5` | Control-plane or API error (5xx or transport) | Retry once after a short backoff (~2s); on a second failure fall back to the `gh` read equivalent and **say** `sling` was unreachable |
 | `6` | Partial — telemetry incomplete, result still emitted (`time`, `why`) | Not an error. Use the result, and tell the user it is partial |
 | `7` | Rate limited (HTTP 429) | Back off and retry once. Do not hammer |
