@@ -10835,7 +10835,8 @@ def _stamp_run_context(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
     ev = str(run.get("event") or "")
     rid = _run_id(run)
     # Head repo (owner/name) of the run — a fork PR's head repo differs from the
-    # audited repo, and a fork run is cache-cold by construction. Stamped here (free —
+    # audited repo, and a fork run runs colder (no repo secrets, so a secrets-gated
+    # remote cache is unreachable to it). Stamped here (free —
     # already on the run object) so the cache-distribution grounding can exclude fork
     # PRs from the upstream hit-rate median without a second fetch.
     head_repo = str((run.get("head_repository") or {}).get("full_name") or "")
@@ -12962,7 +12963,8 @@ def _magnitude_sample(
 
     `state_fn` (cache leaves only): a `log -> {miss_pct, cold, remote_off} | None`
     reader. When set, each value entry is ANNOTATED with the run's event, head-repo,
-    fork flag (head repo != audited repo — a fork PR can't read the repo's cache),
+    fork flag (head repo != audited repo — a fork PR gets no repo secrets, so a
+    secrets-gated remote cache is unreachable to it),
     job duration, and parsed cache state, from the SAME already-fetched log. This is
     what `_cache_distribution` reads to ground a cache pole in a per-event, fork-aware
     hit-rate distribution instead of the single drilled run's miss. No extra fetches:
@@ -13052,9 +13054,10 @@ def _magnitude_sample(
             entry = {"run_url": str(j.get("html_url", "")).split("/job/")[0],
                      "value": val, "drilled": jid == repr_job.get("id")}
             if state_fn is not None:
-                # Fork = the run's head repo differs from the audited repo. A fork PR
-                # runs cold by construction (it cannot read the base repo's cache), so
-                # it must be EXCLUDED from the upstream median — else external-contributor
+                # Fork = the run's head repo differs from the audited repo. A fork PR gets no
+                # repo secrets (secrets-gated remote caches are unreachable) and restores only
+                # the base branch's scope, so it runs colder than an upstream PR and must be
+                # EXCLUDED from the upstream median — else external-contributor
                 # PRs drag a warm cache's miss rate up and manufacture a "churn" verdict.
                 hr = str(j.get("_run_head_repo") or "")
                 entry["event"] = str(j.get("_run_event") or "")
@@ -13090,7 +13093,8 @@ def _magnitude_sample(
 
 def _job_is_fork(j: dict[str, Any], repo: str) -> bool:
     """A run whose head repository differs from the audited repo — a fork PR, which runs
-    cold (it cannot read the base repo's cache). Reads the `_run_head_repo` stamp
+    colder (no repo secrets, so a secrets-gated remote cache is unreachable). Reads
+    the `_run_head_repo` stamp
     `_accumulate_jobs` puts on every job (no extra fetch)."""
     hr = str(j.get("_run_head_repo") or "")
     return bool(hr) and hr.lower() != str(repo).lower()

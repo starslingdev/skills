@@ -246,21 +246,28 @@ unversioned and updates by reinstall from `main`.
 ### Fixed
 
 - **2026-08-22** — **OPT74 no longer claims a fork PR can't restore the base
-  branch's cache — it can; what it can't do is save one.** The pattern's
-  anti-pattern text said a fork-PR job "can't restore a cache the trusted side
-  wrote". GitHub's dependency-caching reference says the opposite: "If a workflow
-  run is triggered for a pull request, it can also restore caches created in the
-  base branch, including base branches of forked repositories." The false claim
-  denied the mechanism OPT74's own fix depends on — the trusted-producer +
-  read-only-consumer split works precisely because the fork side can read — so a
-  reader was steered away from a technique that works. The real constraint,
-  now stated: a fork PR runs with a read-only `GITHUB_TOKEN` and no secrets and
-  **cannot save** a cache entry anything else can use (its writes are scoped to
-  `refs/pull/.../merge` and restorable only by re-runs of that PR), which is why
-  fork PRs still pay cold setup. The same wrong claim in `blocking_path.py`'s
-  fork disclosures ("repo cache unavailable", "a fork PR cannot read the repo
-  cache") and in `ARCHITECTURE.md` is corrected to the save-side constraint; the
-  fork-exclusion behaviour in the cache-health median is unchanged.
+  branch's cache — it can; and every fork disclosure now names the reason that
+  actually makes a fork colder.** The pattern's anti-pattern text said a fork-PR
+  job "can't restore a cache the trusted side wrote". GitHub's dependency-caching
+  reference says the opposite: "If a workflow run is triggered for a pull request,
+  it can also restore caches created in the base branch, including base branches of
+  forked repositories." The false claim denied the mechanism OPT74's own fix depends
+  on — the trusted-producer + read-only-consumer split works precisely because the
+  fork side can read — so a reader was steered away from a technique that works.
+  The save side is not the replacement reason either: a `pull_request` run saves
+  into the merge ref's scope whether or not it comes from a fork, so it cannot
+  explain why a fork run is excluded from the cache-health median. What IS
+  fork-specific, and what every disclosure now says: a fork PR carries **no repo
+  secrets**, so a secrets-gated remote build cache is unreachable to it, and it
+  cannot restore an upstream feature branch's own scope. Corrected across the
+  pattern catalog, the sizing methodology reference, `ARCHITECTURE.md`, the three
+  fork disclosures rendered into reports and coding-agent prompts, and the comments
+  that justify the fork exclusion where it is implemented. OPT74's TL;DR and
+  detection heuristic also stop asserting that fork PRs are cold unconditionally:
+  the entry now tells a reader to check first whether the base branch already
+  publishes a restorable entry under a key the fork can compute — the common case
+  for `actions/setup-*` with `cache:` enabled — and says OPT74 does not apply when
+  it does. Scoring, detection and the fork-exclusion behaviour itself are unchanged.
 
 - **2026-08-16** — **The verifier's `_fence_safe` twin masks credentials the
   same way the renderer does, so a credential-bearing evidence line stops

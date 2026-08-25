@@ -5581,16 +5581,83 @@ def test_mag_line_healthy_step_wall_still_reads_stable():
     assert "NOT cross-run validated" not in out
 
 
+# The one sentence every fork disclosure must land on. A fork PR is NOT colder because it
+# "cannot save" a cache — a same-repo PR saves under the identical merge-ref scoping. What is
+# fork-specific is that it gets no repo secrets (so a secrets-gated remote cache is out of
+# reach) and can restore only the base branch's scope. Every rendered disclosure is pinned to
+# that reason below, because a report that excludes data must say what the exclusion is FOR.
+_FORK_TAG = " — fork PR (no repo secrets; restores base-branch caches only)"
+
+
 def test_mag_line_annotates_fork_run_in_the_common_case_loop():
-    # PR #126 fresh-review (Angle A): the fork disclosure (" — fork PR (cannot save the repo cache; runs cold)")
-    # was added to only the degenerate "NOT cross-run validated" per-run loop; the common-case
-    # (n>=5) loop emitted fork runs unannotated, so a fork PR's cold-cache miss read as an ordinary
-    # upstream point in the range. Both loops must annotate the fork run.
+    # PR #126 fresh-review (Angle A): the fork disclosure was added to only the degenerate
+    # "NOT cross-run validated" per-run loop; the common-case (n>=5) loop emitted fork runs
+    # unannotated, so a fork PR's cold-cache miss read as an ordinary upstream point in the
+    # range. Both loops must annotate the fork run.
     vals = [{"run_url": f"https://x/runs/{i}", "value": 12.0} for i in range(1, 5)]
     vals.append({"run_url": "https://x/runs/9", "value": 95.0, "fork": True})  # cold fork run
     mag = {"unit": "%", "label": "packages rebuilt", "this_run": 12.0, "values": vals}
     out = "\n".join(bp._mag_line(mag, {"fix_key": "turbo-partial-cache"}))
-    assert "[run 9](https://x/runs/9) — 95% — fork PR (cannot save the repo cache; runs cold)" in out
+    assert "[run 9](https://x/runs/9) — 95%" + _FORK_TAG in out
+
+
+def test_mag_line_annotates_fork_run_in_the_degenerate_loop():
+    # PR #75 review: only the common-case loop's tag was pinned, so the DEGENERATE
+    # ("NOT cross-run validated", n<5) loop's identical tag could drift or be dropped with the
+    # whole suite green — re-opening PR #126's bug in the other direction. Pin both loops.
+    # The degenerate branch fires when the per-run samples collapse to ~0 against a non-zero
+    # drilled value, so the magnitude is reported as not cross-run validated.
+    vals = [{"run_url": "https://x/runs/1", "value": 0.0},
+            {"run_url": "https://x/runs/9", "value": 0.0, "fork": True}]
+    mag = {"unit": "%", "label": "packages rebuilt", "this_run": 100.0, "values": vals}
+    out = "\n".join(bp._mag_line(mag, {"fix_key": "turbo-partial-cache"}))
+    assert "NOT cross-run validated" in out, "expected the degenerate branch"
+    assert "[run 9](https://x/runs/9) — 0%" + _FORK_TAG in out
+
+
+def test_fork_disclosures_never_blame_the_save_side():
+    # PR #75 review: the save-side scoping rule (`refs/pull/.../merge`) binds same-repo PRs
+    # identically, so it cannot explain why a FORK run is excluded from the upstream median.
+    # A disclosure that cites it is telling the reader a reason that doesn't distinguish the
+    # run it just dropped. Guard every rendered fork surface at once.
+    vals = [{"run_url": f"https://x/runs/{i}", "value": 12.0} for i in range(1, 5)]
+    vals.append({"run_url": "https://x/runs/9", "value": 95.0, "fork": True})
+    surfaces = [
+        "\n".join(bp._mag_line({"unit": "%", "label": "packages rebuilt",
+                                "this_run": 12.0, "values": vals},
+                               {"fix_key": "turbo-partial-cache"})),
+        "\n".join(bp._cache_health_block(_cd("mostly-warm", med=9, rng=(2, 44), n=8,
+                                             upstream_n=6, fork_n=1))),
+    ]
+    for out in surfaces:
+        assert "fork PR" in out or "fork-PR" in out
+        low = out.lower()
+        assert "cannot save" not in low and "can't save" not in low
+        assert "cannot read the repo cache" not in low
+        assert "repo cache unavailable" not in low
+
+
+def test_agent_prompt_cache_context_gives_a_reason_the_agent_cannot_refute():
+    # PR #75 review: this constraint tells a coding subagent "NEVER benchmark on a fork". The
+    # reason it gives has to SURVIVE the agent checking it, because an agent that refutes a
+    # stated rationale disregards the instruction. "A fork can't save a cache" is refutable —
+    # GitHub's own reference says a fork PR's merge-ref cache is restorable by re-runs of that
+    # PR, so "run the fork PR twice" reads as a legal workaround. The durable reasons are the
+    # missing repo secrets and the unreachable upstream branch scope.
+    leaf = {"fix_key": "turbo-partial-cache", "unit_label": "", "deeper": [],
+            "magnitude": None, "evidence": [], "search": []}
+    pole = {"check": "build", "workflow_file": ".github/workflows/ci.yml", "p50_s": 600.0,
+            "dominant_step": "build", "dominant_p50_s": 560.0, "dominant_share": 0.93,
+            "steps": [{"step": "build", "category": "build", "p50_s": 560.0}],
+            "cache_dist": {"verdict": "mostly-warm", "pr": {"upstream_median": 9.0}}}
+    prompt = bp._build_agent_prompt(leaf, pole, [], "https://x/actions/runs/1",
+                                    "o/r", "abc1234", 5, 20, timeline=None)
+    assert "NEVER a fork or cold clone" in prompt, "expected the cache-context constraint"
+    assert "no repo secrets" in prompt
+    assert "cannot restore an upstream branch's own cache scope" in prompt
+    low = prompt.lower()
+    assert "cannot save" not in low and "can't save" not in low
+    assert "nothing it builds is ever warm" not in low
 
 
 def test_headline_floor_is_slowest_check_not_the_frequency_gate():
@@ -6141,6 +6208,9 @@ def test_cache_health_block_renders_all_disclosure_lines():
     out = "\n".join(bp._cache_health_block(cd))
     assert "median miss **9%**" in out and "across 6 sampled run(s)" in out   # upstream_n, not n
     assert "fork-PR run(s) excluded" in out and "1 run(s) exposed no cache summary" in out
+    # The REASON, not just the fact: the exclusion has to name what makes a fork colder.
+    assert ("no repo secrets and cannot restore an upstream branch's own cache scope"
+            in out), "the fork exclusion must disclose the fork-specific reason"
     assert "unknown — 2 log fetch(es) failed" in out                          # push-error line
     assert bp._CACHE_CONTEXT_MARKER in out and "Cache-context caveat" in out   # demoted -> marker+caveat
     # insufficient / absent -> empty (nothing measured to disclose).

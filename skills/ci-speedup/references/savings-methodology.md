@@ -174,8 +174,9 @@ credited billable minutes from structured per-sample rounding evidence.
 > per-event, fork-excluded miss distribution + `verdict`. If the verdict is `mostly-warm` or
 > `miss-tail`, frame the saving as *"helps cache-miss-heavy PRs"* (a tail/variance win), NOT
 > *"speeds up CI by X%"*, and size against the miss-heavy tail, not every run. Never project a
-> full-job wall-clock saving from a cold or fork-clone benchmark: a fork can't read the repo
-> cache, so it shows a worst-case cold build. And distinguish a **cache-MISS problem** (fix the
+> full-job wall-clock saving from a cold or fork-clone benchmark: a fork PR gets no repo secrets,
+> so a secrets-gated remote cache is unreachable to it, and it can restore only what the base
+> branch already published — so it shows a worst-case cold build. And distinguish a **cache-MISS problem** (fix the
 > key / restore) from **work that runs even when cached** (`install-lifecycle-build`: a build
 > runs during `pnpm install` — the fix is `--ignore-scripts` + an explicit cached step, not a
 > cache key). The report's cache-context caveat + `<!-- ci-speedup:cache-context -->` marker
