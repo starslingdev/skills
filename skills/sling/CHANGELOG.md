@@ -89,6 +89,12 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   usage --org --window 7d` exits `0` having eaten `--window` as the org slug
   and returns a wrongly-scoped cost answer that looks correct.
 
+- **2026-08-25** — **The `sling update` gotcha is now dated to the release it
+  applies to.** It is real on 0.1.2, which is what the installer serves, and
+  already fixed on the CLI's main branch — where the same check emits the
+  installer one-liner. Saying so keeps the note from outliving the bug and
+  teaching users to distrust a `fix_command` that has become correct.
+
 ### Notes
 
 - **The install command is described, not printed.** `sling` installs by

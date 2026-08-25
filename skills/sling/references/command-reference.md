@@ -66,12 +66,16 @@ Exits `0` healthy, **`10` unhealthy**.
 A check with `"skipped": true` is advisory (the `version` check reports an
 available upgrade this way) and does not make the environment unhealthy.
 
-**The `version` check's `fix_command` is not a real subcommand.** On v0.1.2
+**On v0.1.2 the `version` check's `fix_command` is not a real subcommand.**
 `doctor` emits `"fix_command": "sling update"`, and `sling update` **does not
 exist** — the binary rejects it as an unknown command. Never run a
 `fix_command` unchecked; to upgrade, re-run the installer from the
-installation page. (Reported upstream; if a later release adds the
-subcommand, add it to `command-surface.json` and drop this note.)
+installation page.
+
+Already fixed on the CLI's main branch, where the check emits the installer
+one-liner instead, so this note expires with the next release — but 0.1.2 is
+the version the installer serves, so it is the version users have. Drop this
+paragraph once the served release moves.
 
 ### `sling whoami [--agent]`
 

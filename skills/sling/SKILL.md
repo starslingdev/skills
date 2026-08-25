@@ -240,11 +240,13 @@ These are the places where `sling` behaves differently from what its own
 output, its `--help`, or its documentation implies. Each was found by
 running the binary; none of them announce themselves at runtime.
 
-- **`sling update` does not exist, and `sling doctor` recommends it.** The
-  `version` check emits `"fix_command": "sling update"`, and the binary
-  rejects that command as unknown. Never run a `fix_command` unchecked —
-  upgrade by re-running the installer. The general lesson: a command name
-  printed by a tool is not proof the tool has it.
+- **On the current release (0.1.2), `sling doctor` recommends a command that
+  does not exist.** Its `version` check emits `"fix_command": "sling
+  update"`, and the binary rejects `sling update` as unknown. Fixed on the
+  CLI's main branch, where the same check emits the installer one-liner
+  instead — but 0.1.2 is what the installer serves today, so it is what a
+  user has. Never run a `fix_command` unchecked. The general lesson outlives
+  the bug: a command name printed by a tool is not proof the tool has it.
 - **Unknown flags are ignored, not rejected.** `sling runs list --bogus`
   exits `0` and returns unfiltered rows. Exit `0` is therefore not evidence
   that a filter applied — check the rows you got back before reporting a
