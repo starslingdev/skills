@@ -4302,7 +4302,7 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
             rid = url.rstrip("/").rsplit("/", 1)[-1]
             tag = " — drilled above" if x.get("drilled") else ""
             if x.get("fork"):
-                tag += " — fork PR (no repo secrets; restores base-branch caches only)"
+                tag += " — fork PR (no repo secrets; can't reach upstream branch caches)"
             out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
         out.append("")
         return out
@@ -4340,13 +4340,13 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
         rid = url.rstrip("/").rsplit("/", 1)[-1]
         tag = " — drilled above" if x.get("drilled") else ""
         # Same fork disclosure as the NOT-cross-run-validated branch above: a fork PR gets no
-        # repo secrets (so a secrets-gated remote cache is unreachable) and can restore only the
-        # base branch's scope, never an upstream feature branch's — so its miss is a worst case,
-        # not an ordinary upstream point —
+        # repo secrets (so a secrets-gated remote cache is unreachable) and cannot restore an
+        # upstream feature branch's scope — only the base branch's and its own PR's. So its miss
+        # is a worst case, not an ordinary upstream point —
         # annotate it so a reader doesn't size the fix off it (the value is still listed, but the
         # cross-run median/verdict already exclude forks). Applying it in BOTH per-run loops.
         if x.get("fork"):
-            tag += " — fork PR (no repo secrets; restores base-branch caches only)"
+            tag += " — fork PR (no repo secrets; can't reach upstream branch caches)"
         out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
     out.append("")
     return out

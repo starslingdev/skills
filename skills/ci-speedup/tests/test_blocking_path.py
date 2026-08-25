@@ -5586,7 +5586,7 @@ def test_mag_line_healthy_step_wall_still_reads_stable():
 # fork-specific is that it gets no repo secrets (so a secrets-gated remote cache is out of
 # reach) and can restore only the base branch's scope. Every rendered disclosure is pinned to
 # that reason below, because a report that excludes data must say what the exclusion is FOR.
-_FORK_TAG = " — fork PR (no repo secrets; restores base-branch caches only)"
+_FORK_TAG = " — fork PR (no repo secrets; can't reach upstream branch caches)"
 
 
 def test_mag_line_annotates_fork_run_in_the_common_case_loop():
@@ -5635,6 +5635,10 @@ def test_fork_disclosures_never_blame_the_save_side():
         assert "cannot save" not in low and "can't save" not in low
         assert "cannot read the repo cache" not in low
         assert "repo cache unavailable" not in low
+        # A fork PR's own re-run restores what that PR saved under its merge ref, so no
+        # disclosure may present the base branch as the only thing it can restore.
+        assert "base-branch caches only" not in low
+        assert "restores only base-branch" not in low
 
 
 def test_agent_prompt_cache_context_gives_a_reason_the_agent_cannot_refute():
