@@ -28,6 +28,16 @@ THE_TEN = {
     "P14.15", "P14.18", "P14.19", "P14.24", "P14.25",
 }
 
+# Vectors admitted AFTER the 2026-08-01 critical-only descope. They are part of
+# today's ten but were never in the old catalog, so they must not be counted
+# into its size. CHANGELOG.md's descope entry is the record: "Critical-only
+# descope: the nine attack chains" / "The catalog is now exactly nine
+# outsider -> compromise chains" — which is why this document shipped as
+# why-these-nine.md until P14.25 was admitted 2026-08-06 and renamed it.
+# Without this set the census would derive the historical size from a set that
+# includes a later addition, and could never fail on that error.
+_ADMITTED_AFTER_THE_DESCOPE = {"P14.25"}
+
 
 def _doc_patterns() -> set[str]:
     """Pattern ids from the doc's 'The ten' table (| # | Pattern | ... rows)."""
@@ -126,7 +136,7 @@ def _catalog_pattern_ids(text: str) -> set[str]:
 def test_no_shipped_doc_cites_a_removed_pattern():
     """A whole-catalog + SKILL.md sweep, not a section-scoped one.
 
-    The descope removed 15 patterns. A reader who meets `P8.3` or `P14.22` in
+    The descope removed 18 patterns. A reader who meets `P8.3` or `P14.22` in
     shipped prose has no way to resolve it — the id exists nowhere in the
     installed skill. why-these-ten.md is exempt: naming the removed ids IS
     its rejection record.
@@ -273,25 +283,42 @@ def test_the_rejection_record_accounts_for_the_catalog_size_it_claims():
     P14.21 (secret passed on the command line), and P14.4 (the
     environment-scoping manual-review entry). Those three were removed from
     the scanner without ever being written down here, so anything citing them
-    had no document defining them. The independent check is a downstream
-    vendored copy of the old ci-secure catalog, which carries 27 ci-secure
-    ids: nine of the ten (P14.25 is absent there) plus exactly 18 non-ten
-    ids — 10 + 18 = 28, matching the corrected opening line. A claim ABOUT
-    the data has to be checked AGAINST the data, so count the record instead
-    of trusting prose.
+    had no document defining them.
+
+    The independent check is in this repository and any reader can open it:
+    CHANGELOG.md's "Removed" entry for the descope already recorded "the 18
+    presence-shaped/blast-radius patterns", while this document named only 15
+    — a gap of exactly three, written down here long before it was closed. Two
+    of the three also still have their era's fixtures under
+    tests/fixtures/dot-github/workflows/ (`p14_1_*`, `p14_21_*`), which is
+    direct evidence the old catalog carried them.
+
+    The old catalog's SIZE is nine plus those 18, not ten plus 18. The same
+    CHANGELOG records the descope as "the nine attack chains", and P14.25 was
+    admitted 2026-08-06, after it — so the tenth vector was never in the
+    catalog whose size this line states. Deriving that size from every id the
+    document names would silently count it, which is why the post-descope
+    admissions are subtracted explicitly.
+
+    A claim ABOUT the data has to be checked AGAINST the data, so count the
+    record instead of trusting prose.
     """
     text = _WHY.read_text()
     named = _catalog_pattern_ids(text)
     removed = named - THE_TEN
+    kept_from_the_old_catalog = THE_TEN - _ADMITTED_AFTER_THE_DESCOPE
+    old_catalog_size = len(kept_from_the_old_catalog) + len(removed)
     assert THE_TEN <= named, (
         "why-these-ten.md must name every kept pattern: "
         f"missing {sorted(THE_TEN - named)}")
     assert len(removed) == 18, (
         "the rejection record names a different number of removed patterns "
         f"than the prose claims: {len(removed)} — {sorted(removed)}")
-    assert f"not the {len(named)} patterns" in text, (
-        f"the opening line must say {len(named)} — ten kept plus the "
-        f"{len(removed)} the record accounts for")
+    assert f"not the {old_catalog_size} patterns" in text, (
+        f"the opening line must say {old_catalog_size} — the "
+        f"{len(kept_from_the_old_catalog)} of today's ten that were in the old "
+        f"catalog, plus the {len(removed)} the record accounts for "
+        f"(P14.25 was admitted after the descope and was never in it)")
     assert f"the {len(removed)} the rejection record below" in text
 
 
@@ -348,7 +375,7 @@ def test_the_rejection_record_keeps_its_attestation_verdict():
     """Build provenance / attestation is the practice a reader is most likely
     to expect beside these ten, and its exclusion is the first entry in the
     rejection record that carries no pattern id — so the census equality above
-    (`len(removed) == 15`), which pins every other entry, cannot see it. It
+    (`len(removed) == 18`), which pins every other entry, cannot see it. It
     could be deleted, reversed or contradicted with the whole suite green.
     No test can prove the reasoning is right; what a test can do is stop the
     verdict being dropped the next time this file is trimmed, which is the
