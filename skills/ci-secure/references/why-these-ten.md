@@ -1,9 +1,13 @@
 # Why these ten — the selection criterion behind the critical-only catalog
 
-ci-secure deliberately detects **ten** attack vectors, not the 25 patterns
-its catalog once held — the ten kept, and the 15 the rejection record below
+ci-secure deliberately detects **ten** attack vectors, not the 27 patterns
+its catalog held before the critical-only descope — the nine of today's ten
+that survived it, and the 18 the rejection record below
 names and accounts for, plus one adjacent practice recorded there as
-considered and excluded. This document is the reasoning, shipped with the skill
+considered and excluded. The tenth vector (P14.25) was admitted after the
+descope and was never in that catalog; its own evaluation is below, which is
+why this document shipped as why-these-nine.md until then.
+This document is the reasoning, shipped with the skill
 so every finding can answer "why is this one of only ten?" — and so every
 future "shouldn't we add pattern X?" is tested against a written criterion
 instead of instinct. A census test binds the list below to the scanner's
@@ -141,6 +145,45 @@ the gate they can already see, on a vector already in the ten, is capable
 of restricting anything.
 These either became scored config facts — where a one-line
 pass/fail is the honest weight for a presence fact — or were dropped.
+
+**Three more from the old catalog, named here for completeness.** A rejection
+record is only usable if it accounts for every id the old catalog carried, and
+these three were removed without being written down:
+
+- **Untrusted-event trigger presence (P14.1)** reports a precondition, not a
+  finding. `pull_request_target` and its siblings are the entry condition for
+  three vectors that ARE in the ten — the shared-cache write (P14.7), fork code
+  executed with privileges (P14.9), and `pull-requests: write` on an untrusted
+  trigger (P14.18) — and the template injection those events feed (P14.10) is
+  raised on its own, independent of the trigger — so a maintainer whose repo is
+  clean against those has nothing left to do about the trigger itself. Naming it
+  separately restates the precondition of findings the scan already raises.
+- **Secret passed on the command line (P14.21)** fails the outsider-chain test.
+  Process arguments are readable to whatever already executes on that runner, so
+  the exposure widens a breach rather than starting one. Its second arm — the
+  value reaching a run log, which on a public repo anyone can read, and where
+  transforming the secret defeats GitHub's literal-string masking — does start
+  at outsider, but only when the command echoes the value back. The detector
+  never established that: it fired on the interpolation alone. A chain
+  conditional on a shape the check does not test is not the complete chain the
+  filter requires. That places it with the blast-radius class above: real, and
+  not a chain that starts at outsider.
+- **Secrets accessible to jobs without environment scoping (P14.4)** fails the
+  outsider-chain test. It listed every job reading a stored secret without an
+  `environment:` gate — the structural precondition, not proof the secret is a
+  sensitive publish credential, and not a chain an outsider can walk. The
+  routes an attacker actually takes to that secret are already in the ten: a
+  compromised test job, or a workflow added on a malicious PR, both mean
+  execution on the runner first. That places it with the blast-radius class
+  above. Its output also needed per-job human triage to tell release tokens
+  from benign build ones — advisory as flagged, and only HIGH once a human
+  confirmed which jobs mattered.
+
+No detector for any of the three ships, so none of them can raise a finding.
+Test fixtures named for two of them (`p14_1_*`, `p14_21_*`) do still ship, kept
+deliberately as the negative space the scan must stay silent on. Re-admitting
+any of the three means passing the three tests above and updating the census,
+exactly as for any other entry in this record.
 
 Two catalog-MEDIUM patterns **passed** the filter and stayed: the fork-code
 trust chain (P14.9 — its severity was raised to HIGH with the rebuilt

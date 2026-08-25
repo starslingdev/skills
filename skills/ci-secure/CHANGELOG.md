@@ -109,6 +109,23 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
+- **2026-08-25** — **The rejection record now accounts for every pattern id
+  the old catalog carried, and states the catalog's size correctly.**
+  `references/why-these-ten.md` is the one document that explains why each
+  pattern the scanner no longer ships was dropped, and three ids were missing
+  from it — untrusted-event trigger presence (P14.1), secret passed on the
+  command line (P14.21), and secrets accessible to jobs without environment
+  scoping (P14.4) — so a reader who met one of them in an older finding or
+  catalog reference had nothing defining it. Each now carries its rejection in
+  the document's own idiom. The opening line's arithmetic is corrected with
+  them: the pre-descope catalog held 27 patterns, of which nine of today's ten
+  survived and 18 were removed. It had been stated as 25 and then would have
+  been 28, both of which counted the tenth vector (P14.25) into a catalog it
+  was admitted a week after. The census guard now subtracts post-descope
+  admissions instead of deriving the historical size from every id the
+  document names, so it can fail on that error rather than restate it. No
+  detector, catalog entry or severity changes; the scanner is untouched.
+
 - **2026-08-20** — **Build provenance and artifact attestation now have a
   recorded verdict.** The rejection record in `references/why-these-ten.md`
   accounted for the patterns the descope removed, and attestation —
