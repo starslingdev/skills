@@ -43,6 +43,47 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   gained a contents block, since long reference files get previewed with
   partial reads.
 
+### Fixed
+
+- **2026-08-25** — **The output-stream rule was wrong for the two exit codes
+  that are not errors, and it broke the skill's own preflight.** The `--agent`
+  section said a non-zero exit means stdout is empty and stderr carries the
+  message. Verified against the binary: `sling doctor --agent` on an
+  unreachable control plane exits `10` and writes every check to stdout with
+  stderr empty. An agent following the old rule would have skipped that JSON
+  and been unable to do what the preflight asks two paragraphs later — act on
+  the check that is `ok: false` — and would have discarded every partial
+  `why` / `time` result at exit `6`. The rule is now: parse stdout first
+  whatever the exit code, and fall back to stderr only when stdout is empty.
+- **2026-08-25** — **"Pass `--agent` on every invocation" made authentication
+  unreachable.** `--agent` implies `--no-input`, so it turns a prompt into
+  exit `2`. Following the auth recovery — "`sling login`, then retry once" —
+  with `--agent` attached refuses the device-code prompt, lands on the usage
+  row, and loops without ever signing in. `--agent` is now scoped to data
+  commands, with the two interactive ones called out.
+- **2026-08-25** — **The login step could not be carried out by the agent it
+  was written for.** It said to show the user the device code and wait, which
+  assumes streaming output; a blocking subprocess returns its output only
+  after it has finished, so the code would appear when it was already too late
+  to use. The skill now asks the user to run `sling login` in their own
+  terminal and confirms with `doctor` afterwards.
+- **2026-08-25** — **The invention guard missed invented subcommands under
+  real commands, and never looked at the description.** It reported only the
+  first word when a pair was unknown, so `sling bill export` and `sling logs
+  tail` passed because `bill` and `logs` are real — the exact class it exists
+  to catch. It also scanned only SKILL.md's body, and the frontmatter
+  description was at that moment shipping `sling runs`, which is not a command
+  (only `runs list` / `runs show` are). The detector now reads command
+  mentions out of code spans rather than prose, and the description and every
+  shipped reference are scanned alongside the body.
+- **2026-08-25** — **`gh run delete` was in the fallback reference but missing
+  from the routing table**, and the two mutating-verb guards disagreed about
+  whether `trigger` counts as a state change. Both now derive from one list.
+- **2026-08-25** — **`--org` was documented as both taking and not taking a
+  value.** Because malformed flags are ignored rather than rejected, `sling
+  usage --org --window 7d` exits `0` having eaten `--window` as the org slug
+  and returns a wrongly-scoped cost answer that looks correct.
+
 ### Notes
 
 - **The install command is described, not printed.** `sling` installs by

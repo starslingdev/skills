@@ -4,8 +4,8 @@ description: >-
   Answers live questions about one GitHub Actions run or job by driving
   `sling`, StarSling's read-only agent-first CLI, and routes anything
   `sling` cannot do to the `gh` CLI. Uses `sling why` for why a job failed,
-  `sling time` for where a run's wall-clock went, `sling runs`/`jobs`/`logs`
-  /`resolve` for run detail, and `sling usage`/`top`/`bill` for
+  `sling time` for where a run's wall-clock went, `sling logs` for only the
+  lines that matter, and `sling usage`, `sling top` and `sling bill` for
   runner-minutes and spend.
   Falls back to `gh` for everything that changes state, because `sling` is
   read-only: re-running, cancelling, triggering, enabling or disabling a
@@ -139,6 +139,7 @@ reading YAML yourself.
 | **Trigger a workflow (`workflow_dispatch`)** | `gh` | `gh workflow run <workflow> [-f key=value]` |
 | **Enable or disable a workflow** | `gh` | `gh workflow enable\|disable <workflow>` |
 | **Download an artifact** | `gh` | `gh run download <run-id>` |
+| **Delete a run** | `gh` | `gh run delete <run-id>` |
 | Approve or reject a pending deployment | `gh` | `gh api` — see [references/gh-fallback.md](references/gh-fallback.md) |
 | The checks on a specific PR | `gh` | `gh pr checks <pr>` — then take the failing run/job id back into `sling why` / `sling time` |
 | Secrets or repo/environment variables | `gh` | `gh secret`, `gh variable` |

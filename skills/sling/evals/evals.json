@@ -1,6 +1,6 @@
 {
   "skill_name": "sling",
-  "_comment": "Behavioral evals: what an agent DOES with the skill loaded. The routing contract it must obey is pinned separately in prompt-routing.json. Every should_trigger case needs a live `sling` login; the should_not_trigger cases do not.",
+  "_comment": "Behavioral evals: what an agent DOES with the skill loaded. The routing contract it must obey is pinned separately in prompt-routing.json. Every should_trigger case needs a live `sling` login. TWO THINGS TO KNOW BEFORE RUNNING THESE: (1) the run ids below are real and GitHub purges Actions logs after 90 days, so a stale id fails with exit 3 for reasons that have nothing to do with the skill \u2014 refresh them from `sling runs list --conclusion failure` before a run; (2) case 2 asks for a re-run, which would burn runner minutes on a real repo, so run these with the harness instructing that state-changing commands be NAMED rather than executed. The assertions below grade on naming the right command, never on firing it.",
   "evals": [
     {
       "id": 1,
@@ -21,11 +21,11 @@
       "name": "compound-ask-diagnoses-before-changing-state",
       "should_trigger": true,
       "prompt": "figure out why run 32881736257 failed and then just re-run the failed jobs for me",
-      "expected_output": "Does the read half first with `sling why`, reports the finding, and only then runs `gh run rerun <id> --failed` as an announced, separate action. Never attempts a `sling` subcommand for the re-run \u2014 `sling` is read-only and has none.",
+      "expected_output": "Does the read half first with `sling why`, reports the finding, and only then names `gh run rerun <id> --failed` as an announced, separate action, leaving the decision to the user. Never attempts a `sling` subcommand for the re-run \u2014 `sling` is read-only and has none.",
       "assertions": [
         "Diagnosis reported before any state change",
-        "Re-run performed with `gh run rerun`, not an invented `sling` subcommand",
-        "Told the user it was about to change state before doing it"
+        "Named `gh run rerun` for the re-run \u2014 executed or explicitly deferred \u2014 and never an invented `sling` subcommand",
+        "Surfaced the exact re-run command and left the decision to the user"
       ],
       "files": []
     },

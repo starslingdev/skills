@@ -268,7 +268,7 @@ workflow is written the way it is. That second question is `ci-speedup`.
 
 ## Cost & capacity
 
-### `sling usage [--group-by label|workflow|job|repo|day] [--order-by cost|minutes|jobs|key] [--org | --repo <r>] [--window <n>d | --month]`
+### `sling usage [--group-by label|workflow|job|repo|day] [--order-by cost|minutes|jobs|key] [--org <slug> | --repo <owner/name>] [--window <n>d | --month]`
 
 ```json
 {"group_by": "repo", "window": {"from": "…", "to": "…"},
@@ -303,6 +303,12 @@ is a change against the prior comparable window.
 Report `amount_due_usd`, not `amount_usd`, when the user asks what is owed —
 they differ by `credits_usd`. `status: "open"` means the period is still
 accruing; it is not a final number.
+
+**Both scope flags take a value.** `sling <cmd> --help` renders them as
+`[--org | --repo <r>]`, which reads as though `--org` were a bare switch — it
+is not. Since unknown and malformed flags are ignored rather than rejected,
+`sling usage --org --window 7d` exits `0` having swallowed `--window` as the
+org slug, and returns a wrongly-scoped answer that looks fine.
 
 ### `sling labels list`
 
