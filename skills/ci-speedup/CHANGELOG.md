@@ -245,6 +245,30 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-08-22** — **OPT74 no longer claims a fork PR can't restore the base
+  branch's cache — it can; and every fork disclosure now names the reason that
+  actually makes a fork colder.** The pattern's anti-pattern text said a fork-PR
+  job "can't restore a cache the trusted side wrote". GitHub's dependency-caching
+  reference says the opposite: "If a workflow run is triggered for a pull request,
+  it can also restore caches created in the base branch, including base branches of
+  forked repositories." The false claim denied the mechanism OPT74's own fix depends
+  on — the trusted-producer + read-only-consumer split works precisely because the
+  fork side can read — so a reader was steered away from a technique that works.
+  The save side is not the replacement reason either: a `pull_request` run saves
+  into the merge ref's scope whether or not it comes from a fork, so it cannot
+  explain why a fork run is excluded from the cache-health median. What IS
+  fork-specific, and what every disclosure now says: a fork PR carries **no repo
+  secrets**, so a secrets-gated remote build cache is unreachable to it, and it
+  cannot restore an upstream feature branch's own scope. Corrected across the
+  pattern catalog, the sizing methodology reference, `ARCHITECTURE.md`, the three
+  fork disclosures rendered into reports and coding-agent prompts, and the comments
+  that justify the fork exclusion where it is implemented. OPT74's TL;DR and
+  detection heuristic also stop asserting that fork PRs are cold unconditionally:
+  the entry now tells a reader to check first whether the base branch already
+  publishes a restorable entry under a key the fork can compute — the common case
+  for `actions/setup-*` with `cache:` enabled — and says OPT74 does not apply when
+  it does. Scoring, detection and the fork-exclusion behaviour itself are unchanged.
+
 - **2026-08-16** — **The verifier's `_fence_safe` twin masks credentials the
   same way the renderer does, so a credential-bearing evidence line stops
   tripping a bogus `check_gap_fill_evidence_grounded` failure** (issue #16,
