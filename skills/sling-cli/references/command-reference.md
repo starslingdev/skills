@@ -14,6 +14,18 @@ The `local` object that most responses carry is the CLI's own record of
 what it resolved (`org`, and the id or input it acted on). It is client
 context, not data — never report it as a finding.
 
+## Contents
+
+- **Global flags** — `--agent`, `--org`, `--repo`, `SLING_HOST`, and the
+  unknown-flag trap
+- **Auth & setup** — `doctor`, `whoami`, `login`, `logout`, `org switch`
+- **Inspect** — `runs list`, `runs show`, `jobs list`, `jobs show`, `logs`,
+  `resolve`
+- **Diagnose** — `why`, `time` (one run), `time --repo` (percentiles)
+- **Cost & capacity** — `usage`, `top`, `bill`, `bill history`, `labels list`
+
+Each entry gives the flags and the verified JSON response shape.
+
 ## Global flags
 
 Available on the root command and every subcommand.

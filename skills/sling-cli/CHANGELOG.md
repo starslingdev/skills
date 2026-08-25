@@ -31,6 +31,18 @@ All notable changes to the `sling-cli` skill. Unversioned; dated (UTC).
   `sling update` as its fix, and the binary rejects `sling update` as unknown.
   The reference says so rather than passing the suggestion along.
 
+- **2026-08-25** — **A Gotchas section, an eval set, and a contents block**,
+  from a pass against the official skill-authoring best practices and the
+  internal authoring guide. The Gotchas section collects the places where
+  `sling` behaves differently from what its own `--help`, its output, or its
+  documentation implies — the highest-signal content in a skill about driving
+  a CLI, and previously scattered through the body.
+  [`evals/evals.json`](evals/evals.json) adds five behavioral scenarios,
+  including the two the skill must DECLINE, so a later change cannot quietly
+  turn the handoff rule into an approximation. The 300-line command reference
+  gained a contents block, since long reference files get previewed with
+  partial reads.
+
 ### Notes
 
 - **The install command is described, not printed.** `sling` installs by

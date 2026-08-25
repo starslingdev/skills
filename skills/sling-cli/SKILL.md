@@ -93,16 +93,13 @@ it.
   prompts) goes to stderr, and only when stderr is a TTY. A failed command
   writes nothing to stdout, so an error message arrives on **stderr as
   plain text, not JSON** — read stderr when the exit code is non-zero.
-- **`sling logs` is not an exception under `--agent`.** It returns the same
-  structured JSON as everything else (`{"lines": [...], "has_more",
-  "local"}`), verified against the binary. (The published docs describe
-  `logs` as streaming raw text in both modes; that is what *human* mode
-  does. Trust the JSON.)
-- **`--agent` silently includes `--yes`.** Harmless while `sling` is
-  read-only, but never rely on a confirmation prompt to stop anything.
+- Under `--agent`, **every** command returns JSON, `sling logs` included.
 - JSON keys are `snake_case` on every command **except `whoami`**, which
   returns camelCase (`userId`, `githubLogin`, `expiresAt`). Key a parser per
   command, not on a local-vs-remote rule.
+
+The traps in this contract are collected under [Gotchas](#gotchas) — worth
+reading before the first parse.
 
 ## The routing table
 
@@ -214,6 +211,47 @@ nothing to stdout at all.
 are real and documented (and `doctor --help` names `10` itself), so treat
 that help text as abridged. Any non-zero code not in this table: surface
 stderr to the user rather than guessing a recovery.
+
+## Gotchas
+
+These are the places where `sling` behaves differently from what its own
+output, its `--help`, or its documentation implies. Each was found by
+running the binary; none of them announce themselves at runtime.
+
+- **`sling update` does not exist, and `sling doctor` recommends it.** The
+  `version` check emits `"fix_command": "sling update"`, and the binary
+  rejects that command as unknown. Never run a `fix_command` unchecked —
+  upgrade by re-running the installer. The general lesson: a command name
+  printed by a tool is not proof the tool has it.
+- **Unknown flags are ignored, not rejected.** `sling runs list --bogus`
+  exits `0` and returns unfiltered rows. Exit `0` is therefore not evidence
+  that a filter applied — check the rows you got back before reporting a
+  filtered answer.
+- **`--help` lists an abridged flag set.** `runs list --help` omits
+  `--trigger`, `--workflow-path`, `--label` and the window flags, all of
+  which work. Absence from `--help` is not absence from the CLI; the fuller
+  list is in [references/command-reference.md](references/command-reference.md).
+- **`sling logs` returns JSON under `--agent`**, despite documentation that
+  calls it the one command streaming raw text in both modes. That describes
+  human mode.
+- **A zero phase in `sling time` can mean "not measured".** In v1,
+  `image_pull` and `cold_start` are bundled into `provision` and reported as
+  `0` with a reason in `meta.truncated`. Read that array before telling a
+  user a phase took no time — a measurement gap reported as a finding is a
+  false finding.
+- **Exit `10` is an answer, not a failure.** `doctor` unhealthy and `runs
+  show --wait` on a failed run both exit `10`. Report what it says. Exit `6`
+  likewise carries a real result, flagged partial.
+- **`--agent` silently includes `--yes`.** Harmless while `sling` is
+  read-only, but do not treat a confirmation prompt as a safety net.
+- **`sling runs show` gives no `job_id`** — its `jobs[]` carry `job_name`
+  and `attempts[]` only. Use `jobs list --run <id>` or `resolve` when you
+  need job ids.
+- **`sling top` can report a repo as `(multiple)`** when one key spans
+  repos. Do not print that as a repo name without saying what it means.
+- **`sling bill` has two totals.** `amount_due_usd` is what is owed;
+  `amount_usd` is before credits. `status: "open"` means the period is still
+  accruing, so it is not a final number.
 
 ## Handoff to the audit skills
 

@@ -32,6 +32,7 @@ import yaml
 _SKILL = Path(__file__).resolve().parents[1]
 _SURFACE = json.loads((_SKILL / "references" / "command-surface.json").read_text())
 _ROUTING = json.loads((_SKILL / "evals" / "prompt-routing.json").read_text())
+_EVALS = json.loads((_SKILL / "evals" / "evals.json").read_text())
 _SKILL_MD = (_SKILL / "SKILL.md").read_text()
 _FRONT = yaml.safe_load(_SKILL_MD[4:_SKILL_MD.index("\n---", 4)])
 _BODY = _SKILL_MD[_SKILL_MD.index("\n---", 4):]
@@ -75,24 +76,37 @@ def test_detector_recognises_a_real_and_a_fake_command():
     assert _mentions("`sling` cannot do it in this release.") == set()
 
 
-def test_skill_md_names_only_commands_that_exist():
-    """The routing table must not invent a subcommand. `sling update` is the
-    live example: printed by the tool, rejected by the tool."""
-    unknown = _mentions(_BODY) - _COMMANDS
-    assert not unknown, (
-        f"SKILL.md routes to sling subcommand(s) that do not exist: "
-        f"{sorted(unknown)}. Check them against `sling --help`, and if a new "
+def _assert_only_real_commands(text: str, where: str) -> None:
+    """A `sling <cmd>` a reader could act on must exist — with one allowance:
+    naming a non-command in order to WARN about it is the opposite of the
+    failure, so it passes only when the same file says the command is not real.
+    `sling update` is the live case: `sling doctor` recommends it and the
+    binary rejects it, so warning about it by name is the useful thing to do."""
+    unknown = _mentions(text) - _COMMANDS
+    warned = {c for c in unknown
+              if re.search(rf"`sling {c}`[^.]{{0,120}}?does not\s+exist", text, re.S)}
+    invented = unknown - warned
+    assert not invented, (
+        f"{where} routes to sling subcommand(s) that do not exist: "
+        f"{sorted(invented)}. Check them against `sling --help`, and if a new "
         f"release added one, update references/command-surface.json.")
 
 
-def test_reference_names_only_commands_that_exist_or_documents_the_exception():
-    ref = (_SKILL / "references" / "command-reference.md").read_text()
-    unknown = _mentions(ref) - _COMMANDS
-    assert unknown <= {"update"}, f"command reference invents {sorted(unknown - {'update'})}"
-    if "update" in unknown:
-        assert "does not\nexist" in ref or "does not exist" in ref, (
-            "the reference mentions `sling update` without saying it is not a "
-            "real subcommand — that is the exact trap it was written to warn about")
+def test_skill_md_names_only_commands_that_exist():
+    _assert_only_real_commands(_BODY, "SKILL.md")
+
+
+def test_reference_names_only_commands_that_exist():
+    _assert_only_real_commands(
+        (_SKILL / "references" / "command-reference.md").read_text(),
+        "references/command-reference.md")
+
+
+def test_the_warning_allowance_does_not_swallow_a_plain_invention():
+    """Teeth check on the allowance itself: a made-up command with no warning
+    beside it must still fail, or the exemption quietly disables the guard."""
+    with pytest.raises(AssertionError):
+        _assert_only_real_commands("Just run `sling rerun 123` to retry.", "sample")
 
 
 @pytest.mark.parametrize("verb", ["rerun", "cancel", "trigger", "enable",
@@ -186,3 +200,27 @@ def test_skill_ships_no_installer_literal():
                          _SKILL_MD + (_SKILL / "references" / "command-reference.md").read_text())
     assert "docs.starsling.dev/sling-cli/installation" in _SKILL_MD, (
         "the install path must still be reachable — point at the installation page")
+
+
+def test_evals_cover_both_polarities():
+    """Skill evals are how a later change gets caught, and how we notice if the
+    base model catches up and the skill stops earning its context. Coverage has
+    to include the asks this skill must DECLINE, or it only ever proves the
+    happy path."""
+    cases = _EVALS["evals"]
+    assert len(cases) >= 3, "fewer than three eval scenarios"
+    assert any(c["should_trigger"] for c in cases), "no should-trigger case"
+    assert any(not c["should_trigger"] for c in cases), "no should-NOT-trigger case"
+    for c in cases:
+        assert c.get("assertions"), f"eval {c['id']} has no assertions to grade"
+        assert c.get("expected_output", "").strip(), f"eval {c['id']} has no expected output"
+
+
+def test_reference_over_100_lines_carries_a_contents_block():
+    """Claude previews long reference files with partial reads, so a file that
+    does not state its own scope up top can be acted on half-read."""
+    for ref in sorted((_SKILL / "references").glob("*.md")):
+        text = ref.read_text()
+        if len(text.splitlines()) > 100:
+            head = "\n".join(text.splitlines()[:25]).lower()
+            assert "contents" in head, f"{ref.name} is long but has no contents block"
