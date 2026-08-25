@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the `sling-cli` skill. Unversioned; dated (UTC).
+All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 ## [Unreleased]
 

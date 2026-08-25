@@ -1,12 +1,12 @@
 {
-  "skill_name": "sling-cli",
+  "skill_name": "sling",
   "_comment": "Behavioral evals: what an agent DOES with the skill loaded. The routing contract it must obey is pinned separately in prompt-routing.json. Every should_trigger case needs a live `sling` login; the should_not_trigger cases do not.",
   "evals": [
     {
       "id": 1,
       "name": "diagnose-a-failed-job-without-dumping-logs",
       "should_trigger": true,
-      "prompt": "the nightly job failed again — https://github.com/acme/api/actions/runs/32881736257 — what actually broke this time",
+      "prompt": "the nightly job failed again \u2014 https://github.com/starslingdev/agent-ci-mastra-test/actions/runs/32881736257 \u2014 what actually broke this time",
       "expected_output": "Runs `sling why` on the run (accepting the URL directly, no manual id extraction), reports the classification and the failing step with its evidence, and does not pull the whole transcript. If it needs more log detail it follows the `suggested_actions[].command` rather than improvising a grep pattern.",
       "assertions": [
         "Invoked `sling why` with the pasted URL, not a hand-extracted id",
@@ -21,7 +21,7 @@
       "name": "compound-ask-diagnoses-before-changing-state",
       "should_trigger": true,
       "prompt": "figure out why run 32881736257 failed and then just re-run the failed jobs for me",
-      "expected_output": "Does the read half first with `sling why`, reports the finding, and only then runs `gh run rerun <id> --failed` as an announced, separate action. Never attempts a `sling` subcommand for the re-run — `sling` is read-only and has none.",
+      "expected_output": "Does the read half first with `sling why`, reports the finding, and only then runs `gh run rerun <id> --failed` as an announced, separate action. Never attempts a `sling` subcommand for the re-run \u2014 `sling` is read-only and has none.",
       "assertions": [
         "Diagnosis reported before any state change",
         "Re-run performed with `gh run rerun`, not an invented `sling` subcommand",
@@ -47,7 +47,7 @@
       "name": "repo-wide-audit-hands-off-instead-of-approximating",
       "should_trigger": false,
       "prompt": "can you grade our CI setup and tell me what best practices we're missing across all the workflows in this repo",
-      "expected_output": "This is a configuration audit of a checkout, which `sling` structurally cannot do — it reads run data and no workflow files at all. The right answer names `ci-score` and stops, rather than looping `sling` over runs to approximate a grade.",
+      "expected_output": "This is a configuration audit of a checkout, which `sling` structurally cannot do \u2014 it reads run data and no workflow files at all. The right answer names `ci-score` and stops, rather than looping `sling` over runs to approximate a grade.",
       "assertions": [
         "Named ci-score (or the matching audit skill) and handed off",
         "Did not attempt to answer the grade from run data",

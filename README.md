@@ -23,11 +23,11 @@ gives the one-line command for that skill on its own.
 | 🏎️ [**ci-speedup**](#ci-speedup) | Why is my CI slow? | [`skills/ci-speedup/`](skills/ci-speedup/) |
 | 📋 [**ci-score**](#ci-score) | Is my CI config following best practices? | [`skills/ci-score/`](skills/ci-score/) |
 | 🔒 [**ci-secure**](#ci-secure) | Can someone attack me through my CI? | [`skills/ci-secure/`](skills/ci-secure/) |
-| 🛰️ [**sling-cli**](#sling-cli) | Why did *this* run fail, and what did it cost? | [`skills/sling-cli/`](skills/sling-cli/) |
+| 🛰️ [**sling**](#sling) | Why did *this* run fail, and what did it cost? | [`skills/sling/`](skills/sling/) |
 
 The first three audit a checkout and end the same way: your agent offers to
 fix the findings you pick, or to just save the full report as markdown.
-`sling-cli` is the odd one out — it answers questions about live runs instead
+`sling` is the odd one out — it answers questions about live runs instead
 of auditing files. Fixes land in your working tree for
 you to review, and nothing is ever committed, pushed, or opened as a PR.
 
@@ -181,28 +181,28 @@ Source: [`skills/ci-secure/`](skills/ci-secure/) · [SKILL.md](skills/ci-secure/
 
 ---
 
-## sling-cli
+## sling
 
 🛰️ **Answers questions about one live CI run — and knows when to reach for
 `gh` instead.**
 
 ```bash
-npx skills add starslingdev/skills --skill sling-cli
+npx skills add starslingdev/skills --skill sling
 ```
 
 Or paste this into your agent:
 
 ```text
-Run `npx skills add starslingdev/skills --skill sling-cli` to install or
-update the sling-cli skill.
+Run `npx skills add starslingdev/skills --skill sling` to install or
+update the sling skill.
 ```
 
-Then invoke it by name (**`/sling-cli`**, or `$sling-cli` in Codex), or just
+Then invoke it by name (**`/sling`**, or `$sling` in Codex), or just
 ask *"why did this job fail?"*
 
-The other three skills read your workflow files. This one reads your **live
-CI**, through [`sling`](https://docs.starsling.dev/sling-cli), StarSling's
-read-only CLI: why a job failed (classified server-side, no LLM in the loop),
+The skill is named after the CLI it drives. The other three skills read your
+workflow files; this one reads your **live CI**, through
+[`sling`](https://docs.starsling.dev/sling-cli), StarSling's read-only CLI: why a job failed (classified server-side, no LLM in the loop),
 where a run's wall-clock actually went, only the log lines that matter, and
 what your runner minutes cost, broken down by repo, workflow, or label.
 
@@ -213,13 +213,13 @@ carries the table that decides which tool answers which ask — reads about a
 run, a job, or spend go to `sling`; anything that changes state (re-run,
 cancel, trigger, enable, disable, download an artifact) goes to `gh` — plus
 the exit-code handling and the `--agent` JSON shapes for every command,
-[read off the binary rather than the docs](skills/sling-cli/references/command-reference.md).
+[read off the binary rather than the docs](skills/sling/references/command-reference.md).
 
 It needs `sling` installed and signed in; the skill runs `sling doctor` first
 and walks you through `sling login` if you are not. Everything it does is a
 read, unless you ask for a state change and it tells you before making it.
 
-Source: [`skills/sling-cli/`](skills/sling-cli/) · [SKILL.md](skills/sling-cli/SKILL.md)
+Source: [`skills/sling/`](skills/sling/) · [SKILL.md](skills/sling/SKILL.md)
 
 ---
 

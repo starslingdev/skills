@@ -1,5 +1,5 @@
 ---
-name: sling-cli
+name: sling
 description: >-
   Answers live questions about one GitHub Actions run or job by driving
   `sling`, StarSling's read-only agent-first CLI, and routes anything

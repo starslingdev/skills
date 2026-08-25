@@ -1,7 +1,8 @@
 """Guards for the one thing this skill is: a routing contract.
 
-`sling-cli` ships no detectors and no report pipeline — its whole product is
-prose that tells an agent which CLI answers which ask. Two ways that prose
+This skill ships no detectors and no report pipeline — its whole product is
+prose that tells an agent which CLI answers which ask. (It is named after the
+CLI it drives, so `sling` below always means the binary.) Two ways that prose
 can be wrong while every other check in the repo stays green:
 
 1. **It names a `sling` subcommand that does not exist.** This is the
