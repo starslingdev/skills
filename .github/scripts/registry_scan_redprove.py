@@ -43,7 +43,7 @@ from pathlib import Path
 # constant so a catalog revamp is a one-line, reviewed change.
 EXPECTED_ISSUE_CODE = "E005"
 
-SCANNER = "snyk-agent-scan@latest"
+SCANNER = "snyk-agent-scan==0.6.0"
 
 
 def build_violating_skill(root: Path) -> Path:
@@ -110,7 +110,7 @@ def main() -> int:
         # code would leave the red-proof green while the real gate could no longer fire on it.
         ignored = os.environ.get("IGNORED_ISSUE_CODES", "").strip()
         if ignored:
-            cmd += ["--ignore-issues-codes", ignored]
+            cmd += ["--ignore-failure-codes", ignored]
 
         print("Red-proof: scanning a deliberately violating skill")
         print("  " + " ".join(cmd))

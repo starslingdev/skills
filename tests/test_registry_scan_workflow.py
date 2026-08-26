@@ -34,7 +34,7 @@ _REPORT = _REPO / ".github" / "scripts" / "registry_scan_report.py"
 # THE GATING RULE (owner ruling, 2026-08-10): the build fails on the critical class only —
 # Snyk Agent Scan's E-codes. Warning-class findings (W-codes) are surfaced on every run but
 # never block. The scanner has no severity threshold, so the rule is expressed by enumerating
-# the W class into --ignore-issues-codes.
+# the W class into --ignore-failure-codes.
 #
 # This is every W-code published in the scanner's catalog:
 # https://github.com/snyk/agent-scan/blob/main/docs/issue-codes.md
@@ -90,7 +90,7 @@ def _gate_step(workflow: dict) -> dict:
     """
     steps = [
         step for step in _scan_job(workflow)["steps"]
-        if _invokes_scanner(step) and "--ignore-issues-codes" in step["run"]
+        if _invokes_scanner(step) and "--ignore-failure-codes" in step["run"]
     ]
     assert len(steps) == 1, (
         f"expected exactly one gating scanner invocation (the one passing the ignore "
@@ -103,7 +103,7 @@ def _visibility_step(workflow: dict) -> dict:
     """The unfiltered pass: a scanner invocation with no ignore list, distinct from the gate."""
     steps = [
         step for step in _scan_job(workflow)["steps"]
-        if _invokes_scanner(step) and "--ignore-issues-codes" not in step["run"]
+        if _invokes_scanner(step) and "--ignore-failure-codes" not in step["run"]
     ]
     assert len(steps) == 1, (
         f"expected exactly one unfiltered scanner invocation; found {len(steps)}. The "
@@ -183,16 +183,16 @@ def test_gate_uses_ci_flag(workflow: dict):
 
 
 def test_gate_spells_the_ignore_flag_the_way_the_scanner_does(workflow: dict):
-    """The flag is `--ignore-issues-codes` — plural "issues", singular "codes".
+    """The flag is `--ignore-failure-codes`, as of scanner 0.6.0.
 
-    It reads like a typo and has been "corrected" to `--ignore-issue-codes` in review.
-    It is not a typo: the scanner's own argument parser declares
-    `parser.add_argument("--ignore-issues-codes", ...)`, and the singular spelling is
-    rejected with `error: unrecognized arguments`. Getting it wrong does not degrade the
-    gate quietly — it exits on a usage error the first time it runs with a token, which
-    is a path no offline test can reach. Hence this assertion.
+    It was `--ignore-issues-codes` until the scanner renamed it, and because the
+    invocation was pinned to `@latest`, that rename landed here with no commit of ours
+    and reddened this build for five days (2026-08-20 → 2026-08-25). Getting it wrong
+    does not degrade the gate quietly — the scanner exits on a usage error the first
+    time it runs with a token, a path no offline test can reach, which is why the
+    spelling is asserted here and why the version is now pinned rather than floating.
     """
-    assert "--ignore-issues-codes" in _gate_step(workflow)["run"]
+    assert "--ignore-failure-codes" in _gate_step(workflow)["run"]
 
 
 def test_unfiltered_pass_sees_what_the_printer_would_hide(workflow: dict):
@@ -250,11 +250,11 @@ def test_ignore_list_is_exactly_the_published_warning_class(workflow: dict):
     )
 
     # The env var is only the declared list; what the gate actually suppresses is what it
-    # passes on the command line. An inline `--ignore-issues-codes "${IGNORED_ISSUE_CODES},E005"`
+    # passes on the command line. An inline `--ignore-failure-codes "${IGNORED_ISSUE_CODES},E005"`
     # would suppress the very rule the red-proof is anchored to while the check above stays
     # green, so pin that the flag's argument is the variable and nothing else.
     argument = re.search(
-        r'--ignore-issues-codes\s+"?([^"\n\\]*)"?', _gate_step(workflow)["run"]
+        r'--ignore-failure-codes\s+"?([^"\n\\]*)"?', _gate_step(workflow)["run"]
     )
     assert argument, "the gating scan no longer passes an ignore list"
     assert argument.group(1).strip() == "${IGNORED_ISSUE_CODES}", (
@@ -745,3 +745,54 @@ def test_redprove_builds_a_violating_skill_without_committing_one(tmp_path):
     assert marker not in _REDPROVE.read_text(encoding="utf-8"), (
         "the red-proof script now contains the literal it is supposed to construct"
     )
+
+
+def test_a_scan_that_could_not_run_is_never_reported_as_a_finding(workflow: dict):
+    """A crashed scanner and a real finding must not read the same.
+
+    The gate uses `--ci`, where exit 1 means "a finding is present" and exit 2 means
+    "I could not start" — a renamed flag, a missing token, an unparseable argument.
+    While both surfaced as a bare non-zero, the verdict step read either as a finding,
+    and this build spent five days announcing `The gate reported a critical finding in
+    skills` over a scan that never happened. That is worse than a plain failure: it
+    sends every reviewer hunting for a security issue that does not exist, and it hides
+    the real news, which is that the repo has no working registry scanning at all.
+
+    So the gate must capture the exit code and the verdict must branch on it.
+    """
+    gate = _gate_step(workflow)
+    run = gate["run"]
+    assert "scan_exit=" in run and "GITHUB_OUTPUT" in run, (
+        "the gate no longer publishes the scanner's exit code, so the verdict step "
+        "cannot tell a crash from a finding")
+    assert 'code}" -eq 1 ' in run or "code}\" -eq 1" in run, (
+        "the gate no longer treats exit 1 specifically as the finding case")
+
+    verdict = next(s for s in workflow["jobs"]["scan"]["steps"]
+                   if s.get("name") == "Report the coverage gap")
+    vrun = verdict["run"]
+    assert "steps.gate.outputs.scan_exit" in vrun, (
+        "the verdict step no longer reads the gate's exit code, so any non-zero exit "
+        "is reported as a critical finding again")
+    assert "DID NOT RUN — NOT A FINDING" in vrun, (
+        "the verdict step lost the branch that names a failed-to-start scan as a "
+        "coverage gap rather than a finding")
+
+
+def test_the_scanner_version_is_pinned(workflow: dict):
+    """`@latest` is why a vendor rename broke a green build with no commit of ours.
+
+    The weekly cron exists to catch RULE-catalog drift — a rule renamed or added
+    upstream that turns a shipped skill red on its own. It is not there to absorb
+    breaking CLI changes, and it cannot: a usage error is not a finding, so the cron
+    just goes red and stays red. Pinning makes the next scanner upgrade a deliberate
+    commit that can be reviewed and reverted.
+    """
+    runs = [s["run"] for s in workflow["jobs"]["scan"]["steps"]
+            if "snyk-agent-scan" in s.get("run", "")]
+    assert runs, "no step invokes the scanner"
+    for run in runs:
+        assert "snyk-agent-scan@latest" not in run, (
+            "the scanner is back on @latest — an upstream rename will redden this "
+            "build again with no commit of ours")
+        assert "snyk-agent-scan==" in run, "the scanner invocation is not version-pinned"

@@ -42,7 +42,7 @@ env:
   # summary, and the raw finding set uploaded as the `registry-scan-findings` artifact. A human
   # or a review agent judges them; CI does not block on them.
   #
-  # The scanner has no severity threshold — `--ignore-issues-codes` is its only gating knob — so
+  # The scanner has no severity threshold — `--ignore-failure-codes` is its only gating knob — so
   # the rule is expressed by enumerating the W class. This is every W-code published in
   # https://github.com/snyk/agent-scan/blob/main/docs/issue-codes.md. It is a class rule, not
   # fifteen individual judgements, so it carries no per-code justification. W011 "exposure to
@@ -164,7 +164,7 @@ jobs:
         run: python .github/scripts/registry_scan_redprove.py
 
       # Two passes, on purpose, and exactly two — the scanner is a network service, so every
-      # invocation costs. `--ignore-issues-codes` filters findings out of the printed report as
+      # invocation costs. `--ignore-failure-codes` filters findings out of the printed report as
       # well as out of the exit status, so the gating pass below is structurally incapable of
       # showing a warning: it runs with the very flags that hide them. This pass carries no
       # ignore list and is the only one that sees everything.
@@ -177,7 +177,7 @@ jobs:
         continue-on-error: true
         run: |
           echo "Scanning '${SCAN_PATH}' with no ignore list — every finding the scanner has."
-          uvx snyk-agent-scan@latest scan "${SCAN_PATH}" --json > registry-scan-findings.json
+          uvx snyk-agent-scan==0.6.0 scan "${SCAN_PATH}" --json > registry-scan-findings.json
 
       # Warnings never fail this build, so they must be impossible to miss instead. This writes
       # each one to the checks tab as an annotation (where a review agent can query it), to the
@@ -207,14 +207,38 @@ jobs:
       # "we looked and found something". Without it that step reads only the
       # control's outcome, and a run where the control failed AND a critical was
       # reported goes red annotated NOT A FINDING.
+      #
+      # The exit code is captured rather than allowed to fail the step, because
+      # `--ci` uses exit 1 for "a finding is present" while the scanner uses exit
+      # 2 for "I could not start" — a usage error from a renamed flag, a missing
+      # token, an unparseable argument. Letting both surface as a bare non-zero
+      # made the step below read a crash as a finding, and for five days this
+      # build announced `The gate reported a critical finding in skills` when
+      # nothing had been scanned at all (2026-08-20 → 2026-08-25, after the
+      # scanner renamed `--ignore-issues-codes`). A scan that never ran is a
+      # coverage gap; only exit 1 is a finding.
       - name: Gate on critical findings
         id: gate
         run: |
-          uvx snyk-agent-scan@latest scan "${SCAN_PATH}" \
+          set +e
+          uvx snyk-agent-scan==0.6.0 scan "${SCAN_PATH}" \
             --ci \
             --verbose \
             --dangerously-run-mcp-servers \
-            --ignore-issues-codes "${IGNORED_ISSUE_CODES}"
+            --ignore-failure-codes "${IGNORED_ISSUE_CODES}"
+          code=$?
+          set -e
+          echo "scan_exit=${code}" >> "${GITHUB_OUTPUT}"
+          if [ "${code}" -eq 0 ]; then
+            echo "Gate passed: no critical finding under '${SCAN_PATH}'."
+            exit 0
+          fi
+          if [ "${code}" -eq 1 ]; then
+            echo "Gate failed: a critical finding is present. Its issue code is above."
+            exit 1
+          fi
+          echo "::error title=REGISTRY SCAN DID NOT RUN::The scanner exited ${code} without completing a scan — it could not start, so NOTHING under '${SCAN_PATH}' was checked. This is a coverage gap, not a finding and not a clean result. Read this step's log: a usage error here usually means the scanner renamed a flag out from under us."
+          exit 1
 
       # Two red checks that mean opposite things must not look the same. A gate
       # failure above means "a critical finding is in this tree". This step means
@@ -244,6 +268,10 @@ jobs:
           # in the tree, and the unfiltered pass behind the control can still
           # surface one. Announcing the coverage gap over that run would put
           # "NOT A FINDING" on the one result a human most needs to read.
+          if [ "${{ steps.gate.outcome }}" = "failure" ] && [ "${{ steps.gate.outputs.scan_exit }}" != "1" ]; then
+            echo "::error title=REGISTRY SCAN DID NOT RUN — NOT A FINDING::The scanner exited ${{ steps.gate.outputs.scan_exit }} without completing a scan, so nothing under ${SCAN_PATH} was checked. This is a coverage gap. Do NOT read it as a security finding."
+            exit 1
+          fi
           if [ "${{ steps.gate.outcome }}" = "failure" ]; then
             echo "::error title=REGISTRY SCAN FINDING — AND THE CONTROL WAS BLIND::The gate reported a critical finding in ${SCAN_PATH}. Treat it as a real finding and read the gate step above for its issue code. Separately, the control also failed, so the scan's SILENCE elsewhere carries no information — this run is a floor on what is present, not a ceiling."
             {
