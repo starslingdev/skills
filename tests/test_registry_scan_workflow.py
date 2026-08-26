@@ -714,13 +714,20 @@ def test_the_scanner_version_is_pinned(workflow: dict):
     just goes red and stays red. Pinning makes the next scanner upgrade a deliberate
     commit that can be reviewed and reverted.
     """
-    runs = [s["run"] for s in workflow["jobs"]["scan"]["steps"] if _invokes_scanner(s)]
-    assert runs, "no step invokes the scanner"
-    for run in runs:
+    steps = [s for s in workflow["jobs"]["scan"]["steps"] if _invokes_scanner(s)]
+    assert steps, "no step invokes the scanner"
+    for step in steps:
+        run = step["run"]
         assert "snyk-agent-scan@latest" not in run, (
             "the scanner is back on @latest — an upstream rename will redden this "
             "build again with no commit of ours")
-        assert "snyk-agent-scan==" in run, "the scanner invocation is not version-pinned"
+        invocations = re.findall(r"uvx\s+snyk-agent-scan(\S*)\s+scan\b", run)
+        assert invocations, "no scanner invocation found in a step that runs one"
+        for spec in invocations:
+            assert spec.startswith("=="), (
+                f"the scanner invocation is not version-pinned on the command line "
+                f"(found `uvx snyk-agent-scan{spec} scan`). A pin written in a comment "
+                f"above an unpinned invocation is not a pin.")
 
 
 def test_a_runtime_failure_is_not_reported_as_a_finding(workflow: dict):
@@ -1204,6 +1211,23 @@ def test_the_red_proof_fails_when_the_scanner_says_nothing(tmp_path):
     proc = _run_redprove(tmp_path, scanner_output="Scan complete. No risks.", scanner_exit=0)
     assert proc.returncode == 1, "a blind scanner passed the control"
     assert "NOT PROVEN" in proc.stdout + proc.stderr
+
+
+def test_the_red_proof_fails_when_the_scanner_exits_zero_on_the_fixture(tmp_path):
+    """Isolated from the anchor check: the scanner SAW the fixture and still exited 0.
+
+    A control that only asserts the anchor would pass this, and a scanner that reports a
+    risk without failing on it is a gate that cannot go red.
+    """
+    spec = importlib.util.spec_from_file_location("registry_scan_redprove", _REDPROVE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    proc = _run_redprove(
+        tmp_path,
+        scanner_output=f"1 risk: Unverifiable URLs: {module.expected_evidence()}/install.sh",
+        scanner_exit=0)
+    assert proc.returncode == 1, "the scanner exited 0 on the violating fixture and the control passed"
+    assert "exited 0" in proc.stdout + proc.stderr
 
 
 def test_the_red_proof_fails_when_the_anchor_host_is_absent(tmp_path):
