@@ -189,7 +189,13 @@ def test_read_only_claim_matches_the_captured_surface():
     anything."""
     assert _SURFACE["read_only"] is True
     assert _SURFACE["mutating_commands"] == []
-    assert "read-only" in _FRONT["description"]
+    # The description carries the CONSEQUENCE (state changes route to gh) rather than
+    # the word "read-only" — the documented description shape is ~150 chars, and the
+    # routing rule is what a router needs. The mechanism lives in the body.
+    low_desc = _FRONT["description"].lower()
+    assert "gh" in low_desc and ("re-run" in low_desc or "rerun" in low_desc), (
+        "the description no longer says state changes route to gh")
+    assert "read-only" in _BODY, "the body no longer states that sling is read-only"
 
 
 def test_routing_evals_agree_with_the_surface_and_the_split():
@@ -233,7 +239,8 @@ def test_frontmatter_carries_the_handoff_contract():
     low = _FRONT["description"].lower()
     for engine in ("ci-score", "ci-speedup", "ci-secure"):
         assert engine in low, f"description no longer names {engine}"
-    assert "do not trigger" in low, "description lost its negative-trigger clause"
+    assert any(k in low for k in ("do not trigger", "do not use", "not for")), (
+        "description lost its negative-trigger clause")
 
 
 def test_agent_flag_is_the_documented_default():
@@ -587,3 +594,53 @@ def test_agent_is_not_described_as_an_alias_for_flags_it_does_not_have():
     section = low[i:i + 900]
     assert "do not describe it as an alias" in section, (
         "the caution against restating the docs' flag-alias claim is gone")
+
+
+def test_the_description_follows_the_documented_two_part_shape():
+    """Capability, then a compact `Use when` naming the terms a user would say.
+
+    That is the shape the official skill-authoring guidance specifies, and its worked
+    examples are ~150 characters. The first version here ran to 999 characters of
+    dense prose with `Use when` 63% in, and a live dogfood showed the cost: asked
+    "why did this job fail?" with an Actions URL, the skill did not fire and the agent
+    grepped a whole job log instead — the behaviour it exists to replace.
+
+    The fix is not quoting user sentences into the description (that was a wrong turn);
+    it is the documented shape, short, with the terms named.
+    """
+    d = _FRONT["description"]
+    assert "Use when" in d, "the description lost its Use-when clause"
+    assert d.index("Use when") < len(d) * 0.55, (
+        "`Use when` sits in the back half of the description; the capability preamble "
+        "has grown past the trigger again")
+    for term in ("run", "job", "runner minutes", "GitHub Actions URL"):
+        assert term in d, f"the Use-when clause no longer names {term!r}"
+    assert "gh" in d, (
+        "the description no longer says it should be preferred over reading raw logs "
+        "with `gh`, so nothing signals that a better path exists")
+
+
+def test_no_hyphenated_term_is_split_by_the_yaml_fold():
+    """A `>-` block folds newlines into spaces, so a term wrapped across the fold
+    silently becomes two words in the value the router actually reads.
+
+    `read-only` split this way and turned into `read- only`, which a guard caught only
+    because it happened to assert on that exact term. Anything not asserted on would
+    have shipped mangled and invisible.
+    """
+    raw = (_SKILL / "SKILL.md").read_text()
+    front_lines = raw[:raw.index("\n---", 4)].splitlines()
+    desc_lines = []
+    inside = False
+    for line in front_lines:
+        if line.startswith("description:"):
+            inside = True
+            continue
+        if inside:
+            if line and not line.startswith("  "):
+                break
+            desc_lines.append(line)
+    broken = [ln for ln in desc_lines if ln.rstrip().endswith("-")]
+    assert not broken, (
+        "description line(s) end in a hyphen, so the fold will join them into two "
+        f"words: {[ln.strip()[-30:] for ln in broken]}")

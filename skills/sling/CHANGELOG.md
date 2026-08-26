@@ -201,6 +201,18 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   install check and sandbox caution from both files. Each guard now reads the
   section it protects, and each of those three mutations now fails.
 
+- **2026-08-26** — **The description is cut to the documented shape, after a
+  live dogfood showed it never fired.** Asked "why did this job fail?" with an
+  Actions URL, the agent grepped a whole job log with `gh` — the exact behaviour
+  this skill replaces — because the 999-character description buried its trigger
+  63% in. Two wrong fixes followed (quoting user sentences verbatim, then a
+  self-invented "trigger-first" ordering rule) before the official guidance
+  settled it: one capability clause, one short `Use when` naming key terms,
+  third person, on the scale of the doc's own ~150-character worked examples.
+  Now 372 characters. The guards assert the documented properties — third
+  person, a Use-when clause with the key terms, a negative clause naming the
+  three audit skills — rather than any particular phrasing.
+
 ### Notes
 
 - **The install command is described, not printed.** `sling` installs by

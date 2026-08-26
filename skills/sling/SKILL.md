@@ -1,21 +1,11 @@
 ---
 name: sling
 description: >-
-  Answers live questions about one GitHub Actions run or job by driving
-  `sling`, StarSling's read-only agent-first CLI, and routes anything
-  `sling` cannot do to the `gh` CLI. Uses `sling why` for why a job failed,
-  `sling time` for where a run's wall-clock went, `sling logs` for only the
-  lines that matter, and `sling usage`, `sling top` and `sling bill` for
-  runner-minutes and spend.
-  Falls back to `gh` for everything that changes state, because `sling` is
-  read-only: re-running, cancelling, triggering, enabling or disabling a
-  workflow, downloading an artifact. Runs `sling doctor` as a preflight and
-  walks the user through `sling login`. Use when the user asks
-  about a specific CI run or job, or gives a live instruction to inspect,
-  diagnose, re-run, cancel, or trigger GitHub Actions right now. Do NOT
-  trigger for: a repo-wide CI audit, grade, speed sweep, or security scan of
-  the workflow files, which belong to ci-score, ci-speedup and ci-secure;
-  writing workflow YAML; or non-GitHub-Actions CI.
+  Answers questions about a specific GitHub Actions run or job from live CI
+  data with StarSling's `sling` CLI, and routes state changes (re-run, cancel,
+  trigger) to `gh`. Use when the user asks why a job failed, what made a run
+  slow, about runner minutes or CI cost, or pastes a GitHub Actions URL. Not
+  for repo-wide CI audits — those are ci-score, ci-speedup and ci-secure.
 license: MIT
 ---
 
