@@ -28,7 +28,7 @@ Each entry gives the flags and the verified JSON response shape.
 
 ## Global flags
 
-Available on the root command and every subcommand.
+Available on the root command and every subcommand **except `sling logs`**, whose strict parser rejects `--org` and `--repo` with exit `2` (`Unknown flag "--org"`) — switch the default org (`sling org switch`) instead of flagging a logs call.
 
 | Flag | Meaning |
 |---|---|
@@ -42,7 +42,7 @@ Available on the root command and every subcommand.
 self-hosted or development control planes. It must be `https://` — or
 `http://` on a loopback host.
 
-**Unknown flags are ignored rather than rejected.** `sling runs list
+**Unknown flags are ignored rather than rejected — except by `sling logs`, the one strict parser.** `sling runs list
 --bogus` exits `0` and returns unfiltered rows. Do not read a `0` as proof
 that a filter was applied; check the returned rows.
 
@@ -160,7 +160,7 @@ Page with `--cursor` while `has_more` is true.
 {"run": {"run_id": "…", "run_url": "…", "workflow_path": "…", "branch": "main",
          "trigger": "schedule", "status": "completed", "conclusion": "failure",
          "created_at": "…", "duration_ms": 11000},
- "jobs": [{"job_name": "discord-triage / execute-workflow",
+ "jobs": [{"job_name": "<job name>",
            "attempts": [{"attempt_id": "att_97912608061.1", "attempt": 1,
                          "status": "completed", "conclusion": "failure",
                          "runner_id": "1000520625", "duration_ms": 3000}]}],
@@ -178,7 +178,7 @@ Note the shape: `jobs[]` here carries `job_name` and `attempts[]` but no
 
 ```json
 {"jobs": [{"job_id": "97912608061", "run_id": "32881736257",
-           "name": "discord-triage / execute-workflow", "status": "completed",
+           "name": "<job name>", "status": "completed",
            "conclusion": "failure", "runner_id": "1000520625", "attempt": 1,
            "duration_ms": 3000, "created_at": "…"}],
  "has_more": false, "local": {"org": "…", "run_id": "…"}}
@@ -321,15 +321,15 @@ workflow is written the way it is. That second question is `ci-speedup`.
 ```json
 {"group_by": "repo", "window": {"from": "…", "to": "…"},
  "plan": {"status": "paid", "period_source": "install_cycle"},
- "rows": [{"key": "owner/repo", "runner_minutes": 53206, "jobs": 23812,
-           "cost_usd": 361.98, "pct_of_total": 49.46}]}
+ "rows": [{"key": "owner/repo", "runner_minutes": 5320, "jobs": 2381,
+           "cost_usd": 43.21, "pct_of_total": 49.46}]}
 ```
 
 ### `sling top [--by workflow|job|label|repo|branch] [--metric runner-minutes|cost|jobs|p95-duration] [-n <count>] [--window <n>d | --month]`
 
 ```json
 {"by": "workflow", "metric": "runner-minutes", "window": {"from": "…", "to": "…"},
- "rows": [{"key": "ci", "repo": "blazar", "runner_minutes": 70145, "cost_usd": 561.16,
+ "rows": [{"key": "ci", "repo": "<repo>", "runner_minutes": 70145, "cost_usd": 56.12,
            "runs": 14852, "jobs": 31983, "p50_ms": 70000, "p95_ms": 184000,
            "p99_ms": 354810, "queue_wait_ms": 14000, "trend_pct": 154.6}]}
 ```
@@ -342,8 +342,8 @@ is a change against the prior comparable window.
 
 ```json
 {"period": {"from": "…", "to": "…"}, "status": "open",
- "period_source": "install_cycle", "runner_minutes": 94655,
- "amount_usd": 731.81, "credits_usd": 0, "amount_due_usd": 731.81,
+ "period_source": "install_cycle", "runner_minutes": 12345,
+ "amount_usd": 98.76, "credits_usd": 0, "amount_due_usd": 98.76,
  "line_items": [{"label": "starsling-ubuntu-24.04", "minutes": 40227, "usd": 321.816}]}
 ```
 

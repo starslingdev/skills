@@ -4,13 +4,44 @@
   "captured_utc": "2026-08-25",
   "read_only": true,
   "groups": {
-    "auth_and_setup": ["login", "logout", "whoami", "doctor", "org switch"],
-    "inspect": ["runs list", "runs show", "jobs list", "jobs show", "logs", "resolve"],
-    "diagnose": ["why", "time"],
-    "cost_and_capacity": ["usage", "top", "bill", "bill history", "labels list"],
-    "help": ["exit-codes"]
+    "auth_and_setup": [
+      "login",
+      "logout",
+      "whoami",
+      "doctor",
+      "org switch"
+    ],
+    "inspect": [
+      "runs list",
+      "runs show",
+      "jobs list",
+      "jobs show",
+      "logs",
+      "resolve"
+    ],
+    "diagnose": [
+      "why",
+      "time"
+    ],
+    "cost_and_capacity": [
+      "usage",
+      "top",
+      "bill",
+      "bill history",
+      "labels list"
+    ],
+    "help": [
+      "exit-codes"
+    ]
   },
-  "global_flags": ["--agent", "--json", "--org", "--repo", "--version", "--help"],
+  "global_flags": [
+    "--agent",
+    "--json",
+    "--org",
+    "--repo",
+    "--version",
+    "--help"
+  ],
   "exit_codes": {
     "0": "success",
     "1": "unexpected internal error",
@@ -22,5 +53,6 @@
     "7": "rate limited",
     "10": "remote outcome failed (doctor unhealthy, or runs show --wait on a non-success run)"
   },
-  "mutating_commands": []
+  "mutating_commands": [],
+  "global_flags_note": "--org and --repo are rejected by `logs` (strict parser, exit 2); every other data command accepts them. Unknown flags are ignored everywhere except `logs`."
 }
