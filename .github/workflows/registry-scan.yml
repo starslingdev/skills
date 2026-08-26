@@ -33,31 +33,18 @@ permissions:
   contents: read
 
 env:
-  # THE GATING RULE (owner ruling, 2026-08-10): this build fails on Snyk Agent Scan's critical
-  # class only — the E-codes. Warning-class findings (W-codes) never fail CI.
+  # THE GATING RULE, restated for scanner 0.6.0 (owner ruling 2026-08-10, re-ruled
+  # 2026-08-26). 0.6.0 has no E/W classes — it reports named risks with 0-1000 scores —
+  # so "criticals block, warnings do not" is now a list of risk NAMES that do not block.
   #
-  # They are not hidden, though; "does not block" must not decay into "does not appear". Every
-  # W finding is surfaced three ways on every run: a `::warning::` annotation on the checks tab
-  # (queryable through the checks API, which is what a review agent reads), a table in the job
-  # summary, and the raw finding set uploaded as the `registry-scan-findings` artifact. A human
-  # or a review agent judges them; CI does not block on them.
+  # The list and the reasoning live in .github/scripts/registry_scan_contract.py, which
+  # is the single place this workflow's three readers get the vocabulary from. It is
+  # passed here as `--ignore-risks`, which is the flag that takes risk names.
   #
-  # The scanner has no severity threshold — `--ignore-failure-codes` is its only gating knob — so
-  # the rule is expressed by enumerating the W class. This is every W-code published in
-  # https://github.com/snyk/agent-scan/blob/main/docs/issue-codes.md. It is a class rule, not
-  # fifteen individual judgements, so it carries no per-code justification. W011 "exposure to
-  # untrusted third-party content", the one that fires on these skills today, is an accurate
-  # description of what they do: they read a repository's own CI configuration, workflow files,
-  # and job logs, none of which the skill authored.
-  #
-  # NO E-CODE MAY EVER APPEAR HERE — that would silently disarm the gate, and
-  # tests/test_registry_scan_workflow.py fails if one does. When the scanner publishes a new
-  # W-code it will fail this build once; adding it here is the conscious update that follows.
-  IGNORED_ISSUE_CODES: W001,W007,W008,W009,W011,W012,W013,W014,W015,W016,W017,W018,W019,W020,W021
-
-  # The scanner reads skills out of a directory of `<name>/SKILL.md` subdirectories. This is the
-  # installable tree: exactly what the `skills` CLI copies onto a user's machine and what a
-  # registry publishes.
+  # NOT `--ignore-failure-codes`. That is a DIFFERENT flag, not the renamed one: it
+  # accepts only the scanner's X001-X009 runtime codes. Passing the old W-list to it
+  # made the scanner print `unknown failure code: W001` fifteen times a run and left
+  # every risk of every score blocking — the gating policy off, on a green build.
   SCAN_PATH: skills
 
 jobs:
@@ -146,7 +133,7 @@ jobs:
       # step goes red and we find out from our own CI instead of from a public audit page.
       # The offending string is assembled at runtime — committing one is the thing we're guarding
       # against — so nothing in this repository contains it. It runs the gate's real flags,
-      # IGNORED_ISSUE_CODES included, so an ignore list that grew to swallow the anchor rule
+      # the non-blocking risk list included, so an exemption that grew to swallow the anchor
       # would fail here rather than quietly neutering the gate.
       #
       # `continue-on-error` here does NOT make the control advisory — the
@@ -225,7 +212,7 @@ jobs:
             --ci \
             --verbose \
             --dangerously-run-mcp-servers \
-            --ignore-failure-codes "${IGNORED_ISSUE_CODES}" 2>&1 | tee gate-output.txt
+            --ignore-risks "$(python .github/scripts/registry_scan_ignored.py)" 2>&1 | tee gate-output.txt
           code=${PIPESTATUS[0]}
           set -e
           echo "scan_exit=${code}" >> "${GITHUB_OUTPUT}"
@@ -241,18 +228,22 @@ jobs:
             # does not ignore because a scan that broke is not a scan that passed.
             # Both are failures; only one is a finding, and reporting an X as a
             # critical is the same false verdict as reporting a usage error was.
-            if grep -qE '\bE[0-9]{3}\b' gate-output.txt; then
+            # 0.6.0 names its reason in the exit line: `CI (--ci): exiting with
+            # code 1 (risks found)` for a finding, `runtime failure codes: X###` when
+            # the scanner itself broke. Both are exit 1, and only the first is a
+            # security result. Grepping for E-codes here matched nothing 0.6.0 emits,
+            # so every real finding fell through to the coverage-gap branch below and
+            # was announced as NOT A FINDING.
+            if grep -q 'risks found' gate-output.txt; then
               echo "scan_class=finding" >> "${GITHUB_OUTPUT}"
-              echo "Gate failed: an E-class critical finding is present. Its code is above."
+              echo "Gate failed: a blocking risk is present. Its name and evidence are above."
               exit 1
             fi
-            if grep -qE '\bX[0-9]{3}\b' gate-output.txt; then
+            if grep -q 'runtime failure codes' gate-output.txt; then
               echo "scan_class=operational" >> "${GITHUB_OUTPUT}"
-              echo "::error title=REGISTRY SCAN DID NOT COMPLETE::The scanner reported an X-class runtime failure, not a finding. Nothing under '${SCAN_PATH}' was fully checked. This is a coverage gap, not a security finding."
+              echo "::error title=REGISTRY SCAN DID NOT COMPLETE::The scanner reported a runtime failure, not a finding. Nothing under '${SCAN_PATH}' was fully checked. This is a coverage gap, not a security finding."
               exit 1
             fi
-            # Neither class named. Do NOT guess: asserting "critical finding" on an
-            # unclassifiable exit is how the five-day false verdict happened.
             echo "scan_class=indeterminate" >> "${GITHUB_OUTPUT}"
             echo "::error title=REGISTRY SCAN RESULT UNCLASSIFIED::The scanner exited 1 without naming an E- or X-class code, so this run cannot say whether that was a finding or a runtime failure. Read the log above before treating it as either."
             exit 1

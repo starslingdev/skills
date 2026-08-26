@@ -29,6 +29,12 @@ Usage:  python3 .github/scripts/registry_scan_report.py <findings.json>
 """
 from __future__ import annotations
 
+import pathlib as _pathlib
+import sys as _sys
+
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent))
+from registry_scan_contract import iter_findings  # noqa: E402
+
 import json
 import os
 import sys
@@ -78,23 +84,28 @@ def severity_of(issue: dict) -> str:
 
 
 def collect(findings: dict) -> list[dict]:
+    """Every risk in the payload, via the shared contract.
+
+    This read the 0.5.x shape — a mapping of scanned path to a record carrying
+    `issues` — until 0.6.0 replaced it with `{"scan_path_responses": [...]}`, whose one
+    top-level value is a LIST. The old loop skipped anything that was not a dict, so it
+    returned empty unconditionally and every summary read "No findings." regardless of
+    content. It parsed cleanly, so the FINDINGS UNREADABLE guard never fired either.
+    Silent, and indistinguishable from a clean scan.
+    """
     rows = []
-    for result in findings.values():
-        if not isinstance(result, dict):
-            continue
-        for issue in result.get("issues") or []:
-            code = str(issue.get("code") or "")
-            rows.append(
-                {
-                    "code": code,
-                    "severity": severity_of(issue),
-                    "skill": skill_name(result, issue),
-                    "message": " ".join(str(issue.get("message") or "").split()),
-                    "critical": code.startswith(CRITICAL_PREFIX),
-                }
-            )
-    # Critical first, then by code, so the thing that will fail the build reads first.
-    rows.sort(key=lambda r: (not r["critical"], r["code"], r["skill"]))
+    for row in iter_findings(findings):
+        rows.append(
+            {
+                "code": row["risk"],
+                "severity": "blocking" if row["blocking"] else "warning",
+                "skill": row["skill"],
+                "message": row["evidence"],
+                "critical": row["blocking"],
+                "score": row["score"],
+            }
+        )
+    # iter_findings already orders blocking-first, then by risk name, then skill.
     return rows
 
 
@@ -133,7 +144,7 @@ def write_summary(rows: list[dict]) -> None:
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     body = ["## Registry scan findings", ""]
     body.append(
-        "Warnings do not block; critical (E-class) findings do. Every finding below is "
+        "Non-blocking risks do not fail the build; every other risk does. Every finding below is "
         "real — warnings are surfaced for a human or a review agent to judge, not "
         "suppressed. The full machine-readable finding set is attached to this run as "
         "the `registry-scan-findings` artifact."

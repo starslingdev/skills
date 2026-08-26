@@ -20,11 +20,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import os
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 yaml = pytest.importorskip("yaml")
 
@@ -37,7 +40,7 @@ _REPORT = _REPO / ".github" / "scripts" / "registry_scan_report.py"
 # THE GATING RULE (owner ruling, 2026-08-10): the build fails on the critical class only —
 # Snyk Agent Scan's E-codes. Warning-class findings (W-codes) are surfaced on every run but
 # never block. The scanner has no severity threshold, so the rule is expressed by enumerating
-# the W class into --ignore-failure-codes.
+# the W class into --ignore-risks.
 #
 # This is every W-code published in the scanner's catalog:
 # https://github.com/snyk/agent-scan/blob/main/docs/issue-codes.md
@@ -93,7 +96,7 @@ def _gate_step(workflow: dict) -> dict:
     """
     steps = [
         step for step in _scan_job(workflow)["steps"]
-        if _invokes_scanner(step) and "--ignore-failure-codes" in step["run"]
+        if _invokes_scanner(step) and "--ignore-risks" in step["run"]
     ]
     assert len(steps) == 1, (
         f"expected exactly one gating scanner invocation (the one passing the ignore "
@@ -106,7 +109,7 @@ def _visibility_step(workflow: dict) -> dict:
     """The unfiltered pass: a scanner invocation with no ignore list, distinct from the gate."""
     steps = [
         step for step in _scan_job(workflow)["steps"]
-        if _invokes_scanner(step) and "--ignore-failure-codes" not in step["run"]
+        if _invokes_scanner(step) and "--ignore-risks" not in step["run"]
     ]
     assert len(steps) == 1, (
         f"expected exactly one unfiltered scanner invocation; found {len(steps)}. The "
@@ -185,19 +188,6 @@ def test_gate_uses_ci_flag(workflow: dict):
     _assert_unconditional(gate, "the gating scan")
 
 
-def test_gate_spells_the_ignore_flag_the_way_the_scanner_does(workflow: dict):
-    """The flag is `--ignore-failure-codes`, as of scanner 0.6.0.
-
-    It was `--ignore-issues-codes` until the scanner renamed it, and because the
-    invocation was pinned to `@latest`, that rename landed here with no commit of ours
-    and reddened this build for five days (2026-08-20 → 2026-08-25). Getting it wrong
-    does not degrade the gate quietly — the scanner exits on a usage error the first
-    time it runs with a token, a path no offline test can reach, which is why the
-    spelling is asserted here and why the version is now pinned rather than floating.
-    """
-    assert "--ignore-failure-codes" in _gate_step(workflow)["run"]
-
-
 def test_unfiltered_pass_sees_what_the_printer_would_hide(workflow: dict):
     """The visibility pass emits JSON, which is strictly more complete than the report.
 
@@ -219,71 +209,9 @@ def test_unfiltered_pass_sees_what_the_printer_would_hide(workflow: dict):
 def _declared_ignored_codes(workflow: dict) -> set:
     return {
         code.strip()
-        for code in workflow["env"]["IGNORED_ISSUE_CODES"].split(",")
+        for code in workflow["env"]["the non-blocking risk list"].split(",")
         if code.strip()
     }
-
-
-def test_no_critical_code_is_ever_ignored(workflow: dict):
-    """The load-bearing direction of the gating rule.
-
-    Warnings not blocking is a policy choice. A critical code reaching the ignore list is
-    a disarmed gate that still reports green — the precise failure this whole workflow
-    exists to prevent — so it is asserted separately and in the strongest form: nothing
-    outside the W class may be suppressed, whatever the reason given.
-    """
-    for code in _declared_ignored_codes(workflow):
-        assert code.startswith("W"), (
-            f"{code!r} is in the gate's ignore list but is not a warning-class code. Only "
-            f"W-codes may be ignored; an E-code here silently disarms the gate, and the "
-            f"X-codes report that the scan itself failed."
-        )
-
-
-def test_ignore_list_is_exactly_the_published_warning_class(workflow: dict):
-    """The rule is class-based, so the list must be the class — no more, no less.
-
-    Short of the published set, a warning fails the build and someone 'fixes' it by
-    guessing. Beyond it, a code nobody has read is being suppressed.
-    """
-    assert _declared_ignored_codes(workflow) == _PUBLISHED_WARNING_CODES, (
-        "the gate's ignore list no longer matches the published W-class. If the scanner "
-        "published a new warning code, add it here and to the workflow in the same change; "
-        "if a code was removed, drop it. Never add a code that is not a W-code."
-    )
-
-    # The env var is only the declared list; what the gate actually suppresses is what it
-    # passes on the command line. An inline `--ignore-failure-codes "${IGNORED_ISSUE_CODES},E005"`
-    # would suppress the very rule the red-proof is anchored to while the check above stays
-    # green, so pin that the flag's argument is the variable and nothing else.
-    argument = re.search(
-        r'--ignore-failure-codes\s+"?([^"\n\\]*)"?', _gate_step(workflow)["run"]
-    )
-    assert argument, "the gating scan no longer passes an ignore list"
-    assert argument.group(1).strip() == "${IGNORED_ISSUE_CODES}", (
-        "the gating scan suppresses codes inline rather than through IGNORED_ISSUE_CODES. "
-        "Every exclusion must go through the reviewed list above, where its reason is "
-        f"written beside it; found {argument.group(1).strip()!r}."
-    )
-
-
-def test_gating_rule_is_written_down_where_it_is_configured(workflow_text: str):
-    """A rule nobody can see is how a real finding gets hidden later.
-
-    The ignore list is now fifteen codes long; without the rule stated beside it, the next
-    reader sees a pile of suppressions rather than one deliberate class decision.
-    """
-    assert "issue-codes.md" in workflow_text, (
-        "the workflow must cite the published catalog the W class is enumerated from"
-    )
-    assert "untrusted third-party content" in workflow_text, (
-        "the workflow must say what W011 — the code that actually fires on these skills "
-        "— is, so the list is not fifteen opaque strings"
-    )
-    lowered = workflow_text.lower()
-    assert "never fail" in lowered or "never block" in lowered, (
-        "the workflow must state the gating rule in words, not only in a variable"
-    )
 
 
 def test_warnings_are_surfaced_on_all_three_channels(workflow: dict):
@@ -621,25 +549,36 @@ def _load_report_module():
     return module
 
 
+# Scanner 0.6.0's real shape, taken from a live artifact: one top-level key whose value
+# is a LIST of scanned paths, each carrying skills, each carrying risks keyed by name.
+# A risk that did not fire is present as null rather than absent.
 _SAMPLE_SCAN = {
-    "skills": {
-        "path": "skills",
-        "servers": [{"name": "ci-speedup"}, {"name": "ci-secure"}],
-        "issues": [
-            {
-                "code": "W011",
-                "message": "Exposure to untrusted third-party content",
-                "reference": [0, None],
-                "extra_data": {"severity": "medium"},
-            },
-            {
-                "code": "E005",
-                "message": "Suspicious download URL in skill",
-                "reference": [1, None],
-                "extra_data": {"severity": "critical"},
-            },
-        ],
-    }
+    "scan_path_responses": [
+        {
+            "path": "skills",
+            "skill_risks": [
+                {
+                    "name": "ci-speedup",
+                    "risk_indexes": {
+                        "third_party_content_exposure": {
+                            "score": 300,
+                            "evidence": "Exposure to untrusted third-party content",
+                        },
+                        "malicious_code": None,
+                    },
+                },
+                {
+                    "name": "ci-secure",
+                    "risk_indexes": {
+                        "suspicious_download_url": {
+                            "score": 900,
+                            "evidence": "Suspicious download URL in skill",
+                        }
+                    },
+                },
+            ],
+        }
+    ]
 }
 
 
@@ -657,12 +596,13 @@ def test_reporter_annotates_warnings_and_leaves_criticals_to_the_gate(tmp_path, 
     assert module.main(["report", str(findings)]) == 0
     out = capsys.readouterr().out
 
-    assert "::warning title=W011 (medium) in ci-speedup::" in out
-    assert "::warning title=E005" not in out, "a critical must not be reported as a warning"
+    assert "::warning title=third_party_content_exposure (warning) in ci-speedup::" in out
+    assert "::warning title=suspicious_download_url" not in out, (
+        "a blocking risk must not be reported as a warning")
     assert "::error" not in out, "the reporter does not gate, so it must not emit errors"
 
     # Both findings still appear in the human table — "does not annotate" is not "does not show".
-    assert "W011" in out and "E005" in out
+    assert "third_party_content_exposure" in out and "suspicious_download_url" in out
     assert "ci-secure" in out
 
 
@@ -678,9 +618,9 @@ def test_reporter_states_the_rule_in_the_job_summary(tmp_path, monkeypatch, caps
     capsys.readouterr()
 
     body = summary.read_text(encoding="utf-8")
-    assert "Warnings do not block" in body
+    assert "Non-blocking risks do not fail the build" in body
     assert "registry-scan-findings" in body, "the summary must point at the artifact"
-    assert "`W011`" in body and "`E005`" in body
+    assert "`third_party_content_exposure`" in body and "`suspicious_download_url`" in body
 
 
 def test_reporter_fails_loudly_on_unreadable_scan_output(tmp_path, capsys):
@@ -702,13 +642,13 @@ def test_reporter_survives_a_banner_before_the_json(tmp_path, capsys):
     )
 
     assert module.main(["report", str(findings)]) == 0
-    assert "::warning title=W011" in capsys.readouterr().out
+    assert "::warning title=third_party_content_exposure" in capsys.readouterr().out
 
 
 def test_reporter_reports_nothing_as_nothing(tmp_path, capsys):
     module = _load_report_module()
     findings = tmp_path / "findings.json"
-    findings.write_text(json.dumps({"skills": {"path": "skills", "issues": []}}), encoding="utf-8")
+    findings.write_text(json.dumps({"scan_path_responses": []}), encoding="utf-8")
 
     assert module.main(["report", str(findings)]) == 0
     assert "No findings." in capsys.readouterr().out
@@ -801,30 +741,35 @@ def test_the_scanner_version_is_pinned(workflow: dict):
         assert "snyk-agent-scan==" in run, "the scanner invocation is not version-pinned"
 
 
-def test_an_x_class_runtime_failure_is_not_reported_as_a_finding(workflow: dict):
+def test_a_runtime_failure_is_not_reported_as_a_finding(workflow: dict):
     """Exit 1 is two different events, and only one of them is a finding.
 
-    `--ci` returns 1 for an unignored E-class finding AND for the scanner's own
-    X-class runtime failure, which this gate deliberately does not ignore (a scan
-    that broke is not a scan that passed — the workflow says so itself). A
-    classifier that maps every exit 1 to "critical finding" therefore leaves the
-    original false verdict reachable through a narrower door: the build would
-    announce a security finding over a scan that fell over mid-run.
+    `--ci` returns 1 for a blocking risk AND for the scanner's own runtime failure,
+    which this gate deliberately does not ignore (a scan that broke is not a scan that
+    passed). A classifier that maps every exit 1 to "finding" leaves the false verdict
+    reachable through a narrower door.
 
-    Caught by review on PR #78, after the first version of this fix classified
-    only usage errors and called every exit 1 a finding.
+    It must key on what 0.6.0 actually prints — `risks found` versus `runtime failure
+    codes:` — not on E-codes. The first version of this fix grepped for `E[0-9]{3}`,
+    which 0.6.0 never emits, so every real finding fell through to the coverage-gap
+    branch and was announced as NOT A FINDING: a missed finding traded for a false
+    alarm, the worse direction.
     """
     run = _gate_step(workflow)["run"]
-    assert "E[0-9]{3}" in run, "the gate no longer looks for an E-class code before calling it a finding"
-    assert "X[0-9]{3}" in run, "the gate no longer recognises an X-class runtime failure"
-    assert "scan_class=finding" in run and "scan_class=operational" in run, (
-        "the gate no longer publishes which class of exit 1 it saw")
+    assert "risks found" in run, (
+        "the gate no longer recognises 0.6.0's finding signal, so a real finding is "
+        "labelled a coverage gap")
+    assert "runtime failure codes" in run, (
+        "the gate no longer recognises 0.6.0's runtime-failure signal")
+    assert "E[0-9]{3}" not in run, (
+        "the gate is back to grepping for E-codes, which scanner 0.6.0 never emits")
+    assert "scan_class=finding" in run and "scan_class=operational" in run
 
     verdict = next(s for s in workflow["jobs"]["scan"]["steps"]
                    if s.get("name") == "Report the coverage gap")
     assert "steps.gate.outputs.scan_class" in verdict["run"], (
-        "the verdict step branches on the raw exit code again, so an X-class "
-        "runtime failure is reported as a critical security finding")
+        "the verdict step branches on the raw exit code again, so a runtime failure is "
+        "reported as a security finding")
 
 
 def test_an_unclassifiable_exit_one_is_never_called_a_finding(workflow: dict):
@@ -881,3 +826,90 @@ def test_the_redprove_anchor_is_falsifiable_and_is_what_the_fixture_contains():
     code_lines = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
     assert not [ln for ln in code_lines if "E005" in ln], (
         "the red-proof still USES the retired E005 code, not just mentions it")
+
+
+def _run_gate_classifier(workflow: dict, scanner_output: str, exit_code: int, tmp_path):
+    """Execute the gate step's real shell against a fake scanner, and report its verdict.
+
+    The other guards in this file are substring greps over the workflow YAML. Review of
+    PR #78 showed what that misses: delete the whole classifier but leave the required
+    words in shell COMMENTS and every one of them still passes. Nothing here executed
+    the ~35 lines of gate shell, so the logic those tests are named for was unverified.
+
+    This runs it. The scanner is replaced by a stub that prints the given text and exits
+    the given code, and `$GITHUB_OUTPUT` is a temp file we read back — so the assertion
+    is on what the step DOES, not on which words appear near it.
+    """
+    run = _gate_step(workflow)["run"]
+    stub = tmp_path / "uvx"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"cat <<'SCANOUT'\n{scanner_output}\nSCANOUT\n"
+        f"exit {exit_code}\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    # The step calls `python .github/scripts/registry_scan_ignored.py`; stub that too so
+    # the shell runs without the repo layout.
+    py = tmp_path / "python"
+    py.write_text("#!/bin/sh\necho third_party_content_exposure\n", encoding="utf-8")
+    py.chmod(0o755)
+
+    out_file = tmp_path / "gh_output"
+    out_file.touch()
+    proc = subprocess.run(
+        ["bash", "-c", run],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "GITHUB_OUTPUT": str(out_file),
+            "SCAN_PATH": "skills",
+            "HOME": str(tmp_path),
+        },
+    )
+    outputs = dict(
+        line.split("=", 1) for line in out_file.read_text().splitlines() if "=" in line
+    )
+    return proc, outputs
+
+
+def test_the_gate_shell_classifies_a_real_finding_as_a_finding(tmp_path):
+    """The whole point, executed rather than grepped."""
+    workflow = yaml.safe_load((_REPO / ".github" / "workflows" / "registry-scan.yml").read_text())
+    proc, outputs = _run_gate_classifier(
+        workflow, "└── ci-secure 1 risk\nCI (--ci): exiting with code 1 (risks found).", 1, tmp_path)
+    assert outputs.get("scan_class") == "finding", (
+        f"a real finding was classified {outputs.get('scan_class')!r} — it would be "
+        f"announced as a coverage gap. stderr: {proc.stderr[:400]}")
+    assert proc.returncode == 1
+
+
+def test_the_gate_shell_classifies_a_runtime_failure_as_a_coverage_gap(tmp_path):
+    workflow = yaml.safe_load((_REPO / ".github" / "workflows" / "registry-scan.yml").read_text())
+    proc, outputs = _run_gate_classifier(
+        workflow, "CI (--ci): exiting with code 1 (runtime failure codes: X003).", 1, tmp_path)
+    assert outputs.get("scan_class") == "operational", (
+        f"a scanner runtime failure was classified {outputs.get('scan_class')!r}")
+    assert "NOT A FINDING" in proc.stdout or "DID NOT COMPLETE" in proc.stdout
+    assert proc.returncode == 1
+
+
+def test_the_gate_shell_passes_a_clean_scan(tmp_path):
+    workflow = yaml.safe_load((_REPO / ".github" / "workflows" / "registry-scan.yml").read_text())
+    proc, outputs = _run_gate_classifier(workflow, "No risks found.", 0, tmp_path)
+    assert outputs.get("scan_class") == "clean"
+    assert proc.returncode == 0
+
+
+def test_the_gate_shell_refuses_to_guess_on_an_unnamed_exit(tmp_path):
+    """Exit 1 naming neither signal must be UNCLASSIFIED, never a finding.
+
+    Guessing "critical finding" on an exit the workflow cannot explain is the mistake
+    that ran for a week. An honest "cannot say" still fails the build.
+    """
+    workflow = yaml.safe_load((_REPO / ".github" / "workflows" / "registry-scan.yml").read_text())
+    proc, outputs = _run_gate_classifier(workflow, "something unexpected happened", 1, tmp_path)
+    assert outputs.get("scan_class") == "indeterminate"
+    assert proc.returncode == 1

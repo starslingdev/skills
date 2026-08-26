@@ -32,6 +32,12 @@ Run it by hand the same way CI does (needs SNYK_TOKEN in the environment):
 """
 from __future__ import annotations
 
+import pathlib as _pathlib
+import sys as _sys
+
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent))
+from registry_scan_contract import NON_BLOCKING_RISKS  # noqa: E402
+
 import os
 import subprocess
 import sys
@@ -52,9 +58,11 @@ from pathlib import Path
 #
 # It is assembled from the same fragments as the fixture, and for the same reason: a
 # literal installer host must not exist on disk in this repository, which is precisely
-# what this gate exists to prevent. `expected_evidence()` is a function, not a
-# constant, so the fragments are joined at call time rather than folded into the
-# module by the peephole optimiser.
+# what this gate exists to prevent. Being a function does NOT stop CPython folding the
+# adjacent fragments — the module docstring above says so, and it is right: the
+# hostname is recoverable from a compiled `.pyc`. Those are gitignored, untracked, and
+# under `.github/`, which the scanner never reads. What the function buys is that the
+# gate and the fixture cannot drift apart, not concealment.
 def expected_evidence() -> str:
     return "get" + "." + "redprove" + "-fixture" + "." + "example" + "." + "com"
 
@@ -121,13 +129,13 @@ def main() -> int:
             "--verbose",
             "--dangerously-run-mcp-servers",
         ]
-        # Run the GATE'S ignore list, not an empty one. Otherwise this proves only that the
-        # scanner can fail, not that this gate can: an ignore list grown to include the anchor
-        # code would leave the red-proof green while the real gate could no longer fire on it.
-        ignored = os.environ.get("IGNORED_ISSUE_CODES", "").strip()
-        if ignored:
-            cmd += ["--ignore-failure-codes", ignored]
-
+        # Run the GATE'S ignore list, not an empty one. Otherwise this proves only
+        # that the scanner can fail, not that this gate can: an exemption grown to
+        # include the anchored risk would leave the red-proof green while the real gate
+        # could no longer fire on it. Read from the same contract the gate uses, so the
+        # two cannot drift.
+        if NON_BLOCKING_RISKS:
+            cmd += ["--ignore-risks", ",".join(NON_BLOCKING_RISKS)]
         print("Red-proof: scanning a deliberately violating skill")
         print("  " + " ".join(cmd))
         try:
