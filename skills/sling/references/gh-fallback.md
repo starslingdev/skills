@@ -3,10 +3,18 @@
 `sling` is **read-only** in this release. Anything that changes CI state
 goes to the GitHub CLI. Syntax below was checked against **`gh` v2.93.0**.
 
-Before the first `gh` call, confirm `gh auth status` succeeds. `gh` and
-`sling` authenticate separately: a working `sling` says nothing about
-whether `gh` is signed in. If `gh` is unauthenticated, say so — never
-report a state change as done when the command did not run.
+Before the first `gh` call, confirm `gh` is installed **and** `gh auth
+status` succeeds. The two are different failures with the same consequence,
+and `gh` authenticates separately from `sling` — a working `sling` says
+nothing about whether `gh` is signed in.
+
+A sandboxed agent shell can fail that probe for its own reasons (Codex
+cannot reach keyring credentials), so retry with host access before trusting
+a single failure, and never report auth "expired" off a sandboxed probe.
+
+If it genuinely is missing or signed out, say which, give the path
+(https://cli.github.com; then `gh auth login`), and never report a state
+change as done when the command did not run.
 
 Add `-R <owner>/<repo>` when the working directory is not the target repo.
 

@@ -116,6 +116,18 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   Adopts ci-secure's rule for a check that could not run: an absent result is a
   coverage hole, never a pass.
 
+- **2026-08-25** — **The `gh` half of the routing table gets the same gate the
+  `sling` half has**, reusing ci-speedup's rather than a thinner re-derivation.
+  It previously carried a one-line aside about `gh auth status`, which missed
+  three things that pattern already encodes: whether `gh` is **installed** at
+  all (a different failure with the same consequence), the concrete path
+  (https://cli.github.com, then `gh auth login`), and the caution ci-speedup
+  recorded from a live miss — a sandboxed agent shell cannot reach keyring
+  credentials, so one failed probe is not proof and must never be reported as
+  an expired login. The degraded path when `sling` is unavailable now runs that
+  gate before promising `gh`, since with neither CLI there is nothing left to
+  fall back to.
+
 ### Notes
 
 - **The install command is described, not printed.** `sling` installs by

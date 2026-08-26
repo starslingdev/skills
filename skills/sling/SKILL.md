@@ -113,6 +113,10 @@ Do this once per session, before the first `sling` command.
    diagnosis — `sling why`'s classification, `sling time`'s phase
    breakdown — is unavailable without `sling`. Do not silently degrade.
 
+   Run the gh gate below before promising that path: with neither CLI
+   available there is nothing left to fall back to, and saying so up front
+   beats discovering it one failed command at a time.
+
 ## Always pass `--agent`
 
 `--agent` is a global machine-mode flag, exactly equivalent to `--json
@@ -337,6 +341,14 @@ user asking.
 ## `gh` fallback
 
 The mutating commands this skill routes to, with their real syntax:
-[references/gh-fallback.md](references/gh-fallback.md). `gh` needs its own
-auth (`gh auth status`); if it is missing or unauthenticated, say so rather
-than reporting the action as done.
+[references/gh-fallback.md](references/gh-fallback.md).
+
+**gh gate, before the first `gh` call.** If `gh` isn't installed or `gh auth
+status` fails, `gh` cannot do any of it — and `gh` authenticates separately
+from `sling`, so a working `sling` says nothing about whether `gh` is signed
+in. Sandboxed agent shells (Codex) can't reach keyring credentials: retry
+with host access before trusting a failure, and never report auth "expired"
+off a sandboxed probe. Then STOP and tell the user plainly which half of
+their request is unavailable — the reads still work through `sling`, the
+state change does not. Give the path (https://cli.github.com; then `gh auth
+login`), and never report an action as done that never ran.

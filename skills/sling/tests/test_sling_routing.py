@@ -337,3 +337,25 @@ def test_an_empty_result_is_not_documented_as_proof_of_no_ci():
         "the skill lost the warning that an empty listing is a coverage hole "
         "rather than a finding — the same rule ci-secure states for a check "
         "that could not run")
+
+
+def test_the_gh_gate_matches_the_house_pattern():
+    """`gh` is half this skill's routing table, and it authenticates separately
+    from `sling` — a working `sling` says nothing about whether `gh` is signed
+    in. ci-speedup's gh gate already encodes what this costs to get wrong,
+    including a live miss: a sandboxed agent shell cannot reach keyring
+    credentials, so a single failed probe is not proof of anything. Re-deriving
+    a thinner version of that gate is how the lesson gets lost."""
+    # Whitespace-normalised: this prose is hard-wrapped, so `gh auth status`
+    # legitimately spans a line break and a naive substring test would report a
+    # missing gate that is right there.
+    text = _BODY + (_SKILL / "references" / "gh-fallback.md").read_text()
+    low = " ".join(text.split()).lower()
+    assert "isn't installed" in low or "is installed" in low, (
+        "the gh gate no longer checks whether gh is INSTALLED, only whether it "
+        "is authenticated — two different failures with the same consequence")
+    assert "gh auth status" in low, "the gh gate lost its auth probe"
+    assert "cli.github.com" in low, "the gh gate no longer gives the install path"
+    assert "sandbox" in low, (
+        "the gh gate lost the sandboxed-shell caution ci-speedup recorded from "
+        "a live miss — without it a Codex shell reports a false auth failure")
