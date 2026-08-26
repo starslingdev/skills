@@ -391,3 +391,77 @@ def test_the_no_orgs_case_is_not_routed_to_org_switch():
         "the skill no longer separates having no orgs from having several")
     assert "never a flag problem" in low, (
         "exit 2 no longer warns that the zero-org case is not a bad invocation")
+
+
+def test_the_auth_step_does_not_swallow_the_missing_app_shape_of_exit_four():
+    """Exit `4` has two causes with opposite recoveries: a stale credential
+    (`sling login`) and an org the StarSling App was never installed on
+    (install the app — logging in again is a verified no-op). The preflight's
+    auth step is reached BEFORE the app gate, so an unconditional "any command
+    exits 4 -> sling login" is the branch a live session hits first, and the
+    user is sent round a login loop that cannot change the outcome. The
+    exit-code table and the app gate already read stderr first; the auth step
+    has to as well, or the contract contradicts itself in reading order."""
+    low = " ".join(_BODY.split()).lower()
+    auth = low.index("**not authenticated**")
+    gate = low.index("starsling gate")
+    assert auth < gate, (
+        "the preflight reordered: this guard assumes the auth step is reached "
+        "before the app gate, which is why the auth step must self-limit")
+    step = low[auth:gate]
+    assert "exits `4`" not in step or "does not name an org" in step, (
+        "the preflight's auth step routes exit 4 to `sling login` without "
+        "excluding the missing-installation shape, so a user whose app is not "
+        "installed is sent to log in again before the app gate is reached")
+
+
+def test_a_non_zero_exit_is_not_documented_as_an_empty_stdout():
+    """Verified against v0.1.2: `sling logs` on a job that stores no logs exits
+    `3` and still prints `{"lines": [], ...}`, and `sling resolve` on an
+    ambiguous id exits `2` and still prints `{"candidates": [...]}`. A contract
+    that says errors write nothing to stdout tells an agent to read that empty
+    `lines` array as "no log lines" — the silent false negative this skill
+    exists to prevent. `references/command-reference.md` already says "branch
+    on the exit code, not on whether stdout looks empty"; SKILL.md must not
+    say the opposite."""
+    low = " ".join(_BODY.split()).lower()
+    assert "writes nothing to stdout" not in low, (
+        "SKILL.md still claims a genuine error writes nothing to stdout — "
+        "`logs` (exit 3) and `resolve` (exit 2) both emit a full JSON body")
+    assert "fall back to stderr only when stdout is empty" not in low, (
+        "SKILL.md still tells the agent to key its stderr fallback on an "
+        "empty stdout rather than on the exit code")
+    assert "branch on the exit code" in low, (
+        "SKILL.md lost the rule the reference states — branch on the exit "
+        "code, never on whether stdout looks empty")
+
+
+def test_exit_one_covers_a_subcommand_that_does_not_exist():
+    """`sling update` — this skill's own headline gotcha — exits `1`, not `2`.
+    An exit-1 row that says only "a crash ... this is a bug report, not a
+    routing decision" sends an agent that typo'd a subcommand off to file a bug
+    instead of reading the `unknown command` list the binary just printed."""
+    low = " ".join(_BODY.split()).lower()
+    row = [ln for ln in low.split("|") if "unexpected internal error" in ln]
+    assert row, "the exit-1 row is gone or reworded past recognition"
+    ctx = low[low.index("unexpected internal error"):][:600]
+    assert "unknown command" in ctx, (
+        "the exit-1 row does not mention that a nonexistent subcommand exits "
+        "1 — the skill's own `sling update` gotcha lands here and the row "
+        "tells the agent to treat it as a crash")
+
+
+def test_the_scope_flag_gotcha_reports_the_exit_code_the_binary_returns():
+    """A scope flag with no value is REJECTED, not swallowed: `sling usage
+    --org --window 7d` exits `2` with `--org needs a slug (got an empty
+    value).` The shipped text claimed it exits `0` and returns a wrongly-scoped
+    answer that looks fine — the opposite failure mode, in the one file whose
+    stated premise is that every shape was read off the binary."""
+    text = " ".join(
+        " ".join(t for _, t in _shipped_text()).split()).lower()
+    if "--org --window" not in text:
+        pytest.skip("the scope-flag gotcha is no longer documented")
+    ctx = text[text.index("--org --window") - 200:][:600]
+    assert "exits `0`" not in ctx, (
+        "the scope-flag gotcha still says a valueless `--org` exits 0 and "
+        "silently swallows the next flag; the binary exits 2 and says so")

@@ -6,7 +6,7 @@
       "id": 1,
       "name": "diagnose-a-failed-job-without-dumping-logs",
       "should_trigger": true,
-      "prompt": "the nightly job failed again \u2014 https://github.com/starslingdev/agent-ci-mastra-test/actions/runs/32881736257 \u2014 what actually broke this time",
+      "prompt": "the nightly job failed again \u2014 https://github.com/acme/web/actions/runs/32881736257 \u2014 what actually broke this time",
       "expected_output": "Runs `sling why` on the run (accepting the URL directly, no manual id extraction), reports the classification and the failing step with its evidence, and does not pull the whole transcript. If it needs more log detail it follows the `suggested_actions[].command` rather than improvising a grep pattern.",
       "assertions": [
         "Invoked `sling why` with the pasted URL, not a hand-extracted id",

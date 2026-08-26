@@ -62,10 +62,18 @@ Do this once per session, before the first `sling` command.
    a real subcommand, so re-run the installer instead of running it (see
    [references/command-reference.md](references/command-reference.md)).
 
-3. **Not authenticated** (`doctor`'s `token` check fails, or any command
-   exits `4`): **ask the user to run `sling login` in their own terminal**,
-   then wait for them to say it is done. Do not run it yourself, and never
-   pass `--agent` to it.
+3. **Not authenticated** (`doctor`'s `token` check fails, or a command exits
+   `4` **whose stderr does not name an org**): **ask the user to run `sling
+   login` in their own terminal**, then wait for them to say it is done.
+   Do not run it yourself, and never pass `--agent` to it.
+
+   **Read the stderr before acting on exit `4`.** `You don't have access to
+   org "<name>"` is a missing app installation, not a stale credential, and
+   it belongs to step 5 rather than here. It ends `Run \`sling login\``
+   anyway, because a generic decorator appends that to every auth-class
+   error — so the code and the advice both point the wrong way. Signing in
+   again succeeds and changes nothing, which reads to the user as a broken
+   login rather than as the missing installation it is.
 
    Signing in needs a person at a browser: `sling login` prints a device
    code, opens a GitHub approval page, and blocks until someone approves it.
@@ -135,10 +143,15 @@ Do this once per session, before the first `sling` command.
 
 ## Always pass `--agent`
 
-`--agent` is a global machine-mode flag, exactly equivalent to `--json
---compact --no-input --no-color --yes`. Pass it on every **data** command
-and parse stdout as JSON. Do not also pass `--json`; `--agent` already
-implies it.
+`--agent` is a global machine-mode flag: its own help describes it as
+`--json --compact --no-input --no-color --yes`. Pass it on every **data**
+command and parse stdout as JSON. Do not also pass `--json`; `--agent`
+already implies it.
+
+**`--compact` has no observable effect on v0.1.2** — output is
+pretty-printed, indented JSON with or without it, under `--agent` too. Feed
+stdout to a real JSON parser and never to a line-oriented one that assumes
+one object per line.
 
 **Never pass `--agent` to `sling login`.** Signing in requires a human to
 open a browser and approve a device code, and `--agent` carries
@@ -147,14 +160,22 @@ one command that needs a person into exit `2`. `sling org switch` has the
 same shape: under `--agent` its picker is refused, so give it an explicit
 slug (`sling org switch acme --agent`).
 
-- **Parse stdout first, whatever the exit code.** Human chrome (spinners,
-  summary rows, prompts) goes to stderr, and only when stderr is a TTY. A
-  genuine error — `1`, `2`, `3`, `4`, `5`, `7` — writes nothing to stdout
-  and puts a plain-text message on stderr. But `6` and `10` are outcomes,
-  not errors: they emit the **full JSON payload on stdout** with stderr
-  empty. An unhealthy `sling doctor --agent` exits `10` and still returns
-  every check, which is exactly what the preflight above asks you to read.
-  So read stdout, and fall back to stderr only when stdout is empty.
+- **Branch on the exit code, never on whether stdout looks empty.** Human
+  chrome (spinners, summary rows, prompts) goes to stderr, and only when
+  stderr is a TTY. `6` and `10` are outcomes rather than errors: they emit
+  the **full JSON payload on stdout** with stderr empty — an unhealthy
+  `sling doctor --agent` exits `10` and still returns every check, which is
+  exactly what the preflight above asks you to read.
+
+  **A non-zero exit does not mean stdout is empty, and a well-formed JSON
+  body does not mean success.** `sling logs` on a job that stores no logs
+  exits `3` and still prints `{"lines": [], "has_more": false, …}`;
+  `sling resolve` on an ambiguous id exits `2` and still prints
+  `{"candidates": […]}`. So read stdout as JSON *and* read the exit code,
+  and when the two disagree the exit code decides. Reporting that empty
+  `lines` array as "nothing in the log" is exactly the silent false negative
+  this skill exists to prevent — the reason is on stderr, which stays worth
+  reading even when stdout parsed cleanly.
 - Under `--agent`, **every** command returns JSON, `sling logs` included.
 - JSON keys are `snake_case` on every command **except `whoami`**, which
   returns camelCase (`userId`, `githubLogin`, `expiresAt`). Key a parser per
@@ -190,7 +211,7 @@ reading YAML yourself.
 | Which jobs in a run failed, or jobs across a repo | `sling` | `sling jobs list --run <id>` / `--repo <owner/name>` |
 | Which step in a job failed, and each step's duration | `sling` | `sling jobs show <job id\|URL>` |
 | Only the log lines that matter for a failure | `sling` | `sling logs <run\|job\|attempt id\|URL> [--grep <re>] [--since <dur>] [--limit <n>]` |
-| Turning a pasted Actions URL into a run/job/attempt id | `sling` | `sling resolve <id\|URL> [--target run\|job\|attempt]` |
+| Turning a pasted Actions URL into a run/job/attempt id | `sling` | `sling resolve <id\|URL> [--target run\|job\|attempt]` — a run id covering several jobs is **ambiguous**: exit `2`, `{"candidates": […]}` on stdout. Pick one with `--target`, or show the user the list |
 | The biggest time or cost hotspots | `sling` | `sling top [--by workflow\|job\|label\|repo\|branch] [--metric ...]` |
 | Runner-minutes and cost attributed per repo/workflow/label/day | `sling` | `sling usage [--group-by <axis>] [--window <n>d]` |
 | What is owed this period, or past invoices | `sling` | `sling bill`, `sling bill history` |
@@ -254,14 +275,16 @@ Two habits worth keeping:
 
 ## Exit codes
 
-Branch on `$?`, read immediately after the command. Never infer failure
-from empty stdout — a real result can be empty and a failed command writes
-nothing to stdout at all.
+Branch on `$?`, read immediately after the command. The inference fails in
+both directions: a successful result can be empty, and a **failed command
+can still print a full JSON body** — `logs` exits `3` with `{"lines": []}`,
+`resolve` exits `2` with `{"candidates": […]}`. Neither an empty stdout nor
+a parseable one tells you what happened; only `$?` does.
 
 | Code | Meaning | What to do |
 |---|---|---|
 | `0` | Success | — |
-| `1` | Unexpected internal error (a crash) | Do not retry blindly. Surface the stderr text; this is a bug report, not a routing decision |
+| `1` | Unexpected internal error (a crash) — **or a subcommand that does not exist** | Read stderr first. `unknown command "<name>" for "sling"` is a routing mistake, not a crash: the binary lists its real commands, so correct the name against that list rather than filing a bug — this is where the `doctor` `fix_command` gotcha below lands. Anything else: do not retry blindly, and surface the stderr text as a bug report |
 | `2` | Usage — bad flags, a prompt refused under `--agent`, org ambiguity, **or no orgs at all** | Read the stderr first. `You don't belong to any orgs yet.` → step 5, the app is not installed; never a flag problem. Org-ambiguous → pass `--org` or `sling org switch`. Otherwise fix the invocation against `sling <cmd> --help` |
 | `3` | Not found — no such run/job/attempt in this org, or a real job that stores no logs | Try `sling resolve` on the raw id or URL, confirm the org, then ask the user to confirm the id |
 | `4` | Auth — **or no StarSling installation on that org.** Read the stderr text before acting | `You don't have access to org "<name>"` → the app is not installed there (or the user is not a member); point them at `https://github.com/apps/starslingdev`, do NOT retry login. Anything else → ask the user to run `sling login` themselves (a browser approval, never `--agent`), then retry once |

@@ -32,7 +32,7 @@ Available on the root command and every subcommand.
 
 | Flag | Meaning |
 |---|---|
-| `--agent` | Machine mode: exactly `--json --compact --no-input --no-color --yes`. Pass this on every invocation |
+| `--agent` | Machine mode; its help reads `--json --compact --no-input --no-color --yes` (`--compact` changes nothing on 0.1.2). Pass it on every **data** command — never on `sling login`, and give `sling org switch` an explicit slug |
 | `--json` | JSON on stdout (implied by `--agent`) |
 | `--org <slug>` | Org context. Auto-resolved when unambiguous; default set by `sling org switch` |
 | `--repo <owner/name>` | Repo context. Defaults to the git remote of the current directory |
@@ -226,11 +226,25 @@ The first move when an id does not resolve.
 
 ```json
 {"resolved": {"id": "att_97912608061.1", "kind": "attempt", "run_id": "…",
-              "org": "starslingdev", "repo": "agent-ci-mastra-test",
+              "org": "starslingdev", "repo": "<repo>",
               "job_id": "97912608061", "attempt": 1, "job_name": "…",
               "runner_id": "…", "runner_name": "GitHub Actions …"},
  "local": {"input": "32881736257"}}
 ```
+
+**An ambiguous input exits `2` and still returns JSON.** A run id covering
+more than one job cannot resolve to a single attempt, so `resolve` lists
+what it found rather than guessing:
+
+```json
+{"candidates": [{"id": "att_98038364232.1", "kind": "attempt",
+                 "run_id": "…", "job_id": "98038364232", "attempt": 1,
+                 "job_name": "…"}, …]}
+```
+
+stderr carries the same list as `Ambiguous — N candidates; pass one:`.
+Narrow it with `--target`, or put the candidates to the user — do not pick
+one silently.
 
 Id shapes accepted across commands: a run id, a job id, `att_<jobid>.<n>`,
 a runner id, a bare id, or a GitHub Actions URL.
@@ -340,9 +354,10 @@ accruing; it is not a final number.
 
 **Both scope flags take a value.** `sling <cmd> --help` renders them as
 `[--org | --repo <r>]`, which reads as though `--org` were a bare switch — it
-is not. Since unknown and malformed flags are ignored rather than rejected,
-`sling usage --org --window 7d` exits `0` having swallowed `--window` as the
-org slug, and returns a wrongly-scoped answer that looks fine.
+is not. A scope flag with no value is rejected rather than swallowed:
+`sling usage --org --window 7d` exits `2` with `--org needs a slug (got an
+empty value).` on stderr. Loud rather than silent — but it is still a bad
+invocation, so pass the slug.
 
 ### `sling labels list`
 

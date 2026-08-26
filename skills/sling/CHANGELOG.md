@@ -45,6 +45,45 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 ### Fixed
 
+- **2026-08-26** — **The parse contract was falsified by the binary, in the
+  direction that loses data.** SKILL.md said a genuine error writes nothing to
+  stdout and told an agent to fall back to stderr only when stdout was empty.
+  Verified against v0.1.2: `sling logs` on a job that stores no logs exits `3`
+  and still prints `{"lines": [], "has_more": false, …}`, and `sling resolve`
+  on an ambiguous id exits `2` and still prints `{"candidates": […]}`. An agent
+  following the old rule parses that empty `lines` array as "nothing in the
+  log" and reports a clean run — the silent false negative the skill exists to
+  prevent. The rule is now "branch on the exit code, never on whether stdout
+  looks empty", stated once, and the Exit-codes preamble no longer contradicts
+  it.
+- **2026-08-26** — **Exit `4` was routed to `sling login` before the app gate
+  was reached.** The preflight's auth step took *any* exit `4` as a stale
+  credential, but the missing-GitHub-App shape (`You don't have access to org
+  "<name>"`) exits `4` too — and step 5, which handles it, comes later. A user
+  whose app was never installed was sent round a login loop that cannot change
+  the outcome. The auth step now excludes the shape whose stderr names an org.
+- **2026-08-26** — **The `--org` gotcha described the opposite failure.** A
+  scope flag with no value is rejected, not swallowed: `sling usage --org
+  --window 7d` exits `2` with `--org needs a slug (got an empty value).` The
+  reference had it exiting `0` with a wrongly-scoped answer that looks fine.
+- **2026-08-26** — **A nonexistent subcommand exits `1`, not `2`.** The
+  exit-`1` row read only "a crash … a bug report, not a routing decision",
+  which is where the skill's own `sling doctor` `fix_command` gotcha lands. It
+  now names the `unknown command` shape and says to correct the name.
+- **2026-08-26** — **`sling resolve` on a run covering several jobs is
+  ambiguous** — exit `2`, with the candidate list on stdout and on stderr.
+  Undocumented, on the command the routing table reaches for whenever a user
+  pastes an Actions URL.
+- **2026-08-26** — **`--compact` has no observable effect on v0.1.2**, so
+  `--agent` output is indented JSON. Described as exact flag equivalence
+  before, which invited a line-oriented parser.
+- **2026-08-26** — **A private repository name shipped in the skill.**
+  `starslingdev/agent-ci-mastra-test` appeared in an eval prompt and in the
+  `resolve` sample payload; both now use placeholders.
+- **2026-08-26** — **`--agent` was described as belonging on "every
+  invocation"** in the reference, contradicting SKILL.md's rule that it must
+  never reach `sling login` and needs an explicit slug on `sling org switch`.
+
 - **2026-08-25** — **The output-stream rule was wrong for the two exit codes
   that are not errors, and it broke the skill's own preflight.** The `--agent`
   section said a non-zero exit means stdout is empty and stderr carries the
@@ -85,9 +124,9 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   from the routing table**, and the two mutating-verb guards disagreed about
   whether `trigger` counts as a state change. Both now derive from one list.
 - **2026-08-25** — **`--org` was documented as both taking and not taking a
-  value.** Because malformed flags are ignored rather than rejected, `sling
-  usage --org --window 7d` exits `0` having eaten `--window` as the org slug
-  and returns a wrongly-scoped cost answer that looks correct.
+  value.** `sling <cmd> --help` renders it as `[--org | --repo <r>]`, which
+  reads as a bare switch; it is not, and `sling usage --org --window 7d` is a
+  bad invocation.
 
 - **2026-08-25** — **The `sling update` gotcha is now dated to the release it
   applies to.** It is real on 0.1.2, which is what the installer serves, and
