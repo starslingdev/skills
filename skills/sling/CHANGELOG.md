@@ -128,6 +128,19 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   gate before promising `gh`, since with neither CLI there is nothing left to
   fall back to.
 
+- **2026-08-25** — **The most ordinary first-run state was unhandled, and the
+  step next to it gave wrong advice.** Someone who installs `sling` and signs in
+  before installing the GitHub App has no orgs at all: login succeeds, `whoami`
+  succeeds, and then every data command exits `2` with `You don't belong to any
+  orgs yet.` The skill had no account of that message, so it fell through to the
+  exit-`2` row and read as a bad flag. Worse, the preflight's wrong-org step was
+  keyed on `doctor`'s `org` check — which fails for *both* "pick one of several"
+  and "you have none" — so a brand-new user was sent to `sling org switch
+  <slug>` to choose from an empty list. The gate now recognises both shapes of a
+  missing installation (exit `4` for an org you cannot reach, exit `2` for
+  having none), gives them the same answer, and the wrong-org step hands the
+  empty case off instead of claiming it.
+
 ### Notes
 
 - **The install command is described, not printed.** `sling` installs by

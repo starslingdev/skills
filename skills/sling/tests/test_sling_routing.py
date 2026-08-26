@@ -359,3 +359,27 @@ def test_the_gh_gate_matches_the_house_pattern():
     assert "sandbox" in low, (
         "the gh gate lost the sandboxed-shell caution ci-speedup recorded from "
         "a live miss — without it a Codex shell reports a false auth failure")
+
+
+def test_both_shapes_of_a_missing_installation_are_recognised():
+    """`sling` sees nothing until the StarSling GitHub App is installed, and that
+    arrives two ways: exit 4 for an org you cannot reach, and exit 2 with "you
+    don't belong to any orgs yet" for the brand-new user who signed in first.
+    Only the first was handled, so the most ordinary first-run state in the
+    product fell through to whatever the exit-code table happened to say."""
+    low = " ".join(_BODY.split()).lower()
+    assert "don't have access to org" in low, "lost the unreachable-org trigger"
+    assert "don't belong to any orgs" in low, (
+        "lost the zero-org trigger — a new user who has not installed the app "
+        "hits a message the skill does not recognise")
+
+
+def test_the_no_orgs_case_is_not_routed_to_org_switch():
+    """There is no slug to switch to. `doctor`'s org check fails for BOTH "pick
+    one of several" and "you have none", so a step keyed on the check alone
+    sends a brand-new user to choose from an empty list."""
+    low = " ".join(_BODY.split()).lower()
+    assert "there is nothing to switch to" in low or "no slug to switch to" in low, (
+        "the skill no longer separates having no orgs from having several")
+    assert "never a flag problem" in low, (
+        "exit 2 no longer warns that the zero-org case is not a bad invocation")

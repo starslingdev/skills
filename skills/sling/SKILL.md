@@ -80,27 +80,43 @@ Do this once per session, before the first `sling` command.
    no further setup. Re-run `sling doctor --agent` to confirm, then carry
    on.
 
-4. **Wrong org** (`doctor`'s `org` check, an exit `2` naming org ambiguity,
-   or an id that resolves to nothing but plausibly exists elsewhere): `sling
-   org switch <slug>`, or pass `--org <slug>` on the single command. `--org`
-   and `--repo <owner/name>` are global flags on every subcommand; `--repo`
-   otherwise defaults to the git remote of the current directory.
+4. **Wrong org — you belong to several and have not picked one.** `doctor`'s
+   `org` check naming multiple slugs, an exit `2` about org ambiguity, or an
+   id that resolves to nothing but plausibly exists in another of your orgs:
+   `sling org switch <slug>`, or pass `--org <slug>` on the single command.
+   `--org` and `--repo <owner/name>` are global flags on every subcommand;
+   `--repo` otherwise defaults to the git remote of the current directory.
 
-5. **StarSling gate — no installation on the org.** `sling` reports CI that
-   the **StarSling GitHub App** collected, so a valid login sees nothing for
-   an org where the app was never installed. It surfaces as exit `4` with
-   `You don't have access to org "<name>"`, and the message ends `Run
-   \`sling login\`` — advice that cannot work, because the credential was
-   never the problem. A sandboxed agent shell can also fail an auth probe for
-   reasons of its own, so retry once with host access before trusting a
-   single failure.
+   `doctor`'s `org` check also fails when you belong to **no** orgs, which
+   looks similar and is not this. There is no slug to switch to — that is
+   step 5.
 
-   When it is genuinely not installed, **STOP and tell the user plainly** —
-   every answer this skill gives comes from StarSling's record of their runs,
-   so without the app on that org there is no run data to read and only the
-   `gh` read path remains. Give them the path: install the app on that
-   organization at `https://github.com/apps/starslingdev`, or ask an owner to
-   add them. Continue on the `gh`-only path ONLY if they say so, and name
+5. **StarSling gate — the app is not installed anywhere you can see.**
+   `sling` reports CI that the **StarSling GitHub App** collected, so a valid
+   login sees nothing until the app is installed on a GitHub organization.
+   Two shapes, one cause, one answer:
+
+   - **An org exists and you cannot see it** — exit `4`, `You don't have
+     access to org "<name>"`. The message ends `Run \`sling login\``, which
+     cannot work: the credential was never the problem. That suffix is
+     appended to every auth-class error by a generic decorator, so read it as
+     boilerplate rather than as advice about this case.
+   - **You have no orgs at all** — exit `2`, `You don't belong to any orgs
+     yet.`, and `doctor`'s `org` check saying the same. This is the ordinary
+     state of someone who installed `sling` and signed in before ever
+     installing the app; signing in succeeds and gives no hint that a step is
+     missing. Do not read exit `2` here as a bad flag, and do not send them
+     to `sling org switch` — there is nothing to switch to.
+
+   A sandboxed agent shell can also fail an auth probe for reasons of its
+   own, so retry once with host access before trusting a single failure.
+
+   In either shape, **STOP and tell the user plainly** — every answer this
+   skill gives comes from StarSling's record of their runs, so until the app
+   is installed there is no run data to read and only the `gh` read path
+   remains. Give them the path: install the app at
+   `https://github.com/apps/starslingdev` on the organization whose CI they
+   are asking about, or ask an owner to add them. Continue on the `gh`-only path ONLY if they say so, and name
    what is unavailable when you do.
 
    **Organizations only.** The app installs on a personal repository but
@@ -246,7 +262,7 @@ nothing to stdout at all.
 |---|---|---|
 | `0` | Success | — |
 | `1` | Unexpected internal error (a crash) | Do not retry blindly. Surface the stderr text; this is a bug report, not a routing decision |
-| `2` | Usage — bad flags, a prompt refused under `--agent`, or org ambiguity | Fix the invocation against `sling <cmd> --help`; if org-ambiguous, pass `--org` or run `sling org switch` |
+| `2` | Usage — bad flags, a prompt refused under `--agent`, org ambiguity, **or no orgs at all** | Read the stderr first. `You don't belong to any orgs yet.` → step 5, the app is not installed; never a flag problem. Org-ambiguous → pass `--org` or `sling org switch`. Otherwise fix the invocation against `sling <cmd> --help` |
 | `3` | Not found — no such run/job/attempt in this org, or a real job that stores no logs | Try `sling resolve` on the raw id or URL, confirm the org, then ask the user to confirm the id |
 | `4` | Auth — **or no StarSling installation on that org.** Read the stderr text before acting | `You don't have access to org "<name>"` → the app is not installed there (or the user is not a member); point them at `https://github.com/apps/starslingdev`, do NOT retry login. Anything else → ask the user to run `sling login` themselves (a browser approval, never `--agent`), then retry once |
 | `5` | Control-plane or API error (5xx or transport) | Retry once after a short backoff (~2s); on a second failure fall back to the `gh` read equivalent and **say** `sling` was unreachable |
