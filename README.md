@@ -73,7 +73,13 @@ Example reports from real runs:
 [`pallets/flask`](examples/pallets-flask/ci-speedup-findings-report.md) and
 [`microsoft/playwright`](examples/microsoft-playwright/ci-speedup-findings-report.md).
 
-Source: [`skills/ci-speedup/`](skills/ci-speedup/) · [SKILL.md](skills/ci-speedup/SKILL.md) · Learn more: [starsling.dev/ci-speedup](https://starsling.dev/ci-speedup)
+**Read the skill:** [SKILL.md](skills/ci-speedup/SKILL.md) — what it does, step by step ·
+[ARCHITECTURE.md](skills/ci-speedup/ARCHITECTURE.md) — how the pipeline fits together ·
+[CHANGELOG.md](skills/ci-speedup/CHANGELOG.md)
+**The catalog and the methods:** [optimization-patterns.md](skills/ci-speedup/references/optimization-patterns.md) — all 70+ patterns ·
+[wall-clock-methodology.md](skills/ci-speedup/references/wall-clock-methodology.md) — how the merge-gating critical path is derived ·
+[savings-methodology.md](skills/ci-speedup/references/savings-methodology.md) — how every number is sized
+**Everything else:** [`skills/ci-speedup/`](skills/ci-speedup/) · Learn more: [starsling.dev/ci-speedup](https://starsling.dev/ci-speedup)
 
 ---
 
@@ -107,7 +113,11 @@ of the eleven checks are security-adjacent, and it claims nothing further.
 Example report from a real run:
 [`pallets/flask`](examples/pallets-flask/ci-score-report.md), scoring 89/100.
 
-Source: [`skills/ci-score/`](skills/ci-score/) · [SKILL.md](skills/ci-score/SKILL.md) · Learn more: [starsling.dev/ci-score](https://starsling.dev/ci-score)
+**Read the skill:** [SKILL.md](skills/ci-score/SKILL.md) — what it does, step by step ·
+[CHANGELOG.md](skills/ci-score/CHANGELOG.md)
+**The rubric:** [ci-score-methodology.md](skills/ci-score/references/ci-score-methodology.md) — what each check asks and why ·
+[ci-score-spec.json](skills/ci-score/references/ci-score-spec.json) — the eleven checks, machine-readable
+**Everything else:** [`skills/ci-score/`](skills/ci-score/) · Learn more: [starsling.dev/ci-score](https://starsling.dev/ci-score)
 
 ---
 
@@ -177,7 +187,14 @@ It ships in `--advisory` mode, so it does not affect your merge path on day
 one. It becomes blocking when you drop `--advisory` and add the check to your
 repository's required checks.
 
-Source: [`skills/ci-secure/`](skills/ci-secure/) · [SKILL.md](skills/ci-secure/SKILL.md) · Learn more: [starsling.dev/ci-secure](https://starsling.dev/ci-secure)
+**Read the skill:** [SKILL.md](skills/ci-secure/SKILL.md) — what it does, step by step ·
+[CHANGELOG.md](skills/ci-secure/CHANGELOG.md)
+**The vectors and the scope:** [security-patterns.md](skills/ci-secure/references/security-patterns.md) — all ten attack chains ·
+[why-these-ten.md](skills/ci-secure/references/why-these-ten.md) — the selection criterion, and what was rejected ·
+[security-facts.md](skills/ci-secure/references/security-facts.md) — the pass/fail config checks ·
+[ci-gate.md](skills/ci-secure/references/ci-gate.md) — running it as a CI check ·
+[troubleshooting.md](skills/ci-secure/references/troubleshooting.md)
+**Everything else:** [`skills/ci-secure/`](skills/ci-secure/) · Learn more: [starsling.dev/ci-secure](https://starsling.dev/ci-secure)
 
 ---
 
@@ -224,7 +241,12 @@ nothing. Organizations only; the app installs on a personal repository but
 StarSling never picks up its jobs. Everything the skill does is a read, unless
 you ask for a state change and it tells you before making it.
 
-Source: [`skills/sling/`](skills/sling/) · [SKILL.md](skills/sling/SKILL.md)
+**Read the skill:** [SKILL.md](skills/sling/SKILL.md) — the routing table, the preflight, the gotchas ·
+[CHANGELOG.md](skills/sling/CHANGELOG.md)
+**The commands:** [command-reference.md](skills/sling/references/command-reference.md) — every flag and JSON shape, read off the binary ·
+[gh-fallback.md](skills/sling/references/gh-fallback.md) — what `gh` does that `sling` cannot ·
+[command-surface.json](skills/sling/references/command-surface.json) — the complete command list, machine-readable
+**Everything else:** [`skills/sling/`](skills/sling/) · Learn more: [docs.starsling.dev/sling-cli](https://docs.starsling.dev/sling-cli)
 
 ---
 
