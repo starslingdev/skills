@@ -8,7 +8,7 @@
       "why": "read, one job"
     },
     {
-      "prompt": "why is this run failing \u2014 here's the Actions URL",
+      "prompt": "why is this run failing — here's the Actions URL",
       "route": "sling",
       "command": "sling why",
       "why": "read, one run; a URL resolves"
@@ -153,6 +153,24 @@
       "prompt": "why did my CircleCI job fail",
       "route": "none",
       "why": "not GitHub Actions; neither CLI covers it"
+    },
+    {
+      "prompt": "why did CI fail on my last push",
+      "route": "sling",
+      "command": "sling why",
+      "why": "read, one failure; no id given — resolve the latest red run for the current branch first"
+    },
+    {
+      "prompt": "what's breaking the nightly build",
+      "route": "sling",
+      "command": "sling why",
+      "why": "read, recurring failure; runs list finds the recent reds, why classifies them"
+    },
+    {
+      "prompt": "is this test actually broken or just flaky",
+      "route": "sling",
+      "command": "sling why",
+      "why": "read, failure classification; compare the classified cause across recent runs, not one log"
     }
   ]
 }

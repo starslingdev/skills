@@ -6,6 +6,13 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 ### Added
 
+- **2026-08-26** — **The launch-announcement prompts are pinned in the routing
+  eval.** "why did CI fail on my last push", "what's breaking the nightly
+  build", and "is this test actually broken or just flaky" are published as
+  example prompts, so they join `prompt-routing.json` as required rows a
+  description edit cannot silently drop (30 rows; the floor and the required
+  pins in the guard moved with them).
+
 - **2026-08-25** — **Initial skill.** Routes GitHub Actions questions between
   `sling` (StarSling's read-only, agent-first CLI) and `gh`, so an agent stops
   defaulting to whichever tool it already knows. Ships the routing table, the
@@ -43,6 +50,24 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   turn the handoff rule into an approximation. The 300-line command reference
   gained a contents block, since long reference files get previewed with
   partial reads.
+
+### Changed
+
+- **2026-08-26** — **Re-pinned every version-pinned fact against `sling`
+  v0.1.4** (the version the installer now serves; 0.1.3 and 0.1.4 shipped
+  today, both release-plumbing only). Re-verified on the new binary:
+  `--compact` still absent, `sling logs` still rejects `--org`/`--repo`
+  (exit `2`), an empty scope-flag value still exits `2`, `sling exit-codes`
+  still lists only `0`–`5`, `sling update` still does not exist.
+  `command-surface.json` now records `cli_version: "0.1.4"`.
+- **2026-08-26** — **The `doctor` `fix_command` gotcha is rewritten around
+  the surviving lesson.** The 0.1.2 bug it described is fixed upstream: the
+  `version` check now emits the installer one-liner (shown as a placeholder —
+  this skill ships no literal `curl | sh`), plus `warn: true` on an
+  advisory upgrade notice, documented in the reference's doctor shape. The
+  rule stays: never run a `fix_command` unchecked — other checks emit
+  templates with unfilled placeholders (`git remote add origin
+  <github-url>`).
 
 ### Fixed
 

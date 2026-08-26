@@ -2,7 +2,7 @@
 
 Every flag list and JSON shape below was **read off the binary**, not off
 documentation: each command was run with `--agent` against a live control
-plane on **`sling` v0.1.2**, 2026-08-25. Where the published docs and the
+plane on **`sling` v0.1.4**, 2026-08-26. Where the published docs and the
 binary disagree, the binary wins and the disagreement is noted.
 
 Field names are `snake_case` everywhere **except `whoami`**. Objects are
@@ -32,7 +32,7 @@ Available on the root command and every subcommand **except `sling logs`**, whos
 
 | Flag | Meaning |
 |---|---|
-| `--agent` | Machine mode. The PUBLISHED DOCS call it equivalent to `--json --compact --no-input --no-color --yes`; no help page says that, and `--compact` is not a flag this binary has (0.1.2) — it changes nothing because unknown flags are ignored. Pass it on every **data** command — never on `sling login`, and give `sling org switch` an explicit slug |
+| `--agent` | Machine mode. The PUBLISHED DOCS call it equivalent to `--json --compact --no-input --no-color --yes`; no help page says that, and `--compact` is not a flag this binary has (0.1.4) — it changes nothing because unknown flags are ignored. Pass it on every **data** command — never on `sling login`, and give `sling org switch` an explicit slug |
 | `--json` | JSON on stdout (implied by `--agent`) |
 | `--org <slug>` | Org context. Auto-resolved when unambiguous; default set by `sling org switch` |
 | `--repo <owner/name>` | Repo context. Defaults to the git remote of the current directory |
@@ -82,26 +82,18 @@ Exits `0` healthy, **`10` unhealthy**.
             {"key": "clock_skew", "ok": true, "detail": "1s vs server"},
             {"key": "git_remote", "ok": true, "detail": "origin → …"},
             {"key": "patch_tooling", "ok": true, "detail": "git found (/usr/bin/git)"},
-            {"key": "version", "ok": false, "skipped": true, "detail": "on 0.1.2",
-             "fix_command": "sling update"},
+            {"key": "version", "ok": true, "warn": true,
+             "detail": "version 0.1.3\n0.1.4 is available, to update:",
+             "fix_command": "<the installer one-liner from the installation page>"},
             {"key": "org", "ok": true, "detail": "starslingdev (paid)"}]}
 ```
 
-`"skipped": true` means the check produced NO verdict — an advisory upgrade
-notice (`version`), or a check that could not run at all (`clock_skew` and
-`org` under an unreachable control plane read `ok: false, skipped: true,
-"not checked"`). Read `detail`; a skipped check is never a pass.
-
-**On v0.1.2 the `version` check's `fix_command` is not a real subcommand.**
-`doctor` emits `"fix_command": "sling update"`, and `sling update` **does not
-exist** — the binary rejects it as an unknown command. Never run a
-`fix_command` unchecked; to upgrade, re-run the installer from the
-installation page.
-
-Already fixed on the CLI's main branch, where the check emits the installer
-one-liner instead, so this note expires with the next release — but 0.1.2 is
-the version the installer serves, so it is the version users have. Drop this
-paragraph once the served release moves.
+`"skipped": true` means the check produced NO verdict — a check that could
+not run at all (`clock_skew` and `org` under an unreachable control plane
+read `ok: false, skipped: true, "not checked"`). Read `detail`; a skipped
+check is never a pass. An outdated-but-working version reads `ok: true,
+warn: true` with the upgrade one-liner in `fix_command` — advisory, not a
+failure (up to date it reads `ok: true, "up to date (<version>)"`).
 
 ### `sling whoami [--agent]`
 

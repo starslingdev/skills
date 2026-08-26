@@ -597,7 +597,7 @@ def test_the_scope_flags_are_not_claimed_to_be_universal():
 def test_agent_is_not_described_as_an_alias_for_flags_it_does_not_have():
     """The reference's stated premise is that it was read off the binary.
 
-    `--compact` does not exist in v0.1.2 — the published docs call `--agent`
+    `--compact` does not exist in v0.1.4 — the published docs call `--agent`
     "exactly equivalent to --json --compact --no-input --no-color --yes", and
     repeating that attributes to the tool a contract no help page states.
     """
@@ -765,7 +765,7 @@ def test_the_compound_ask_rule_orders_read_before_write():
 
 _GOTCHA_CLAUSES = [
     # (anchor that identifies the bullet, clause that carries its meaning)
-    ("recommends a command that does not exist", "never run a `fix_command` unchecked"),
+    ("advice, not a verified command", "never run a `fix_command` unchecked"),
     ("unknown flags are ignored, not rejected", "check the rows you got back"),
     ("`--help` lists an abridged flag set", "absence from `--help` is not absence"),
     ("zero phase in `sling time`", "not measured"),
@@ -814,7 +814,7 @@ def test_routing_artifact_is_load_bearing():
     repointing a spend prompt at `sling why` passed. Mirror ci-score's house pattern —
     a floor, no duplicates, and required prompt→command pins."""
     rows = _ROUTING["routings"]
-    assert len(rows) >= 25, f"the routing artifact shrank to {len(rows)} rows"
+    assert len(rows) >= 28, f"the routing artifact shrank to {len(rows)} rows"
     prompts = [r["prompt"] for r in rows]
     assert len(prompts) == len(set(prompts)), "duplicate prompts in the routing artifact"
     required = {
@@ -823,6 +823,11 @@ def test_routing_artifact_is_load_bearing():
         "how many runner minutes did each repo use": "sling usage",
         "which workflow is costing us the most": "sling top",
         "what did we spend on CI this month": "sling bill",
+        # the three prompts published in the launch announcement — a description
+        # edit must never silently stop these exact phrasings from routing here
+        "why did CI fail on my last push": "sling why",
+        "what's breaking the nightly build": "sling why",
+        "is this test actually broken or just flaky": "sling why",
     }
     by_prompt = {r["prompt"]: r for r in rows}
     for prompt, command in required.items():
