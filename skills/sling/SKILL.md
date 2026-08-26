@@ -335,7 +335,10 @@ running the binary; none of them announce themselves at runtime.
   had no runs in the window and when StarSling is not watching that repo at
   all. The payload cannot tell them apart, so an empty result means this
   check did NOT run — say so with the reason you cannot rule out, rather than
-  reporting "you have no CI runs" as a fact about their repo.
+  reporting "you have no CI runs" as a fact about their repo. A repo that does
+  not exist at all returns the same empty shape at exit `0` (verified live), so
+  when the answer matters, a cheap `gh` read — `gh repo view`, `gh run list` —
+  settles which of the three it is.
 - **Unknown flags are ignored, not rejected.** `sling runs list --bogus`
   exits `0` and returns unfiltered rows. Exit `0` is therefore not evidence
   that a filter applied — check the rows you got back before reporting a
