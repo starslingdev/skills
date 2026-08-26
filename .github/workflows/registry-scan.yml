@@ -33,32 +33,27 @@ permissions:
   contents: read
 
 env:
-  # THE GATING RULE (owner ruling, 2026-08-10): this build fails on Snyk Agent Scan's critical
-  # class only — the E-codes. Warning-class findings (W-codes) never fail CI.
+  # THE GATING RULE, restated for scanner 0.6.0 (owner ruling 2026-08-10, re-ruled
+  # 2026-08-26). 0.6.0 has no E/W classes — it reports named risks with 0-1000 scores —
+  # so "criticals block, warnings do not" is now a list of risk NAMES that do not block.
   #
-  # They are not hidden, though; "does not block" must not decay into "does not appear". Every
-  # W finding is surfaced three ways on every run: a `::warning::` annotation on the checks tab
-  # (queryable through the checks API, which is what a review agent reads), a table in the job
-  # summary, and the raw finding set uploaded as the `registry-scan-findings` artifact. A human
-  # or a review agent judges them; CI does not block on them.
+  # The list and the reasoning live in .github/scripts/registry_scan_contract.py, which
+  # is the single place this workflow's three readers get the vocabulary from. It is
+  # passed here as `--ignore-risks`, which is the flag that takes risk names.
   #
-  # The scanner has no severity threshold — `--ignore-issues-codes` is its only gating knob — so
-  # the rule is expressed by enumerating the W class. This is every W-code published in
-  # https://github.com/snyk/agent-scan/blob/main/docs/issue-codes.md. It is a class rule, not
-  # fifteen individual judgements, so it carries no per-code justification. W011 "exposure to
-  # untrusted third-party content", the one that fires on these skills today, is an accurate
-  # description of what they do: they read a repository's own CI configuration, workflow files,
-  # and job logs, none of which the skill authored.
-  #
-  # NO E-CODE MAY EVER APPEAR HERE — that would silently disarm the gate, and
-  # tests/test_registry_scan_workflow.py fails if one does. When the scanner publishes a new
-  # W-code it will fail this build once; adding it here is the conscious update that follows.
-  IGNORED_ISSUE_CODES: W001,W007,W008,W009,W011,W012,W013,W014,W015,W016,W017,W018,W019,W020,W021
-
-  # The scanner reads skills out of a directory of `<name>/SKILL.md` subdirectories. This is the
-  # installable tree: exactly what the `skills` CLI copies onto a user's machine and what a
-  # registry publishes.
+  # NOT `--ignore-failure-codes`. That is a DIFFERENT flag, not the renamed one: it
+  # accepts only the scanner's X001-X009 runtime codes. Passing the old W-list to it
+  # made the scanner print `unknown failure code: W001` fifteen times a run and left
+  # every risk of every score blocking — the gating policy off, on a green build.
   SCAN_PATH: skills
+
+  # Read from the contract so the pin is named in one place. Every coverage-gap message
+  # below ends with it.
+  STALE_PIN_HINT: >-
+    If this is not obviously a problem with the skills themselves, suspect the scanner
+    pin first: this gate runs snyk-agent-scan==0.6.0, and a newer release can rename a
+    flag, a risk, or the JSON shape out from under it. Compare against the current
+    release before assuming the tree is at fault.
 
 jobs:
   scan:
@@ -146,7 +141,7 @@ jobs:
       # step goes red and we find out from our own CI instead of from a public audit page.
       # The offending string is assembled at runtime — committing one is the thing we're guarding
       # against — so nothing in this repository contains it. It runs the gate's real flags,
-      # IGNORED_ISSUE_CODES included, so an ignore list that grew to swallow the anchor rule
+      # the non-blocking risk list included, so an exemption that grew to swallow the anchor
       # would fail here rather than quietly neutering the gate.
       #
       # `continue-on-error` here does NOT make the control advisory — the
@@ -164,20 +159,20 @@ jobs:
         run: python .github/scripts/registry_scan_redprove.py
 
       # Two passes, on purpose, and exactly two — the scanner is a network service, so every
-      # invocation costs. `--ignore-issues-codes` filters findings out of the printed report as
-      # well as out of the exit status, so the gating pass below is structurally incapable of
-      # showing a warning: it runs with the very flags that hide them. This pass carries no
-      # ignore list and is the only one that sees everything.
+      # invocation costs. `--ignore-risks` nulls the exempt risks out of the response BEFORE it
+      # is printed, not just before the exit status is computed, so the gating pass below is
+      # structurally incapable of showing an exempt finding: it runs with the very flag that
+      # hides them. This pass carries no exemption list and is the only one that sees everything.
       #
       # It emits `--json` rather than the rich report because the JSON is what the next step
-      # turns into annotations, a summary table, and an artifact — and because the scanner's own
-      # printer silently drops the codes W003-W006 from the result, mutating it in place as it
-      # prints. JSON skips the printer entirely, so it is strictly the more complete output.
+      # turns into annotations, a summary table, and an artifact, and because it carries the
+      # per-entry `error` objects and the 0-1000 scores that the rich printer renders for a
+      # human rather than for a parser.
       - name: Scan (all findings, unfiltered)
         continue-on-error: true
         run: |
           echo "Scanning '${SCAN_PATH}' with no ignore list — every finding the scanner has."
-          uvx snyk-agent-scan@latest scan "${SCAN_PATH}" --json > registry-scan-findings.json
+          uvx snyk-agent-scan==0.6.0 scan "${SCAN_PATH}" --json > registry-scan-findings.json
 
       # Warnings never fail this build, so they must be impossible to miss instead. This writes
       # each one to the checks tab as an annotation (where a review agent can query it), to the
@@ -197,9 +192,9 @@ jobs:
           if-no-files-found: warn
 
       # The authoritative gate, and the only step that fails on a finding. `--ci` turns any
-      # remaining finding into exit 1; with the W class ignored, "remaining" means the critical
-      # E-class, plus the scanner's own X-class runtime failures, which are deliberately NOT
-      # ignored — a scan that broke is not a scan that passed.
+      # remaining risk into exit 1; with the one exempt risk ignored, "remaining" means every
+      # other risk 0.6.0 can report, plus the scanner's own runtime failures, which are
+      # deliberately NOT ignored — a scan that broke is not a scan that passed.
       # `--dangerously-run-mcp-servers` is required by `--ci`; it only affects MCP server configs,
       # and this path contains skill directories only, so nothing is executed.
       #
@@ -207,14 +202,97 @@ jobs:
       # "we looked and found something". Without it that step reads only the
       # control's outcome, and a run where the control failed AND a critical was
       # reported goes red annotated NOT A FINDING.
+      #
+      # The exit code is captured rather than allowed to fail the step, because
+      # `--ci` uses exit 1 for "a finding is present" while the scanner uses exit
+      # 2 for "I could not start" — a usage error from a renamed flag, a missing
+      # token, an unparseable argument. Letting both surface as a bare non-zero
+      # made the step below read a crash as a finding, and for five days this
+      # build announced `The gate reported a critical finding in skills` when
+      # nothing had been scanned at all (2026-08-20 → 2026-08-25, after the
+      # scanner renamed `--ignore-issues-codes`). A scan that never ran is a
+      # coverage gap; only exit 1 is a finding.
       - name: Gate on critical findings
         id: gate
         run: |
-          uvx snyk-agent-scan@latest scan "${SCAN_PATH}" \
+          # Build the exemption list FIRST and check it. Inlining it into the command as
+          # `--ignore-risks "$(python ...)"` discards the shim's exit status: a traceback
+          # becomes an empty argument, the scanner exempts nothing, and the owner's ruling
+          # is silently off — which on a tree with no risks is a green build.
+          if ! ignored=$(python .github/scripts/registry_scan_ignored.py); then
+            echo "scan_class=did-not-run" >> "${GITHUB_OUTPUT}"
+            echo "::error title=REGISTRY SCAN DID NOT RUN::The exemption list could not be built from .github/scripts/registry_scan_contract.py, so the gating rule is unknown and nothing was scanned. This is a coverage gap, not a finding and not a clean result. ${STALE_PIN_HINT}"
+            exit 1
+          fi
+          if [ -z "${ignored}" ]; then
+            echo "scan_class=did-not-run" >> "${GITHUB_OUTPUT}"
+            echo "::error title=REGISTRY SCAN DID NOT RUN::The exemption list came back empty. That is never correct — the ruling exempts exactly one risk — and an empty --ignore-risks would run the gate under a policy nobody chose. ${STALE_PIN_HINT}"
+            exit 1
+          fi
+          set +e
+          uvx snyk-agent-scan==0.6.0 scan "${SCAN_PATH}" \
             --ci \
             --verbose \
             --dangerously-run-mcp-servers \
-            --ignore-issues-codes "${IGNORED_ISSUE_CODES}"
+            --ignore-risks "${ignored}" 2>&1 | tee gate-output.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "scan_exit=${code}" >> "${GITHUB_OUTPUT}"
+          # The scanner does not fail on an exemption name it does not recognise: it prints
+          # `Warning: unknown risk name: <n>` and drops it. That is precisely how the last
+          # outage hid — fifteen `unknown failure code: W001` lines on a green build — so a
+          # retired name is read here rather than left to be noticed when the risk next fires.
+          if grep -q 'unknown risk name' gate-output.txt; then
+            echo "scan_class=exemption-stale" >> "${GITHUB_OUTPUT}"
+            echo "::error title=REGISTRY SCAN EXEMPTION IS STALE::The scanner does not recognise a risk name in this gate's exemption list, so it dropped it and scanned under a policy nobody chose. Update NON_BLOCKING_RISKS in .github/scripts/registry_scan_contract.py to the scanner's current catalog. This is a coverage gap, not a finding. ${STALE_PIN_HINT}"
+            exit 1
+          fi
+          if [ "${code}" -eq 0 ]; then
+            echo "Gate passed: no critical finding under '${SCAN_PATH}'."
+            echo "scan_class=clean" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [ "${code}" -eq 1 ]; then
+            # Exit 1 is TWO different events. `--ci` returns it for an unignored
+            # E-class finding — a real security result — and equally for the
+            # scanner's own X-class runtime failure, which this gate deliberately
+            # does not ignore because a scan that broke is not a scan that passed.
+            # Both are failures; only one is a finding, and reporting an X as a
+            # critical is the same false verdict as reporting a usage error was.
+            # 0.6.0 names its reason in the exit line: `CI (--ci): exiting with
+            # code 1 (risks found)` for a finding, `runtime failure codes: X###` when
+            # the scanner itself broke. Both are exit 1, and only the first is a
+            # security result. Grepping for E-codes here matched nothing 0.6.0 emits,
+            # so every real finding fell through to the coverage-gap branch below and
+            # was announced as NOT A FINDING.
+            #
+            # ANCHORED on the exit line, not searched for anywhere in the log. This step
+            # captures the scanner's `--verbose` output, which echoes the description and
+            # evidence text of the skills being scanned — and these are CI-security skills,
+            # for which "risks found" is ordinary prose. A bare substring search let the
+            # scanned tree classify a crashed scan as a security finding.
+            if grep -q 'exiting with code 1 (risks found' gate-output.txt; then
+              echo "scan_class=finding" >> "${GITHUB_OUTPUT}"
+              # A titled annotation, not a bare echo: the reporter deliberately leaves
+              # blocking risks to this step, so without one a real finding is the only
+              # failure state on this workflow that reaches the checks API with nothing
+              # attached — on the run a review agent most needs to read.
+              echo "::error title=REGISTRY SCAN FINDING::The gate reported a blocking risk under '${SCAN_PATH}'. This IS a security finding: its risk name, 0-1000 score and evidence are in this step's log above."
+              echo "Gate failed: a blocking risk is present. Its name and evidence are above."
+              exit 1
+            fi
+            if grep -q 'runtime failure codes:' gate-output.txt; then
+              echo "scan_class=operational" >> "${GITHUB_OUTPUT}"
+              echo "::error title=REGISTRY SCAN DID NOT COMPLETE::The scanner reported a runtime failure, not a finding. Nothing under '${SCAN_PATH}' was fully checked. This is a coverage gap, not a security finding. ${STALE_PIN_HINT}"
+              exit 1
+            fi
+            echo "scan_class=indeterminate" >> "${GITHUB_OUTPUT}"
+            echo "::error title=REGISTRY SCAN RESULT UNCLASSIFIED::The scanner exited 1 without naming a reason on its exit line, so this run cannot say whether that was a risk it found or a runtime failure of its own. Read the log above before treating it as either. ${STALE_PIN_HINT}"
+            exit 1
+          fi
+          echo "scan_class=did-not-run" >> "${GITHUB_OUTPUT}"
+          echo "::error title=REGISTRY SCAN DID NOT RUN::The scanner exited ${code} without completing a scan — it could not start, so NOTHING under '${SCAN_PATH}' was checked. This is a coverage gap, not a finding and not a clean result. Read this step's log: a usage error here usually means the scanner renamed a flag out from under us. ${STALE_PIN_HINT}"
+          exit 1
 
       # Two red checks that mean opposite things must not look the same. A gate
       # failure above means "a critical finding is in this tree". This step means
@@ -231,12 +309,22 @@ jobs:
       - name: Report the coverage gap
         if: ${{ !cancelled() }}
         run: |
+          # A SKIPPED gate is not a clean gate, and a passing control does not make a run
+          # whose gate never executed meaningful. The steps between the control and the
+          # gate are not all continue-on-error — `Surface findings` fails on unreadable
+          # scan output — so this is a reachable state, and it must be read BEFORE the
+          # control's verdict rather than after it, which is what made the branch at the
+          # end of this step unreachable in exactly the case it was written for.
+          if [ "${{ steps.gate.outcome }}" != "success" ] && [ "${{ steps.gate.outcome }}" != "failure" ]; then
+            echo "::error title=REGISTRY SCAN GATE DID NOT RUN::The gating scan did not run (outcome: ${{ steps.gate.outcome }}), so nothing was checked for critical findings. Read the failing step above. This is a coverage gap, not a clean result. ${STALE_PIN_HINT}"
+            exit 1
+          fi
           if [ "${{ steps.red_proof.outcome }}" = "success" ]; then
             echo "Control passed: the scanner reported the anchor finding, so this run's result is meaningful."
             exit 0
           fi
           if [ "${{ steps.red_proof.outcome }}" != "failure" ]; then
-            echo "::error title=REGISTRY SCAN CONTROL DID NOT RUN::The control step did not run (outcome: ${{ steps.red_proof.outcome }}), so nothing here established whether the scanner can see. Read the failing step above."
+            echo "::error title=REGISTRY SCAN CONTROL DID NOT RUN::The control step did not run (outcome: ${{ steps.red_proof.outcome }}), so nothing here established whether the scanner can see. Read the failing step above. ${STALE_PIN_HINT}"
             exit 1
           fi
           # The two failures are not exclusive, and this ordering matters: a blind
@@ -244,26 +332,22 @@ jobs:
           # in the tree, and the unfiltered pass behind the control can still
           # surface one. Announcing the coverage gap over that run would put
           # "NOT A FINDING" on the one result a human most needs to read.
+          if [ "${{ steps.gate.outcome }}" = "failure" ] && [ "${{ steps.gate.outputs.scan_class }}" != "finding" ]; then
+            echo "::error title=REGISTRY SCAN DID NOT RUN — NOT A FINDING::The scan did not produce a finding (exit ${{ steps.gate.outputs.scan_exit }}, class ${{ steps.gate.outputs.scan_class }}), so nothing under ${SCAN_PATH} was verified clean. This is a coverage gap. Do NOT read it as a security finding. ${STALE_PIN_HINT}"
+            exit 1
+          fi
           if [ "${{ steps.gate.outcome }}" = "failure" ]; then
-            echo "::error title=REGISTRY SCAN FINDING — AND THE CONTROL WAS BLIND::The gate reported a critical finding in ${SCAN_PATH}. Treat it as a real finding and read the gate step above for its issue code. Separately, the control also failed, so the scan's SILENCE elsewhere carries no information — this run is a floor on what is present, not a ceiling."
+            echo "::error title=REGISTRY SCAN FINDING — AND THE CONTROL WAS BLIND::The gate reported a critical finding in ${SCAN_PATH}. Treat it as a real finding and read the gate step above for its risk name and score. Separately, the control also failed, so the scan's SILENCE elsewhere carries no information — this run is a floor on what is present, not a ceiling."
             {
               echo "## Registry scan: a finding, on a run that also verified nothing else"
               echo ""
               echo "The gating step reported a critical finding under \`${SCAN_PATH}\`."
-              echo "**This IS a security finding** — its issue code is in the gate step's log."
+              echo "**This IS a security finding** — its risk name and score are in the gate step's log."
               echo ""
               echo "The control skill ALSO came back clean on this run, so everything the"
               echo "scan did NOT report is unverified. Treat the finding above as a floor,"
               echo "not as the complete set."
             } >> "${GITHUB_STEP_SUMMARY}"
-            exit 1
-          fi
-          # A SKIPPED gate is not a clean gate. The steps between the control and
-          # the gate are not all continue-on-error, so one of them failing leaves
-          # the gate unrun — and the coverage-gap text below asserts a verified
-          # cause that such a run never established.
-          if [ "${{ steps.gate.outcome }}" != "success" ]; then
-            echo "::error title=REGISTRY SCAN GATE DID NOT RUN::The gating scan did not run (outcome: ${{ steps.gate.outcome }}), so nothing was checked for critical findings. Read the failing step above. This is a coverage gap, not a clean result."
             exit 1
           fi
           echo "::error title=REGISTRY SCAN COVERAGE GAP — NOT A FINDING::The scanner reported nothing on a deliberately malicious control skill, so this run verified NOTHING about ${SCAN_PATH}. This is a coverage gap, not a clean result and not a security finding."
@@ -276,7 +360,7 @@ jobs:
             echo "means nothing either."
             echo ""
             echo "**This is not a security finding.** A finding fails the gate step above and"
-            echo "names its issue code."
+            echo "names its risk."
             echo ""
             echo "Known cause, verified against the live API on 2026-08-19: the analysis"
             echo "endpoint answers HTTP 200 with an empty finding set on both API versions it"
