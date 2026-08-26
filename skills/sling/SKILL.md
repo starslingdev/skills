@@ -92,8 +92,14 @@ Do this once per session, before the first `sling` command.
    `org` check naming multiple slugs, an exit `2` about org ambiguity, or an
    id that resolves to nothing but plausibly exists in another of your orgs:
    `sling org switch <slug>`, or pass `--org <slug>` on the single command.
-   `--org` and `--repo <owner/name>` are global flags on every subcommand;
-   `--repo` otherwise defaults to the git remote of the current directory.
+
+   `--org` and `--repo <owner/name>` are accepted by most subcommands but
+   **not by `sling logs`**, which parses strictly and rejects both with exit
+   `2` (`Unknown flag "--org"`). That is the command this routing table
+   reaches for most, so fix a wrong org for a logs read by switching the
+   default rather than by adding a flag to the call. `--repo` otherwise
+   defaults to the git remote of the current directory, and takes
+   `owner/name` — a bare repo name is rejected with exit `2`.
 
    `doctor`'s `org` check also fails when you belong to **no** orgs, which
    looks similar and is not this. There is no slug to switch to — that is
@@ -105,7 +111,12 @@ Do this once per session, before the first `sling` command.
    Two shapes, one cause, one answer:
 
    - **An org exists and you cannot see it** — exit `4`, `You don't have
-     access to org "<name>"`. The message ends `Run \`sling login\``, which
+     access to org "<name>"`. **Rule out a typo first.** A slug that could
+     never exist returns byte-identically, so this message alone does not
+     establish that an org is real: `sling org switch <slug>` answers with
+     `Unknown org "<slug>" — your orgs: …`, which both settles it and prints
+     the list. Telling someone to install a GitHub App on an organization
+     they mistyped is worse than saying nothing. The message ends `Run \`sling login\``, which
      cannot work: the credential was never the problem. That suffix is
      appended to every auth-class error by a generic decorator, so read it as
      boilerplate rather than as advice about this case.
@@ -143,13 +154,16 @@ Do this once per session, before the first `sling` command.
 
 ## Always pass `--agent`
 
-`--agent` is a global machine-mode flag: its own help describes it as
-`--json --compact --no-input --no-color --yes`. Pass it on every **data**
-command and parse stdout as JSON. Do not also pass `--json`; `--agent`
-already implies it.
+`--agent` is the machine-mode flag: JSON on stdout, no prompts, no colour.
+Pass it on every **data** command and parse stdout as JSON. Do not also pass
+`--json` — every help page that mentions the pair renders them together as
+`--json, --agent  Machine output on stdout`.
 
-**`--compact` has no observable effect on v0.1.2** — output is
-pretty-printed, indented JSON with or without it, under `--agent` too. Feed
+**Do not describe it as an alias for a longer flag list.** The published docs
+call it "exactly equivalent to `--json --compact --no-input --no-color
+--yes`", and on v0.1.2 `--compact` is not a flag this binary has at all:
+passing it changes nothing because unknown flags are ignored, not because it
+does anything. Output is pretty-printed, indented JSON either way, so feed
 stdout to a real JSON parser and never to a line-oriented one that assumes
 one object per line.
 

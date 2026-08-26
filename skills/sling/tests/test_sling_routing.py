@@ -82,6 +82,22 @@ def _mentions(text: str) -> set[str]:
     return found
 
 
+def _preflight_step(n: int) -> str:
+    """The text of one numbered preflight step, and nothing else.
+
+    Every guard below was originally written against the whole of `_BODY`, which is why
+    they were all vacuous: the phrases they look for also occur in the exit-code table
+    and in the references, so DELETING THE ENTIRE APP GATE left all of them green.
+    A guard for a step has to read that step.
+    """
+    start = _BODY.index(f"\n{n}. **")
+    try:
+        end = _BODY.index(f"\n{n + 1}. **", start)
+    except ValueError:
+        end = _BODY.index("\n## ", start)
+    return _BODY[start:end]
+
+
 def test_surface_capture_is_not_empty():
     """Positive control: an empty or renamed `groups` block would make every
     membership assertion below pass vacuously."""
@@ -316,16 +332,22 @@ def test_exit_four_is_not_treated_as_a_login_problem_unconditionally():
         "exit 4 no longer warns against retrying login for the org case")
 
 
-def test_the_app_precondition_is_stated_somewhere_a_reader_will_hit_it():
-    """A valid login sees nothing for an org without the app installed. That is
-    a precondition, not an error case, and nothing in `sling doctor` checks it —
-    so the skill is the only place a user can learn it."""
-    body_and_refs = _BODY + "".join(
-        r.read_text() for r in sorted((_SKILL / "references").glob("*.md")))
-    assert "github.com/apps/starslingdev" in body_and_refs, (
-        "the skill no longer says where to install the GitHub App")
-    assert "personal" in body_and_refs.lower(), (
-        "the skill no longer notes that personal repositories are unsupported")
+def test_the_app_gate_survives_in_the_step_that_owns_it():
+    """Scoped to step 5, because a global search could not see it disappear.
+
+    Deleting the entire gate — both failure shapes, the STOP, the install path, the
+    organizations-only rule — left all 36 guards green, because every phrase they
+    looked for also occurs in the exit-code table or a reference. A guard for the
+    centrepiece of this skill has to read the centrepiece.
+    """
+    step = " ".join(_preflight_step(5).split()).lower()
+    assert "github.com/apps/starslingdev" in step, (
+        "step 5 no longer gives the app install path")
+    assert "stop" in step, "step 5 no longer tells the agent to stop and explain"
+    assert "organizations only" in step or "organisations only" in step, (
+        "step 5 no longer says the app does not work on personal repositories")
+    assert "don't have access to org" in step and "don't belong to any orgs" in step, (
+        "step 5 no longer recognises both shapes of a missing installation")
 
 
 def test_an_empty_result_is_not_documented_as_proof_of_no_ci():
@@ -340,46 +362,53 @@ def test_an_empty_result_is_not_documented_as_proof_of_no_ci():
 
 
 def test_the_gh_gate_matches_the_house_pattern():
-    """`gh` is half this skill's routing table, and it authenticates separately
-    from `sling` — a working `sling` says nothing about whether `gh` is signed
-    in. ci-speedup's gh gate already encodes what this costs to get wrong,
-    including a live miss: a sandboxed agent shell cannot reach keyring
-    credentials, so a single failed probe is not proof of anything. Re-deriving
-    a thinner version of that gate is how the lesson gets lost."""
-    # Whitespace-normalised: this prose is hard-wrapped, so `gh auth status`
-    # legitimately spans a line break and a naive substring test would report a
-    # missing gate that is right there.
-    text = _BODY + (_SKILL / "references" / "gh-fallback.md").read_text()
-    low = " ".join(text.split()).lower()
-    assert "isn't installed" in low or "is installed" in low, (
-        "the gh gate no longer checks whether gh is INSTALLED, only whether it "
-        "is authenticated — two different failures with the same consequence")
-    assert "gh auth status" in low, "the gh gate lost its auth probe"
-    # A bounded match, not a substring test. CodeQL's incomplete-URL-sanitization
-    # rule fires on any `in` check against a host — correctly in general, since
-    # `"cli.github.com" in text` is satisfied by `evil-cli.github.com.example`, the
-    # look-alike shape this repo has shipped once and been rated CRITICAL for. Here the
-    # subject is our own documentation rather than an untrusted URL, but the weakness is
-    # the same either way, so the check is anchored: scheme in front, and nothing that
-    # could extend the host behind.
-    assert re.search(r"https://cli\.github\.com(?![\w.-])", low), (
-        "the gh gate no longer gives the install path")
-    assert "sandbox" in low, (
-        "the gh gate lost the sandboxed-shell caution ci-speedup recorded from "
-        "a live miss — without it a Codex shell reports a false auth failure")
+    """Scoped per file to the gh gate itself, not to the document.
+
+    `gh` authenticates separately from `sling`, and ci-speedup's gate already encodes
+    what this costs to get wrong — including a live miss: a sandboxed agent shell
+    cannot reach keyring credentials, so one failed probe proves nothing.
+
+    Every assertion here used to search SKILL.md and the reference as one blob, which
+    made three of them vacuous: "is installed" was satisfied by the StarSling App's own
+    prose, and "sandbox" by step 5's caution about sling's auth probe. Both gh gates
+    could lose their install check and their sandbox caution with the suite green.
+    """
+    gh_body = _BODY[_BODY.index("**gh gate,"):]
+    gh_body = gh_body[:gh_body.index("\n## ")] if "\n## " in gh_body else gh_body
+    ref = (_SKILL / "references" / "gh-fallback.md").read_text()
+    ref_gate = ref[ref.index("Before the first `gh` call"):ref.index("## State changes")]
+
+    for where, text in (("SKILL.md's gh gate", gh_body), ("gh-fallback.md's gate", ref_gate)):
+        low = " ".join(text.split()).lower()
+        assert "installed" in low, (
+            f"{where} no longer checks whether gh is INSTALLED — a different failure "
+            "from being signed out, with the same consequence")
+        assert "gh auth status" in low, f"{where} lost its auth probe"
+        assert "sandbox" in low, (
+            f"{where} lost the sandboxed-shell caution ci-speedup recorded from a live "
+            "miss — without it a Codex shell reports a false auth failure")
+    # The install path is given once, in the gate the agent reads first.
+    assert re.search(r"https://cli\.github\.com(?![\w.@:-])", " ".join(gh_body.split()).lower()), (
+        "SKILL.md's gh gate no longer gives the install path, bounded against a host "
+        "that could be extended — including the `user@host` form, where everything "
+        "before the @ is userinfo and the real host is whatever follows")
 
 
-def test_both_shapes_of_a_missing_installation_are_recognised():
-    """`sling` sees nothing until the StarSling GitHub App is installed, and that
-    arrives two ways: exit 4 for an org you cannot reach, and exit 2 with "you
-    don't belong to any orgs yet" for the brand-new user who signed in first.
-    Only the first was handled, so the most ordinary first-run state in the
-    product fell through to whatever the exit-code table happened to say."""
+def test_the_empty_listing_rule_survives_in_the_gotcha_that_states_it():
+    """Scoped to the bullet, and asserting the semantic clause.
+
+    A global search for "coverage hole" and "did not run" was satisfied by a
+    parenthetical, so the gotcha could be replaced with its INVERSION — "report it as:
+    this repo had no CI runs" — and stay green. That is the exact false finding the
+    rule exists to stop.
+    """
     low = " ".join(_BODY.split()).lower()
-    assert "don't have access to org" in low, "lost the unreachable-org trigger"
-    assert "don't belong to any orgs" in low, (
-        "lost the zero-org trigger — a new user who has not installed the app "
-        "hits a message the skill does not recognise")
+    i = low.index("empty listing")
+    bullet = low[i:i + 700]
+    assert "coverage hole" in bullet, "the empty-listing rule lost its coverage-hole framing"
+    assert "never a finding" in bullet or "not a finding" in bullet, (
+        "the empty-listing rule no longer says an empty result is not a finding")
+    assert "did not run" in bullet, "the empty-listing rule no longer says the check did NOT run"
 
 
 def test_the_no_orgs_case_is_not_routed_to_org_switch():
@@ -465,3 +494,96 @@ def test_the_scope_flag_gotcha_reports_the_exit_code_the_binary_returns():
     assert "exits `0`" not in ctx, (
         "the scope-flag gotcha still says a valueless `--org` exits 0 and "
         "silently swallows the next flag; the binary exits 2 and says so")
+
+
+def test_exit_four_is_disambiguated_where_the_agent_first_meets_it():
+    """The carve-out has to live in the AUTH step, not only in the app step.
+
+    Exit 4 arrives two ways — a stale credential and an org the StarSling app was
+    never installed on — and the preflight reaches authentication (step 3) before
+    it reaches the app gate (step 5). Without a carve-out at step 3, the first
+    step to match claims every exit 4 and sends the second case round a login loop
+    that cannot change the outcome. That was greptile's P1 on this PR, and nothing
+    guarded the fix: deleting the sentence left all 36 tests green.
+    """
+    auth_step = _BODY[_BODY.index("3. **Not authenticated"):_BODY.index("4. **Wrong org")]
+    low = " ".join(auth_step.split()).lower()
+    assert "exit `4`" in low or "exit 4" in low, "step 3 no longer names the code it shares"
+    assert "step 5" in low, (
+        "the auth step no longer hands the missing-installation case to the app gate, "
+        "so it claims every exit 4 and loops the user on login")
+
+
+def test_the_wrong_org_step_hands_off_the_empty_case():
+    """`doctor`'s org check fails for BOTH 'pick one of several' and 'you have none'.
+
+    A step keyed on that check alone answers a brand-new user with
+    `sling org switch <slug>` — choosing from an empty list. The hand-off is the
+    only thing separating them, and deleting it left every test green.
+    """
+    org_step = _BODY[_BODY.index("4. **Wrong org"):_BODY.index("5. **StarSling gate")]
+    low = " ".join(org_step.split()).lower()
+    assert "step 5" in low, (
+        "the wrong-org step no longer hands the no-orgs case to the app gate, so a "
+        "user with zero orgs is told to switch to one of them")
+
+
+def test_the_app_install_url_is_right_in_every_file_that_gives_it():
+    """One correct occurrence must not vouch for a wrong one elsewhere.
+
+    The earlier guard concatenated SKILL.md and the references and asked whether the
+    URL appeared anywhere, so SKILL.md could send users to the wrong host while a
+    reference kept the right one — and the suite stayed green. Each file that names
+    an install URL for the app has to name the right one.
+    """
+    expected = "https://github.com/apps/starslingdev"
+    files = [("SKILL.md", _BODY)] + [
+        (r.name, r.read_text()) for r in sorted((_SKILL / "references").glob("*.md"))
+    ]
+    named = [(name, text) for name, text in files if "github.com/apps/" in text]
+    assert named, "no file gives an install URL for the StarSling GitHub App"
+    wrong = [name for name, text in named if expected not in text]
+    assert not wrong, (
+        f"{', '.join(wrong)} names a GitHub App install URL that is not {expected}")
+
+
+def test_the_unreachable_org_case_rules_out_a_typo_first():
+    """Exit 4 with that message does not prove the org exists.
+
+    A slug that could never exist returns byte-identically to one whose org simply
+    lacks the app — verified against the binary. Reading it only as "the app is not
+    installed" sends someone to install a GitHub App on an organization they
+    mistyped, and `sling org switch <slug>` settles it for free by printing the
+    orgs they actually have.
+    """
+    step = " ".join(_preflight_step(5).split()).lower()
+    assert "typo" in step, (
+        "step 5 no longer tells the agent to rule out a mistyped slug before "
+        "reading exit 4 as a missing installation")
+    assert "org switch" in step, (
+        "step 5 no longer names the disambiguator that lists the user's real orgs")
+
+
+def test_the_scope_flags_are_not_claimed_to_be_universal():
+    """`sling logs` rejects `--org` and `--repo` with exit 2, and it is the command
+    the routing table reaches for most. Claiming they are global on every subcommand
+    turns a working logs read into a usage error on the recovery path."""
+    low = " ".join(_BODY.split()).lower()
+    assert "global flags on every subcommand" not in low, (
+        "the scope flags are documented as universal again — `sling logs` rejects them")
+    assert "not by `sling logs`" in low, (
+        "the strict-parser exception for `sling logs` is gone")
+
+
+def test_agent_is_not_described_as_an_alias_for_flags_it_does_not_have():
+    """The reference's stated premise is that it was read off the binary.
+
+    `--compact` does not exist in v0.1.2 — the published docs call `--agent`
+    "exactly equivalent to --json --compact --no-input --no-color --yes", and
+    repeating that attributes to the tool a contract no help page states.
+    """
+    low = " ".join(_BODY.split()).lower()
+    i = low.index("`--agent` is the machine-mode flag")
+    section = low[i:i + 900]
+    assert "do not describe it as an alias" in section, (
+        "the caution against restating the docs' flag-alias claim is gone")

@@ -39,3 +39,28 @@ def test_each_shipped_skill_is_linked_from_the_readme():
     for skill in sorted(p.name for p in (_REPO / "skills").iterdir() if p.is_dir()):
         assert f"skills/{skill}/SKILL.md" in readme, (
             f"{skill} ships but the README never links its SKILL.md")
+
+
+def test_every_in_page_anchor_matches_a_real_heading():
+    """The README's table of contents is entirely `](#…)` links, and the existence
+    check above skips them by construction — it only resolves paths on disk.
+
+    An anchor that matches no heading is a click that silently does nothing, and the
+    table is the first thing a reader uses. Renaming a section is the ordinary way to
+    break one, and nothing would have failed.
+    """
+    text = (_REPO / "README.md").read_text(encoding="utf-8")
+    anchors = set(re.findall(r"\]\(#([^)\s]+)\)", text))
+    assert anchors, "no in-page anchors found — the table of contents is gone?"
+
+    # GitHub's slug: lowercase, drop anything but word chars/spaces/hyphens, spaces to
+    # hyphens. Enough for this file's plain headings.
+    def slug(heading: str) -> str:
+        s = heading.strip().lower()
+        s = re.sub(r"[^\w\s-]", "", s)
+        return re.sub(r"\s+", "-", s)
+
+    headings = {slug(m) for m in re.findall(r"^#{1,6}\s+(.+?)\s*$", text, re.M)}
+    missing = sorted(a for a in anchors if a not in headings)
+    assert not missing, (
+        "README anchor(s) point at no heading: " + ", ".join(missing))

@@ -78,7 +78,7 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   `--agent` output is indented JSON. Described as exact flag equivalence
   before, which invited a line-oriented parser.
 - **2026-08-26** — **A private repository name shipped in the skill.**
-  `starslingdev/agent-ci-mastra-test` appeared in an eval prompt and in the
+  A private test repository's name appeared in an eval prompt and in the
   `resolve` sample payload; both now use placeholders.
 - **2026-08-26** — **`--agent` was described as belonging on "every
   invocation"** in the reference, contradicting SKILL.md's rule that it must
@@ -179,6 +179,27 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   missing installation (exit `4` for an org you cannot reach, exit `2` for
   having none), gives them the same answer, and the wrong-org step hands the
   empty case off instead of claiming it.
+
+- **2026-08-26** — **Four claims the binary contradicts, and the guards that
+  let them through.** A review pass run against `sling` itself rather than its
+  docs found: `--org`/`--repo` documented as global on every subcommand when
+  `sling logs` rejects both with exit `2` — and `logs` is the command the
+  routing table reaches for most, so the wrong-org recovery turned a working
+  read into a usage error; `--agent` described as an alias for
+  `--json --compact --no-input --no-color --yes`, which no help page states and
+  whose `--compact` does not exist in this binary at all; `--target` offered as
+  the way to resolve an ambiguous id, when it biases the kind and returns the
+  same ambiguity; and exit `4`'s missing-app reading applied to a message a
+  mistyped slug returns byte-identically, which would have sent someone to
+  install a GitHub App on an organization that does not exist.
+- **2026-08-26** — **The guards were scoped to the whole document, so the
+  centrepiece could be deleted silently.** Removing the entire StarSling gate —
+  both failure shapes, the stop, the install path, the organizations-only rule —
+  left every test green, because each phrase they searched for also occurs in
+  the exit-code table or a reference. Inverting the empty-listing rule into the
+  false finding it exists to prevent also passed, as did stripping the gh gate's
+  install check and sandbox caution from both files. Each guard now reads the
+  section it protects, and each of those three mutations now fails.
 
 ### Notes
 
