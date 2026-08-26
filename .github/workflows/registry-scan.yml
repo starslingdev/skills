@@ -225,16 +225,36 @@ jobs:
             --ci \
             --verbose \
             --dangerously-run-mcp-servers \
-            --ignore-failure-codes "${IGNORED_ISSUE_CODES}"
-          code=$?
+            --ignore-failure-codes "${IGNORED_ISSUE_CODES}" 2>&1 | tee gate-output.txt
+          code=${PIPESTATUS[0]}
           set -e
           echo "scan_exit=${code}" >> "${GITHUB_OUTPUT}"
           if [ "${code}" -eq 0 ]; then
             echo "Gate passed: no critical finding under '${SCAN_PATH}'."
+            echo "scan_class=clean" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
           if [ "${code}" -eq 1 ]; then
-            echo "Gate failed: a critical finding is present. Its issue code is above."
+            # Exit 1 is TWO different events. `--ci` returns it for an unignored
+            # E-class finding — a real security result — and equally for the
+            # scanner's own X-class runtime failure, which this gate deliberately
+            # does not ignore because a scan that broke is not a scan that passed.
+            # Both are failures; only one is a finding, and reporting an X as a
+            # critical is the same false verdict as reporting a usage error was.
+            if grep -qE '\bE[0-9]{3}\b' gate-output.txt; then
+              echo "scan_class=finding" >> "${GITHUB_OUTPUT}"
+              echo "Gate failed: an E-class critical finding is present. Its code is above."
+              exit 1
+            fi
+            if grep -qE '\bX[0-9]{3}\b' gate-output.txt; then
+              echo "scan_class=operational" >> "${GITHUB_OUTPUT}"
+              echo "::error title=REGISTRY SCAN DID NOT COMPLETE::The scanner reported an X-class runtime failure, not a finding. Nothing under '${SCAN_PATH}' was fully checked. This is a coverage gap, not a security finding."
+              exit 1
+            fi
+            # Neither class named. Do NOT guess: asserting "critical finding" on an
+            # unclassifiable exit is how the five-day false verdict happened.
+            echo "scan_class=indeterminate" >> "${GITHUB_OUTPUT}"
+            echo "::error title=REGISTRY SCAN RESULT UNCLASSIFIED::The scanner exited 1 without naming an E- or X-class code, so this run cannot say whether that was a finding or a runtime failure. Read the log above before treating it as either."
             exit 1
           fi
           echo "::error title=REGISTRY SCAN DID NOT RUN::The scanner exited ${code} without completing a scan — it could not start, so NOTHING under '${SCAN_PATH}' was checked. This is a coverage gap, not a finding and not a clean result. Read this step's log: a usage error here usually means the scanner renamed a flag out from under us."
@@ -268,8 +288,8 @@ jobs:
           # in the tree, and the unfiltered pass behind the control can still
           # surface one. Announcing the coverage gap over that run would put
           # "NOT A FINDING" on the one result a human most needs to read.
-          if [ "${{ steps.gate.outcome }}" = "failure" ] && [ "${{ steps.gate.outputs.scan_exit }}" != "1" ]; then
-            echo "::error title=REGISTRY SCAN DID NOT RUN — NOT A FINDING::The scanner exited ${{ steps.gate.outputs.scan_exit }} without completing a scan, so nothing under ${SCAN_PATH} was checked. This is a coverage gap. Do NOT read it as a security finding."
+          if [ "${{ steps.gate.outcome }}" = "failure" ] && [ "${{ steps.gate.outputs.scan_class }}" != "finding" ]; then
+            echo "::error title=REGISTRY SCAN DID NOT RUN — NOT A FINDING::The scan did not produce a finding (exit ${{ steps.gate.outputs.scan_exit }}, class ${{ steps.gate.outputs.scan_class }}), so nothing under ${SCAN_PATH} was verified clean. This is a coverage gap. Do NOT read it as a security finding."
             exit 1
           fi
           if [ "${{ steps.gate.outcome }}" = "failure" ]; then

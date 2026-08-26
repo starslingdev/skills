@@ -796,3 +796,43 @@ def test_the_scanner_version_is_pinned(workflow: dict):
             "the scanner is back on @latest — an upstream rename will redden this "
             "build again with no commit of ours")
         assert "snyk-agent-scan==" in run, "the scanner invocation is not version-pinned"
+
+
+def test_an_x_class_runtime_failure_is_not_reported_as_a_finding(workflow: dict):
+    """Exit 1 is two different events, and only one of them is a finding.
+
+    `--ci` returns 1 for an unignored E-class finding AND for the scanner's own
+    X-class runtime failure, which this gate deliberately does not ignore (a scan
+    that broke is not a scan that passed — the workflow says so itself). A
+    classifier that maps every exit 1 to "critical finding" therefore leaves the
+    original false verdict reachable through a narrower door: the build would
+    announce a security finding over a scan that fell over mid-run.
+
+    Caught by review on PR #78, after the first version of this fix classified
+    only usage errors and called every exit 1 a finding.
+    """
+    run = _gate_step(workflow)["run"]
+    assert "E[0-9]{3}" in run, "the gate no longer looks for an E-class code before calling it a finding"
+    assert "X[0-9]{3}" in run, "the gate no longer recognises an X-class runtime failure"
+    assert "scan_class=finding" in run and "scan_class=operational" in run, (
+        "the gate no longer publishes which class of exit 1 it saw")
+
+    verdict = next(s for s in workflow["jobs"]["scan"]["steps"]
+                   if s.get("name") == "Report the coverage gap")
+    assert "steps.gate.outputs.scan_class" in verdict["run"], (
+        "the verdict step branches on the raw exit code again, so an X-class "
+        "runtime failure is reported as a critical security finding")
+
+
+def test_an_unclassifiable_exit_one_is_never_called_a_finding(workflow: dict):
+    """When the scanner names neither class, the honest answer is 'unclassified'.
+
+    Guessing 'critical finding' on an exit this workflow cannot explain is exactly
+    the failure it spent five days committing. An unclassified exit still fails the
+    build — it is not a pass — it just does not claim to be a security result.
+    """
+    run = _gate_step(workflow)["run"]
+    assert "scan_class=indeterminate" in run, (
+        "the gate lost its unclassified branch, so an exit 1 naming no code falls "
+        "through to whichever label happens to be last")
+    assert "UNCLASSIFIED" in run
