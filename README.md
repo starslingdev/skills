@@ -215,9 +215,14 @@ cancel, trigger, enable, disable, download an artifact) goes to `gh` — plus
 the exit-code handling and the `--agent` JSON shapes for every command,
 [read off the binary rather than the docs](skills/sling/references/command-reference.md).
 
-It needs `sling` installed and signed in; the skill runs `sling doctor` first
-and walks you through `sling login` if you are not. Everything it does is a
-read, unless you ask for a state change and it tells you before making it.
+It needs three things, and the skill checks all three before answering: the
+`sling` CLI installed, you signed in (a browser step it hands back to you),
+and the [StarSling GitHub App](https://github.com/apps/starslingdev) installed
+on the organization whose CI you are asking about — that last one is what
+StarSling reads your runs from, and without it a perfectly valid login sees
+nothing. Organizations only; the app installs on a personal repository but
+StarSling never picks up its jobs. Everything the skill does is a read, unless
+you ask for a state change and it tells you before making it.
 
 Source: [`skills/sling/`](skills/sling/) · [SKILL.md](skills/sling/SKILL.md)
 
