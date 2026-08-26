@@ -355,12 +355,14 @@ def test_the_gh_gate_matches_the_house_pattern():
         "the gh gate no longer checks whether gh is INSTALLED, only whether it "
         "is authenticated — two different failures with the same consequence")
     assert "gh auth status" in low, "the gh gate lost its auth probe"
-    # Scheme-anchored, not a bare substring. `"cli.github.com" in text` is satisfied
-    # by `https://evil-cli.github.com.example`, which is the look-alike shape this repo
-    # has already been bitten by once — and CodeQL flags it as incomplete URL
-    # sanitization, correctly: a host check that can match at an arbitrary position is
-    # not a host check.
-    assert "https://cli.github.com" in low, (
+    # A bounded match, not a substring test. CodeQL's incomplete-URL-sanitization
+    # rule fires on any `in` check against a host — correctly in general, since
+    # `"cli.github.com" in text` is satisfied by `evil-cli.github.com.example`, the
+    # look-alike shape this repo has shipped once and been rated CRITICAL for. Here the
+    # subject is our own documentation rather than an untrusted URL, but the weakness is
+    # the same either way, so the check is anchored: scheme in front, and nothing that
+    # could extend the host behind.
+    assert re.search(r"https://cli\.github\.com(?![\w.-])", low), (
         "the gh gate no longer gives the install path")
     assert "sandbox" in low, (
         "the gh gate lost the sandboxed-shell caution ci-speedup recorded from "
