@@ -59,7 +59,9 @@ These rules apply to EVERY shipped skill — `ci-speedup`, `ci-score`,
   `skills/<skill>/`. One install-surface guard per skill under `tests/`
   (`test_skill_install_surface.py` for ci-speedup, `test_ci_score_…` and
   `test_ci_secure_install_surface.py` for the others) makes this a PASS/FAIL
-  invariant — each fails if maintainer infra leaks back into its skill dir.
+  invariant — each fails if maintainer infra leaks back into its skill dir. — except `sling`, which ships no scripts and has no
+  `maintainers/sling/` tree to leak from; the repo-wide internal-identifier
+  guard covers it, and it gets a per-skill guard the day it grows either
 - **Keep the changelog current.** Every change that alters a skill's behavior
   adds a dated (UTC) bullet to THAT skill's `CHANGELOG.md` under the right
   Added / Changed / Fixed heading, *in the same PR*. If you changed a skill and

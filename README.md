@@ -31,11 +31,15 @@ fix the findings you pick, or to just save the full report as markdown.
 of auditing files. Fixes land in your working tree for
 you to review, and nothing is ever committed, pushed, or opened as a PR.
 
-All three run from a local checkout and need **`python3` 3.9+** and **PyYAML**
-(`pip install pyyaml`). `ci-speedup` also needs **`gh auth login`**, because it
-reads your run history over the GitHub API. That data stays on your machine:
+The three audit skills — `ci-speedup`, `ci-score`, `ci-secure` — run from a
+local checkout and need **`python3` 3.9+** and **PyYAML** (`pip install
+pyyaml`). `ci-speedup` also needs **`gh auth login`**, because it reads your
+run history over the GitHub API. What they read stays on your machine:
 **nothing is sent to StarSling**, and nothing is sent to any third party
-([data handling](SECURITY.md)).
+([data handling](SECURITY.md)). **`sling` is the exception by design**: it
+queries StarSling's control plane for the CI data StarSling already collects —
+sending the org, repo and run identifiers you ask about — and stores a
+credential at `~/.config/sling/credentials`.
 
 ---
 

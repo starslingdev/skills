@@ -32,7 +32,7 @@ Available on the root command and every subcommand **except `sling logs`**, whos
 
 | Flag | Meaning |
 |---|---|
-| `--agent` | Machine mode; its help reads `--json --compact --no-input --no-color --yes` (`--compact` changes nothing on 0.1.2). Pass it on every **data** command — never on `sling login`, and give `sling org switch` an explicit slug |
+| `--agent` | Machine mode. The PUBLISHED DOCS call it equivalent to `--json --compact --no-input --no-color --yes`; no help page says that, and `--compact` is not a flag this binary has (0.1.2) — it changes nothing because unknown flags are ignored. Pass it on every **data** command — never on `sling login`, and give `sling org switch` an explicit slug |
 | `--json` | JSON on stdout (implied by `--agent`) |
 | `--org <slug>` | Org context. Auto-resolved when unambiguous; default set by `sling org switch` |
 | `--repo <owner/name>` | Repo context. Defaults to the git remote of the current directory |
@@ -87,8 +87,10 @@ Exits `0` healthy, **`10` unhealthy**.
             {"key": "org", "ok": true, "detail": "starslingdev (paid)"}]}
 ```
 
-A check with `"skipped": true` is advisory (the `version` check reports an
-available upgrade this way) and does not make the environment unhealthy.
+`"skipped": true` means the check produced NO verdict — an advisory upgrade
+notice (`version`), or a check that could not run at all (`clock_skew` and
+`org` under an unreachable control plane read `ok: false, skipped: true,
+"not checked"`). Read `detail`; a skipped check is never a pass.
 
 **On v0.1.2 the `version` check's `fix_command` is not a real subcommand.**
 `doctor` emits `"fix_command": "sling update"`, and `sling update` **does not
@@ -212,8 +214,7 @@ Flags: `--job <name>` (one job leg of a run), `--grep <re>` (server-side),
  "has_more": false, "local": {…}}
 ```
 
-The published docs call `logs` the exception that streams raw text in both
-modes. That describes **human** mode. Under `--agent`, hand its stdout to
+A log-less job also stamps `"local": {"empty": {"kind": "absent"}}` into the payload — a machine discriminator on stdout, not only a stderr explanation. Under `--agent`, hand its stdout to
 the same JSON parser as every other command.
 
 A real job that stores no logs exits `3` — branch on the exit code, not on
@@ -243,7 +244,7 @@ what it found rather than guessing:
 ```
 
 stderr carries the same list as `Ambiguous — N candidates; pass one:`.
-Narrow it with `--target`, or put the candidates to the user — do not pick
+Pass one of the returned candidate ids, or `--target run` when a run is wanted — `--target job`/`attempt` re-state the kind and return the same ambiguity. Otherwise put the candidates to the user — do not pick
 one silently.
 
 Id shapes accepted across commands: a run id, a job id, `att_<jobid>.<n>`,

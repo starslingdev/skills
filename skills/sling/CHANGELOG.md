@@ -18,10 +18,11 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   flag list and JSON shape was captured by running `sling` v0.1.2 with
   `--agent` against a live control plane. Three places where the published
   documentation and the binary disagree are recorded with the binary as the
-  answer, the largest being `sling logs`: the docs describe it as the one
-  command that streams raw text in both modes, and under `--agent` it in fact
-  returns the same structured JSON as everything else, so an agent can hand
-  every command's stdout to one parser.
+  answer. (An entry here previously called `sling logs` "the largest"
+  disagreement, claiming the docs describe it as streaming raw text in both
+  modes — that was wrong, corrected 2026-08-26: the docs document the
+  agent-mode JSON envelope. The real, smaller discrepancy is the docs calling
+  the envelope one-object-per-line when it is pretty-printed.)
 - **2026-08-25** — **A pinned capture of the command surface**
   ([`references/command-surface.json`](references/command-surface.json)) and
   the tests that hold the skill to it. The skill exists to stop an agent
@@ -223,6 +224,42 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   organization. The exit-3 row and the app gate now name the shape and route it
   to the `gh` read fallback, which is what the live session correctly
   improvised.
+
+- **2026-08-26** — **A pr-review-toolkit round (four agents) over the full
+  diff.** The comment analyzer, running ~40 read-only probes against the
+  binary, REFUTED the skill's flagship claim: the published docs do document
+  `sling logs`' agent-mode JSON envelope, so the "largest docs-vs-binary
+  disagreement" never existed — corrected here and in the earlier entry, with
+  the real (smaller) discrepancy recorded. Also fixed from that round: the
+  `--target` advice the changelog claimed fixed but the files never received;
+  a second private-repo leak (a product repo's name and the org's live spend
+  in sample payloads — cloaked, denylisted, red-proven); the reference
+  contradicting SKILL.md on the `logs` strict parser; `skipped: true`'s
+  second meaning (not-checked, under an outage); and README/SECURITY data-
+  handling text that still said "nothing is sent to StarSling" above a skill
+  whose design is to query StarSling.
+- **2026-08-26** — **The silent-failure hunter walked the undefined states.**
+  Verified live and now documented: `why`/`time` on a bare multi-job run id
+  exit `2` with candidates on stdout and NOTHING on stderr (the exit-2 row
+  said "read the stderr first"); `why` on a run URL can diagnose one selected
+  job at exit `0` on a cancelled three-job run — confirm the job set before
+  reporting it as the cause; compound `doctor` failures need control_plane
+  precedence, or an outage reads as "please sign in"; a third party's org via
+  `--repo` reaches the exit-4 path the URL carve-out missed; exits `4` and
+  `7` now have terminal branches instead of dangling retries; a misconfigured
+  `SLING_HOST` exits `1` and is an environment fix, not a bug report; there
+  is no client-side timeout, so a black-holed connection hangs — wrap and
+  report the timeout; and the empty-listing coverage hole covers `jobs list`,
+  `usage` and `time --repo` (which exits `6` even on full data).
+- **2026-08-26** — **The mutation sweep's gaps closed.** 13 of 20 probes had
+  passed green: step 2, step 6, the exit-row semantics (row 10 could be
+  inverted to "file a bug"), the handoff section, the compound-ask rule, ten
+  of eleven gotchas, the platform claim, the casing rule, and the routing
+  artifact (24 of 27 rows inert) were all unguarded prose. Each now has a
+  section-scoped guard; three vacuous assertions (`"gh"` satisfied by
+  "GitHub", a `not`-anywhere exemption on the login pairing, a bare
+  `"before"`) were replaced with shape-anchored ones, and a skip-instead-of-
+  fail became a fail.
 
 ### Notes
 

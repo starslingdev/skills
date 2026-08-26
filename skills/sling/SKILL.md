@@ -50,7 +50,13 @@ Do this once per session, before the first `sling` command.
    when a real check fails** (`0` when healthy). The checks name the
    problem — `token`, `control_plane`, `clock_skew`, `git_remote`,
    `patch_tooling`, `version`, `org` — so act on the one that is `ok:
-   false` instead of guessing. A `version` check with `"skipped": true` is
+   false` instead of guessing — and when SEVERAL are `ok: false`, act on
+   `control_plane` first: an unreachable control plane fails `token` and `org`
+   as dependents, and the `token` check still attaches `fix_command: "sling
+   login"` — a wrong lead during an outage, since the device flow cannot reach
+   the control plane either. Network first, never login. `"skipped": true` can
+   also mean "not checked" for exactly this reason — read `detail`, not just
+   the flag. A `version` check with `"skipped": true` is
    an upgrade notice, not a failure — and the fix command it suggests is not
    a real subcommand, so re-run the installer instead of running it (see
    [references/command-reference.md](references/command-reference.md)).
@@ -109,7 +115,11 @@ Do this once per session, before the first `sling` command.
      establish that an org is real: `sling org switch <slug>` answers with
      `Unknown org "<slug>" — your orgs: …`, which both settles it and prints
      the list. Telling someone to install a GitHub App on an organization
-     they mistyped is worse than saying nothing. The message ends `Run \`sling login\``, which
+     they mistyped is worse than saying nothing. The URL carve-out below
+     does NOT cover the flag path: a third party's org passed via
+     `--repo`/`--org` lands here at exit `4` (verified: `--repo
+     vercel/skills`), same split — your own orgs are listed by `org switch`;
+     a third party's routes to the `gh` read fallback of step 6. The message ends `Run \`sling login\``, which
      cannot work: the credential was never the problem. That suffix is
      appended to every auth-class error by a generic decorator, so read it as
      boilerplate rather than as advice about this case.
@@ -155,8 +165,8 @@ Do this once per session, before the first `sling` command.
 
 `--agent` is the machine-mode flag: JSON on stdout, no prompts, no colour.
 Pass it on every **data** command and parse stdout as JSON. Do not also pass
-`--json` — every help page that mentions the pair renders them together as
-`--json, --agent  Machine output on stdout`.
+`--json` — help pages render the pair together (`--json, --agent`), with
+per-command wording.
 
 **Do not describe it as an alias for a longer flag list.** The published docs
 call it "exactly equivalent to `--json --compact --no-input --no-color
@@ -189,7 +199,10 @@ slug (`sling org switch acme --agent`).
   `lines` array as "nothing in the log" is exactly the silent false negative
   this skill exists to prevent — the reason is on stderr, which stays worth
   reading even when stdout parsed cleanly.
-- Under `--agent`, **every** command returns JSON, `sling logs` included.
+- Under `--agent`, every **data** command returns JSON, `sling logs`
+  included (`sling exit-codes` is help text: exit `0`, empty stdout, prose on
+  stderr). A log-less job's payload carries its own machine discriminator —
+  `"local": {"empty": {"kind": "absent"}}` — alongside `"lines": []`.
 - JSON keys are `snake_case` on every command **except `whoami`**, which
   returns camelCase (`userId`, `githubLogin`, `expiresAt`). Key a parser per
   command, not on a local-vs-remote rule.
@@ -224,7 +237,7 @@ reading YAML yourself.
 | Which jobs in a run failed, or jobs across a repo | `sling` | `sling jobs list --run <id>` / `--repo <owner/name>` |
 | Which step in a job failed, and each step's duration | `sling` | `sling jobs show <job id\|URL>` |
 | Only the log lines that matter for a failure | `sling` | `sling logs <run\|job\|attempt id\|URL> [--grep <re>] [--since <dur>] [--limit <n>]` |
-| Turning a pasted Actions URL into a run/job/attempt id | `sling` | `sling resolve <id\|URL> [--target run\|job\|attempt]` — a run id covering several jobs is **ambiguous**: exit `2`, `{"candidates": […]}` on stdout. Pick one with `--target`, or show the user the list |
+| Turning a pasted Actions URL into a run/job/attempt id | `sling` | `sling resolve <id\|URL> [--target run\|job\|attempt]` — a run id covering several jobs is **ambiguous**: exit `2`, `{"candidates": […]}` on stdout. Pass one of the returned candidate ids (`att_<jobid>.<n>`) or `--target run`; `--target job`/`attempt` re-state the kind and return the same ambiguity |
 | The biggest time or cost hotspots | `sling` | `sling top [--by workflow\|job\|label\|repo\|branch] [--metric ...]` |
 | Runner-minutes and cost attributed per repo/workflow/label/day | `sling` | `sling usage [--group-by <axis>] [--window <n>d]` |
 | What is owed this period, or past invoices | `sling` | `sling bill`, `sling bill history` |
@@ -252,8 +265,9 @@ file rather than forcing it through either CLI.
 **Compound asks** — "tell me why this run failed, then re-run it" — are two
 steps, in order: do the `sling` half first (`sling why`), **report it**,
 then do the `gh` half (`gh run rerun`) as an explicit, separately announced
-action. Never chain into a state change without telling the user what
-changed.
+action — and run the gh gate (below) before promising that second half: a
+working `sling` says nothing about whether `gh` is signed in. Never chain
+into a state change without telling the user what changed.
 
 ## Command reference
 
@@ -277,6 +291,12 @@ The short version, grouped the way `sling --help` groups them:
 
 Two habits worth keeping:
 
+- **`sling why` on a RUN (id or URL) can answer for ONE selected job at exit
+  `0`** — verified on a cancelled three-job run, where it diagnosed the single
+  failed job and never mentioned the other two or the cancellation. Before
+  reporting that diagnosis as *the* cause of a run, confirm the run's job set
+  (`jobs list --run <id>`) whenever the run has several jobs or did not
+  conclude cleanly.
 - **Start from `why` for a failure**, not from `logs`. `why` is classified
   server-side with no LLM in the loop, and its `suggested_actions[]` carry
   the exact follow-up command (usually a `sling logs --grep`) instead of
@@ -291,19 +311,23 @@ Two habits worth keeping:
 Branch on `$?`, read immediately after the command. The inference fails in
 both directions: a successful result can be empty, and a **failed command
 can still print a full JSON body** — `logs` exits `3` with `{"lines": []}`,
-`resolve` exits `2` with `{"candidates": […]}`. Neither an empty stdout nor
+`resolve` exits `2` with `{"candidates": […]}` — and so do `logs`, `why`
+and `time` on a bare multi-job run id, with `why`/`time` putting **nothing on
+stderr** at all. The invocation was valid: read the candidates off stdout and
+pass one id (or `--target run`) rather than re-reading `--help` for a usage
+error that is not there. Neither an empty stdout nor
 a parseable one tells you what happened; only `$?` does.
 
 | Code | Meaning | What to do |
 |---|---|---|
 | `0` | Success | — |
-| `1` | Unexpected internal error (a crash) — **or a subcommand that does not exist** | Read stderr first. `unknown command "<name>" for "sling"` is a routing mistake, not a crash: the binary lists its real commands, so correct the name against that list rather than filing a bug — this is where the `doctor` `fix_command` gotcha below lands. Anything else: do not retry blindly, and surface the stderr text as a bug report |
+| `1` | Unexpected internal error (a crash) — **or a subcommand that does not exist** | Read stderr first. `unknown command "<name>" for "sling"` is a routing mistake, not a crash: the binary lists its real commands, so correct the name against that list rather than filing a bug — this is where the `doctor` `fix_command` gotcha below lands. stderr naming an environment variable (`SLING_HOST must be a valid https URL …`) is an environment fix, not a bug. Anything else: do not retry blindly, and surface the stderr text as a bug report |
 | `2` | Usage — bad flags, a prompt refused under `--agent`, org ambiguity, **or no orgs at all** | Read the stderr first. `You don't belong to any orgs yet.` → step 5, the app is not installed; never a flag problem. Org-ambiguous → pass `--org` or `sling org switch`. Otherwise fix the invocation against `sling <cmd> --help` |
 | `3` | Not found — no such run/job/attempt in any org you can access, or a real job that stores no logs | **A pasted URL from a third-party org lands here, not on exit `4`** — the resolver searches your orgs and reports not-found (`No run/job/attempt matches that id in an org you can access`). For an org the user does not belong to, do not suggest installing the app on it: fall back to the `gh` read path (public repos answer) and say the richer `sling` diagnosis is unavailable. Otherwise try `sling resolve`, confirm the org, then ask the user to confirm the id |
-| `4` | Auth — **or no StarSling installation on that org.** Read the stderr text before acting | `You don't have access to org "<name>"` → the app is not installed there (or the user is not a member); point them at `https://github.com/apps/starslingdev`, do NOT retry login. Anything else → ask the user to run `sling login` themselves (a browser approval, never `--agent`), then retry once |
+| `4` | Auth — **or no StarSling installation on that org, or a third party's org named via a flag.** Read the stderr text before acting | `You don't have access to org "<name>"` → the app is not installed there (or the user is not a member); point them at `https://github.com/apps/starslingdev`, do NOT retry login. Anything else → ask the user to run `sling login` themselves (a browser approval, never `--agent`), then retry once. If the retry exits `4` again, STOP and report what was verified — never ask for a second login |
 | `5` | Control-plane or API error (5xx or transport) | Retry once after a short backoff (~2s); on a second failure fall back to the `gh` read equivalent and **say** `sling` was unreachable |
 | `6` | Partial — telemetry incomplete, result still emitted (`time`, `why`) | Not an error. Use the result, and tell the user it is partial |
-| `7` | Rate limited (HTTP 429) | Back off and retry once. Do not hammer |
+| `7` | Rate limited (HTTP 429) | Back off and retry once. On a second `429`, stop: fall back to the `gh` read equivalent and say `sling` was rate limited |
 | `10` | Remote outcome failed — `doctor` unhealthy, or `runs show --wait` on a run that did not succeed | **Not a CLI error.** This is the answer: report the unhealthy check, or the run's failure |
 
 `sling exit-codes` on v0.1.2 prints only `0`–`5`; codes `6`, `7`, and `10`
@@ -315,7 +339,9 @@ stderr to the user rather than guessing a recovery.
 
 These are the places where `sling` behaves differently from what its own
 output, its `--help`, or its documentation implies. Each was found by
-running the binary; none of them announce themselves at runtime.
+running the binary; none of them announce themselves at runtime. Everything
+version-pinned here was verified against `sling` v0.1.2 and `gh` 2.93.0 —
+re-verify on upgrade.
 
 - **On the current release (0.1.2), `sling doctor` recommends a command that
   does not exist.** Its `version` check emits `"fix_command": "sling
@@ -338,7 +364,17 @@ running the binary; none of them announce themselves at runtime.
   reporting "you have no CI runs" as a fact about their repo. A repo that does
   not exist at all returns the same empty shape at exit `0` (verified live), so
   when the answer matters, a cheap `gh` read — `gh repo view`, `gh run list` —
-  settles which of the three it is.
+  settles which of the three it is. The same three-way-ambiguous empty comes
+  back from `jobs list --repo` (`{"jobs": []}`), `usage --repo`
+  (`{"rows": []}`) and `time --repo` (`{"phases": []}` — at exit `6`, which
+  `time --repo` returns even on full data, so "partial" there carries no
+  signal; the empty phase list is the coverage hole).
+- **There is no client-side timeout.** A black-holed control plane (packets
+  dropped, not refused) hangs `sling` indefinitely — verified past 45s — with
+  no exit code and nothing on either stream. Wrap long calls in a timeout,
+  and when one fires report the timeout itself: a killed command produced no
+  result, and "no result" is never "no findings". A *refused* connection
+  returns exit `5` cleanly.
 - **Unknown flags are ignored, not rejected.** `sling runs list --bogus`
   exits `0` and returns unfiltered rows. Exit `0` is therefore not evidence
   that a filter applied — check the rows you got back before reporting a
@@ -347,9 +383,11 @@ running the binary; none of them announce themselves at runtime.
   `--trigger`, `--workflow-path`, `--label` and the window flags, all of
   which work. Absence from `--help` is not absence from the CLI; the fuller
   list is in [references/command-reference.md](references/command-reference.md).
-- **`sling logs` returns JSON under `--agent`**, despite documentation that
-  calls it the one command streaming raw text in both modes. That describes
-  human mode.
+- **`sling logs` returns JSON under `--agent`** — the same structured
+  envelope as every other data command. (An earlier revision claimed the
+  published docs disagreed; they do not — the docs document exactly this. The
+  real doc discrepancy is smaller: they call the envelope one-object-per-line,
+  and it is pretty-printed, indented JSON.)
 - **A zero phase in `sling time` can mean "not measured".** In v1,
   `image_pull` and `cold_start` are bundled into `provision` and reported as
   `0` with a reason in `meta.truncated`. Read that array before telling a
@@ -403,7 +441,9 @@ status` fails, `gh` cannot do any of it — and `gh` authenticates separately
 from `sling`, so a working `sling` says nothing about whether `gh` is signed
 in. Sandboxed agent shells (Codex) can't reach keyring credentials: retry
 with host access before trusting a failure, and never report auth "expired"
-off a sandboxed probe. Then STOP and tell the user plainly which half of
+off a sandboxed probe. When host access is not
+   available to retry with, report `gh`'s availability as UNVERIFIED rather
+   than expired or absent. Then STOP and tell the user plainly which half of
 their request is unavailable — the reads still work through `sling`, the
 state change does not. Give the path (https://cli.github.com; then `gh auth
 login`), and never report an action as done that never ran.

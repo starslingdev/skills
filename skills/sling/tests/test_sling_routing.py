@@ -192,9 +192,12 @@ def test_read_only_claim_matches_the_captured_surface():
     # The description carries the CONSEQUENCE (state changes route to gh) rather than
     # the word "read-only" — the documented description shape is ~150 chars, and the
     # routing rule is what a router needs. The mechanism lives in the body.
-    low_desc = _FRONT["description"].lower()
-    assert "gh" in low_desc and ("re-run" in low_desc or "rerun" in low_desc), (
-        "the description no longer says state changes route to gh")
+    # Probed vacuous: `"gh" in low` was satisfied by the "gh" inside "GitHub", so the
+    # whole state-change clause could be replaced with "state changes are unsupported"
+    # and the suite stayed green. The claim must be the backticked token, in the same
+    # clause as the state-change language.
+    assert re.search(r"state changes?[^.]{0,60}`gh`", _FRONT["description"]), (
+        "the description no longer says state changes route to `gh` in one clause")
     assert "read-only" in _BODY, "the body no longer states that sling is read-only"
 
 
@@ -307,9 +310,15 @@ def test_login_is_never_shown_with_the_machine_mode_flag():
     an agent to hang the session on a prompt it has already refused."""
     for where, text in _shipped_text():
         for line in text.splitlines():
-            if "sling login" in line:
-                assert "--agent" not in line or "never" in line.lower() or "not" in line.lower(), (
-                    f"{where}: `sling login` shown with --agent — {line.strip()[:90]}")
+            # The dangerous shape is the RUNNABLE literal: `sling login --agent` as a
+            # contiguous invocation an agent can copy. Warnings phrase the pairing the
+            # other way around ("never pass `--agent` to `sling login`"), so banning
+            # the literal outright needs no exemption — and the previous exemption
+            # (`or "not" in line`) was probed vacuous: "If the token is not present,
+            # run `sling login --agent`" sailed through on the word "not".
+            assert "sling login --agent" not in line, (
+                f"{where}: a runnable `sling login --agent` ships — the exit-2 hang "
+                f"this guard exists to block — {line.strip()[:90]}")
 
 
 def test_the_skill_says_the_user_runs_login():
@@ -496,7 +505,10 @@ def test_the_scope_flag_gotcha_reports_the_exit_code_the_binary_returns():
     text = " ".join(
         " ".join(t for _, t in _shipped_text()).split()).lower()
     if "--org --window" not in text:
-        pytest.skip("the scope-flag gotcha is no longer documented")
+        pytest.fail(
+            "the scope-flag gotcha is gone — it documents a verified binary fact "
+            "(a valueless --org is rejected with exit 2), and deleting it is a "
+            "strictly easier way to reintroduce the old exits-0 claim than editing it")
     ctx = text[text.index("--org --window") - 200:][:600]
     assert "exits `0`" not in ctx, (
         "the scope-flag gotcha still says a valueless `--org` exits 0 and "
@@ -616,9 +628,11 @@ def test_the_description_keeps_its_measured_trigger_properties():
     """
     d = _FRONT["description"]
     low = d.lower()
-    assert "before" in low and "`gh`" in d, (
-        "the description lost its invoke-before-gh claim — the single feature that "
-        "took the trigger rate from 0% to 4/4")
+    # Probed vacuous as a bare substring: "Consider using it, before or after `gh`"
+    # kept the suite green while inverting the measured imperative. Require the shape.
+    assert re.search(r"\b[Ii]nvoke this BEFORE[^.]{0,40}`gh`", d), (
+        "the description lost its invoke-BEFORE-`gh` imperative — the single feature "
+        "that took the trigger rate from 0% to 4/4")
     for term in ("failed", "runner minutes", "GitHub Actions URL"):
         assert term in d, f"the description lost the trigger term {term!r}"
     assert "re-run" in low or "rerun" in low, "the state-change cue is gone"
@@ -669,3 +683,176 @@ def test_a_foreign_org_url_is_not_answered_with_the_app_install_remedy():
     step5 = " ".join(_preflight_step(5).split()).lower()
     assert "exit `3`" in step5 or "exit 3" in step5, (
         "the app gate no longer warns that a foreign URL bypasses it via exit 3")
+
+
+# ---------------------------------------------------------------------------
+# Guards added after a pr-review-toolkit mutation sweep (2026-08-26) found that
+# 13 of 20 probes passed green: the sections earlier review rounds hardened had
+# teeth, and everything else was unguarded prose. Each guard below is scoped to
+# the section it protects, per the pattern _preflight_step established.
+# ---------------------------------------------------------------------------
+
+
+def test_the_doctor_step_survives_with_its_exit_contract():
+    """Step 2 is the step every later step leans on ("re-run `sling doctor --agent`
+    to confirm"), and it was deletable with the suite green."""
+    step = " ".join(_preflight_step(2).split())
+    assert "sling doctor --agent" in step, "step 2 lost the doctor invocation"
+    assert "exits `10`" in step or "exit `10`" in step, (
+        "step 2 no longer says an unhealthy doctor exits 10 with the payload on stdout")
+    assert "ok:" in step or "ok: false" in step.replace('"', ""), (
+        "step 2 no longer tells the agent to act on the failing check")
+
+
+def test_the_degraded_path_is_never_silent():
+    """Step 6 — the gh-only fallback — was deletable with 45/45 green. It is the rule
+    that stops the skill answering from `gh` while implying it had `sling`'s
+    classification: the same never-a-silent-degrade family as ci-secure's
+    a-check-that-could-not-run-is-not-a-pass."""
+    step = " ".join(_preflight_step(6).split()).lower()
+    assert "gh run view" in step, "step 6 lost its concrete gh fallback commands"
+    assert "unavailable" in step, (
+        "step 6 no longer names what is lost when sling is absent")
+    assert "silently degrade" in step or "tell the user plainly" in step, (
+        "step 6 lost the do-not-silently-degrade rule")
+
+
+def _exit_row(code: str) -> str:
+    lines = [ln for ln in _BODY.splitlines() if ln.startswith(f"| `{code}` |")]
+    assert lines, f"the exit-code table lost its row for {code}"
+    return lines[0].lower()
+
+
+def test_exit_rows_keep_their_meaning_not_just_their_numbers():
+    """The old guard checked only that each code CELL existed, so row 10 could be
+    rewritten as "CLI crash — file a bug" — the exact inversion its docstring claimed
+    to prevent — with the suite green. Pin each row's semantic clause."""
+    assert "not a cli error" in _exit_row("10") or "the answer" in _exit_row("10"), (
+        "row 10 no longer says the exit IS the answer — an agent will report a "
+        "failed run as a sling crash")
+    assert "partial" in _exit_row("6") and "not an error" in _exit_row("6"), (
+        "row 6 no longer says partial results are usable")
+    assert "back off" in _exit_row("7") or "backoff" in _exit_row("7"), (
+        "row 7 lost its backoff rule")
+    assert "retry once" in _exit_row("5"), "row 5 lost its bounded retry"
+    assert "fall back" in _exit_row("5") and "gh" in _exit_row("5"), (
+        "row 5 no longer routes a second control-plane failure to the gh fallback")
+
+
+def test_the_handoff_section_owns_its_table():
+    """The whole handoff section — the three-engine table and suggest-don't-chain —
+    was deletable while the description still promised one; the guards read only the
+    frontmatter and the eval artifact, never the body."""
+    i = _BODY.index("## Handoff to the audit skills")
+    section = _BODY[i:_BODY.index("## `gh` fallback", i)].lower()
+    for engine in ("ci-score", "ci-speedup", "ci-secure"):
+        assert f"`{engine}`" in section, f"the handoff table lost {engine}"
+    assert "do not auto-chain" in section or "never invoke another skill" in section, (
+        "the handoff section lost the suggest-don't-chain rule")
+
+
+def test_the_compound_ask_rule_orders_read_before_write():
+    """Eval case 2's entire subject, and nothing but the never-run eval encoded it:
+    the paragraph was replaceable with "just do both halves" with the suite green."""
+    i = _BODY.index("**Compound asks**")
+    para = " ".join(_BODY[i:i + 700].split()).lower()
+    assert "first" in para and "report" in para, (
+        "the compound-ask rule no longer orders the sling half first, reported")
+    assert "never chain" in para, (
+        "the compound-ask rule lost 'never chain into a state change without telling "
+        "the user'")
+
+
+_GOTCHA_CLAUSES = [
+    # (anchor that identifies the bullet, clause that carries its meaning)
+    ("recommends a command that does not exist", "never run a `fix_command` unchecked"),
+    ("unknown flags are ignored, not rejected", "check the rows you got back"),
+    ("`--help` lists an abridged flag set", "absence from `--help` is not absence"),
+    ("zero phase in `sling time`", "not measured"),
+    ("exit `10` is an answer", "report what it says"),
+    ("`sling runs show` gives no `job_id`", "jobs list --run"),
+    ("`sling bill` has two totals", "amount_due"),
+    ("no client-side timeout", "report the timeout itself"),
+    ("`sling why` on a run (id or url) can answer for one selected job", "jobs list --run"),
+]
+
+
+@pytest.mark.parametrize("anchor,clause", _GOTCHA_CLAUSES,
+                         ids=[a[:28] for a, _ in _GOTCHA_CLAUSES])
+def test_each_gotcha_survives(anchor, clause):
+    """Ten of the eleven gotchas were individually deletable with the suite green —
+    including the skill's own headline bug (`sling update`). Each bullet is a
+    verified binary fact; pin the bullet AND its load-bearing clause, scoped to the
+    bullet the way the empty-listing guard already is."""
+    low = " ".join(_BODY.split()).lower()
+    assert anchor.lower() in low, f"the gotcha anchored on {anchor!r} is gone"
+    i = low.index(anchor.lower())
+    bullet = low[i:i + 700]
+    assert clause.lower() in bullet, (
+        f"the gotcha {anchor!r} lost its clause {clause!r}")
+
+
+def test_the_platform_claim_survives():
+    """Apple Silicon macOS / x64 glibc Linux only, no Windows build — deletable with
+    the suite green, and the preflight's step-6 fallback depends on it being said."""
+    step = " ".join(_preflight_step(1).split())
+    assert "Apple Silicon" in step and "Linux" in step, (
+        "step 1 no longer states the supported platforms")
+    assert "Windows" in step, "step 1 no longer says there is no Windows build"
+
+
+def test_the_casing_rule_survives():
+    """snake_case everywhere except whoami's camelCase — a wrong-cased parse is a
+    silent empty read, the false-negative class this skill exists to prevent."""
+    low = " ".join(_BODY.split())
+    assert "snake_case" in low and "whoami" in low and "camelCase" in low, (
+        "the parser-casing rule (snake_case except whoami) is gone")
+
+
+def test_routing_artifact_is_load_bearing():
+    """24 of 27 rows were inert: deleting all but the three audit prompts passed, and
+    repointing a spend prompt at `sling why` passed. Mirror ci-score's house pattern —
+    a floor, no duplicates, and required prompt→command pins."""
+    rows = _ROUTING["routings"]
+    assert len(rows) >= 25, f"the routing artifact shrank to {len(rows)} rows"
+    prompts = [r["prompt"] for r in rows]
+    assert len(prompts) == len(set(prompts)), "duplicate prompts in the routing artifact"
+    required = {
+        "why did this job fail": "sling why",
+        "what made this run so slow": "sling time",
+        "how many runner minutes did each repo use": "sling usage",
+        "which workflow is costing us the most": "sling top",
+        "what did we spend on CI this month": "sling bill",
+    }
+    by_prompt = {r["prompt"]: r for r in rows}
+    for prompt, command in required.items():
+        assert prompt in by_prompt, f"the routing artifact lost {prompt!r}"
+        got = by_prompt[prompt].get("command", "")
+        assert got.startswith(command), (
+            f"{prompt!r} now routes to {got!r}, expected {command!r}")
+
+
+def test_routing_artifact_commands_exist_in_the_routing_table():
+    """Every sling command the artifact names must appear in SKILL.md's routing
+    table, so the two contracts cannot drift apart silently."""
+    for r in _ROUTING["routings"]:
+        cmd = r.get("command", "")
+        if cmd.startswith("sling "):
+            head = " ".join(cmd.split()[:2])
+            assert head.split()[1] in _BODY or head in _BODY, (
+                f"{r['prompt']!r} routes to {cmd!r}, which SKILL.md's table never names")
+
+
+def test_evals_encode_rules_the_suite_cannot_otherwise_see():
+    """evals.json is run by no harness, so its content must at least stay coherent
+    with the routing artifact: every should-not-trigger eval prompt needs a matching
+    non-sling route, and every eval's assertions must name a real command."""
+    for case in _EVALS["evals"]:
+        text = " ".join(case["assertions"]).lower()
+        assert ("sling" in text or "gh" in text or "ci-" in text or "read" in text), (
+            f"eval {case['id']} asserts nothing about any tool or route")
+        if not case["should_trigger"]:
+            assert any(k in " ".join(case["assertions"]).lower()
+                       for k in ("hand", "read", "did not", "not invoke", "never")), (
+                f"eval {case['id']} is should-not-trigger but its assertions do not "
+                "describe a refusal or handoff")

@@ -1,12 +1,12 @@
 {
   "skill_name": "sling",
-  "_comment": "Behavioral evals: what an agent DOES with the skill loaded. The routing contract it must obey is pinned separately in prompt-routing.json. Every should_trigger case needs a live `sling` login. TWO THINGS TO KNOW BEFORE RUNNING THESE: (1) the run ids below are real and GitHub purges Actions logs after 90 days, so a stale id fails with exit 3 for reasons that have nothing to do with the skill \u2014 refresh them from `sling runs list --conclusion failure` before a run; (2) case 2 asks for a re-run, which would burn runner minutes on a real repo, so run these with the harness instructing that state-changing commands be NAMED rather than executed. The assertions below grade on naming the right command, never on firing it.",
+  "_comment": "Behavioral evals: what an agent DOES with the skill loaded. The routing contract it must obey is pinned separately in prompt-routing.json. Every should_trigger case needs a live `sling` login. TWO THINGS TO KNOW BEFORE RUNNING THESE: (1) the run ids below are real and GitHub purges Actions logs after 90 days, so a stale id fails with exit 3 for reasons that have nothing to do with the skill \u2014 the ids are placeholders \u2014 refresh them from `sling runs list --conclusion failure` before a run; (2) case 2 asks for a re-run, which would burn runner minutes on a real repo, so run these with the harness instructing that state-changing commands be NAMED rather than executed. The assertions below grade on naming the right command, never on firing it.",
   "evals": [
     {
       "id": 1,
       "name": "diagnose-a-failed-job-without-dumping-logs",
       "should_trigger": true,
-      "prompt": "the nightly job failed again \u2014 https://github.com/acme/web/actions/runs/32881736257 \u2014 what actually broke this time",
+      "prompt": "the nightly job failed again \u2014 https://github.com/acme/web/actions/runs/1234567890 \u2014 what actually broke this time",
       "expected_output": "Runs `sling why` on the run (accepting the URL directly, no manual id extraction), reports the classification and the failing step with its evidence, and does not pull the whole transcript. If it needs more log detail it follows the `suggested_actions[].command` rather than improvising a grep pattern.",
       "assertions": [
         "Invoked `sling why` with the pasted URL, not a hand-extracted id",
@@ -20,7 +20,7 @@
       "id": 2,
       "name": "compound-ask-diagnoses-before-changing-state",
       "should_trigger": true,
-      "prompt": "figure out why run 32881736257 failed and then just re-run the failed jobs for me",
+      "prompt": "figure out why run 1234567890 failed and then just re-run the failed jobs for me",
       "expected_output": "Does the read half first with `sling why`, reports the finding, and only then names `gh run rerun <id> --failed` as an announced, separate action, leaving the decision to the user. Never attempts a `sling` subcommand for the re-run \u2014 `sling` is read-only and has none.",
       "assertions": [
         "Diagnosis reported before any state change",
