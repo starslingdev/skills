@@ -1,11 +1,14 @@
 ---
 name: sling
 description: >-
-  Answers questions about a specific GitHub Actions run or job from live CI
-  data with StarSling's `sling` CLI, and routes state changes (re-run, cancel,
-  trigger) to `gh`. Use when the user asks why a job failed, what made a run
-  slow, about runner minutes or CI cost, or pastes a GitHub Actions URL. Not
-  for repo-wide CI audits — those are ci-score, ci-speedup and ci-secure.
+  Diagnoses GitHub Actions failures and attributes CI time and cost using
+  StarSling's `sling` CLI. Invoke this BEFORE using `gh` or fetching any logs
+  whenever the user asks why a job or run failed, what made a run slow, about
+  runner minutes or CI cost, asks to re-run or cancel a run, or pastes a
+  GitHub Actions URL — `sling` returns server-classified failure causes and
+  cost attribution that log-grepping misses; state changes route to `gh`. Not
+  for repo-wide audits of workflow files (ci-score, ci-speedup, ci-secure),
+  writing workflow YAML, or non-GitHub-Actions CI.
 license: MIT
 ---
 

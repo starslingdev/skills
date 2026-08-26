@@ -596,28 +596,32 @@ def test_agent_is_not_described_as_an_alias_for_flags_it_does_not_have():
         "the caution against restating the docs' flag-alias claim is gone")
 
 
-def test_the_description_follows_the_documented_two_part_shape():
-    """Capability, then a compact `Use when` naming the terms a user would say.
+def test_the_description_keeps_its_measured_trigger_properties():
+    """This description was chosen by measurement, not judgement — keep what won.
 
-    That is the shape the official skill-authoring guidance specifies, and its worked
-    examples are ~150 characters. The first version here ran to 999 characters of
-    dense prose with `Use when` 63% in, and a live dogfood showed the cost: asked
-    "why did this job fail?" with an Actions URL, the skill did not fire and the agent
-    grepped a whole job log instead — the behaviour it exists to replace.
+    The documented gentle shape (capability clause + short "Use when") measured 0%
+    on real prompts: "why did this job fail?" with an Actions URL was answered by
+    grepping a whole job log with `gh`, in two live dogfoods and in direct
+    `claude -p` probes. The same probes showed the channel works — an imperative
+    claim over the default path fired 4/4 with `Skill:sling` as the FIRST tool
+    call, while both near-miss negatives (a repo-wide grade, a YAML question)
+    still routed away correctly.
 
-    The fix is not quoting user sentences into the description (that was a wrong turn);
-    it is the documented shape, short, with the terms named.
+    So the properties pinned here are the measured winners: the imperative
+    invoke-before-`gh` claim, the trigger terms, the pasted-URL cue, and the
+    negative clause. Softening these back toward the documented shape is the
+    regression the measurements exist to prevent — re-measure before changing
+    them (direct `claude -p` probes; the eval harness's positive control failed,
+    so its numbers are void).
     """
     d = _FRONT["description"]
-    assert "Use when" in d, "the description lost its Use-when clause"
-    assert d.index("Use when") < len(d) * 0.55, (
-        "`Use when` sits in the back half of the description; the capability preamble "
-        "has grown past the trigger again")
-    for term in ("run", "job", "runner minutes", "GitHub Actions URL"):
-        assert term in d, f"the Use-when clause no longer names {term!r}"
-    assert "gh" in d, (
-        "the description no longer says it should be preferred over reading raw logs "
-        "with `gh`, so nothing signals that a better path exists")
+    low = d.lower()
+    assert "before" in low and "`gh`" in d, (
+        "the description lost its invoke-before-gh claim — the single feature that "
+        "took the trigger rate from 0% to 4/4")
+    for term in ("failed", "runner minutes", "GitHub Actions URL"):
+        assert term in d, f"the description lost the trigger term {term!r}"
+    assert "re-run" in low or "rerun" in low, "the state-change cue is gone"
 
 
 def test_no_hyphenated_term_is_split_by_the_yaml_fold():

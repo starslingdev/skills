@@ -201,17 +201,19 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   install check and sandbox caution from both files. Each guard now reads the
   section it protects, and each of those three mutations now fails.
 
-- **2026-08-26** — **The description is cut to the documented shape, after a
-  live dogfood showed it never fired.** Asked "why did this job fail?" with an
-  Actions URL, the agent grepped a whole job log with `gh` — the exact behaviour
-  this skill replaces — because the 999-character description buried its trigger
-  63% in. Two wrong fixes followed (quoting user sentences verbatim, then a
-  self-invented "trigger-first" ordering rule) before the official guidance
-  settled it: one capability clause, one short `Use when` naming key terms,
-  third person, on the scale of the doc's own ~150-character worked examples.
-  Now 372 characters. The guards assert the documented properties — third
-  person, a Use-when clause with the key terms, a negative clause naming the
-  three audit skills — rather than any particular phrasing.
+- **2026-08-26** — **The description is now the one that measured best, not the
+  one that read best.** Two live dogfoods asked "why did this job fail?" with an
+  Actions URL and the skill never fired — the agent grepped a whole job log with
+  `gh`, the exact behaviour this skill replaces. Rewrites to the documented
+  gentle shape (capability clause + short "Use when") still measured 0% in
+  direct `claude -p` probes, while an imperative claim over the default path —
+  invoke this BEFORE `gh`, before fetching logs — fired 4/4 with the skill as
+  the first tool call, and both near-miss negatives (a repo-wide grade, a
+  workflow-YAML question) still routed away correctly. The shipped description
+  is the tested string verbatim, and the guard pins its measured properties.
+  One measurement caveat is recorded with it: the skill-creator eval harness's
+  positive control failed (an explicit "use the sling skill" showed 0%), so its
+  numbers were discarded and every figure above comes from direct probes.
 
 ### Notes
 
