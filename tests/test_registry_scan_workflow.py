@@ -17,8 +17,11 @@ inside the workflow itself on every run.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
+import pathlib
 import re
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -836,3 +839,45 @@ def test_an_unclassifiable_exit_one_is_never_called_a_finding(workflow: dict):
         "the gate lost its unclassified branch, so an exit 1 naming no code falls "
         "through to whichever label happens to be last")
     assert "UNCLASSIFIED" in run
+
+
+def test_the_redprove_anchor_is_falsifiable_and_is_what_the_fixture_contains():
+    """The control's anchor must be a string only a working scanner can produce.
+
+    It was the vendor code `E005` until scanner 0.6.0 replaced issue codes with named
+    risks, at which point the control reported a blind scanner while the scanner was
+    demonstrably seeing — it returned `2 risks` on the same fixture. Anchoring on
+    vendor vocabulary means a rename reads as a detection failure.
+
+    The anchor is now the fixture's own malicious host, produced by the SAME function
+    that builds the fixture, so the two cannot drift apart and no installer-host
+    literal lands on disk (which this repo's IOC guard forbids, and which the
+    red-proof module goes out of its way to avoid).
+
+    Two ways this could rot into a meaningless green, both pinned: a trivial anchor
+    that any output satisfies, and an anchor the fixture does not actually contain.
+    """
+    src = (_REPO / ".github" / "scripts" / "registry_scan_redprove.py").read_text()
+
+    spec = importlib.util.spec_from_file_location(
+        "_redprove", _REPO / ".github" / "scripts" / "registry_scan_redprove.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    anchor = mod.expected_evidence()
+
+    assert len(anchor) >= 12, (
+        f"the anchor is {anchor!r} — too short to be evidence of anything. A trivial "
+        "anchor is satisfied by a scanner that says nothing, which is exactly the "
+        "blind-scanner case this control exists to catch")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        mod.build_violating_skill(pathlib.Path(tmp))
+        fixture = (pathlib.Path(tmp) / "redprove-fixture" / "SKILL.md").read_text()
+    assert anchor in fixture, (
+        f"the anchor is {anchor!r}, which the fixture this script writes does not "
+        "contain — so the scanner cannot echo it back and the control can never pass, "
+        "however well the scanner is working")
+
+    code_lines = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
+    assert not [ln for ln in code_lines if "E005" in ln], (
+        "the red-proof still USES the retired E005 code, not just mentions it")
