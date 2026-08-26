@@ -14,13 +14,19 @@ gating exemption was passed to `--ignore-failure-codes`, which accepts only the
 scanner's X-class runtime codes, silently switching the whole warning policy off.
 
 So the vocabulary lives here now, checked against the scanner's own models
-(`agent_scan/models/api/v20260710.py`) rather than inferred from its printed output.
+(`agent_scan/models/api/v20260710.py`) rather than inferred from its printed output,
+and pinned offline by `tests/test_registry_scan_workflow.py` so a hand-copied list
+cannot drift unnoticed.
 """
 from __future__ import annotations
 
-# Every skill risk 0.6.0 can report, verbatim from SkillRiskIndexes. The gate refuses
-# to run if the scanner grows one this list does not know: a new risk defaulting to
-# "not blocking" is the silent-exemption failure all over again.
+# Every skill risk 0.6.0 can report, verbatim from `SkillRiskIndexes`.
+#
+# The list is not what blocks — the exemption list below is, by omission — but it is
+# what lets this build NOTICE that the scanner's catalog has moved. A risk name outside
+# it is surfaced by the reporter as unrecognised (see `unknown_risks`), because the
+# alternative is finding out the vocabulary drifted the way we found out last time:
+# from a public audit page.
 SKILL_RISKS: tuple[str, ...] = (
     "prompt_injection_skill_instructions",
     "suspicious_download_url",
@@ -32,6 +38,17 @@ SKILL_RISKS: tuple[str, ...] = (
     "unverifiable_dependencies",
     "modifying_system_services",
     "missing_skill_md",
+)
+
+# The MCP-server risks, verbatim from `McpServerRiskIndexes`. The scanner's `--ci` exit
+# weighs these alongside the skill risks, so a run can fail the gate on one; the reporter
+# has to be able to name it rather than print "No findings." over it.
+SERVER_RISKS: tuple[str, ...] = (
+    "dangerous_words",
+    "prompt_injection_tool_desc",
+    "untrusted_content",
+    "private_data",
+    "destructive_capabilities",
 )
 
 # THE GATING RULE (owner ruling 2026-08-10, restated for 0.6.0's model 2026-08-26).
@@ -51,49 +68,107 @@ SKILL_RISKS: tuple[str, ...] = (
 # In a security gate a false block is loud and one line to fix; a false exemption is
 # silent.
 #
-# Not exempt, and never to be: `suspicious_download_url` — the old E005, the only code
-# that has ever turned our skills red (ci-score once, ci-secure twice), AND the rule
-# the red-proof control anchors on. Exempting it would disable the check that proves
-# the scanner still detects anything.
+# Never to be exempted, and pinned offline by
+# `tests/test_registry_scan_workflow.py::test_no_blocking_risk_is_ever_exempt`:
+#
+#   `suspicious_download_url` — the old E005, the only rule that has ever turned our
+#   skills red (ci-score once, ci-secure twice).
+#   `unverifiable_dependencies` — what the red-proof control's fixture actually fires
+#   on 0.6.0. The scanner labels it `Unverifiable URLs:` in the output the control
+#   greps, and exempting it would disable the check that proves the scanner still
+#   detects anything.
 NON_BLOCKING_RISKS: tuple[str, ...] = ("third_party_content_exposure",)
 
-BLOCKING_RISKS: tuple[str, ...] = tuple(r for r in SKILL_RISKS if r not in NON_BLOCKING_RISKS)
+BLOCKING_RISKS: tuple[str, ...] = tuple(
+    r for r in SKILL_RISKS + SERVER_RISKS if r not in NON_BLOCKING_RISKS
+)
 
 
-def unknown_risks(seen: set[str]) -> set[str]:
-    """Risk names the scanner reported that this contract does not know about."""
-    return seen - set(SKILL_RISKS)
+class UnrecognisedPayload(ValueError):
+    """The scanner's JSON parsed, but is not a shape this contract understands."""
+
+
+def unknown_risks(seen) -> set[str]:
+    """Risk names the scanner reported that this contract does not know about.
+
+    An unknown risk already BLOCKS — it is not in the exemption list, so `--ci` fails
+    on it. What it does not do on its own is tell anyone the catalog moved, which is
+    why the reporter calls this and says so out loud.
+    """
+    return set(seen) - set(SKILL_RISKS) - set(SERVER_RISKS)
 
 
 def iter_findings(payload: dict) -> list[dict]:
     """Every risk in a 0.6.0 `--json` payload, as flat rows.
 
-    Shape (ScanPathResponse): `{"scan_path_responses": [{"path", "skill_risks":
-    [{"name", "risk_indexes": {<risk name>: {"score", "evidence", ...} | null}}]}]}`.
-    A risk that did not fire is present as null rather than absent, so `None` values
-    are skipped rather than counted.
+    Shape (`ScanPathResponse`): `{"scan_path_responses": [{"path", "error",
+    "server_risks": [...], "skill_risks": [{"name", "error", "risk_indexes":
+    {<risk name>: {"score", "evidence", ...}}}]}]}`.
+
+    A risk that did not fire is ABSENT, not null: the scanner serialises with
+    `model_dump(mode="json", exclude_none=True)`. Nulls are tolerated anyway, because
+    tolerating a shape costs nothing and assuming one is what broke the reporter.
+
+    Both `server_risks` and `skill_risks` are read, because the scanner's `--ci` exit
+    weighs both — a server risk the reporter skipped would fail the gate under a
+    summary saying "No findings."
+
+    Raises `UnrecognisedPayload` if the top-level key is missing. Returning `[]` there
+    is indistinguishable from a clean scan, and that silence is exactly how the 0.5.x
+    reader survived a week of reporting nothing.
     """
+    if "scan_path_responses" not in payload:
+        raise UnrecognisedPayload(
+            "no `scan_path_responses` key: this is not scanner 0.6.0's `--json` shape, "
+            "so no finding in it can be read. Do not treat this run as clean."
+        )
     rows: list[dict] = []
     for response in payload.get("scan_path_responses") or []:
         if not isinstance(response, dict):
             continue
-        for skill in response.get("skill_risks") or []:
-            if not isinstance(skill, dict):
-                continue
-            indexes = skill.get("risk_indexes") or {}
-            if not isinstance(indexes, dict):
-                continue
-            for name, score in indexes.items():
-                if not isinstance(score, dict):
-                    continue  # null = this risk did not fire
-                rows.append(
-                    {
-                        "risk": name,
-                        "skill": str(skill.get("name") or response.get("path") or "unknown"),
-                        "score": score.get("score"),
-                        "evidence": " ".join(str(score.get("evidence") or "").split()),
-                        "blocking": name not in NON_BLOCKING_RISKS,
-                    }
-                )
+        path = str(response.get("path") or "unknown")
+        _append_error(rows, response.get("error"), path)
+        for key in ("skill_risks", "server_risks"):
+            for entity in response.get(key) or []:
+                if not isinstance(entity, dict):
+                    continue
+                name = str(entity.get("name") or path)
+                _append_error(rows, entity.get("error"), name)
+                indexes = entity.get("risk_indexes") or {}
+                if not isinstance(indexes, dict):
+                    continue
+                for risk, score in indexes.items():
+                    if not isinstance(score, dict):
+                        continue  # absent/null = this risk did not fire
+                    rows.append(
+                        {
+                            "risk": risk,
+                            "skill": name,
+                            "score": score.get("score"),
+                            "evidence": " ".join(str(score.get("evidence") or "").split()),
+                            "blocking": risk not in NON_BLOCKING_RISKS,
+                        }
+                    )
     rows.sort(key=lambda r: (not r["blocking"], r["risk"], r["skill"]))
     return rows
+
+
+def _append_error(rows: list[dict], error, where: str) -> None:
+    """A scan error is not a finding, but it is emphatically not a clean result either.
+
+    Without this the summary printed "No findings." over a run where the scanner failed
+    on part of the tree — the gate caught it in a separate pass, so the two surfaces
+    said opposite things and the human-glanceable one was the one that was wrong.
+    """
+    if not isinstance(error, dict):
+        return
+    detail = " ".join(str(error.get("message") or error.get("code") or error).split())
+    rows.append(
+        {
+            "risk": f"scan_error:{error.get('code') or 'unknown'}",
+            "skill": where,
+            "score": None,
+            "evidence": f"The scanner could not analyse this entry: {detail}",
+            "blocking": True,
+        }
+    )

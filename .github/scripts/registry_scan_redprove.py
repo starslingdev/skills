@@ -124,8 +124,9 @@ def main() -> int:
             "scan",
             str(scan_path),
             "--ci",
-            # Keeps codes the printer would otherwise strip in the result the --ci exit
-            # check reads. Same reason the workflow passes it — see the comment there.
+            # Logging only, in 0.6.0 — it does not change what the printer keeps. Passed
+            # because this control asserts on the scanner's OUTPUT, and a quiet run gives
+            # it nothing to read. Same reason the workflow passes it.
             "--verbose",
             "--dangerously-run-mcp-servers",
         ]

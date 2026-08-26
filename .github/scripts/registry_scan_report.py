@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Surface every registry-scan finding, without letting a warning block the build.
 
-`.github/workflows/registry-scan.yml` gates on Snyk Agent Scan's critical class only
-— the E-codes. Warnings (W-codes) are real findings we want a human or a review agent
-to look at, but they do not fail CI. A finding nobody can see is the failure this whole
-gate exists to prevent, so "does not block" must not decay into "does not appear".
+`.github/workflows/registry-scan.yml` blocks on every risk 0.6.0 reports except the
+ones named in `registry_scan_contract.NON_BLOCKING_RISKS`. Those exempt risks are real
+findings we want a human or a review agent to look at, but they do not fail CI. A
+finding nobody can see is the failure this whole gate exists to prevent, so "does not
+block" must not decay into "does not appear".
 
 This script reads the scanner's `--json` output and writes it to three surfaces, each
 for a different consumer:
@@ -18,12 +19,13 @@ for a different consumer:
 
 It also prints a plain-text table to the job log, because the scanner's own rich report
 is not produced in JSON mode and this is the only pass that sees every finding: the
-gating pass runs with the ignore list, and the scanner strips ignored findings from its
-printed report as well as from its exit status.
+gating pass runs with the exemption list, and `--ignore-risks` nulls those risks out of
+the response before it is printed as well as before the exit status is computed.
 
-Exit status: 0 whatever the findings are — gating is the next step's job, and warnings
-must never block. It exits 1 only if the scan output cannot be parsed at all, because at
-that point the surfacing is broken and silence would look exactly like "nothing found".
+Exit status: 0 whatever the findings are — gating is the next step's job, and exempt
+risks must never block. It exits 1 only if the scan output cannot be read: either it
+does not parse, or it parses into a shape this build does not recognise. Both are a
+broken pipeline, and silence there looks exactly like "nothing found".
 
 Usage:  python3 .github/scripts/registry_scan_report.py <findings.json>
 """
@@ -33,18 +35,12 @@ import pathlib as _pathlib
 import sys as _sys
 
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent))
-from registry_scan_contract import iter_findings  # noqa: E402
+from registry_scan_contract import UnrecognisedPayload, iter_findings, unknown_risks  # noqa: E402
 
 import json
 import os
 import sys
 from pathlib import Path
-
-# Snyk Agent Scan issue codes carry their class in the prefix: E = critical class
-# (what this gate fails on), W = warning class (surfaced, never blocking), X = a scan
-# runtime failure. See https://github.com/snyk/agent-scan/blob/main/docs/issue-codes.md
-CRITICAL_PREFIX = "E"
-
 
 def load_findings(path: Path) -> dict:
     """Parse the scanner's JSON, tolerating a banner printed before the document.
@@ -60,29 +56,6 @@ def load_findings(path: Path) -> dict:
     return json.loads(raw[start:])
 
 
-def skill_name(result: dict, issue: dict) -> str:
-    """Best-effort name of the skill an issue fired on.
-
-    `reference` is (server_index, entity_index); for a skills directory each skill is
-    one "server" entry. Falls back to the scanned path when the shape is unfamiliar,
-    which is a labelling detail only — the finding is reported either way.
-    """
-    reference = issue.get("reference")
-    servers = result.get("servers") or []
-    if isinstance(reference, (list, tuple)) and reference and isinstance(reference[0], int):
-        index = reference[0]
-        if 0 <= index < len(servers):
-            name = (servers[index] or {}).get("name")
-            if name:
-                return str(name)
-    return str(result.get("path") or "unknown")
-
-
-def severity_of(issue: dict) -> str:
-    extra = issue.get("extra_data") or {}
-    return str(extra.get("severity") or "unknown")
-
-
 def collect(findings: dict) -> list[dict]:
     """Every risk in the payload, via the shared contract.
 
@@ -93,8 +66,14 @@ def collect(findings: dict) -> list[dict]:
     content. It parsed cleanly, so the FINDINGS UNREADABLE guard never fired either.
     Silent, and indistinguishable from a clean scan.
     """
+    parsed = iter_findings(findings)
+    # A risk name outside the pinned vocabulary already blocks (it is not exempt), but
+    # nothing told anyone the scanner's catalog had moved. Saying so is what makes the
+    # ten-name list in the contract load-bearing rather than decorative.
+    unrecognised = unknown_risks(
+        row["risk"] for row in parsed if not row["risk"].startswith("scan_error:"))
     rows = []
-    for row in iter_findings(findings):
+    for row in parsed:
         rows.append(
             {
                 "code": row["risk"],
@@ -103,6 +82,7 @@ def collect(findings: dict) -> list[dict]:
                 "message": row["evidence"],
                 "critical": row["blocking"],
                 "score": row["score"],
+                "unknown": row["risk"] in unrecognised,
             }
         )
     # iter_findings already orders blocking-first, then by risk name, then skill.
@@ -118,6 +98,14 @@ def emit_annotations(rows: list[dict]) -> None:
     the gating step, which fails the job and says so itself.
     """
     for row in rows:
+        if row["unknown"]:
+            print(
+                f"::warning title=UNKNOWN RISK NAME {row['code']} in {row['skill']}::"
+                f"The scanner reported a risk this build's vocabulary does not carry, so "
+                f"registry_scan_contract.py is out of date with the scanner's catalog. It "
+                f"blocks the gate either way. {row['message']}"
+            )
+            continue
         if row["critical"]:
             continue
         print(
@@ -128,14 +116,15 @@ def emit_annotations(rows: list[dict]) -> None:
 
 def render_table(rows: list[dict]) -> str:
     lines = [
-        "| Class | Code | Severity | Skill | Finding |",
+        "| Class | Risk | Score | Skill | Finding |",
         "| --- | --- | --- | --- | --- |",
     ]
     for row in rows:
-        klass = "**critical — blocks**" if row["critical"] else "warning"
+        klass = "**blocks the build**" if row["critical"] else "does not block"
+        name = f"`{row['code']}`" + (" **(UNKNOWN to this build)**" if row["unknown"] else "")
+        score = "—" if row["score"] is None else f"{row['score']}/1000"
         lines.append(
-            f"| {klass} | `{row['code']}` | {row['severity']} | `{row['skill']}` | "
-            f"{row['message']} |"
+            f"| {klass} | {name} | {score} | `{row['skill']}` | {row['message']} |"
         )
     return "\n".join(lines)
 
@@ -187,7 +176,18 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
-    rows = collect(findings)
+    try:
+        rows = collect(findings)
+    except UnrecognisedPayload as exc:
+        # Valid JSON in a shape we cannot read is the 0.5.x failure exactly: it parsed,
+        # it yielded nothing, and "No findings." was printed over every run for a week.
+        print(
+            "::error title=REGISTRY SCAN FINDINGS UNREADABLE::"
+            f"The scanner's JSON is not a shape this build recognises ({exc}). Findings "
+            "were not surfaced; do not read this run as 'no warnings'.",
+            file=sys.stderr,
+        )
+        return 1
     emit_annotations(rows)
     write_summary(rows)
     return 0

@@ -23,11 +23,11 @@ import pathlib
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
-import yaml
 
 yaml = pytest.importorskip("yaml")
 
@@ -36,21 +36,6 @@ _WORKFLOW = _REPO / ".github" / "workflows" / "registry-scan.yml"
 _CI_WORKFLOW = _REPO / ".github" / "workflows" / "ci.yml"
 _REDPROVE = _REPO / ".github" / "scripts" / "registry_scan_redprove.py"
 _REPORT = _REPO / ".github" / "scripts" / "registry_scan_report.py"
-
-# THE GATING RULE (owner ruling, 2026-08-10): the build fails on the critical class only —
-# Snyk Agent Scan's E-codes. Warning-class findings (W-codes) are surfaced on every run but
-# never block. The scanner has no severity threshold, so the rule is expressed by enumerating
-# the W class into --ignore-risks.
-#
-# This is every W-code published in the scanner's catalog:
-# https://github.com/snyk/agent-scan/blob/main/docs/issue-codes.md
-# Pinned so that a newly published W-code arrives as a conscious update here rather than as an
-# unexplained red build — and, far more importantly, so that no E-code can ever be slipped in.
-_PUBLISHED_WARNING_CODES = {
-    "W001", "W007", "W008", "W009", "W011", "W012", "W013", "W014",
-    "W015", "W016", "W017", "W018", "W019", "W020", "W021",
-}
-
 
 @pytest.fixture(scope="module")
 def workflow() -> dict:
@@ -188,30 +173,18 @@ def test_gate_uses_ci_flag(workflow: dict):
     _assert_unconditional(gate, "the gating scan")
 
 
-def test_unfiltered_pass_sees_what_the_printer_would_hide(workflow: dict):
-    """The visibility pass emits JSON, which is strictly more complete than the report.
+def test_the_gating_pass_logs_what_it_did(workflow: dict):
+    """`--verbose` on the gating pass, so gate-output.txt records the run.
 
-    The scanner's printer strips the codes W003-W006 from the result as it prints — and
-    mutates the result in place doing it. JSON output skips the printer entirely, so the
-    one pass that is supposed to see everything actually does. (The gating pass keeps
-    `--verbose`, which is the same defect's off-switch on the report path.)
+    Not for the reason an earlier revision of this test gave: in 0.6.0 `--verbose` only
+    raises the logging level (`setup_logging`), and the printer neither strips codes nor
+    mutates the response. It is pinned because the gate CLASSIFIES on that captured
+    output, and a silent run gives the classifier nothing to read.
     """
-    assert "--json" in _visibility_step(workflow)["run"], (
-        "the unfiltered pass must emit JSON: it is the input to the annotation, summary, "
-        "and artifact surfaces, and it is the only output the printer cannot silently trim"
-    )
     assert "--verbose" in _gate_step(workflow)["run"], (
-        "the gating pass lost --verbose, so the scanner drops W003-W006 from the result "
-        "the --ci exit check reads"
+        "the gating pass lost `--verbose`, so the output the classifier greps is thinner "
+        "than the one those branches were written against"
     )
-
-
-def _declared_ignored_codes(workflow: dict) -> set:
-    return {
-        code.strip()
-        for code in workflow["env"]["the non-blocking risk list"].split(",")
-        if code.strip()
-    }
 
 
 def test_warnings_are_surfaced_on_all_three_channels(workflow: dict):
@@ -551,7 +524,9 @@ def _load_report_module():
 
 # Scanner 0.6.0's real shape, taken from a live artifact: one top-level key whose value
 # is a LIST of scanned paths, each carrying skills, each carrying risks keyed by name.
-# A risk that did not fire is present as null rather than absent.
+# A risk that did not fire is ABSENT: the scanner serialises with `exclude_none=True`.
+# `ci-secure` below carries no `malicious_code` key at all, which is the real shape;
+# `ci-speedup` carries an explicit null, which the reader tolerates but never sees live.
 _SAMPLE_SCAN = {
     "scan_path_responses": [
         {
@@ -683,11 +658,19 @@ def test_redprove_builds_a_violating_skill_without_committing_one(tmp_path):
             f"fixture URL host {host!r} is outside the reserved example.com domain"
         )
 
-    # The assembled string must not appear verbatim in the script that assembles it.
-    marker = "curl -sSL http" + "s://get.redprove-fixture.example.com"
-    assert marker not in _REDPROVE.read_text(encoding="utf-8"), (
-        "the red-proof script now contains the literal it is supposed to construct"
-    )
+    # The assembled string must not appear verbatim in the script that assembles it —
+    # asserted with the SHIPPED guard's own patterns rather than a hand-built substring,
+    # which would silently stop matching if the fixture's flags ever changed.
+    ioc_spec = importlib.util.spec_from_file_location(
+        "test_no_ioc_shaped_literals", _REPO / "tests" / "test_no_ioc_shaped_literals.py")
+    ioc = importlib.util.module_from_spec(ioc_spec)
+    ioc_spec.loader.exec_module(ioc)
+    source = _REDPROVE.read_text(encoding="utf-8")
+    for name in ("_FETCH_AND_EXECUTE", "_SCRIPT_URL", "_URL"):
+        assert not re.search(getattr(ioc, name), source), (
+            f"the red-proof script now contains a literal matching the shipped IOC guard's "
+            f"{name}; it is supposed to construct that string at runtime, never carry it"
+        )
 
 
 def test_a_scan_that_could_not_run_is_never_reported_as_a_finding(workflow: dict):
@@ -731,8 +714,7 @@ def test_the_scanner_version_is_pinned(workflow: dict):
     just goes red and stays red. Pinning makes the next scanner upgrade a deliberate
     commit that can be reviewed and reverted.
     """
-    runs = [s["run"] for s in workflow["jobs"]["scan"]["steps"]
-            if "snyk-agent-scan" in s.get("run", "")]
+    runs = [s["run"] for s in workflow["jobs"]["scan"]["steps"] if _invokes_scanner(s)]
     assert runs, "no step invokes the scanner"
     for run in runs:
         assert "snyk-agent-scan@latest" not in run, (
@@ -828,7 +810,9 @@ def test_the_redprove_anchor_is_falsifiable_and_is_what_the_fixture_contains():
         "the red-proof still USES the retired E005 code, not just mentions it")
 
 
-def _run_gate_classifier(workflow: dict, scanner_output: str, exit_code: int, tmp_path):
+def _run_gate_classifier(workflow: dict, scanner_output: str, exit_code: int, tmp_path,
+                         *, ignored_stdout: str = "third_party_content_exposure",
+                         ignored_exit: int = 0):
     """Execute the gate step's real shell against a fake scanner, and report its verdict.
 
     The other guards in this file are substring greps over the workflow YAML. Review of
@@ -852,13 +836,13 @@ def _run_gate_classifier(workflow: dict, scanner_output: str, exit_code: int, tm
     # The step calls `python .github/scripts/registry_scan_ignored.py`; stub that too so
     # the shell runs without the repo layout.
     py = tmp_path / "python"
-    py.write_text("#!/bin/sh\necho third_party_content_exposure\n", encoding="utf-8")
+    py.write_text(f"#!/bin/sh\necho '{ignored_stdout}'\nexit {ignored_exit}\n", encoding="utf-8")
     py.chmod(0o755)
 
     out_file = tmp_path / "gh_output"
     out_file.touch()
     proc = subprocess.run(
-        ["bash", "-c", run],
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", run],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -913,3 +897,340 @@ def test_the_gate_shell_refuses_to_guess_on_an_unnamed_exit(tmp_path):
     proc, outputs = _run_gate_classifier(workflow, "something unexpected happened", 1, tmp_path)
     assert outputs.get("scan_class") == "indeterminate"
     assert proc.returncode == 1
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review: the properties that were still only grepped, or not checked at
+# all. Each behavioural test below was written against the unfixed code and
+# watched fail; each guard was proven by mutating the code it protects.
+# ---------------------------------------------------------------------------
+
+
+def _load_contract_module():
+    spec = importlib.util.spec_from_file_location(
+        "registry_scan_contract", _REPO / ".github" / "scripts" / "registry_scan_contract.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run_verdict_shell(workflow: dict, tmp_path, *, red_proof: str, gate: str,
+                       scan_class: str = "", scan_exit: str = ""):
+    """Execute the verdict step's real shell with the step-context values substituted.
+
+    The gate step got an execution harness this round; this step — the one that
+    actually prints `DID NOT RUN — NOT A FINDING` — did not, so every one of its five
+    branches was pinned only by substring greps. Inverting its finding test to put the
+    NOT A FINDING banner over a real critical left all tests green.
+    """
+    run = _enforcement_step(workflow)["run"]
+    for expr, value in (
+        ("steps.red_proof.outcome", red_proof),
+        ("steps.gate.outcome", gate),
+        ("steps.gate.outputs.scan_class", scan_class),
+        ("steps.gate.outputs.scan_exit", scan_exit),
+    ):
+        run = re.sub(r"\$\{\{\s*" + re.escape(expr) + r"\s*\}\}", value, run)
+    assert "${{" not in run, f"unsubstituted step expression left in the verdict shell: {run}"
+    summary = tmp_path / "step_summary"
+    summary.touch()
+    proc = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", run],
+        cwd=tmp_path, capture_output=True, text=True,
+        env={"PATH": os.environ["PATH"], "SCAN_PATH": "skills",
+             "GITHUB_STEP_SUMMARY": str(summary), "HOME": str(tmp_path)},
+    )
+    return proc, summary.read_text(encoding="utf-8")
+
+
+def test_the_verdict_shell_never_labels_a_real_finding_not_a_finding(workflow, tmp_path):
+    """Executed, not grepped. This is the bug the whole PR exists to remove."""
+    proc, summary = _run_verdict_shell(
+        workflow, tmp_path, red_proof="failure", gate="failure", scan_class="finding", scan_exit="1")
+    assert "NOT A FINDING" not in proc.stdout + summary, (
+        "a run whose gate reported a blocking risk was announced as NOT A FINDING")
+    assert proc.returncode == 1
+
+
+def test_the_verdict_shell_reports_a_gate_that_never_ran(workflow, tmp_path):
+    """A passing control must not certify a run whose gate was skipped.
+
+    `Surface findings` is not continue-on-error, so unreadable scan output fails it and
+    leaves the gate unrun. The verdict step's own comment describes exactly this case —
+    and its early `exit 0` on a passing control made that branch unreachable, so the run
+    was announced "meaningful" with nothing gated.
+    """
+    proc, _ = _run_verdict_shell(workflow, tmp_path, red_proof="success", gate="skipped")
+    assert proc.returncode == 1, (
+        f"a skipped gate was certified as a meaningful run: {proc.stdout!r}")
+    assert "DID NOT RUN" in proc.stdout
+
+
+def test_the_verdict_shell_certifies_a_healthy_run(workflow, tmp_path):
+    proc, _ = _run_verdict_shell(
+        workflow, tmp_path, red_proof="success", gate="success", scan_class="clean", scan_exit="0")
+    assert proc.returncode == 0
+
+
+def test_the_verdict_shell_reports_the_coverage_gap_on_a_blind_scanner(workflow, tmp_path):
+    proc, _ = _run_verdict_shell(
+        workflow, tmp_path, red_proof="failure", gate="success", scan_class="clean", scan_exit="0")
+    assert proc.returncode == 1
+    assert "COVERAGE GAP" in proc.stdout and "NOT A FINDING" in proc.stdout
+
+
+def test_the_gate_shell_does_not_mistake_scanned_prose_for_a_finding(tmp_path):
+    """`risks found` must be read off the scanner's verdict line, not the whole log.
+
+    The gate captures the scanner's `--verbose` output, which echoes the description and
+    evidence text of the skills being scanned. These are CI-security skills, so the
+    phrase is ordinary prose for them. An unanchored grep let that prose classify a
+    crashed scan as a security finding — the same false verdict, sourced from the tree
+    instead of from the scanner.
+    """
+    workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    proc, outputs = _run_gate_classifier(
+        workflow,
+        "Scanning skills\n"
+        "└── ci-secure 0 risks\n"
+        "    description: Reports the risks found in a repository's workflows.\n"
+        "CI (--ci): exiting with code 1 (runtime failure codes: X003).",
+        1, tmp_path)
+    assert outputs.get("scan_class") == "operational", (
+        f"scanned skill prose classified a crashed scan as {outputs.get('scan_class')!r}")
+
+
+def test_a_blocking_finding_is_annotated_on_the_checks_tab(tmp_path):
+    """The finding branch was the only failure state emitting no titled annotation.
+
+    The reporter deliberately leaves blocking risks to the gate, and the gate emitted a
+    plain `echo` — so the one run a review agent most needs to read through the checks
+    API had an empty annotation set.
+    """
+    workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    proc, outputs = _run_gate_classifier(
+        workflow, "CI (--ci): exiting with code 1 (risks found).", 1, tmp_path)
+    assert outputs.get("scan_class") == "finding"
+    assert "::error title=" in proc.stdout, "a blocking risk produced no checks-tab annotation"
+
+
+def test_the_exit_two_path_records_a_class(tmp_path):
+    """The verdict annotation renders `class <value>`; a blank one reads as a bug."""
+    workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    proc, outputs = _run_gate_classifier(workflow, "error: unrecognized arguments", 2, tmp_path)
+    assert outputs.get("scan_class"), "the exit-2 path left scan_class unset"
+    assert outputs["scan_class"] != "finding"
+    assert proc.returncode == 1
+
+
+def test_the_gate_fails_when_its_exemption_list_cannot_be_built(tmp_path):
+    """`--ignore-risks "$(python ...)"` swallowed the shim's failure.
+
+    A traceback from the shim became an empty argument, the scanner exempted nothing,
+    and the owner's ruling was silently off — on a tree with no risks, a green build.
+    """
+    workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    proc, outputs = _run_gate_classifier(
+        workflow, "no risks", 0, tmp_path, ignored_stdout="", ignored_exit=1)
+    assert proc.returncode != 0, "the gate ran with an empty exemption list instead of failing"
+    assert outputs.get("scan_class") != "clean"
+
+
+def test_a_retired_exemption_name_fails_the_gate(tmp_path):
+    """The scanner drops an unknown risk name with a yellow warning and exits 0.
+
+    That is exactly how the previous outage hid: fifteen `unknown failure code` lines on
+    a green build. If Snyk renames the one exempt risk, the exemption goes inert the same
+    silent way unless this build reads the warning.
+    """
+    workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    proc, _ = _run_gate_classifier(
+        workflow, "Warning: unknown risk name: third_party_content_exposure\nScan complete.",
+        0, tmp_path)
+    assert proc.returncode != 0, (
+        "the gate passed with an exemption name the scanner does not recognise")
+
+
+def test_the_gate_reads_its_exemption_list_from_the_shared_contract(workflow: dict):
+    """The gate must not restate the ruling inline.
+
+    An inline `--ignore-risks "third_party_content_exposure,suspicious_download_url"`
+    would exempt the very risk the red-proof anchors on, while the red-proof — which
+    reads the contract — stayed green. Drift between the two is the single thing
+    `registry_scan_contract.py` exists to prevent.
+    """
+    run = _gate_step(workflow)["run"]
+    assert "registry_scan_ignored.py" in run, (
+        "the gate no longer sources its exemption list from the shared contract shim")
+    contract = _load_contract_module()
+    for risk in contract.SKILL_RISKS + contract.SERVER_RISKS:
+        assert risk not in run, (
+            f"the gate names the risk {risk!r} inline; the ruling has exactly one home, "
+            f"in registry_scan_contract.py")
+
+
+def test_no_blocking_risk_is_ever_exempt():
+    """A blocking risk reaching the exemption list is a disarmed gate reporting green.
+
+    The runtime red-proof only anchors on the fixture's own risk, so widening the list to
+    swallow malicious code or secret detection is invisible to it. This is the offline
+    half, and it is the half that runs in the required `test` check.
+    """
+    contract = _load_contract_module()
+    assert contract.NON_BLOCKING_RISKS == ("third_party_content_exposure",), (
+        "the non-blocking list changed; exactly one risk is exempt by owner ruling "
+        "(2026-08-10, restated for 0.6.0 2026-08-26)")
+    for risk in ("suspicious_download_url", "malicious_code", "secret_detection",
+                 "prompt_injection_skill_instructions", "insecure_credential_handling",
+                 "unverifiable_dependencies", "direct_money_access",
+                 "modifying_system_services", "missing_skill_md"):
+        assert risk in contract.BLOCKING_RISKS, f"{risk} is no longer a blocking risk"
+
+
+def test_the_risk_vocabulary_matches_the_scanners_own_model():
+    """Pinned so a catalog change arrives as a conscious edit, not a silent exemption.
+
+    Verbatim from `SkillRiskIndexes` / `McpServerRiskIndexes` in the scanner's
+    `agent_scan/models/api/v20260710.py` at the pinned version.
+    """
+    contract = _load_contract_module()
+    assert contract.SKILL_RISKS == (
+        "prompt_injection_skill_instructions", "suspicious_download_url", "malicious_code",
+        "insecure_credential_handling", "secret_detection", "direct_money_access",
+        "third_party_content_exposure", "unverifiable_dependencies",
+        "modifying_system_services", "missing_skill_md")
+    assert contract.SERVER_RISKS == (
+        "dangerous_words", "prompt_injection_tool_desc", "untrusted_content",
+        "private_data", "destructive_capabilities")
+
+
+def test_the_exemption_shim_prints_exactly_the_contract_list():
+    """The one place a policy decision becomes a command-line argument, and it had no
+    coverage at all: hardcoding blocking risks into it kept every test green."""
+    proc = subprocess.run(
+        [sys.executable, str(_REPO / ".github" / "scripts" / "registry_scan_ignored.py")],
+        capture_output=True, text=True, check=True)
+    contract = _load_contract_module()
+    assert proc.stdout.strip() == ",".join(contract.NON_BLOCKING_RISKS)
+    assert proc.stdout.strip() == "third_party_content_exposure"
+
+
+def test_an_unrecognised_payload_shape_is_never_reported_as_clean(tmp_path, capsys):
+    """The reporter returning `[]` on a renamed shape is bug #3, left undefended.
+
+    0.5.x's shape produced exactly this: valid JSON, an empty finding list, "No
+    findings." on every run, and the UNREADABLE guard never firing. The next rename must
+    be loud.
+    """
+    module = _load_report_module()
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps({"results": {"skills": {"issues": []}}}), encoding="utf-8")
+    assert module.main(["report", str(findings)]) == 1
+    assert "UNREADABLE" in capsys.readouterr().err
+
+
+def test_a_server_risk_is_surfaced_like_a_skill_risk(tmp_path, capsys):
+    """The scanner's `--ci` exit weighs `server_risks` as well as `skill_risks`.
+
+    A server risk therefore fails the gate while the reporter printed "No findings." —
+    the same silent-surfacing failure this gate exists to remove, from the other side.
+    """
+    module = _load_report_module()
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps({"scan_path_responses": [{
+        "path": "skills",
+        "server_risks": [{"name": "some-mcp", "risk_indexes": {
+            "untrusted_content": {"score": 400, "evidence": "Reads untrusted content"}}}],
+        "skill_risks": [],
+    }]}), encoding="utf-8")
+    assert module.main(["report", str(findings)]) == 0
+    out = capsys.readouterr().out
+    assert "untrusted_content" in out and "No findings." not in out
+
+
+def test_a_scan_error_is_surfaced_rather_than_read_as_clean(tmp_path, capsys):
+    """A skill the scanner could not analyse is not a skill that came back clean."""
+    module = _load_report_module()
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps({"scan_path_responses": [{
+        "path": "skills",
+        "skill_risks": [{"name": "ci-secure", "risk_indexes": {},
+                         "error": {"code": "X002", "message": "skill scan failed"}}],
+    }]}), encoding="utf-8")
+    assert module.main(["report", str(findings)]) == 0
+    out = capsys.readouterr().out
+    assert "No findings." not in out, "a skill that failed to scan was reported as clean"
+    assert "ci-secure" in out
+
+
+def test_a_risk_the_contract_does_not_know_is_announced(tmp_path, capsys):
+    """The contract's comment promised this and nothing implemented it.
+
+    A risk name the vocabulary does not carry still blocks (it is not in the exemption
+    list), but nobody was told the catalog had moved — so the ten-name list, checked by
+    hand against the scanner's model, had no effect on anything.
+    """
+    module = _load_report_module()
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps({"scan_path_responses": [{
+        "path": "skills",
+        "skill_risks": [{"name": "ci-secure", "risk_indexes": {
+            "brand_new_risk_2027": {"score": 700, "evidence": "something new"}}}],
+    }]}), encoding="utf-8")
+    assert module.main(["report", str(findings)]) == 0
+    out = capsys.readouterr().out
+    assert "brand_new_risk_2027" in out
+    assert "UNKNOWN" in out.upper(), (
+        "a risk name outside the pinned vocabulary was surfaced as if it were known")
+
+
+def _run_redprove(tmp_path, *, scanner_output: str, scanner_exit: int):
+    """Drive the red-proof offline with a stub scanner on PATH.
+
+    `main()` was executed by nothing, so both of its failure conditions could be disabled
+    with the suite green — including the blind-scanner anchor its own comment says must
+    never be weakened.
+    """
+    stub = tmp_path / "uvx"
+    stub.write_text(f"#!/bin/sh\ncat <<'OUT'\n{scanner_output}\nOUT\nexit {scanner_exit}\n",
+                    encoding="utf-8")
+    stub.chmod(0o755)
+    return subprocess.run(
+        [sys.executable, str(_REDPROVE)], capture_output=True, text=True,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "SNYK_TOKEN": "stub"})
+
+
+def test_the_red_proof_fails_when_the_scanner_says_nothing(tmp_path):
+    proc = _run_redprove(tmp_path, scanner_output="Scan complete. No risks.", scanner_exit=0)
+    assert proc.returncode == 1, "a blind scanner passed the control"
+    assert "NOT PROVEN" in proc.stdout + proc.stderr
+
+
+def test_the_red_proof_fails_when_the_anchor_host_is_absent(tmp_path):
+    """Non-zero exit alone is not proof the scanner saw OUR fixture."""
+    proc = _run_redprove(
+        tmp_path, scanner_output="CI (--ci): exiting with code 1 (risks found).", scanner_exit=1)
+    assert proc.returncode == 1, "the control passed without the scanner echoing the fixture host"
+    assert "NOT PROVEN" in proc.stdout + proc.stderr
+
+
+def test_the_red_proof_passes_only_on_a_scanner_that_saw_the_fixture(tmp_path):
+    spec = importlib.util.spec_from_file_location("registry_scan_redprove", _REDPROVE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    proc = _run_redprove(
+        tmp_path,
+        scanner_output=f"1 risk: Unverifiable URLs: {module.expected_evidence()}/install.sh\n"
+                       "CI (--ci): exiting with code 1 (risks found).",
+        scanner_exit=1)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_the_red_proof_runs_the_gates_own_exemption_list(tmp_path):
+    """Documented as load-bearing and guarded by nothing: deleting the two lines that
+    append `--ignore-risks` left every test green, and with them gone an exemption grown
+    to swallow the anchor would no longer fail here."""
+    proc = _run_redprove(tmp_path, scanner_output="Scan complete.", scanner_exit=0)
+    contract = _load_contract_module()
+    assert f"--ignore-risks {','.join(contract.NON_BLOCKING_RISKS)}" in proc.stdout, (
+        "the red-proof no longer runs the gate's real exemption list")
