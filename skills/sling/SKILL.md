@@ -50,7 +50,7 @@ Do this once per session, before the first `sling` command.
    that page and let them run it, rather than pasting an installer command
    from memory. It supports **Apple Silicon macOS and x64 glibc Linux
    only**; there is no Windows build, so on Windows say so plainly and use
-   the `gh`-only path in step 5.
+   the `gh`-only path in step 6.
 
 2. **Is the environment healthy?** `sling doctor --agent`. It emits
    `{"checks": [{"key", "ok", "detail", ...}]}` on stdout and **exits `10`
@@ -86,7 +86,28 @@ Do this once per session, before the first `sling` command.
    and `--repo <owner/name>` are global flags on every subcommand; `--repo`
    otherwise defaults to the git remote of the current directory.
 
-5. **If `sling` cannot be installed or authenticated at all**, fall back to
+5. **StarSling gate — no installation on the org.** `sling` reports CI that
+   the **StarSling GitHub App** collected, so a valid login sees nothing for
+   an org where the app was never installed. It surfaces as exit `4` with
+   `You don't have access to org "<name>"`, and the message ends `Run
+   \`sling login\`` — advice that cannot work, because the credential was
+   never the problem. A sandboxed agent shell can also fail an auth probe for
+   reasons of its own, so retry once with host access before trusting a
+   single failure.
+
+   When it is genuinely not installed, **STOP and tell the user plainly** —
+   every answer this skill gives comes from StarSling's record of their runs,
+   so without the app on that org there is no run data to read and only the
+   `gh` read path remains. Give them the path: install the app on that
+   organization at `https://github.com/apps/starslingdev`, or ask an owner to
+   add them. Continue on the `gh`-only path ONLY if they say so, and name
+   what is unavailable when you do.
+
+   **Organizations only.** The app installs on a personal repository but
+   StarSling does not pick up its jobs, so there is never data to report for
+   one — say that rather than reporting an empty result.
+
+6. **If `sling` cannot be installed or authenticated at all**, fall back to
    the `gh` read path for whatever is achievable (`gh run view`, `gh run
    view --log-failed`) and **tell the user plainly** that the richer
    diagnosis — `sling why`'s classification, `sling time`'s phase
@@ -223,7 +244,7 @@ nothing to stdout at all.
 | `1` | Unexpected internal error (a crash) | Do not retry blindly. Surface the stderr text; this is a bug report, not a routing decision |
 | `2` | Usage — bad flags, a prompt refused under `--agent`, or org ambiguity | Fix the invocation against `sling <cmd> --help`; if org-ambiguous, pass `--org` or run `sling org switch` |
 | `3` | Not found — no such run/job/attempt in this org, or a real job that stores no logs | Try `sling resolve` on the raw id or URL, confirm the org, then ask the user to confirm the id |
-| `4` | Auth — missing, expired, or under-scoped credential | Ask the user to run `sling login` themselves (a browser approval, never `--agent`), then retry once |
+| `4` | Auth — **or no StarSling installation on that org.** Read the stderr text before acting | `You don't have access to org "<name>"` → the app is not installed there (or the user is not a member); point them at `https://github.com/apps/starslingdev`, do NOT retry login. Anything else → ask the user to run `sling login` themselves (a browser approval, never `--agent`), then retry once |
 | `5` | Control-plane or API error (5xx or transport) | Retry once after a short backoff (~2s); on a second failure fall back to the `gh` read equivalent and **say** `sling` was unreachable |
 | `6` | Partial — telemetry incomplete, result still emitted (`time`, `why`) | Not an error. Use the result, and tell the user it is partial |
 | `7` | Rate limited (HTTP 429) | Back off and retry once. Do not hammer |
@@ -247,6 +268,18 @@ running the binary; none of them announce themselves at runtime.
   instead — but 0.1.2 is what the installer serves today, so it is what a
   user has. Never run a `fix_command` unchecked. The general lesson outlives
   the bug: a command name printed by a tool is not proof the tool has it.
+- **Exit `4` does not always mean the credential is stale, and its message
+  misdirects when it does not.** An org StarSling was never installed on
+  fails with `You don't have access to org "<name>". Run \`sling login\`` —
+  the same shape as an expired session, ending in advice that cannot work.
+  Read the message before acting on the code: a named org means the app is
+  missing there, not that the login is.
+- **An empty listing is a coverage hole, never a finding.** `sling runs list
+  --repo <name>` returns `{"runs": []}` and exit `0` both when the repo truly
+  had no runs in the window and when StarSling is not watching that repo at
+  all. The payload cannot tell them apart, so an empty result means this
+  check did NOT run — say so with the reason you cannot rule out, rather than
+  reporting "you have no CI runs" as a fact about their repo.
 - **Unknown flags are ignored, not rejected.** `sling runs list --bogus`
   exits `0` and returns unfiltered rows. Exit `0` is therefore not evidence
   that a filter applied — check the rows you got back before reporting a

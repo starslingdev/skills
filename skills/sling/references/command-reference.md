@@ -46,6 +46,30 @@ self-hosted or development control planes. It must be `https://` — or
 --bogus` exits `0` and returns unfiltered rows. Do not read a `0` as proof
 that a filter was applied; check the returned rows.
 
+## The precondition behind every command
+
+`sling` reports on CI that the **StarSling GitHub App** collected. A valid
+login is not sufficient: for an organization the app was never installed on,
+every data command fails with exit `4` —
+
+```
+You don't have access to org "vercel". Run `sling login`.
+```
+
+— on stderr, with nothing on stdout. The trailing advice is wrong for this
+case; re-authenticating changes nothing. The remedy is installing the app on
+that organization (`https://github.com/apps/starslingdev`), or being added to
+an org where it already is.
+
+**Organizations only.** The app can be installed on a personal repository, but
+StarSling will not pick up that repository's jobs, so there is never data to
+report for one.
+
+A connected org with a repo that has no runs in the window is the *other*
+shape: exit `0` with `{"runs": [], "has_more": false, "local": {...}}`. Empty
+and refused look nothing alike at the exit code, which is why branching on
+the code rather than on emptiness matters here.
+
 ## Auth & setup
 
 ### `sling doctor [--agent]`

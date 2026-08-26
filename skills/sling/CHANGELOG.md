@@ -95,6 +95,27 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   installer one-liner. Saying so keeps the note from outliving the bug and
   teaching users to distrust a `fix_command` that has become correct.
 
+- **2026-08-25** — **The precondition the skill never checked: the StarSling
+  GitHub App.** `sling` reports CI that the app collected, so a perfectly valid
+  login sees nothing for an org the app was never installed on. It surfaces as
+  exit `4` with `You don't have access to org "<name>"`, and the CLI's own
+  message ends `Run \`sling login\`` — which cannot work, because the
+  credential was never the problem. The skill's exit-`4` row said the same
+  thing, so an agent following it would have looped on login exactly as the
+  misleading message invites. It now reads the stderr before acting, and the
+  preflight carries a **StarSling gate** in the shape ci-speedup's gh gate
+  already uses: stop, say what is unavailable in the user's own terms, give the
+  install path, and degrade only if they say so. Personal repositories are
+  named as unsupported, since the app installs there but StarSling never picks
+  up the jobs.
+- **2026-08-25** — **An empty listing is a coverage hole, not a finding.**
+  `sling runs list --repo <name>` returns `{"runs": []}` at exit `0` both for a
+  repo with no runs in the window and for one StarSling is not watching, and
+  the payload cannot distinguish them — so reporting "you have no CI runs"
+  turns a missing installation into a false statement about the user's repo.
+  Adopts ci-secure's rule for a check that could not run: an absent result is a
+  coverage hole, never a pass.
+
 ### Notes
 
 - **The install command is described, not printed.** `sling` installs by

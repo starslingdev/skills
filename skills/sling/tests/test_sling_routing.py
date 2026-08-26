@@ -298,3 +298,42 @@ def test_the_skill_says_the_user_runs_login():
         "the preflight no longer hands the sign-in to the user")
     assert "do not run it yourself" in body, (
         "the preflight no longer tells the agent to keep its hands off login")
+
+
+def test_exit_four_is_not_treated_as_a_login_problem_unconditionally():
+    """`sling` reports CI that the StarSling GitHub App collected, so an org the
+    app was never installed on fails with exit `4` — the same code as a stale
+    credential, and a message that ends "Run `sling login`". Following that
+    advice cannot work: the login was never the problem. If the skill ever
+    collapses exit 4 back into "run login and retry", it sends users into the
+    same loop the CLI's own message does."""
+    row = next((ln for ln in _BODY.splitlines()
+                if ln.startswith("| `4` |")), None)
+    assert row, "the exit-code table lost its row for 4"
+    low = row.lower()
+    assert "org" in low, "exit 4 no longer mentions the org/installation case"
+    assert "do not retry login" in low or "not retry" in low, (
+        "exit 4 no longer warns against retrying login for the org case")
+
+
+def test_the_app_precondition_is_stated_somewhere_a_reader_will_hit_it():
+    """A valid login sees nothing for an org without the app installed. That is
+    a precondition, not an error case, and nothing in `sling doctor` checks it —
+    so the skill is the only place a user can learn it."""
+    body_and_refs = _BODY + "".join(
+        r.read_text() for r in sorted((_SKILL / "references").glob("*.md")))
+    assert "github.com/apps/starslingdev" in body_and_refs, (
+        "the skill no longer says where to install the GitHub App")
+    assert "personal" in body_and_refs.lower(), (
+        "the skill no longer notes that personal repositories are unsupported")
+
+
+def test_an_empty_result_is_not_documented_as_proof_of_no_ci():
+    """`{"runs": []}` with exit 0 means either "no runs in the window" or
+    "StarSling is not watching this repo". Reporting the first as fact is how a
+    missing installation gets rendered as a finding about the user's CI."""
+    low = _BODY.lower()
+    assert "coverage hole" in low and "did not run" in low, (
+        "the skill lost the warning that an empty listing is a coverage hole "
+        "rather than a finding — the same rule ci-secure states for a check "
+        "that could not run")
