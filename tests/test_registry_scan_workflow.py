@@ -1258,3 +1258,57 @@ def test_the_red_proof_runs_the_gates_own_exemption_list(tmp_path):
     contract = _load_contract_module()
     assert f"--ignore-risks {','.join(contract.NON_BLOCKING_RISKS)}" in proc.stdout, (
         "the red-proof no longer runs the gate's real exemption list")
+
+
+def test_every_coverage_gap_names_the_scanner_pin(workflow: dict):
+    """A red that is not a finding should point at the pin before the tree.
+
+    The 2026-08-19 outage cost a week because the failure said "critical finding in
+    skills" and nobody thought to check whether the vendor had moved. Every message
+    that means "this check did not verify anything" now ends by naming the pinned
+    version and suggesting it as the first suspect — so the next person does not need
+    to have read this history.
+    """
+    steps = workflow["jobs"]["scan"]["steps"]
+    gap_markers = ("DID NOT RUN", "DID NOT COMPLETE", "EXEMPTION IS STALE", "UNCLASSIFIED")
+    # SNYK_TOKEN and HAS NOTHING TO SCAN are excluded deliberately: neither can be
+    # caused by the scanner version, and a hint that fires on every gap regardless of
+    # cause is noise that trains people to skip it.
+    not_version_related = ("SNYK_TOKEN is not set", "HAS NOTHING TO SCAN")
+    gap_lines = [
+        line
+        for step in steps
+        for line in (step.get("run") or "").splitlines()
+        if "::error title=" in line
+        and any(m in line for m in gap_markers)
+        and not any(x in line for x in not_version_related)
+    ]
+    assert len(gap_lines) >= 4, f"expected several coverage-gap messages, found {len(gap_lines)}"
+    missing = [ln for ln in gap_lines if "STALE_PIN_HINT" not in ln]
+    assert not missing, (
+        "coverage-gap message(s) do not name the scanner pin as a suspect:\n  "
+        + "\n  ".join(m.strip()[:120] for m in missing))
+
+
+def test_the_pin_is_stated_once_and_matches_everywhere(workflow: dict):
+    """Three places invoke the scanner; a half-bumped pin is two contracts at once.
+
+    The workflow's unfiltered pass, its gate, and the red-proof must all run the same
+    version, and the contract's PINNED_SCANNER must agree — otherwise the hint above
+    names a version the gate is not running, which is worse than no hint.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_contract", _REPO / ".github" / "scripts" / "registry_scan_contract.py")
+    contract = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(contract)
+    pin = contract.PINNED_SCANNER
+
+    text = (_REPO / ".github" / "workflows" / "registry-scan.yml").read_text()
+    text += (_REPO / ".github" / "scripts" / "registry_scan_redprove.py").read_text()
+    found = set(re.findall(r"snyk-agent-scan==([0-9][0-9.]*)", text))
+    assert found == {pin}, (
+        f"scanner is invoked at {sorted(found)} but the contract pins {pin!r} — a "
+        "half-bumped pin runs two different contracts in one job")
+    assert pin in contract.STALE_PIN_HINT, "the hint no longer names the pinned version"

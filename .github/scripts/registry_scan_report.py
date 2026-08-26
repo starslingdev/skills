@@ -35,7 +35,12 @@ import pathlib as _pathlib
 import sys as _sys
 
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent))
-from registry_scan_contract import UnrecognisedPayload, iter_findings, unknown_risks  # noqa: E402
+from registry_scan_contract import (  # noqa: E402
+    STALE_PIN_HINT,
+    UnrecognisedPayload,
+    iter_findings,
+    unknown_risks,
+)
 
 import json
 import os
@@ -171,7 +176,7 @@ def main(argv: list[str]) -> int:
         print(
             "::error title=REGISTRY SCAN FINDINGS UNREADABLE::"
             f"Could not read the scanner's JSON output ({exc}). Findings were not "
-            "surfaced; do not read this run as 'no warnings'.",
+            f"surfaced; do not read this run as 'no warnings'. {STALE_PIN_HINT}",
             file=sys.stderr,
         )
         return 1
@@ -184,7 +189,7 @@ def main(argv: list[str]) -> int:
         print(
             "::error title=REGISTRY SCAN FINDINGS UNREADABLE::"
             f"The scanner's JSON is not a shape this build recognises ({exc}). Findings "
-            "were not surfaced; do not read this run as 'no warnings'.",
+            f"were not surfaced; do not read this run as 'no warnings'. {STALE_PIN_HINT}",
             file=sys.stderr,
         )
         return 1

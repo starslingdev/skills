@@ -27,6 +27,24 @@ from __future__ import annotations
 # it is surfaced by the reporter as unrecognised (see `unknown_risks`), because the
 # alternative is finding out the vocabulary drifted the way we found out last time:
 # from a public audit page.
+# The pinned scanner. Stated here so the hint below can name it, and so a guard can
+# prove the workflow's two invocations and the red-proof all pin the SAME version — a
+# half-bumped pin would have two passes disagreeing about the contract they read.
+PINNED_SCANNER = "0.6.0"
+
+# Every coverage-gap message ends with this. When this check goes red for a reason that
+# is not a finding, the FIRST thing worth suspecting is that the vendor moved and the
+# pin did not: that is what happened on 2026-08-19, and it cost a week because the red
+# said "critical finding" and nobody thought to look at the version. Naming the pin in
+# the failure itself is what turns "why is this red" into "check whether 0.6.0 is still
+# current" without anyone having to remember this history.
+STALE_PIN_HINT = (
+    f"If this is not obviously a problem with the skills themselves, suspect the "
+    f"scanner pin first: this gate runs snyk-agent-scan=={PINNED_SCANNER}, and a newer "
+    f"release can rename a flag, a risk, or the JSON shape out from under it. Compare "
+    f"against the current release before assuming the tree is at fault."
+)
+
 SKILL_RISKS: tuple[str, ...] = (
     "prompt_injection_skill_instructions",
     "suspicious_download_url",

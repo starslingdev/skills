@@ -47,6 +47,14 @@ env:
   # every risk of every score blocking — the gating policy off, on a green build.
   SCAN_PATH: skills
 
+  # Read from the contract so the pin is named in one place. Every coverage-gap message
+  # below ends with it.
+  STALE_PIN_HINT: >-
+    If this is not obviously a problem with the skills themselves, suspect the scanner
+    pin first: this gate runs snyk-agent-scan==0.6.0, and a newer release can rename a
+    flag, a risk, or the JSON shape out from under it. Compare against the current
+    release before assuming the tree is at fault.
+
 jobs:
   scan:
     name: registry scan
@@ -213,12 +221,12 @@ jobs:
           # is silently off — which on a tree with no risks is a green build.
           if ! ignored=$(python .github/scripts/registry_scan_ignored.py); then
             echo "scan_class=did-not-run" >> "${GITHUB_OUTPUT}"
-            echo "::error title=REGISTRY SCAN DID NOT RUN::The exemption list could not be built from .github/scripts/registry_scan_contract.py, so the gating rule is unknown and nothing was scanned. This is a coverage gap, not a finding and not a clean result."
+            echo "::error title=REGISTRY SCAN DID NOT RUN::The exemption list could not be built from .github/scripts/registry_scan_contract.py, so the gating rule is unknown and nothing was scanned. This is a coverage gap, not a finding and not a clean result. ${STALE_PIN_HINT}"
             exit 1
           fi
           if [ -z "${ignored}" ]; then
             echo "scan_class=did-not-run" >> "${GITHUB_OUTPUT}"
-            echo "::error title=REGISTRY SCAN DID NOT RUN::The exemption list came back empty. That is never correct — the ruling exempts exactly one risk — and an empty --ignore-risks would run the gate under a policy nobody chose."
+            echo "::error title=REGISTRY SCAN DID NOT RUN::The exemption list came back empty. That is never correct — the ruling exempts exactly one risk — and an empty --ignore-risks would run the gate under a policy nobody chose. ${STALE_PIN_HINT}"
             exit 1
           fi
           set +e
@@ -236,7 +244,7 @@ jobs:
           # retired name is read here rather than left to be noticed when the risk next fires.
           if grep -q 'unknown risk name' gate-output.txt; then
             echo "scan_class=exemption-stale" >> "${GITHUB_OUTPUT}"
-            echo "::error title=REGISTRY SCAN EXEMPTION IS STALE::The scanner does not recognise a risk name in this gate's exemption list, so it dropped it and scanned under a policy nobody chose. Update NON_BLOCKING_RISKS in .github/scripts/registry_scan_contract.py to the scanner's current catalog. This is a coverage gap, not a finding."
+            echo "::error title=REGISTRY SCAN EXEMPTION IS STALE::The scanner does not recognise a risk name in this gate's exemption list, so it dropped it and scanned under a policy nobody chose. Update NON_BLOCKING_RISKS in .github/scripts/registry_scan_contract.py to the scanner's current catalog. This is a coverage gap, not a finding. ${STALE_PIN_HINT}"
             exit 1
           fi
           if [ "${code}" -eq 0 ]; then
@@ -275,15 +283,15 @@ jobs:
             fi
             if grep -q 'runtime failure codes:' gate-output.txt; then
               echo "scan_class=operational" >> "${GITHUB_OUTPUT}"
-              echo "::error title=REGISTRY SCAN DID NOT COMPLETE::The scanner reported a runtime failure, not a finding. Nothing under '${SCAN_PATH}' was fully checked. This is a coverage gap, not a security finding."
+              echo "::error title=REGISTRY SCAN DID NOT COMPLETE::The scanner reported a runtime failure, not a finding. Nothing under '${SCAN_PATH}' was fully checked. This is a coverage gap, not a security finding. ${STALE_PIN_HINT}"
               exit 1
             fi
             echo "scan_class=indeterminate" >> "${GITHUB_OUTPUT}"
-            echo "::error title=REGISTRY SCAN RESULT UNCLASSIFIED::The scanner exited 1 without naming a reason on its exit line, so this run cannot say whether that was a risk it found or a runtime failure of its own. Read the log above before treating it as either."
+            echo "::error title=REGISTRY SCAN RESULT UNCLASSIFIED::The scanner exited 1 without naming a reason on its exit line, so this run cannot say whether that was a risk it found or a runtime failure of its own. Read the log above before treating it as either. ${STALE_PIN_HINT}"
             exit 1
           fi
           echo "scan_class=did-not-run" >> "${GITHUB_OUTPUT}"
-          echo "::error title=REGISTRY SCAN DID NOT RUN::The scanner exited ${code} without completing a scan — it could not start, so NOTHING under '${SCAN_PATH}' was checked. This is a coverage gap, not a finding and not a clean result. Read this step's log: a usage error here usually means the scanner renamed a flag out from under us."
+          echo "::error title=REGISTRY SCAN DID NOT RUN::The scanner exited ${code} without completing a scan — it could not start, so NOTHING under '${SCAN_PATH}' was checked. This is a coverage gap, not a finding and not a clean result. Read this step's log: a usage error here usually means the scanner renamed a flag out from under us. ${STALE_PIN_HINT}"
           exit 1
 
       # Two red checks that mean opposite things must not look the same. A gate
@@ -308,7 +316,7 @@ jobs:
           # control's verdict rather than after it, which is what made the branch at the
           # end of this step unreachable in exactly the case it was written for.
           if [ "${{ steps.gate.outcome }}" != "success" ] && [ "${{ steps.gate.outcome }}" != "failure" ]; then
-            echo "::error title=REGISTRY SCAN GATE DID NOT RUN::The gating scan did not run (outcome: ${{ steps.gate.outcome }}), so nothing was checked for critical findings. Read the failing step above. This is a coverage gap, not a clean result."
+            echo "::error title=REGISTRY SCAN GATE DID NOT RUN::The gating scan did not run (outcome: ${{ steps.gate.outcome }}), so nothing was checked for critical findings. Read the failing step above. This is a coverage gap, not a clean result. ${STALE_PIN_HINT}"
             exit 1
           fi
           if [ "${{ steps.red_proof.outcome }}" = "success" ]; then
@@ -316,7 +324,7 @@ jobs:
             exit 0
           fi
           if [ "${{ steps.red_proof.outcome }}" != "failure" ]; then
-            echo "::error title=REGISTRY SCAN CONTROL DID NOT RUN::The control step did not run (outcome: ${{ steps.red_proof.outcome }}), so nothing here established whether the scanner can see. Read the failing step above."
+            echo "::error title=REGISTRY SCAN CONTROL DID NOT RUN::The control step did not run (outcome: ${{ steps.red_proof.outcome }}), so nothing here established whether the scanner can see. Read the failing step above. ${STALE_PIN_HINT}"
             exit 1
           fi
           # The two failures are not exclusive, and this ordering matters: a blind
@@ -325,7 +333,7 @@ jobs:
           # surface one. Announcing the coverage gap over that run would put
           # "NOT A FINDING" on the one result a human most needs to read.
           if [ "${{ steps.gate.outcome }}" = "failure" ] && [ "${{ steps.gate.outputs.scan_class }}" != "finding" ]; then
-            echo "::error title=REGISTRY SCAN DID NOT RUN — NOT A FINDING::The scan did not produce a finding (exit ${{ steps.gate.outputs.scan_exit }}, class ${{ steps.gate.outputs.scan_class }}), so nothing under ${SCAN_PATH} was verified clean. This is a coverage gap. Do NOT read it as a security finding."
+            echo "::error title=REGISTRY SCAN DID NOT RUN — NOT A FINDING::The scan did not produce a finding (exit ${{ steps.gate.outputs.scan_exit }}, class ${{ steps.gate.outputs.scan_class }}), so nothing under ${SCAN_PATH} was verified clean. This is a coverage gap. Do NOT read it as a security finding. ${STALE_PIN_HINT}"
             exit 1
           fi
           if [ "${{ steps.gate.outcome }}" = "failure" ]; then
