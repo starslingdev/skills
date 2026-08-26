@@ -131,6 +131,12 @@ Do this once per session, before the first `sling` command.
    are asking about, or ask an owner to add them. Continue on the `gh`-only path ONLY if they say so, and name
    what is unavailable when you do.
 
+   **A pasted URL from someone else's org never reaches this gate.** The
+   resolver searches only orgs you belong to, so a foreign Actions URL fails
+   with exit `3` (not-found), not exit `4` — verified live on a `mastra-ai`
+   run URL. The app-install remedy applies only to orgs the user belongs to;
+   for a third party, the right move is the `gh` read fallback of step 6.
+
    **Organizations only.** The app installs on a personal repository but
    StarSling does not pick up its jobs, so there is never data to report for
    one — say that rather than reporting an empty result.
@@ -293,7 +299,7 @@ a parseable one tells you what happened; only `$?` does.
 | `0` | Success | — |
 | `1` | Unexpected internal error (a crash) — **or a subcommand that does not exist** | Read stderr first. `unknown command "<name>" for "sling"` is a routing mistake, not a crash: the binary lists its real commands, so correct the name against that list rather than filing a bug — this is where the `doctor` `fix_command` gotcha below lands. Anything else: do not retry blindly, and surface the stderr text as a bug report |
 | `2` | Usage — bad flags, a prompt refused under `--agent`, org ambiguity, **or no orgs at all** | Read the stderr first. `You don't belong to any orgs yet.` → step 5, the app is not installed; never a flag problem. Org-ambiguous → pass `--org` or `sling org switch`. Otherwise fix the invocation against `sling <cmd> --help` |
-| `3` | Not found — no such run/job/attempt in this org, or a real job that stores no logs | Try `sling resolve` on the raw id or URL, confirm the org, then ask the user to confirm the id |
+| `3` | Not found — no such run/job/attempt in any org you can access, or a real job that stores no logs | **A pasted URL from a third-party org lands here, not on exit `4`** — the resolver searches your orgs and reports not-found (`No run/job/attempt matches that id in an org you can access`). For an org the user does not belong to, do not suggest installing the app on it: fall back to the `gh` read path (public repos answer) and say the richer `sling` diagnosis is unavailable. Otherwise try `sling resolve`, confirm the org, then ask the user to confirm the id |
 | `4` | Auth — **or no StarSling installation on that org.** Read the stderr text before acting | `You don't have access to org "<name>"` → the app is not installed there (or the user is not a member); point them at `https://github.com/apps/starslingdev`, do NOT retry login. Anything else → ask the user to run `sling login` themselves (a browser approval, never `--agent`), then retry once |
 | `5` | Control-plane or API error (5xx or transport) | Retry once after a short backoff (~2s); on a second failure fall back to the `gh` read equivalent and **say** `sling` was unreachable |
 | `6` | Partial — telemetry incomplete, result still emitted (`time`, `why`) | Not an error. Use the result, and tell the user it is partial |

@@ -215,6 +215,15 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   positive control failed (an explicit "use the sling skill" showed 0%), so its
   numbers were discarded and every figure above comes from direct probes.
 
+- **2026-08-26** — **A pasted URL from a third-party org fails with exit `3`,
+  not exit `4` — found in live dogfood.** The resolver searches only orgs the
+  user belongs to, so a foreign Actions URL reports not-found rather than
+  no-access; the exit-4 app-install remedy never applies there, and following
+  it would tell the user to install a GitHub App on someone else's
+  organization. The exit-3 row and the app gate now name the shape and route it
+  to the `gh` read fallback, which is what the live session correctly
+  improvised.
+
 ### Notes
 
 - **The install command is described, not printed.** `sling` installs by

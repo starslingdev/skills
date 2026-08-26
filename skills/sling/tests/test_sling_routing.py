@@ -648,3 +648,24 @@ def test_no_hyphenated_term_is_split_by_the_yaml_fold():
     assert not broken, (
         "description line(s) end in a hyphen, so the fold will join them into two "
         f"words: {[ln.strip()[-30:] for ln in broken]}")
+
+
+def test_a_foreign_org_url_is_not_answered_with_the_app_install_remedy():
+    """A pasted URL from an org the user does not belong to fails with exit 3, not 4.
+
+    The resolver searches only the user's own orgs, so a foreign Actions URL reports
+    not-found — verified live on a mastra-ai run URL (`No run/job/attempt matches that
+    id in an org you can access`, exit 3). The app-install remedy is only correct for
+    an org the user belongs to; suggesting it for a third party tells them to install
+    a GitHub App on someone else's organization. The right move is the gh read
+    fallback, stated as such.
+    """
+    low = " ".join(_BODY.split()).lower()
+    row = low[low.index("| `3` |"):low.index("| `4` |")]
+    assert "third-party" in row or "third party" in row, (
+        "the exit-3 row no longer names the pasted-foreign-URL shape")
+    assert "gh" in row, (
+        "the exit-3 row no longer routes the foreign-org case to the gh read fallback")
+    step5 = " ".join(_preflight_step(5).split()).lower()
+    assert "exit `3`" in step5 or "exit 3" in step5, (
+        "the app gate no longer warns that a foreign URL bypasses it via exit 3")
