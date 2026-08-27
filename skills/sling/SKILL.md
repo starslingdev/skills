@@ -29,7 +29,7 @@ that owns it and stop. Do not invent a `sling` subcommand for something
 surface](references/command-surface.json) is the complete list.
 
 Every fact in this skill's command reference was read off `sling` itself
-(v0.1.4) rather than from documentation — see
+(v0.1.5) rather than from documentation — see
 [references/command-reference.md](references/command-reference.md) for the
 verified per-command JSON shapes.
 
@@ -170,7 +170,7 @@ per-command wording.
 
 **Do not describe it as an alias for a longer flag list.** The published docs
 call it "exactly equivalent to `--json --compact --no-input --no-color
---yes`", and on v0.1.4 `--compact` is not a flag this binary has at all:
+--yes`", and on v0.1.5 `--compact` is not a flag this binary has at all:
 passing it changes nothing because unknown flags are ignored, not because it
 does anything. Output is pretty-printed, indented JSON either way, so feed
 stdout to a real JSON parser and never to a line-oriented one that assumes
@@ -330,7 +330,7 @@ a parseable one tells you what happened; only `$?` does.
 | `7` | Rate limited (HTTP 429) | Back off and retry once. On a second `429`, stop: fall back to the `gh` read equivalent and say `sling` was rate limited |
 | `10` | Remote outcome failed — `doctor` unhealthy, or `runs show --wait` on a run that did not succeed | **Not a CLI error.** This is the answer: report the unhealthy check, or the run's failure |
 
-`sling exit-codes` on v0.1.4 prints only `0`–`5`; codes `6`, `7`, and `10`
+`sling exit-codes` on v0.1.5 prints only `0`–`5`; codes `6`, `7`, and `10`
 are real and documented (and `doctor --help` names `10` itself), so treat
 that help text as abridged. Any non-zero code not in this table: surface
 stderr to the user rather than guessing a recovery.
@@ -340,13 +340,13 @@ stderr to the user rather than guessing a recovery.
 These are the places where `sling` behaves differently from what its own
 output, its `--help`, or its documentation implies. Each was found by
 running the binary; none of them announce themselves at runtime. Everything
-version-pinned here was verified against `sling` v0.1.4 and `gh` 2.93.0 —
+version-pinned here was verified against `sling` v0.1.5 and `gh` 2.93.0 —
 re-verify on upgrade.
 
 - **`doctor`'s `fix_command` is advice, not a verified command.** On 0.1.2
   its `version` check recommended a command that did not exist — it emitted
   `"fix_command": "sling update"`, and `sling update` does not exist in any
-  release (0.1.4 still rejects it as unknown; the check now emits the
+  release (0.1.5 still rejects it as unknown; the check now emits the
   installer one-liner instead). Other checks emit templates with unfilled
   placeholders: `git_remote` suggests `git remote add origin <github-url>`
   verbatim. Never run a `fix_command` unchecked. The general lesson outlives

@@ -53,13 +53,13 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 ### Changed
 
-- **2026-08-26** — **Re-pinned every version-pinned fact against `sling`
-  v0.1.4** (the version the installer now serves; 0.1.3 and 0.1.4 shipped
-  today, both release-plumbing only). Re-verified on the new binary:
+- **2026-08-27** — **Re-pinned every version-pinned fact against `sling`
+  v0.1.5** (the version the installer now serves; 0.1.3, 0.1.4 and 0.1.5
+  shipped across 2026-08-26/27, all release- or test-plumbing only). Re-verified on the new binary:
   `--compact` still absent, `sling logs` still rejects `--org`/`--repo`
   (exit `2`), an empty scope-flag value still exits `2`, `sling exit-codes`
   still lists only `0`–`5`, `sling update` still does not exist.
-  `command-surface.json` now records `cli_version: "0.1.4"`.
+  `command-surface.json` now records `cli_version: "0.1.5"`.
 - **2026-08-26** — **The `doctor` `fix_command` gotcha is rewritten around
   the surviving lesson.** The 0.1.2 bug it described is fixed upstream: the
   `version` check now emits the installer one-liner (shown as a placeholder —

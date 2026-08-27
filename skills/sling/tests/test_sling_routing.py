@@ -597,7 +597,7 @@ def test_the_scope_flags_are_not_claimed_to_be_universal():
 def test_agent_is_not_described_as_an_alias_for_flags_it_does_not_have():
     """The reference's stated premise is that it was read off the binary.
 
-    `--compact` does not exist in v0.1.4 — the published docs call `--agent`
+    `--compact` does not exist in v0.1.5 — the published docs call `--agent`
     "exactly equivalent to --json --compact --no-input --no-color --yes", and
     repeating that attributes to the tool a contract no help page states.
     """

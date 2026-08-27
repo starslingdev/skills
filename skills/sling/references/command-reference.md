@@ -2,7 +2,7 @@
 
 Every flag list and JSON shape below was **read off the binary**, not off
 documentation: each command was run with `--agent` against a live control
-plane on **`sling` v0.1.4**, 2026-08-26. Where the published docs and the
+plane on **`sling` v0.1.5**, 2026-08-26. Where the published docs and the
 binary disagree, the binary wins and the disagreement is noted.
 
 Field names are `snake_case` everywhere **except `whoami`**. Objects are
@@ -32,7 +32,7 @@ Available on the root command and every subcommand **except `sling logs`**, whos
 
 | Flag | Meaning |
 |---|---|
-| `--agent` | Machine mode. The PUBLISHED DOCS call it equivalent to `--json --compact --no-input --no-color --yes`; no help page says that, and `--compact` is not a flag this binary has (0.1.4) — it changes nothing because unknown flags are ignored. Pass it on every **data** command — never on `sling login`, and give `sling org switch` an explicit slug |
+| `--agent` | Machine mode. The PUBLISHED DOCS call it equivalent to `--json --compact --no-input --no-color --yes`; no help page says that, and `--compact` is not a flag this binary has (0.1.5) — it changes nothing because unknown flags are ignored. Pass it on every **data** command — never on `sling login`, and give `sling org switch` an explicit slug |
 | `--json` | JSON on stdout (implied by `--agent`) |
 | `--org <slug>` | Org context. Auto-resolved when unambiguous; default set by `sling org switch` |
 | `--repo <owner/name>` | Repo context. Defaults to the git remote of the current directory |
@@ -83,7 +83,7 @@ Exits `0` healthy, **`10` unhealthy**.
             {"key": "git_remote", "ok": true, "detail": "origin → …"},
             {"key": "patch_tooling", "ok": true, "detail": "git found (/usr/bin/git)"},
             {"key": "version", "ok": true, "warn": true,
-             "detail": "version 0.1.3\n0.1.4 is available, to update:",
+             "detail": "version 0.1.4\n0.1.5 is available, to update:",
              "fix_command": "<the installer one-liner from the installation page>"},
             {"key": "org", "ok": true, "detail": "starslingdev (paid)"}]}
 ```
