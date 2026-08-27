@@ -184,6 +184,8 @@ _INTERNAL_IDENTIFIER_DENYLIST = (
     "starsling-website",     # the internal dev repo (the #117 leak)  content-guard:allow
     "skills-next",           # internal skills staging repo           content-guard:allow
     "starsling-internal",    # internal org / runner-label prefix     content-guard:allow
+    "agent-ci-mastra-test",  # private test repo (the sling leak)  content-guard:allow
+    "blazar",                # private product repo (spend-sample leak)  content-guard:allow
 )
 
 # The guard scans EVERY tracked file, including this one. A line that legitimately names a

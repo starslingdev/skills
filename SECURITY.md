@@ -14,7 +14,13 @@ investigate.
 ## Data-handling model
 
 `ci-speedup` is designed to run **locally, under your own GitHub credentials**,
-and to keep your data on your machine.
+and to keep your data on your machine. **`sling` is different by design**: it
+drives StarSling's `sling` CLI, which sends the org, repo, run and job
+identifiers you ask about to StarSling's control plane and reads back the CI
+data StarSling already collects for your organization. It authenticates via a
+GitHub device flow and stores its credential at `~/.config/sling/credentials`
+(owner-only). It is read-only against your CI, and the skill routes anything
+that changes state to your own `gh`.
 
 - **Runs with your own `gh` auth.** The skill reads the audited repository's
   GitHub Actions run/job/log data and workflow YAML through a fixed set of

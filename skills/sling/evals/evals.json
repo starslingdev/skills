@@ -1,0 +1,71 @@
+{
+  "skill_name": "sling",
+  "_comment": "Behavioral evals: what an agent DOES with the skill loaded. The routing contract it must obey is pinned separately in prompt-routing.json. Every should_trigger case needs a live `sling` login. TWO THINGS TO KNOW BEFORE RUNNING THESE: (1) the run ids below are real and GitHub purges Actions logs after 90 days, so a stale id fails with exit 3 for reasons that have nothing to do with the skill \u2014 the ids are placeholders \u2014 refresh them from `sling runs list --conclusion failure` before a run; (2) case 2 asks for a re-run, which would burn runner minutes on a real repo, so run these with the harness instructing that state-changing commands be NAMED rather than executed. The assertions below grade on naming the right command, never on firing it.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "diagnose-a-failed-job-without-dumping-logs",
+      "should_trigger": true,
+      "prompt": "the nightly job failed again \u2014 https://github.com/acme/web/actions/runs/1234567890 \u2014 what actually broke this time",
+      "expected_output": "Runs `sling why` on the run (accepting the URL directly, no manual id extraction), reports the classification and the failing step with its evidence, and does not pull the whole transcript. If it needs more log detail it follows the `suggested_actions[].command` rather than improvising a grep pattern.",
+      "assertions": [
+        "Invoked `sling why` with the pasted URL, not a hand-extracted id",
+        "Reported the classification and the named failing step",
+        "Did not download or print the full job log",
+        "Passed --agent and parsed JSON rather than reading human output"
+      ],
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "compound-ask-diagnoses-before-changing-state",
+      "should_trigger": true,
+      "prompt": "figure out why run 1234567890 failed and then just re-run the failed jobs for me",
+      "expected_output": "Does the read half first with `sling why`, reports the finding, and only then names `gh run rerun <id> --failed` as an announced, separate action, leaving the decision to the user. Never attempts a `sling` subcommand for the re-run \u2014 `sling` is read-only and has none.",
+      "assertions": [
+        "Diagnosis reported before any state change",
+        "Named `gh run rerun` for the re-run \u2014 executed or explicitly deferred \u2014 and never an invented `sling` subcommand",
+        "Surfaced the exact re-run command and left the decision to the user"
+      ],
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "cost-question-attributes-then-suggests-not-chains",
+      "should_trigger": true,
+      "prompt": "our runner bill jumped this month. which workflow is eating it?",
+      "expected_output": "Uses `sling top` / `sling usage` to attribute the spend, reports `amount_due_usd` rather than the pre-credit total if it quotes a bill, explains `(multiple)` if a row carries it, and closes by suggesting `ci-speedup` for the across-many-runs root cause instead of invoking another skill on its own.",
+      "assertions": [
+        "Attribution came from `sling top` or `sling usage`, not from guesswork or gh",
+        "Suggested ci-speedup as a next step rather than invoking it",
+        "Did not attempt to audit workflow YAML from run data"
+      ],
+      "files": []
+    },
+    {
+      "id": 4,
+      "name": "repo-wide-audit-hands-off-instead-of-approximating",
+      "should_trigger": false,
+      "prompt": "can you grade our CI setup and tell me what best practices we're missing across all the workflows in this repo",
+      "expected_output": "This is a configuration audit of a checkout, which `sling` structurally cannot do \u2014 it reads run data and no workflow files at all. The right answer names `ci-score` and stops, rather than looping `sling` over runs to approximate a grade.",
+      "assertions": [
+        "Named ci-score (or the matching audit skill) and handed off",
+        "Did not attempt to answer the grade from run data",
+        "Did not loop sling over many runs"
+      ],
+      "files": []
+    },
+    {
+      "id": 5,
+      "name": "yaml-question-reads-the-file-not-the-cli",
+      "should_trigger": false,
+      "prompt": "does our deploy workflow trigger on tags or only on pushes to main?",
+      "expected_output": "This is the content of a workflow file, not run data. Reads `.github/workflows/*.yml` directly instead of forcing the question through either CLI.",
+      "assertions": [
+        "Read the workflow file to answer",
+        "Did not invoke a sling or gh subcommand to answer a YAML question"
+      ],
+      "files": []
+    }
+  ]
+}
