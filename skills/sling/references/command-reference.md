@@ -2,7 +2,7 @@
 
 Every flag list and JSON shape below was **read off the binary**, not off
 documentation: each command was run with `--agent` against a live control
-plane on **`sling` v0.1.5**, 2026-08-26. Where the published docs and the
+plane on **`sling` v0.1.5**, 2026-08-27. Where the published docs and the
 binary disagree, the binary wins and the disagreement is noted.
 
 Field names are `snake_case` everywhere **except `whoami`**. Objects are
