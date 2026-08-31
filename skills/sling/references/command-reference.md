@@ -2,7 +2,7 @@
 
 Every flag list and JSON shape below was **read off the binary**, not off
 documentation: each command was run with `--agent` against a live control
-plane on **`sling` v0.1.5**, 2026-08-27. Where the published docs and the
+plane on **`sling` v0.1.8**, 2026-08-31. Where the published docs and the
 binary disagree, the binary wins and the disagreement is noted.
 
 Field names are `snake_case` everywhere **except `whoami`**. Objects are
@@ -32,7 +32,7 @@ Available on the root command and every subcommand **except `sling logs`**, whos
 
 | Flag | Meaning |
 |---|---|
-| `--agent` | Machine mode. The PUBLISHED DOCS call it equivalent to `--json --compact --no-input --no-color --yes`; no help page says that, and `--compact` is not a flag this binary has (0.1.5) — it changes nothing because unknown flags are ignored. Pass it on every **data** command — never on `sling login`, and give `sling org switch` an explicit slug |
+| `--agent` | Machine mode. The PUBLISHED DOCS call it equivalent to `--json --compact --no-input --no-color --yes`; no help page says that, and `--compact` is not a flag this binary has (0.1.8) — it changes nothing because unknown flags are ignored. Pass it on every **data** command — never on `sling login`, and give `sling org switch` an explicit slug |
 | `--json` | JSON on stdout (implied by `--agent`) |
 | `--org <slug>` | Org context. Auto-resolved when unambiguous; default set by `sling org switch` |
 | `--repo <owner/name>` | Repo context. Defaults to the git remote of the current directory |
@@ -83,10 +83,17 @@ Exits `0` healthy, **`10` unhealthy**.
             {"key": "git_remote", "ok": true, "detail": "origin → …"},
             {"key": "patch_tooling", "ok": true, "detail": "git found (/usr/bin/git)"},
             {"key": "version", "ok": true, "warn": true,
-             "detail": "version 0.1.4\n0.1.5 is available, to update:",
+             "detail": "version 0.1.7\n0.1.8 is available, to update:",
              "fix_command": "<the installer one-liner from the installation page>"},
-            {"key": "org", "ok": true, "detail": "starslingdev (paid)"}]}
+            {"key": "org", "ok": true, "detail": "starslingdev (paid)"},
+            {"key": "agent_skill", "ok": true,
+             "detail": "sling skill installed for Claude Code"}]}
 ```
+
+The `version` row above is shown deliberately in its OUTDATED shape, so the
+upgrade fields are visible; a current binary reports
+`{"key": "version", "ok": true, "detail": "up to date (0.1.8)"}` with no
+`warn` and no `fix_command`. Every other row is a live 0.1.8 capture.
 
 `"skipped": true` means the check produced NO verdict — a check that could
 not run at all (`clock_skew` and `org` under an unreachable control plane
@@ -94,6 +101,32 @@ read `ok: false, skipped: true, "not checked"`). Read `detail`; a skipped
 check is never a pass. An outdated-but-working version reads `ok: true,
 warn: true` with the upgrade one-liner in `fix_command` — advisory, not a
 failure (up to date it reads `ok: true, "up to date (<version>)"`).
+
+**`agent_skill` (new in 0.1.8) is advisory and can never fail the run.**
+`doctor` is unhealthy only when a check is `ok: false` AND not `skipped`, and
+this check's only `ok: false` shape is also `skipped: true` — so it never
+contributes to exit `10`. It reports whether this skill is installed for a
+coding agent on the machine, in four shapes:
+
+| Shape | Row |
+|---|---|
+| Installed under a per-agent home (`.claude` / `.codex` / `.cursor`) | `ok: true`, `"sling skill installed for <agents>"` |
+| Installed under the shared `.agents` home | `ok: true`, `"sling skill installed"` — no agent named |
+| A coding agent is present but the skill is not | `ok: true, warn: true`, `"not installed — …, to install:"`, with the install command in `fix_command` |
+| No coding agent found | `ok: false, skipped: true`, `"no supported coding agent detected"` (the detail closes "— sling is usable directly") — per the rule above a non-verdict, not a failure |
+
+**Never run this row's `fix_command` yourself** — it is a mutating install,
+and the machine's own agent configuration is the user's to change.
+
+**Do not read a `warn` row as proof your own copy is missing.** The check
+only looks under `<root>/{.claude,.codex,.cursor,.agents}/skills/sling/`, for
+`$HOME` and for the current directory walked up to the first `.git` — so a
+skill delivered any other way (a plugin or marketplace directory, a repo
+checkout, an outer repo above a nested `.git`, a different `HOME` than the
+one `sling` sees) reads as "not installed" while you are demonstrably
+reading it. That row is still worth surfacing: it means the user has no
+installed copy for their agent, and the `fix_command` is what fixes it. Report
+it with its detail; do not act on it, and do not treat it as a failure.
 
 ### `sling whoami [--agent]`
 

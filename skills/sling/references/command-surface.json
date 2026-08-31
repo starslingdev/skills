@@ -1,7 +1,7 @@
 {
-  "_comment": "The complete set of sling subcommands, captured from `sling --help` on v0.1.5 (2026-08-27). This file exists so a test can prove SKILL.md never routes to a subcommand that does not exist. Update it, and the changelog, when a sling release adds or removes a command.",
-  "cli_version": "0.1.5",
-  "captured_utc": "2026-08-25",
+  "_comment": "The complete set of sling subcommands, captured from `sling --help` on v0.1.8 (2026-08-31). This file exists so a test can prove SKILL.md never routes to a subcommand that does not exist. Update it, and the changelog, when a sling release adds or removes a command.",
+  "cli_version": "0.1.8",
+  "captured_utc": "2026-08-31",
   "read_only": true,
   "groups": {
     "auth_and_setup": [

@@ -53,6 +53,27 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 ### Changed
 
+- **2026-08-31** — **Re-pinned every version-pinned fact against `sling`
+  v0.1.8** (what the installer serves since 2026-08-31) and **documented
+  `doctor`'s new `agent_skill` check** in all **four** shapes it emits
+  (per-agent home / shared `.agents` home / agent-without-skill /
+  no agent), each quoted as the binary prints it. The row can never make
+  `doctor` unhealthy, and the reason is now stated rather than asserted: a
+  check fails only when it is `ok: false` AND not `skipped`, and this row's
+  only `ok: false` shape is also `skipped: true`. Its `fix_command` is a
+  mutating install and is never for the agent to run — but a `warn` row is
+  no longer described as impossible to see from inside the skill: the check
+  only looks in a fixed set of directories, so a copy delivered any other
+  way reads as "not installed" while the agent is reading it, and that row
+  is worth surfacing to the user. Also corrected two stale preflight claims
+  from the 0.1.2 era: an upgrade notice reads `warn: true` (not
+  `skipped: true`), and the `version` `fix_command` is the real installer
+  one-liner (a shell pipeline to surface to the user), no longer a fake
+  subcommand — with `version`'s own `ok: false, skipped: true`
+  "could not compare" shape kept named. All prior probes re-verified
+  unchanged on 0.1.8: `--compact` absent, `sling update` unknown, `logs`
+  rejects `--org`, empty scope-flag exits `2`, `exit-codes` lists only
+  `0`–`5`.
 - **2026-08-27** — **Re-pinned every version-pinned fact against `sling`
   v0.1.5** (the version the installer now serves; 0.1.3, 0.1.4 and 0.1.5
   shipped across 2026-08-26/27, all release- or test-plumbing only). Re-verified on the new binary:
@@ -70,6 +91,21 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   <github-url>`).
 
 ### Fixed
+
+- **2026-08-31** — **The commands-must-exist guard no longer stops reading at
+  a `"detail"` string.** Documenting `doctor`'s `agent_skill` row meant
+  quoting output that reads as a command (`sling skill installed for …`), and
+  the first pass bought that by exempting every `"detail"` value from the
+  scan — which blinded the guard in the highest-risk place it has, since
+  details are where the binary prints commands (`fix_command: "sling update"`
+  is this skill's founding anecdote) and the preflight tells the agent to read
+  them. One WORD is waved through now instead of one field, so an invented
+  `sling rerun` inside a detail still fails; two tests pin both directions.
+  Three new guards also pin the re-pin itself, which nothing covered before: every
+  live `0.1.x` mention must match `command-surface.json`'s `cli_version`, that
+  file's two provenance dates must agree (they had drifted six days), and
+  every `doctor` check key the reference documents must be named in preflight
+  step 2 — the way a release that adds a check reaches both surfaces.
 
 - **2026-08-26** — **The parse contract was falsified by the binary, in the
   direction that loses data.** SKILL.md said a genuine error writes nothing to

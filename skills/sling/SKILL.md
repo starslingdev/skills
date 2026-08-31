@@ -29,7 +29,7 @@ that owns it and stop. Do not invent a `sling` subcommand for something
 surface](references/command-surface.json) is the complete list.
 
 Every fact in this skill's command reference was read off `sling` itself
-(v0.1.5) rather than from documentation — see
+(v0.1.8) rather than from documentation — see
 [references/command-reference.md](references/command-reference.md) for the
 verified per-command JSON shapes.
 
@@ -48,18 +48,30 @@ Do this once per session, before the first `sling` command.
 2. **Is the environment healthy?** `sling doctor --agent`. It emits
    `{"checks": [{"key", "ok", "detail", ...}]}` on stdout and **exits `10`
    when a real check fails** (`0` when healthy). The checks name the
-   problem — `token`, `control_plane`, `clock_skew`, `git_remote`,
-   `patch_tooling`, `version`, `org` — so act on the one that is `ok:
-   false` instead of guessing — and when SEVERAL are `ok: false`, act on
+   problem. Seven of the eight are actionable — `token`, `control_plane`,
+   `clock_skew`, `git_remote`, `patch_tooling`, `version`, `org` — so act on
+   the one that is `ok: false` instead of guessing (the eighth, `agent_skill`,
+   is advisory only; see below) — and when SEVERAL are `ok: false`, act on
    `control_plane` first: an unreachable control plane fails `token` and `org`
    as dependents, and the `token` check still attaches `fix_command: "sling
    login"` — a wrong lead during an outage, since the device flow cannot reach
    the control plane either. Network first, never login. `"skipped": true` can
    also mean "not checked" for exactly this reason — read `detail`, not just
-   the flag. A `version` check with `"skipped": true` is
-   an upgrade notice, not a failure — and the fix command it suggests is not
-   a real subcommand, so re-run the installer instead of running it (see
-   [references/command-reference.md](references/command-reference.md)).
+   the flag. A `version` check with `warn: true` is an upgrade
+   notice, not a failure — any `fix_command` it carries is the installer
+   one-liner, a shell pipeline, so surface it to the user rather than running
+   it yourself. `version` reads `ok: false, skipped: true` when it could not
+   compare at all (installer URL unreachable, served version unreadable) —
+   that is "not checked", not "out of date".
+   The `agent_skill` row is likewise advisory and can never make `doctor`
+   unhealthy: a check counts as failing only when it is `ok: false` AND not
+   `skipped`, and this row's only `ok: false` shape is also `skipped: true`.
+   It reports whether this skill is installed for a coding agent on the
+   machine, and it can read "not installed" while you are reading the skill,
+   because it only looks in a fixed set of directories. So report the row with
+   its detail and never run its `fix_command` yourself — installing is the
+   user's call
+   (see [references/command-reference.md](references/command-reference.md)).
 
 3. **Not authenticated** (`doctor`'s `token` check fails, or a command exits
    `4` **whose stderr does not name an org**): **ask the user to run `sling
@@ -170,7 +182,7 @@ per-command wording.
 
 **Do not describe it as an alias for a longer flag list.** The published docs
 call it "exactly equivalent to `--json --compact --no-input --no-color
---yes`", and on v0.1.5 `--compact` is not a flag this binary has at all:
+--yes`", and on v0.1.8 `--compact` is not a flag this binary has at all:
 passing it changes nothing because unknown flags are ignored, not because it
 does anything. Output is pretty-printed, indented JSON either way, so feed
 stdout to a real JSON parser and never to a line-oriented one that assumes
@@ -330,7 +342,7 @@ a parseable one tells you what happened; only `$?` does.
 | `7` | Rate limited (HTTP 429) | Back off and retry once. On a second `429`, stop: fall back to the `gh` read equivalent and say `sling` was rate limited |
 | `10` | Remote outcome failed — `doctor` unhealthy, or `runs show --wait` on a run that did not succeed | **Not a CLI error.** This is the answer: report the unhealthy check, or the run's failure |
 
-`sling exit-codes` on v0.1.5 prints only `0`–`5`; codes `6`, `7`, and `10`
+`sling exit-codes` on v0.1.8 prints only `0`–`5`; codes `6`, `7`, and `10`
 are real and documented (and `doctor --help` names `10` itself), so treat
 that help text as abridged. Any non-zero code not in this table: surface
 stderr to the user rather than guessing a recovery.
@@ -340,13 +352,13 @@ stderr to the user rather than guessing a recovery.
 These are the places where `sling` behaves differently from what its own
 output, its `--help`, or its documentation implies. Each was found by
 running the binary; none of them announce themselves at runtime. Everything
-version-pinned here was verified against `sling` v0.1.5 and `gh` 2.93.0 —
+version-pinned here was verified against `sling` v0.1.8 and `gh` 2.93.0 —
 re-verify on upgrade.
 
 - **`doctor`'s `fix_command` is advice, not a verified command.** On 0.1.2
   its `version` check recommended a command that did not exist — it emitted
   `"fix_command": "sling update"`, and `sling update` does not exist in any
-  release (0.1.5 still rejects it as unknown; the check now emits the
+  release (0.1.8 still rejects it as unknown; the check now emits the
   installer one-liner instead). Other checks emit templates with unfilled
   placeholders: `git_remote` suggests `git remote add origin <github-url>`
   verbatim. Never run a `fix_command` unchecked. The general lesson outlives
