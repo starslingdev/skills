@@ -2,7 +2,7 @@
 
 Every flag list and JSON shape below was **read off the binary**, not off
 documentation: each command was run with `--agent` against a live control
-plane on **`sling` v0.1.5**, 2026-08-27. Where the published docs and the
+plane on **`sling` v0.1.8**, 2026-08-31. Where the published docs and the
 binary disagree, the binary wins and the disagreement is noted.
 
 Field names are `snake_case` everywhere **except `whoami`**. Objects are
@@ -32,7 +32,7 @@ Available on the root command and every subcommand **except `sling logs`**, whos
 
 | Flag | Meaning |
 |---|---|
-| `--agent` | Machine mode. The PUBLISHED DOCS call it equivalent to `--json --compact --no-input --no-color --yes`; no help page says that, and `--compact` is not a flag this binary has (0.1.5) — it changes nothing because unknown flags are ignored. Pass it on every **data** command — never on `sling login`, and give `sling org switch` an explicit slug |
+| `--agent` | Machine mode. The PUBLISHED DOCS call it equivalent to `--json --compact --no-input --no-color --yes`; no help page says that, and `--compact` is not a flag this binary has (0.1.8) — it changes nothing because unknown flags are ignored. Pass it on every **data** command — never on `sling login`, and give `sling org switch` an explicit slug |
 | `--json` | JSON on stdout (implied by `--agent`) |
 | `--org <slug>` | Org context. Auto-resolved when unambiguous; default set by `sling org switch` |
 | `--repo <owner/name>` | Repo context. Defaults to the git remote of the current directory |
@@ -83,9 +83,11 @@ Exits `0` healthy, **`10` unhealthy**.
             {"key": "git_remote", "ok": true, "detail": "origin → …"},
             {"key": "patch_tooling", "ok": true, "detail": "git found (/usr/bin/git)"},
             {"key": "version", "ok": true, "warn": true,
-             "detail": "version 0.1.4\n0.1.5 is available, to update:",
+             "detail": "version 0.1.7\n0.1.8 is available, to update:",
              "fix_command": "<the installer one-liner from the installation page>"},
-            {"key": "org", "ok": true, "detail": "starslingdev (paid)"}]}
+            {"key": "org", "ok": true, "detail": "starslingdev (paid)"},
+            {"key": "agent_skill", "ok": true,
+             "detail": "sling skill installed for Claude Code"}]}
 ```
 
 `"skipped": true` means the check produced NO verdict — a check that could
@@ -94,6 +96,17 @@ read `ok: false, skipped: true, "not checked"`). Read `detail`; a skipped
 check is never a pass. An outdated-but-working version reads `ok: true,
 warn: true` with the upgrade one-liner in `fix_command` — advisory, not a
 failure (up to date it reads `ok: true, "up to date (<version>)"`).
+
+**`agent_skill` (new in 0.1.8) is advisory and can never fail the run.** It
+reports whether this very skill is installed for a coding agent on the
+machine, in three shapes: installed → `ok: true` naming the agents it was
+found under; a coding agent present but no skill → `ok: true, warn: true`
+with the install command in `fix_command`; no coding agent at all →
+`ok: false, skipped: true` ("no coding agent detected"), which per the rule
+above is a non-verdict, not a failure. An agent following this skill needs
+to do nothing with this row: if you are reading this file, your copy of the
+skill exists — report the row's detail if asked, and never run its
+`fix_command` to "fix" your own environment.
 
 ### `sling whoami [--agent]`
 

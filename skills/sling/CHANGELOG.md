@@ -53,6 +53,20 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 ### Changed
 
+- **2026-08-31** — **Re-pinned every version-pinned fact against `sling`
+  v0.1.8** (what the installer serves since 2026-08-31) and **documented
+  `doctor`'s new `agent_skill` check**: advisory in all three shapes
+  (installed / agent-without-skill / no agent), never a health failure, and
+  a row an agent following this skill must report rather than act on — its
+  own copy of the skill demonstrably exists. Also corrected two stale
+  preflight claims from the 0.1.2 era: an upgrade notice now reads
+  `warn: true` (not `skipped: true`), and the `version` `fix_command` is the
+  real installer one-liner (a shell pipeline to surface to the user), no
+  longer a fake subcommand. All prior probes re-verified unchanged on
+  0.1.8: `--compact` absent, `sling update` unknown, `logs` rejects
+  `--org`, empty scope-flag exits `2`, `exit-codes` lists only `0`–`5`.
+
+
 - **2026-08-27** — **Re-pinned every version-pinned fact against `sling`
   v0.1.5** (the version the installer now serves; 0.1.3, 0.1.4 and 0.1.5
   shipped across 2026-08-26/27, all release- or test-plumbing only). Re-verified on the new binary:

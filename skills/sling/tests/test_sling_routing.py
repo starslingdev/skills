@@ -125,10 +125,15 @@ def _assert_only_real_commands(text: str, where: str) -> None:
     naming a non-command in order to WARN about it is the opposite of the
     failure, so it passes only when the same file says the command is not real.
     `sling update` is the live case: `sling doctor` recommends it and the
-    binary rejects it, so warning about it by name is the useful thing to do."""
-    unknown = _mentions(text) - _COMMANDS
+    binary rejects it, so warning about it by name is the useful thing to do.
+
+    A `"detail": "..."` string is exempt before scanning: details quote what
+    the binary PRINTS (doctor's `agent_skill` row says "sling skill installed
+    for …"), and quoted output is not a command a reader could route to."""
+    scanned = re.sub(r'"detail":\s*"[^"]*"', '"detail": ""', text)
+    unknown = _mentions(scanned) - _COMMANDS
     warned = {c for c in unknown
-              if re.search(rf"`sling {c}`[^.]{{0,120}}?does not\s+exist", text, re.S)}
+              if re.search(rf"`sling {c}`[^.]{{0,120}}?does not\s+exist", scanned, re.S)}
     invented = unknown - warned
     assert not invented, (
         f"{where} routes to sling subcommand(s) that do not exist: "
@@ -597,7 +602,7 @@ def test_the_scope_flags_are_not_claimed_to_be_universal():
 def test_agent_is_not_described_as_an_alias_for_flags_it_does_not_have():
     """The reference's stated premise is that it was read off the binary.
 
-    `--compact` does not exist in v0.1.5 — the published docs call `--agent`
+    `--compact` does not exist in v0.1.8 — the published docs call `--agent`
     "exactly equivalent to --json --compact --no-input --no-color --yes", and
     repeating that attributes to the tool a contract no help page states.
     """
