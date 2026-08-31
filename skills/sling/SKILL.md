@@ -48,20 +48,29 @@ Do this once per session, before the first `sling` command.
 2. **Is the environment healthy?** `sling doctor --agent`. It emits
    `{"checks": [{"key", "ok", "detail", ...}]}` on stdout and **exits `10`
    when a real check fails** (`0` when healthy). The checks name the
-   problem — `token`, `control_plane`, `clock_skew`, `git_remote`,
-   `patch_tooling`, `version`, `org`, `agent_skill` — so act on the one that is `ok:
-   false` instead of guessing — and when SEVERAL are `ok: false`, act on
+   problem. Seven of the eight are actionable — `token`, `control_plane`,
+   `clock_skew`, `git_remote`, `patch_tooling`, `version`, `org` — so act on
+   the one that is `ok: false` instead of guessing (the eighth, `agent_skill`,
+   is advisory only; see below) — and when SEVERAL are `ok: false`, act on
    `control_plane` first: an unreachable control plane fails `token` and `org`
    as dependents, and the `token` check still attaches `fix_command: "sling
    login"` — a wrong lead during an outage, since the device flow cannot reach
    the control plane either. Network first, never login. `"skipped": true` can
    also mean "not checked" for exactly this reason — read `detail`, not just
    the flag. A `version` check with `warn: true` is an upgrade
-   notice, not a failure — its `fix_command` is the installer one-liner, a
-   shell pipeline, so surface it to the user rather than running it yourself.
-   The `agent_skill` row is likewise advisory and never unhealthy: it reports
-   whether THIS skill is installed for a coding agent on the machine, so if
-   you are reading this, your copy exists — report the row, never "fix" it
+   notice, not a failure — any `fix_command` it carries is the installer
+   one-liner, a shell pipeline, so surface it to the user rather than running
+   it yourself. `version` reads `ok: false, skipped: true` when it could not
+   compare at all (installer URL unreachable, served version unreadable) —
+   that is "not checked", not "out of date".
+   The `agent_skill` row is likewise advisory and can never make `doctor`
+   unhealthy: a check counts as failing only when it is `ok: false` AND not
+   `skipped`, and this row's only `ok: false` shape is also `skipped: true`.
+   It reports whether this skill is installed for a coding agent on the
+   machine, and it can read "not installed" while you are reading the skill,
+   because it only looks in a fixed set of directories. So report the row with
+   its detail and never run its `fix_command` yourself — installing is the
+   user's call
    (see [references/command-reference.md](references/command-reference.md)).
 
 3. **Not authenticated** (`doctor`'s `token` check fails, or a command exits

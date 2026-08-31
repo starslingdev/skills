@@ -90,6 +90,11 @@ Exits `0` healthy, **`10` unhealthy**.
              "detail": "sling skill installed for Claude Code"}]}
 ```
 
+The `version` row above is shown deliberately in its OUTDATED shape, so the
+upgrade fields are visible; a current binary reports
+`{"key": "version", "ok": true, "detail": "up to date (0.1.8)"}` with no
+`warn` and no `fix_command`. Every other row is a live 0.1.8 capture.
+
 `"skipped": true` means the check produced NO verdict — a check that could
 not run at all (`clock_skew` and `org` under an unreachable control plane
 read `ok: false, skipped: true, "not checked"`). Read `detail`; a skipped
@@ -97,16 +102,31 @@ check is never a pass. An outdated-but-working version reads `ok: true,
 warn: true` with the upgrade one-liner in `fix_command` — advisory, not a
 failure (up to date it reads `ok: true, "up to date (<version>)"`).
 
-**`agent_skill` (new in 0.1.8) is advisory and can never fail the run.** It
-reports whether this very skill is installed for a coding agent on the
-machine, in three shapes: installed → `ok: true` naming the agents it was
-found under; a coding agent present but no skill → `ok: true, warn: true`
-with the install command in `fix_command`; no coding agent at all →
-`ok: false, skipped: true` ("no coding agent detected"), which per the rule
-above is a non-verdict, not a failure. An agent following this skill needs
-to do nothing with this row: if you are reading this file, your copy of the
-skill exists — report the row's detail if asked, and never run its
-`fix_command` to "fix" your own environment.
+**`agent_skill` (new in 0.1.8) is advisory and can never fail the run.**
+`doctor` is unhealthy only when a check is `ok: false` AND not `skipped`, and
+this check's only `ok: false` shape is also `skipped: true` — so it never
+contributes to exit `10`. It reports whether this skill is installed for a
+coding agent on the machine, in four shapes:
+
+| Shape | Row |
+|---|---|
+| Installed under a per-agent home (`.claude` / `.codex` / `.cursor`) | `ok: true`, `"sling skill installed for <agents>"` |
+| Installed under the shared `.agents` home | `ok: true`, `"sling skill installed"` — no agent named |
+| A coding agent is present but the skill is not | `ok: true, warn: true`, `"not installed — …, to install:"`, with the install command in `fix_command` |
+| No coding agent found | `ok: false, skipped: true`, `"no supported coding agent detected"` (the detail closes "— sling is usable directly") — per the rule above a non-verdict, not a failure |
+
+**Never run this row's `fix_command` yourself** — it is a mutating install,
+and the machine's own agent configuration is the user's to change.
+
+**Do not read a `warn` row as proof your own copy is missing.** The check
+only looks under `<root>/{.claude,.codex,.cursor,.agents}/skills/sling/`, for
+`$HOME` and for the current directory walked up to the first `.git` — so a
+skill delivered any other way (a plugin or marketplace directory, a repo
+checkout, an outer repo above a nested `.git`, a different `HOME` than the
+one `sling` sees) reads as "not installed" while you are demonstrably
+reading it. That row is still worth surfacing: it means the user has no
+installed copy for their agent, and the `fix_command` is what fixes it. Report
+it with its detail; do not act on it, and do not treat it as a failure.
 
 ### `sling whoami [--agent]`
 

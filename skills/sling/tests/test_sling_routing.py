@@ -120,6 +120,12 @@ def test_detector_recognises_a_real_and_a_fake_command():
     assert _mentions("`sling logs 97912608061 --agent --limit 60`") == {"logs"}
 
 
+# Words that follow `sling` in output the binary PRINTS, where they are plain
+# English rather than a subcommand. Keep this list one word long if you can:
+# every entry is a word the guard can no longer catch anywhere.
+_QUOTED_OUTPUT_NOUNS = {"skill"}
+
+
 def _assert_only_real_commands(text: str, where: str) -> None:
     """A `sling <cmd>` a reader could act on must exist — with one allowance:
     naming a non-command in order to WARN about it is the opposite of the
@@ -127,13 +133,16 @@ def _assert_only_real_commands(text: str, where: str) -> None:
     `sling update` is the live case: `sling doctor` recommends it and the
     binary rejects it, so warning about it by name is the useful thing to do.
 
-    A `"detail": "..."` string is exempt before scanning: details quote what
-    the binary PRINTS (doctor's `agent_skill` row says "sling skill installed
-    for …"), and quoted output is not a command a reader could route to."""
-    scanned = re.sub(r'"detail":\s*"[^"]*"', '"detail": ""', text)
-    unknown = _mentions(scanned) - _COMMANDS
+    One WORD is waved through rather than one field: `doctor`'s `agent_skill`
+    row prints "sling skill installed for …", and `skill` is a noun there, not
+    a subcommand a reader could route to. Exempting the whole `"detail"` value
+    instead would blind the guard in the highest-risk place it has — details
+    are where the binary prints commands (`fix_command: "sling update"` is
+    this skill's founding anecdote) and step 2 tells the agent to read them —
+    so an invented `sling rerun` inside a detail must still fail."""
+    unknown = _mentions(text) - _COMMANDS - _QUOTED_OUTPUT_NOUNS
     warned = {c for c in unknown
-              if re.search(rf"`sling {c}`[^.]{{0,120}}?does not\s+exist", scanned, re.S)}
+              if re.search(rf"`sling {c}`[^.]{{0,120}}?does not\s+exist", text, re.S)}
     invented = unknown - warned
     assert not invented, (
         f"{where} routes to sling subcommand(s) that do not exist: "
@@ -166,6 +175,41 @@ def test_the_warning_allowance_does_not_swallow_a_plain_invention():
     beside it must still fail, or the exemption quietly disables the guard."""
     with pytest.raises(AssertionError):
         _assert_only_real_commands("Just run `sling rerun 123` to retry.", "sample")
+
+
+# A `"detail"` value quoting the binary is the shape the quoted-output
+# allowance exists for; anything else inside one is still routing a reader.
+_DETAIL_BLOCK = (
+    '```json\n'
+    '{"checks": [{"key": "agent_skill", "ok": true,\n'
+    '             "detail": "%s"}]}\n'
+    '```\n'
+)
+
+
+@pytest.mark.parametrize("invention", ["frobnicate", "rerun"])
+def test_a_detail_string_does_not_launder_an_invented_command(invention):
+    """Teeth check on the quoted-output allowance. `doctor` details are the
+    HIGHEST-risk place for a command that does not exist, not the lowest: the
+    skill's founding anecdote is the binary itself printing `sling update`,
+    and step 2 tells the agent to read `detail` and act on it. So exempting a
+    whole `"detail"` value would blind the guard exactly where it is needed —
+    `rerun` is the canonical case, the invention this whole file exists to
+    stop. Only the phrase the binary really prints may be waved through."""
+    with pytest.raises(AssertionError):
+        _assert_only_real_commands(
+            _DETAIL_BLOCK % f"run `sling {invention} 123` to fix", "sample")
+
+
+def test_the_quoted_output_allowance_covers_the_detail_the_binary_prints():
+    """The other direction: `doctor`'s `agent_skill` row prints "sling skill
+    installed for …", so documenting that row verbatim must NOT trip the
+    guard. Without this the reference cannot quote the binary at all."""
+    _assert_only_real_commands(
+        _DETAIL_BLOCK % "sling skill installed for Claude Code", "sample")
+    _assert_only_real_commands(
+        _DETAIL_BLOCK % "not installed \u2014 the sling skill lets your coding "
+                        "agent run sling for you, to install:", "sample")
 
 
 # The canonical state-changing actions, as the routing table names them.
@@ -866,3 +910,58 @@ def test_evals_encode_rules_the_suite_cannot_otherwise_see():
                        for k in ("hand", "read", "did not", "not invoke", "never")), (
                 f"eval {case['id']} is should-not-trigger but its assertions do not "
                 "describe a refusal or handoff")
+
+
+# --- Re-pin parity: the facts a version bump must carry to every surface ----
+#
+# This skill's whole premise is "every fact was read off the binary at a pinned
+# version". Two things make that premise rot silently, and both have happened:
+# a re-pin that updates some surfaces and not others, and a documented `doctor`
+# shape that drifts from the check list the preflight tells an agent to act on.
+
+# Versions the docs cite deliberately as HISTORY, not as the current pin:
+# 0.1.2 is the `fix_command: "sling update"` anecdote, and 0.1.7 is the
+# outdated-binary side of the reference's illustrative `version` upgrade row.
+_HISTORICAL_VERSIONS = {"0.1.2", "0.1.7"}
+# Scoped to sling's own 0.1.x family: these files also cite `gh` and the
+# Actions runner, whose versions are not this skill's to pin.
+_VERSION_RE = re.compile(r"\bv?(0\.1\.\d+)\b")
+
+
+@pytest.mark.parametrize("name", ["SKILL.md", "references/command-reference.md"])
+def test_every_live_version_pin_matches_the_captured_cli_version(name):
+    """A re-pin that misses a surface leaves the skill asserting two different
+    versions of the truth, and nothing goes red. `command-surface.json` is the
+    capture of record, so every other live mention must agree with it."""
+    pinned = _SURFACE["cli_version"]
+    text = _BODY if name == "SKILL.md" else (_SKILL / name).read_text()
+    found = set(_VERSION_RE.findall(text)) - _HISTORICAL_VERSIONS
+    assert found == {pinned}, (
+        f"{name} cites version(s) {sorted(found)} but "
+        f"command-surface.json pins {pinned!r}. Re-pin every surface together, "
+        f"or add a deliberate historical citation to _HISTORICAL_VERSIONS.")
+
+
+def test_the_surface_captures_provenance_agree_with_each_other():
+    """`_comment` and `captured_utc` are the file's only provenance, and they
+    drifted six days apart once because a re-pin moved one and not the other."""
+    assert _SURFACE["captured_utc"] in _SURFACE["_comment"], (
+        f"captured_utc {_SURFACE['captured_utc']!r} is not the date named in "
+        f"_comment: {_SURFACE['_comment']!r}")
+
+
+def test_every_doctor_check_key_is_named_in_the_preflight():
+    """The preflight tells an agent which rows to act on; the reference
+    documents what `doctor` emits. A release that adds a check (0.1.8 added
+    `agent_skill`) must land on BOTH, or the agent meets a row its contract
+    never mentions."""
+    ref = (_SKILL / "references" / "command-reference.md").read_text()
+    block = ref[ref.index('{"checks": ['):]
+    block = block[:block.index("```")]
+    keys = re.findall(r'"key":\s*"([a-z_]+)"', block)
+    assert len(keys) >= 8, f"doctor example lists only {keys}"
+    step = _preflight_step(2)
+    missing = [k for k in keys if f"`{k}`" not in step]
+    assert not missing, (
+        f"preflight step 2 never names doctor check(s) {missing}, which "
+        f"references/command-reference.md documents `doctor` as emitting.")
