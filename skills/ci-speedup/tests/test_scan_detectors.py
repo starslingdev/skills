@@ -1007,6 +1007,68 @@ jobs:
     assert "OPT28" not in _scan_one(tmp_path, neg, name="regenerate.yml")
 
 
+def test_opt28_suppressed_on_backslash_continued_history_command(tmp_path: Path):
+    """A `run:` block that continues a git command onto the next line with a
+    trailing backslash is ONE shell command. The merge-base diff below needs
+    full history, so `fetch-depth: 0` is load-bearing — OPT28 must not
+    recommend shallowing the job just because the operand sits on line two."""
+    neg = """name: prebuild
+on: pull_request
+jobs:
+  affected-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          git diff --name-only \\
+            "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \\
+            > /tmp/changed-files.txt
+"""
+    assert "OPT28" not in _scan_one(tmp_path, neg, name="prebuild.yml")
+
+
+def test_opt28_suppressed_on_diff_against_a_variable_base_ref(tmp_path: Path):
+    """A `git diff` whose base operand is a shell variable is still a diff
+    against a base commit — a shallow clone does not contain it — so
+    `fetch-depth: 0` is load-bearing and OPT28 must stay silent."""
+    neg = """name: CI
+on: pull_request
+jobs:
+  changed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          base=$(cat base.txt)
+          git diff --no-renames --name-only "$base" HEAD
+"""
+    assert "OPT28" not in _scan_one(tmp_path, neg, name="changed.yml")
+
+
+def test_opt28_suppressed_on_cat_file_reachability_probe(tmp_path: Path):
+    """`git cat-file -e <sha>^{commit}` probes whether an object is present in
+    the clone — it only succeeds with the history fetched, so the job needs
+    `fetch-depth: 0` and OPT28 must not flag it."""
+    neg = """name: CI
+on: pull_request
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          git cat-file -e "${base}^{commit}"
+"""
+    assert "OPT28" not in _scan_one(tmp_path, neg, name="probe.yml")
+
+
 def test_opt28_line_points_at_the_flagged_job_not_the_first_match(tmp_path: Path):
     """A per-job OPT28 hit must record ITS OWN `fetch-depth: 0` line, not the
     file-global first match. prebuild.yml has depth:0 in the `changes` job (two-SHA

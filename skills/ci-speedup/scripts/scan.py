@@ -275,6 +275,15 @@ _GIT_HISTORY_RE = re.compile(
     # full history just like a `...` merge-base diff — but it has neither `...`
     # nor `origin/`. Match a `git diff` line that references a `.sha` expression.
     r"git\s+diff\b[^\n|]*\.sha\b|"
+    # Diff against a base ref held in a shell variable: `git diff --name-only
+    # "$base" HEAD`. The base commit is just as absent from a shallow clone as a
+    # literal `<sha>...HEAD` is — it simply carries no `...`, no `origin/` and no
+    # `.sha` for the clauses above to see.
+    r"git\s+diff\b[^\n|]*\$[({]?[A-Za-z_]|"
+    # Object-reachability probe: `git cat-file -e "${base}^{commit}"` succeeds
+    # only when the object is present in the clone, which is exactly what full
+    # history buys.
+    r"git\s+cat-file\b|"
     r"fetch-tags|--tags|"
     # Change-detection actions that diff the head against a BASE ref need base
     # history: `dorny/paths-filter` with `base:` set, and `tj-actions/changed-files`
@@ -297,6 +306,20 @@ _HISTORY_JOB_NAME_RE = re.compile(
 # once per scan() from the referenced action files; consulted by
 # `_job_needs_git_history` so OPT28 never recommends shallowing such a job.
 _GIT_HISTORY_LOCAL_ACTIONS: set[str] = set()
+
+
+# A `run:` block routinely breaks ONE shell command across several lines with a
+# trailing backslash, and every clause of `_GIT_HISTORY_RE` is line-scoped. Join
+# the continuations back together before matching, so a git command whose
+# history-revealing operand sits on the next line is still seen as one command.
+_LINE_CONTINUATION_RE = re.compile(r"\\\n[ \t]*")
+
+
+def _has_git_history_op(text: str) -> bool:
+    """True when `text` runs a git operation that needs full history. Applied to
+    every surface `_GIT_HISTORY_RE` is matched against, so line continuations are
+    joined in exactly one place."""
+    return bool(_GIT_HISTORY_RE.search(_LINE_CONTINUATION_RE.sub(" ", text)))
 
 
 def _index_local_git_actions(root: Path, parsed: list[tuple[str, dict, str]]) -> set[str]:
@@ -322,7 +345,7 @@ def _index_local_git_actions(root: Path, parsed: list[tuple[str, dict, str]]) ->
                 text = cand.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            if _GIT_HISTORY_RE.search(text):
+            if _has_git_history_op(text):
                 out.add(ref)
             break
         else:
@@ -338,7 +361,7 @@ def _index_local_git_actions(root: Path, parsed: list[tuple[str, dict, str]]) ->
 def _job_needs_git_history(job: dict, job_name: str = "") -> bool:
     blob = _job_run_blob(job)
     uses_blob = "\n".join(_uses(s) for s in _steps(job))
-    if _GIT_HISTORY_RE.search(blob) or _GIT_HISTORY_RE.search(uses_blob):
+    if _has_git_history_op(blob) or _has_git_history_op(uses_blob):
         return True
     # A local composite action the job invokes may run the git op internally
     # (the workflow yaml shows only `uses: ./…`). Consult the per-scan index.

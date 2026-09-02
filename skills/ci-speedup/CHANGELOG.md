@@ -245,6 +245,21 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-09-02** — **Full-history checkout no longer tells you to shallow a job
+  that reads git history across a line continuation, diffs against a base held
+  in a shell variable, or probes an object's presence.** The check that spares a
+  job whose `fetch-depth: 0` is load-bearing read one line at a time, so a git
+  command split over two lines with a trailing backslash — a very common way to
+  write a merge-base diff in a `run:` block — looked to it like no git command at
+  all, and the job got a recommendation that would have broken it. Two more real
+  history operations were also missing from what it recognises: a `git diff`
+  whose base operand is a shell variable rather than a literal ref, and
+  `git cat-file`, which only succeeds when the object is actually in the clone.
+  Line continuations are now joined before the check runs, on every surface it
+  reads — a job's run blocks, its `uses:` refs, and the body of a local composite
+  action it invokes — and both operations are recognised. The pattern's stance is
+  unchanged: the cost of a miss is a lost finding, never a fix that breaks a job.
+
 - **2026-08-22** — **OPT74 no longer claims a fork PR can't restore the base
   branch's cache — it can; and every fork disclosure now names the reason that
   actually makes a fork colder.** The pattern's anti-pattern text said a fork-PR
