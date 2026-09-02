@@ -910,6 +910,19 @@ def test_pull_request_target_gating_is_not_excluded_by_a_pull_request_negation(t
     assert f["state"] == "fail", f["evidence"]
 
 
+def test_event_name_comparison_is_case_insensitive(tmp_path):
+    """GitHub Actions does case-insensitive string comparison. A job with
+    `github.event_name == 'Pull_Request'` (capital letters) still matches a
+    pull_request event, so it gateways pull requests and must not be excluded."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  b:\n"
+          "    if: github.event_name == 'Pull_Request'\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
+
+
 def test_pinned_offender_files_rank_third_party_first(tmp_path):
     """The maintainer was pointed at actions/labeler while changesets/action@v1
     held release credentials. Third-party offenders sort first."""

@@ -647,7 +647,10 @@ def _eval_if_for_event(tokens: list[tuple[str, str]], event_name: str) -> bool:
         else:
             raise _UnresolvableIf("not an event_name comparison")
         pos += 3
-        return (event_name == want) if op == "==" else (event_name != want)
+        # GitHub Actions does case-insensitive string comparison
+        event = event_name.casefold()
+        expected = want.casefold()
+        return (event == expected) if op == "==" else (event != expected)
 
     result = parse_or()
     if pos != len(tokens):

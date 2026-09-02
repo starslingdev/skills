@@ -334,6 +334,11 @@
   ],
   "changelog": [
     {
+      "version": "ci-score-v0.1.3",
+      "date": "2026-09-02",
+      "change": "Job-level if condition scoping refinement (ci.checkout.shallow-clone): a workflow triggered by pull_request can hold a job whose own if: is never true for a pull-request event — a heavy job scoped to pushes on a release branch, or to manual dispatch — and no pull request waits for it. The check now skips such a job. Event name comparison is case-insensitive to match GitHub Actions string comparison semantics. Scores on committed corpora unchanged."
+    },
+    {
       "version": "ci-score-v0.1",
       "date": "2026-07-14",
       "change": "Initial rubric: 4 categories, 13 scored checks, 5 informational entries, 9 refusal conditions (7 caps + merge_queue + low_evaluability). Encodes section 1 of the CI Score v0.1 build plan.",
