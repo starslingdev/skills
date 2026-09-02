@@ -249,6 +249,49 @@ def _line_of_in_job(raw: str, job_name: str, needle: str) -> int:
     return 0
 
 
+def _line_of_nth_in_job(raw: str, job_name: str, needle: str, occurrence: int) -> int:
+    """1-based line of the Nth occurrence of `needle` within the `job_name:` block.
+    Used when multiple steps in a job contain the same needle (e.g., multiple
+    `fetch-depth: 0` lines). occurrence is 1-based. Returns 0 if not enough
+    occurrences are found."""
+    lines = raw.splitlines()
+    jobs_at = next(
+        (i for i, ln in enumerate(lines) if re.match(r"^jobs:\s*(#.*)?$", ln)), None)
+    if jobs_at is None:
+        return 0
+    indent = None
+    for i in range(jobs_at + 1, len(lines)):
+        ln = lines[i]
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        m = re.match(r"^(\s+)\S", ln)
+        indent = len(m.group(1)) if m else None
+        break
+    if not indent:
+        return 0
+    header = re.compile(rf"^\s{{{indent}}}([A-Za-z0-9_.-]+):\s*(#.*)?$")
+    start = None
+    for i in range(jobs_at + 1, len(lines)):
+        m = header.match(lines[i])
+        if m and m.group(1) == job_name:
+            start = i
+            break
+    if start is None:
+        return 0
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if header.match(lines[j]):
+            end = j
+            break
+    count = 0
+    for k in range(start, end):
+        if needle in lines[k]:
+            count += 1
+            if count == occurrence:
+                return k + 1
+    return 0  # Not enough occurrences
+
+
 def _jobs_from_doc(doc: dict) -> dict[str, dict]:
     jobs = doc.get("jobs") or {}
     return jobs if isinstance(jobs, dict) else {}
@@ -401,24 +444,48 @@ _OPT28_JUSTIFY_RE = re.compile(
 
 def _opt28_history_justification(raw: str, line: int | None) -> str | None:
     """The nearby comment that documents why this `fetch-depth: 0` is needed, or
-    None. Suppressor only: it can remove an OPT28 finding, never create one."""
+    None. Suppressor only: it can remove an OPT28 finding, never create one.
+    Comments must be from the same step (same indentation region) to count as
+    justification — a comment on a prior step is not a justification for this
+    step's checkout."""
     if not line:
         return None
     lines = raw.splitlines()
     idx = line - 1  # 0-based index of the matched `fetch-depth: 0` line
     if idx < 0 or idx >= len(lines):
         return None
+    # Find the step marker (line starting with "- " at the step level) by
+    # looking backward from the fetch-depth line. This determines the indent
+    # level of the current step, so we can detect step boundaries.
+    step_indent = None
+    for i in range(idx, -1, -1):
+        text = lines[i]
+        if not text.strip():
+            continue
+        m = re.match(r"^(\s*)-\s", text)
+        if m:
+            step_indent = len(m.group(1))
+            break
     for back in range(1, _OPT28_JUSTIFY_LOOKBACK + 1):
         i = idx - back
         if i < 0:
             break
-        text = lines[i].strip()
-        if not text:
+        text = lines[i]
+        stripped = text.strip()
+        if not stripped:
             break  # a blank line ends this step's comment region
-        if not text.startswith("#"):
+        if not stripped.startswith("#"):
+            # Non-comment, non-blank line. If it's a step boundary (line starting
+            # with "- " at LESS indent than the current step), we've crossed into
+            # a different step's scope and should stop looking. But the current
+            # step's own marker ("- uses:") is OK to cross since we're within it.
+            if step_indent is not None:
+                m = re.match(r"^(\s*)-\s", text)
+                if m and len(m.group(1)) < step_indent:
+                    break  # We've crossed into a previous step
             continue
-        if _OPT28_JUSTIFY_RE.search(text):
-            return text.lstrip("#").strip()
+        if _OPT28_JUSTIFY_RE.search(stripped):
+            return stripped.lstrip("#").strip()
     return None
 
 
@@ -442,6 +509,7 @@ def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
             continue
         if _job_needs_git_history(job, job_name):
             continue  # depth:0 is load-bearing here — removing it breaks the job
+        checkout_index = 0  # Track which checkout step this is (1-based)
         for step in (job.get("steps") or []):
             if not isinstance(step, dict):
                 continue
@@ -450,7 +518,10 @@ def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
                 continue
             depth = (step.get("with") or {}).get("fetch-depth")
             if str(depth) == "0":
-                line = _line_of_in_job(raw, job_name, "fetch-depth: 0")
+                checkout_index += 1
+                # Find the line for THIS checkout (the Nth occurrence of "fetch-depth: 0"
+                # in the job block), not the first one.
+                line = _line_of_nth_in_job(raw, job_name, "fetch-depth: 0", checkout_index)
                 # A documented justification above the line settles it: the
                 # depth is load-bearing, so stay silent for this step. A comment
                 # can be stale or wrong, and this trades a possible missed
