@@ -13,6 +13,23 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-09-02** — **A long pole whose job is declared advisory now says so.**
+  Nothing in the engine read a job's `continue-on-error` setting, so a job could
+  be reported as the slowest check on the pull-request path, and as the dominant
+  share of the runner-minute bill, without the report ever mentioning that the
+  workflow run passes whether or not that job succeeded — a materially different
+  thing for a reader deciding what the measurement is worth. The scan now records
+  a literal job-level `continue-on-error: true` (an expression such as
+  `${{ matrix.experimental }}` is true on some matrix legs and false on others, so
+  it is not judged; a step-level declaration is job-scoped and proves nothing about
+  the job), and each long-pole section states the fact under its role line. The
+  wording stays at the strength GitHub documents for
+  `jobs.<job_id>.continue-on-error` — it prevents the workflow *run* from failing —
+  and says plainly that the job still reports its own check-run conclusion, so a
+  branch protection rule requiring that check can still block a merge. No
+  recommendation is attached: the report discloses the declaration and does not
+  suggest moving, skipping, or dropping the job.
+
 - **2026-08-20** — **The shipped pattern-count breakdown is now guarded, not
   just the total.** `SKILL.md` and `ARCHITECTURE.md` state the catalog size and
   then break it down into hygiene plus structural patterns. The existing guard

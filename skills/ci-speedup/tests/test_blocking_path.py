@@ -7374,3 +7374,89 @@ def test_aggregation_gate_cross_job_pick_ranks_by_header_not_p50():
     # RED against a bare-p50 cross-job comparison: it named `build` at its 9m 10s p50.
     assert "`build`" not in sec, sec
     assert "9m 10s" not in sec, sec
+
+
+# ── Advisory long poles (`continue-on-error: true` on the pole's job) ──────────────────
+# A job declared `continue-on-error: true` cannot fail its workflow RUN. The engine can
+# crown such a job as the long pole and as the dominant runner-minute spend without ever
+# reading that declaration, which leaves the reader with a materially incomplete picture of
+# what the job's failure does. The pole section must state the fact, and must state it at
+# exactly the strength GitHub documents: `jobs.<job_id>.continue-on-error` "prevents a
+# workflow run from failing when a job fails" and says nothing about the job's own check-run
+# conclusion, so the report must NOT claim the job can never block a merge.
+
+_ADV_WF = ".github/workflows/ci.yml"
+
+
+def _advisory_pole_doc(continue_on_error: bool) -> dict:
+    node = {"name": "e2e", "needs": []}
+    if continue_on_error:
+        node["continue_on_error"] = True
+    return {
+        "repo": "acme/site", "repo_visibility": "public",
+        "scanned_at": "2026-09-02T00:00:00Z", "commit_sha": "09e8243",
+        "skill_commit_sha": "dd51d85", "findings": [],
+        "data_sources": {"runs_sampled": 20, "jobs_sampled": 40, "workflows_analyzed": 1},
+        "workflow_job_graph": {_ADV_WF: {
+            "e2e": node,
+            "lint": {"name": "lint", "needs": []},
+        }},
+        "pr_critical_path": {
+            "sampled_pr_count": 20, "sample_target": 20, "sample_complete": True,
+            "check_present_n_pr": 20, "critical_path_check": "e2e",
+            "poles": [
+                {"check": "e2e", "p50_s": 900.0, "workflow_file": _ADV_WF, "job": "e2e",
+                 "dominant_step": "Run tests", "dominant_p50_s": 800.0,
+                 "steps": [{"step": "Checkout", "category": "setup", "p50_s": 20.0},
+                           {"step": "Run tests", "category": "test", "p50_s": 800.0}]},
+                {"check": "lint", "p50_s": 60.0, "workflow_file": _ADV_WF, "job": "lint",
+                 "dominant_step": "Run eslint", "dominant_p50_s": 40.0,
+                 "steps": [{"step": "Run eslint", "category": "lint", "p50_s": 40.0}]},
+            ],
+            "checks": [
+                {"name": "e2e", "p50_s": 900.0, "present_on": 20, "workflow_file": _ADV_WF},
+                {"name": "lint", "p50_s": 60.0, "present_on": 20, "workflow_file": _ADV_WF},
+            ],
+            "populations": [],
+        },
+    }
+
+
+def test_advisory_long_pole_reports_its_continue_on_error_declaration():
+    md = bp.render(_advisory_pole_doc(True), {}, {}, {}, "2026-09-02T00:00:00Z", {})
+    sec = _pole_section(md, "e2e")
+    assert "`continue-on-error: true`" in sec, sec
+    assert "does not fail the workflow run" in sec, sec
+
+
+def test_advisory_long_pole_does_not_overclaim_what_continue_on_error_does():
+    # The documented semantics are run-scoped only. The job still reports its own check-run
+    # conclusion, so a required-status-check rule naming it can still block a merge - the
+    # report must say so rather than declaring the job harmless.
+    md = bp.render(_advisory_pole_doc(True), {}, {}, {}, "2026-09-02T00:00:00Z", {})
+    sec = _pole_section(md, "e2e")
+    assert "can still block a merge" in sec, sec
+    for overclaim in ("never fail the build", "cannot fail the build", "gates nothing",
+                      "never block a merge", "blocks nothing", "nothing waits on it"):
+        assert overclaim not in sec, f"over-claimed: {overclaim!r}"
+    # And it must not tell the reader to move or skip the job (the no-weakening rail).
+    for banned in ("move it off", "off the PR path", "skip it", "stop running it"):
+        assert banned not in sec, f"weakening advice: {banned!r}"
+
+
+def test_pole_without_the_declaration_renders_byte_identically():
+    # Fact-only, and only when the scanned graph literally says so. Two poles must be
+    # untouched: the same job with no `continue-on-error`, and a sibling pole in the same
+    # workflow whose own job carries none. (Scoped to the advisory sentence, not the bare
+    # word: the no-weakening rail's prompt copy names `continue-on-error` on every pole.)
+    advisory = "does not fail the workflow run"
+    plain = _pole_section(
+        bp.render(_advisory_pole_doc(False), {}, {}, {}, "2026-09-02T00:00:00Z", {}), "e2e")
+    assert advisory not in plain, plain
+    md = bp.render(_advisory_pole_doc(True), {}, {}, {}, "2026-09-02T00:00:00Z", {})
+    assert advisory not in _pole_section(md, "lint")
+    # The advisory pole's section is otherwise byte-identical to the un-annotated one:
+    # the change adds a fact, it does not re-frame anything.
+    annotated = _pole_section(md, "e2e")
+    assert annotated.replace(
+        "\n".join(l for l in annotated.splitlines() if advisory in l) + "\n\n", "") == plain

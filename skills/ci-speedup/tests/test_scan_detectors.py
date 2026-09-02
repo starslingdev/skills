@@ -2678,8 +2678,8 @@ jobs: {}
     graph = _scan(tmp_path).get("workflow_job_graph", {})
     ci = graph.get(".github/workflows/ci.yml")
     assert ci is not None
-    assert ci["changes"] == {"name": "changes", "needs": [], "reusable": False, "matrix": False, "timeout_minutes": False}  # missing needs -> []; no name -> job id; no strategy.matrix
-    assert ci["build"] == {"name": "Build", "needs": ["changes"], "reusable": False, "matrix": False, "timeout_minutes": True}  # bare string normalized
+    assert ci["changes"] == {"name": "changes", "needs": [], "reusable": False, "matrix": False, "timeout_minutes": False, "continue_on_error": False}  # missing needs -> []; no name -> job id; no strategy.matrix
+    assert ci["build"] == {"name": "Build", "needs": ["changes"], "reusable": False, "matrix": False, "timeout_minutes": True, "continue_on_error": False}  # bare string normalized
     assert ci["test"]["needs"] == ["changes", "build"]                                    # list preserved
     assert ci["test"]["name"] == "UNIT Test (Shard ${{ matrix.shard }})"                  # matrix placeholder kept intact
     assert ci["test"]["matrix"] is True                                                   # strategy.matrix -> matrix flag
@@ -3452,3 +3452,56 @@ jobs:
     assert len(hits) == 1
     assert "git lfs pull" in hits[0]["evidence_snippet"]
     assert "install" not in hits[0]["evidence_snippet"]
+
+
+def test_workflow_job_graph_records_literal_continue_on_error(tmp_path: Path):
+    """A job declared `continue-on-error: true` cannot fail its workflow RUN, which is a
+    material fact about a job the report may crown as the long pole. The graph carries it so
+    the renderer never has to re-read YAML. Only a LITERAL true counts: an expression such as
+    `${{ matrix.experimental }}` is true on some matrix legs and false on others, and the YAML
+    cannot say which, so it is not judged. GitHub also accepts the quoted string form."""
+    wf = """name: CI
+on:
+  pull_request:
+jobs:
+  advisory:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - run: echo advisory
+  quoted:
+    runs-on: ubuntu-latest
+    continue-on-error: "TRUE"
+    steps:
+      - run: echo quoted
+  expression:
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      matrix:
+        experimental: [true, false]
+    steps:
+      - run: echo maybe
+  explicit_false:
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - run: echo blocking
+  step_level_only:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo upload
+        continue-on-error: true
+  plain:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo plain
+"""
+    _write_workflow(tmp_path, "ci.yml", wf)
+    jobs = _scan(tmp_path)["workflow_job_graph"][".github/workflows/ci.yml"]
+    assert jobs["advisory"]["continue_on_error"] is True
+    assert jobs["quoted"]["continue_on_error"] is True
+    # An expression, an explicit false, a STEP-level declaration (which is job-scoped, not
+    # run-scoped, and so proves nothing about the job) and a plain job all read as False.
+    for jid in ("expression", "explicit_false", "step_level_only", "plain"):
+        assert jobs[jid]["continue_on_error"] is False, jid

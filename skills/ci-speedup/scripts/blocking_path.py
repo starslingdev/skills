@@ -823,6 +823,64 @@ def _agg_job_produces_check(job_name: str, is_matrix: bool, check: str) -> bool:
     return False
 
 
+def _pole_job_node(pole: dict[str, Any],
+                   job_graph: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The scanned job-graph node for `pole`'s job, or None when the pole's identity does not
+    resolve to exactly ONE job in its own workflow.
+
+    The pole's `job` is usually the YAML key, but it may be a DISPLAY name or absent, so fall
+    back to matching the check-run name against each job's name template (the same resolution
+    `_agg_gate_shape` uses). An ambiguous or unresolvable identity yields None: a fact stated
+    about the wrong job is worse than no fact."""
+    jobs = _as_dict(_as_dict(job_graph).get(str(pole.get("workflow_file") or "")))
+    if not jobs:
+        return None
+    jid = str(pole.get("job") or "")
+    if jid in jobs:
+        return _as_dict(jobs[jid])
+    check = str(pole.get("check") or "")
+    cands = [_as_dict(m) for k, m in jobs.items()
+             if _agg_job_produces_check(str(_as_dict(m).get("name") or k),
+                                        bool(_as_dict(m).get("matrix")), check)]
+    return cands[0] if len(cands) == 1 else None
+
+
+def _advisory_job_line(pole: dict[str, Any],
+                       job_graph: dict[str, Any] | None) -> str:
+    """The advisory-job disclosure for `pole`, or "" when its job declares no literal
+    job-level `continue-on-error: true`.
+
+    WHY IT EXISTS. The engine ranks poles by measured wall-clock and runner minutes, which is
+    blind to what a job's failure DOES. A job the report crowns as the check a PR waits on
+    longest, or as the dominant share of the runner-minute bill, reads very differently once
+    the reader knows the workflow run passes whether or not it succeeded. That is a fact about
+    the job, and the reader needs it to decide what the measurement is worth.
+
+    WHY IT IS WORDED THIS NARROWLY. GitHub documents `jobs.<job_id>.continue-on-error` as
+    "Prevents a workflow run from failing when a job fails" - run-scoped, and silent on the
+    job's own check run. The job still reports its own conclusion, so a branch protection rule
+    or ruleset that requires that specific check can still block a merge. Saying the job "can
+    never fail the build" or "gates nothing" would therefore be false, and would also
+    contradict a security audit of the same repository, which reads this same declaration on a
+    verification job as a gate-integrity problem. Both readings stand together only if this
+    line stays at the strength the documentation supports: state what the run does, name what
+    is NOT settled here, and stop.
+
+    WHY IT RECOMMENDS NOTHING. The no-weakening rail below forbids buying speed by verifying
+    less, and its carve-out is scoped to a check the change cannot fail on - which an advisory
+    job whose tests do cover the change is not. So this discloses; it does not advise moving,
+    skipping, or dropping the job."""
+    node = _pole_job_node(pole, job_graph)
+    if not node or node.get("continue_on_error") is not True:
+        return ""
+    return ("> **Declared advisory: this job sets `continue-on-error: true`.** Its failure "
+            "does not fail the workflow run, so the run can pass on a PR where this job "
+            "failed. That is run-scoped only: the job still reports its own check-run "
+            "conclusion, so a branch protection rule or ruleset requiring this specific check "
+            "can still block a merge, and this report does not read those rules. The timings "
+            "below are measured the same either way.")
+
+
 def _agg_gate_shape(pole: dict[str, Any], job_graph: dict[str, Any] | None,
                     checks: list[dict[str, Any]],
                     timeline: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -8885,6 +8943,13 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out.append("")
         out.append(f"_{role}_" if not role.startswith("**") else role)
         out.append("")
+        # Advisory-job disclosure. Sits directly under the role line, because it qualifies
+        # what this pole's ranking MEANS before any drill, prompt or saving is read. Plain
+        # prose, not a `Claim`: it asserts no framing-vocabulary phrase and no derived
+        # quantity - it restates one scanned YAML fact - so it has no comparator to bind.
+        _adv = _advisory_job_line(p, doc.get("workflow_job_graph"))
+        if _adv:
+            out += [_adv, ""]
         # Machine marker: which log-detector leaf crowned this pole's MEASURED CAUSE. Emitted
         # only for a leaf that survived off-category demotion, so verify_report re-derives the
         # crowned leaf's category and asserts it agrees with the pole's dominant_category.

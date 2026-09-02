@@ -2753,6 +2753,26 @@ def _build_workflow_call_graph(
     return graph
 
 
+def _job_continue_on_error_is_literally_true(job: dict) -> bool:
+    """Whether a job declares `continue-on-error: true` as a LITERAL, at job level.
+
+    Job-level `continue-on-error: true` prevents the workflow RUN from failing when the job
+    fails (GitHub's documented wording for `jobs.<job_id>.continue-on-error`: "Prevents a
+    workflow run from failing when a job fails"). It says nothing about the job's own
+    check-run conclusion, so a consumer may report the run-level fact and no more.
+
+    Only a literal counts. `continue-on-error: ${{ matrix.experimental }}` is true on some
+    matrix legs and false on others, and the YAML cannot say which, so an expression is not
+    judged. GitHub also accepts the quoted string, which parses as a str and means the same
+    thing, so that counts. A STEP-level declaration is deliberately NOT read here: it is
+    job-scoped (it stops a step from failing its JOB) and proves nothing about what the job's
+    own failure does to the run.
+    """
+    value = job.get("continue-on-error")
+    return value is True or (isinstance(value, str)
+                             and value.strip().lower() == "true")
+
+
 def _build_workflow_job_graph(
     parsed: list[tuple[str, dict, str]],
 ) -> dict[str, dict[str, dict[str, Any]]]:
@@ -2768,6 +2788,9 @@ def _build_workflow_job_graph(
     - `reusable` marks a job that invokes a reusable workflow (`uses:` at job level): its
       leaf check-runs surface as `<job name> / <child job>`, so the consumer groups those
       children under this caller.
+    - `continue_on_error` marks a job that declares a LITERAL `continue-on-error: true`
+      (see `_job_continue_on_error_is_literally_true`), so a consumer that crowns the job as
+      a long pole can state what its failure does to the workflow run without re-reading YAML.
     - `matrix` marks a job with a `strategy.matrix`: GitHub appends the leg to its check-run
       name (`<name> (<leg…>)`) even when the `name:` carries NO `${{ matrix.* }}` placeholder
       to expand, so the consumer must tolerate that appended parenthetical for these jobs.
@@ -2793,6 +2816,7 @@ def _build_workflow_job_graph(
                 "reusable": isinstance(job.get("uses"), str),
                 "matrix": isinstance(strategy, dict) and bool(strategy.get("matrix")),
                 "timeout_minutes": "timeout-minutes" in job,
+                "continue_on_error": _job_continue_on_error_is_literally_true(job),
             }
         if jobs:
             graph[rel] = jobs
