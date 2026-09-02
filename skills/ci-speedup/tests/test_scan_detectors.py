@@ -3505,3 +3505,60 @@ jobs:
     # run-scoped, and so proves nothing about the job) and a plain job all read as False.
     for jid in ("expression", "explicit_false", "step_level_only", "plain"):
         assert jobs[jid]["continue_on_error"] is False, jid
+
+
+def test_workflow_job_graph_rejects_yaml_1_1_boolean_words(tmp_path: Path):
+    """`continue-on-error: yes` is NOT an advisory job on GitHub, and the report must not
+    say it is.
+
+    GitHub Actions reads booleans the YAML 1.2 way: `true` / `false` (and their capitalised
+    spellings) and nothing else. PyYAML reads YAML 1.1, where `yes`, `on`, `y`, `no`, `off`
+    and `n` are ALSO booleans. So a workflow that says `continue-on-error: yes` arrives here
+    as Python `True` while GitHub reads it as the plain string "yes" and the job keeps
+    failing its run exactly as before. Trusting the parsed value would put a false
+    "declared advisory" sentence on the slowest check in the report.
+
+    The truthy words are the whole point of the test; `off`/`no` are here so the fix cannot
+    pass by reading every word as advisory instead."""
+    wf = """name: CI
+on:
+  pull_request:
+jobs:
+  word_yes:
+    runs-on: ubuntu-latest
+    continue-on-error: yes
+    steps:
+      - run: echo yes
+  word_on:
+    runs-on: ubuntu-latest
+    continue-on-error: on
+    steps:
+      - run: echo on
+  word_y:
+    runs-on: ubuntu-latest
+    continue-on-error: y
+    steps:
+      - run: echo y
+  word_off:
+    runs-on: ubuntu-latest
+    continue-on-error: off
+    steps:
+      - run: echo off
+  word_no:
+    runs-on: ubuntu-latest
+    continue-on-error: no
+    steps:
+      - run: echo no
+  really_advisory:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - run: echo advisory
+"""
+    _write_workflow(tmp_path, "ci.yml", wf)
+    jobs = _scan(tmp_path)["workflow_job_graph"][".github/workflows/ci.yml"]
+    for jid in ("word_yes", "word_on", "word_y", "word_off", "word_no"):
+        assert jobs[jid]["continue_on_error"] is False, jid
+    # The literal GitHub does accept still reads as advisory: the fix narrows the
+    # detection, it does not switch it off.
+    assert jobs["really_advisory"]["continue_on_error"] is True

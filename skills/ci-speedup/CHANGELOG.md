@@ -28,7 +28,10 @@ unversioned and updates by reinstall from `main`.
   and says plainly that the job still reports its own check-run conclusion, so a
   branch protection rule requiring that check can still block a merge. No
   recommendation is attached: the report discloses the declaration and does not
-  suggest moving, skipping, or dropping the job.
+  suggest moving, skipping, or dropping the job. The copy-paste prompt for a
+  coding agent carries the same fact, because that block is designed to be pasted
+  on its own and an agent that only sees the prompt would otherwise change the
+  slowest job on the pull-request path without knowing what its failure does.
 
 - **2026-08-20** — **The shipped pattern-count breakdown is now guarded, not
   just the total.** `SKILL.md` and `ARCHITECTURE.md` state the catalog size and
@@ -261,6 +264,15 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-09-02** — **`continue-on-error: yes` is no longer reported as an
+  advisory job.** GitHub Actions reads only `true` and `false` as booleans; the
+  YAML library this scan uses also reads `yes`, `on` and `y` that way. A workflow
+  written with those words would therefore have been declared advisory in the
+  report while GitHub keeps failing the run on that job exactly as before — a
+  false statement about the slowest check in the repository. The one keyword the
+  report speaks about is now re-read with GitHub's boolean spellings, so only what
+  GitHub honours counts.
 
 - **2026-08-22** — **OPT74 no longer claims a fork PR can't restore the base
   branch's cache — it can; and every fork disclosure now names the reason that

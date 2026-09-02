@@ -2753,8 +2753,58 @@ def _build_workflow_call_graph(
     return graph
 
 
+# GitHub Actions reads booleans the YAML 1.2 way: `true` / `false` and their capitalised
+# spellings, and nothing else. PyYAML reads YAML 1.1, where `yes`, `on`, `y`, `no`, `off`
+# and `n` are ALSO booleans. The two disagree on real workflow files: `continue-on-error:
+# yes` reaches this scan as Python `True` while GitHub reads the plain string "yes" and the
+# job keeps failing its run exactly as before. Reading the parsed value alone would let the
+# report print "declared advisory" over the slowest check in the repository on the strength
+# of a spelling GitHub does not honour.
+#
+# So the ONE keyword the report speaks about is re-read through this loader, which drops
+# PyYAML's YAML-1.1 boolean words and resolves only the spellings GitHub accepts. It is
+# deliberately NOT the loader the rest of the scan uses: every other detector keeps today's
+# parse, so the blast radius of this correction stays on the fact that needs it.
+class _GitHubBoolLoader(yaml.SafeLoader):
+    """A `SafeLoader` whose booleans are GitHub's, not YAML 1.1's."""
+
+
+_GitHubBoolLoader.yaml_implicit_resolvers = {
+    ch: [(tag, rx) for tag, rx in resolvers if tag != "tag:yaml.org,2002:bool"]
+    for ch, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_GitHubBoolLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool",
+    re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"))
+
+
+def _github_bool_jobs(raw: str) -> dict[str, Any]:
+    """The workflow's `jobs:` mapping re-read with GitHub's boolean spellings.
+
+    `{}` when the text cannot be re-read that way. The caller treats a job missing from this
+    mapping as NOT advisory: silence is the safe direction for a disclosure, and a sentence
+    resting on a boolean this scan could not confirm is worse than no sentence."""
+    try:
+        doc = yaml.load(raw, Loader=_GitHubBoolLoader)
+    except yaml.YAMLError:
+        return {}
+    return _jobs_from_doc(doc) if isinstance(doc, dict) else {}
+
+
+def _strict_job(strict: Any) -> dict:
+    """The strictly re-read job node, or a node with no `continue-on-error` at all - never
+    the loosely parsed one, whose boolean is the very thing that cannot be trusted."""
+    return strict if isinstance(strict, dict) else {}
+
+
 def _job_continue_on_error_is_literally_true(job: dict) -> bool:
     """Whether a job declares `continue-on-error: true` as a LITERAL, at job level.
+
+    Takes a job node parsed by `_GitHubBoolLoader`, so `yes` / `on` / `y` arrive as the
+    strings they are to GitHub rather than as booleans. The value-level semantics are the
+    ones the security engine's `_continue_on_error_is_literally_true` already applies: a
+    literal true, or the quoted string that means the same thing.
 
     Job-level `continue-on-error: true` prevents the workflow RUN from failing when the job
     fails (GitHub's documented wording for `jobs.<job_id>.continue-on-error`: "Prevents a
@@ -2800,6 +2850,13 @@ def _build_workflow_job_graph(
     graph: dict[str, dict[str, dict[str, Any]]] = {}
     for rel, doc, _raw in parsed:
         jobs: dict[str, dict[str, Any]] = {}
+        # Only pay for the strict re-read when the loose parse turned some job's
+        # `continue-on-error` into a boolean at all - the two parsers cannot disagree
+        # otherwise, and most workflow files never mention the keyword.
+        strict_jobs: dict[str, Any] = {}
+        if any(isinstance(j, dict) and isinstance(j.get("continue-on-error"), bool)
+               for j in _jobs_from_doc(doc).values()):
+            strict_jobs = _github_bool_jobs(_raw)
         for jid, job in _jobs_from_doc(doc).items():
             if not isinstance(job, dict):
                 continue
@@ -2816,7 +2873,8 @@ def _build_workflow_job_graph(
                 "reusable": isinstance(job.get("uses"), str),
                 "matrix": isinstance(strategy, dict) and bool(strategy.get("matrix")),
                 "timeout_minutes": "timeout-minutes" in job,
-                "continue_on_error": _job_continue_on_error_is_literally_true(job),
+                "continue_on_error": _job_continue_on_error_is_literally_true(
+                    _strict_job(strict_jobs.get(str(jid)))),
             }
         if jobs:
             graph[rel] = jobs

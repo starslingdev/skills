@@ -7456,10 +7456,23 @@ def test_pole_without_the_declaration_renders_byte_identically():
     md = bp.render(_advisory_pole_doc(True), {}, {}, {}, "2026-09-02T00:00:00Z", {})
     assert advisory not in _pole_section(md, "lint")
     # The advisory pole's section is otherwise byte-identical to the un-annotated one:
-    # the change adds a fact, it does not re-frame anything.
+    # the change adds a fact, it does not re-frame anything. The fact renders in TWO places
+    # (the prose disclosure under the role line, and the bullet inside the copy-paste agent
+    # prompt), and only the prose one carries a blank separator line, so the comparison drops
+    # the advisory lines and then collapses blank runs - applied to BOTH sides, so any real
+    # re-framing still shows up as a difference.
+    def _without_advisory(text: str) -> str:
+        kept: list[str] = []
+        for line in text.splitlines():
+            if advisory in line:
+                continue
+            if line == "" and kept and kept[-1] == "":
+                continue
+            kept.append(line)
+        return "\n".join(kept)
+
     annotated = _pole_section(md, "e2e")
-    assert annotated.replace(
-        "\n".join(l for l in annotated.splitlines() if advisory in l) + "\n\n", "") == plain
+    assert _without_advisory(annotated) == _without_advisory(plain)
 
 
 # ── Job-selection collision regression ──────────────────────────────────────
@@ -7514,3 +7527,22 @@ def test_pole_job_node_resolves_correct_job_when_display_name_collides_with_yaml
         "produces the check and falling back to job B (check-name match)."
         .format(node.get("continue_on_error"))
     )
+
+
+def test_advisory_long_pole_tells_the_coding_agent_the_job_is_advisory():
+    """The copy-paste prompt is handed to an agent alone, so the disclosure has to be IN it.
+
+    The report states the advisory declaration under the pole's role line, but the prompt
+    block is designed to be pasted on its own - "self-contained: pasted alone it gives the
+    agent the gate". An agent that only ever sees the prompt would size and change the
+    slowest job on the pull-request path without knowing the workflow run passes whether or
+    not that job succeeded, which is exactly the context the disclosure exists to supply."""
+    md = bp.render(_advisory_pole_doc(True), {}, {}, {}, "2026-09-02T00:00:00Z", {})
+    prompt = _pole_section(md, "e2e").split("#### 🤖 Prompt for your coding agent", 1)
+    assert len(prompt) == 2, "no agent prompt rendered for the advisory pole"
+    assert "continue-on-error: true" in prompt[1], prompt[1]
+    # A pole whose job declares nothing keeps a prompt with no such line.
+    plain = _pole_section(
+        bp.render(_advisory_pole_doc(False), {}, {}, {}, "2026-09-02T00:00:00Z", {}), "e2e")
+    assert "continue-on-error: true" not in plain.split(
+        "#### 🤖 Prompt for your coding agent", 1)[1]
