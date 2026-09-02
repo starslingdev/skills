@@ -375,6 +375,53 @@ def _job_needs_git_history(job: dict, job_name: str = "") -> bool:
     return bool(_HISTORY_JOB_NAME_RE.search(job_name))
 
 
+# When `fetch-depth: 0` is load-bearing, maintainers routinely say so in a YAML
+# comment right above it — and comments are dropped at parse time, so the one
+# artifact that settles the question is invisible to the detector. Read it back
+# out of the raw text and treat it as a carve-out: a nearby comment that names a
+# history operation means "do not recommend shallowing this step".
+#
+# The bound is six lines above the matched `fetch-depth: 0`, and a blank line
+# ends the region. Six is what it takes to reach a comment written above the
+# step itself — `- uses:` and `with:` sit between — with room for a two- or
+# three-line comment block; beyond that the comment belongs to an earlier step
+# and is not a justification for this one.
+_OPT28_JUSTIFY_LOOKBACK = 6
+
+# Deliberately tight. `depth` is NOT in the vocabulary: "fetch-depth: 0 is
+# unnecessary here" must not read as a justification — hence also the
+# `fetch(?!-depth)` guard, so the key's own name never counts as `git fetch`.
+_OPT28_JUSTIFY_RE = re.compile(
+    r"\b(?:rev-list|rev-parse|merge-base|describe|blame|history|ancestors?|"
+    r"changelog|tags?|log)\b|"
+    r"\bfetch(?!-depth)\b|"
+    r"\bshallow\s+clone\b",
+    re.I)
+
+
+def _opt28_history_justification(raw: str, line: int | None) -> str | None:
+    """The nearby comment that documents why this `fetch-depth: 0` is needed, or
+    None. Suppressor only: it can remove an OPT28 finding, never create one."""
+    if not line:
+        return None
+    lines = raw.splitlines()
+    idx = line - 1  # 0-based index of the matched `fetch-depth: 0` line
+    if idx < 0 or idx >= len(lines):
+        return None
+    for back in range(1, _OPT28_JUSTIFY_LOOKBACK + 1):
+        i = idx - back
+        if i < 0:
+            break
+        text = lines[i].strip()
+        if not text:
+            break  # a blank line ends this step's comment region
+        if not text.startswith("#"):
+            continue
+        if _OPT28_JUSTIFY_RE.search(text):
+            return text.lstrip("#").strip()
+    return None
+
+
 def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
     """`actions/checkout@v?` with `fetch-depth: 0` — but ONLY when the job does
     not actually need full history. A job running changeset versioning/publish,
@@ -404,6 +451,13 @@ def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
             depth = (step.get("with") or {}).get("fetch-depth")
             if str(depth) == "0":
                 line = _line_of_in_job(raw, job_name, "fetch-depth: 0")
+                # A documented justification above the line settles it: the
+                # depth is load-bearing, so stay silent for this step. A comment
+                # can be stale or wrong, and this trades a possible missed
+                # finding for never recommending a fix that breaks a job — the
+                # direction this pattern already chose.
+                if _opt28_history_justification(raw, line):
+                    continue
                 hits.append(Hit(
                     line=line,
                     affected_jobs=[job_name],

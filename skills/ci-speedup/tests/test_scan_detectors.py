@@ -1069,6 +1069,68 @@ jobs:
     assert "OPT28" not in _scan_one(tmp_path, neg, name="probe.yml")
 
 
+def test_opt28_suppressed_by_a_documented_history_justification_comment(tmp_path: Path):
+    """A YAML comment above `fetch-depth: 0` naming a history command is the one
+    artifact that settles whether the depth is load-bearing — and comments are
+    dropped at parse time, so the detector never saw it. It must now stay
+    silent rather than recommend a change that breaks the job."""
+    neg = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # full history is required: the version stamp comes from `git describe`
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: make build
+"""
+    assert "OPT28" not in _scan_one(tmp_path, neg, name="build.yml")
+
+
+def test_opt28_still_fires_when_a_comment_denies_the_depth_is_needed(tmp_path: Path):
+    """The justification suppressor must read the comment, not merely notice one.
+    A comment saying the depth is unnecessary is not a justification, and the
+    word `depth` alone never suppresses."""
+    pos = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 is unnecessary here, left over from an old job
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: make build
+"""
+    assert "OPT28" in _scan_one(tmp_path, pos, name="build.yml")
+
+
+def test_opt28_ignores_a_history_comment_too_far_above_the_step(tmp_path: Path):
+    """The suppressor reads a NEARBY comment block. A history comment attached to
+    an earlier step is not a justification for this one, and must not silence it."""
+    pos = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # this earlier step is the one that needs `git log`
+      - run: echo one
+      - run: echo two
+      - run: echo three
+      - run: echo four
+      - run: echo five
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: make build
+"""
+    assert "OPT28" in _scan_one(tmp_path, pos, name="build.yml")
+
+
 def test_opt28_line_points_at_the_flagged_job_not_the_first_match(tmp_path: Path):
     """A per-job OPT28 hit must record ITS OWN `fetch-depth: 0` line, not the
     file-global first match. prebuild.yml has depth:0 in the `changes` job (two-SHA

@@ -245,6 +245,18 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-09-02** — **A comment explaining why full history is needed now
+  silences the full-history-checkout finding.** When `fetch-depth: 0` is
+  load-bearing, the reason is usually written in a comment directly above it —
+  and comments are discarded when the workflow is parsed, so the one artifact
+  that settles the question was invisible. A comment within six lines above the
+  line, naming a git-history operation or history work in general, now
+  suppresses the finding for that step. The reading is deliberately narrow: the
+  word `depth` is not part of the vocabulary, so a comment saying the depth is
+  unnecessary still leaves the finding standing, and a comment that belongs to
+  an earlier step is out of range. The check can only ever remove this one
+  finding — it never creates a finding and touches no other pattern.
+
 - **2026-09-02** — **Full-history checkout no longer tells you to shallow a job
   that reads git history across a line continuation, diffs against a base held
   in a shell variable, or probes an object's presence.** The check that spares a
