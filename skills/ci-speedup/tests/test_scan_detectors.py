@@ -1129,6 +1129,24 @@ jobs:
       - run: make build
 """
     assert "OPT28" in _scan_one(tmp_path, pos, name="build.yml")
+def test_opt28_suppressed_on_positional_parameter_base_ref(tmp_path: Path):
+    """A `git diff` whose base operand is a positional parameter like `$1` is
+    still a diff against a base commit that must be in the history — a shallow
+    clone does not contain it — so `fetch-depth: 0` is load-bearing and OPT28
+    must not recommend shallowing."""
+    neg = """name: CI
+on: pull_request
+jobs:
+  changed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          git diff --name-only "$1" HEAD
+"""
+    assert "OPT28" not in _scan_one(tmp_path, neg, name="changed.yml")
 
 
 def test_opt28_line_points_at_the_flagged_job_not_the_first_match(tmp_path: Path):
