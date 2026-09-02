@@ -5,7 +5,7 @@ ci-speedup's scanner, 2026-07-16).
 composite actions and returns the eleven pass/fail CONFIGURATION FACTS the CI
 Score consumes (each fact: {"state": "pass"|"fail"|"not_applicable",
 "evidence": str, "files": [..<=3]}). `ci_score.compute_ci_score` maps these
-onto the frozen v0.1.3 registry and does the arithmetic.
+onto the frozen v0.1.4 registry and does the arithmetic.
 
 STRUCTURE, NOT SUBSTRINGS: every fact walks the parsed workflow (jobs, steps,
 with-blocks, on-blocks). The only substring matching is over the CODE inside a
@@ -446,14 +446,30 @@ _GIT_HISTORY_RE = re.compile(
     # nor `origin/`. Match a `git diff` line that references a `.sha` expression.
     r"git\s+diff\b[^\n|]*\.sha\b|"
     # Diff against a base ref held in a shell variable: `git diff --name-only
-    # "$base" HEAD`. The base commit is just as absent from a shallow clone as a
-    # literal `<sha>...HEAD` is — it simply carries no `...`, no `origin/` and no
+    # "$base" HEAD` or as a positional parameter like `git diff "$1" HEAD`. The
+    # base commit is just as absent from a shallow clone as a literal
+    # `<sha>...HEAD` is — it simply carries no `...`, no `origin/` and no
     # `.sha` for the clauses above to see.
-    r"git\s+diff\b[^\n|]*\$[({]?[A-Za-z_]|"
+    #
+    # The variable only counts where a REF operand can stand. Two positions on
+    # the command line can never hold a ref, and a `$` reached through either
+    # one says nothing about history:
+    #   * past a redirection arrow — `git diff --stat >> $GITHUB_STEP_SUMMARY`
+    #     and `git diff > $OUT` name the FILE the diff is written to;
+    #   * past a bare `--` separator — everything after it is a pathspec, so
+    #     `git diff --exit-code -- "$FILE"` names a path, not a base commit.
+    # Option flags such as `--name-only` are not the separator (no trailing
+    # space), so `git diff --no-renames --name-only "$base" HEAD` still counts.
+    r"git\s+diff\b(?:(?!\s--\s|>)[^\n|])*\$[({]?[A-Za-z_0-9]|"
     # Object-reachability probe: `git cat-file -e "${base}^{commit}"` succeeds
     # only when the object is present in the clone, which is exactly what full
-    # history buys.
-    r"git\s+cat-file\b|"
+    # history buys. A cat-file whose operand is anchored at HEAD is the
+    # opposite case — `git cat-file -p HEAD:package.json` reads a blob at the
+    # checked-out commit, which every clone depth already has — so a HEAD
+    # operand (but not `HEAD~1` / `HEAD^`, which do reach back) disqualifies
+    # the clause. The lookahead stops at a command separator so a later,
+    # unrelated HEAD read cannot cancel a genuine probe.
+    r"git\s+cat-file\b(?![^\n|;&]*\bHEAD(?![~^]))|"
     r"fetch-tags|--tags|"
     # Change-detection actions that diff the head against a BASE ref need base
     # history: `dorny/paths-filter` with `base:` set, and `tj-actions/changed-files`

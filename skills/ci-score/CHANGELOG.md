@@ -11,6 +11,14 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-09-02** — **Changed**: the CI Score registry is bumped to
+  `ci-score-v0.1.4` (OD-CS22). The two shallow-clone exemptions below move a
+  gate — one frozen calibration control goes from 9/11 to 10/11 on identical
+  workflow YAML — and the rubric's own rule bumps `spec_version` when a gate
+  moves. Check count (11), bands, formula, refusals and scorer arithmetic are
+  unchanged. Committed corpus and synthetic stamps carry the new
+  `spec_version` field and nothing else: no corpus score moves.
+
 - **2026-09-02** — **Fixed**: pull-request relevance was decided at the
   WORKFLOW level, so a job that can never run on a pull request was still
   graded as if it gated one. A workflow triggered by `pull_request` can hold a

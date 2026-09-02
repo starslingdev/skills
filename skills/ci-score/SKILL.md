@@ -26,7 +26,7 @@ repo's workflow configuration.** Eleven configuration facts, each
 self-verifiable in the repo's own YAML in under a minute; score = checks
 passed / applicable; one refusal (no workflows to check). Registry:
 [references/ci-score-spec.json](references/ci-score-spec.json) (frozen
-v0.1.3); rubric write-up:
+v0.1.4); rubric write-up:
 [references/ci-score-methodology.md](references/ci-score-methodology.md).
 
 The score measures **adherence, not speed** — measured, faster repos can

@@ -434,7 +434,7 @@ def render_report(doc: dict[str, Any], registry: dict[str, Any]) -> str:
         lines += ["## Recommendations", "",
                   "Every applicable check passes — nothing to recommend. "
                   "(Re-run after CI changes; the practices above are the "
-                  "full v0.1.3 rubric.)", ""]
+                  "full v0.1.4 rubric.)", ""]
         lines += _render_appendix(registry)
         return "\n".join(lines) + "\n"
 

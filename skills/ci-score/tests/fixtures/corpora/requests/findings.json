@@ -5945,7 +5945,7 @@
     ]
   },
   "ci_score": {
-    "spec_version": "ci-score-v0.1.3",
+    "spec_version": "ci-score-v0.1.4",
     "scope_statement": "CI Score gauges best-practice adherence on CI speed and gate hygiene: a straightforward pass/fail rubric of best-practice checks computed from a repo's workflow configuration.",
     "value": 56,
     "grade": "C-",

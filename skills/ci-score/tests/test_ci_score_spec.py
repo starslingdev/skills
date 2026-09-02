@@ -50,7 +50,7 @@ def spec() -> dict:
 
 
 def test_spec_version(spec):
-    assert spec["spec_version"] == "ci-score-v0.1.3"
+    assert spec["spec_version"] == "ci-score-v0.1.4"
 
 
 def test_registry_is_the_eleven_basic_checks(spec):
