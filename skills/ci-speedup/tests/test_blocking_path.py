@@ -7460,3 +7460,57 @@ def test_pole_without_the_declaration_renders_byte_identically():
     annotated = _pole_section(md, "e2e")
     assert annotated.replace(
         "\n".join(l for l in annotated.splitlines() if advisory in l) + "\n\n", "") == plain
+
+
+# ── Job-selection collision regression ──────────────────────────────────────
+# When a pole's job field equals a DIFFERENT job's YAML ID but the pole's check
+# matches a DIFFERENT job's display name, the correct job (the one that produces
+# the check) must be resolved. Direct YAML ID lookup without validation caused
+# false matches. The fix validates the YAML-ID match produces the check before
+# returning it.
+
+def test_pole_job_node_resolves_correct_job_when_display_name_collides_with_yaml_id():
+    """Regression: job-selection collision when pole's job field is ambiguous.
+    
+    Scenario:
+      - Job A: YAML ID "build", display name "build-python", no continue-on-error
+      - Job B: YAML ID "lint", display name "build", continue-on-error: true
+      - Pole: job="build" (ambiguous: YAML ID of A or display name of B)
+              check="build" (check-run name produced by B, not A)
+    
+    Bug: direct YAML ID lookup returns job A without validating it produces check.
+    Result: advisory `continue-on-error` flag read from wrong job (A instead of B).
+    
+    Fix: validates YAML-ID match produces the check before returning; falls back
+    to check-name matching if not.
+    
+    Assertion: resolved job must be B (continue-on-error: true), not A (false).
+    """
+    job_graph = {
+        ".github/workflows/ci.yml": {
+            "build": {
+                "name": "build-python",
+                "needs": [],
+                "continue_on_error": False,
+            },
+            "lint": {
+                "name": "build",  # collision: display name == job A's YAML ID
+                "needs": [],
+                "continue_on_error": True,
+            },
+        }
+    }
+    pole = {
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "build",  # ambiguous
+        "check": "build",  # produced by job B, not A
+    }
+    node = bp._pole_job_node(pole, job_graph)
+    # Must resolve to job B (lint), not A (build).
+    assert node is not None, "Should resolve to exactly one job"
+    assert node.get("continue_on_error") is True, (
+        "Resolved to wrong job: got continue_on_error={}, expected True. "
+        "Unfixed code returns job A (YAML ID match) instead of validating it "
+        "produces the check and falling back to job B (check-name match)."
+        .format(node.get("continue_on_error"))
+    )
