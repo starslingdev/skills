@@ -255,9 +255,21 @@ unversioned and updates by reinstall from `main`.
   representative run, its step-by-step timeline and its cross-run check all came
   from a runner the headline never measured: a report whose drill-down said ten
   minutes under a four-minute headline, with nothing on the page to explain the
-  gap. The cut-off is now clamped so it can never exclude the runs the headline
-  named, while the absolute floor that keeps self-skipped runs out of the drill
-  still applies.
+  gap. The runs the drill can choose from are now narrowed to the headline's own
+  runner *before* the cut-off is worked out, so the cut-off is set by the same
+  machines the headline reports and can no longer throw the headline's own runs
+  away; the cut-off is clamped to the typical time as well, and the absolute floor
+  that keeps self-skipped runs out of the drill still applies. When the runner
+  behind a headline isn't recorded, or narrowing would leave nothing to drill, the
+  drill falls back to all the sampled runs rather than losing the drill-down.
+
+- **2026-09-02** — **The drill-down's cross-run check no longer mixes machines.**
+  Underneath the drilled run, the report shows the same job's time across other
+  sampled runs, as evidence that what the drill-down describes is typical rather
+  than a one-off. Those other runs were taken from every runner the job had used,
+  so for a job mid-migration the check reported the spread between two different
+  machines and called it run-to-run variation. It now reports only runs from the
+  population the headline measured.
 
 - **2026-08-22** — **OPT74 no longer claims a fork PR can't restore the base
   branch's cache — it can; and every fork disclosure now names the reason that
