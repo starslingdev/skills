@@ -2304,11 +2304,23 @@ The rule composes with the existing rare-demotion (§12.2 `_ms_freq_demoted`) an
 ### 12.2 Representative-run selection — nearest-P50 (`_persist_pole_logs`)
 
 The drilled run is the **qualifying instance whose duration is closest to the job
-P50** (`job_p50_s`, else the check `p50_s`). *Qualifying* = duration ≥ 0.5×the
-slowest sampled instance, which drops short-circuit / self-skipped no-ops (a gated
-job like `changed-tests` that does nothing on most PRs) so they can't be picked.
-Nearest-P50 (not the slowest, not the high-skewed qualifying median) makes the
-drill **reconcile with the headline** instead of overstating it.
+P50** (`job_p50_s`, else the check `p50_s`). *Qualifying* = duration ≥ a floor of
+half the median sampled duration (with an absolute `_NOOP_FLOOR_S` backstop), which
+drops short-circuit / self-skipped no-ops (a gated job like `changed-tests` that
+does nothing on most PRs) so they can't be picked. Nearest-P50 (not the slowest, not
+the high-skewed qualifying median) makes the drill **reconcile with the headline**
+instead of overstating it.
+
+That relative floor is **clamped to the stamped typical time** so it can never
+exclude the population the headline itself measured. A job whose sampled runs span
+more than one **runner label** inside one window has a P50 scoped to the label it
+runs on most (§ `_critical_path`), while the median is taken across every label
+mixed together — so when the labels differ enough in speed, half the mixed median
+lands above the headline population and discards all of it as "no-ops". The drill
+then reconciles with nothing: representative run, step timeline and cross-run sample
+are all drawn from a runner the headline never measured. The absolute backstop still
+wins over the clamp, so a job whose own typical time *is* a self-skip cannot pull
+no-op instances back in.
 
 The level-1 bar is the **check-run** gate time (`p50_s`); the timeline is the
 **job** clock (`job_p50_s`). They differ — the job includes the runner

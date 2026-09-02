@@ -13362,9 +13362,7 @@ def _persist_pole_logs(
             # are the MAJORITY (a gated job that self-skips on most PRs): there the median
             # is itself a no-op, so the relative floor alone wouldn't exclude them. `or
             # durs` keeps everything when every run is short (a genuinely fast job).
-            med = statistics.median([d for d, _ in durs])
-            floor = max(0.5 * med, _NOOP_FLOOR_S)
-            qual = [dj for dj in durs if dj[0] >= floor] or durs
+            #
             # B: pick the qualifying run CLOSEST to the typical (P50) time, so the drill
             # reconciles with the level-1 headline. Falls back to the qualifying median
             # when no P50 is on the pole.
@@ -13373,8 +13371,24 @@ def _persist_pole_logs(
             # so the drill shows WHY it's a long gate on its slow PRs - the median run is
             # the fast mode and would hide the root cause. Otherwise target the P50.
             slow = _f((p.get("bimodal") or {}).get("high_p50_s"))
-            target = (slow or _f(p.get("job_p50_s")) or _f(p.get("p50_s"))
-                      or qual[len(qual) // 2][0])
+            stamped = slow or _f(p.get("job_p50_s")) or _f(p.get("p50_s"))
+            med = statistics.median([d for d, _ in durs])
+            floor = max(0.5 * med, _NOOP_FLOOR_S)
+            if stamped:
+                # The relative floor may never exclude the population the headline
+                # itself measured. A job whose sampled runs span MORE THAN ONE runner
+                # label has a P50 scoped to the label it runs on most (`_critical_path`),
+                # while `med` mixes every label - so when the labels differ enough in
+                # speed, half the mixed median sits ABOVE the headline population and
+                # discards all of it as "no-ops". The drill would then reconcile with
+                # nothing: representative run, step timeline and cross-run sample all
+                # drawn from a runner the headline never measured. Clamping to the
+                # stamped typical time keeps that population eligible; the absolute
+                # backstop still wins, so a job whose own typical time IS a self-skip
+                # cannot pull no-op instances back in.
+                floor = max(min(floor, stamped), _NOOP_FLOOR_S)
+            qual = [dj for dj in durs if dj[0] >= floor] or durs
+            target = stamped or qual[len(qual) // 2][0]
             repr_dur, repr_job = min(qual, key=lambda dj: abs(dj[0] - target))
             jid = repr_job.get("id")
             if not jid or jid in seen:

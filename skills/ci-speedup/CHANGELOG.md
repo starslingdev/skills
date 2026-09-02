@@ -245,6 +245,20 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-09-02** — **A job that changed runners part-way through the sampling
+  window no longer gets drilled on the runner it left behind.** The report
+  measures such a job's typical time on the runner it runs on *most*, but picked
+  the run to drill after discarding everything below half the median of all its
+  runs mixed together — every runner, fast and slow, in one pile. When the runners
+  differ enough in speed, that cut-off landed above the very runs the headline
+  measured and threw all of them away as if they were self-skips, so the
+  representative run, its step-by-step timeline and its cross-run check all came
+  from a runner the headline never measured: a report whose drill-down said ten
+  minutes under a four-minute headline, with nothing on the page to explain the
+  gap. The cut-off is now clamped so it can never exclude the runs the headline
+  named, while the absolute floor that keeps self-skipped runs out of the drill
+  still applies.
+
 - **2026-08-22** — **OPT74 no longer claims a fork PR can't restore the base
   branch's cache — it can; and every fork disclosure now names the reason that
   actually makes a fork colder.** The pattern's anti-pattern text said a fork-PR
