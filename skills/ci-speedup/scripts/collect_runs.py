@@ -13388,6 +13388,18 @@ def _persist_pole_logs(
                 # cannot pull no-op instances back in.
                 floor = max(min(floor, stamped), _NOOP_FLOOR_S)
             qual = [dj for dj in durs if dj[0] >= floor] or durs
+            # Scope the cross-run sample to the headline runner population when it is
+            # known. The sample (built from qual) must validate magnitude stability on
+            # the SAME population the headline was measured on, not across runner
+            # migrations. Fall back to unfiltered if no label is available or if
+            # filtering would empty the pool (a job whose only qualifying runs are on
+            # a non-headline label is rare but possible, and losing the drill is worse
+            # than losing the runner-label filter).
+            headline_runner = p.get("headline_runner")
+            if headline_runner:
+                qual_filtered = [dj for dj in qual if _job_runner_label(dj[1]) == headline_runner]
+                if qual_filtered:
+                    qual = qual_filtered
             target = stamped or qual[len(qual) // 2][0]
             repr_dur, repr_job = min(qual, key=lambda dj: abs(dj[0] - target))
             jid = repr_job.get("id")
@@ -14907,6 +14919,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 entry["dominant_p50_s"] = decomp["dominant_p50"]
                 entry["dominant_share"] = decomp["dominant_share"]
                 entry["job_p50_s"] = decomp["job_p50"]
+                # Record the runner label the headline was measured on, so the drill's
+                # cross-run sample can be scoped to the same population.
+                crit = crit_by_wf.get(wf_path, {})
+                if job_name in crit.get("job_runner", {}):
+                    entry["headline_runner"] = crit["job_runner"][job_name]
                 entry["steps"] = [{"step": n, "category": c, "p50_s": round(p, 1)}
                                   for n, c, p in decomp["steps"]]
         else:

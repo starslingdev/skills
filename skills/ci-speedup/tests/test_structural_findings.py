@@ -497,6 +497,61 @@ def test_persist_pole_logs_drills_the_headline_runner_population(tmp_path: Path)
     assert headline_p50 in [r["duration_s"] for r in entry["sample"]]
 
 
+def test_persist_pole_logs_cross_run_sample_scoped_to_headline_runner(tmp_path: Path):
+    # The cross-run check validates the dominant step's wall time to prove the drilled
+    # run's magnitude is stable across runs — when a magnitude is available. This
+    # stability evidence must be drawn from the SAME population the headline was
+    # measured on, not from runs the headline never measured.
+    #
+    # When a job changes runners part-way through the sampling window, the headline
+    # P50 is scoped (by _critical_path) to the runner it runs on MOST. But the
+    # qualifying floor (_persist_pole_logs) starts as half the MIXED median of every
+    # runner, and when the runners differ in speed, the clamp can still leave BOTH
+    # runners' runs in qual. When the cross-run sample is built from this mixed qual,
+    # it reports wall-time variation across two different machines — not stability
+    # evidence for the headline job. The sample must be further scoped to the runs
+    # whose runner label matches the headline label, falling back to unfiltered only
+    # if no label context exists or if filtering would empty the pool.
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return "log " + endpoint
+
+    def _labeled(jid: int, dur_s: int, label: str) -> dict:
+        job = _job_inst("test", jid, dur_s)
+        job["labels"] = [label]
+        return job
+
+    wf = ".github/workflows/ci.yml"
+    # Nine sampled runs: four on fast-label (240s, the dominant runner), five on
+    # slow labels (600s, runners being left behind). All clear the clamped floor.
+    plan = ([("fast-label", 240)] * 4
+            + [("slow-label-a", 600)] * 3
+            + [("slow-label-b", 600)] * 2)
+    runs = [[_labeled(100 + idx, dur, label)]
+            for idx, (label, dur) in enumerate(plan)]
+
+    crit = cr._critical_path(runs)
+    assert crit["job_runner"]["test"] == "fast-label"
+    headline_p50 = crit["job_p50"]["test"]
+    assert headline_p50 == 240.0
+
+    poles = [{"check": "test", "workflow_file": wf, "job": "test",
+              "job_p50_s": headline_p50, "p50_s": headline_p50,
+              "headline_runner": crit["job_runner"]["test"]}]
+    manifest = cr._persist_pole_logs(FakeClient(), "o/r", poles, {wf: runs}, tmp_path)
+
+    assert len(manifest) == 1
+    entry = manifest[0]
+    # The cross-run sample reports only runs from the headline population (fast-label).
+    # Runs on the slow labels (600s) MUST NOT appear — they're stability evidence
+    # across two machines, not across the headline's own population.
+    sample_durations = [r["duration_s"] for r in entry["sample"]]
+    assert all(d == 240.0 for d in sample_durations), (
+        f"cross-run sample includes runs from non-headline runners: {sample_durations}. "
+        f"Stability evidence must be from the headline population (fast-label, 240s only), "
+        f"not a mix of machines with different speeds.")
+
+
 def test_step_timeline_is_execution_order_with_offsets():
     # The timeline preserves step ORDER and records each step's start offset (from
     # job start) + duration - the data the report needs to draw steps as a
