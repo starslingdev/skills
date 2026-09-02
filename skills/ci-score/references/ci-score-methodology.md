@@ -115,7 +115,7 @@ the practice matters. The score card links every check name here.
 
 ### Shallow checkout
 
-**The fact:** no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; a JOB THAT WALKS GIT HISTORY - changelog generation, a merge-base or base-SHA diff, tag/describe, changeset versioning - is exempt: full history is load-bearing there and shallowing it would break the job; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt too: it needs history and gates nobody; a job whose own if: can never be true for a pull-request event - e.g. github.event_name == 'push' - is exempt too: no pull request waits for it. Only simple, fully resolvable event_name conditions are read; anything else keeps the job on the PR path)
+**The fact:** no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; a JOB THAT WALKS GIT HISTORY - changelog generation, a merge-base or base-SHA diff, tag/describe, changeset versioning - is exempt: full history is load-bearing there and shallowing it would break the job; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt too: it needs history and gates nobody; a job whose own if: can never be true for a pull-request event - e.g. github.event_name == 'push', or a job scoped to the merge queue with github.event_name == 'merge_group', which is not a pull-request event - is exempt too: no pull request waits for it. Only simple, fully resolvable event_name conditions are read; anything else keeps the job on the PR path, including a bare literal if: false, which the grammar does not read and which is therefore still graded - a known miss in the fail-closed direction, costing at most a finding that was already reported)
 
 **Why it matters:** CI downloads your repo's entire history when it only needs today's code.
 
@@ -370,7 +370,13 @@ of YAML. Second, a job whose own `if:` can never be true for any pull-request
 event the workflow is triggered by is not on the pull-request path, so it is
 not graded there; the expression parser recognises only `github.event_name`
 compared with a string literal, and anything it cannot fully resolve leaves the
-job graded — it fails closed. Recomputed over the frozen calibration controls,
+job graded — it fails closed. Two consequences are worth naming. A job scoped
+to the merge queue alone (`github.event_name == 'merge_group'`) is off the
+pull-request path by this rule, because a merge-queue run is not a
+pull-request event and no pull request waits for it. And a job switched off
+with a bare literal — `if: false` or `if: ${{ false }}` — is still graded,
+because the grammar reads no literal: a known miss, left deliberately, since
+it errs toward reporting a finding rather than dropping one. Recomputed over the frozen calibration controls,
 one moves 82 → 91 (all nine of its PR-gating full-history jobs walk history)
 and the other holds at 82. The rationale is OD-CS22 in the spec's
 `decision_log`. Committed corpus stamps carry the new `spec_version` and

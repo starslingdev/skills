@@ -35,6 +35,16 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   `event_name != 'pull_request'` does not exempt a job on a workflow triggered
   by `pull_request_target`, where that condition is true.
 
+- **2026-09-02** — **Changed**: the rubric now states two consequences of that
+  rule that it previously left to the reader. A job scoped to the merge queue
+  alone (`github.event_name == 'merge_group'`) is off the pull-request path,
+  because a merge-queue run is not a pull-request event and no pull request
+  waits for it. And a job switched off with a bare literal — `if: false` or
+  `if: ${{ false }}` — is still graded, because the grammar reads no literal;
+  that is a known miss in the fail-closed direction, costing at most a finding
+  that was already being reported, and both behaviours are now pinned by tests
+  so a change to either is deliberate.
+
 - **2026-09-02** — **Fixed**: the shallow-checkout check (`ci.checkout.shallow-clone`)
   failed a repository for *any* `fetch-depth: 0` on a pull-request-gating
   workflow, including on jobs where full history is load-bearing — changelog

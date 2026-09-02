@@ -915,10 +915,43 @@ def test_pull_request_target_gating_is_not_excluded_by_a_pull_request_negation(t
 def test_event_name_comparison_is_case_insensitive(tmp_path):
     """GitHub Actions does case-insensitive string comparison. A job with
     `github.event_name == 'Pull_Request'` (capital letters) still matches a
-    pull_request event, so it gateways pull requests and must not be excluded."""
+    pull_request event, so it gates pull requests and must not be excluded."""
     wf = ("ci.yml",
           PR_ON + "jobs:\n  b:\n"
           "    if: github.event_name == 'Pull_Request'\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
+
+
+def test_a_merge_queue_only_job_is_off_the_pull_request_path(tmp_path):
+    """A merge-queue run is not a pull-request event, so a job scoped to
+    `merge_group` alone is not on the PR path and its full-history checkout is
+    not a PR-path finding. This falls out of the event-name rule rather than
+    being written for it, which is exactly why it is pinned: the rubric now
+    documents the behaviour, so a change to it must be deliberate."""
+    wf = ("ci.yml",
+          "on:\n  pull_request:\n  merge_group:\n"
+          "jobs:\n  queue-only:\n    if: github.event_name == 'merge_group'\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "pass", f["evidence"]
+    assert "cannot run on a pull request" in f["evidence"], f["evidence"]
+
+
+@pytest.mark.parametrize("cond", ["false", "${{ false }}"])
+def test_a_job_switched_off_with_a_bare_literal_is_still_graded(tmp_path, cond):
+    """KNOWN LIMITATION, pinned so it stays a decision rather than a surprise.
+    The grammar reads exactly one atom — `github.event_name` against a string
+    literal — and no bare boolean, so `if: false` is unresolvable and the job
+    stays on the PR path. The miss is in the fail-closed direction: it costs at
+    most a finding that was already being reported, never a fix that breaks a
+    build. Widening the grammar to read literals is a deliberate future
+    change, and this cell is what will go red when someone makes it."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  b:\n    if: " + json.dumps(cond) + "\n"
           "    steps:\n      - uses: actions/checkout@v4\n"
           "        with:\n          fetch-depth: 0\n")
     f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
