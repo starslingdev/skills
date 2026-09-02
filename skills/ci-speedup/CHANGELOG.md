@@ -257,6 +257,26 @@ unversioned and updates by reinstall from `main`.
   an earlier step is out of range. The check can only ever remove this one
   finding — it never creates a finding and touches no other pattern.
 
+- **2026-09-02** — **Full-history checkout now reads a `$` on a `git diff` line
+  as a base ref only where a ref can stand, and stops treating a blob read at
+  `HEAD` as a history operation.** The carve-out that spares a load-bearing
+  `fetch-depth: 0` had been widened to recognise a base ref held in a shell
+  variable, including one passed as a positional parameter (`git diff "$1"
+  HEAD`). But it accepted a `$` anywhere on the line, so four ordinary commands
+  that read nothing older than the working tree silenced the finding: a diff
+  written to a file (`git diff --stat >> $GITHUB_STEP_SUMMARY`, `git diff >
+  $OUT`), and a diff restricted to a path after the `--` separator (`git diff
+  --exit-code -- "$FILE"`). A redirection target is never a ref and everything
+  after a bare `--` is a pathspec, so neither position counts any more; option
+  flags such as `--name-only` are unaffected. Separately, `git cat-file` was
+  treated as a history operation unconditionally, but `git cat-file -p
+  HEAD:package.json` reads a blob at the checked-out commit, which is present at
+  any clone depth — a `HEAD` operand (though not `HEAD~1` or `HEAD^`) no longer
+  suppresses. Every genuine history read the carve-out already recognised —
+  merge-base diffs, two-SHA diffs, a variable or positional base ref, an
+  object-reachability probe, all of them across a line continuation — still
+  suppresses.
+
 - **2026-09-02** — **Full-history checkout no longer tells you to shallow a job
   that reads git history across a line continuation, diffs against a base held
   in a shell variable, or probes an object's presence.** The check that spares a
