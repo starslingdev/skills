@@ -50,6 +50,26 @@ def sides():
     return speed, score
 
 
+# Where a `$` or a `HEAD` SITS on the command line decides whether it says
+# anything about history, and these rows pin that by VERDICT, not only by
+# agreement between the two engines. They carry expected values because the
+# agreement arm alone is blind to a shape neither engine has a row for: the
+# operand-position rules below were tightened in the canonical engine while
+# ci-score's copy still carried the loose original, and no behavioural row in
+# this battery could tell — only the character-identity arm caught it.
+_OPERAND_POSITION_ROWS = [
+    # A positional parameter is a ref operand like any other variable.
+    ('git diff "$1" HEAD', True),
+    # Past a redirection arrow the `$` names the FILE the diff is written to.
+    ("git diff --stat >> $GITHUB_STEP_SUMMARY", False),
+    ("git diff > $OUT", False),
+    # Past a bare `--` separator the `$` names a pathspec, not a base commit.
+    ('git diff --exit-code -- "$FILE"', False),
+    # A cat-file anchored at HEAD reads a blob every clone depth already has.
+    ("git cat-file -p HEAD:package.json", False),
+]
+
+
 # Every clause of the shared pattern gets at least one row, plus the shapes the
 # carve-out exists to protect and the near-misses it must NOT protect.
 _TEXT_BATTERY = [
@@ -93,7 +113,7 @@ _TEXT_BATTERY = [
     "grep -r 'changelog' docs/",
     "curl --tags-are-not-a-flag https://example.test",
     "docker build --tags foo .",
-]
+] + [t for t, _expected in _OPERAND_POSITION_ROWS]
 
 
 def test_has_git_history_op_agrees_on_every_battery_row(sides):
@@ -105,6 +125,16 @@ def test_has_git_history_op_agrees_on_every_battery_row(sides):
         f"{mismatches!r} — re-sync ci-score's copy with the canonical source in "
         f"ci-speedup's scanner; the two engines must not give one repository "
         f"contradictory advice about the same fetch-depth line")
+
+
+def test_operand_position_rows_get_the_verdict_they_are_pinned_to(sides):
+    """Both engines, checked against expected values rather than each other."""
+    for engine in sides:
+        wrong = [t for t, expected in _OPERAND_POSITION_ROWS
+                 if engine._has_git_history_op(t) is not expected]
+        assert not wrong, (
+            f"{engine.__name__} read the wrong verdict for {wrong!r} — a `$` or a "
+            f"`HEAD` only counts where a ref operand can stand")
 
 
 def test_the_copied_patterns_are_character_identical(sides):

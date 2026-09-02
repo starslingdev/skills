@@ -4,7 +4,9 @@ Rebuilt for ci-score by the score-ectomy (2026-07-16): the layers under test
 are the same, but every module is loaded from ci-score's OWN scripts by file
 path, and the corpus-pinning cells read the six SCORED corpus fixtures under
 `tests/fixtures/corpora/` — this suite imports NO ci-speedup code and reads
-NOTHING from ci-speedup's `reports/`.
+NOTHING from ci-speedup's `reports/`. That claim used to live only in this
+docstring; `test_the_skill_never_reaches_into_ci_speedup` below now asserts
+the import half of it, which is the half a contributor can break by accident.
 
 Two layers, matching the two-layer design:
 
@@ -1047,3 +1049,26 @@ def test_card_survives_hostile_evidence_and_malformed_stamps(spec):
     # malformed shapes render best-effort, never raise
     assert rc_mod._render_score_card({"ci_score": {"checks": "garbage", "refusal": "nope"}})
     assert rc_mod._render_score_card({"ci_score": {"checks": [None, 42]}})
+
+
+def test_the_skill_never_reaches_into_ci_speedup():
+    """ci-score installs and runs standalone: the `skills` CLI copies
+    `skills/ci-score/` and nothing else, so anything this skill reaches for
+    outside its own directory is missing at runtime for every user who
+    installed only ci-score. The git-history predicate is duplicated rather
+    than imported for exactly this reason, and prose in a docstring does not
+    stop the next contributor from writing the import. Assert it."""
+    offenders = []
+    for path in sorted(_SKILL_DIR.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith(("import ", "from ")) and (
+                    "ci_speedup" in stripped or "ci-speedup" in stripped):
+                offenders.append(f"{path.relative_to(_SKILL_DIR)}:{lineno}: {stripped}")
+    assert not offenders, (
+        "ci-score must not import ci-speedup — it installs on its own and the "
+        f"import would not resolve: {offenders}")
+

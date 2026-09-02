@@ -39,7 +39,7 @@ invariant intentionally does not flag them.
 ## The frozen registry
 
 `skills/ci-score/references/ci-score-spec.json` is the frozen CI Score registry
-(`spec_version` `ci-score-v0.1.3`). It changes **only** with a deliberate,
+(`spec_version` `ci-score-v0.1.4`). It changes **only** with a deliberate,
 calibrated version bump and a recorded entry in its own `decision_log` /
 `changelog`. `spec_version` moves when scoring semantics move (checks, gates,
 refusals, bands, formula) — never for a prose-only edit. The scorer

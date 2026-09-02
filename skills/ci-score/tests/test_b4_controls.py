@@ -44,10 +44,15 @@ _SKILL_DIR = Path(__file__).resolve().parents[1]
 #    run a real history operation — seven diff the pull request's base SHA
 #    against its head SHA (one of them across a line continuation), one
 #    fetches the head repository and diffs the base SHA against FETCH_HEAD,
-#    and one runs changeset versioning and then diffs the working tree. Every
-#    one of them breaks under a shallow clone, so none is an offender and the
+#    and one runs changeset versioning and then diffs the working tree. Eight
+#    of the nine are proven from the YAML itself: the base SHA they name is
+#    absent from a depth-1 clone, so the command cannot run. The ninth — the
+#    peer-dependency check — is a FAIL-CLOSED carve-out, not a proof: its own
+#    diffs are working-tree diffs that a shallow clone serves fine, and it is
+#    spared because it runs changeset versioning, which the predicate treats
+#    as a history operation. So: none of the nine is an offender, and the
 #    check passes. 82 B+ -> 91 A.
-#  - Second control: six of its seven PR-gating full-history jobs run only
+#  - Second control: eight of its NINE PR-gating full-history jobs run only
 #    package install / build / lint / typecheck / test commands and no git
 #    operation at all, so they stay offenders; only the changeset-verification
 #    job (which diffs `origin/$BASE_REF...HEAD`) is newly spared. The check
