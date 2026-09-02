@@ -276,10 +276,11 @@ _GIT_HISTORY_RE = re.compile(
     # nor `origin/`. Match a `git diff` line that references a `.sha` expression.
     r"git\s+diff\b[^\n|]*\.sha\b|"
     # Diff against a base ref held in a shell variable: `git diff --name-only
-    # "$base" HEAD`. The base commit is just as absent from a shallow clone as a
-    # literal `<sha>...HEAD` is — it simply carries no `...`, no `origin/` and no
+    # "$base" HEAD` or as a positional parameter like `git diff "$1" HEAD`. The
+    # base commit is just as absent from a shallow clone as a literal
+    # `<sha>...HEAD` is — it simply carries no `...`, no `origin/` and no
     # `.sha` for the clauses above to see.
-    r"git\s+diff\b[^\n|]*\$[({]?[A-Za-z_]|"
+    r"git\s+diff\b[^\n|]*\$[({]?[A-Za-z_0-9]|"
     # Object-reachability probe: `git cat-file -e "${base}^{commit}"` succeeds
     # only when the object is present in the clone, which is exactly what full
     # history buys.
