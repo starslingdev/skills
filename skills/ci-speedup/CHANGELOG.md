@@ -258,10 +258,14 @@ unversioned and updates by reinstall from `main`.
   gap. The runs the drill can choose from are now narrowed to the headline's own
   runner *before* the cut-off is worked out, so the cut-off is set by the same
   machines the headline reports and can no longer throw the headline's own runs
-  away; the cut-off is clamped to the typical time as well, and the absolute floor
-  that keeps self-skipped runs out of the drill still applies. When the runner
-  behind a headline isn't recorded, or narrowing would leave nothing to drill, the
-  drill falls back to all the sampled runs rather than losing the drill-down.
+  away; and the absolute floor that keeps self-skipped runs out of the drill still
+  applies. When the runner behind a headline isn't recorded, or narrowing would
+  leave nothing to drill, the drill falls back to all the sampled runs rather than
+  losing the drill-down. On that fallback the cut-off can still never rise above
+  the typical time, so the run nearest the headline always stays eligible and the
+  drill-down can never end up illustrating nothing — but runs faster than the
+  typical time can still be cut, which is why the narrowing, not the cut-off's own
+  ceiling, is what keeps the whole population.
 
 - **2026-09-02** — **The drill-down's cross-run check no longer mixes machines.**
   Underneath the drilled run, the report shows the same job's time across other

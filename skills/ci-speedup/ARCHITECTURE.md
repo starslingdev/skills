@@ -2318,17 +2318,22 @@ computed**. A job whose sampled runs span more than one **runner label** inside 
 window has a P50 scoped to the label it runs on most (§ `_critical_path`), so an
 unscoped pool mixes populations the headline never measured with the one it did.
 The floor would then be set by the wrong machines: a slower non-headline population
-drags the median up, half of it lands above the headline population, and genuine
-headline runs are discarded as "no-ops" — the drill reconciling with nothing.
-Scoping first is what makes the drill's every figure describe the runs the headline
+drags the median up, and genuine headline runs are discarded as "no-ops". Scoping
+first is what makes the drill's every figure describe the runs the headline
 reports. The scope falls back to the unfiltered pool when no headline label is
 recorded, or when filtering would empty the pool (losing the drill is worse than
 losing the runner scope); both fallbacks are traced at DEBUG.
 
-The relative floor is additionally **clamped to the stamped typical time**, so even
-on that unfiltered fallback it can never exclude the population the headline named.
-The absolute backstop still wins over the clamp, so a job whose own typical time
-*is* a self-skip cannot pull no-op instances back in.
+The relative floor is additionally **clamped to the stamped typical time**
+(`max(min(0.5 × median, stamped), _NOOP_FLOOR_S)`). Read that bound exactly: it
+stops the floor rising ABOVE the stamped typical time, so the run nearest the
+headline P50 always stays eligible and the drill can never reconcile with
+*nothing*. It does NOT bound the floor below the population's minimum — on the
+unfiltered fallback, headline runs BELOW the stamped P50 can still be cut (a
+mixed pool of 200/220/240/260/280 plus six at 2000 gives a floor of 240, dropping
+the 200 and 220). Only scoping the pool first keeps the whole population. The
+absolute backstop still wins over the clamp, so a job whose own typical time *is*
+a self-skip cannot pull no-op instances back in.
 
 The level-1 bar is the **check-run** gate time (`p50_s`); the timeline is the
 **job** clock (`job_p50_s`). They differ — the job includes the runner

@@ -13403,12 +13403,16 @@ def _persist_pole_logs(
             med = statistics.median([d for d, _ in pool])
             floor = max(0.5 * med, _NOOP_FLOOR_S)
             if stamped:
-                # Belt and braces: the relative floor may never exclude the population
-                # the headline itself measured. Scoping above removes the usual way
-                # that happens, but the pool can still fall back to a mixed `durs`, so
-                # the clamp to the stamped typical time stays. The absolute backstop
-                # still wins, so a job whose own typical time IS a self-skip cannot
-                # pull no-op instances back in.
+                # Belt and braces for the unfiltered-fallback path, and NOTHING MORE:
+                # this bounds the floor ABOVE, at the stamped typical time, so the run
+                # nearest the headline P50 always stays eligible and the drill can
+                # never reconcile with NOTHING. It does NOT bound the floor below the
+                # population's minimum — on a mixed pool, runs FASTER than the stamped
+                # P50 are still cut (200/220/240/260/280 mixed with six at 2000 gives
+                # med 2000, min(1000, 240) = 240, dropping the 200 and 220). Keeping
+                # the WHOLE headline population is the scoping above, not this clamp.
+                # The absolute backstop still wins, so a job whose own typical time IS
+                # a self-skip cannot pull no-op instances back in.
                 floor = max(min(floor, stamped), _NOOP_FLOOR_S)
             qual = [dj for dj in pool if dj[0] >= floor] or pool
             target = stamped or qual[len(qual) // 2][0]
