@@ -836,9 +836,17 @@ def _pole_job_node(pole: dict[str, Any],
     if not jobs:
         return None
     jid = str(pole.get("job") or "")
-    if jid in jobs:
-        return _as_dict(jobs[jid])
     check = str(pole.get("check") or "")
+    # Try direct YAML ID lookup, but validate the job produces the check before returning.
+    # If the pole's job field equals a YAML ID, that usually means YAML ID, but it may be
+    # the display name of a DIFFERENT job (e.g. one job's display name equals another
+    # job's YAML ID). Only return the YAML-ID match if it produces the check.
+    if jid in jobs:
+        job_node = _as_dict(jobs[jid])
+        if _agg_job_produces_check(str(job_node.get("name") or jid),
+                                   bool(job_node.get("matrix")), check):
+            return job_node
+    # Fall back to check-name matching.
     cands = [_as_dict(m) for k, m in jobs.items()
              if _agg_job_produces_check(str(_as_dict(m).get("name") or k),
                                         bool(_as_dict(m).get("matrix")), check)]
