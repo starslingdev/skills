@@ -228,7 +228,7 @@ data:
   *and* have enormous test volume; small repos are fast because there is
   little to run). Among the committed worked examples, the lowest-scoring repo
   has the fastest gate (deepgram's SDK at 33, a typical PR waits ~1¼ minutes)
-  and 82-scoring mastra the slowest (~7 minutes) — each number is the headline
+  and 91-scoring mastra the slowest (~7 minutes) — each number is the headline
   of the report shipped beside that card. That is why
   the measured report — with its headline "a typical PR waits N minutes" —
   renders directly beneath the card in the same document: adherence and

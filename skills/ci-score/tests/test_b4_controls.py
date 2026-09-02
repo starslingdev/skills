@@ -1,6 +1,6 @@
 """B4 layer (a): exact-match controls on frozen fixture checkouts.
 
-The calibration positive controls (mastra 82 B+, better-auth 82 B+) must
+The calibration positive controls (mastra 91 A, better-auth 82 B+) must
 reproduce EXACTLY from the committed fixture trees under
 `tests/fixtures/checkouts-src/` — the full collector path (acquire → facts →
 score), not just the arithmetic. Live repos drift; these trees cannot, so
