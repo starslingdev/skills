@@ -455,38 +455,38 @@ def _opt28_history_justification(raw: str, line: int | None) -> str | None:
     idx = line - 1  # 0-based index of the matched `fetch-depth: 0` line
     if idx < 0 or idx >= len(lines):
         return None
-    # Find the step marker (line starting with "- " at the step level) by
-    # looking backward from the fetch-depth line. This determines the indent
-    # level of the current step, so we can detect step boundaries.
-    step_indent = None
+    # Find the step marker by scanning backward from fetch-depth line
+    step_marker_idx = None
     for i in range(idx, -1, -1):
         text = lines[i]
         if not text.strip():
             continue
         m = re.match(r"^(\s*)-\s", text)
         if m:
-            step_indent = len(m.group(1))
+            step_marker_idx = i
             break
-    for back in range(1, _OPT28_JUSTIFY_LOOKBACK + 1):
-        i = idx - back
-        if i < 0:
-            break
+
+    if step_marker_idx is None:
+        return None
+
+    # Scan backward from the line above the step marker, accepting only comments
+    # and blanks. Stop at the first non-comment, non-blank line.
+    for i in range(step_marker_idx - 1, -1, -1):
         text = lines[i]
         stripped = text.strip()
+
         if not stripped:
-            break  # a blank line ends this step's comment region
-        if not stripped.startswith("#"):
-            # Non-comment, non-blank line. If it's a step boundary (line starting
-            # with "- " at LESS indent than the current step), we've crossed into
-            # a different step's scope and should stop looking. But the current
-            # step's own marker ("- uses:") is OK to cross since we're within it.
-            if step_indent is not None:
-                m = re.match(r"^(\s*)-\s", text)
-                if m and len(m.group(1)) < step_indent:
-                    break  # We've crossed into a previous step
+            # Blank line is OK, continue scanning
             continue
+
+        if not stripped.startswith("#"):
+            # Non-comment, non-blank line above the step marker ends the search
+            break
+
+        # It's a comment - check if it mentions a history operation
         if _OPT28_JUSTIFY_RE.search(stripped):
             return stripped.lstrip("#").strip()
+
     return None
 
 
