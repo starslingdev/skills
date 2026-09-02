@@ -3594,3 +3594,27 @@ jobs:
     assert len(hits) == 1
     assert "git lfs pull" in hits[0]["evidence_snippet"]
     assert "install" not in hits[0]["evidence_snippet"]
+
+
+def test_opt28_multiple_checkouts_each_reported_on_own_line(tmp_path: Path):
+    """Regression: when a job has multiple checkouts with fetch-depth: 0,
+    each must be reported on its OWN line. The first has a justifying comment
+    (suppressed); the second has no justification (reported)."""
+    yml = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # checkout 1 needs history for git describe
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: echo one
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: make build
+"""
+    result = _scan_one(tmp_path, yml, name="multi.yml")
+    assert "OPT28" in result, "Expected OPT28 finding for the unjustified checkout"
