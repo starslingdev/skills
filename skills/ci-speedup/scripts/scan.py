@@ -285,6 +285,13 @@ def _line_of_nth_in_job(raw: str, job_name: str, needle: str, occurrence: int) -
             break
     count = 0
     for k in range(start, end):
+        # A comment that quotes the needle ("TODO: drop fetch-depth: 0") is
+        # prose, not a configuration key. Counting it shifts every later
+        # occurrence's line by one and leaves the LAST one unreachable — the
+        # caller then loses that finding entirely. Full-line comments only:
+        # a trailing comment sits on a real key line, which does count.
+        if lines[k].lstrip().startswith("#"):
+            continue
         if needle in lines[k]:
             count += 1
             if count == occurrence:
@@ -319,14 +326,30 @@ _GIT_HISTORY_RE = re.compile(
     # nor `origin/`. Match a `git diff` line that references a `.sha` expression.
     r"git\s+diff\b[^\n|]*\.sha\b|"
     # Diff against a base ref held in a shell variable: `git diff --name-only
-    # "$base" HEAD`. The base commit is just as absent from a shallow clone as a
-    # literal `<sha>...HEAD` is — it simply carries no `...`, no `origin/` and no
+    # "$base" HEAD` or as a positional parameter like `git diff "$1" HEAD`. The
+    # base commit is just as absent from a shallow clone as a literal
+    # `<sha>...HEAD` is — it simply carries no `...`, no `origin/` and no
     # `.sha` for the clauses above to see.
-    r"git\s+diff\b[^\n|]*\$[({]?[A-Za-z_]|"
+    #
+    # The variable only counts where a REF operand can stand. Two positions on
+    # the command line can never hold a ref, and a `$` reached through either
+    # one says nothing about history:
+    #   * past a redirection arrow — `git diff --stat >> $GITHUB_STEP_SUMMARY`
+    #     and `git diff > $OUT` name the FILE the diff is written to;
+    #   * past a bare `--` separator — everything after it is a pathspec, so
+    #     `git diff --exit-code -- "$FILE"` names a path, not a base commit.
+    # Option flags such as `--name-only` are not the separator (no trailing
+    # space), so `git diff --no-renames --name-only "$base" HEAD` still counts.
+    r"git\s+diff\b(?:(?!\s--\s|>)[^\n|])*\$[({]?[A-Za-z_0-9]|"
     # Object-reachability probe: `git cat-file -e "${base}^{commit}"` succeeds
     # only when the object is present in the clone, which is exactly what full
-    # history buys.
-    r"git\s+cat-file\b|"
+    # history buys. A cat-file whose operand is anchored at HEAD is the
+    # opposite case — `git cat-file -p HEAD:package.json` reads a blob at the
+    # checked-out commit, which every clone depth already has — so a HEAD
+    # operand (but not `HEAD~1` / `HEAD^`, which do reach back) disqualifies
+    # the clause. The lookahead stops at a command separator so a later,
+    # unrelated HEAD read cannot cancel a genuine probe.
+    r"git\s+cat-file\b(?![^\n|;&]*\bHEAD(?![~^]))|"
     r"fetch-tags|--tags|"
     # Change-detection actions that diff the head against a BASE ref need base
     # history: `dorny/paths-filter` with `base:` set, and `tj-actions/changed-files`
@@ -445,47 +468,60 @@ _OPT28_JUSTIFY_RE = re.compile(
 def _opt28_history_justification(raw: str, line: int | None) -> str | None:
     """The nearby comment that documents why this `fetch-depth: 0` is needed, or
     None. Suppressor only: it can remove an OPT28 finding, never create one.
-    Comments must be from the same step (same indentation region) to count as
-    justification — a comment on a prior step is not a justification for this
-    step's checkout."""
+
+    The region is the `_OPT28_JUSTIFY_LOOKBACK` lines directly above the key,
+    closed early by a blank line. Within it, a comment counts only when it
+    belongs to THIS step: the step's own body qualifies, and so does a comment
+    written above the step marker at the step's own indentation. A comment
+    above the marker but indented deeper is inside the preceding step (the tail
+    of its `run: |` block), and ordinary YAML above the marker ends the region —
+    neither is a justification for this checkout."""
     if not line:
         return None
     lines = raw.splitlines()
     idx = line - 1  # 0-based index of the matched `fetch-depth: 0` line
     if idx < 0 or idx >= len(lines):
         return None
-    # Find the step marker (line starting with "- " at the step level) by
-    # looking backward from the fetch-depth line. This determines the indent
-    # level of the current step, so we can detect step boundaries.
-    step_indent = None
+    # The step this key belongs to — the nearest `- ` marker at or above it.
+    step_marker_idx = None
     for i in range(idx, -1, -1):
         text = lines[i]
         if not text.strip():
             continue
-        m = re.match(r"^(\s*)-\s", text)
-        if m:
-            step_indent = len(m.group(1))
+        if re.match(r"^\s*-\s", text):
+            step_marker_idx = i
             break
-    for back in range(1, _OPT28_JUSTIFY_LOOKBACK + 1):
-        i = idx - back
-        if i < 0:
-            break
+    if step_marker_idx is None:
+        return None
+    marker = lines[step_marker_idx]
+    marker_indent = len(marker) - len(marker.lstrip())
+
+    # Walk up from the key, no further than the documented bound.
+    for i in range(idx - 1, max(0, idx - _OPT28_JUSTIFY_LOOKBACK) - 1, -1):
         text = lines[i]
         stripped = text.strip()
+
         if not stripped:
-            break  # a blank line ends this step's comment region
+            break  # a blank line ends the region
+
         if not stripped.startswith("#"):
-            # Non-comment, non-blank line. If it's a step boundary (line starting
-            # with "- " at LESS indent than the current step), we've crossed into
-            # a different step's scope and should stop looking. But the current
-            # step's own marker ("- uses:") is OK to cross since we're within it.
-            if step_indent is not None:
-                m = re.match(r"^(\s*)-\s", text)
-                if m and len(m.group(1)) < step_indent:
-                    break  # We've crossed into a previous step
-            continue
+            # Inside this step, the non-comment lines are its own scaffolding
+            # (`- uses:`, `with:`) and a comment may sit among them. Above the
+            # step marker, ordinary YAML ends the region.
+            if i >= step_marker_idx:
+                continue
+            break
+
+        if i < step_marker_idx and len(text) - len(text.lstrip()) > marker_indent:
+            # A comment above the step marker but indented DEEPER than it is
+            # inside the preceding step — the tail of a `run: |` block, say.
+            # That is the preceding step's shell text, not this step's
+            # justification.
+            break
+
         if _OPT28_JUSTIFY_RE.search(stripped):
             return stripped.lstrip("#").strip()
+
     return None
 
 

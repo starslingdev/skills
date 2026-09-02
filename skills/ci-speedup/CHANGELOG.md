@@ -251,11 +251,46 @@ unversioned and updates by reinstall from `main`.
   and comments are discarded when the workflow is parsed, so the one artifact
   that settles the question was invisible. A comment within six lines above the
   line, naming a git-history operation or history work in general, now
-  suppresses the finding for that step. The reading is deliberately narrow: the
-  word `depth` is not part of the vocabulary, so a comment saying the depth is
-  unnecessary still leaves the finding standing, and a comment that belongs to
-  an earlier step is out of range. The check can only ever remove this one
-  finding — it never creates a finding and touches no other pattern.
+  suppresses the finding for that step. The six-line region is closed early by
+  a blank line, and it never reaches into a neighbouring step: a comment above
+  the step but indented deeper than it — the last line of the previous step's
+  `run: |` block, say — belongs to that step, and ordinary configuration above
+  the step ends the region too. Inside the region the step's own body counts,
+  so the justification can be written above the step, between `- uses:` and
+  `with:`, or on the line directly above the key. The reading is deliberately
+  narrow: the word `depth` is not part of the vocabulary, so a comment saying
+  the depth is unnecessary still leaves the finding standing. The check can only
+  ever remove this one finding — it never creates a finding and touches no other
+  pattern.
+
+- **2026-09-02** — **A comment that quotes `fetch-depth: 0` no longer swallows
+  a checkout's finding.** Locating which line a finding belongs to counted every
+  line containing the key, comments included. A job with two full-history
+  checkouts under a comment mentioning `fetch-depth: 0` therefore reported one
+  finding instead of two, pointed it at the comment rather than at any
+  configuration line, and left the genuinely unjustified checkout unreported —
+  the exact case the reader most needs to see. Full-line comments are no longer
+  counted; a trailing comment sits on a real key line and still is.
+
+- **2026-09-02** — **Full-history checkout now reads a `$` on a `git diff` line
+  as a base ref only where a ref can stand, and stops treating a blob read at
+  `HEAD` as a history operation.** The carve-out that spares a load-bearing
+  `fetch-depth: 0` had been widened to recognise a base ref held in a shell
+  variable, including one passed as a positional parameter (`git diff "$1"
+  HEAD`). But it accepted a `$` anywhere on the line, so four ordinary commands
+  that read nothing older than the working tree silenced the finding: a diff
+  written to a file (`git diff --stat >> $GITHUB_STEP_SUMMARY`, `git diff >
+  $OUT`), and a diff restricted to a path after the `--` separator (`git diff
+  --exit-code -- "$FILE"`). A redirection target is never a ref and everything
+  after a bare `--` is a pathspec, so neither position counts any more; option
+  flags such as `--name-only` are unaffected. Separately, `git cat-file` was
+  treated as a history operation unconditionally, but `git cat-file -p
+  HEAD:package.json` reads a blob at the checked-out commit, which is present at
+  any clone depth — a `HEAD` operand (though not `HEAD~1` or `HEAD^`) no longer
+  suppresses. Every genuine history read the carve-out already recognised —
+  merge-base diffs, two-SHA diffs, a variable or positional base ref, an
+  object-reachability probe, all of them across a line continuation — still
+  suppresses.
 
 - **2026-09-02** — **Full-history checkout no longer tells you to shallow a job
   that reads git history across a line continuation, diffs against a base held
