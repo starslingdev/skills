@@ -542,6 +542,157 @@ def _job_needs_git_history(job: dict, job_name: str = "",
     return bool(_HISTORY_JOB_NAME_RE.search(job_name))
 
 
+# ---- Job-level reachability from a pull request ------------------------------
+#
+# `_wf_is_pr_gating` answers the question at the WORKFLOW level. A workflow can
+# be triggered by `pull_request` and still hold a job whose own `if:` can never
+# be true for a pull-request event — a heavy job scoped to pushes on a release
+# branch, or to manual dispatch. No pull request ever waits for that job, so a
+# job-scoped fact about the PR path must not grade the repository on it.
+#
+# The parser below is deliberately TINY and FAILS CLOSED. It recognises exactly
+# one atom — `github.event_name` compared with a string literal by `==` or `!=`
+# — combined with `&&`, `||` and parentheses. A variable, a function call, any
+# other context reference, or text it cannot fully consume makes the whole
+# expression unresolvable, and an unresolvable `if:` leaves the job ON the PR
+# path. A wrong exclusion silently drops a real finding, which is the one
+# outcome worth designing against; a missed exclusion only costs a finding that
+# was already being reported.
+_EVENT_NAME_TOKEN = "github.event_name"
+_IF_TOKEN_RE = re.compile(
+    r"\s*(?:(\()|(\))|(\|\|)|(&&)|(==|!=)|('[^']*'|\"[^\"]*\")|([A-Za-z_][\w.\-]*))")
+
+
+class _UnresolvableIf(Exception):
+    """The `if:` contains something this parser will not reason about."""
+
+
+def _tokenize_if(expr: str) -> list[tuple[str, str]]:
+    # `${{ ... }}` is optional around a job-level `if:`; both forms are common.
+    text = expr.strip()
+    if text.startswith("${{") and text.endswith("}}"):
+        text = text[3:-2].strip()
+    if "${{" in text or "}}" in text:
+        raise _UnresolvableIf("nested or partial expression syntax")
+    out: list[tuple[str, str]] = []
+    pos = 0
+    while pos < len(text):
+        m = _IF_TOKEN_RE.match(text, pos)
+        if not m:
+            raise _UnresolvableIf(f"unrecognized text at offset {pos}")
+        pos = m.end()
+        lp, rp, or_, and_, cmp_, lit, word = m.groups()
+        if lp:
+            out.append(("(", lp))
+        elif rp:
+            out.append((")", rp))
+        elif or_:
+            out.append(("||", or_))
+        elif and_:
+            out.append(("&&", and_))
+        elif cmp_:
+            out.append(("cmp", cmp_))
+        elif lit is not None:
+            out.append(("lit", lit[1:-1]))
+        else:
+            if word != _EVENT_NAME_TOKEN:
+                # Any other identifier — `needs.*`, `env.*`, `success`,
+                # `contains`, `matrix.event`, a bare boolean — is out of scope.
+                raise _UnresolvableIf(f"unsupported reference {word!r}")
+            out.append(("event", word))
+    if not out:
+        raise _UnresolvableIf("empty expression")
+    return out
+
+
+def _eval_if_for_event(tokens: list[tuple[str, str]], event_name: str) -> bool:
+    """Evaluate the tokenized expression with `github.event_name` bound to
+    `event_name`. Raises `_UnresolvableIf` on anything outside the grammar."""
+    pos = 0
+
+    def peek() -> str | None:
+        return tokens[pos][0] if pos < len(tokens) else None
+
+    def parse_or() -> bool:
+        nonlocal pos
+        val = parse_and()
+        while peek() == "||":
+            pos += 1
+            val = parse_and() or val   # no short circuit: both sides must parse
+        return val
+
+    def parse_and() -> bool:
+        nonlocal pos
+        val = parse_atom()
+        while peek() == "&&":
+            pos += 1
+            val = parse_atom() and val
+        return val
+
+    def parse_atom() -> bool:
+        nonlocal pos
+        if peek() == "(":
+            pos += 1
+            val = parse_or()
+            if peek() != ")":
+                raise _UnresolvableIf("unbalanced parenthesis")
+            pos += 1
+            return val
+        # the only comparison shape: event_name OP 'literal', either order
+        kinds = [t[0] for t in tokens[pos:pos + 3]]
+        if kinds == ["event", "cmp", "lit"]:
+            op, want = tokens[pos + 1][1], tokens[pos + 2][1]
+        elif kinds == ["lit", "cmp", "event"]:
+            op, want = tokens[pos + 1][1], tokens[pos][1]
+        else:
+            raise _UnresolvableIf("not an event_name comparison")
+        pos += 3
+        return (event_name == want) if op == "==" else (event_name != want)
+
+    result = parse_or()
+    if pos != len(tokens):
+        raise _UnresolvableIf("trailing tokens")
+    return result
+
+
+_PR_EVENT_NAMES = ("pull_request", "pull_request_target")
+
+
+def _wf_pr_event_names(doc: dict) -> list[str]:
+    """The pull-request event names this workflow is actually triggered by."""
+    on = doc.get("on", doc.get(True))
+    if isinstance(on, str):
+        names = [on]
+    elif isinstance(on, list):
+        names = [str(e) for e in on]
+    elif isinstance(on, dict):
+        names = [str(k) for k in on]
+    else:
+        names = []
+    return [n for n in names if n in _PR_EVENT_NAMES]
+
+
+def _job_if_excludes_pull_requests(job: dict, doc: dict) -> bool:
+    """True only when the job's own `if:` is provably FALSE for every
+    pull-request event the workflow is triggered by — i.e. no pull request can
+    ever wait for this job. Fails closed: anything unresolvable returns False,
+    keeping the job on the PR path."""
+    cond = job.get("if")
+    if not isinstance(cond, str) or not cond.strip():
+        return False
+    pr_events = _wf_pr_event_names(doc)
+    if not pr_events:
+        return False
+    try:
+        tokens = _tokenize_if(cond)
+        # `!=` is why the workflow's OWN trigger list matters: on a workflow
+        # triggered by `pull_request_target`, `event_name != 'pull_request'`
+        # is TRUE and the job still gates pull requests.
+        return not any(_eval_if_for_event(tokens, ev) for ev in pr_events)
+    except _UnresolvableIf:
+        return False
+
+
 def _composite_action_docs(root: Path) -> list[tuple[str, dict]]:
     """Local composite actions' parsed action.yml files - setup (and its
     caching / pinning) frequently lives there rather than in the workflow."""
@@ -667,6 +818,7 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     local_history_actions = _index_local_git_actions(root, parsed)
     offenders = []
     carved_out = 0   # PR-gating jobs that take full history AND need it
+    off_pr_path = 0  # jobs whose own `if:` can never be true on a pull request
     for rel, doc in pr_wfs:
         for job_name, job in _wf_jobs(doc).items():
             takes_full_history = any(
@@ -674,6 +826,12 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
                     .get("fetch-depth")).strip("'\"") == "0"
                 for step in _job_steps(job))
             if not takes_full_history:
+                continue
+            # A job whose own `if:` can never be true for a pull-request event
+            # is not on the PR path at all — no pull request waits for it, so
+            # its checkout depth is not a PR-speed fact.
+            if _job_if_excludes_pull_requests(job, doc):
+                off_pr_path += 1
                 continue
             if _job_needs_git_history(job, job_name, local_history_actions):
                 carved_out += 1
@@ -685,13 +843,20 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
                     f"e.g. {', '.join(uniq_offenders[:3])}")
     elif not pr_wfs:
         evidence = "no PR-gating workflows"
-    elif carved_out:
-        # A pass the carve-out produced must SAY so. `fetch-depth: 0` is right
-        # there on the PR path, and evidence claiming otherwise sends the
-        # maintainer to a file that contradicts the card.
-        evidence = (f"{carved_out} PR-gating job(s) check out full history and need "
-                    f"it - each walks git history, so shallowing the checkout would "
-                    f"break the job; no other PR-gating job takes full history")
+    elif carved_out or off_pr_path:
+        # A pass that an exemption produced must SAY so. `fetch-depth: 0` is
+        # right there in a PR-triggered workflow, and evidence claiming
+        # otherwise sends the maintainer to a file that contradicts the card.
+        why = []
+        if carved_out:
+            why.append(f"{carved_out} walk(s) git history, so shallowing the "
+                       f"checkout would break the job")
+        if off_pr_path:
+            why.append(f"{off_pr_path} cannot run on a pull request at all (a "
+                       f"job-level if: that is never true for a pull-request event)")
+        evidence = (f"{carved_out + off_pr_path} job(s) in PR-triggered workflow(s) "
+                    f"check out full history and are exempt: " + "; ".join(why) +
+                    "; no other PR-gating job takes full history")
     else:
         evidence = ("no PR-gating workflow checks out full history (post-merge "
                     "automation like backport/changelog jobs is exempt - it needs "

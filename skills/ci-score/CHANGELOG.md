@@ -11,6 +11,22 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-09-02** — **Fixed**: pull-request relevance was decided at the
+  WORKFLOW level, so a job that can never run on a pull request was still
+  graded as if it gated one. A workflow triggered by `pull_request` can hold a
+  job carrying its own `if:` that is never true for a pull-request event — a
+  heavy job scoped to pushes on a release branch, or to manual dispatch — and
+  no pull request ever waits for it. The shallow-checkout check now skips such
+  a job. The condition parser is deliberately tiny and fails closed: it reads
+  only `github.event_name` compared with a string literal by `==` or `!=`,
+  combined with `&&`, `||` and parentheses, and treats anything else — a
+  variable, a function call, any other context reference, malformed text — as
+  possibly pull-request-reachable, keeping the job on the PR path. A wrong
+  exclusion would silently drop a real finding, so ambiguity always resolves
+  toward keeping the job. The workflow's own trigger list is consulted, so
+  `event_name != 'pull_request'` does not exempt a job on a workflow triggered
+  by `pull_request_target`, where that condition is true.
+
 - **2026-09-02** — **Fixed**: the shallow-checkout check (`ci.checkout.shallow-clone`)
   failed a repository for *any* `fetch-depth: 0` on a pull-request-gating
   workflow, including on jobs where full history is load-bearing — changelog

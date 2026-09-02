@@ -115,7 +115,7 @@ the practice matters. The score card links every check name here.
 
 ### Shallow checkout
 
-**The fact:** no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; a JOB THAT WALKS GIT HISTORY - changelog generation, a merge-base or base-SHA diff, tag/describe, changeset versioning - is exempt: full history is load-bearing there and shallowing it would break the job; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt too: it needs history and gates nobody)
+**The fact:** no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; a JOB THAT WALKS GIT HISTORY - changelog generation, a merge-base or base-SHA diff, tag/describe, changeset versioning - is exempt: full history is load-bearing there and shallowing it would break the job; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt too: it needs history and gates nobody; a job whose own if: can never be true for a pull-request event - e.g. github.event_name == 'push' - is exempt too: no pull request waits for it. Only simple, fully resolvable event_name conditions are read; anything else keeps the job on the PR path)
 
 **Why it matters:** CI downloads your repo's entire history when it only needs today's code.
 
