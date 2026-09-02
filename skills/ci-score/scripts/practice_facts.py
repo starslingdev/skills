@@ -408,6 +408,140 @@ def _step_uses(step: dict) -> tuple[str, str] | None:
     return (action, ref) if action else None
 
 
+# ---- Git-history carve-out ---------------------------------------------------
+#
+# CANONICAL SOURCE: `skills/ci-speedup/scripts/scan.py` — `_GIT_HISTORY_RE`,
+# `_HISTORY_JOB_NAME_RE`, `_LINE_CONTINUATION_RE`, `_has_git_history_op`,
+# `_index_local_git_actions` and `_job_needs_git_history`. What follows is a
+# deliberate VERBATIM COPY of that predicate, not an import.
+#
+# WHY A COPY. Every skill in this repo installs and runs standalone, so
+# ci-score may not import ci-speedup at runtime (the same rule that made this
+# whole module a copy — see the header). Duplication is the house style here.
+# The cost of duplication is drift, so the copy is pinned: the repo-root
+# `tests/test_git_history_carveout_parity.py` loads BOTH modules and fails if
+# the two predicates ever disagree.
+#
+# WHY THE CARVE-OUT. `fetch-depth: 0` is LOAD-BEARING for a job that walks git
+# history — changelog generation, merge-base diffs, tag/describe, changeset
+# publishing. Telling a maintainer to shallow such a job is not an
+# optimization, it is a broken build. The speed engine has always failed
+# CLOSED here on the documented ground that the cost of a miss is a lost
+# finding, never a fix that breaks a job; grading the identical configuration
+# fact the opposite way meant the two shipped engines could give one
+# repository contradictory advice about one line of YAML. Same fact, same
+# stance.
+_GIT_HISTORY_RE = re.compile(
+    r"auto-?changeset|changeset(s)?[ -](version|publish|cli)|changesets/action|"
+    r"changelog|release-please|"
+    r"git\s+(fetch|show|log|describe|rev-list|rev-parse|tag)|"
+    # History-walking ops a bot commit-back / sync job needs: `git pull --rebase`,
+    # `git rebase`, `git merge`, `git cherry-pick` all require base history, so a
+    # job running them genuinely needs `fetch-depth: 0`.
+    r"git\s+(pull|rebase|merge|cherry-pick)\b|"
+    r"git\s+diff\b.*(\.\.\.|origin/)|"
+    # Two-SHA / two-ref diff: `git diff <base.sha> <head.sha>` (PR change
+    # detection). A shallow checkout doesn't contain base.sha, so this needs
+    # full history just like a `...` merge-base diff — but it has neither `...`
+    # nor `origin/`. Match a `git diff` line that references a `.sha` expression.
+    r"git\s+diff\b[^\n|]*\.sha\b|"
+    # Diff against a base ref held in a shell variable: `git diff --name-only
+    # "$base" HEAD`. The base commit is just as absent from a shallow clone as a
+    # literal `<sha>...HEAD` is — it simply carries no `...`, no `origin/` and no
+    # `.sha` for the clauses above to see.
+    r"git\s+diff\b[^\n|]*\$[({]?[A-Za-z_]|"
+    # Object-reachability probe: `git cat-file -e "${base}^{commit}"` succeeds
+    # only when the object is present in the clone, which is exactly what full
+    # history buys.
+    r"git\s+cat-file\b|"
+    r"fetch-tags|--tags|"
+    # Change-detection actions that diff the head against a BASE ref need base
+    # history: `dorny/paths-filter` with `base:` set, and `tj-actions/changed-files`
+    # both run `git diff` against the base branch under the hood, so a shallow
+    # checkout breaks them. Treating them as history ops (fail-closed) avoids the
+    # false positive of "shallow this, no git-history op found" on a change-gate job.
+    r"dorny/paths-filter|tj-actions/changed-files|"
+    r"nx\s+affected|--affected|lerna\b.*--since|\[origin/|\.\.\.[A-Za-z]",
+    re.I)
+
+# A job whose NAME signals history work (the actual git op is often hidden in a
+# repo script the YAML invokes, e.g. `node .github/scripts/auto-changeset.ts`).
+_HISTORY_JOB_NAME_RE = re.compile(
+    r"changeset|changelog|release|version|snapshot|publish", re.I)
+
+# A `run:` block routinely breaks ONE shell command across several lines with a
+# trailing backslash, and every clause of `_GIT_HISTORY_RE` is line-scoped. Join
+# the continuations back together before matching, so a git command whose
+# history-revealing operand sits on the next line is still seen as one command.
+_LINE_CONTINUATION_RE = re.compile(r"\\\n[ \t]*")
+
+
+def _has_git_history_op(text: str) -> bool:
+    """True when `text` runs a git operation that needs full history. Applied to
+    every surface `_GIT_HISTORY_RE` is matched against, so line continuations are
+    joined in exactly one place."""
+    return bool(_GIT_HISTORY_RE.search(_LINE_CONTINUATION_RE.sub(" ", text)))
+
+
+def _step_uses_ref(step: dict) -> str:
+    """The raw `uses:` string (local `./...` refs included, unlike
+    `_step_uses`, which is scoped to remote actions)."""
+    return str(step.get("uses") or "")
+
+
+def _index_local_git_actions(root: Path,
+                             parsed: list[tuple[str, dict, str]]) -> set[str]:
+    """Return the set of local `uses:` refs (e.g. `./.github/actions/changed`)
+    whose composite-action file performs a git-history op."""
+    refs: set[str] = set()
+    for _rel, doc, _raw in parsed:
+        for job in _wf_jobs(doc).values():
+            for s in _job_steps(job):
+                u = _step_uses_ref(s).split("@")[0].strip()
+                if u.startswith("./"):
+                    refs.add(u)
+    out: set[str] = set()
+    for ref in refs:
+        rel = ref[2:]  # strip leading "./"
+        base = root / rel
+        candidates = [base] if base.suffix in (".yml", ".yaml") else [
+            base / "action.yml", base / "action.yaml"]
+        for cand in candidates:
+            try:
+                text = cand.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if _has_git_history_op(text):
+                out.add(ref)
+            break
+        else:
+            # No candidate file was readable — we can't PROVE the action is
+            # history-free. Fail CLOSED: assume it may run a git-history op so
+            # the job that invokes it is never called an offender. The cost is
+            # at most a missed finding, never advice that breaks a job.
+            out.add(ref)
+    return out
+
+
+def _job_needs_git_history(job: dict, job_name: str = "",
+                           local_history_actions: set[str] | None = None) -> bool:
+    """True when shallowing this job's checkout would break it."""
+    blob = "\n".join(str(s.get("run") or "") for s in _job_steps(job))
+    uses_blob = "\n".join(_step_uses_ref(s) for s in _job_steps(job))
+    if _has_git_history_op(blob) or _has_git_history_op(uses_blob):
+        return True
+    # A local composite action the job invokes may run the git op internally
+    # (the workflow yaml shows only `uses: ./…`). Consult the per-scan index.
+    if local_history_actions:
+        for s in _job_steps(job):
+            if _step_uses_ref(s).split("@")[0].strip() in local_history_actions:
+                return True
+    # Name-based fallback: a changeset/release/version job almost always needs
+    # history even when the op lives in an invoked script. Conservative on
+    # purpose — never recommend shallowing one of these.
+    return bool(_HISTORY_JOB_NAME_RE.search(job_name))
+
+
 def _composite_action_docs(root: Path) -> list[tuple[str, dict]]:
     """Local composite actions' parsed action.yml files - setup (and its
     caching / pinning) frequently lives there rather than in the workflow."""
@@ -525,23 +659,46 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     # 3. Shallow checkout: no checkout STEP on the PR path sets
     # fetch-depth: 0 (structure walk - a comment mentioning it never counts,
     # and a quoted '0' does).
+    # A job that WALKS git history is exempt: `fetch-depth: 0` is load-bearing
+    # there and shallowing it breaks the job, so it is not an offender (the
+    # carve-out above, shared verbatim with ci-speedup). The exemption is
+    # per-JOB, not per-workflow: a second job in the same file that takes full
+    # history for nothing is still a real finding.
+    local_history_actions = _index_local_git_actions(root, parsed)
     offenders = []
+    carved_out = 0   # PR-gating jobs that take full history AND need it
     for rel, doc in pr_wfs:
-        for job in _wf_jobs(doc).values():
-            for step in _job_steps(job):
-                with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
-                if str(with_.get("fetch-depth")).strip("'\"") == "0":
-                    offenders.append(rel)
+        for job_name, job in _wf_jobs(doc).items():
+            takes_full_history = any(
+                str((step.get("with") if isinstance(step.get("with"), dict) else {})
+                    .get("fetch-depth")).strip("'\"") == "0"
+                for step in _job_steps(job))
+            if not takes_full_history:
+                continue
+            if _job_needs_git_history(job, job_name, local_history_actions):
+                carved_out += 1
+                continue
+            offenders.append(rel)
     uniq_offenders = sorted(set(offenders))
+    if offenders:
+        evidence = (f"fetch-depth: 0 on {len(uniq_offenders)} PR-gating workflow(s), "
+                    f"e.g. {', '.join(uniq_offenders[:3])}")
+    elif not pr_wfs:
+        evidence = "no PR-gating workflows"
+    elif carved_out:
+        # A pass the carve-out produced must SAY so. `fetch-depth: 0` is right
+        # there on the PR path, and evidence claiming otherwise sends the
+        # maintainer to a file that contradicts the card.
+        evidence = (f"{carved_out} PR-gating job(s) check out full history and need "
+                    f"it - each walks git history, so shallowing the checkout would "
+                    f"break the job; no other PR-gating job takes full history")
+    else:
+        evidence = ("no PR-gating workflow checks out full history (post-merge "
+                    "automation like backport/changelog jobs is exempt - it needs "
+                    "history and gates nobody)")
     facts["ci.checkout.shallow-clone"] = fact(
         "fail" if offenders else ("pass" if pr_wfs else "not_applicable"),
-        (f"fetch-depth: 0 on {len(uniq_offenders)} PR-gating workflow(s), "
-         f"e.g. {', '.join(uniq_offenders[:3])}"
-         if offenders else
-         ("no PR-gating workflow checks out full history (post-merge automation "
-          "like backport/changelog jobs is exempt - it needs history and gates nobody)"
-          if pr_wfs else "no PR-gating workflows")),
-        offenders)
+        evidence, offenders)
 
     # 4. Test sharding / matrix: a matrix on a TEST-LIKE job (test/spec/e2e/
     # integration/unit in its id or name), or a matrix whose axis is

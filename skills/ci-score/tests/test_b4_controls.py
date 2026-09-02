@@ -36,9 +36,35 @@ _SKILL_DIR = Path(__file__).resolve().parents[1]
 # test-sharding no-test-job gate: both fixtures already pass dependency-cache
 # (cache hits present) and pass test-sharding (real test jobs), so neither
 # gate fires and both hold at 82 B+ — re-verified by re-running the collector.
+# The git-history carve-out on ci.checkout.shallow-clone (2026-09-02) moves the
+# first control from 9/11 to 10/11 and leaves the second where it was. Both
+# numbers were re-derived by running the collector over the frozen trees and
+# then AUDITING every full-history checkout on the PR path by hand:
+#  - First control: all nine of its PR-gating jobs that set `fetch-depth: 0`
+#    run a real history operation — seven diff the pull request's base SHA
+#    against its head SHA (one of them across a line continuation), one
+#    fetches the head repository and diffs the base SHA against FETCH_HEAD,
+#    and one runs changeset versioning and then diffs the working tree. Every
+#    one of them breaks under a shallow clone, so none is an offender and the
+#    check passes. 82 B+ -> 91 A.
+#  - Second control: six of its seven PR-gating full-history jobs run only
+#    package install / build / lint / typecheck / test commands and no git
+#    operation at all, so they stay offenders; only the changeset-verification
+#    job (which diffs `origin/$BASE_REF...HEAD`) is newly spared. The check
+#    still fails — on four workflow files instead of five — and the score is
+#    unchanged at 82 B+. That the second control did NOT move is the evidence
+#    that the carve-out spares history jobs rather than blanket-silencing the
+#    check.
 _CONTROLS = {
-    "mastra": {"value": 82, "grade": "B+"},
+    "mastra": {"value": 91, "grade": "A"},
     "better-auth": {"value": 82, "grade": "B+"},
+}
+
+# The per-fixture verdict on the one fact the carve-out moves, audited job by
+# job in the note above.
+_SHALLOW_CLONE = {
+    "mastra": {"state": "pass", "offender_workflows": 0},
+    "better-auth": {"state": "fail", "offender_workflows": 4},
 }
 
 
@@ -94,3 +120,11 @@ def test_control_reproduces_calibration_grade_exactly(name, tmp_path):
     # clean throwaway repo → clean provenance (the -dirty path is tested
     # elsewhere; here it would mask an unstable fixture build)
     assert not doc["commit_sha"].endswith("-dirty")
+    # The grade above is a total; pin the ONE fact the git-history carve-out
+    # moves, so a future regression that happens to keep the total intact
+    # still shows up here.
+    shallow = doc["practice_facts"]["ci.checkout.shallow-clone"]
+    assert shallow["state"] == _SHALLOW_CLONE[name]["state"], shallow["evidence"]
+    if _SHALLOW_CLONE[name]["offender_workflows"]:
+        assert (f"{_SHALLOW_CLONE[name]['offender_workflows']} PR-gating workflow(s)"
+                in shallow["evidence"]), shallow["evidence"]

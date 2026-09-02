@@ -134,7 +134,7 @@
     {
       "check_id": "ci.checkout.shallow-clone",
       "label": "Shallow checkout",
-      "fact": "no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt: it needs history and gates nobody)",
+      "fact": "no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; a JOB THAT WALKS GIT HISTORY - changelog generation, a merge-base or base-SHA diff, tag/describe, changeset versioning - is exempt: full history is load-bearing there and shallowing it would break the job; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt too: it needs history and gates nobody)",
       "practice_slug": "shallow-checkout"
     },
     {
