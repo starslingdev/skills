@@ -1270,6 +1270,67 @@ jobs:
     assert "OPT28" in _scan_one(tmp_path, pos)
 
 
+def _opt28_workflow(job: str, run_body: str) -> str:
+    indented = "\n".join("          " + ln for ln in run_body.strip("\n").split("\n"))
+    return f"""name: CI
+on: pull_request
+jobs:
+  {job}:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+{indented}
+"""
+
+
+def test_opt28_fires_when_diff_output_is_redirected_to_a_variable_path(tmp_path: Path):
+    """`git diff --stat >> $GITHUB_STEP_SUMMARY` writes a diff of the working
+    tree into a file whose path is a variable. A redirection target is never a
+    ref, so nothing here reads history and OPT28 must still fire."""
+    wf = _opt28_workflow("summary", 'git diff --stat >> $GITHUB_STEP_SUMMARY')
+    assert "OPT28" in _scan_one(tmp_path, wf, name="summary.yml")
+
+
+def test_opt28_fires_when_diff_output_is_redirected_with_single_arrow(tmp_path: Path):
+    """Same shape with `>` instead of `>>`: the variable is the file being
+    written, not a base ref, so the checkout is still unjustified."""
+    wf = _opt28_workflow("out", 'git diff > $OUT')
+    assert "OPT28" in _scan_one(tmp_path, wf, name="out.yml")
+
+
+def test_opt28_fires_when_variable_after_dash_dash_is_a_pathspec(tmp_path: Path):
+    """After a bare `--` separator every operand is a pathspec, never a ref.
+    `git diff --exit-code -- "$FILE"` compares the working tree against the
+    index for one path and needs no history, so OPT28 must fire."""
+    wf = _opt28_workflow("dirty", 'git diff --exit-code -- "$FILE"')
+    assert "OPT28" in _scan_one(tmp_path, wf, name="dirty.yml")
+
+
+def test_opt28_fires_when_cat_file_reads_a_blob_at_head(tmp_path: Path):
+    """`git cat-file -p HEAD:package.json` reads a blob at the checked-out
+    commit. That object is present at any clone depth, so this is not a
+    history read and OPT28 must fire."""
+    wf = _opt28_workflow("read", 'git cat-file -p HEAD:package.json > pkg.json')
+    assert "OPT28" in _scan_one(tmp_path, wf, name="read.yml")
+
+
+def test_opt28_fires_on_working_tree_git_commands(tmp_path: Path):
+    """`git diff --cached`, `git diff --quiet`, `git status` and `git add` all
+    read the index or the working tree only — none of them reaches back into
+    history, so a `fetch-depth: 0` alongside them stays unjustified."""
+    for job, cmd in (
+        ("cached", "git diff --cached --name-only"),
+        ("quiet", "git diff --quiet"),
+        ("status", "git status --porcelain"),
+        ("add", "git add -A"),
+    ):
+        wf = _opt28_workflow(job, cmd)
+        assert "OPT28" in _scan_one(tmp_path / job, wf, name=f"{job}.yml"), cmd
+
+
 def test_opt35_suppressed_on_diagnostic_matrix(tmp_path: Path):
     """A node-version / named-adapter matrix with fail-fast:false is correct —
     you want each variant's result — so OPT35 must NOT fire."""
