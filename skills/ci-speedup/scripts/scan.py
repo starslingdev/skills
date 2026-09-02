@@ -285,6 +285,13 @@ def _line_of_nth_in_job(raw: str, job_name: str, needle: str, occurrence: int) -
             break
     count = 0
     for k in range(start, end):
+        # A comment that quotes the needle ("TODO: drop fetch-depth: 0") is
+        # prose, not a configuration key. Counting it shifts every later
+        # occurrence's line by one and leaves the LAST one unreachable — the
+        # caller then loses that finding entirely. Full-line comments only:
+        # a trailing comment sits on a real key line, which does count.
+        if lines[k].lstrip().startswith("#"):
+            continue
         if needle in lines[k]:
             count += 1
             if count == occurrence:
@@ -461,44 +468,57 @@ _OPT28_JUSTIFY_RE = re.compile(
 def _opt28_history_justification(raw: str, line: int | None) -> str | None:
     """The nearby comment that documents why this `fetch-depth: 0` is needed, or
     None. Suppressor only: it can remove an OPT28 finding, never create one.
-    Comments must be from the same step (same indentation region) to count as
-    justification — a comment on a prior step is not a justification for this
-    step's checkout."""
+
+    The region is the `_OPT28_JUSTIFY_LOOKBACK` lines directly above the key,
+    closed early by a blank line. Within it, a comment counts only when it
+    belongs to THIS step: the step's own body qualifies, and so does a comment
+    written above the step marker at the step's own indentation. A comment
+    above the marker but indented deeper is inside the preceding step (the tail
+    of its `run: |` block), and ordinary YAML above the marker ends the region —
+    neither is a justification for this checkout."""
     if not line:
         return None
     lines = raw.splitlines()
     idx = line - 1  # 0-based index of the matched `fetch-depth: 0` line
     if idx < 0 or idx >= len(lines):
         return None
-    # Find the step marker by scanning backward from fetch-depth line
+    # The step this key belongs to — the nearest `- ` marker at or above it.
     step_marker_idx = None
     for i in range(idx, -1, -1):
         text = lines[i]
         if not text.strip():
             continue
-        m = re.match(r"^(\s*)-\s", text)
-        if m:
+        if re.match(r"^\s*-\s", text):
             step_marker_idx = i
             break
-
     if step_marker_idx is None:
         return None
+    marker = lines[step_marker_idx]
+    marker_indent = len(marker) - len(marker.lstrip())
 
-    # Scan backward from the line above the step marker, accepting only comments
-    # and blanks. Stop at the first non-comment, non-blank line.
-    for i in range(step_marker_idx - 1, -1, -1):
+    # Walk up from the key, no further than the documented bound.
+    for i in range(idx - 1, max(0, idx - _OPT28_JUSTIFY_LOOKBACK) - 1, -1):
         text = lines[i]
         stripped = text.strip()
 
         if not stripped:
-            # Blank line is OK, continue scanning
-            continue
+            break  # a blank line ends the region
 
         if not stripped.startswith("#"):
-            # Non-comment, non-blank line above the step marker ends the search
+            # Inside this step, the non-comment lines are its own scaffolding
+            # (`- uses:`, `with:`) and a comment may sit among them. Above the
+            # step marker, ordinary YAML ends the region.
+            if i >= step_marker_idx:
+                continue
             break
 
-        # It's a comment - check if it mentions a history operation
+        if i < step_marker_idx and len(text) - len(text.lstrip()) > marker_indent:
+            # A comment above the step marker but indented DEEPER than it is
+            # inside the preceding step — the tail of a `run: |` block, say.
+            # That is the preceding step's shell text, not this step's
+            # justification.
+            break
+
         if _OPT28_JUSTIFY_RE.search(stripped):
             return stripped.lstrip("#").strip()
 

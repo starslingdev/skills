@@ -1129,6 +1129,8 @@ jobs:
       - run: make build
 """
     assert "OPT28" in _scan_one(tmp_path, pos, name="build.yml")
+
+
 def test_opt28_suppressed_on_positional_parameter_base_ref(tmp_path: Path):
     """A `git diff` whose base operand is a positional parameter like `$1` is
     still a diff against a base commit that must be in the history — a shallow
@@ -3702,3 +3704,164 @@ jobs:
     result = _scan_one(tmp_path, yml, name="boundary.yml")
     assert "OPT28" in result, \
         "checkout must NOT be suppressed by history comment inside preceding step"
+
+
+def test_opt28_blank_line_ends_the_justification_region(tmp_path: Path):
+    """The justification region is bounded and a blank line closes it. A history
+    comment separated from the step by a blank line is a note about something
+    else, so the finding must still fire."""
+    pos = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # full history is required: the version stamp comes from `git describe`
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: make build
+"""
+    assert "OPT28" in _scan_one(tmp_path, pos, name="blank.yml")
+
+
+def test_opt28_justification_region_stops_six_lines_above_the_key(tmp_path: Path):
+    """The region reaches six lines above the matched `fetch-depth: 0` — enough
+    for a comment block written above the step. A history comment pushed beyond
+    that by four unrelated comment lines is out of range and must not suppress."""
+    pos = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # full history is required: the version stamp comes from `git describe`
+      # note four
+      # note three
+      # note two
+      # note one
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: make build
+"""
+    assert "OPT28" in _scan_one(tmp_path, pos, name="far.yml")
+
+
+def test_opt28_comment_ending_a_preceding_run_block_does_not_suppress(tmp_path: Path):
+    """A comment written as the last line of the preceding step's `run: |` block
+    sits directly above the checkout's step marker, but it is shell text
+    belonging to that step — not a justification for this checkout."""
+    pos = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prev
+        run: |
+          echo one
+          # this step walks the ancestors, so it needs the history
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: make build
+"""
+    assert "OPT28" in _scan_one(tmp_path, pos, name="scalar.yml")
+
+
+def test_opt28_justification_comment_between_uses_and_with_suppresses(tmp_path: Path):
+    """The region is the six lines above the key, so it covers the step's own
+    body. A justification written between `- uses:` and `with:` is as much this
+    step's justification as one written above the step."""
+    neg = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        # full history is required: the version stamp comes from `git describe`
+        with:
+          fetch-depth: 0
+      - run: make build
+"""
+    assert "OPT28" not in _scan_one(tmp_path, neg, name="inuses.yml")
+
+
+def test_opt28_justification_comment_above_the_key_suppresses(tmp_path: Path):
+    """A justification written on the line immediately above `fetch-depth: 0`,
+    inside `with:`, is the closest place a maintainer can put it and must
+    suppress."""
+    neg = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # full history is required: the version stamp comes from `git describe`
+          fetch-depth: 0
+      - run: make build
+"""
+    assert "OPT28" not in _scan_one(tmp_path, neg, name="inwith.yml")
+
+
+def test_opt28_comment_quoting_the_key_does_not_consume_a_checkout_slot(tmp_path: Path):
+    """A comment that quotes `fetch-depth: 0` is not a checkout. Counting it as
+    one shifts every checkout's reported line by one and drops the last
+    checkout's finding entirely: here the second, unjustified checkout would
+    never be reached."""
+    yml = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # keep fetch-depth: 0 here — the version stamp comes from `git describe`
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: echo one
+      - uses: actions/checkout@v4
+        with:
+          path: vendor
+          fetch-depth: 0
+      - run: make build
+"""
+    _write_workflow(tmp_path, "quote.yml", yml)
+    opt28 = [f for f in _scan(tmp_path)["findings"] if f["pattern"] == "OPT28"]
+    lines = yml.split("\n")
+    depth_lines = [i + 1 for i, ln in enumerate(lines)
+                   if ln.strip() == "fetch-depth: 0"]
+    assert len(depth_lines) == 2
+    assert len(opt28) == 1, opt28
+    # The justified first checkout is suppressed; the finding belongs to the
+    # second checkout's own line, not to the comment that quotes the key.
+    assert opt28[0]["line"] == depth_lines[1]
+
+
+def test_opt28_single_checkout_is_reported_on_the_key_not_a_comment(tmp_path: Path):
+    """With one checkout and a comment quoting `fetch-depth: 0` above it, the
+    finding must still point at the configuration line, not at the comment."""
+    yml = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # TODO: drop fetch-depth: 0 once the stamp moves into the build script
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: make build
+"""
+    _write_workflow(tmp_path, "single.yml", yml)
+    opt28 = [f for f in _scan(tmp_path)["findings"] if f["pattern"] == "OPT28"]
+    lines = yml.split("\n")
+    depth_line = next(i + 1 for i, ln in enumerate(lines)
+                      if ln.strip() == "fetch-depth: 0")
+    assert len(opt28) == 1, opt28
+    assert opt28[0]["line"] == depth_line
