@@ -3618,3 +3618,26 @@ jobs:
 """
     result = _scan_one(tmp_path, yml, name="multi.yml")
     assert "OPT28" in result, "Expected OPT28 finding for the unjustified checkout"
+
+
+def test_opt28_preceding_step_comment_does_not_suppress(tmp_path: Path):
+    """Regression: a history-naming comment INSIDE a preceding step's body
+    should not suppress the following checkout's finding. The comment belongs
+    to that earlier step, not to the checkout that follows it."""
+    yml = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prev
+        # this step is the one that needs `git rev-list`
+        run: echo hi
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: make build
+"""
+    result = _scan_one(tmp_path, yml, name="boundary.yml")
+    assert "OPT28" in result, \
+        "checkout must NOT be suppressed by history comment inside preceding step"
