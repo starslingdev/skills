@@ -2970,7 +2970,10 @@ def _github_bool_jobs(raw: str) -> dict[str, Any]:
     mapping as NOT advisory: silence is the safe direction for a disclosure, and a sentence
     resting on a boolean this scan could not confirm is worse than no sentence."""
     try:
-        doc = yaml.load(raw, Loader=_GitHubBoolLoader)
+        # Not an unsafe load: _GitHubBoolLoader subclasses SafeLoader and changes only the
+        # implicit boolean resolvers, so the SafeConstructor still rejects arbitrary object
+        # tags. Scanners that match on the loader's NAME rather than its bases need telling.
+        doc = yaml.load(raw, Loader=_GitHubBoolLoader)  # nosec B506
     except yaml.YAMLError:
         return {}
     return _jobs_from_doc(doc) if isinstance(doc, dict) else {}
