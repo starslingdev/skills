@@ -2308,11 +2308,36 @@ The rule composes with the existing rare-demotion (§12.2 `_ms_freq_demoted`) an
 ### 12.2 Representative-run selection — nearest-P50 (`_persist_pole_logs`)
 
 The drilled run is the **qualifying instance whose duration is closest to the job
-P50** (`job_p50_s`, else the check `p50_s`). *Qualifying* = duration ≥ 0.5×the
-slowest sampled instance, which drops short-circuit / self-skipped no-ops (a gated
-job like `changed-tests` that does nothing on most PRs) so they can't be picked.
-Nearest-P50 (not the slowest, not the high-skewed qualifying median) makes the
-drill **reconcile with the headline** instead of overstating it.
+P50** (`job_p50_s`, else the check `p50_s`). *Qualifying* = duration ≥ a floor of
+half the median sampled duration (with an absolute `_NOOP_FLOOR_S` backstop), which
+drops short-circuit / self-skipped no-ops (a gated job like `changed-tests` that
+does nothing on most PRs) so they can't be picked. Nearest-P50 (not the slowest, not
+the high-skewed qualifying median) makes the drill **reconcile with the headline**
+instead of overstating it.
+
+Everything the drill derives — the floor, the qualifying set, the representative
+run, its step timeline, the cross-run sample and the log handed to the fixing
+agent — comes from **one pool, scoped to the headline runner before the floor is
+computed**. A job whose sampled runs span more than one **runner label** inside one
+window has a P50 scoped to the label it runs on most (§ `_critical_path`), so an
+unscoped pool mixes populations the headline never measured with the one it did.
+The floor would then be set by the wrong machines: a slower non-headline population
+drags the median up, and genuine headline runs are discarded as "no-ops". Scoping
+first is what makes the drill's every figure describe the runs the headline
+reports. The scope falls back to the unfiltered pool when no headline label is
+recorded, or when filtering would empty the pool (losing the drill is worse than
+losing the runner scope); both fallbacks are traced at DEBUG.
+
+The relative floor is additionally **clamped to the stamped typical time**
+(`max(min(0.5 × median, stamped), _NOOP_FLOOR_S)`). Read that bound exactly: it
+stops the floor rising ABOVE the stamped typical time, so the run nearest the
+headline P50 always stays eligible and the drill can never reconcile with
+*nothing*. It does NOT bound the floor below the population's minimum — on the
+unfiltered fallback, headline runs BELOW the stamped P50 can still be cut (a
+mixed pool of 200/220/240/260/280 plus six at 2000 gives a floor of 240, dropping
+the 200 and 220). Only scoping the pool first keeps the whole population. The
+absolute backstop still wins over the clamp, so a job whose own typical time *is*
+a self-skip cannot pull no-op instances back in.
 
 The level-1 bar is the **check-run** gate time (`p50_s`); the timeline is the
 **job** clock (`job_p50_s`). They differ — the job includes the runner

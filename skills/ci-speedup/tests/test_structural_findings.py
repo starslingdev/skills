@@ -446,6 +446,158 @@ def test_persist_pole_logs_a_slow_outlier_does_not_displace_the_median(tmp_path:
     assert 300.0 in [r["duration_s"] for r in manifest[0]["sample"]]
 
 
+def test_persist_pole_logs_drills_the_headline_runner_population(tmp_path: Path):
+    # A job whose sampled runs span MORE THAN ONE runner label inside one sampling
+    # window (a runner change part-way through the window) has a headline P50 scoped
+    # by `_critical_path` to the label the job runs on MOST — while the drill's
+    # qualifying floor is half the median of every label mixed together. When the
+    # labels differ enough in speed, that floor lands ABOVE the headline population
+    # and discards every instance of it as a "no-op": the representative run stamped
+    # `nearest-p50`, its step timeline, and its whole cross-run sample then come from
+    # a runner the headline never measured, and the drill overstates the level-1
+    # figure it exists to reconcile with. The absolute no-op backstop must still
+    # apply — this clamps the RELATIVE floor only.
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return "log " + endpoint
+
+    def _labeled(jid: int, dur_s: int, label: str) -> dict:
+        job = _job_inst("test", jid, dur_s)
+        job["labels"] = [label]
+        return job
+
+    wf = ".github/workflows/ci.yml"
+    # Nine sampled runs of one job: four on the label it now runs on most (240s),
+    # five split across the two labels it is leaving behind (600s).
+    plan = ([("fast-label", 240)] * 4
+            + [("slow-label-a", 600)] * 3
+            + [("slow-label-b", 600)] * 2)
+    runs = [[_labeled(100 + idx, dur, label)]
+            for idx, (label, dur) in enumerate(plan)]
+
+    crit = cr._critical_path(runs)
+    # The headline measures the job on the label it actually runs on most.
+    assert crit["job_runner"]["test"] == "fast-label"
+    headline_p50 = crit["job_p50"]["test"]
+    assert headline_p50 == 240.0
+
+    poles = [{"check": "test", "workflow_file": wf, "job": "test",
+              "job_p50_s": headline_p50, "p50_s": headline_p50}]
+    manifest = cr._persist_pole_logs(FakeClient(), "o/r", poles, {wf: runs}, tmp_path)
+
+    assert len(manifest) == 1
+    entry = manifest[0]
+    assert entry["selected"] == "nearest-p50"
+    # The drilled run belongs to the population the headline named, not to a label
+    # the job has largely stopped using.
+    assert entry["duration_s"] == headline_p50, (
+        f"drilled representative run is {entry['duration_s']}s against a "
+        f"{headline_p50}s headline — the drill reconciles with nothing")
+    # And the cross-run check is not drawn exclusively from the other labels.
+    assert headline_p50 in [r["duration_s"] for r in entry["sample"]]
+
+
+def test_persist_pole_logs_cross_run_sample_scoped_to_headline_runner(tmp_path: Path):
+    # The cross-run check validates the dominant step's wall time to prove the drilled
+    # run's magnitude is stable across runs — when a magnitude is available. This
+    # stability evidence must be drawn from the SAME population the headline was
+    # measured on, not from runs the headline never measured.
+    #
+    # When a job changes runners part-way through the sampling window, the headline
+    # P50 is scoped (by _critical_path) to the runner it runs on MOST. But the
+    # qualifying floor (_persist_pole_logs) starts as half the MIXED median of every
+    # runner, and when the runners differ in speed, the clamp can still leave BOTH
+    # runners' runs in qual. When the cross-run sample is built from this mixed qual,
+    # it reports wall-time variation across two different machines — not stability
+    # evidence for the headline job. The sample must be further scoped to the runs
+    # whose runner label matches the headline label, falling back to unfiltered only
+    # if no label context exists or if filtering would empty the pool.
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return "log " + endpoint
+
+    def _labeled(jid: int, dur_s: int, label: str) -> dict:
+        job = _job_inst("test", jid, dur_s)
+        job["labels"] = [label]
+        return job
+
+    wf = ".github/workflows/ci.yml"
+    # Nine sampled runs: four on fast-label (240s, the dominant runner), five on
+    # slow labels (600s, runners being left behind). All clear the clamped floor.
+    plan = ([("fast-label", 240)] * 4
+            + [("slow-label-a", 600)] * 3
+            + [("slow-label-b", 600)] * 2)
+    runs = [[_labeled(100 + idx, dur, label)]
+            for idx, (label, dur) in enumerate(plan)]
+
+    crit = cr._critical_path(runs)
+    assert crit["job_runner"]["test"] == "fast-label"
+    headline_p50 = crit["job_p50"]["test"]
+    assert headline_p50 == 240.0
+
+    poles = [{"check": "test", "workflow_file": wf, "job": "test",
+              "job_p50_s": headline_p50, "p50_s": headline_p50,
+              "headline_runner": crit["job_runner"]["test"]}]
+    manifest = cr._persist_pole_logs(FakeClient(), "o/r", poles, {wf: runs}, tmp_path)
+
+    assert len(manifest) == 1
+    entry = manifest[0]
+    # The cross-run sample reports only runs from the headline population (fast-label).
+    # Runs on the slow labels (600s) MUST NOT appear — they're stability evidence
+    # across two machines, not across the headline's own population.
+    sample_durations = [r["duration_s"] for r in entry["sample"]]
+    assert all(d == 240.0 for d in sample_durations), (
+        f"cross-run sample includes runs from non-headline runners: {sample_durations}. "
+        f"Stability evidence must be from the headline population (fast-label, 240s only), "
+        f"not a mix of machines with different speeds.")
+
+
+def test_persist_pole_logs_floor_computed_on_headline_runner_population(tmp_path: Path):
+    # The qualifying floor itself must be computed on the headline runner's own runs.
+    # Scoping the sample AFTER the floor is not enough: the floor starts as half the
+    # MIXED median, so a slow non-headline population inflates the median that sets the
+    # floor, and the floor then discards genuine headline runs as if they were no-ops.
+    # The clamp to the stamped typical time bounds the floor at the P50 — but the P50
+    # is the MIDDLE of the headline population, so every headline run below it is still
+    # dropped, and the cross-run check reports the top half of the population as if it
+    # were the whole of it.
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return "log " + endpoint
+
+    def _labeled(jid: int, dur_s: int, label: str) -> dict:
+        job = _job_inst("test", jid, dur_s)
+        job["labels"] = [label]
+        return job
+
+    wf = ".github/workflows/ci.yml"
+    # The headline population spreads around its own P50 (240s); six much slower runs
+    # sit on labels the job is leaving behind.
+    plan = ([("fast-label", d) for d in (200, 220, 240, 260, 280)]
+            + [("slow-label-a", 2000)] * 3
+            + [("slow-label-b", 2000)] * 3)
+    runs = [[_labeled(100 + idx, dur, label)]
+            for idx, (label, dur) in enumerate(plan)]
+
+    crit = cr._critical_path(runs)
+    assert crit["job_runner"]["test"] == "fast-label"
+    headline_p50 = crit["job_p50"]["test"]
+    assert headline_p50 == 240.0
+
+    poles = [{"check": "test", "workflow_file": wf, "job": "test",
+              "job_p50_s": headline_p50, "p50_s": headline_p50,
+              "headline_runner": crit["job_runner"]["test"]}]
+    manifest = cr._persist_pole_logs(FakeClient(), "o/r", poles, {wf: runs}, tmp_path)
+
+    assert len(manifest) == 1
+    sample_durations = sorted(r["duration_s"] for r in manifest[0]["sample"])
+    # Every run of the headline population is real work and belongs in the cross-run
+    # check — none of them is a no-op the floor exists to exclude.
+    assert sample_durations == [200.0, 220.0, 240.0, 260.0, 280.0], (
+        f"cross-run sample is {sample_durations}: runs the headline itself measured "
+        f"were discarded by a floor computed on a pool the headline never measured")
+
+
 def test_step_timeline_is_execution_order_with_offsets():
     # The timeline preserves step ORDER and records each step's start offset (from
     # job start) + duration - the data the report needs to draw steps as a
