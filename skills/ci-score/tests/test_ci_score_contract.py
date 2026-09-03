@@ -4,7 +4,9 @@ Rebuilt for ci-score by the score-ectomy (2026-07-16): the layers under test
 are the same, but every module is loaded from ci-score's OWN scripts by file
 path, and the corpus-pinning cells read the six SCORED corpus fixtures under
 `tests/fixtures/corpora/` — this suite imports NO ci-speedup code and reads
-NOTHING from ci-speedup's `reports/`.
+NOTHING from ci-speedup's `reports/`. That claim used to live only in this
+docstring; `test_the_skill_never_reaches_into_ci_speedup` below now asserts
+the import half of it, which is the half a contributor can break by accident.
 
 Two layers, matching the two-layer design:
 
@@ -759,15 +761,201 @@ def test_delegated_ci_is_na_never_fail(tmp_path):
 
 
 def test_capped_file_lists_are_never_phrased_as_exhaustive(tmp_path):
-    """mastra has SIX fetch-depth offenders; the card named three as if the
-    list were complete — a maintainer who fixed the named three would still
-    fail with no idea why. Counts must be complete even when files are capped."""
+    """A repo with five fetch-depth offenders got a card naming three as if
+    the list were complete — a maintainer who fixed the named three would
+    still fail with no idea why. Counts must be complete even when files are
+    capped. (No job here runs a git operation, so the git-history carve-out
+    spares none of them and all five stay offenders.)"""
     files = [(f"w{i}.yml", PR_ON + "jobs:\n  b:\n    steps:\n      - uses: actions/checkout@v4\n"
               "        with:\n          fetch-depth: 0\n") for i in range(5)]
     f = facts_for(tmp_path, *files)["ci.checkout.shallow-clone"]
     assert f["state"] == "fail"
     assert "5 PR-gating workflow(s)" in f["evidence"] and "e.g." in f["evidence"]
     assert len(f["files"]) == 3  # capped, but the count above is complete
+
+
+def test_history_reading_job_is_not_a_shallow_clone_offender(tmp_path):
+    """`fetch-depth: 0` is LOAD-BEARING for a job that walks git history:
+    shallowing it breaks the job. The speed engine has always carved these
+    out; the best-practices engine graded the identical fact the opposite
+    way, so one repository could be told to remove a checkout depth the
+    other engine correctly leaves alone."""
+    wf = ("release-notes.yml",
+          PR_ON + "jobs:\n  notes:\n    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n"
+          "      - run: git log --oneline $(git describe --tags --abbrev=0)..HEAD\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "pass", f["evidence"]
+    assert f["files"] == []
+
+
+def test_a_carved_out_pass_never_claims_nobody_checks_out_full_history(tmp_path):
+    """Evidence must stay true of the repo in front of it. When the carve-out
+    is what produced the pass, `fetch-depth: 0` IS present on the PR path — a
+    maintainer reading 'no PR-gating workflow checks out full history' would
+    open the file, see one, and stop trusting the card."""
+    wf = ("release-notes.yml",
+          PR_ON + "jobs:\n  notes:\n    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n"
+          "      - run: git log --oneline\n")
+    ev = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]["evidence"]
+    assert "no PR-gating workflow checks out full history" not in ev, ev
+    assert "1" in ev and "git history" in ev, ev
+
+
+def test_history_carveout_is_per_job_not_per_workflow(tmp_path):
+    """The carve-out spares the JOB that reads history, never the whole file:
+    a second job in the same workflow that takes full history for nothing is
+    still a real finding."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n"
+          "  changelog:\n    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n"
+          "      - run: git log --oneline\n"
+          "  unit:\n    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n"
+          "      - run: npm test\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
+    assert f["files"] == ["ci.yml"]
+
+
+def test_history_op_split_across_a_line_continuation_still_carves_out(tmp_path):
+    """A `run:` block routinely breaks one command over several lines with a
+    trailing backslash. The operand that reveals the history walk can sit on
+    the next physical line, and a line-scoped match would miss it and flag a
+    job whose full history is load-bearing."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  diff:\n    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n"
+          "      - run: |\n"
+          "          git diff --name-only \\\n"
+          "            origin/main...HEAD\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "pass", f["evidence"]
+
+
+def test_job_that_cannot_run_on_a_pull_request_is_not_graded_on_the_pr_path(tmp_path):
+    """PR relevance was decided at the WORKFLOW level. A workflow can be
+    triggered by pull_request and still hold a job whose own `if:` can never be
+    true for a pull-request event — a heavy job scoped to pushes, or to manual
+    dispatch. No pull request ever waits for that job, so grading the
+    repository's PR path on it is grading a job nobody is blocked by."""
+    wf = ("ci.yml",
+          "on:\n  pull_request:\n  push:\n    branches: [release/*]\n"
+          "jobs:\n  heavy-build:\n    if: github.event_name == 'push'\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n"
+          "  unit:\n    steps:\n      - uses: actions/checkout@v4\n"
+          "      - run: npm test\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "pass", f["evidence"]
+    # and the evidence says why, rather than claiming nothing takes full history
+    assert "no PR-gating workflow checks out full history" not in f["evidence"]
+    assert "cannot run on a pull request" in f["evidence"], f["evidence"]
+
+
+def test_a_job_if_that_negates_the_pull_request_event_is_off_the_pr_path(tmp_path):
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  nightly:\n    if: ${{ github.event_name != 'pull_request' }}\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "pass", f["evidence"]
+
+
+def test_a_disjunction_that_still_admits_a_pull_request_stays_on_the_pr_path(tmp_path):
+    """`push || pull_request` is true for a pull request, so the job gates
+    pull requests and its full-history checkout is still a finding."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  b:\n"
+          "    if: github.event_name == 'push' || github.event_name == 'pull_request'\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
+
+
+@pytest.mark.parametrize("cond", [
+    "needs.changes.outputs.docs == 'true'",
+    "github.event.pull_request.draft == false",
+    "!contains(github.event.pull_request.labels.*.name, 'skip')",
+    "success() && github.event_name == 'push'",
+    "env.RUN_HEAVY == 'true' && github.event_name == 'push'",
+    "github.event_name == matrix.event",
+    "github.ref == 'refs/heads/main'",
+    "github.event_name == 'push' && ",
+    "((github.event_name == 'push'",
+])
+def test_an_if_the_parser_cannot_fully_resolve_keeps_the_job_gating(tmp_path, cond):
+    """Fail CLOSED. A wrong exclusion silently drops a real finding, so a
+    variable, a function call, a context reference or malformed text must all
+    resolve toward keeping the job on the PR path."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  b:\n    if: " + json.dumps(cond) + "\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
+
+
+def test_pull_request_target_gating_is_not_excluded_by_a_pull_request_negation(tmp_path):
+    """`github.event_name != 'pull_request'` is TRUE for a
+    pull_request_target event, so on a workflow triggered that way the job
+    still gates pull requests. Excluding it would drop a real finding."""
+    wf = ("ci.yml",
+          "on:\n  pull_request_target:\n"
+          "jobs:\n  b:\n    if: github.event_name != 'pull_request'\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
+
+
+def test_event_name_comparison_is_case_insensitive(tmp_path):
+    """GitHub Actions does case-insensitive string comparison. A job with
+    `github.event_name == 'Pull_Request'` (capital letters) still matches a
+    pull_request event, so it gates pull requests and must not be excluded."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  b:\n"
+          "    if: github.event_name == 'Pull_Request'\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
+
+
+def test_a_merge_queue_only_job_is_off_the_pull_request_path(tmp_path):
+    """A merge-queue run is not a pull-request event, so a job scoped to
+    `merge_group` alone is not on the PR path and its full-history checkout is
+    not a PR-path finding. This falls out of the event-name rule rather than
+    being written for it, which is exactly why it is pinned: the rubric now
+    documents the behaviour, so a change to it must be deliberate."""
+    wf = ("ci.yml",
+          "on:\n  pull_request:\n  merge_group:\n"
+          "jobs:\n  queue-only:\n    if: github.event_name == 'merge_group'\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "pass", f["evidence"]
+    assert "cannot run on a pull request" in f["evidence"], f["evidence"]
+
+
+@pytest.mark.parametrize("cond", ["false", "${{ false }}"])
+def test_a_job_switched_off_with_a_bare_literal_is_still_graded(tmp_path, cond):
+    """KNOWN LIMITATION, pinned so it stays a decision rather than a surprise.
+    The grammar reads exactly one atom — `github.event_name` against a string
+    literal — and no bare boolean, so `if: false` is unresolvable and the job
+    stays on the PR path. The miss is in the fail-closed direction: it costs at
+    most a finding that was already being reported, never a fix that breaks a
+    build. Widening the grammar to read literals is a deliberate future
+    change, and this cell is what will go red when someone makes it."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  b:\n    if: " + json.dumps(cond) + "\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
 
 
 def test_pinned_offender_files_rank_third_party_first(tmp_path):
@@ -984,3 +1172,26 @@ def test_card_survives_hostile_evidence_and_malformed_stamps(spec):
     # malformed shapes render best-effort, never raise
     assert rc_mod._render_score_card({"ci_score": {"checks": "garbage", "refusal": "nope"}})
     assert rc_mod._render_score_card({"ci_score": {"checks": [None, 42]}})
+
+
+def test_the_skill_never_reaches_into_ci_speedup():
+    """ci-score installs and runs standalone: the `skills` CLI copies
+    `skills/ci-score/` and nothing else, so anything this skill reaches for
+    outside its own directory is missing at runtime for every user who
+    installed only ci-score. The git-history predicate is duplicated rather
+    than imported for exactly this reason, and prose in a docstring does not
+    stop the next contributor from writing the import. Assert it."""
+    offenders = []
+    for path in sorted(_SKILL_DIR.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith(("import ", "from ")) and (
+                    "ci_speedup" in stripped or "ci-speedup" in stripped):
+                offenders.append(f"{path.relative_to(_SKILL_DIR)}:{lineno}: {stripped}")
+    assert not offenders, (
+        "ci-score must not import ci-speedup — it installs on its own and the "
+        f"import would not resolve: {offenders}")
+

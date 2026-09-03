@@ -251,7 +251,7 @@ def test_refusal_report_has_no_grade_no_disclosure_no_recs(registry):
     refusal_doc = {
         "repo_root": "/x", "commit_sha": "a" * 40, "scanned_workflows": 0,
         "practice_facts": {}, "ci_score": {
-            "spec_version": "ci-score-v0.1.3", "scope_statement": "s",
+            "spec_version": "ci-score-v0.1.4", "scope_statement": "s",
             "value": None, "grade": None,
             "refusal": {"reason_code": "no_workflow_yaml",
                         "human_reason": "No score: no GitHub Actions workflow "
@@ -278,7 +278,7 @@ def test_refusal_report_still_links_and_resolves_the_appendix(registry):
               for c in registry["checks"]]
     doc = {"repo_root": "/x", "commit_sha": "a" * 40, "scanned_workflows": 4,
            "automation_only": True, "practice_facts": {}, "ci_score": {
-               "spec_version": "ci-score-v0.1.3", "scope_statement": "s",
+               "spec_version": "ci-score-v0.1.4", "scope_statement": "s",
                "value": None, "grade": None,
                "refusal": {"reason_code": "automation_only",
                            "human_reason": "Not scored: this repository's workflows "

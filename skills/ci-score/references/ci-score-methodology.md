@@ -1,4 +1,4 @@
-# CI Score v0.1.3 — methodology
+# CI Score v0.1.4 — methodology
 
 > **CI Score gauges best-practice adherence on CI speed and gate hygiene: a
 > straightforward pass/fail rubric of best-practice checks computed from a
@@ -115,7 +115,7 @@ the practice matters. The score card links every check name here.
 
 ### Shallow checkout
 
-**The fact:** no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt: it needs history and gates nobody)
+**The fact:** no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; a JOB THAT WALKS GIT HISTORY - changelog generation, a merge-base or base-SHA diff, tag/describe, changeset versioning - is exempt: full history is load-bearing there and shallowing it would break the job; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt too: it needs history and gates nobody; a job whose own if: can never be true for a pull-request event - e.g. github.event_name == 'push', or a job scoped to the merge queue with github.event_name == 'merge_group', which is not a pull-request event - is exempt too: no pull request waits for it. Only simple, fully resolvable event_name conditions are read; anything else keeps the job on the PR path, including a bare literal if: false, which the grammar does not read and which is therefore still graded - a known miss in the fail-closed direction, costing at most a finding that was already reported)
 
 **Why it matters:** CI downloads your repo's entire history when it only needs today's code.
 
@@ -217,19 +217,26 @@ data:
 
 - A heavily-optimized repo can score lower than a simpler one. mastra-ai/mastra
   runs test sharding, a turbo build cache, and a changed-tests-only gate — and
-  scores **82** (9 of 11), because it genuinely has two gaps: full-history
-  checkouts on five PR-gating workflows and 19 of 120 action references
-  unpinned. Its sophistication earns exactly one checkmark per practice, the
-  same as anyone's. 82 means "strong, with two concrete, fixable gaps" — which
-  is precisely true of mastra.
+  scores **91** (10 of 11), because it genuinely has one gap: 19 of 120 action
+  references unpinned. Its sophistication earns exactly one checkmark per
+  practice, the same as anyone's. 91 means "strong, with one concrete, fixable
+  gap" — which is precisely true of mastra. Its full-history checkouts are not
+  the second gap they once looked like: every one of them sits on a job that
+  walks git history, and the shallow-clone check now spares such a job rather
+  than telling a maintainer to break it.
 - **The score does not predict speed — measured, it runs the other way.**
   Across the eleven repos we measured end-to-end, higher adherence scores
   associate with *slower* merge gates (large monorepos adopt every practice
   *and* have enormous test volume; small repos are fast because there is
   little to run). Among the committed worked examples, the lowest-scoring repo
   has the fastest gate (deepgram's SDK at 33, a typical PR waits ~1¼ minutes)
-  and 82-scoring mastra the slowest (~7 minutes) — each number is the headline
-  of the report shipped beside that card. That is why
+  and 91-scoring mastra the slowest (~7 minutes). The wait times are the
+  headline of the report shipped beside each card. The adherence numbers are
+  not always: a card is a frozen snapshot that also carries live run data no
+  offline re-run can reproduce, so a card is not re-stamped when the engine
+  gets more precise. Mastra's shipped card still reads 82 for that reason —
+  91 is what the current engine computes from the same workflow YAML. That is
+  why
   the measured report — with its headline "a typical PR waits N minutes" —
   renders directly beneath the card in the same document: adherence and
   speed are reported separately, side by side, never blended.
@@ -351,6 +358,31 @@ install command), while *coolify* keeps its value (real build-push jobs) and
 *leonardo* keeps its 0 (its `pull_request` ci runs a real `pnpm install`). Net:
 one calibration row becomes "not scored." The rationale is OD-CS19 and OD-CS20
 in the spec's `decision_log`.
+
+**v0.1.4 (2026-09-02, OD-CS22)** narrows **shallow clone** twice, both times
+to the *job* rather than the workflow file. First, a job that walks git history
+is no longer an offender: `fetch-depth: 0` is load-bearing for changelog
+generation, merge-base diffs, `git describe`, and changeset publishing, so
+telling a maintainer to shallow such a job is not an optimization, it is a
+broken build. The predicate is the speed engine's, character for character, so
+the two shipped engines can no longer reach opposite verdicts on the same line
+of YAML. Second, a job whose own `if:` can never be true for any pull-request
+event the workflow is triggered by is not on the pull-request path, so it is
+not graded there; the expression parser recognises only `github.event_name`
+compared with a string literal, and anything it cannot fully resolve leaves the
+job graded — it fails closed. Two consequences are worth naming. A job scoped
+to the merge queue alone (`github.event_name == 'merge_group'`) is off the
+pull-request path by this rule, because a merge-queue run is not a
+pull-request event and no pull request waits for it. And a job switched off
+with a bare literal — `if: false` or `if: ${{ false }}` — is still graded,
+because the grammar reads no literal: a known miss, left deliberately, since
+it errs toward reporting a finding rather than dropping one. Recomputed over the frozen calibration controls,
+one moves 82 → 91 (all nine of its PR-gating full-history jobs walk history)
+and the other holds at 82. The rationale is OD-CS22 in the spec's
+`decision_log`. Committed corpus stamps carry the new `spec_version` and
+nothing else — their facts and scores are unchanged — and the published worked
+example keeps its own frozen `v0.1.3` stamp, since a snapshot records what the
+engine said on the day it ran.
 
 The v1-granular rubric (measured-magnitude gating, tiers, weights,
 nine refusal conditions) was **punted before publication by owner decision

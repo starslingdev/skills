@@ -100,7 +100,7 @@ def test_happy_path_stamps_score_offline(tmp_path):
     stamp = doc["ci_score"]
     assert stamp["refusal"] is None
     assert isinstance(stamp["value"], int) and stamp["grade"]
-    assert stamp["spec_version"] == "ci-score-v0.1.3"
+    assert stamp["spec_version"] == "ci-score-v0.1.4"
     # provenance is the full-repo HEAD, clean tree → bare SHA
     assert doc["commit_sha"] == _git(root, "rev-parse", "HEAD")
     assert doc["scanned_workflows"] == 1

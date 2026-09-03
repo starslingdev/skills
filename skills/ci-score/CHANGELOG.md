@@ -11,6 +11,62 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-09-02** — **Changed**: the CI Score registry is bumped to
+  `ci-score-v0.1.4` (OD-CS22). The two shallow-clone exemptions below move a
+  gate — one frozen calibration control goes from 9/11 to 10/11 on identical
+  workflow YAML — and the rubric's own rule bumps `spec_version` when a gate
+  moves. Check count (11), bands, formula, refusals and scorer arithmetic are
+  unchanged. Committed corpus and synthetic stamps carry the new
+  `spec_version` field and nothing else: no corpus score moves.
+
+- **2026-09-02** — **Fixed**: pull-request relevance was decided at the
+  WORKFLOW level, so a job that can never run on a pull request was still
+  graded as if it gated one. A workflow triggered by `pull_request` can hold a
+  job carrying its own `if:` that is never true for a pull-request event — a
+  heavy job scoped to pushes on a release branch, or to manual dispatch — and
+  no pull request ever waits for it. The shallow-checkout check now skips such
+  a job. The condition parser is deliberately tiny and fails closed: it reads
+  only `github.event_name` compared with a string literal by `==` or `!=`,
+  combined with `&&`, `||` and parentheses, and treats anything else — a
+  variable, a function call, any other context reference, malformed text — as
+  possibly pull-request-reachable, keeping the job on the PR path. A wrong
+  exclusion would silently drop a real finding, so ambiguity always resolves
+  toward keeping the job. The workflow's own trigger list is consulted, so
+  `event_name != 'pull_request'` does not exempt a job on a workflow triggered
+  by `pull_request_target`, where that condition is true.
+
+- **2026-09-02** — **Changed**: the rubric now states two consequences of that
+  rule that it previously left to the reader. A job scoped to the merge queue
+  alone (`github.event_name == 'merge_group'`) is off the pull-request path,
+  because a merge-queue run is not a pull-request event and no pull request
+  waits for it. And a job switched off with a bare literal — `if: false` or
+  `if: ${{ false }}` — is still graded, because the grammar reads no literal;
+  that is a known miss in the fail-closed direction, costing at most a finding
+  that was already being reported, and both behaviours are now pinned by tests
+  so a change to either is deliberate.
+
+- **2026-09-02** — **Fixed**: the shallow-checkout check (`ci.checkout.shallow-clone`)
+  failed a repository for *any* `fetch-depth: 0` on a pull-request-gating
+  workflow, including on jobs where full history is load-bearing — changelog
+  generation, a merge-base or base-SHA diff, `git describe`, changeset
+  versioning. Following that advice breaks the job. The speed-audit skill's
+  equivalent pattern has always carved those jobs out, so the two shipped
+  skills could give one repository contradictory advice about the same line of
+  YAML. The check now applies the identical carve-out, per JOB rather than per
+  workflow: a job that walks git history is not an offender, while another job
+  in the same file that takes full history for nothing still is. The carve-out
+  fails closed — anything that might read history (a local composite action
+  whose file cannot be read, a changeset/release/version job name) is treated
+  as needing it, so the cost of a miss is a lost finding, never a fix that
+  breaks a build. A pass produced by the carve-out now says so in its evidence
+  instead of claiming no workflow checks out full history.
+
+- **2026-09-02** — **Added**: a repo-level parity test pins the git-history
+  carve-out on both sides. The predicate is duplicated rather than imported —
+  each skill must install and run standalone — so the test loads both copies
+  and fails if they ever disagree, on the pattern text or on any input in its
+  battery.
+
 - **Fixed**: registry security scanners attributed the frozen third-party
   control fixtures' workflow files to this repository, because they sat at real
   `.github/workflows/` paths that scanners parse as this repo's live automation.
