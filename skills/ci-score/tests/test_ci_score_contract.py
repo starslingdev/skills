@@ -835,6 +835,129 @@ def test_history_op_split_across_a_line_continuation_still_carves_out(tmp_path):
     assert f["state"] == "pass", f["evidence"]
 
 
+def test_job_that_cannot_run_on_a_pull_request_is_not_graded_on_the_pr_path(tmp_path):
+    """PR relevance was decided at the WORKFLOW level. A workflow can be
+    triggered by pull_request and still hold a job whose own `if:` can never be
+    true for a pull-request event — a heavy job scoped to pushes, or to manual
+    dispatch. No pull request ever waits for that job, so grading the
+    repository's PR path on it is grading a job nobody is blocked by."""
+    wf = ("ci.yml",
+          "on:\n  pull_request:\n  push:\n    branches: [release/*]\n"
+          "jobs:\n  heavy-build:\n    if: github.event_name == 'push'\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n"
+          "  unit:\n    steps:\n      - uses: actions/checkout@v4\n"
+          "      - run: npm test\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "pass", f["evidence"]
+    # and the evidence says why, rather than claiming nothing takes full history
+    assert "no PR-gating workflow checks out full history" not in f["evidence"]
+    assert "cannot run on a pull request" in f["evidence"], f["evidence"]
+
+
+def test_a_job_if_that_negates_the_pull_request_event_is_off_the_pr_path(tmp_path):
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  nightly:\n    if: ${{ github.event_name != 'pull_request' }}\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "pass", f["evidence"]
+
+
+def test_a_disjunction_that_still_admits_a_pull_request_stays_on_the_pr_path(tmp_path):
+    """`push || pull_request` is true for a pull request, so the job gates
+    pull requests and its full-history checkout is still a finding."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  b:\n"
+          "    if: github.event_name == 'push' || github.event_name == 'pull_request'\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
+
+
+@pytest.mark.parametrize("cond", [
+    "needs.changes.outputs.docs == 'true'",
+    "github.event.pull_request.draft == false",
+    "!contains(github.event.pull_request.labels.*.name, 'skip')",
+    "success() && github.event_name == 'push'",
+    "env.RUN_HEAVY == 'true' && github.event_name == 'push'",
+    "github.event_name == matrix.event",
+    "github.ref == 'refs/heads/main'",
+    "github.event_name == 'push' && ",
+    "((github.event_name == 'push'",
+])
+def test_an_if_the_parser_cannot_fully_resolve_keeps_the_job_gating(tmp_path, cond):
+    """Fail CLOSED. A wrong exclusion silently drops a real finding, so a
+    variable, a function call, a context reference or malformed text must all
+    resolve toward keeping the job on the PR path."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  b:\n    if: " + json.dumps(cond) + "\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
+
+
+def test_pull_request_target_gating_is_not_excluded_by_a_pull_request_negation(tmp_path):
+    """`github.event_name != 'pull_request'` is TRUE for a
+    pull_request_target event, so on a workflow triggered that way the job
+    still gates pull requests. Excluding it would drop a real finding."""
+    wf = ("ci.yml",
+          "on:\n  pull_request_target:\n"
+          "jobs:\n  b:\n    if: github.event_name != 'pull_request'\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
+
+
+def test_event_name_comparison_is_case_insensitive(tmp_path):
+    """GitHub Actions does case-insensitive string comparison. A job with
+    `github.event_name == 'Pull_Request'` (capital letters) still matches a
+    pull_request event, so it gates pull requests and must not be excluded."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  b:\n"
+          "    if: github.event_name == 'Pull_Request'\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
+
+
+def test_a_merge_queue_only_job_is_off_the_pull_request_path(tmp_path):
+    """A merge-queue run is not a pull-request event, so a job scoped to
+    `merge_group` alone is not on the PR path and its full-history checkout is
+    not a PR-path finding. This falls out of the event-name rule rather than
+    being written for it, which is exactly why it is pinned: the rubric now
+    documents the behaviour, so a change to it must be deliberate."""
+    wf = ("ci.yml",
+          "on:\n  pull_request:\n  merge_group:\n"
+          "jobs:\n  queue-only:\n    if: github.event_name == 'merge_group'\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "pass", f["evidence"]
+    assert "cannot run on a pull request" in f["evidence"], f["evidence"]
+
+
+@pytest.mark.parametrize("cond", ["false", "${{ false }}"])
+def test_a_job_switched_off_with_a_bare_literal_is_still_graded(tmp_path, cond):
+    """KNOWN LIMITATION, pinned so it stays a decision rather than a surprise.
+    The grammar reads exactly one atom — `github.event_name` against a string
+    literal — and no bare boolean, so `if: false` is unresolvable and the job
+    stays on the PR path. The miss is in the fail-closed direction: it costs at
+    most a finding that was already being reported, never a fix that breaks a
+    build. Widening the grammar to read literals is a deliberate future
+    change, and this cell is what will go red when someone makes it."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  b:\n    if: " + json.dumps(cond) + "\n"
+          "    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
+
+
 def test_pinned_offender_files_rank_third_party_first(tmp_path):
     """The maintainer was pointed at actions/labeler while changesets/action@v1
     held release credentials. Third-party offenders sort first."""

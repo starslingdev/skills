@@ -19,6 +19,32 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   unchanged. Committed corpus and synthetic stamps carry the new
   `spec_version` field and nothing else: no corpus score moves.
 
+- **2026-09-02** — **Fixed**: pull-request relevance was decided at the
+  WORKFLOW level, so a job that can never run on a pull request was still
+  graded as if it gated one. A workflow triggered by `pull_request` can hold a
+  job carrying its own `if:` that is never true for a pull-request event — a
+  heavy job scoped to pushes on a release branch, or to manual dispatch — and
+  no pull request ever waits for it. The shallow-checkout check now skips such
+  a job. The condition parser is deliberately tiny and fails closed: it reads
+  only `github.event_name` compared with a string literal by `==` or `!=`,
+  combined with `&&`, `||` and parentheses, and treats anything else — a
+  variable, a function call, any other context reference, malformed text — as
+  possibly pull-request-reachable, keeping the job on the PR path. A wrong
+  exclusion would silently drop a real finding, so ambiguity always resolves
+  toward keeping the job. The workflow's own trigger list is consulted, so
+  `event_name != 'pull_request'` does not exempt a job on a workflow triggered
+  by `pull_request_target`, where that condition is true.
+
+- **2026-09-02** — **Changed**: the rubric now states two consequences of that
+  rule that it previously left to the reader. A job scoped to the merge queue
+  alone (`github.event_name == 'merge_group'`) is off the pull-request path,
+  because a merge-queue run is not a pull-request event and no pull request
+  waits for it. And a job switched off with a bare literal — `if: false` or
+  `if: ${{ false }}` — is still graded, because the grammar reads no literal;
+  that is a known miss in the fail-closed direction, costing at most a finding
+  that was already being reported, and both behaviours are now pinned by tests
+  so a change to either is deliberate.
+
 - **2026-09-02** — **Fixed**: the shallow-checkout check (`ci.checkout.shallow-clone`)
   failed a repository for *any* `fetch-depth: 0` on a pull-request-gating
   workflow, including on jobs where full history is load-bearing — changelog
