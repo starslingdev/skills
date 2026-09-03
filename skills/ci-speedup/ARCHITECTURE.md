@@ -1991,10 +1991,14 @@ non-PR-gating drop (`_dropped_non_pr`) and **before** `pr_checks_tuple` is sorte
 **`needs:`-reachability** over the workflow job graph.
 
 The graph itself is repo-agnostic: `scan.py`'s `_build_workflow_job_graph` emits
-`workflow_job_graph = {wf_file: {job_id: {name, needs:[job_id], reusable, timeout_minutes}}}`
-straight from the YAML (matrix `${{...}}` placeholders left in `name` for the consumer
-to regex-match; `reusable` flags a job with a `uses:` reusable-workflow call;
-`timeout_minutes` records whether the job declares `timeout-minutes`). `collect_runs`
+`workflow_job_graph = {wf_file: {job_id: {name, needs:[job_id], reusable, matrix,
+timeout_minutes, continue_on_error}}}` straight from the YAML (matrix `${{...}}`
+placeholders left in `name` for the consumer to regex-match; `reusable` flags a job with a
+`uses:` reusable-workflow call; `matrix` flags a `strategy.matrix` job, whose check-run
+names carry an appended `(leg…)`; `timeout_minutes` records whether the job declares
+`timeout-minutes`; `continue_on_error` records a LITERAL job-level `continue-on-error:
+true`, read through a loader that resolves booleans GitHub's way rather than PyYAML's, so
+`continue-on-error: yes` — a string to GitHub — is not reported as advisory). `collect_runs`
 consumes it:
 
 - **`_required_reachable_checks(candidates, req_names, job_graph, crit_by_wf)`** — returns

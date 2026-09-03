@@ -7374,3 +7374,175 @@ def test_aggregation_gate_cross_job_pick_ranks_by_header_not_p50():
     # RED against a bare-p50 cross-job comparison: it named `build` at its 9m 10s p50.
     assert "`build`" not in sec, sec
     assert "9m 10s" not in sec, sec
+
+
+# ── Advisory long poles (`continue-on-error: true` on the pole's job) ──────────────────
+# A job declared `continue-on-error: true` cannot fail its workflow RUN. The engine can
+# crown such a job as the long pole and as the dominant runner-minute spend without ever
+# reading that declaration, which leaves the reader with a materially incomplete picture of
+# what the job's failure does. The pole section must state the fact, and must state it at
+# exactly the strength GitHub documents: `jobs.<job_id>.continue-on-error` "prevents a
+# workflow run from failing when a job fails" and says nothing about the job's own check-run
+# conclusion, so the report must NOT claim the job can never block a merge.
+
+_ADV_WF = ".github/workflows/ci.yml"
+
+
+def _advisory_pole_doc(continue_on_error: bool) -> dict:
+    node = {"name": "e2e", "needs": []}
+    if continue_on_error:
+        node["continue_on_error"] = True
+    return {
+        "repo": "acme/site", "repo_visibility": "public",
+        "scanned_at": "2026-09-02T00:00:00Z", "commit_sha": "09e8243",
+        "skill_commit_sha": "dd51d85", "findings": [],
+        "data_sources": {"runs_sampled": 20, "jobs_sampled": 40, "workflows_analyzed": 1},
+        "workflow_job_graph": {_ADV_WF: {
+            "e2e": node,
+            "lint": {"name": "lint", "needs": []},
+        }},
+        "pr_critical_path": {
+            "sampled_pr_count": 20, "sample_target": 20, "sample_complete": True,
+            "check_present_n_pr": 20, "critical_path_check": "e2e",
+            "poles": [
+                {"check": "e2e", "p50_s": 900.0, "workflow_file": _ADV_WF, "job": "e2e",
+                 "dominant_step": "Run tests", "dominant_p50_s": 800.0,
+                 "steps": [{"step": "Checkout", "category": "setup", "p50_s": 20.0},
+                           {"step": "Run tests", "category": "test", "p50_s": 800.0}]},
+                {"check": "lint", "p50_s": 60.0, "workflow_file": _ADV_WF, "job": "lint",
+                 "dominant_step": "Run eslint", "dominant_p50_s": 40.0,
+                 "steps": [{"step": "Run eslint", "category": "lint", "p50_s": 40.0}]},
+            ],
+            "checks": [
+                {"name": "e2e", "p50_s": 900.0, "present_on": 20, "workflow_file": _ADV_WF},
+                {"name": "lint", "p50_s": 60.0, "present_on": 20, "workflow_file": _ADV_WF},
+            ],
+            "populations": [],
+        },
+    }
+
+
+def test_advisory_long_pole_reports_its_continue_on_error_declaration():
+    md = bp.render(_advisory_pole_doc(True), {}, {}, {}, "2026-09-02T00:00:00Z", {})
+    sec = _pole_section(md, "e2e")
+    assert "`continue-on-error: true`" in sec, sec
+    assert "does not fail the workflow run" in sec, sec
+
+
+def test_advisory_long_pole_does_not_overclaim_what_continue_on_error_does():
+    # The documented semantics are run-scoped only. The job still reports its own check-run
+    # conclusion, so a required-status-check rule naming it can still block a merge - the
+    # report must say so rather than declaring the job harmless.
+    md = bp.render(_advisory_pole_doc(True), {}, {}, {}, "2026-09-02T00:00:00Z", {})
+    sec = _pole_section(md, "e2e")
+    assert "can still block a merge" in sec, sec
+    for overclaim in ("never fail the build", "cannot fail the build", "gates nothing",
+                      "never block a merge", "blocks nothing", "nothing waits on it"):
+        assert overclaim not in sec, f"over-claimed: {overclaim!r}"
+    # And it must not tell the reader to move or skip the job (the no-weakening rail).
+    for banned in ("move it off", "off the PR path", "skip it", "stop running it"):
+        assert banned not in sec, f"weakening advice: {banned!r}"
+
+
+def test_pole_without_the_declaration_renders_byte_identically():
+    # Fact-only, and only when the scanned graph literally says so. Two poles must be
+    # untouched: the same job with no `continue-on-error`, and a sibling pole in the same
+    # workflow whose own job carries none. (Scoped to the advisory sentence, not the bare
+    # word: the no-weakening rail's prompt copy names `continue-on-error` on every pole.)
+    advisory = "does not fail the workflow run"
+    plain = _pole_section(
+        bp.render(_advisory_pole_doc(False), {}, {}, {}, "2026-09-02T00:00:00Z", {}), "e2e")
+    assert advisory not in plain, plain
+    md = bp.render(_advisory_pole_doc(True), {}, {}, {}, "2026-09-02T00:00:00Z", {})
+    assert advisory not in _pole_section(md, "lint")
+    # The advisory pole's section is otherwise byte-identical to the un-annotated one:
+    # the change adds a fact, it does not re-frame anything. The fact renders in TWO places
+    # (the prose disclosure under the role line, and the bullet inside the copy-paste agent
+    # prompt), and only the prose one carries a blank separator line, so the comparison drops
+    # the advisory lines and then collapses blank runs - applied to BOTH sides, so any real
+    # re-framing still shows up as a difference.
+    def _without_advisory(text: str) -> str:
+        kept: list[str] = []
+        for line in text.splitlines():
+            if advisory in line:
+                continue
+            if line == "" and kept and kept[-1] == "":
+                continue
+            kept.append(line)
+        return "\n".join(kept)
+
+    annotated = _pole_section(md, "e2e")
+    assert _without_advisory(annotated) == _without_advisory(plain)
+
+
+# ── Job-selection collision regression ──────────────────────────────────────
+# When a pole's job field equals a DIFFERENT job's YAML ID but the pole's check
+# matches a DIFFERENT job's display name, the correct job (the one that produces
+# the check) must be resolved. Direct YAML ID lookup without validation caused
+# false matches. The fix validates the YAML-ID match produces the check before
+# returning it.
+
+def test_pole_job_node_resolves_correct_job_when_display_name_collides_with_yaml_id():
+    """Regression: job-selection collision when pole's job field is ambiguous.
+    
+    Scenario:
+      - Job A: YAML ID "build", display name "build-python", no continue-on-error
+      - Job B: YAML ID "lint", display name "build", continue-on-error: true
+      - Pole: job="build" (ambiguous: YAML ID of A or display name of B)
+              check="build" (check-run name produced by B, not A)
+    
+    Bug: direct YAML ID lookup returns job A without validating it produces check.
+    Result: advisory `continue-on-error` flag read from wrong job (A instead of B).
+    
+    Fix: validates YAML-ID match produces the check before returning; falls back
+    to check-name matching if not.
+    
+    Assertion: resolved job must be B (continue-on-error: true), not A (false).
+    """
+    job_graph = {
+        ".github/workflows/ci.yml": {
+            "build": {
+                "name": "build-python",
+                "needs": [],
+                "continue_on_error": False,
+            },
+            "lint": {
+                "name": "build",  # collision: display name == job A's YAML ID
+                "needs": [],
+                "continue_on_error": True,
+            },
+        }
+    }
+    pole = {
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "build",  # ambiguous
+        "check": "build",  # produced by job B, not A
+    }
+    node = bp._pole_job_node(pole, job_graph)
+    # Must resolve to job B (lint), not A (build).
+    assert node is not None, "Should resolve to exactly one job"
+    assert node.get("continue_on_error") is True, (
+        "Resolved to wrong job: got continue_on_error={}, expected True. "
+        "Unfixed code returns job A (YAML ID match) instead of validating it "
+        "produces the check and falling back to job B (check-name match)."
+        .format(node.get("continue_on_error"))
+    )
+
+
+def test_advisory_long_pole_tells_the_coding_agent_the_job_is_advisory():
+    """The copy-paste prompt is handed to an agent alone, so the disclosure has to be IN it.
+
+    The report states the advisory declaration under the pole's role line, but the prompt
+    block is designed to be pasted on its own - "self-contained: pasted alone it gives the
+    agent the gate". An agent that only ever sees the prompt would size and change the
+    slowest job on the pull-request path without knowing the workflow run passes whether or
+    not that job succeeded, which is exactly the context the disclosure exists to supply."""
+    md = bp.render(_advisory_pole_doc(True), {}, {}, {}, "2026-09-02T00:00:00Z", {})
+    prompt = _pole_section(md, "e2e").split("#### 🤖 Prompt for your coding agent", 1)
+    assert len(prompt) == 2, "no agent prompt rendered for the advisory pole"
+    assert "continue-on-error: true" in prompt[1], prompt[1]
+    # A pole whose job declares nothing keeps a prompt with no such line.
+    plain = _pole_section(
+        bp.render(_advisory_pole_doc(False), {}, {}, {}, "2026-09-02T00:00:00Z", {}), "e2e")
+    assert "continue-on-error: true" not in plain.split(
+        "#### 🤖 Prompt for your coding agent", 1)[1]

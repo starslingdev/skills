@@ -823,6 +823,88 @@ def _agg_job_produces_check(job_name: str, is_matrix: bool, check: str) -> bool:
     return False
 
 
+def _pole_job_node(pole: dict[str, Any],
+                   job_graph: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The scanned job-graph node for `pole`'s job, or None when the pole's identity does not
+    resolve to exactly ONE job in its own workflow.
+
+    The pole's `job` is usually the YAML key, but it may be a DISPLAY name or absent, so fall
+    back to matching the check-run name against each job's name template (the same resolution
+    `_agg_gate_shape` uses). An ambiguous or unresolvable identity yields None: a fact stated
+    about the wrong job is worse than no fact.
+
+    WHAT THIS DELIBERATELY DOES NOT COVER. Requiring the YAML-ID hit to also produce the
+    check narrows what resolves. A pole whose check-run name is produced by a REUSABLE-WORKFLOW
+    caller (`<caller> / <child>`) does not match the caller job's own name template, and neither
+    does a pole whose check name simply differs from its job name. Both now resolve to None and
+    get no advisory disclosure at all. That is the intended direction - the alternative is
+    attaching the fact to whichever job the id happened to hit - but it means an advisory
+    reusable caller is silently NOT disclosed, and closing that gap means resolving the caller
+    from the `<caller> / <child>` shape, which this does not attempt."""
+    jobs = _as_dict(_as_dict(job_graph).get(str(pole.get("workflow_file") or "")))
+    if not jobs:
+        return None
+    jid = str(pole.get("job") or "")
+    check = str(pole.get("check") or "")
+    # Try direct YAML ID lookup, but validate the job produces the check before returning.
+    # If the pole's job field equals a YAML ID, that usually means YAML ID, but it may be
+    # the display name of a DIFFERENT job (e.g. one job's display name equals another
+    # job's YAML ID). Only return the YAML-ID match if it produces the check.
+    if jid in jobs:
+        job_node = _as_dict(jobs[jid])
+        if _agg_job_produces_check(str(job_node.get("name") or jid),
+                                   bool(job_node.get("matrix")), check):
+            return job_node
+    # Fall back to check-name matching.
+    cands = [_as_dict(m) for k, m in jobs.items()
+             if _agg_job_produces_check(str(_as_dict(m).get("name") or k),
+                                        bool(_as_dict(m).get("matrix")), check)]
+    return cands[0] if len(cands) == 1 else None
+
+
+def _advisory_job_line(pole: dict[str, Any],
+                       job_graph: dict[str, Any] | None) -> str:
+    """The advisory-job disclosure for `pole`, or "" when its job declares no literal
+    job-level `continue-on-error: true`.
+
+    WHY IT EXISTS. The engine ranks poles by measured wall-clock and runner minutes, which is
+    blind to what a job's failure DOES. A job the report crowns as the check a PR waits on
+    longest, or as the dominant share of the runner-minute bill, reads very differently once
+    the reader knows the workflow run passes whether or not it succeeded. That is a fact about
+    the job, and the reader needs it to decide what the measurement is worth.
+
+    WHY IT IS WORDED THIS NARROWLY. GitHub documents `jobs.<job_id>.continue-on-error` as
+    "Prevents a workflow run from failing when a job fails" - run-scoped, and silent on the
+    job's own check run. The job still reports its own conclusion, so a branch protection rule
+    or ruleset that requires that specific check can still block a merge. Saying the job "can
+    never fail the build" or "gates nothing" would therefore be false, and this line does not
+    say it.
+
+    IT DOES NOT AGREE WITH THE SECURITY ENGINE, AND THAT IS NOT A HEDGE. The security engine
+    reads this same job-level declaration on a verification job and says the arrangement
+    "leaves the merge gate green whatever the tests did". This line says a rule requiring that
+    check can still block a merge. On one job both cannot hold, and THIS one is the correct
+    reading: the job's own check run still reports its conclusion, so a branch rule requiring
+    that check still blocks. The security engine's JOB-LEVEL arm is wrong on that point - a
+    pre-existing defect there, out of scope here and worth its own change. An earlier draft of
+    this docstring claimed the two readings "stand together" at different strengths; they do
+    not, and that claim is withdrawn.
+
+    WHY IT RECOMMENDS NOTHING. The no-weakening rail below forbids buying speed by verifying
+    less, and its carve-out is scoped to a check the change cannot fail on - which an advisory
+    job whose tests do cover the change is not. So this discloses; it does not advise moving,
+    skipping, or dropping the job."""
+    node = _pole_job_node(pole, job_graph)
+    if not node or node.get("continue_on_error") is not True:
+        return ""
+    return ("> **Declared advisory: this job sets `continue-on-error: true`.** Its failure "
+            "does not fail the workflow run, so the run can pass on a PR where this job "
+            "failed. That is run-scoped only: the job still reports its own check-run "
+            "conclusion, so a branch protection rule or ruleset requiring this specific check "
+            "can still block a merge, and this report does not read those rules. The timings "
+            "below are measured the same either way.")
+
+
 def _agg_gate_shape(pole: dict[str, Any], job_graph: dict[str, Any] | None,
                     checks: list[dict[str, Any]],
                     timeline: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -2802,6 +2884,24 @@ def _pole_gate_prompt_claim(check: str, wf: str, dur: str, gate_count: int, npop
     return cs.add(_claim) if cs is not None else _claim.rendered
 
 
+def _advisory_prompt_lines(pole: dict[str, Any]) -> list[str]:
+    """The advisory-job bullet for the agent prompt's THE GATE section, or `[]`.
+
+    The prompt is built to be pasted on its own, so a fact the reader gets from the report
+    body reaches the agent only if it is repeated in here. Stamped onto the pole by the
+    renderer (`_advisory_declared`) rather than re-derived, so the bullet and the report's
+    own disclosure can never disagree about which poles are advisory. Same strength as that
+    disclosure, and the same absence of advice: it does not tell the agent the job may be
+    moved, skipped or dropped - the no-weakening rail further down the prompt still governs."""
+    if not pole.get("_advisory_declared"):
+        return []
+    return ["- Declared advisory: this job sets `continue-on-error: true`, so its failure "
+            "does not fail the workflow run. The job still reports its own check-run "
+            "conclusion, so a branch rule requiring this specific check can still block a "
+            "merge; this report does not read those rules. The timings are measured the "
+            "same either way, and this is context, not permission to verify less."]
+
+
 def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
                         candidates: list[dict[str, Any]], run_url: str | None,
                         repo: str, sha: str | None, gate_count: int,
@@ -2847,6 +2947,7 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
            "THE GATE",
            f"- Workflow `{wf}`, job `{check}`.",
            f"- {gate}",
+           *_advisory_prompt_lines(pole),
            ""]
 
     _bi = pole.get("bimodal")
@@ -2961,6 +3062,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             "THE GATE",
             f"- Workflow `{wf}`, check `{check}`.",
             f"- {gate}",
+            *_advisory_prompt_lines(pole),
             "",
             "WHAT IS MISSING",
             f"- {reason}" if reason else (
@@ -3000,6 +3102,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
            "THE GATE",
            f"- Workflow `{wf}`, job `{check}`.",
            f"- {gate}",
+           *_advisory_prompt_lines(pole),
            ""]
     wtg = ["WHERE THE TIME GOES" + (f" (representative run {rid})" if rid else "")]
     pole_dom = str(pole.get("dominant_step") or "")
@@ -3145,7 +3248,7 @@ def _strip_rail_echo(body: str) -> str:
     return "\n".join(kept).rstrip("\n")
 
 
-def _llm_agent_prompt(body: str) -> str:
+def _llm_agent_prompt(body: str, pole: dict[str, Any] | None = None) -> str:
     """Wrap an LLM-authored, log-tailored agent prompt (from the analysis JSON) in the
     same copy-paste block matched/generic prompts use, **prepending the standard
     no-prescription disclaimer** so a gap-fill pole hands off on the same no-prescription
@@ -3164,6 +3267,14 @@ def _llm_agent_prompt(body: str) -> str:
         # follows — so a locator word here would point at the wrong thing.
         body = ("ci-speedup read the captured job log but does NOT prescribe the "
                 "fix - investigate it in the repo and apply a safe change.\n\n" + body)
+    # The advisory declaration is the renderer's to state here for the same reason the
+    # disclaimer is: this body is LLM-authored, so a fact the agent must not be missing is
+    # added by the renderer rather than left to the author. It leads, because it qualifies
+    # what the rest of the prompt is worth. Prepended only when it is not already present,
+    # so a body that quoted the report's own sentence is not doubled.
+    _adv = _advisory_prompt_lines(_as_dict(pole))
+    if _adv and "continue-on-error: true" not in body:
+        body = _adv[0].lstrip("- ") + "\n\n" + body
     # The no-weakening rail is the renderer's too, for the same reason the disclaimer
     # is: the gap-fill body is LLM-authored, so the one rule the hand-off cannot afford
     # to have paraphrased away is appended here, not left to the author. The canonical
@@ -8885,6 +8996,17 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out.append("")
         out.append(f"_{role}_" if not role.startswith("**") else role)
         out.append("")
+        # Advisory-job disclosure. Sits directly under the role line, because it qualifies
+        # what this pole's ranking MEANS before any drill, prompt or saving is read. Plain
+        # prose, not a `Claim`: it asserts no framing-vocabulary phrase and no derived
+        # quantity - it restates one scanned YAML fact - so it has no comparator to bind.
+        _adv = _advisory_job_line(p, doc.get("workflow_job_graph"))
+        if _adv:
+            out += [_adv, ""]
+        # Stamped so the copy-paste agent prompt below can repeat the fact without
+        # re-resolving the pole's job: one resolution, one answer, no way for the prose and
+        # the prompt to disagree about whether this pole is advisory.
+        p["_advisory_declared"] = bool(_adv)
         # Machine marker: which log-detector leaf crowned this pole's MEASURED CAUSE. Emitted
         # only for a leaf that survived off-category demotion, so verify_report re-derives the
         # crowned leaf's category and asserts it agrees with the pole's dominant_category.
@@ -9050,7 +9172,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # Prompt: an LLM-authored, log-tailored one when the gap was filled; otherwise
         # the matched-cause prompt, or the generic dominant-step prompt.
         if analysis and str(analysis.get("prompt", "")).strip():
-            out += [_llm_agent_prompt(analysis["prompt"]), ""]
+            out += [_llm_agent_prompt(analysis["prompt"], p), ""]
         else:
             out += [_build_agent_prompt(
                 leaf, p, floor_pool, run_url, repo, doc.get("commit_sha"),

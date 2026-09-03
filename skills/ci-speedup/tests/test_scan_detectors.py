@@ -2883,8 +2883,8 @@ jobs: {}
     graph = _scan(tmp_path).get("workflow_job_graph", {})
     ci = graph.get(".github/workflows/ci.yml")
     assert ci is not None
-    assert ci["changes"] == {"name": "changes", "needs": [], "reusable": False, "matrix": False, "timeout_minutes": False}  # missing needs -> []; no name -> job id; no strategy.matrix
-    assert ci["build"] == {"name": "Build", "needs": ["changes"], "reusable": False, "matrix": False, "timeout_minutes": True}  # bare string normalized
+    assert ci["changes"] == {"name": "changes", "needs": [], "reusable": False, "matrix": False, "timeout_minutes": False, "continue_on_error": False}  # missing needs -> []; no name -> job id; no strategy.matrix
+    assert ci["build"] == {"name": "Build", "needs": ["changes"], "reusable": False, "matrix": False, "timeout_minutes": True, "continue_on_error": False}  # bare string normalized
     assert ci["test"]["needs"] == ["changes", "build"]                                    # list preserved
     assert ci["test"]["name"] == "UNIT Test (Shard ${{ matrix.shard }})"                  # matrix placeholder kept intact
     assert ci["test"]["matrix"] is True                                                   # strategy.matrix -> matrix flag
@@ -3659,6 +3659,114 @@ jobs:
     assert "install" not in hits[0]["evidence_snippet"]
 
 
+def test_workflow_job_graph_records_literal_continue_on_error(tmp_path: Path):
+    """A job declared `continue-on-error: true` cannot fail its workflow RUN, which is a
+    material fact about a job the report may crown as the long pole. The graph carries it so
+    the renderer never has to re-read YAML. Only a LITERAL true counts: an expression such as
+    `${{ matrix.experimental }}` is true on some matrix legs and false on others, and the YAML
+    cannot say which, so it is not judged. GitHub also accepts the quoted string form."""
+    wf = """name: CI
+on:
+  pull_request:
+jobs:
+  advisory:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - run: echo advisory
+  quoted:
+    runs-on: ubuntu-latest
+    continue-on-error: "TRUE"
+    steps:
+      - run: echo quoted
+  expression:
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      matrix:
+        experimental: [true, false]
+    steps:
+      - run: echo maybe
+  explicit_false:
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - run: echo blocking
+  step_level_only:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo upload
+        continue-on-error: true
+  plain:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo plain
+"""
+    _write_workflow(tmp_path, "ci.yml", wf)
+    jobs = _scan(tmp_path)["workflow_job_graph"][".github/workflows/ci.yml"]
+    assert jobs["advisory"]["continue_on_error"] is True
+    assert jobs["quoted"]["continue_on_error"] is True
+    # An expression, an explicit false, a STEP-level declaration (which is job-scoped, not
+    # run-scoped, and so proves nothing about the job) and a plain job all read as False.
+    for jid in ("expression", "explicit_false", "step_level_only", "plain"):
+        assert jobs[jid]["continue_on_error"] is False, jid
+
+
+def test_workflow_job_graph_rejects_yaml_1_1_boolean_words(tmp_path: Path):
+    """`continue-on-error: yes` is NOT an advisory job on GitHub, and the report must not
+    say it is.
+
+    GitHub Actions reads booleans the YAML 1.2 way: `true` / `false` (and their capitalised
+    spellings) and nothing else. PyYAML reads YAML 1.1, where `yes`, `on`, `y`, `no`, `off`
+    and `n` are ALSO booleans. So a workflow that says `continue-on-error: yes` arrives here
+    as Python `True` while GitHub reads it as the plain string "yes" and the job keeps
+    failing its run exactly as before. Trusting the parsed value would put a false
+    "declared advisory" sentence on the slowest check in the report.
+
+    The truthy words are the whole point of the test; `off`/`no` are here so the fix cannot
+    pass by reading every word as advisory instead."""
+    wf = """name: CI
+on:
+  pull_request:
+jobs:
+  word_yes:
+    runs-on: ubuntu-latest
+    continue-on-error: yes
+    steps:
+      - run: echo yes
+  word_on:
+    runs-on: ubuntu-latest
+    continue-on-error: on
+    steps:
+      - run: echo on
+  word_y:
+    runs-on: ubuntu-latest
+    continue-on-error: y
+    steps:
+      - run: echo y
+  word_off:
+    runs-on: ubuntu-latest
+    continue-on-error: off
+    steps:
+      - run: echo off
+  word_no:
+    runs-on: ubuntu-latest
+    continue-on-error: no
+    steps:
+      - run: echo no
+  really_advisory:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - run: echo advisory
+"""
+    _write_workflow(tmp_path, "ci.yml", wf)
+    jobs = _scan(tmp_path)["workflow_job_graph"][".github/workflows/ci.yml"]
+    for jid in ("word_yes", "word_on", "word_y", "word_off", "word_no"):
+        assert jobs[jid]["continue_on_error"] is False, jid
+    # The literal GitHub does accept still reads as advisory: the fix narrows the
+    # detection, it does not switch it off.
+    assert jobs["really_advisory"]["continue_on_error"] is True
 def test_opt28_multiple_checkouts_each_reported_on_own_line(tmp_path: Path):
     """Regression: when a job has multiple checkouts with fetch-depth: 0,
     each must be reported on its OWN line. The first has a justifying comment

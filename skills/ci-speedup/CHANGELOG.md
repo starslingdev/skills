@@ -13,6 +13,26 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-09-02** — **A long pole whose job is declared advisory now says so.**
+  Nothing in the engine read a job's `continue-on-error` setting, so a job could
+  be reported as the slowest check on the pull-request path, and as the dominant
+  share of the runner-minute bill, without the report ever mentioning that the
+  workflow run passes whether or not that job succeeded — a materially different
+  thing for a reader deciding what the measurement is worth. The scan now records
+  a literal job-level `continue-on-error: true` (an expression such as
+  `${{ matrix.experimental }}` is true on some matrix legs and false on others, so
+  it is not judged; a step-level declaration is job-scoped and proves nothing about
+  the job), and each long-pole section states the fact under its role line. The
+  wording stays at the strength GitHub documents for
+  `jobs.<job_id>.continue-on-error` — it prevents the workflow *run* from failing —
+  and says plainly that the job still reports its own check-run conclusion, so a
+  branch protection rule requiring that check can still block a merge. No
+  recommendation is attached: the report discloses the declaration and does not
+  suggest moving, skipping, or dropping the job. The copy-paste prompt for a
+  coding agent carries the same fact, because that block is designed to be pasted
+  on its own and an agent that only sees the prompt would otherwise change the
+  slowest job on the pull-request path without knowing what its failure does.
+
 - **2026-08-20** — **The shipped pattern-count breakdown is now guarded, not
   just the total.** `SKILL.md` and `ARCHITECTURE.md` state the catalog size and
   then break it down into hygiene plus structural patterns. The existing guard
@@ -245,6 +265,14 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-09-02** — **`continue-on-error: yes` is no longer reported as an
+  advisory job.** GitHub Actions reads only `true` and `false` as booleans; the
+  YAML library this scan uses also reads `yes`, `on` and `y` that way. A workflow
+  written with those words would therefore have been declared advisory in the
+  report while GitHub keeps failing the run on that job exactly as before — a
+  false statement about the slowest check in the repository. The one keyword the
+  report speaks about is now re-read with GitHub's boolean spellings, so only what
+  GitHub honours counts.
 - **2026-09-02** — **A job that changed runners part-way through the sampling
   window no longer gets drilled on the runner it left behind.** The report
   measures such a job's typical time on the runner it runs on *most*, but picked
