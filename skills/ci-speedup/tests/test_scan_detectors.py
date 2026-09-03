@@ -1007,6 +1007,88 @@ jobs:
     assert "OPT28" not in _scan_one(tmp_path, neg, name="regenerate.yml")
 
 
+def test_opt28_suppressed_on_backslash_continued_history_command(tmp_path: Path):
+    """A `run:` block that continues a git command onto the next line with a
+    trailing backslash is ONE shell command. The merge-base diff below needs
+    full history, so `fetch-depth: 0` is load-bearing — OPT28 must not
+    recommend shallowing the job just because the operand sits on line two."""
+    neg = """name: prebuild
+on: pull_request
+jobs:
+  affected-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          git diff --name-only \\
+            "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \\
+            > /tmp/changed-files.txt
+"""
+    assert "OPT28" not in _scan_one(tmp_path, neg, name="prebuild.yml")
+
+
+def test_opt28_suppressed_on_diff_against_a_variable_base_ref(tmp_path: Path):
+    """A `git diff` whose base operand is a shell variable is still a diff
+    against a base commit — a shallow clone does not contain it — so
+    `fetch-depth: 0` is load-bearing and OPT28 must stay silent."""
+    neg = """name: CI
+on: pull_request
+jobs:
+  changed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          base=$(cat base.txt)
+          git diff --no-renames --name-only "$base" HEAD
+"""
+    assert "OPT28" not in _scan_one(tmp_path, neg, name="changed.yml")
+
+
+def test_opt28_suppressed_on_cat_file_reachability_probe(tmp_path: Path):
+    """`git cat-file -e <sha>^{commit}` probes whether an object is present in
+    the clone — it only succeeds with the history fetched, so the job needs
+    `fetch-depth: 0` and OPT28 must not flag it."""
+    neg = """name: CI
+on: pull_request
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          git cat-file -e "${base}^{commit}"
+"""
+    assert "OPT28" not in _scan_one(tmp_path, neg, name="probe.yml")
+
+
+def test_opt28_suppressed_on_positional_parameter_base_ref(tmp_path: Path):
+    """A `git diff` whose base operand is a positional parameter like `$1` is
+    still a diff against a base commit that must be in the history — a shallow
+    clone does not contain it — so `fetch-depth: 0` is load-bearing and OPT28
+    must not recommend shallowing."""
+    neg = """name: CI
+on: pull_request
+jobs:
+  changed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          git diff --name-only "$1" HEAD
+"""
+    assert "OPT28" not in _scan_one(tmp_path, neg, name="changed.yml")
+
+
 def test_opt28_line_points_at_the_flagged_job_not_the_first_match(tmp_path: Path):
     """A per-job OPT28 hit must record ITS OWN `fetch-depth: 0` line, not the
     file-global first match. prebuild.yml has depth:0 in the `changes` job (two-SHA
@@ -1186,6 +1268,67 @@ jobs:
       - run: pnpm test
 """
     assert "OPT28" in _scan_one(tmp_path, pos)
+
+
+def _opt28_workflow(job: str, run_body: str) -> str:
+    indented = "\n".join("          " + ln for ln in run_body.strip("\n").split("\n"))
+    return f"""name: CI
+on: pull_request
+jobs:
+  {job}:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+{indented}
+"""
+
+
+def test_opt28_fires_when_diff_output_is_redirected_to_a_variable_path(tmp_path: Path):
+    """`git diff --stat >> $GITHUB_STEP_SUMMARY` writes a diff of the working
+    tree into a file whose path is a variable. A redirection target is never a
+    ref, so nothing here reads history and OPT28 must still fire."""
+    wf = _opt28_workflow("summary", 'git diff --stat >> $GITHUB_STEP_SUMMARY')
+    assert "OPT28" in _scan_one(tmp_path, wf, name="summary.yml")
+
+
+def test_opt28_fires_when_diff_output_is_redirected_with_single_arrow(tmp_path: Path):
+    """Same shape with `>` instead of `>>`: the variable is the file being
+    written, not a base ref, so the checkout is still unjustified."""
+    wf = _opt28_workflow("out", 'git diff > $OUT')
+    assert "OPT28" in _scan_one(tmp_path, wf, name="out.yml")
+
+
+def test_opt28_fires_when_variable_after_dash_dash_is_a_pathspec(tmp_path: Path):
+    """After a bare `--` separator every operand is a pathspec, never a ref.
+    `git diff --exit-code -- "$FILE"` compares the working tree against the
+    index for one path and needs no history, so OPT28 must fire."""
+    wf = _opt28_workflow("dirty", 'git diff --exit-code -- "$FILE"')
+    assert "OPT28" in _scan_one(tmp_path, wf, name="dirty.yml")
+
+
+def test_opt28_fires_when_cat_file_reads_a_blob_at_head(tmp_path: Path):
+    """`git cat-file -p HEAD:package.json` reads a blob at the checked-out
+    commit. That object is present at any clone depth, so this is not a
+    history read and OPT28 must fire."""
+    wf = _opt28_workflow("read", 'git cat-file -p HEAD:package.json > pkg.json')
+    assert "OPT28" in _scan_one(tmp_path, wf, name="read.yml")
+
+
+def test_opt28_fires_on_working_tree_git_commands(tmp_path: Path):
+    """`git diff --cached`, `git diff --quiet`, `git status` and `git add` all
+    read the index or the working tree only — none of them reaches back into
+    history, so a `fetch-depth: 0` alongside them stays unjustified."""
+    for job, cmd in (
+        ("cached", "git diff --cached --name-only"),
+        ("quiet", "git diff --quiet"),
+        ("status", "git status --porcelain"),
+        ("add", "git add -A"),
+    ):
+        wf = _opt28_workflow(job, cmd)
+        assert "OPT28" in _scan_one(tmp_path / job, wf, name=f"{job}.yml"), cmd
 
 
 def test_opt35_suppressed_on_diagnostic_matrix(tmp_path: Path):
