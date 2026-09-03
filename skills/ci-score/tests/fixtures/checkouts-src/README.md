@@ -28,7 +28,7 @@ re-run the relocation so the manifest is regenerated from the new bytes.
 
 | fixture | source repo | upstream SHA (2026-07-27) | expected |
 |---|---|---|---|
-| mastra/ | mastra-ai/mastra (Apache-2.0) | 5718a229281dcfd36bcd1f42a242e3717e510a33 | 82 (B+) |
+| mastra/ | mastra-ai/mastra (Apache-2.0) | 5718a229281dcfd36bcd1f42a242e3717e510a33 | 91 (A) |
 | better-auth/ | better-auth/better-auth (MIT) | e2c73fbec87f5e19f6a2b5ac371bc5bba9bd49ff | 82 (B+) |
 
 Both grades are the v0.1.2 calibration rows (OD-CS18 removed

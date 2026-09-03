@@ -249,6 +249,56 @@ def _line_of_in_job(raw: str, job_name: str, needle: str) -> int:
     return 0
 
 
+def _line_of_nth_in_job(raw: str, job_name: str, needle: str, occurrence: int) -> int:
+    """1-based line of the Nth occurrence of `needle` within the `job_name:` block.
+    Used when multiple steps in a job contain the same needle (e.g., multiple
+    `fetch-depth: 0` lines). occurrence is 1-based. Returns 0 if not enough
+    occurrences are found."""
+    lines = raw.splitlines()
+    jobs_at = next(
+        (i for i, ln in enumerate(lines) if re.match(r"^jobs:\s*(#.*)?$", ln)), None)
+    if jobs_at is None:
+        return 0
+    indent = None
+    for i in range(jobs_at + 1, len(lines)):
+        ln = lines[i]
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        m = re.match(r"^(\s+)\S", ln)
+        indent = len(m.group(1)) if m else None
+        break
+    if not indent:
+        return 0
+    header = re.compile(rf"^\s{{{indent}}}([A-Za-z0-9_.-]+):\s*(#.*)?$")
+    start = None
+    for i in range(jobs_at + 1, len(lines)):
+        m = header.match(lines[i])
+        if m and m.group(1) == job_name:
+            start = i
+            break
+    if start is None:
+        return 0
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if header.match(lines[j]):
+            end = j
+            break
+    count = 0
+    for k in range(start, end):
+        # A comment that quotes the needle ("TODO: drop fetch-depth: 0") is
+        # prose, not a configuration key. Counting it shifts every later
+        # occurrence's line by one and leaves the LAST one unreachable — the
+        # caller then loses that finding entirely. Full-line comments only:
+        # a trailing comment sits on a real key line, which does count.
+        if lines[k].lstrip().startswith("#"):
+            continue
+        if needle in lines[k]:
+            count += 1
+            if count == occurrence:
+                return k + 1
+    return 0  # Not enough occurrences
+
+
 def _jobs_from_doc(doc: dict) -> dict[str, dict]:
     jobs = doc.get("jobs") or {}
     return jobs if isinstance(jobs, dict) else {}
@@ -275,6 +325,31 @@ _GIT_HISTORY_RE = re.compile(
     # full history just like a `...` merge-base diff — but it has neither `...`
     # nor `origin/`. Match a `git diff` line that references a `.sha` expression.
     r"git\s+diff\b[^\n|]*\.sha\b|"
+    # Diff against a base ref held in a shell variable: `git diff --name-only
+    # "$base" HEAD` or as a positional parameter like `git diff "$1" HEAD`. The
+    # base commit is just as absent from a shallow clone as a literal
+    # `<sha>...HEAD` is — it simply carries no `...`, no `origin/` and no
+    # `.sha` for the clauses above to see.
+    #
+    # The variable only counts where a REF operand can stand. Two positions on
+    # the command line can never hold a ref, and a `$` reached through either
+    # one says nothing about history:
+    #   * past a redirection arrow — `git diff --stat >> $GITHUB_STEP_SUMMARY`
+    #     and `git diff > $OUT` name the FILE the diff is written to;
+    #   * past a bare `--` separator — everything after it is a pathspec, so
+    #     `git diff --exit-code -- "$FILE"` names a path, not a base commit.
+    # Option flags such as `--name-only` are not the separator (no trailing
+    # space), so `git diff --no-renames --name-only "$base" HEAD` still counts.
+    r"git\s+diff\b(?:(?!\s--\s|>)[^\n|])*\$[({]?[A-Za-z_0-9]|"
+    # Object-reachability probe: `git cat-file -e "${base}^{commit}"` succeeds
+    # only when the object is present in the clone, which is exactly what full
+    # history buys. A cat-file whose operand is anchored at HEAD is the
+    # opposite case — `git cat-file -p HEAD:package.json` reads a blob at the
+    # checked-out commit, which every clone depth already has — so a HEAD
+    # operand (but not `HEAD~1` / `HEAD^`, which do reach back) disqualifies
+    # the clause. The lookahead stops at a command separator so a later,
+    # unrelated HEAD read cannot cancel a genuine probe.
+    r"git\s+cat-file\b(?![^\n|;&]*\bHEAD(?![~^]))|"
     r"fetch-tags|--tags|"
     # Change-detection actions that diff the head against a BASE ref need base
     # history: `dorny/paths-filter` with `base:` set, and `tj-actions/changed-files`
@@ -297,6 +372,20 @@ _HISTORY_JOB_NAME_RE = re.compile(
 # once per scan() from the referenced action files; consulted by
 # `_job_needs_git_history` so OPT28 never recommends shallowing such a job.
 _GIT_HISTORY_LOCAL_ACTIONS: set[str] = set()
+
+
+# A `run:` block routinely breaks ONE shell command across several lines with a
+# trailing backslash, and every clause of `_GIT_HISTORY_RE` is line-scoped. Join
+# the continuations back together before matching, so a git command whose
+# history-revealing operand sits on the next line is still seen as one command.
+_LINE_CONTINUATION_RE = re.compile(r"\\\n[ \t]*")
+
+
+def _has_git_history_op(text: str) -> bool:
+    """True when `text` runs a git operation that needs full history. Applied to
+    every surface `_GIT_HISTORY_RE` is matched against, so line continuations are
+    joined in exactly one place."""
+    return bool(_GIT_HISTORY_RE.search(_LINE_CONTINUATION_RE.sub(" ", text)))
 
 
 def _index_local_git_actions(root: Path, parsed: list[tuple[str, dict, str]]) -> set[str]:
@@ -322,7 +411,7 @@ def _index_local_git_actions(root: Path, parsed: list[tuple[str, dict, str]]) ->
                 text = cand.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            if _GIT_HISTORY_RE.search(text):
+            if _has_git_history_op(text):
                 out.add(ref)
             break
         else:
@@ -338,7 +427,7 @@ def _index_local_git_actions(root: Path, parsed: list[tuple[str, dict, str]]) ->
 def _job_needs_git_history(job: dict, job_name: str = "") -> bool:
     blob = _job_run_blob(job)
     uses_blob = "\n".join(_uses(s) for s in _steps(job))
-    if _GIT_HISTORY_RE.search(blob) or _GIT_HISTORY_RE.search(uses_blob):
+    if _has_git_history_op(blob) or _has_git_history_op(uses_blob):
         return True
     # A local composite action the job invokes may run the git op internally
     # (the workflow yaml shows only `uses: ./…`). Consult the per-scan index.
@@ -350,6 +439,90 @@ def _job_needs_git_history(job: dict, job_name: str = "") -> bool:
     # history even when the op lives in an invoked script. Conservative on
     # purpose — never recommend shallowing one of these.
     return bool(_HISTORY_JOB_NAME_RE.search(job_name))
+
+
+# When `fetch-depth: 0` is load-bearing, maintainers routinely say so in a YAML
+# comment right above it — and comments are dropped at parse time, so the one
+# artifact that settles the question is invisible to the detector. Read it back
+# out of the raw text and treat it as a carve-out: a nearby comment that names a
+# history operation means "do not recommend shallowing this step".
+#
+# The bound is six lines above the matched `fetch-depth: 0`, and a blank line
+# ends the region. Six is what it takes to reach a comment written above the
+# step itself — `- uses:` and `with:` sit between — with room for a two- or
+# three-line comment block; beyond that the comment belongs to an earlier step
+# and is not a justification for this one.
+_OPT28_JUSTIFY_LOOKBACK = 6
+
+# Deliberately tight. `depth` is NOT in the vocabulary: "fetch-depth: 0 is
+# unnecessary here" must not read as a justification — hence also the
+# `fetch(?!-depth)` guard, so the key's own name never counts as `git fetch`.
+_OPT28_JUSTIFY_RE = re.compile(
+    r"\b(?:rev-list|rev-parse|merge-base|describe|blame|history|ancestors?|"
+    r"changelog|tags?|log)\b|"
+    r"\bfetch(?!-depth)\b|"
+    r"\bshallow\s+clone\b",
+    re.I)
+
+
+def _opt28_history_justification(raw: str, line: int | None) -> str | None:
+    """The nearby comment that documents why this `fetch-depth: 0` is needed, or
+    None. Suppressor only: it can remove an OPT28 finding, never create one.
+
+    The region is the `_OPT28_JUSTIFY_LOOKBACK` lines directly above the key,
+    closed early by a blank line. Within it, a comment counts only when it
+    belongs to THIS step: the step's own body qualifies, and so does a comment
+    written above the step marker at the step's own indentation. A comment
+    above the marker but indented deeper is inside the preceding step (the tail
+    of its `run: |` block), and ordinary YAML above the marker ends the region —
+    neither is a justification for this checkout."""
+    if not line:
+        return None
+    lines = raw.splitlines()
+    idx = line - 1  # 0-based index of the matched `fetch-depth: 0` line
+    if idx < 0 or idx >= len(lines):
+        return None
+    # The step this key belongs to — the nearest `- ` marker at or above it.
+    step_marker_idx = None
+    for i in range(idx, -1, -1):
+        text = lines[i]
+        if not text.strip():
+            continue
+        if re.match(r"^\s*-\s", text):
+            step_marker_idx = i
+            break
+    if step_marker_idx is None:
+        return None
+    marker = lines[step_marker_idx]
+    marker_indent = len(marker) - len(marker.lstrip())
+
+    # Walk up from the key, no further than the documented bound.
+    for i in range(idx - 1, max(0, idx - _OPT28_JUSTIFY_LOOKBACK) - 1, -1):
+        text = lines[i]
+        stripped = text.strip()
+
+        if not stripped:
+            break  # a blank line ends the region
+
+        if not stripped.startswith("#"):
+            # Inside this step, the non-comment lines are its own scaffolding
+            # (`- uses:`, `with:`) and a comment may sit among them. Above the
+            # step marker, ordinary YAML ends the region.
+            if i >= step_marker_idx:
+                continue
+            break
+
+        if i < step_marker_idx and len(text) - len(text.lstrip()) > marker_indent:
+            # A comment above the step marker but indented DEEPER than it is
+            # inside the preceding step — the tail of a `run: |` block, say.
+            # That is the preceding step's shell text, not this step's
+            # justification.
+            break
+
+        if _OPT28_JUSTIFY_RE.search(stripped):
+            return stripped.lstrip("#").strip()
+
+    return None
 
 
 def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
@@ -372,6 +545,7 @@ def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
             continue
         if _job_needs_git_history(job, job_name):
             continue  # depth:0 is load-bearing here — removing it breaks the job
+        checkout_index = 0  # Track which checkout step this is (1-based)
         for step in (job.get("steps") or []):
             if not isinstance(step, dict):
                 continue
@@ -380,7 +554,17 @@ def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
                 continue
             depth = (step.get("with") or {}).get("fetch-depth")
             if str(depth) == "0":
-                line = _line_of_in_job(raw, job_name, "fetch-depth: 0")
+                checkout_index += 1
+                # Find the line for THIS checkout (the Nth occurrence of "fetch-depth: 0"
+                # in the job block), not the first one.
+                line = _line_of_nth_in_job(raw, job_name, "fetch-depth: 0", checkout_index)
+                # A documented justification above the line settles it: the
+                # depth is load-bearing, so stay silent for this step. A comment
+                # can be stale or wrong, and this trades a possible missed
+                # finding for never recommending a fix that breaks a job — the
+                # direction this pattern already chose.
+                if _opt28_history_justification(raw, line):
+                    continue
                 hits.append(Hit(
                     line=line,
                     affected_jobs=[job_name],
