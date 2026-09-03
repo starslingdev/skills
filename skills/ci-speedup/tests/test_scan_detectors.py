@@ -3767,6 +3767,40 @@ jobs:
     # The literal GitHub does accept still reads as advisory: the fix narrows the
     # detection, it does not switch it off.
     assert jobs["really_advisory"]["continue_on_error"] is True
+
+
+def test_github_bool_reread_still_refuses_python_object_tags():
+    """The narrowed boolean re-read must stay a SAFE load — nothing may be constructed.
+
+    `_github_bool_jobs` re-reads a workflow through `_GitHubBoolLoader`, which exists only
+    to drop PyYAML's YAML-1.1 boolean words (see the test above). That loader subclasses
+    `SafeLoader` and replaces nothing but the implicit boolean resolvers, so PyYAML's
+    SafeConstructor still refuses to instantiate objects from `!!python/...` tags.
+
+    Because the call sits behind a permanent `# nosec B506` annotation, static analysis
+    will NOT notice if that loader ever stops inheriting from `SafeLoader` or gains a
+    permissive constructor. This test is what stands in the scanner's place: it fails if a
+    hostile tag is ever constructed instead of rejected. The payload calls `os.getcwd`,
+    which does nothing observable if it runs — the assertion is that the parse is refused,
+    not that the damage was small.
+
+    The benign leg is here so the test cannot pass by the re-read being broken outright."""
+    if not _have_yaml():
+        pytest.skip("PyYAML not installed in the test runner")
+    import sys as _sys
+    _sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import scan  # noqa: E402
+
+    hostile = "jobs:\n  evil: !!python/object/apply:os.getcwd []\n"
+    assert scan._github_bool_jobs(hostile) == {}, (
+        "the boolean re-read constructed a Python object from a workflow tag: "
+        "_GitHubBoolLoader is no longer a safe loader, and the B506 suppression on it "
+        "is now hiding a real finding")
+
+    benign = "jobs:\n  advisory:\n    continue-on-error: true\n"
+    assert scan._github_bool_jobs(benign)["advisory"]["continue-on-error"] is True, (
+        "the re-read must still parse an ordinary workflow; a loader that refuses "
+        "everything would pass the hostile leg while reporting nothing")
 def test_opt28_multiple_checkouts_each_reported_on_own_line(tmp_path: Path):
     """Regression: when a job has multiple checkouts with fetch-depth: 0,
     each must be reported on its OWN line. The first has a justifying comment
