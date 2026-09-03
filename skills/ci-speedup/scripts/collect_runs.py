@@ -13361,10 +13361,8 @@ def _persist_pole_logs(
             # absolute backstop (`_NOOP_FLOOR_S`) covers the degenerate case where no-ops
             # are the MAJORITY (a gated job that self-skips on most PRs): there the median
             # is itself a no-op, so the relative floor alone wouldn't exclude them. `or
-            # durs` keeps everything when every run is short (a genuinely fast job).
-            med = statistics.median([d for d, _ in durs])
-            floor = max(0.5 * med, _NOOP_FLOOR_S)
-            qual = [dj for dj in durs if dj[0] >= floor] or durs
+            # pool` keeps everything when every run is short (a genuinely fast job).
+            #
             # B: pick the qualifying run CLOSEST to the typical (P50) time, so the drill
             # reconciles with the level-1 headline. Falls back to the qualifying median
             # when no P50 is on the pole.
@@ -13373,8 +13371,51 @@ def _persist_pole_logs(
             # so the drill shows WHY it's a long gate on its slow PRs - the median run is
             # the fast mode and would hide the root cause. Otherwise target the P50.
             slow = _f((p.get("bimodal") or {}).get("high_p50_s"))
-            target = (slow or _f(p.get("job_p50_s")) or _f(p.get("p50_s"))
-                      or qual[len(qual) // 2][0])
+            stamped = slow or _f(p.get("job_p50_s")) or _f(p.get("p50_s"))
+            # Scope the pool to the headline runner population BEFORE the floor is
+            # computed, not after it has already cut. The headline P50 is scoped by
+            # `_critical_path` to the label the job runs on most, so a job whose
+            # sampled runs span MORE THAN ONE runner label (a runner change part-way
+            # through the sampling window) has a `durs` that MIXES populations the
+            # headline never measured with the one it did. A floor derived from that
+            # mixed median is set by the wrong machines: a slower non-headline
+            # population drags the median up, and the floor then discards genuine
+            # headline runs as if they were self-skips. Everything downstream — the
+            # representative run, its step timeline, the cross-run sample, the log
+            # handed to the fixing agent — is drawn from this pool, so scoping it
+            # first is what makes the drill reconcile with the headline. Falls back
+            # to the unfiltered pool when no headline label is known or when
+            # filtering would empty it (losing the drill is worse than losing the
+            # runner-label scope).
+            headline_runner = p.get("headline_runner")
+            pool = durs
+            if headline_runner:
+                scoped = [dj for dj in durs if _job_runner_label(dj[1]) == headline_runner]
+                if scoped:
+                    pool = scoped
+                else:
+                    logger.debug(
+                        "drill: no sampled run of %s in %s carries the headline runner "
+                        "label %r — drilling the unfiltered pool", job, wf, headline_runner)
+            else:
+                logger.debug("drill: no headline runner recorded for %s in %s — "
+                             "drilling the unfiltered pool", job, wf)
+            med = statistics.median([d for d, _ in pool])
+            floor = max(0.5 * med, _NOOP_FLOOR_S)
+            if stamped:
+                # Belt and braces for the unfiltered-fallback path, and NOTHING MORE:
+                # this bounds the floor ABOVE, at the stamped typical time, so the run
+                # nearest the headline P50 always stays eligible and the drill can
+                # never reconcile with NOTHING. It does NOT bound the floor below the
+                # population's minimum — on a mixed pool, runs FASTER than the stamped
+                # P50 are still cut (200/220/240/260/280 mixed with six at 2000 gives
+                # med 2000, min(1000, 240) = 240, dropping the 200 and 220). Keeping
+                # the WHOLE headline population is the scoping above, not this clamp.
+                # The absolute backstop still wins, so a job whose own typical time IS
+                # a self-skip cannot pull no-op instances back in.
+                floor = max(min(floor, stamped), _NOOP_FLOOR_S)
+            qual = [dj for dj in pool if dj[0] >= floor] or pool
+            target = stamped or qual[len(qual) // 2][0]
             repr_dur, repr_job = min(qual, key=lambda dj: abs(dj[0] - target))
             jid = repr_job.get("id")
             if not jid or jid in seen:
@@ -14893,6 +14934,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 entry["dominant_p50_s"] = decomp["dominant_p50"]
                 entry["dominant_share"] = decomp["dominant_share"]
                 entry["job_p50_s"] = decomp["job_p50"]
+                # Record the runner label the headline was measured on, so the drill's
+                # cross-run sample can be scoped to the same population.
+                crit = crit_by_wf.get(wf_path, {})
+                if job_name in crit.get("job_runner", {}):
+                    entry["headline_runner"] = crit["job_runner"][job_name]
                 entry["steps"] = [{"step": n, "category": c, "p50_s": round(p, 1)}
                                   for n, c, p in decomp["steps"]]
         else:

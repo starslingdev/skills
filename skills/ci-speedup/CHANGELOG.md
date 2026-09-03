@@ -245,6 +245,35 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-09-02** — **A job that changed runners part-way through the sampling
+  window no longer gets drilled on the runner it left behind.** The report
+  measures such a job's typical time on the runner it runs on *most*, but picked
+  the run to drill after discarding everything below half the median of all its
+  runs mixed together — every runner, fast and slow, in one pile. When the runners
+  differ enough in speed, that cut-off landed above the very runs the headline
+  measured and threw all of them away as if they were self-skips, so the
+  representative run, its step-by-step timeline and its cross-run check all came
+  from a runner the headline never measured: a report whose drill-down said ten
+  minutes under a four-minute headline, with nothing on the page to explain the
+  gap. The runs the drill can choose from are now narrowed to the headline's own
+  runner *before* the cut-off is worked out, so the cut-off is set by the same
+  machines the headline reports and can no longer throw the headline's own runs
+  away; and the absolute floor that keeps self-skipped runs out of the drill still
+  applies. When the runner behind a headline isn't recorded, or narrowing would
+  leave nothing to drill, the drill falls back to all the sampled runs rather than
+  losing the drill-down. On that fallback the cut-off can still never rise above
+  the typical time, so the run nearest the headline always stays eligible and the
+  drill-down can never end up illustrating nothing — but runs faster than the
+  typical time can still be cut, which is why the narrowing, not the cut-off's own
+  ceiling, is what keeps the whole population.
+
+- **2026-09-02** — **The drill-down's cross-run check no longer mixes machines.**
+  Underneath the drilled run, the report shows the same job's time across other
+  sampled runs, as evidence that what the drill-down describes is typical rather
+  than a one-off. Those other runs were taken from every runner the job had used,
+  so for a job mid-migration the check reported the spread between two different
+  machines and called it run-to-run variation. It now reports only runs from the
+  population the headline measured.
 - **2026-09-02** — **A comment explaining why full history is needed now
   silences the full-history-checkout finding.** When `fetch-depth: 0` is
   load-bearing, the reason is usually written in a comment directly above it —
