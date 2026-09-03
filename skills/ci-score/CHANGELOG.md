@@ -11,6 +11,36 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-09-02** — **Changed**: the CI Score registry is bumped to
+  `ci-score-v0.1.4` (OD-CS22). The two shallow-clone exemptions below move a
+  gate — one frozen calibration control goes from 9/11 to 10/11 on identical
+  workflow YAML — and the rubric's own rule bumps `spec_version` when a gate
+  moves. Check count (11), bands, formula, refusals and scorer arithmetic are
+  unchanged. Committed corpus and synthetic stamps carry the new
+  `spec_version` field and nothing else: no corpus score moves.
+
+- **2026-09-02** — **Fixed**: the shallow-checkout check (`ci.checkout.shallow-clone`)
+  failed a repository for *any* `fetch-depth: 0` on a pull-request-gating
+  workflow, including on jobs where full history is load-bearing — changelog
+  generation, a merge-base or base-SHA diff, `git describe`, changeset
+  versioning. Following that advice breaks the job. The speed-audit skill's
+  equivalent pattern has always carved those jobs out, so the two shipped
+  skills could give one repository contradictory advice about the same line of
+  YAML. The check now applies the identical carve-out, per JOB rather than per
+  workflow: a job that walks git history is not an offender, while another job
+  in the same file that takes full history for nothing still is. The carve-out
+  fails closed — anything that might read history (a local composite action
+  whose file cannot be read, a changeset/release/version job name) is treated
+  as needing it, so the cost of a miss is a lost finding, never a fix that
+  breaks a build. A pass produced by the carve-out now says so in its evidence
+  instead of claiming no workflow checks out full history.
+
+- **2026-09-02** — **Added**: a repo-level parity test pins the git-history
+  carve-out on both sides. The predicate is duplicated rather than imported —
+  each skill must install and run standalone — so the test loads both copies
+  and fails if they ever disagree, on the pattern text or on any input in its
+  battery.
+
 - **Fixed**: registry security scanners attributed the frozen third-party
   control fixtures' workflow files to this repository, because they sat at real
   `.github/workflows/` paths that scanners parse as this repo's live automation.

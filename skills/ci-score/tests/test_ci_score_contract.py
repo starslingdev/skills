@@ -4,7 +4,9 @@ Rebuilt for ci-score by the score-ectomy (2026-07-16): the layers under test
 are the same, but every module is loaded from ci-score's OWN scripts by file
 path, and the corpus-pinning cells read the six SCORED corpus fixtures under
 `tests/fixtures/corpora/` — this suite imports NO ci-speedup code and reads
-NOTHING from ci-speedup's `reports/`.
+NOTHING from ci-speedup's `reports/`. That claim used to live only in this
+docstring; `test_the_skill_never_reaches_into_ci_speedup` below now asserts
+the import half of it, which is the half a contributor can break by accident.
 
 Two layers, matching the two-layer design:
 
@@ -759,15 +761,78 @@ def test_delegated_ci_is_na_never_fail(tmp_path):
 
 
 def test_capped_file_lists_are_never_phrased_as_exhaustive(tmp_path):
-    """mastra has SIX fetch-depth offenders; the card named three as if the
-    list were complete — a maintainer who fixed the named three would still
-    fail with no idea why. Counts must be complete even when files are capped."""
+    """A repo with five fetch-depth offenders got a card naming three as if
+    the list were complete — a maintainer who fixed the named three would
+    still fail with no idea why. Counts must be complete even when files are
+    capped. (No job here runs a git operation, so the git-history carve-out
+    spares none of them and all five stay offenders.)"""
     files = [(f"w{i}.yml", PR_ON + "jobs:\n  b:\n    steps:\n      - uses: actions/checkout@v4\n"
               "        with:\n          fetch-depth: 0\n") for i in range(5)]
     f = facts_for(tmp_path, *files)["ci.checkout.shallow-clone"]
     assert f["state"] == "fail"
     assert "5 PR-gating workflow(s)" in f["evidence"] and "e.g." in f["evidence"]
     assert len(f["files"]) == 3  # capped, but the count above is complete
+
+
+def test_history_reading_job_is_not_a_shallow_clone_offender(tmp_path):
+    """`fetch-depth: 0` is LOAD-BEARING for a job that walks git history:
+    shallowing it breaks the job. The speed engine has always carved these
+    out; the best-practices engine graded the identical fact the opposite
+    way, so one repository could be told to remove a checkout depth the
+    other engine correctly leaves alone."""
+    wf = ("release-notes.yml",
+          PR_ON + "jobs:\n  notes:\n    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n"
+          "      - run: git log --oneline $(git describe --tags --abbrev=0)..HEAD\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "pass", f["evidence"]
+    assert f["files"] == []
+
+
+def test_a_carved_out_pass_never_claims_nobody_checks_out_full_history(tmp_path):
+    """Evidence must stay true of the repo in front of it. When the carve-out
+    is what produced the pass, `fetch-depth: 0` IS present on the PR path — a
+    maintainer reading 'no PR-gating workflow checks out full history' would
+    open the file, see one, and stop trusting the card."""
+    wf = ("release-notes.yml",
+          PR_ON + "jobs:\n  notes:\n    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n"
+          "      - run: git log --oneline\n")
+    ev = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]["evidence"]
+    assert "no PR-gating workflow checks out full history" not in ev, ev
+    assert "1" in ev and "git history" in ev, ev
+
+
+def test_history_carveout_is_per_job_not_per_workflow(tmp_path):
+    """The carve-out spares the JOB that reads history, never the whole file:
+    a second job in the same workflow that takes full history for nothing is
+    still a real finding."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n"
+          "  changelog:\n    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n"
+          "      - run: git log --oneline\n"
+          "  unit:\n    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n"
+          "      - run: npm test\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "fail", f["evidence"]
+    assert f["files"] == ["ci.yml"]
+
+
+def test_history_op_split_across_a_line_continuation_still_carves_out(tmp_path):
+    """A `run:` block routinely breaks one command over several lines with a
+    trailing backslash. The operand that reveals the history walk can sit on
+    the next physical line, and a line-scoped match would miss it and flag a
+    job whose full history is load-bearing."""
+    wf = ("ci.yml",
+          PR_ON + "jobs:\n  diff:\n    steps:\n      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n"
+          "      - run: |\n"
+          "          git diff --name-only \\\n"
+          "            origin/main...HEAD\n")
+    f = facts_for(tmp_path, wf)["ci.checkout.shallow-clone"]
+    assert f["state"] == "pass", f["evidence"]
 
 
 def test_pinned_offender_files_rank_third_party_first(tmp_path):
@@ -984,3 +1049,26 @@ def test_card_survives_hostile_evidence_and_malformed_stamps(spec):
     # malformed shapes render best-effort, never raise
     assert rc_mod._render_score_card({"ci_score": {"checks": "garbage", "refusal": "nope"}})
     assert rc_mod._render_score_card({"ci_score": {"checks": [None, 42]}})
+
+
+def test_the_skill_never_reaches_into_ci_speedup():
+    """ci-score installs and runs standalone: the `skills` CLI copies
+    `skills/ci-score/` and nothing else, so anything this skill reaches for
+    outside its own directory is missing at runtime for every user who
+    installed only ci-score. The git-history predicate is duplicated rather
+    than imported for exactly this reason, and prose in a docstring does not
+    stop the next contributor from writing the import. Assert it."""
+    offenders = []
+    for path in sorted(_SKILL_DIR.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith(("import ", "from ")) and (
+                    "ci_speedup" in stripped or "ci-speedup" in stripped):
+                offenders.append(f"{path.relative_to(_SKILL_DIR)}:{lineno}: {stripped}")
+    assert not offenders, (
+        "ci-score must not import ci-speedup — it installs on its own and the "
+        f"import would not resolve: {offenders}")
+
