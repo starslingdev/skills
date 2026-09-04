@@ -108,8 +108,9 @@ two moved numbers.
   satisfied by never running it. The pass shape is the always-running verdict
   job that `needs:` the conditional suites and asserts their results. Required
   contexts no workflow job produces are named, not judged — external app
-  checks, reusable-workflow jobs, and job names templated over a matrix this
-  scan cannot enumerate all land there — and a PASS is a statement about EVERY
+  checks, reusable-workflow jobs, and templated job names whose rendering this
+  scan will not guess all land there, each with the reason it was refused —
+  and a PASS is a statement about EVERY
   required check, so ANY context that could
   not be traced leaves the fact unmeasured rather than green — the ordinary
   shape of a mature repository is a dozen required contexts with most coming
@@ -125,23 +126,39 @@ two moved numbers.
   A matrix job's contexts come from the combinations the matrix can actually
   run: a literal `name:` takes GitHub's appended `(value, …)` suffix, and a
   `name:` templated over the matrix (`build shard ${{ matrix.shard }}/4` over
-  `shard: [1, 2, 3, 4]`) renders its legs directly. Both readings enumerate the
+  `shard: [1, 2, 3, 4]`) renders its legs directly. Legs are read the way
+  GitHub substitutes them, so a `true` leg is `true` and a `null` leg is
+  nothing at all. Both readings enumerate the
   same combinations, so both refuse the same unknowables — `fromJSON()` or any
-  other computed value, `include:`, a nested shape, a placeholder that is not a
-  plain `matrix.<axis>` reference, an `exclude:` naming no declared axis or
-  carrying a computed value — and an unenumerable matrix leaves the check
+  other computed value, `include:`, a nested or non-list shape, a placeholder
+  that is not a plain `matrix.<axis>` reference, an axis a name references but
+  the matrix does not declare, and an `exclude:` this scan cannot read (a key
+  naming no declared axis, a computed value, or a value that is not a scalar)
+  — and an unenumerable matrix leaves the check
   untraced rather than guessed. Further shapes are refused even when they
-  do enumerate: a name carrying no literal WORD to anchor it — a bare
-  `${{ matrix.target }}`, but equally `${{ matrix.a }}/${{ matrix.b }}` or
-  `${{ matrix.s }} (${{ matrix.l }})`, since punctuation anchors nothing and
-  those render an external app's `security/snyk` and `Analyze (javascript)`
-  names on a coincidence — a leg that is empty or carries interior double
-  spaces (GitHub substitutes the value verbatim, so neither renders the name
-  this scan would compare), and a rendering that a genuine reusable caller in
-  these files ALSO claims as its own check or as the `<caller> / <child>` leaf
-  of its invocation — whether or not the template begins with the placeholder,
-  and counting a caller whose own `name:` is templated unless this scan can
-  render that name and rule it out.
+  do enumerate:
+
+  - **A name with no literal LETTER to anchor it** — a bare
+    `${{ matrix.target }}`, but equally `${{ matrix.a }}/${{ matrix.b }}`,
+    `${{ matrix.s }} (${{ matrix.l }})` or `${{ matrix.a }}_${{ matrix.b }}`.
+    Punctuation, underscores and digits anchor nothing, and those render an
+    external app's `security/snyk`, `Analyze (javascript)` and `ubuntu_x64`
+    names on a coincidence. One literal letter is enough: `v${{ matrix.n }}`
+    binds.
+  - **An EMPTY leg**, which renders exactly what GitHub renders and that is the
+    problem: `${{ matrix.p }}lint` over `p: ['']` collapses to the bare `lint`
+    another job owns, so the anchoring the name was admitted on is gone from
+    the rendering.
+  - **Interior whitespace** in the `name:` or in a leg. Renderings are
+    whitespace-normalised so they can be compared and GitHub normalises none,
+    so the compared string is one GitHub never emits.
+  - **A rendering a genuine reusable caller in these files ALSO claims**, as
+    its own check or as the `<caller> / <child>` leaf of its invocation. Where
+    the placeholder sits in the template has nothing to do with it; the
+    competing claim is the whole rule. A caller whose own `name:` is templated
+    is rendered the same way, and one this scan cannot render competes for the
+    names its literal text could still produce — not, as it once did, for
+    every name in the repository.
   A push filtered to specific branches or paths is UNKNOWN: it may or may not
   run on a given pull request's head branch, so its jobs still count against
   the check but can never be the evidence that one always reports. Unknown is
