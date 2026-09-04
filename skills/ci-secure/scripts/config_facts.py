@@ -1313,6 +1313,13 @@ def _context_producers(
         for key, job in jobs.items():
             shown = _display_name(key, job)
             if _EXPRESSION_RE.search(shown):
+                # A `${{ matrix.* }}` name over ENUMERABLE literal legs renders
+                # a knowable set of contexts, and one of them may be the check.
+                # See `_templated_name_renderings` for what is refused.
+                if context in (_templated_name_renderings(job, shown) or ()) \
+                        and not (_name_template_leads_with_placeholder(shown)
+                                 and _reusable_caller_claims(docs, context)):
+                    out.append((rel, key, job, jobs, doc, ability))
                 continue
             if context == shown and not _job_has_matrix(job):
                 # A MATRIX job never reports its bare name — GitHub appends the
@@ -1343,9 +1350,9 @@ def _job_has_matrix(job: dict) -> bool:
     return bool(matrix) if not isinstance(matrix, (str, int, float)) else True
 
 
-def _matrix_expansions(job: dict) -> set[str] | None:
-    """Every `(…)` suffix this job's matrix can actually render, or None when
-    the matrix is not knowable from the YAML.
+def _matrix_combinations(job: dict) -> list[dict[str, str]] | None:
+    """Every axis assignment this job's matrix can actually run — `[{"shard":
+    "1"}, …]` — or None when the matrix is not knowable from the YAML.
 
     Only a matrix expands a job into `name (value, …)` contexts; it expands
     into its own values; and it expands into the COMBINATIONS it can really
@@ -1367,6 +1374,11 @@ def _matrix_expansions(job: dict) -> set[str] | None:
     extend existing ones, and guessing its rendering is how the three defects
     above happened. An unknowable matrix produces NO match, which leaves the
     context disclosed as not judged; a wrong match is a silent pass.
+
+    Both readings of a matrix job's context come from here — the appended
+    `(…)` suffix of a literal `name:`, and the rendering of a `${{ matrix.* }}`
+    templated one — so the two can never disagree about the same matrix, and a
+    refusal added for one is a refusal for both.
     """
     strategy = job.get("strategy")
     matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
@@ -1400,14 +1412,29 @@ def _matrix_expansions(job: dict) -> set[str] | None:
             return None
         excluded.append({str(k): str(v).strip() for k, v in entry.items()})
 
-    out: set[str] = set()
+    out: list[dict[str, str]] = []
     for combo in itertools.product(*axes):
         assignment = dict(zip(names, combo))
         if any(all(assignment.get(k) == v for k, v in rule.items())
                for rule in excluded):
             continue
-        out.add(", ".join(combo))
+        out.append(assignment)
     return out or None
+
+
+def _matrix_expansions(job: dict) -> set[str] | None:
+    """The `(…)` suffixes this job's matrix can render, or None when unknowable.
+
+    The values in an expansion appear in the order the axes are DECLARED, which
+    is why the combinations carry their axis names rather than a bare tuple:
+    the templated-name renderer needs to know which value belongs to which
+    axis, and both readings have to come from one enumeration or they can
+    disagree about the same matrix.
+    """
+    combos = _matrix_combinations(job)
+    if combos is None:
+        return None
+    return {", ".join(a.values()) for a in combos} or None
 
 
 def _matrix_produces(job: dict, suffix: str) -> bool:
@@ -1416,6 +1443,104 @@ def _matrix_produces(job: dict, suffix: str) -> bool:
     if expansions is None:
         return False
     return " ".join(suffix.split()) in expansions
+
+
+# A job `name:` may be TEMPLATED over the matrix — `build shard
+# ${{ matrix.shard }}/4` over `shard: [1, 2, 3, 4]`. GitHub renders the name;
+# it does NOT also append the `(…)` combination. So the contexts such a job
+# produces are the renderings, and when the legs are literals sitting in the
+# YAML they are as enumerable as any other expansion.
+#
+# Read as unknowable, every required check a sharded job produces went
+# untraced and this fact dropped to UNMEASURED — so a repository that shards a
+# required job lost a security fact its own YAML answers outright. The
+# expansion is rendered EXACTLY, not matched by a wildcard regex: a rendering
+# is a concrete string that either is the required context or is not.
+_PLACEHOLDER_RE = re.compile(r"\$\{\{(.*?)\}\}", re.S)
+_MATRIX_REF_RE = re.compile(r"^matrix\.([A-Za-z_][A-Za-z0-9_-]*)$")
+
+
+def _name_template_is_degenerate(template: str) -> bool:
+    """A `name:` that is NOTHING but placeholders — `${{ matrix.target }}`.
+
+    It carries no literal text to anchor it, so a rendering that equals a
+    required context is indistinguishable from a coincidence: an external
+    app's `Header rules` check and a matrix leg spelled the same way are the
+    same string. Certifying a required check on that coincidence is a silent
+    pass, and an unresolved check is merely unmeasured — so this shape is
+    refused.
+    """
+    return not _PLACEHOLDER_RE.sub("", template).strip()
+
+
+def _name_template_leads_with_placeholder(template: str) -> bool:
+    """A `name:` whose first character is a placeholder — `${{ matrix.variant
+    }} / build`. GitHub names a reusable invocation's leaf checks `<caller job>
+    / <child>`, and such a template can render exactly that string, so it can
+    impersonate a check a genuine reusable caller in ANOTHER file produces.
+    Refused only when such a caller actually competes (see
+    `_reusable_caller_claims`) — a blanket refusal would drop a real matrix
+    job that is the sole producer of `linux / build`.
+    """
+    if "${{" not in template:
+        return False
+    return not _PLACEHOLDER_RE.split(template)[0].strip()
+
+
+def _reusable_caller_claims(docs: list[tuple[str, dict]], context: str) -> bool:
+    """Does some reusable-workflow CALL in these files claim `context` as its
+    own check or as the `<caller> / <child>` leaf of its invocation?"""
+    for _rel, doc in docs:
+        for key, job in _jobs(doc):
+            if not isinstance(job.get("uses"), str):
+                continue
+            shown = _display_name(key, job)
+            if context == shown or context.startswith(shown + " / "):
+                return True
+    return False
+
+
+def _templated_name_renderings(job: dict, shown: str) -> set[str] | None:
+    """Every display name a templated `name:` can actually render, or None.
+
+    None — the check stays UNTRACED and the fact UNMEASURED — whenever the
+    rendering is not knowable from the YAML, which is every case below. An
+    unknown must never come out as a known negative, and unmeasured beats a
+    confident wrong answer:
+
+      * a placeholder that is not a plain `matrix.<axis>` reference
+        (`${{ github.ref_name }}`, a function call, `matrix['x']`) renders
+        from the run, not the file;
+      * a matrix this scan cannot enumerate — `fromJSON()` or any other
+        computed value, an `include:`, a nested shape — which is the same
+        refusal `_matrix_expansions` already makes, reached through the same
+        enumeration so the two cannot disagree;
+      * an axis the name references that the matrix does not declare.
+
+    A DEGENERATE template is refused here too: it renders concrete strings,
+    but with no literal text anchoring them the match is a coincidence.
+    """
+    if _name_template_is_degenerate(shown):
+        return None
+    axes_used = []
+    for expr in _PLACEHOLDER_RE.findall(shown):
+        ref = _MATRIX_REF_RE.match(expr.strip())
+        if ref is None:
+            return None
+        axes_used.append(ref.group(1))
+    combos = _matrix_combinations(job)
+    if combos is None:
+        return None
+    out: set[str] = set()
+    for assignment in combos:
+        if any(axis not in assignment for axis in axes_used):
+            return None
+        rendered = _PLACEHOLDER_RE.sub(
+            lambda m: assignment[_MATRIX_REF_RE.match(
+                m.group(1).strip()).group(1)],
+            shown)
+        out.add(" ".join(rendered.split()))
+    return out or None
 
 
 # A 403 from the admin-only classic endpoint is ORDINARY — most readers of this
@@ -1637,8 +1762,9 @@ def _required_checks_skippable(
             unjudged.append(
                 f"`{context}` ({near})" if near else
                 f"`{context}` (no job in these workflows reports it — an "
-                f"external app check, a reusable-workflow job, a templated "
-                f"job name, or a stale entry)")
+                f"external app check, a reusable-workflow job, a job name "
+                f"templated over a matrix this scan cannot enumerate, or a "
+                f"stale entry)")
             continue
         skips: list[str] = []
         unknown: list[str] = []

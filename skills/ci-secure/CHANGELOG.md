@@ -141,6 +141,31 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-09-03** — **A required check produced by a matrix-templated job name
+  now resolves to its job.** `sec.required-checks.skippable` matched a job's
+  display name only when that name was literal. A job named `build shard
+  ${{ matrix.shard }}/4` with literal legs `[1, 2, 3, 4]` produces the required
+  checks `build shard 1/4` through `build shard 4/4`, and the resolver could
+  not map any of them back to the job that declares them: checks fully
+  determinable from the workflow YAML were reported as untraceable ("no job in
+  these workflows reports it") and the fact went UNMEASURED, so a repository
+  that shards a required job lost a security fact it could have been graded on.
+  Templated names are now rendered against the matrix's literal values through
+  the SAME enumeration that produces the `(…)` suffixes, so both readings of a
+  matrix job's contexts share one set of refusals: a matrix that cannot be
+  enumerated (`fromJSON()` or any other computed value, `include:`, a nested
+  shape), a placeholder that is not a plain `matrix.<axis>` reference, an axis
+  the matrix does not declare, a DEGENERATE template (nothing but a
+  placeholder, whose rendering matching an external app's check name is a
+  coincidence), and a LEADING-placeholder template competing with a genuine
+  reusable caller for the same `<caller> / <child>` check all still leave the
+  check UNTRACED and the fact UNMEASURED — an unknown must never render as a
+  known negative. Because the fact is SCORED, `security_score` changes on any
+  repository with matrix-templated required checks: the fact enters the scored
+  denominator where it used to sit out, as a PASS where the newly traced
+  producers always run and as a FAIL — lowering the score — where one of them
+  can skip.
+
 - **2026-08-19** — **A deferred file that cannot be read is now a stop, not an
   improvisation.** SKILL.md defers load-bearing procedure to reference files in
   several places, each phrased as "read this before acting". While that

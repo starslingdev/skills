@@ -108,7 +108,8 @@ two moved numbers.
   satisfied by never running it. The pass shape is the always-running verdict
   job that `needs:` the conditional suites and asserts their results. Required
   contexts no workflow job produces are named, not judged — external app
-  checks, reusable-workflow jobs, and templated job names all land there — and
+  checks, reusable-workflow jobs, and job names templated over a matrix this
+  scan cannot enumerate all land there — and
   a PASS is a statement about EVERY required check, so ANY context that could
   not be traced leaves the fact unmeasured rather than green — the ordinary
   shape of a mature repository is a dozen required contexts with most coming
@@ -121,6 +122,18 @@ two moved numbers.
   CAN report, so an always-running job there certifies the check. A push
   restricted to TAGS provably cannot — no pull-request branch push matches it —
   so a same-named job in a tag-only release workflow is not a producer at all.
+  A matrix job's contexts come from the combinations the matrix can actually
+  run: a literal `name:` takes GitHub's appended `(value, …)` suffix, and a
+  `name:` templated over the matrix (`build shard ${{ matrix.shard }}/4` over
+  `shard: [1, 2, 3, 4]`) renders its legs directly. Both readings enumerate the
+  same combinations, so both refuse the same unknowables — `fromJSON()` or any
+  other computed value, `include:`, a nested shape, a placeholder that is not a
+  plain `matrix.<axis>` reference — and an unenumerable matrix leaves the check
+  untraced rather than guessed. Two templated shapes are refused even when they
+  do enumerate: a name that is NOTHING but a placeholder (it would certify a
+  check on a coincidence with an external app's name), and a name BEGINNING
+  with a placeholder when a real reusable caller competes for the same
+  `<caller> / <child>` check.
   A push filtered to specific branches or paths is UNKNOWN: it may or may not
   run on a given pull request's head branch, so its jobs still count against
   the check but can never be the evidence that one always reports. Unknown is
