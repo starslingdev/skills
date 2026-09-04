@@ -155,12 +155,28 @@ entries are dated (UTC). Format loosely follows
   matrix job's contexts share one set of refusals: a matrix that cannot be
   enumerated (`fromJSON()` or any other computed value, `include:`, a nested
   shape), a placeholder that is not a plain `matrix.<axis>` reference, an axis
-  the matrix does not declare, a DEGENERATE template (nothing but a
-  placeholder, whose rendering matching an external app's check name is a
-  coincidence), and a LEADING-placeholder template competing with a genuine
-  reusable caller for the same `<caller> / <child>` check all still leave the
-  check UNTRACED and the fact UNMEASURED — an unknown must never render as a
-  known negative. Because the fact is SCORED, `security_score` changes on any
+  the matrix does not declare, a DEGENERATE template (one carrying no literal
+  WORD to anchor it, whose rendering matching an external app's check name is a
+  coincidence — punctuation does not anchor, so `${{ matrix.a }}/${{ matrix.b }}`
+  rendering `security/snyk` is refused alongside a bare `${{ matrix.target }}`),
+  a leg that is EMPTY or whose whitespace normalising the rendering would
+  rewrite (neither substitutes the way GitHub substitutes it), a `name:` whose
+  own interior whitespace that normalisation rewrote, an `exclude:` this scan
+  cannot read (a key naming no declared axis, or a computed value — both were
+  silent no-ops, and an exclude that fails to remove leaves EXTRA renderings,
+  the dangerous direction), and a rendering a genuine reusable caller in these
+  files also claims, all still leave the check UNTRACED and the fact
+  UNMEASURED — an unknown must never render as a known negative. That last
+  refusal now keys on the competing CLAIM rather than on the template
+  beginning with a placeholder: position was only ever a proxy for the hazard,
+  and one literal word in front (`Nightly ${{ matrix.variant }} / build` against
+  a `Nightly Suite` caller) walked straight past it. The competitor lookup also
+  renders a caller's OWN templated `name:` through the same enumeration and
+  treats a caller it cannot render as one it cannot rule out; comparing a
+  required context against unrendered template text matched nothing, so a
+  matrix caller claimed no name at all. Each of those gaps let a foreign
+  `always()` matrix job certify a check the real caller produces behind a
+  condition. Because the fact is SCORED, `security_score` changes on any
   repository with matrix-templated required checks: the fact enters the scored
   denominator where it used to sit out, as a PASS where the newly traced
   producers always run and as a FAIL — lowering the score — where one of them

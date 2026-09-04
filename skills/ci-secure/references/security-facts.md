@@ -109,8 +109,8 @@ two moved numbers.
   job that `needs:` the conditional suites and asserts their results. Required
   contexts no workflow job produces are named, not judged — external app
   checks, reusable-workflow jobs, and job names templated over a matrix this
-  scan cannot enumerate all land there — and
-  a PASS is a statement about EVERY required check, so ANY context that could
+  scan cannot enumerate all land there — and a PASS is a statement about EVERY
+  required check, so ANY context that could
   not be traced leaves the fact unmeasured rather than green — the ordinary
   shape of a mature repository is a dozen required contexts with most coming
   from external apps, and a green earned off the one traceable check would be
@@ -128,12 +128,20 @@ two moved numbers.
   `shard: [1, 2, 3, 4]`) renders its legs directly. Both readings enumerate the
   same combinations, so both refuse the same unknowables — `fromJSON()` or any
   other computed value, `include:`, a nested shape, a placeholder that is not a
-  plain `matrix.<axis>` reference — and an unenumerable matrix leaves the check
-  untraced rather than guessed. Two templated shapes are refused even when they
-  do enumerate: a name that is NOTHING but a placeholder (it would certify a
-  check on a coincidence with an external app's name), and a name BEGINNING
-  with a placeholder when a real reusable caller competes for the same
-  `<caller> / <child>` check.
+  plain `matrix.<axis>` reference, an `exclude:` naming no declared axis or
+  carrying a computed value — and an unenumerable matrix leaves the check
+  untraced rather than guessed. Further shapes are refused even when they
+  do enumerate: a name carrying no literal WORD to anchor it — a bare
+  `${{ matrix.target }}`, but equally `${{ matrix.a }}/${{ matrix.b }}` or
+  `${{ matrix.s }} (${{ matrix.l }})`, since punctuation anchors nothing and
+  those render an external app's `security/snyk` and `Analyze (javascript)`
+  names on a coincidence — a leg that is empty or carries interior double
+  spaces (GitHub substitutes the value verbatim, so neither renders the name
+  this scan would compare), and a rendering that a genuine reusable caller in
+  these files ALSO claims as its own check or as the `<caller> / <child>` leaf
+  of its invocation — whether or not the template begins with the placeholder,
+  and counting a caller whose own `name:` is templated unless this scan can
+  render that name and rule it out.
   A push filtered to specific branches or paths is UNKNOWN: it may or may not
   run on a given pull request's head branch, so its jobs still count against
   the check but can never be the evidence that one always reports. Unknown is

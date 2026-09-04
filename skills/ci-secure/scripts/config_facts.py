@@ -1301,8 +1301,11 @@ def _context_producers(
 
     A check context is the job's DISPLAY name — its `name:` if it has one, else
     its key — and a matrix job expands to `name (value, value)`. Both spellings
-    are matched; a display name built from an expression (`name: test ${{ … }}`)
-    is not matched at all, because what it renders to is not knowable here.
+    are matched. A display name built from an expression is matched only when
+    the expression is a plain `matrix.<axis>` over legs this scan can enumerate
+    from the YAML, and only when nothing makes the rendering a coincidence —
+    see `_templated_name_renderings`. Everything else stays unmatched, because
+    what it renders to is not knowable here.
     """
     out = []
     for rel, doc in docs:
@@ -1317,8 +1320,7 @@ def _context_producers(
                 # a knowable set of contexts, and one of them may be the check.
                 # See `_templated_name_renderings` for what is refused.
                 if context in (_templated_name_renderings(job, shown) or ()) \
-                        and not (_name_template_leads_with_placeholder(shown)
-                                 and _reusable_caller_claims(docs, context)):
+                        and not _reusable_caller_claims(docs, context):
                     out.append((rel, key, job, jobs, doc, ability))
                 continue
             if context == shown and not _job_has_matrix(job):
@@ -1410,7 +1412,18 @@ def _matrix_combinations(job: dict) -> list[dict[str, str]] | None:
     for entry in matrix.get("exclude") or []:
         if not isinstance(entry, dict):
             return None
-        excluded.append({str(k): str(v).strip() for k, v in entry.items()})
+        rule = {str(k): str(v).strip() for k, v in entry.items()}
+        # An exclude this scan cannot READ is not an exclude it may ignore.
+        # Skipping it keeps combinations the run really removes, and EXTRA
+        # combinations are the dangerous direction: they manufacture renderings
+        # GitHub never emits, any one of which can certify a required check. A
+        # key naming no declared axis matched nothing (`assignment.get(k)` is
+        # None), and a computed value was compared as its literal `${{ … }}`
+        # text — both silently no-ops.
+        if any(k not in names or _EXPRESSION_RE.search(v)
+               for k, v in rule.items()):
+            return None
+        excluded.append(rule)
 
     out: list[dict[str, str]] = []
     for combo in itertools.product(*axes):
@@ -1461,40 +1474,54 @@ _MATRIX_REF_RE = re.compile(r"^matrix\.([A-Za-z_][A-Za-z0-9_-]*)$")
 
 
 def _name_template_is_degenerate(template: str) -> bool:
-    """A `name:` that is NOTHING but placeholders — `${{ matrix.target }}`.
+    """A `name:` carrying no literal WORD to anchor it — `${{ matrix.target }}`,
+    and equally `${{ matrix.a }}/${{ matrix.b }}` or `${{ matrix.s }}
+    (${{ matrix.l }})`.
 
-    It carries no literal text to anchor it, so a rendering that equals a
-    required context is indistinguishable from a coincidence: an external
-    app's `Header rules` check and a matrix leg spelled the same way are the
-    same string. Certifying a required check on that coincidence is a silent
-    pass, and an unresolved check is merely unmeasured — so this shape is
-    refused.
+    Without anchoring text a rendering that equals a required context is
+    indistinguishable from a coincidence: an external app's `Header rules`
+    check and a matrix leg spelled the same way are the same string.
+    Certifying a required check on that coincidence is a silent pass, and an
+    unresolved check is merely unmeasured — so this shape is refused.
+
+    Punctuation is NOT that anchoring text, and reading it as such is how the
+    refusal was escaped: `${{ matrix.a }}/${{ matrix.b }}` over `[security]`
+    and `[snyk]` renders `security/snyk`, and `${{ matrix.s }}
+    (${{ matrix.l }})` renders the `Analyze (javascript)` shape a scanning app
+    reports — every discriminating character supplied by a matrix value, the
+    `/` and ` ()` supplying none. Nothing in these files competes for an
+    EXTERNAL app's name, so the leading-placeholder rule cannot catch these
+    either. The anchor therefore has to be a word character.
     """
-    return not _PLACEHOLDER_RE.sub("", template).strip()
-
-
-def _name_template_leads_with_placeholder(template: str) -> bool:
-    """A `name:` whose first character is a placeholder — `${{ matrix.variant
-    }} / build`. GitHub names a reusable invocation's leaf checks `<caller job>
-    / <child>`, and such a template can render exactly that string, so it can
-    impersonate a check a genuine reusable caller in ANOTHER file produces.
-    Refused only when such a caller actually competes (see
-    `_reusable_caller_claims`) — a blanket refusal would drop a real matrix
-    job that is the sole producer of `linux / build`.
-    """
-    if "${{" not in template:
-        return False
-    return not _PLACEHOLDER_RE.split(template)[0].strip()
+    return not re.search(r"\w", _PLACEHOLDER_RE.sub("", template))
 
 
 def _reusable_caller_claims(docs: list[tuple[str, dict]], context: str) -> bool:
     """Does some reusable-workflow CALL in these files claim `context` as its
-    own check or as the `<caller> / <child>` leaf of its invocation?"""
+    own check or as the `<caller> / <child>` leaf of its invocation?
+
+    A caller's own `name:` may itself be TEMPLATED, and comparing a required
+    context against unrendered template text never matches — so a matrix
+    caller claimed nothing, the leading-placeholder refusal never fired, and a
+    foreign `always()` matrix job in another file certified a check the real
+    caller produces behind a condition. That is exactly the silent pass the
+    refusal exists to prevent. A templated caller is therefore rendered by the
+    same enumeration as any other templated name, and one this scan CANNOT
+    render is a competitor it cannot rule out — so it claims the name.
+    """
     for _rel, doc in docs:
         for key, job in _jobs(doc):
             if not isinstance(job.get("uses"), str):
                 continue
             shown = _display_name(key, job)
+            if _EXPRESSION_RE.search(shown):
+                renderings = _templated_name_renderings(job, shown)
+                if renderings is None:
+                    return True
+                if any(context == r or context.startswith(r + " / ")
+                       for r in renderings):
+                    return True
+                continue
             if context == shown or context.startswith(shown + " / "):
                 return True
     return False
@@ -1522,6 +1549,13 @@ def _templated_name_renderings(job: dict, shown: str) -> set[str] | None:
     """
     if _name_template_is_degenerate(shown):
         return None
+    # Display names are whitespace-collapsed so they can be compared; GitHub
+    # collapses nothing. A `name:` carrying interior runs of whitespace
+    # therefore renders, after that collapse, a string GitHub never emits —
+    # and the required check that does spell it belongs to another producer.
+    raw = job.get("name")
+    if isinstance(raw, str) and " ".join(raw.split()) != raw.strip():
+        return None
     axes_used = []
     for expr in _PLACEHOLDER_RE.findall(shown):
         ref = _MATRIX_REF_RE.match(expr.strip())
@@ -1534,6 +1568,18 @@ def _templated_name_renderings(job: dict, shown: str) -> set[str] | None:
     out: set[str] = set()
     for assignment in combos:
         if any(axis not in assignment for axis in axes_used):
+            return None
+        # A leg does not substitute the way GitHub substitutes it when it is
+        # EMPTY — `${{ matrix.p }}lint` over `p: ['']` renders the bare `lint`
+        # a different job owns, the template's discriminating part gone and
+        # the anchoring premise with it — or when normalising the rendering
+        # would REWRITE it: GitHub normalises neither the template nor the
+        # value, so a leg with interior double spaces renders, after the
+        # normalisation that makes renderings comparable, a string GitHub
+        # never emits, whose real producer this scan has not looked at.
+        if any(not assignment[a]
+               or " ".join(assignment[a].split()) != assignment[a]
+               for a in axes_used):
             return None
         rendered = _PLACEHOLDER_RE.sub(
             lambda m: assignment[_MATRIX_REF_RE.match(
