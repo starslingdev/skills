@@ -1891,9 +1891,11 @@ def _matrix_near_miss(docs: list[tuple[str, dict]], context: str) -> str | None:
         for key, job in _jobs(doc):
             shown = _display_name(key, job)
             if _EXPRESSION_RE.search(shown):
-                # A templated display name is not knowable, which is why the
-                # producer match skips it; the near miss has to skip it too or
-                # it would name a job as the cause on a guess.
+                # This near miss is about the bare-name-versus-expansion
+                # mismatch, which needs a literal name to compare. A templated
+                # name has its own note — see `_templated_refusal_note`, which
+                # rules a job out by its literal text before naming it, rather
+                # than naming one on a guess.
                 continue
             if shown == context and _job_has_matrix(job):
                 return (f"{rel}: the matrix job `{key}` produces "
