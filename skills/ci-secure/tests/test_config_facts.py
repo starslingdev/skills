@@ -3215,6 +3215,56 @@ jobs:
     assert f["outcome"] == "pass", f["evidence"]
 
 
+def test_a_caller_with_interior_whitespace_still_claims_its_leaf(tmp_path):
+    """Narrowing an unrenderable caller to the names its literal text could
+    produce compares that text against the required context, so it has to use
+    the SAME spelling the rest of this scan does — the collapsed display name,
+    never the raw `name:`.
+
+    Both sides are collapsed today, which is why this passes rather than
+    catching a live defect. It is pinned because the consistency is easy to
+    lose: built from the raw `name:`, a caller carrying interior whitespace
+    stops matching a context it really claims, stops competing for it, and a
+    foreign always-running template certifies a check whose real producer
+    carries a condition."""
+    caller = """\
+name: cd
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  suite:
+    name: "Rel  ${{ matrix.tier }}"
+    if: github.event.pull_request.draft == false
+    strategy:
+      matrix:
+        tier: ${{ fromJSON(needs.plan.outputs.tiers) }}
+    uses: ./.github/workflows/reusable.yml
+"""
+    foreign = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  make:
+    name: Rel ${{ matrix.v }} / build
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        v: [Suite, Other]
+    steps:
+      - run: make build
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"cd.yml": caller, "ci.yml": foreign},
+                    ["Rel Suite / build"]),
+        _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "← .github/workflows/ci.yml" not in f["evidence"], f["evidence"]
+
+
 def test_a_caller_whose_rendering_does_not_match_does_not_suppress(tmp_path):
     """A renderable caller that simply does not produce this context is not a
     competitor at all. Nothing pinned this branch, so tightening the claim
