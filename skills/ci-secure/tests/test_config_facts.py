@@ -2181,6 +2181,1317 @@ jobs:
     assert "no job in these workflows reports it" in f["evidence"], f["evidence"]
 
 
+# --- a TEMPLATED job name over an ENUMERABLE matrix -------------------------
+#
+# The literal templated text is still not a context anything reports (the test
+# above), but the names that template RENDERS are. Sharding a required job is
+# the ordinary case: one job named `build shard ${{ matrix.shard }}/4` over
+# `shard: [1, 2, 3, 4]` produces the four contexts the branch requires. Read
+# as "not knowable", all four went untraced and the fact went UNMEASURED — so
+# a repository that shards a required job lost a security fact its own YAML
+# answers outright.
+
+_TEMPLATED_SHARD_MATRIX = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build shard ${{ matrix.shard }}/4
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - run: make test SHARD=${{ matrix.shard }}
+"""
+
+
+def test_a_templated_name_over_a_literal_matrix_resolves_to_its_job(tmp_path):
+    """`build shard ${{ matrix.shard }}/4` over `shard: [1, 2, 3, 4]` renders
+    exactly four names, and every one of them is a context this job produces.
+    Nothing about that is a guess: the legs are literals sitting in the YAML,
+    the same evidence the `(…)` expansion already reads. Leaving it unresolved
+    reported a knowable required check as untraceable and dropped the whole
+    fact to unmeasured."""
+    f = _outcome(
+        _facts_with(tmp_path, {"ci.yml": _TEMPLATED_SHARD_MATRIX},
+                    ["build shard 1/4", "build shard 2/4",
+                     "build shard 3/4", "build shard 4/4"]),
+        _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "all 4 required check(s)" in f["evidence"], f["evidence"]
+
+
+def test_a_templated_name_producer_that_can_skip_still_fails(tmp_path):
+    """Resolution is not absolution. Once the leg is traced to its job, the
+    ordinary skip analysis applies to it — a conditional producer of a
+    rendered leg is the same bypass as a conditional producer of a plain
+    context, and must read as one."""
+    body = _TEMPLATED_SHARD_MATRIX.replace(
+        "    if: always()\n",
+        "    if: github.actor != 'dependabot[bot]'\n")
+    f = _outcome(
+        _facts_with(tmp_path, {"ci.yml": body}, ["build shard 1/4"]), _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "build shard 1/4" in f["evidence"], f["evidence"]
+
+
+def test_a_templated_name_only_produces_the_legs_its_matrix_can_run(tmp_path):
+    """The neighbouring leg that the matrix cannot render is not this job's
+    context. A template that resolved to anything shaped like it would alibi
+    a required check no job emits — the same false green the flattened-value
+    matrix match once produced."""
+    f = _outcome(
+        _facts_with(tmp_path, {"ci.yml": _TEMPLATED_SHARD_MATRIX},
+                    ["build shard 5/4"]),
+        _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "no job in these workflows reports it" in f["evidence"], f["evidence"]
+
+
+def test_a_templated_name_over_a_computed_matrix_stays_untraced(tmp_path):
+    """`fromJSON()` legs are not enumerable from the YAML, so what the name
+    renders to is unknown — and an unknown must never render as a known
+    negative. The fact stays UNMEASURED with the gap disclosed, which is the
+    honest answer; certifying or failing the check would both be inventions.
+
+    Both spellings are exercised. A whole-node `${{ fromJSON(…) }}` is a
+    STRING, so it exits at the not-a-list guard and never reaches the
+    expression check on values — leaving that check unpinned here despite the
+    docstring crediting it. The computed LEG alongside a literal one reaches
+    it."""
+    whole = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build shard ${{ matrix.shard }}/4
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - run: make test
+"""
+    leg = whole.replace(
+        "        shard: ${{ fromJSON(needs.plan.outputs.shards) }}\n",
+        '        shard: [1, "${{ fromJSON(needs.plan.outputs.extra)[0] }}"]\n')
+    for n, body in enumerate((whole, leg)):
+        f = _outcome(
+            _facts_with(tmp_path / str(n), {"ci.yml": body},
+                        ["build shard 1/4"]), _FACT)
+        assert f["outcome"] == "unmeasured", f["evidence"]
+        assert "no job in these workflows reports it" in f["evidence"], \
+            f["evidence"]
+
+
+def test_a_templated_name_over_an_include_matrix_stays_untraced(tmp_path):
+    """`include:` can add combinations, rename axes and extend existing ones,
+    so the rendered set is not the product of the declared axes. The same
+    refusal the `(…)` expansion already makes applies to the rendered name."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build shard ${{ matrix.shard }}/4
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1, 2]
+        include:
+          - shard: 3
+    steps:
+      - run: make test
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["build shard 1/4"]),
+                 _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_a_name_template_over_a_non_matrix_context_stays_untraced(tmp_path):
+    """Only a matrix reference is enumerable. `${{ github.ref_name }}` renders
+    from the run, not the file, so a name built from one is unknowable here
+    however literal the rest of the line is."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build ${{ github.ref_name }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1, 2]
+    steps:
+      - run: make test
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["build main"]), _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_a_degenerate_name_template_is_not_a_producer(tmp_path):
+    """A `name:` that is nothing but a placeholder carries no literal text to
+    anchor it, so whatever it renders is indistinguishable from a check some
+    external app happens to name the same. A security fact that certifies a
+    check on a coincidence is the worse of the two failures available: an
+    unresolved check is merely unmeasured."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [Header rules, Redirect rules]
+    steps:
+      - run: make build
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["Header rules"]),
+                 _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_a_template_loses_a_check_a_reusable_caller_claims(tmp_path):
+    """A reusable invocation's leaf check is named `<caller job> / <child>`.
+    A foreign `${{ matrix.variant }} / build` can render exactly that string,
+    and binding it would certify the caller's check against a job in another
+    file that never reports it. When a genuine reusable caller competes for
+    the name, the template loses.
+
+    Where the placeholder SITS in the template has nothing to do with it —
+    position was once a proxy for this hazard, and one literal word in front
+    walked past it. The competing claim is the whole rule."""
+    caller = """\
+name: release
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  Suite:
+    if: github.event.pull_request.draft == false
+    uses: ./.github/workflows/reusable.yml
+"""
+    foreign = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  make:
+    name: ${{ matrix.variant }} / build
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [Suite, Other]
+    steps:
+      - run: make build
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"release.yml": caller, "ci.yml": foreign},
+                    ["Suite / build"]),
+        _FACT)
+    # Whose check this is stays unresolved — which is the honest answer, and
+    # the one this scan is entitled to. What must NEVER happen is the green:
+    # the foreign `always()` matrix job certifying a check produced in another
+    # file by a caller carrying a real condition.
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    # The foreign job must never be CREDITED as a producer — the `←` is how
+    # this evidence spells credit. Naming the file is fine, and is now how the
+    # reader learns the two jobs compete; asserting the bare filename absent
+    # confused "not credited" with "not mentioned".
+    assert "← .github/workflows/ci.yml" not in f["evidence"], f["evidence"]
+
+
+def test_a_template_binds_its_own_leg_when_no_caller_competes(tmp_path):
+    """The other side of that refusal, and the reason it is scoped rather than
+    blanket: with no reusable caller competing, this job IS the sole real
+    producer of `linux / build`, and refusing it would report a traceable
+    required check as fileless."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  make:
+    name: ${{ matrix.variant }} / build
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [linux, darwin]
+    steps:
+      - run: make build
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["linux / build"]),
+                 _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_templated_reusable_caller_still_competes_for_its_own_check(tmp_path):
+    """The competitor lookup has to recognise a caller whose OWN `name:` is
+    templated. Comparing a required context against unrendered template text
+    never matches, so a matrix reusable caller claimed nothing, the
+    leading-placeholder refusal never fired, and a foreign `always()` matrix
+    job in another file certified a check the real caller produces behind a
+    condition — the exact silent pass that refusal exists to prevent. A caller
+    this scan cannot render is a competitor it cannot rule out."""
+    caller = """\
+name: release
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  tier:
+    name: ${{ matrix.tier }}
+    if: github.event.pull_request.draft == false
+    strategy:
+      matrix:
+        tier: [Suite, Nightly]
+    uses: ./.github/workflows/reusable.yml
+"""
+    foreign = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  make:
+    name: ${{ matrix.variant }} / build
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [Suite, Other]
+    steps:
+      - run: make build
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"release.yml": caller, "ci.yml": foreign},
+                    ["Suite / build"]),
+        _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    # The foreign job must never be CREDITED as a producer — the `←` is how
+    # this evidence spells credit. Naming the file is fine, and is now how the
+    # reader learns the two jobs compete; asserting the bare filename absent
+    # confused "not credited" with "not mentioned".
+    assert "← .github/workflows/ci.yml" not in f["evidence"], f["evidence"]
+
+
+def test_punctuation_is_not_literal_text_anchoring_a_template(tmp_path):
+    """The degenerate refusal asks whether the template carries literal text
+    anchoring it. Punctuation is not that text: `${{ matrix.a }}/${{ matrix.b }}`
+    over `[security] / [snyk]` renders `security/snyk` — an EXTERNAL check name
+    this scan never saw a producer for — with every discriminating character
+    coming from matrix values. Nothing in these files competes for an external
+    app's name, so the leading-placeholder rule cannot catch it either, and the
+    check was certified on a pure coincidence: a scored PASS over a producer
+    that is not the producer."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  scan:
+    name: ${{ matrix.a }}/${{ matrix.b }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        a: [security]
+        b: [snyk]
+    steps:
+      - run: make scan
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["security/snyk"]),
+                 _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_a_bracketing_template_does_not_impersonate_an_appended_suffix(tmp_path):
+    """`${{ matrix.s }} (${{ matrix.l }})` renders `Analyze (javascript)` — the
+    exact shape GitHub gives a MATRIX leg of a job named `Analyze`, and the
+    exact name a code-scanning app reports. The only literal text is ` ()`.
+    Binding it certifies a required check against a job that merely spells the
+    same string."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  scan:
+    name: ${{ matrix.s }} (${{ matrix.l }})
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        s: [Analyze]
+        l: [javascript]
+    steps:
+      - run: make scan
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body},
+                             ["Analyze (javascript)"]), _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_an_empty_matrix_leg_does_not_render_a_neighbours_bare_name(tmp_path):
+    """An axis whose leg is the empty string contributes NOTHING to the name,
+    so `${{ matrix.p }}lint` renders the bare `lint` that a different job in
+    another file legitimately owns. The template's discriminating part vanished
+    — the anchoring premise with it — and because ANY always-running producer
+    settles the context, the decoy converted a real conditional producer's FAIL
+    into a PASS."""
+    real = """\
+name: lint
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  real:
+    name: lint
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: make lint
+"""
+    decoy = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  j:
+    name: ${{ matrix.p }}lint
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        p: ['']
+    steps:
+      - run: make build
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"lint.yml": real, "ci.yml": decoy}, ["lint"]),
+        _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_leg_whose_whitespace_would_be_rewritten_does_not_render(tmp_path):
+    """Renderings are whitespace-normalised so they can be compared with
+    display names; GitHub normalises neither the template nor the value it
+    substitutes. A leg carrying interior double spaces therefore renders, after
+    normalisation, a string GitHub NEVER emits — and the required check that
+    does spell it has some other producer, one this scan has not looked at."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build ${{ matrix.t }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        t: ["e2e  chrome"]
+    steps:
+      - run: make test
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["build e2e chrome"]),
+                 _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_a_literal_word_before_the_placeholder_still_loses_to_a_caller(tmp_path):
+    """The hazard is that a reusable caller ALSO claims this context — never
+    that the placeholder happens to sit first. Keying the refusal on position
+    let one literal word walk past it: `Nightly ${{ matrix.variant }} / build`
+    renders `Nightly Suite / build`, the name a `Nightly Suite` caller's
+    invocation produces, and the foreign `always()` job certified a check whose
+    real producer carries a condition. Position was only ever a proxy; the
+    competing claim is the thing."""
+    caller = """\
+name: release
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  Nightly Suite:
+    if: github.event.pull_request.draft == false
+    uses: ./.github/workflows/reusable.yml
+"""
+    foreign = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  make:
+    name: Nightly ${{ matrix.variant }} / build
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [Suite, Other]
+    steps:
+      - run: make build
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"release.yml": caller, "ci.yml": foreign},
+                    ["Nightly Suite / build"]),
+        _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    # The foreign job must never be CREDITED as a producer — the `←` is how
+    # this evidence spells credit. Naming the file is fine, and is now how the
+    # reader learns the two jobs compete; asserting the bare filename absent
+    # confused "not credited" with "not mentioned".
+    assert "← .github/workflows/ci.yml" not in f["evidence"], f["evidence"]
+
+
+def test_an_exclude_naming_an_undeclared_axis_is_not_read_as_a_no_op(tmp_path):
+    """An `exclude:` key that matches no declared axis is not a rule this scan
+    understood and applied — it is a rule it could not read. Treating it as a
+    no-op keeps every combination, and EXTRA combinations are the dangerous
+    direction: they manufacture renderings GitHub never emits, any one of which
+    can certify a required check."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build ${{ matrix.os }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu, macos]
+        exclude:
+          - arch: x86
+    steps:
+      - run: make build
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["build ubuntu"]),
+                 _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_an_exclude_with_a_computed_value_is_not_compared_literally(tmp_path):
+    """Axis VALUES refuse an expression because what they render to is not
+    knowable; an exclude value is the same evidence and got no such guard, so
+    it was compared as the literal text `${{ … }}`, matched nothing, and
+    removed no combination the run would really remove."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build ${{ matrix.os }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu, macos]
+        exclude:
+          - os: ${{ github.event_name }}
+    steps:
+      - run: make build
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["build ubuntu"]),
+                 _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_interior_whitespace_in_a_templated_name_does_not_bind(tmp_path):
+    """Display names are whitespace-collapsed so they can be compared; GitHub
+    collapses nothing. A `name:` carrying interior double spaces therefore
+    renders a string GitHub never emits, and the required check that does spell
+    it belongs to some other producer this scan has not looked at."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: "build  shard ${{ matrix.shard }}"
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1]
+    steps:
+      - run: make test
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["build shard 1"]),
+                 _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_a_nested_matrix_value_leaves_a_templated_name_untraced(tmp_path):
+    """Pins the documented refusal for a non-scalar leg. A mapping leg carries
+    sub-properties GitHub can reference (`matrix.platform.target`), and what
+    the name renders to is not knowable from the list alone.
+
+    The required context asserted on is the string a dropped refusal would
+    actually render — the leg's own text. Asserting on `build linux` left this
+    test green with the refusal deleted, because a mapping's text never equals
+    `linux`: the mismatch was doing the work the refusal is credited with."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform:
+          - target: linux
+          - target: darwin
+    steps:
+      - run: make build
+"""
+    for n, context in enumerate(("build linux", "build {'target': 'linux'}")):
+        f = _outcome(
+            _facts_with(tmp_path / str(n), {"ci.yml": body}, [context]), _FACT)
+        assert f["outcome"] == "unmeasured", (context, f["evidence"])
+
+
+def test_a_name_referencing_an_undeclared_axis_stays_untraced(tmp_path):
+    """Pins the documented refusal for an axis the name uses but the matrix
+    does not declare. The value comes from somewhere this scan cannot see, so
+    the rendering is a guess — and a guess that matched would certify a
+    required check against a job that never reports it."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build ${{ matrix.shard }} on ${{ matrix.os }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1, 2]
+    steps:
+      - run: make test
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["build 1 on ubuntu"]),
+                 _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+# --- what counts as literal text ANCHORING a template ----------------------
+#
+# The degenerate refusal asks whether the name carries literal text that
+# discriminates. `\w` was the wrong test for that: it spells `[A-Za-z0-9_]`,
+# so an UNDERSCORE anchored — and `${{ matrix.os }}_${{ matrix.arch }}` is a
+# far more ordinary job name than the `security/snyk` shape the refusal was
+# written for. Every discriminating character still came from a matrix value.
+
+
+def test_an_underscore_between_placeholders_does_not_anchor_a_template(tmp_path):
+    """`${{ matrix.a }}_${{ matrix.b }}` over `[security]` and `[snyk]` renders
+    `security_snyk`. An underscore discriminates exactly as much as the `/`
+    already refused beside it — nothing — so the rendering equalling an
+    external app's check name is the same coincidence, and certifying the
+    check on it is the same scored silent PASS."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  scan:
+    name: ${{ matrix.a }}_${{ matrix.b }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        a: [security]
+        b: [snyk]
+    steps:
+      - run: make scan
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["security_snyk"]),
+                 _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_a_digit_between_placeholders_does_not_anchor_a_template(tmp_path):
+    """A digit is not a literal WORD either. `${{ matrix.t }} 2` renders
+    `Header rules 2`, and a required check spelled that way is as likely to be
+    an external app's second-generation check as this job's leg."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  scan:
+    name: ${{ matrix.t }} 2
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        t: [Header rules]
+    steps:
+      - run: make scan
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["Header rules 2"]),
+                 _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_a_single_literal_letter_still_anchors_a_template(tmp_path):
+    """The other side of that tightening, so it stays a rule about letters and
+    does not become a rule about length: `v${{ matrix.n }}` is a real and
+    ordinary name, its `v` is literal text a matrix value cannot supply, and
+    refusing it would report a traceable required check as fileless."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: v${{ matrix.n }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        n: [1, 2]
+    steps:
+      - run: make build
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["v1"]), _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+# --- matrix legs render the way GITHUB renders them ------------------------
+#
+# Legs reached both readings through `str(entry)`, which is Python's spelling,
+# not GitHub's: a YAML `true` leg became `True` and a `null` leg became
+# `None`. The first silently lost the resolution this fact exists to make; the
+# second walked past the empty-leg refusal, because the string `"None"` is
+# truthy where the empty string GitHub actually substitutes is not.
+
+
+def test_a_boolean_matrix_leg_renders_lowercase_like_github(tmp_path):
+    """GitHub substitutes a YAML `true` leg as `true`. Rendered as Python's
+    `True`, the leg matched nothing and a repository with a boolean axis kept
+    losing the fact this PR set out to give it back."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    name: cov ${{ matrix.flag }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        flag: [true, false]
+    steps:
+      - run: make test
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["cov true"]), _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_boolean_leg_also_renders_the_appended_suffix(tmp_path):
+    """The same leg text feeds the `(…)` suffix reading, which is the older of
+    the two: a literal `name:` over `flag: [true]` emits `test (true)`, and
+    `test (True)` is a context GitHub never spells."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        flag: [true]
+    steps:
+      - run: make test
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test (true)"]),
+                 _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_null_matrix_leg_is_refused_like_the_empty_leg_it_renders(tmp_path):
+    """A `null` leg substitutes as NOTHING, exactly like `''` — so
+    `${{ matrix.p }}deploy` renders the bare `deploy` another job owns, and the
+    empty-leg refusal must fire. Rendered as Python's `None` the leg was
+    non-empty, the refusal did not fire, and the decoy certified a check whose
+    real producer carries a condition."""
+    real = """\
+name: deploy
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  real:
+    name: deploy
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: make deploy
+"""
+    decoy = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  j:
+    name: ${{ matrix.p }}deploy
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        p: [~]
+    steps:
+      - run: make build
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"deploy.yml": real, "ci.yml": decoy},
+                    ["deploy"]),
+        _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+# --- refusals that are not about UNKNOWABILITY --------------------------
+
+
+def test_an_unterminated_expression_does_not_match_a_matrix_bare_name(tmp_path):
+    """A `name:` carrying `${{` with no closing `}}` is not a templated name —
+    it has no placeholder to resolve — but it took the templated branch, where
+    every combination rendered the raw text unchanged and the single rendering
+    equalled the bare display name. That reinstated exactly what the literal
+    branch refuses: a MATRIX job standing in for a context GitHub never emits
+    for it, since GitHub always appends the combination."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: "build ${{ matrix.s"
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        s: [1, 2]
+    steps:
+      - run: make build
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"ci.yml": body}, ["build ${{ matrix.s"]), _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_a_non_scalar_exclude_value_is_not_read_as_a_no_op(tmp_path):
+    """An `exclude:` whose VALUE is a list or a mapping is a rule this scan
+    cannot read, and the refusal beside it already says an unreadable exclude
+    is not one it may ignore. Stringified to `"[1]"` it matched no assignment,
+    removed nothing, and left EXTRA renderings standing — the dangerous
+    direction, since any one of them can certify a required check."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build ${{ matrix.s }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        s: [1, 2]
+        exclude:
+          - s: [1]
+    steps:
+      - run: make build
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["build 1"]), _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_a_scalar_matrix_axis_leaves_a_templated_name_untraced(tmp_path):
+    """`node: 18` — a scalar where GitHub wants a list — is a matrix this scan
+    cannot enumerate. Skipping the unreadable axis instead of refusing the
+    matrix would let the REST of the axes render a partial name and bind it."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build ${{ matrix.os }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu]
+        node: 18
+    steps:
+      - run: make build
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["build ubuntu"]),
+                 _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+# --- which reusable callers actually COMPETE for a name --------------------
+#
+# "A caller this scan cannot rule out claims the name" is the right rule, and
+# it was applied to callers it CAN rule out: any unrenderable caller claimed
+# every context in every file, so one `deploy ${{ matrix.env }}` over a
+# computed matrix — the ordinary deploy-per-environment shape — switched the
+# whole fix off repository-wide.
+
+
+def test_an_unrelated_unrenderable_caller_does_not_suppress_a_traceable_check(tmp_path):
+    """The caller's own literal text rules it out: `deploy ${{ matrix.env }}`
+    cannot render `build shard 1/4` whatever its matrix turns out to hold, so
+    it is not a competitor and the sharded job in another file is still the
+    sole producer."""
+    caller = """\
+name: cd
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  deploy:
+    name: deploy ${{ matrix.env }}
+    strategy:
+      matrix:
+        env: ${{ fromJSON(needs.plan.outputs.envs) }}
+    uses: ./.github/workflows/reusable.yml
+"""
+    f = _outcome(
+        _facts_with(tmp_path,
+                    {"ci.yml": _TEMPLATED_SHARD_MATRIX, "cd.yml": caller},
+                    ["build shard 1/4"]),
+        _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_an_unrenderable_caller_that_could_render_the_name_still_claims_it(tmp_path):
+    """The other side: when the caller's literal text COULD produce this
+    context — `build shard ${{ matrix.n }}` against `build shard 1/4` — an
+    unenumerable matrix leaves it a competitor this scan cannot rule out, and
+    the foreign job must not certify the check."""
+    caller = """\
+name: cd
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  shards:
+    name: build shard ${{ matrix.n }}
+    if: github.event.pull_request.draft == false
+    strategy:
+      matrix:
+        n: ${{ fromJSON(needs.plan.outputs.shards) }}
+    uses: ./.github/workflows/reusable.yml
+"""
+    f = _outcome(
+        _facts_with(tmp_path,
+                    {"ci.yml": _TEMPLATED_SHARD_MATRIX, "cd.yml": caller},
+                    ["build shard 1/4"]),
+        _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_an_unrenderable_caller_claims_the_leaf_of_its_own_invocation(tmp_path):
+    """A reusable call's check is named `<caller> / <child>`, and the child
+    half names a job in the called file this scan does not read. Spelling the
+    leaf as a bare `" / "` suffix demanded the context END there, which no
+    real leaf does — so the leaf half of the claim rule never fired, and a
+    foreign always-running template could certify `Suite / build` while the
+    caller that really produces it carries a condition."""
+    caller = """\
+name: cd
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  suite:
+    name: ${{ matrix.tier }}uite
+    if: github.event.pull_request.draft == false
+    strategy:
+      matrix:
+        tier: ${{ fromJSON(needs.plan.outputs.tiers) }}
+    uses: ./.github/workflows/reusable.yml
+"""
+    foreign = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  make:
+    name: ${{ matrix.v }} / build
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        v: [Suite, Other]
+    steps:
+      - run: make build
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"cd.yml": caller, "ci.yml": foreign},
+                    ["Suite / build"]),
+        _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "← .github/workflows/ci.yml" not in f["evidence"], f["evidence"]
+
+
+def test_a_null_matrix_leg_renders_the_empty_suffix_github_renders(tmp_path):
+    """The `(…)` suffix reading shows the leg text directly, so it is where a
+    leg spelled Python's way is visible: GitHub substitutes a `null` leg as
+    nothing and emits `test ()`, while `str(None)` emits `test (None)` — a
+    context GitHub never spells, leaving the real one untraced."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [~]
+    steps:
+      - run: make test
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["test ()"]), _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_caller_with_interior_whitespace_still_claims_its_leaf(tmp_path):
+    """Narrowing an unrenderable caller to the names its literal text could
+    produce compares that text against the required context, so it has to use
+    the SAME spelling the rest of this scan does — the collapsed display name,
+    never the raw `name:`.
+
+    Both sides are collapsed today, which is why this passes rather than
+    catching a live defect. It is pinned because the consistency is easy to
+    lose: built from the raw `name:`, a caller carrying interior whitespace
+    stops matching a context it really claims, stops competing for it, and a
+    foreign always-running template certifies a check whose real producer
+    carries a condition."""
+    caller = """\
+name: cd
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  suite:
+    name: "Rel  ${{ matrix.tier }}"
+    if: github.event.pull_request.draft == false
+    strategy:
+      matrix:
+        tier: ${{ fromJSON(needs.plan.outputs.tiers) }}
+    uses: ./.github/workflows/reusable.yml
+"""
+    foreign = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  make:
+    name: Rel ${{ matrix.v }} / build
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        v: [Suite, Other]
+    steps:
+      - run: make build
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"cd.yml": caller, "ci.yml": foreign},
+                    ["Rel Suite / build"]),
+        _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "← .github/workflows/ci.yml" not in f["evidence"], f["evidence"]
+
+
+def test_a_caller_whose_rendering_does_not_match_does_not_suppress(tmp_path):
+    """A renderable caller that simply does not produce this context is not a
+    competitor at all. Nothing pinned this branch, so tightening the claim
+    rule to "any templated caller blocks" would have gone unnoticed — and it
+    moves a SCORED fact out of the denominator on every repository that calls
+    a reusable workflow over a matrix."""
+    caller = """\
+name: cd
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  tier:
+    name: ${{ matrix.tier }} suite
+    strategy:
+      matrix:
+        tier: [Alpha, Beta]
+    uses: ./.github/workflows/reusable.yml
+"""
+    f = _outcome(
+        _facts_with(tmp_path,
+                    {"ci.yml": _TEMPLATED_SHARD_MATRIX, "cd.yml": caller},
+                    ["build shard 1/4"]),
+        _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_literal_callers_own_exact_name_is_still_a_competing_claim(tmp_path):
+    """The claim rule has two halves — the caller's own name, and the
+    `<caller> / <child>` leaf — and only the leaf was pinned. With the exact
+    half dropped, a foreign `always()` template rendering `Suite` joins the
+    real producer, and ANY always-running producer settles the context: the
+    conditional reusable call's FAIL turns into a PASS."""
+    caller = """\
+name: release
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  Suite:
+    if: github.event.pull_request.draft == false
+    uses: ./.github/workflows/reusable.yml
+"""
+    foreign = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  make:
+    name: ${{ matrix.a }}uite
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        a: [S]
+    steps:
+      - run: make build
+"""
+    f = _outcome(
+        _facts_with(tmp_path, {"release.yml": caller, "ci.yml": foreign},
+                    ["Suite"]),
+        _FACT)
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "release.yml" in f["evidence"], f["evidence"]
+    # The foreign job must never be CREDITED as a producer — the `←` is how
+    # this evidence spells credit. Naming the file is fine, and is now how the
+    # reader learns the two jobs compete; asserting the bare filename absent
+    # confused "not credited" with "not mentioned".
+    assert "← .github/workflows/ci.yml" not in f["evidence"], f["evidence"]
+
+
+def test_a_templated_reusable_caller_is_not_its_own_competitor(tmp_path):
+    """The competitor walk has to skip the job it is deciding about. A job
+    carrying both `uses:` and a templated `name:` rendered the context, found
+    ITSELF in the walk, claimed the name against itself and could never
+    resolve — while the identical job with a literal name resolves. The two
+    readings of one job must not disagree."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build ${{ matrix.s }}
+    if: always()
+    strategy:
+      matrix:
+        s: [1, 2]
+    uses: ./.github/workflows/reusable.yml
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["build 1"]), _FACT)
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+# --- the evidence names the CAUSE it actually found ------------------------
+#
+# Six distinct refusals shared one sentence — "a job name templated over a
+# matrix this scan cannot enumerate" — which is false for five of them. The
+# reader whose axis name has a typo was sent hunting for an external app that
+# does not exist, on the surface whose whole purpose is telling them how to
+# get a lost security grade back.
+
+
+def test_the_evidence_names_an_axis_the_matrix_does_not_declare(tmp_path):
+    """A one-character typo in an axis name is invisible in the generic
+    sentence and obvious in a specific one."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build ${{ matrix.shrd }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1, 2]
+    steps:
+      - run: make build
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["build 1"]), _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "`matrix.shrd`" in f["evidence"], f["evidence"]
+    assert "ci.yml" in f["evidence"], f["evidence"]
+    assert "cannot enumerate" not in f["evidence"], f["evidence"]
+
+
+def test_the_evidence_does_not_blame_the_matrix_for_a_degenerate_name(tmp_path):
+    """The matrix here enumerates perfectly. What this scan refused is the
+    ANCHORING, and saying "cannot enumerate" points the reader at a matrix
+    that is not the problem."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  scan:
+    name: ${{ matrix.target }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [Header rules]
+    steps:
+      - run: make build
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["Header rules"]),
+                 _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "cannot enumerate" not in f["evidence"], f["evidence"]
+    assert "`scan`" in f["evidence"], f["evidence"]
+
+
+def test_the_evidence_names_the_reusable_caller_that_took_the_name(tmp_path):
+    """When a competing reusable call is what suppressed the match, the job
+    the reader can see in front of them IS a producer-shaped job — telling
+    them nothing in these workflows reports the check sends them looking for
+    an external app instead of at the ambiguity."""
+    caller = """\
+name: release
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  Suite:
+    if: github.event.pull_request.draft == false
+    uses: ./.github/workflows/reusable.yml
+"""
+    foreign = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  make:
+    name: Nightly ${{ matrix.variant }} / build
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [Suite, Other]
+    steps:
+      - run: make build
+"""
+    body = foreign.replace("Nightly ${{ matrix.variant }} / build",
+                           "${{ matrix.variant }} / build")
+    f = _outcome(
+        _facts_with(tmp_path, {"release.yml": caller, "ci.yml": body},
+                    ["Suite / build"]),
+        _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "release.yml" in f["evidence"], f["evidence"]
+    assert "`Suite`" in f["evidence"], f["evidence"]
+
+
+def test_an_unrelated_templated_job_is_not_named_as_the_cause(tmp_path):
+    """The specific note is a HINT, and a hint that names a job which could
+    not have produced the context is worse than the generic sentence. A job
+    whose literal text cannot render this check is not the reason it is
+    unresolved."""
+    body = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build ${{ matrix.shrd }}
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1, 2]
+    steps:
+      - run: make build
+"""
+    f = _outcome(_facts_with(tmp_path, {"ci.yml": body}, ["Codecov"]), _FACT)
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "`build`" not in f["evidence"], f["evidence"]
+    assert "external app check" in f["evidence"], f["evidence"]
+
+
 def test_a_needs_cycle_terminates_and_is_not_an_all_clear(tmp_path):
     """Two jobs that `needs:` each other is a shape GitHub rejects but a
     scanner still meets in a work-in-progress branch. The claim the code makes

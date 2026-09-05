@@ -141,6 +141,68 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-09-03** — **A required check produced by a matrix-templated job name
+  now resolves to its job.** `sec.required-checks.skippable` matched a job's
+  display name only when that name was literal. A job named `build shard
+  ${{ matrix.shard }}/4` with literal legs `[1, 2, 3, 4]` produces the required
+  checks `build shard 1/4` through `build shard 4/4`, and the resolver could
+  not map any of them back to the job that declares them: checks fully
+  determinable from the workflow YAML were reported as untraceable ("no job in
+  these workflows reports it") and the fact went UNMEASURED, so a repository
+  that shards a required job lost a security fact it could have been graded on.
+  Templated names are now rendered against the matrix's literal values through
+  the SAME enumeration that produces the `(…)` suffixes, and legs are read the
+  way GitHub substitutes them rather than the way Python prints them — a `true`
+  leg renders `true`, and a `null` leg renders nothing at all.
+
+  Both readings of a matrix job's contexts therefore share one set of refusals,
+  and each leaves the check UNTRACED and the fact UNMEASURED, because an
+  unknown must never render as a known negative:
+
+  - a matrix that cannot be enumerated — `fromJSON()` or any other computed
+    value, `include:`, a nested or non-list shape;
+  - a placeholder that is not a plain `matrix.<axis>` reference, and a `${{`
+    that is never closed (not a templated name at all, and it was letting a
+    matrix job stand in for the bare context GitHub never emits for it);
+  - an axis the name references that the matrix does not declare;
+  - a name with no literal LETTER anchoring it, whose rendering matching an
+    external app's check name is a coincidence. Punctuation was already refused
+    (`${{ matrix.a }}/${{ matrix.b }}` rendering `security/snyk`); underscores
+    and digits are refused with it, since `${{ matrix.os }}_${{ matrix.arch }}`
+    rendering a required `ubuntu_x64` is the same coincidence and a far more
+    ordinary job name. One literal letter still anchors, so `v${{ matrix.n }}`
+    binds;
+  - an EMPTY leg, which renders exactly what GitHub renders and thereby loses
+    the anchoring text the name was admitted on, and interior whitespace in a
+    leg or in the `name:`, which this scan normalises and GitHub does not;
+  - an `exclude:` this scan cannot read — a key naming no declared axis, a
+    computed value, or a value that is not a scalar. All three were silent
+    no-ops, and an exclude that fails to remove leaves EXTRA renderings, the
+    dangerous direction;
+  - a rendering a genuine reusable caller in these files also claims. That
+    refusal keys on the competing CLAIM, not on the template beginning with a
+    placeholder: position was only ever a proxy, and one literal word in front
+    (`Nightly ${{ matrix.variant }} / build` against a `Nightly Suite` caller)
+    walked straight past it. The competitor lookup renders a caller's own
+    templated `name:` through the same enumeration, and a caller it cannot
+    render competes for the names its literal text could still produce — not,
+    as it first did, for every name in the repository, which switched the whole
+    resolution off for any repository holding one `deploy ${{ matrix.env }}`
+    over a computed matrix. A job is no longer its own competitor.
+
+  Every one of those refusals now says which one it was. They shared a single
+  sentence — "a job name templated over a matrix this scan cannot enumerate" —
+  which is false for most of them, since in a degenerate name, a whitespace
+  rewrite, a misspelled axis or a competing reusable call the matrix enumerates
+  perfectly well. The evidence names the job that nearly produced the check and
+  why it did not, and names only a job whose literal text could have produced
+  that context.
+
+  Because the fact is SCORED, `security_score` changes on any repository with
+  matrix-templated required checks: the fact enters the scored denominator
+  where it used to sit out, as a PASS where the newly traced producers always
+  run and as a FAIL — lowering the score — where one of them can skip.
+
 - **2026-08-19** — **A deferred file that cannot be read is now a stop, not an
   improvisation.** SKILL.md defers load-bearing procedure to reference files in
   several places, each phrased as "read this before acting". While that
