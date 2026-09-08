@@ -100,7 +100,7 @@ jobs:
       # this repo: this job holds the API key and repo-write permissions, so a
       # mutable tag would let an upstream retag run unreviewed code here.
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           # Don't leave the job token in .git/config: Claude's own tools run
@@ -110,6 +110,6 @@ jobs:
       # No github_token input on purpose: the action then authenticates its
       # pushes as the Claude App, which lets CI trigger on Claude's commits.
       - name: Run Claude
-        uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
+        uses: anthropics/claude-code-action@d75b94d5ad426cb8546e6628b6f5f19b84e5cce1 # v1.0.216
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
