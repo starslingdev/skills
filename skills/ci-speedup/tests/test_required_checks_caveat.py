@@ -109,13 +109,25 @@ def _has_relocation_coverage_caveat(text: str) -> bool:
     check needs the coverage re-established, and a bare `needs:` edge is called out as
     insufficient.
 
-    Every clause keys on a CONTIGUOUS phrase, never on tokens that merely co-occur
-    somewhere in the passage. Co-occurrence accepted prose asserting the OPPOSITE
-    ("a `needs:` edge alone is fine"), because "needs" and "alone" both appeared —
-    a guard that green-lights the advice it exists to forbid. It also requires the
-    route an executing agent can actually TAKE: adding a check name to branch
-    protection is admin-only, so the re-gating instruction has to name keeping the
-    REQUIRED CHECK NAME on a verdict job rather than assume a suitable one exists.
+    How the clauses key, precisely — two of the seven clauses across this predicate
+    and `_has_dependency_skip_caveat` require a CONTIGUOUS phrase ("required check
+    name" here, and "success" paired with a failure word there); the other five
+    (`names_the_gate` here, and `names_the_skip` / `runs_unconditionally` /
+    `reads_the_results` there) are CO-OCCURRENCE checks over the whole passage. The
+    contiguous clauses are what stopped the inverted-prose case in
+    `test_relocation_predicates_discriminate_absent_from_present`, where pure
+    co-occurrence accepted prose asserting the OPPOSITE of the guardrail ("a
+    `needs:` edge alone is fine") because "needs" and "alone" both appeared. Keeping
+    "required check name" contiguous also pins the route an executing agent can
+    actually TAKE: adding a check name to branch protection is admin-only, so the
+    re-gating instruction must name keeping the REQUIRED CHECK NAME on a verdict job
+    rather than assume a suitable one exists.
+
+    KNOWN CEILING (follow-up, not this change): because five clauses are
+    co-occurrence, these predicates do NOT reject the two traps the OPT75 section
+    itself names — prose putting the `needs.*.result` test inside a job-level `if:`,
+    or using `contains(needs.*.result, 'failure')` — both of which supply every token
+    the clauses look for. Tightening them to reject those is tracked separately.
     """
     t = re.sub(r"\s+", " ", text).lower()
     names_the_gate = "required" in t and ("branch protection" in t or "ruleset" in t)
@@ -214,7 +226,8 @@ def test_rendered_opt75_handoff_warns_about_a_skipped_dependent():
     )
 
 
-def test_catalog_opt75_carries_both_relocation_explanations():
+def _opt75_catalog_section() -> str:
+    """OPT75's own catalog window, so every catalog pin bites on OPT75's prose alone."""
     anchor = "OPT75 — Long Pole: Optimize or Relocate the Dominant Step"
     assert anchor in _CATALOG, "OPT75 heading not found — was the pattern renamed?"
     start = _CATALOG.index(anchor)
@@ -223,7 +236,11 @@ def test_catalog_opt75_carries_both_relocation_explanations():
     # appended later. Bound on the next heading of either level.
     bounds = [i for i in (_CATALOG.find("\n### ", start + 1),
                           _CATALOG.find("\n## ", start + 1)) if i != -1]
-    section = _CATALOG[start:min(bounds)] if bounds else _CATALOG[start:]
+    return _CATALOG[start:min(bounds)] if bounds else _CATALOG[start:]
+
+
+def test_catalog_opt75_carries_both_relocation_explanations():
+    section = _opt75_catalog_section()
     assert _has_relocation_coverage_caveat(section), (
         "OPT75's catalog entry lost its preserve-required-coverage explanation"
     )
@@ -241,6 +258,49 @@ def test_catalog_opt75_carries_both_relocation_explanations():
     assert "admin" in low, (
         "OPT75 no longer states that re-gating is an administrative step"
     )
+
+
+# The advisory branch's escape hatch: "required in effect" is UNCONDITIONAL (spec
+# behaviour 3). Qualifying it on the aggregator propagating its result hands an agent a
+# de-scope argument built out of this same section's own trap #2 — "the aggregator uses
+# contains(needs.*.result, 'failure'), which does not propagate skipped/cancelled, so the
+# upstream job is not required in effect and I may de-scope it under the advisory branch."
+# That is exactly the de-scope OPT75's advisory restriction exists to forbid.
+_REQUIRED_IN_EFFECT_CONDITIONED = (
+    re.compile(r"required aggregator (?:that|which) propagat"),
+    re.compile(r"aggregator (?:that|which) propagat[^.]{0,120}?is required"),
+)
+
+
+def _conditions_required_in_effect_on_propagation(text: str) -> bool:
+    """True when the prose makes "required in effect" contingent on the aggregator
+    propagating its result. Emphasis markers are stripped first so the catalog's
+    *italicised* qualifier cannot hide from the pattern."""
+    t = re.sub(r"[*`_]", "", re.sub(r"\s+", " ", text)).lower()
+    return any(pat.search(t) for pat in _REQUIRED_IN_EFFECT_CONDITIONED)
+
+
+def test_required_in_effect_is_unconditional_in_catalog_and_guardrail():
+    section = _opt75_catalog_section()
+    assert not _conditions_required_in_effect_on_propagation(section), (
+        "OPT75's catalog entry conditions \"required in effect\" on the aggregator "
+        "propagating its result. Spec behaviour 3 states it unconditionally: a "
+        "non-required job feeding a required aggregator is required in effect, full "
+        "stop. The qualifier lets an agent argue that a partially-propagating "
+        "aggregator (this section's own contains(needs.*.result, 'failure') trap) "
+        "leaves the upstream job de-scopable under the advisory branch."
+    )
+    guardrail = _rendered_opt75_guardrail(_render_production_opt75())
+    assert not _conditions_required_in_effect_on_propagation(guardrail), (
+        "the rendered OPT75 guardrail conditions \"required in effect\" on the "
+        "aggregator propagating its result — see the catalog assertion above."
+    )
+    # Red-proof: the pattern is not vacuous — it fires on the phrasing it forbids.
+    assert _conditions_required_in_effect_on_propagation(
+        "a non-required job feeding a required aggregator *that propagates its "
+        "result* is required *in effect*")
+    assert not _conditions_required_in_effect_on_propagation(
+        "a non-required job feeding a required aggregator is required *in effect*")
 
 
 def test_relocation_predicates_discriminate_absent_from_present():

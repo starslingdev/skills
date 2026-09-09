@@ -30,8 +30,9 @@ unversioned and updates by reinstall from `main`.
   propagate every dependency result, not merely add `always()`. The catalog entry
   adds the whole verdict job in YAML, names the three ways to write it wrong, and
   restates the restriction on relocating anything but genuinely advisory work — a
-  job feeding a required aggregator that propagates its result is required in
-  effect, and an unknown required status is treated as required. The sharding and
+  job feeding a required aggregator is required in effect whatever that
+  aggregator's own verdict logic does, and an unknown required status is treated
+  as required. The sharding and
   workflow-consolidation entries that split work into new check names link to the
   same explanation.
 
