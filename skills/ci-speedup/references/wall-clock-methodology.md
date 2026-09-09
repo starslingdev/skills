@@ -542,7 +542,14 @@ the identity failures, because each of them silently changes which comparison
 gets made rather than erroring: a missing or repeated finding ID, a missing
 workflow, affected-work or evidence identity, and one check name claimed by two
 different workflows — the gating set holds a single duration under that name, so
-the two cannot be modelled as one check. This is
+the two cannot be modelled as one check. An observation that timed a check the
+gating set does not declare is refused for the mirror-image reason: the gate
+maximum is taken over the declared names, so an undeclared competitor would be
+dropped out of the competition instead of capping the saving. And a reduction
+basis that merely *names* one of the capped savings stamps — "derived from the
+capped merge-wait saving", in any spelling or case — is refused exactly as the
+bare field name is, because a paraphrase around that stamp is the same
+already-capped number under another sentence. This is
 deliberately not a general DAG scheduler; the existing single-finding
 chain-aware behaviour is unchanged.
 

@@ -601,7 +601,9 @@ def test_pairs_rank_by_joint_reduction_then_by_stable_finding_ids():
 
 
 def test_selection_uses_displayed_precision():
-    """Joint 100.4 vs individual 100.0 does not clear the bar at whole seconds."""
+    """The 0.4s cut on B never reaches the gate — A still finishes last — so
+    the joint saving is 100.0s, exactly what F-A is worth alone. A pair that
+    only ties its better half says nothing new and earns no block."""
     g = gating([obs(f"r{i}", {"A": 300.0, "B": 200.0}) for i in range(3)])
     oids = [o.observation_id for o in g.observations]
     ea = constant_effect("F-A", "A::s", "A", 100.0, 250.0, oids)
@@ -888,3 +890,235 @@ def test_a_scenario_with_no_effects_saves_nothing():
     assert res.median_t_before_s == 300.0
     assert res.median_t_after_s == 300.0
     assert res.median_delta_s == 0.0
+
+
+# --------------------------------------------------------------------------
+# an undeclared competitor may not be dropped out of the gate maximum
+# --------------------------------------------------------------------------
+
+def test_a_competitor_absent_from_the_declared_gating_set_is_rejected():
+    """The gating set is the fixed list of competitors. An observation that
+    timed a check the set never declared is evidence of a check that competes
+    for the gate, and taking `max` over the declared names alone would silently
+    drop it: C at 290s never competes, and the pair is credited with 100s it
+    would not get. §8 keeps every gating competitor."""
+    rows = [obs(f"r{i}", {"A": 300.0, "B": 299.0, "C": 290.0}) for i in range(3)]
+    g = gating(rows, check_names={"A", "B"})
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)])
+    assert res.supported is False
+    assert res.rejection.code == "undeclared_competitor"
+    assert res.median_delta_s is None
+
+
+def test_a_declared_competitor_still_caps_the_joint_saving():
+    """The guard refuses undeclared checks, not extra competitors: declare C
+    and the same observations produce the honest 10s, not 100s."""
+    rows = [obs(f"r{i}", {"A": 300.0, "B": 299.0, "C": 290.0}) for i in range(3)]
+    g = gating(rows, check_names={"A", "B", "C"})
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)])
+    assert res.supported is True
+    assert res.median_delta_s == 10.0
+
+
+# --------------------------------------------------------------------------
+# the capped-stamp refusal reads the basis, not an exact string match
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("basis", [
+    "derived from wall_clock_p50_s",
+    "Derived From Wall_Clock_P50_S.",
+    "wall-clock-p50-s",
+    "computed from the finding's wall_clock_uncapped_p50_s",
+    "cluster_floor_lever (per leg)",
+    "runner_min_saving / n_runs",
+    "chain_win_s, apportioned",
+])
+def test_a_paraphrased_capped_stamp_is_still_refused(basis):
+    """The single most important refusal in the module cannot be exact-match:
+    a producer that writes `derived from wall_clock_p50_s` is declaring the
+    same already-capped merge-wait saving, and letting it through produces a
+    joint number two orders of magnitude wrong."""
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids,
+                        reduction_basis=basis),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)])
+    assert res.supported is False
+    assert res.rejection.code == "capped_stamp_not_a_local_reduction"
+
+
+@pytest.mark.parametrize("basis", [
+    "step_p50_measured",
+    "pr_critical_path.chain_facts.member_spans_s",
+    "measured step span, wall clock, p50 across the matched attempts",
+])
+def test_a_legitimate_reduction_basis_is_not_swept_up(basis):
+    """The refusal is scoped to the capped stamps themselves. A per-observation
+    measured step basis — including one that merely shares a word with a capped
+    field — is exactly what the contract asks a producer for."""
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids,
+                        reduction_basis=basis),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)])
+    assert res.supported is True, res.rejection
+    assert res.median_delta_s == 100.0
+
+
+# --------------------------------------------------------------------------
+# the rejection vocabulary is a closed, pinned set
+# --------------------------------------------------------------------------
+
+def _raw_effect(finding_id, work_id, rows, **kw):
+    """A ScenarioEffect built from explicit EffectObservation rows, so a test
+    can state a shape the keyed builder cannot express."""
+    fields = dict(
+        workflow=".github/workflows/ci.yml", basis=BASIS,
+        assumption="modeled", evidence_refs=("e",),
+        local_runtime_only=True, matrix_identity_resolved=True,
+        reduction_basis="step_p50_measured")
+    fields.update(kw)
+    return js.ScenarioEffect(finding_id=finding_id, work_id=work_id,
+                             observations=tuple(rows), **fields)
+
+
+def _observed_rejection_codes():
+    """Drive every rejection path in the module and collect the codes it
+    produced. Kept next to the exported set so a renamed code shows up as a
+    mismatch rather than as a literal nobody reads."""
+    codes = set()
+
+    def note(res):
+        assert res.supported is False, res
+        codes.add(res.rejection.code)
+
+    good = [obs(f"r{i}", {"A": 300.0, "B": 299.0}) for i in range(3)]
+    oids = ["r0", "r1", "r2"]
+
+    def pair(**kw):
+        return [constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids, **kw),
+                constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)]
+
+    # gating-set rejections
+    note(js.evaluate_scenario(gating(good, topology="needs_chain"), pair()))
+    note(js.evaluate_scenario(gating([], check_names={"A"}), []))
+    note(js.evaluate_scenario(
+        gating([obs("r0", {"A": 300.0}), obs("r0", {"A": 300.0})]),
+        [constant_effect("F-A", "A::s", "A", 1.0, 2.0, ["r0"])]))
+    note(js.evaluate_scenario(gating(
+        [obs("r0", {"A": 300.0, "B": 299.0}, basis="era=e0")] + good[1:]),
+        pair()))
+    note(js.evaluate_scenario(gating(
+        [obs("r0", {"A": float("nan"), "B": 299.0})] + good[1:]), pair()))
+    note(js.evaluate_scenario(gating(
+        [obs("r0", {"A": -1.0, "B": 299.0})] + good[1:]), pair()))
+    note(js.evaluate_scenario(gating(
+        [obs("r0", {"A": 300.0})] + good[1:], check_names={"A", "B"}), pair()))
+    note(js.evaluate_scenario(gating(
+        [obs("r0", {"A": 300.0, "B": 299.0}, validated=False)] + good[1:]),
+        pair()))
+    note(js.evaluate_scenario(gating(
+        [obs("r0", {"A": 300.0, "B": 299.0}, residual=99.0)] + good[1:]),
+        pair()))
+    note(js.evaluate_scenario(gating(
+        [obs(f"r{i}", {"A": 300.0, "B": 299.0, "C": 290.0}) for i in range(3)],
+        check_names={"A", "B"}), pair()))
+
+    # effect-identity rejections
+    g = gating(good)
+    note(js.evaluate_scenario(g, [
+        constant_effect("", "A::pytest", "A", 100.0, 250.0, oids),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)]))
+    note(js.evaluate_scenario(g, [
+        constant_effect("F-D", "A::pytest", "A", 100.0, 250.0, oids),
+        constant_effect("F-D", "B::npm", "B", 100.0, 250.0, oids)]))
+    note(js.evaluate_scenario(g, pair(workflow="")))
+    note(js.evaluate_scenario(g, [
+        constant_effect("F-A", "", "A", 100.0, 250.0, oids),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)]))
+    note(js.evaluate_scenario(g, pair(evidence_refs=())))
+    note(js.evaluate_scenario(
+        gating([obs(f"r{i}", {"test": 300.0, "B": 299.0}) for i in range(3)]), [
+            constant_effect("F-A", "test::a", "test", 100.0, 250.0, oids,
+                            workflow=".github/workflows/ci.yml"),
+            constant_effect("F-B", "test::b", "test", 100.0, 250.0, oids,
+                            workflow=".github/workflows/release.yml")]))
+
+    # effect-eligibility rejections
+    note(js.evaluate_scenario(g, pair(local=False)))
+    note(js.evaluate_scenario(g, pair(matrix_resolved=False)))
+    note(js.evaluate_scenario(g, pair(reduction_basis="   ")))
+    note(js.evaluate_scenario(g, pair(reduction_basis="wall_clock_p50_s")))
+    note(js.evaluate_scenario(g, pair(assumption="  ")))
+    note(js.evaluate_scenario(g, [
+        constant_effect("F-X", "X::s", "X", 100.0, 250.0, oids),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)]))
+    note(js.evaluate_scenario(g, [_raw_effect("F-A", "A::pytest", [
+        js.EffectObservation(o, "A", 1.0, 2.0) for o in oids] + [
+        js.EffectObservation("r0", "A", 1.0, 2.0)])]))
+    note(js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, ["r0", "r1"]),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)]))
+    note(js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 90.0, oids),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)]))
+    note(js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 400.0, oids),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)]))
+    note(js.evaluate_scenario(g, [
+        constant_effect("F-1", "A::pytest", "A", 60.0, 100.0, oids),
+        constant_effect("F-2", "A::pytest", "A", 80.0, 100.0, oids)]))
+    note(js.evaluate_scenario(g, [
+        constant_effect("F-1", "A::install", "A", 100.0, 250.0, oids),
+        constant_effect("F-2", "A::pytest", "A", 100.0, 250.0, oids)]))
+
+    # arithmetic floor, reachable only through the private helper
+    floor = js._after_durations(
+        obs("r0", {"A": 300.0}),
+        [constant_effect("F-1", "A::s", "A", 400.0, 400.0, ["r0"])])
+    codes.add(floor.code)
+
+    # artifact-loading rejections
+    for doc in ({},
+                {js.JOINT_SCENARIO_INPUTS_KEY: {
+                    "contract_version": js.SCENARIO_CONTRACT_VERSION + 1}},
+                {js.JOINT_SCENARIO_INPUTS_KEY: {
+                    "contract_version": js.SCENARIO_CONTRACT_VERSION,
+                    "topology": "independent_concurrent", "basis": BASIS,
+                    "check_names": ["A"], "observations": [],
+                    "effects": [{"finding_id": "F-A", "observations": [
+                        {"observation_id": "r0", "check_name": "A"}]}]}}):
+        _, _, rejection = js.load_inputs(doc)
+        codes.add(rejection.code)
+
+    return codes
+
+
+def test_the_exported_rejection_codes_are_exactly_the_ones_the_module_emits():
+    """`code` is a bare string, so a typo or a silent rename would produce a
+    rejection nothing tests and no caller can branch on. The exported set is
+    the vocabulary; this pins that it is neither larger nor smaller than what
+    the module actually produces."""
+    assert _observed_rejection_codes() == set(js.REJECTION_CODES)
+
+
+def test_the_rejection_vocabulary_size_is_pinned():
+    assert len(js.REJECTION_CODES) == 32
+    assert all(isinstance(c, str) and c.strip() for c in js.REJECTION_CODES)
+
+
+def test_an_unenumerated_rejection_code_cannot_be_constructed():
+    """A new refusal has to be added to the exported vocabulary in the same
+    edit, or it fails the moment it fires."""
+    with pytest.raises(ValueError):
+        js.ScenarioRejection("a_code_nobody_declared", "detail")
+    for code in sorted(js.REJECTION_CODES):
+        assert js.ScenarioRejection(code, "detail").code == code

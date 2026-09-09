@@ -102,11 +102,18 @@ unversioned and updates by reinstall from `main`.
   two findings each claiming 250s of a 300s check are double-counting whatever
   they call the work, not composing. Two findings touching the same step, a
   `needs:` chain, a required aggregator, a shared serial upstream, an
-  unresolved competitor, an ambiguous matrix identity, an unvalidated
+  unresolved competitor, a competitor an observation timed but the gating set
+  never declared (it would be dropped out of the gate maximum instead of
+  capping the saving), an ambiguous matrix identity, an unvalidated
   concurrent timing span, a missing or repeated finding, workflow, work or
   evidence identity, one check name claimed by two different workflows, or
   insufficient per-observation evidence all yield an explicit *unsupported*
-  verdict rather than a number — and a joint saving of zero is a supported,
+  verdict rather than a number. The refusal that protects the whole design —
+  a reduction declared on top of an already-capped savings stamp — reads what
+  the basis says rather than matching one exact string, so "derived from" that
+  stamp, in any spelling or case, is refused as the bare field name is; and
+  the full refusal vocabulary is a single exported set, so a refusal that is
+  not declared there fails the moment it fires. A joint saving of zero is a supported,
   honest answer, not a failure. **No report renders a joint block today**: the
   engine stamps none of the required inputs, and the specific gaps are recorded
   in the module and in the wall-clock methodology so a later producer has a

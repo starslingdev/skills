@@ -1879,6 +1879,9 @@ out of the aggregate stamps that happen to be present.
 
 The methodology is `references/wall-clock-methodology.md` §8; the tests are
 `tests/test_joint_sizing.py`, which pin the numbers and every rejection code.
+The refusal vocabulary is closed: `REJECTION_CODES` exports it, a rejection
+built with a code outside it raises, and the suite asserts the exported set is
+exactly the set of codes the module can actually produce.
 **The next step that would change this status is a producer**, not more
 calculator: until one exists the module stays inert, and it should be either
 wired or removed rather than left to become archaeology.

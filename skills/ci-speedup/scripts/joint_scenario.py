@@ -43,6 +43,7 @@ keeps them apart.
 from __future__ import annotations
 
 import math
+import re
 import statistics
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
@@ -183,10 +184,62 @@ class GatingSet:
     observations: tuple[GatingObservation, ...]
 
 
+#: Every refusal this module can produce. A rejection code is the only part of
+#: an unsupported verdict a caller can branch on and a test can pin, so the
+#: vocabulary is closed: a new refusal is declared here in the same edit that
+#: raises it, or it fails the moment it fires.
+REJECTION_CODES: frozenset[str] = frozenset({
+    # the gating set and its observations
+    "unsupported_topology",
+    "no_matched_observations",
+    "duplicate_observation",
+    "basis_mismatch",
+    "non_finite_input",
+    "negative_input",
+    "missing_competitor",
+    "undeclared_competitor",
+    "concurrency_unvalidated",
+    "scheduling_residual_exceeds_tolerance",
+    # who and what an effect claims to be
+    "missing_finding_id",
+    "duplicate_finding_id",
+    "missing_workflow_identity",
+    "missing_work_identity",
+    "missing_evidence_refs",
+    "ambiguous_check_identity",
+    # whether an effect is eligible at all
+    "not_local_runtime_only",
+    "ambiguous_matrix_identity",
+    "missing_reduction_basis",
+    "capped_stamp_not_a_local_reduction",
+    "missing_assumption",
+    "off_gating_set_check",
+    # the numbers an effect states
+    "duplicate_effect_row",
+    "insufficient_effect_evidence",
+    "reduction_exceeds_affected_work",
+    "affected_work_exceeds_duration",
+    "overlapping_affected_work",
+    "affected_work_sum_exceeds_duration",
+    "negative_post_fix_duration",
+    # reading a producer-stamped artifact
+    "contract_inputs_absent",
+    "unsupported_contract_version",
+    "malformed_contract_inputs",
+})
+
+
 @dataclass(frozen=True)
 class ScenarioRejection:
     code: str
     detail: str
+
+    def __post_init__(self) -> None:
+        if self.code not in REJECTION_CODES:
+            raise ValueError(
+                f"{self.code!r} is not a declared rejection code; add it to "
+                "REJECTION_CODES so callers and tests can see the whole "
+                "refusal vocabulary")
 
 
 @dataclass(frozen=True)
@@ -224,6 +277,24 @@ def _display(value: float) -> float:
 def _finite(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) \
         and math.isfinite(float(value))
+
+
+def _normalise_basis(value: Any) -> str:
+    """Lowercase a declared basis and reduce every run of non-alphanumerics to
+    one underscore, so `Derived from wall_clock_p50_s.` and `wall clock p50 s`
+    reach the same token stream as the field they are naming."""
+    return re.sub(r"[^a-z0-9]+", "_", str(value).lower()).strip("_")
+
+
+def _names_a_capped_stamp(basis: str) -> str | None:
+    """The capped field a basis names, or None. Matching is on whole tokens of
+    the normalised form, so a paraphrase around a capped field is caught while
+    a different field that merely shares a word with one is not."""
+    padded = f"_{_normalise_basis(basis)}_"
+    for field_name in sorted(CAPPED_STAMP_FIELDS):
+        if f"_{_normalise_basis(field_name)}_" in padded:
+            return field_name
+    return None
 
 
 def _reject(code: str, detail: str) -> ScenarioResult:
@@ -279,6 +350,18 @@ def _validate_gating(g: GatingSet) -> ScenarioRejection | None:
                 f"observation {o.observation_id!r} has no duration for "
                 f"{', '.join(missing)}; an unresolved competitor cannot be "
                 "treated as absent from the gate")
+        # The reverse direction matters just as much: the gate maximum is taken
+        # over the DECLARED names, so a check this observation timed but the
+        # gating set never declared would be silently excluded from the
+        # competition and the scenario credited with a saving it cannot have.
+        undeclared = sorted(set(o.check_durations) - set(g.check_names))
+        if undeclared:
+            return ScenarioRejection(
+                "undeclared_competitor",
+                f"observation {o.observation_id!r} timed "
+                f"{', '.join(undeclared)}, which the gating set does not "
+                "declare; an undeclared check would be dropped from the gate "
+                "maximum rather than competing in it")
         if not o.concurrency_validated:
             return ScenarioRejection(
                 "concurrency_unvalidated",
@@ -373,13 +456,15 @@ def _validate_effects(g: GatingSet,
             return ScenarioRejection(
                 "missing_reduction_basis",
                 f"{e.finding_id} declares no reduction basis")
-        if e.reduction_basis in CAPPED_STAMP_FIELDS:
+        capped = _names_a_capped_stamp(e.reduction_basis)
+        if capped is not None:
             return ScenarioRejection(
                 "capped_stamp_not_a_local_reduction",
                 f"{e.finding_id} declares {e.reduction_basis!r} as its "
-                "reduction basis; that field is an already-capped or "
-                "workflow-level savings stamp, not a per-observation local "
-                "duration reduction")
+                f"reduction basis, which names {capped!r}; that field is an "
+                "already-capped or workflow-level savings stamp, not a "
+                "per-observation local duration reduction. A basis derived "
+                "from it is the same stamp under another sentence")
         if not (e.assumption or "").strip():
             return ScenarioRejection(
                 "missing_assumption",
