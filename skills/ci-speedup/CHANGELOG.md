@@ -242,7 +242,12 @@ unversioned and updates by reinstall from `main`.
   six locked design decisions — two samples adaptive to four, the 20% variance
   threshold, sequential reruns with no empty commits, automatic with disclosed
   cost, environment-level configuration, wall-clock only — are unchanged and
-  continue to govern wherever an amendment touches them. (#95)
+  continue to govern wherever an amendment touches them. Two rules the amendment
+  itself needed are stated with it: sampling by workflow dispatch targets a
+  branch ref rather than a commit, so a dispatched run's head is checked against
+  the bound fix commit and discarded on a mismatch; and the documented
+  `CI_SPEEDUP_VERIFY_RUNS=0` escape hatch turns the phase off outright, so a
+  saved verdict is not re-rendered either. (#95)
 
 - **2026-08-20** — **The storage boundary is stated instead of implied.**
   `references/savings-methodology.md` sizes every finding on two axes — runner
