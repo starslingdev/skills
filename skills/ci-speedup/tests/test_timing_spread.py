@@ -413,3 +413,30 @@ def test_runner_labels_cannot_break_out_of_the_sentence_markdown():
             f"raw repo-controlled label {label!r} reached the report unescaped: {sentence}")
     assert sentence.count("`") % 2 == 0, (
         f"odd number of backticks - a code span is left open: {sentence}")
+
+
+def test_the_rendered_sentence_carries_the_right_numbers_in_the_right_roles():
+    """The stamped dict's values are pinned above, but the SENTENCE is the product: it is
+    what the reader and the hand-off agent actually see. Without this, a renderer that
+    swapped min and max, printed the median where the minimum belongs, dropped the clock
+    formatting, or miscounted the runs would ship green - every other test here asserts
+    only the sentence's VOCABULARY (`constant in this sample`, `one observed run`, the
+    banned band/significance words) or the stamped numbers, never the rendered ones."""
+    durs = [30.0, 120.0, 240.0, 300.0, 900.0]
+    s = _spread_for(durs)
+    assert (s["n"], s["min_s"], s["median_s"], s["max_s"]) == (5, 30.0, 240.0, 900.0), s
+    line = bp._timing_spread_sentence({"timing_spread": s})
+    # Roles, not just presence: min before max, median in the parenthetical, each through
+    # `_clock`. A swap or a role substitution changes this exact substring.
+    assert (f"took {bp._clock(30.0)} to {bp._clock(900.0)} "
+            f"(median {bp._clock(240.0)})") in line, line
+    assert f"Across {s['n']} comparable sampled runs" in line, line
+    # And the raw seconds never leak in place of the clock rendering.
+    assert "900.0" not in line and "30.0" not in line, line
+
+    one = _spread_for([240.0])
+    assert bp._clock(240.0) in bp._timing_spread_sentence({"timing_spread": one})
+
+    const = _spread_for([100.0] * 4)
+    cline = bp._timing_spread_sentence({"timing_spread": const})
+    assert f"Across 4 comparable sampled runs this check took {bp._clock(100.0)}" in cline, cline
