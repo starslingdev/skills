@@ -19,6 +19,14 @@ Two things are pinned:
    elsewhere in the file — a term redefined, a precondition added — which is why
    the amendment sections carry their own pins above and why the doc states that
    the locked decision governs wherever the two could be read as interacting.
+   Where an amendment restates a locked decision in its own words (Decision 4's
+   "continue automatically", Decision 1's "counts the automatic run among the
+   N"), that sentence is pinned in the section it lives in as well.
+
+Pins are section-scoped wherever a phrase also occurs elsewhere in the doc, and
+rules that carry a scope condition are pinned against the scope, not the phrase:
+a rule stated as one sentence can be inverted by appending an exception to it,
+which leaves every substring pin intact.
 """
 from __future__ import annotations
 
@@ -41,6 +49,57 @@ def _decisions() -> str:
     start = _SPEC.index("## Decisions (locked)")
     end = _SPEC.index("\n## ", start + 1)
     return _SPEC[start:end]
+
+
+#: Every workload-state token, as the doc writes them.
+_STATES = ("`same`", "`reduced`", "`increased`", "`changed`", "`unknown`")
+
+
+def _raw_section(heading: str) -> str:
+    """The doc text under `heading`, up to the next heading of the same or a
+    higher level (so a `##` section carries its `###` subsections with it).
+    `heading` is matched as a line prefix, so a section is addressable without
+    pinning the date its heading carries.
+
+    Section scoping is what makes a pin local. A phrase asserted against the
+    whole file can be satisfied by an unrelated occurrence elsewhere — which is
+    exactly how "exact remote head SHA" survives rewriting eligibility item 2.
+    """
+    m = re.search(rf"^{re.escape(heading)}.*$", _SPEC, re.MULTILINE)
+    assert m is not None, f"no heading starts with {heading!r}"
+    level = len(heading) - len(heading.lstrip("#"))
+    rest = _SPEC[m.end() :]
+    nxt = re.search(rf"\n#{{1,{level}}} ", rest)
+    return m.group(0) + (rest[: nxt.start()] if nxt else rest)
+
+
+def _section(heading: str) -> str:
+    """`_raw_section`, whitespace-flattened for phrase matching."""
+    return re.sub(r"\s+", " ", _raw_section(heading))
+
+
+def _bullets(heading: str) -> list[str]:
+    """The section's markdown bullets, each flattened to a single line.
+
+    Rules that live in one bullet are pinned against that bullet, not the whole
+    doc: a scope condition appended to a rule ("...when the workload is X")
+    stays inside its bullet, so the bullet is the unit that can prove the rule
+    still binds to what it is supposed to bind to.
+    """
+    body = _raw_section(heading)
+    bullets: list[str] = []
+    in_bullet = False
+    for line in body.splitlines():
+        if re.match(r"\s*[-*] ", line):
+            bullets.append(line.strip()[2:])
+            in_bullet = True
+        elif not line.strip():
+            in_bullet = False
+        elif in_bullet and line.startswith((" ", "\t")):
+            bullets[-1] += " " + line.strip()
+        else:
+            in_bullet = False
+    return [re.sub(r"\s+", " ", b) for b in bullets]
 
 
 # --------------------------------------------------------------------------
@@ -93,6 +152,45 @@ def test_confounded_workload_is_never_a_lower_bound():
     must never be sold as a floor under the fix's benefit."""
     assert "never a lower bound on the fix's benefit" in _FLAT
 
+    # The phrase alone pins nothing about WHICH states the rule binds to: the
+    # rule can be inverted by appending a scope condition to the very sentence
+    # that states it ("...never a lower bound on the fix's benefit when the
+    # workload is `reduced`; for `increased`, `changed`, or `unknown` the delta
+    # MAY be reported as a floor under the fix's benefit"). So pin the rule's
+    # scope, in its own bullet: it binds to the three confounded states, and to
+    # no other.
+    rule = [
+        b
+        for b in _bullets("### Reporting a confounded workload")
+        if "never a lower bound on the fix's benefit" in b
+    ]
+    assert len(rule) == 1, "the never-a-lower-bound rule is not stated in exactly one bullet"
+    (rule,) = rule
+    for state in ("`increased`", "`changed`", "`unknown`"):
+        assert state in rule, (
+            f"the never-a-lower-bound rule no longer binds to {state}: {rule!r}"
+        )
+    assert "`same`" not in rule and "`reduced`" not in rule, (
+        "the never-a-lower-bound rule has been re-scoped to a state other than "
+        f"the three confounded ones: {rule!r}"
+    )
+
+    # ...and nowhere may the doc GRANT a floor, however the grant is phrased.
+    # This catches the rewrite by meaning rather than by substring: any clause
+    # that permits a delta to be read as a lower bound / floor is out of
+    # contract, whatever verb it uses.
+    granted = [
+        m.group(0)
+        for m in re.finditer(
+            r"(?i)\b(may|can|could|might|is permitted|is allowed|permissible|"
+            r"acceptable)\b[^.;]{0,140}?\b(lower bound|floor)\b",
+            _FLAT,
+        )
+    ]
+    assert not granted, (
+        f"the doc now permits quoting a floor under the fix's benefit: {granted!r}"
+    )
+
     # Pin the actual confound sentence. A `.*`/DOTALL search over the flattened
     # doc for the three state names in order proves nothing: the definition list
     # already names them in that order, so it passed even with the whole
@@ -124,7 +222,23 @@ def test_the_same_work_attribution_gate_is_preserved():
         "it is `same` that unlocks a clean attribution, and every other state "
         "withholds it"
     ) in _FLAT
-    assert "do not headline a clean speedup unless the state is `same`" in _FLAT
+    # Anchored to the end of the sentence: an un-anchored prefix match is
+    # satisfied by "unless the state is `same` or `reduced`", which grants the
+    # clean headline to exactly the state the gate exists to withhold it from.
+    assert "do not headline a clean speedup unless the state is `same`." in _FLAT
+
+    # Independently of the sentence above: no state other than `same` may appear
+    # in any clause that grants the clean attribution, however that clause is
+    # worded or wherever in the doc it is added.
+    granting = re.findall(r"unless the state is ([^.]{0,160})\.", _FLAT)
+    granting += re.findall(r"([^.]{0,80})\bunlocks\b", _FLAT)
+    assert granting, "no attribution-granting clause found to check for exclusivity"
+    for clause in granting:
+        named = {s for s in _STATES if s in clause}
+        assert named == {"`same`"}, (
+            "a state other than `same` appears in an attribution-granting "
+            f"clause: {clause!r} names {sorted(named)}"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -135,6 +249,16 @@ def test_the_same_work_attribution_gate_is_preserved():
 def test_eligibility_binds_to_an_exact_remote_head_sha():
     assert "exact remote head SHA" in _FLAT
     assert "authorized commit/push" in _FLAT
+
+    # Both phrases above occur elsewhere in the doc (the phase-7 placement
+    # section states the trigger condition too), so they survive rewriting the
+    # eligibility item itself to bind to a branch name. Pin the item where it
+    # lives, together with the reason it is a SHA.
+    eligibility = _section("### Eligibility")
+    assert "bound to an **exact remote head SHA**, not a branch name" in eligibility, (
+        "eligibility item 2 no longer binds the fix to an exact remote head SHA"
+    )
+    assert "A branch name is a moving target" in eligibility
 
 
 def test_resume_is_scratch_context_not_a_daemon():
@@ -188,6 +312,37 @@ def test_dispatch_sampling_cannot_drift_off_the_bound_head():
 
 def test_phase_six_checkpoint_is_not_bypassed():
     assert "does not authorize bypassing that checkpoint" in _FLAT
+
+
+def test_locked_decisions_are_pinned_where_the_amendments_implement_them():
+    """`test_locked_decisions_are_unchanged` scans only the Decisions section,
+    so it cannot see a decision moved by amended text elsewhere. These are the
+    two places the amendments implement a locked decision in their own words.
+
+    Decision 4 (automatic, with the cost line disclosed) lives in the trigger
+    contract as "continue automatically"; rewriting that to "ask the user to
+    confirm before continuing" turns an automatic phase into a gated one while
+    the Decisions section still reads as written. Decision 1 (N = 2, adaptive to
+    4) lives in the bootstrap clause as "counts the automatic run among the N";
+    dropping that turns N into N + 1 runs of spend.
+    """
+    trigger = _section("## Trigger and resume contract")
+    assert "continue automatically when those facts become available" in trigger, (
+        "the trigger contract no longer starts phase 7 automatically (Decision 4)"
+    )
+    assert "that is Decision 4's automatic behavior" in trigger
+    for gate in ("ask the user", "confirm before", "await confirmation", "prompt the user"):
+        assert gate not in trigger.lower(), (
+            f"the trigger contract now gates the automatic start on {gate!r} "
+            "(Decision 4 is automatic-with-disclosed-cost)"
+        )
+
+    triggering = _section("## Triggering the runs (Decision 3)")
+    assert "counts the automatic run among the N" in triggering, (
+        "the bootstrap clause no longer counts the automatic branch run toward "
+        "N, which raises the sampling spend Decision 1 locked"
+    )
+    assert "it does not raise or lower N" in triggering
 
 
 # --------------------------------------------------------------------------

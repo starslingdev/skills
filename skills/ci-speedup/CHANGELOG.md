@@ -218,7 +218,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
-- **2026-09-08** — **The planned before/after check can no longer claim a
+- **2026-09-09** — **The planned before/after check can no longer claim a
   speedup it did not measure.** The approved (still unimplemented) post-fix
   verification methodology told the future implementation to stamp one universal
   "less work run" label whenever the branch's CI workload differed from the
