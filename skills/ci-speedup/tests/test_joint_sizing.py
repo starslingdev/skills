@@ -1122,3 +1122,73 @@ def test_an_unenumerated_rejection_code_cannot_be_constructed():
         js.ScenarioRejection("a_code_nobody_declared", "detail")
     for code in sorted(js.REJECTION_CODES):
         assert js.ScenarioRejection(code, "detail").code == code
+
+
+# --------------------------------------------------------------------------
+# the capped-stamp refusal reads a camelCased field name too
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("basis", [
+    "wallClockP50S",
+    "wallClockP50s",
+    "derived from the finding's wallClockUncappedP50s",
+    "runnerMinSaving / n_runs",
+    "chainWinS, apportioned",
+    "clusterFloorLever (per leg)",
+])
+def test_a_camel_cased_capped_stamp_is_still_refused(basis):
+    """A producer stamping JSON writes `wallClockP50s`, not `wall_clock_p50_s`.
+    That is the same already-capped merge-wait saving under a different casing
+    convention, and letting it through produces the two-orders-of-magnitude
+    wrong joint number the whole refusal exists to prevent."""
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids,
+                        reduction_basis=basis),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)])
+    assert res.supported is False
+    assert res.rejection.code == "capped_stamp_not_a_local_reduction"
+
+
+@pytest.mark.parametrize("basis", [
+    "affected_step_p50_s",
+    "stepP50Measured",
+    "chain_facts.member_spans_s",
+    "modeled local saving per observation, measured from the job log",
+    "per-observation wall clock of the affected step, uncapped by any stamp",
+])
+def test_camel_case_splitting_does_not_sweep_up_a_legitimate_basis(basis):
+    """Widening the match must not cost the module its usability: a basis that
+    merely shares a word — or a camelCased legitimate field — still admits."""
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids,
+                        reduction_basis=basis),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)])
+    assert res.supported is True, res.rejection
+    assert res.median_delta_s == 100.0
+
+
+# --------------------------------------------------------------------------
+# a malformed artifact is refused by code, never by traceback
+# --------------------------------------------------------------------------
+
+def test_an_out_of_range_json_integer_is_a_named_refusal_not_a_traceback():
+    """JSON carries arbitrary-precision integers, so a findings artifact can
+    hold a duration `float()` cannot represent. `load_inputs` promises a named
+    rejection a caller can branch on; an escaping OverflowError is a traceback
+    instead of a refusal."""
+    doc = {js.JOINT_SCENARIO_INPUTS_KEY: {
+        "contract_version": js.SCENARIO_CONTRACT_VERSION,
+        "topology": js.SUPPORTED_TOPOLOGY, "basis": BASIS,
+        "check_names": ["A"],
+        "observations": [{"observation_id": "r0", "basis": BASIS,
+                          "check_durations": {"A": 10 ** 400},
+                          "concurrency_validated": True}],
+        "effects": []}}
+    gating_set, effects, rejection = js.load_inputs(doc)
+    assert gating_set is None
+    assert effects == ()
+    assert rejection.code == "malformed_contract_inputs"

@@ -1858,35 +1858,6 @@ a CommonMark fence walk ever ends still inside a fence.
 
 ## 10. Status of the planned bounds
 
-### Joint scenarios for two concurrent checks — contract present, nothing feeds it
-
-`scripts/joint_scenario.py` holds a data contract and a pure calculator for
-sizing **two findings on two different concurrent checks together**. It exists
-because the per-finding stamps cannot answer that question: with checks at 300s
-and 299s, cutting 100s off either alone moves the gate by 1s or 0s while doing
-both moves it by 100s, and `wall_clock_p50_s` is an already-capped merge-wait
-saving rather than a post-fix duration, so subtracting the stamps yields 1s.
-
-**It is imported by nothing.** No stage calls it, it has no `main()`, and no
-report renders a joint block. That is deliberate, not an oversight: the module's
-`MISSING_PRODUCER_EVIDENCE` tuple names the six things a producer would have to
-stamp first (per-observation durations for the whole gating set, stamped
-concurrency validation, per-observation local reductions, affected-step
-identity, stable matrix-leg identity, and a local-runtime-only certificate),
-none of which the engine stamps today. `load_inputs` on a current findings
-artifact returns `contract_inputs_absent` rather than reconstructing a scenario
-out of the aggregate stamps that happen to be present.
-
-The methodology is `references/wall-clock-methodology.md` §8; the tests are
-`tests/test_joint_sizing.py`, which pin the numbers and every rejection code.
-The refusal vocabulary is closed: `REJECTION_CODES` exports it, a rejection
-built with a code outside it raises, and the suite asserts the exported set is
-exactly the set of codes the module can actually produce.
-**The next step that would change this status is a producer**, not more
-calculator: until one exists the module stays inert, and it should be either
-wired or removed rather than left to become archaeology.
-
-
 The cascade extraction (`wall_clock.py`, the `Bound` contract, the monotonic-
 down + no-silent-shrink invariants, and `size_wall_clock` wired into production
 with a rendered derivation) is **done** (§5). Disposition of the four physical
@@ -1931,6 +1902,34 @@ bounds the gaps list originally named - three implemented, one deliberately not:
   always-available core ("is this on the developer's critical path") via
   `run.event`; required-check gating would add a usually-blank, contentious cap
   on top. Left out on purpose rather than shipped hollow.
+
+### Joint scenarios for two concurrent checks — contract present, nothing feeds it
+
+`scripts/joint_scenario.py` holds a data contract and a pure calculator for
+sizing **two findings on two different concurrent checks together**. It exists
+because the per-finding stamps cannot answer that question: with checks at 300s
+and 299s, cutting 100s off either alone moves the gate by 1s or 0s while doing
+both moves it by 100s, and `wall_clock_p50_s` is an already-capped merge-wait
+saving rather than a post-fix duration, so subtracting the stamps yields 1s.
+
+**It is imported by nothing.** No stage calls it, it has no `main()`, and no
+report renders a joint block. That is deliberate, not an oversight: the module's
+`MISSING_PRODUCER_EVIDENCE` tuple names the six things a producer would have to
+stamp first (per-observation durations for the whole gating set, stamped
+concurrency validation, per-observation local reductions, affected-step
+identity, stable matrix-leg identity, and a local-runtime-only certificate),
+none of which the engine stamps today. `load_inputs` on a current findings
+artifact returns `contract_inputs_absent` rather than reconstructing a scenario
+out of the aggregate stamps that happen to be present.
+
+The methodology is `references/wall-clock-methodology.md` §8; the tests are
+`tests/test_joint_sizing.py`, which pin the numbers and every rejection code.
+The refusal vocabulary is closed: `REJECTION_CODES` exports it, a rejection
+built with a code outside it raises, and the suite asserts the exported set is
+exactly the set of codes the module can actually produce.
+**The next step that would change this status is a producer**, not more
+calculator: until one exists the module stays inert, and it should be either
+wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 

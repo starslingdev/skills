@@ -110,10 +110,13 @@ unversioned and updates by reinstall from `main`.
   insufficient per-observation evidence all yield an explicit *unsupported*
   verdict rather than a number. The refusal that protects the whole design —
   a reduction declared on top of an already-capped savings stamp — reads what
-  the basis says rather than matching one exact string, so "derived from" that
-  stamp, in any spelling or case, is refused as the bare field name is; and
-  the full refusal vocabulary is a single exported set, so a refusal that is
-  not declared there fails the moment it fires. A joint saving of zero is a supported,
+  the basis says rather than matching one exact string, so a sentence built
+  around that stamp is refused as the bare field name is, in any case,
+  punctuation or camelCase spelling of it; it matches the field name rather
+  than the meaning, so it is defence in depth behind the producer's own
+  declarations rather than a substitute for them. The full refusal vocabulary
+  is a single exported set, so a refusal that is not declared there fails the
+  moment it fires. A joint saving of zero is a supported,
   honest answer, not a failure. **No report renders a joint block today**: the
   engine stamps none of the required inputs, and the specific gaps are recorded
   in the module and in the wall-clock methodology so a later producer has a

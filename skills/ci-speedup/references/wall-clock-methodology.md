@@ -545,11 +545,23 @@ different workflows — the gating set holds a single duration under that name, 
 the two cannot be modelled as one check. An observation that timed a check the
 gating set does not declare is refused for the mirror-image reason: the gate
 maximum is taken over the declared names, so an undeclared competitor would be
-dropped out of the competition instead of capping the saving. And a reduction
-basis that merely *names* one of the capped savings stamps — "derived from the
-capped merge-wait saving", in any spelling or case — is refused exactly as the
-bare field name is, because a paraphrase around that stamp is the same
-already-capped number under another sentence. This is
+dropped out of the competition instead of capping the saving. Affected work is
+also budgeted **across the selected effects**, not only per effect: two effects
+that each claim 250s of affected work in one 300s check cannot both be telling
+the truth whatever their work IDs say, so a per-check affected-work sum that
+exceeds the observed duration is refused rather than composed. And a reduction
+basis that *names* one of the capped savings stamps — in any case, punctuation
+or camelCase spelling of the field name, including inside a longer sentence
+such as "derived from `wall_clock_p50_s`" — is refused exactly as the bare
+field name is, because a sentence wrapped around that stamp is the same
+already-capped number under another name. That last check matches the **field
+name**, not the meaning: an English description that never names the field
+("derived from the capped merge-wait saving") is not caught, so it is defence
+in depth behind the producer's own declarations, not a substitute for them.
+Note that most of the refusals above fire on what the producer **declares** —
+the calculator does not detect a `needs:` chain or verify concurrency itself;
+it refuses when the contract says the topology is not independent-concurrent,
+or leaves the concurrency validation unstamped. This is
 deliberately not a general DAG scheduler; the existing single-finding
 chain-aware behaviour is unchanged.
 
@@ -559,8 +571,9 @@ chain-aware behaviour is unchanged.
 admission rules, unit-tested against every counterexample above. **Nothing in
 the engine stamps its inputs**, so no report renders a joint block. The gaps are
 listed in that module as `MISSING_PRODUCER_EVIDENCE`; in summary, the engine has
-no per-observation durations for the *whole* gating set — `pr_critical_path.
-chain_facts` carries per-sha, era-scoped `member_spans_s`, but only for the
+no per-observation durations for the *whole* gating set —
+`pr_critical_path.chain_facts` carries per-sha, era-scoped `member_spans_s`,
+but only for the
 members of that PR's winning chain and with no attempt or runner identity,
 while `populations` is bimodal-gated and identity-free — no stamped
 concurrency validation (overlap is inferred from the `needs:` closure and

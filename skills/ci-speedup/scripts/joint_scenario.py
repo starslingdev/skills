@@ -280,16 +280,28 @@ def _finite(value: Any) -> bool:
 
 
 def _normalise_basis(value: Any) -> str:
-    """Lowercase a declared basis and reduce every run of non-alphanumerics to
-    one underscore, so `Derived from wall_clock_p50_s.` and `wall clock p50 s`
-    reach the same token stream as the field they are naming."""
-    return re.sub(r"[^a-z0-9]+", "_", str(value).lower()).strip("_")
+    """Reduce a declared basis to a token stream, so the spellings a producer
+    might reasonably use for one field name all land on the same tokens:
+    `Derived from wall_clock_p50_s.`, `wall clock p50 s` and the camelCased
+    `wallClockP50s` a JSON producer would stamp all normalise to
+    `wall_clock_p50_s`. Case and punctuation are folded, camelCase humps and
+    digit/letter joins become token boundaries."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(value))
+    spaced = re.sub(r"(?<=[0-9])(?=[A-Za-z])", "_", spaced)
+    return re.sub(r"[^a-z0-9]+", "_", spaced.lower()).strip("_")
 
 
 def _names_a_capped_stamp(basis: str) -> str | None:
-    """The capped field a basis names, or None. Matching is on whole tokens of
-    the normalised form, so a paraphrase around a capped field is caught while
-    a different field that merely shares a word with one is not."""
+    """The capped field a basis names, or None.
+
+    Matching is on the field's whole token sequence within the normalised
+    basis, so the field name spelled in any case, punctuation or camelCase
+    convention is caught — including inside a longer sentence — while a
+    different field that merely shares a word with one is not. It is a
+    field-name match, NOT a semantic one: an English description of a capped
+    stamp that never names the field ("the capped merge-wait saving") is not
+    caught, and this guard is defence in depth rather than the contract.
+    """
     padded = f"_{_normalise_basis(basis)}_"
     for field_name in sorted(CAPPED_STAMP_FIELDS):
         if f"_{_normalise_basis(field_name)}_" in padded:
@@ -665,8 +677,13 @@ def _evaluate(gating: GatingSet, effects: tuple[ScenarioEffect, ...],
 def eligible_pairs(gating: GatingSet,
                    effects: Sequence[ScenarioEffect]) -> list[ScenarioResult]:
     """Every supported pair with a positive modeled joint reduction, ranked by
-    that reduction and then by stable finding IDs. Unsupported pairs are
-    dropped silently here — the caller renders the limitation, not a number."""
+    that reduction and then by stable finding IDs.
+
+    Unsupported pairs are dropped here and their rejections are NOT returned:
+    this layer answers "which pair is worth rendering", not "why was this pair
+    refused". A caller that needs the named limitation for a specific pair
+    calls `evaluate_scenario` on it directly.
+    """
     ordered = sorted(effects, key=lambda e: e.finding_id)
     out: list[ScenarioResult] = []
     for i in range(len(ordered)):
@@ -760,7 +777,7 @@ def load_inputs(doc: Mapping[str, Any]
                     for eo in (e.get("observations") or ())),
             )
             for e in (raw.get("effects") or ()))
-    except (AttributeError, TypeError, ValueError) as exc:
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
         return None, (), ScenarioRejection(
             "malformed_contract_inputs", f"could not read the contract: {exc}")
 
