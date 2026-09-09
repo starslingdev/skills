@@ -2925,7 +2925,13 @@ def _timing_spread_sentence(pole: dict[str, Any]) -> str:
     scope = str(sel.get("runner_scope") or "")
     others = [str(x) for x in (ts.get("other_runner_labels") or [])]
     if scope and scope != "all-runners" and others:
-        parts.append(f"Measured on `{scope}` runs only; runs on {', '.join(others)} are a "
+        # Runner labels are REPO-CONTROLLED text off the jobs-API payload, so both the
+        # scope name and the other-population labels are markdown sinks: `_safe_span` (the
+        # route every other repo-text sink in this renderer takes) maps each backtick to an
+        # apostrophe and wraps, so a label can neither close its own span early nor render
+        # as emphasis. Byte-identical for a clean label.
+        parts.append(f"Measured on {_safe_span(scope)} runs only; runs on "
+                     f"{', '.join(_safe_span(o) for o in others)} are a "
                      "separate population and are not folded into this range.")
     era = str(sel.get("config_era") or "")
     if era and era != "all_sampled":

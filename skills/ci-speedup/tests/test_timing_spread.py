@@ -380,3 +380,36 @@ def test_the_gap_fill_prompt_carries_the_same_summary_sentence():
     twice = bp._llm_agent_prompt(
         sentence + "\n\nRoot cause: the build re-downloads its toolchain.", pole)
     assert twice.count(sentence) == 1, "the sentence was doubled in the gap-fill prompt"
+
+
+def test_runner_labels_cannot_break_out_of_the_sentence_markdown():
+    """Runner labels are REPOSITORY-CONTROLLED text: they arrive on the jobs-API payload
+    and a self-hosted label can carry backticks. The scope name is rendered as an inline
+    code span and the other-population labels are rendered inline beside it, so both are
+    sinks and both must go through `_safe_span` - otherwise one backtick in a label closes
+    the span early and the rest of the pole's paragraph renders as code, or as emphasis.
+    Every other repo-text sink in this renderer already takes that route."""
+    hostile = "self-hosted`x"
+    other_a, other_b = "gpu`box", "_macos_-14"
+    jobs_per_run = (_runs([100.0] * 6, runner=hostile)
+                    + _runs([900.0], runner=other_a)
+                    + _runs([950.0], runner=other_b))
+    crit = cr._critical_path(jobs_per_run)
+    s = cr._pole_timing_spread(_JOB, _WF, _JOB, {_WF: crit}, {_WF: jobs_per_run}, [])
+    assert s["selection"]["runner_scope"] == hostile, s["selection"]
+    assert sorted(s.get("other_runner_labels") or []) == sorted([other_a, other_b]), s
+
+    sentence = bp._timing_spread_sentence({"timing_spread": s})
+    assert "separate population" in sentence, sentence
+    # No backtick from repo text may survive: `_safe_span` maps every one to an apostrophe,
+    # so the only backticks left in the sentence are the delimiters this renderer wrote.
+    for label in (hostile, other_a, other_b):
+        assert bp._safe_span(label) in sentence, (
+            f"label {label!r} was not rendered through `_safe_span`: {sentence}")
+    for label in (hostile, other_a):
+        # A label carrying a backtick must not survive verbatim - verbatim means its own
+        # backtick closed the span this renderer opened.
+        assert label not in sentence, (
+            f"raw repo-controlled label {label!r} reached the report unescaped: {sentence}")
+    assert sentence.count("`") % 2 == 0, (
+        f"odd number of backticks - a code span is left open: {sentence}")
