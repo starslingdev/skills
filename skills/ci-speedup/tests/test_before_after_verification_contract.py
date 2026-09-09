@@ -27,6 +27,20 @@ Pins are section-scoped wherever a phrase also occurs elsewhere in the doc, and
 rules that carry a scope condition are pinned against the scope, not the phrase:
 a rule stated as one sentence can be inverted by appending an exception to it,
 which leaves every substring pin intact.
+
+Where a rule is pinned by meaning rather than by phrasing, the check is
+**closed-world**: it finds every sentence in the doc that touches the rule and
+requires each one to state or withhold it. The open-world shape — listing the
+verbs or sentence templates a violation might use — was tried first and loses to
+the first wording nobody listed ("the delta serves as a floor", "`reduced` also
+qualifies for the headline", "only after the user approves"). Closed-world costs
+a false positive when the doc says something true in a shape the sweep does not
+recognise; that is the trade, and it is the safe direction for a contract pin.
+A known one: a prohibition opening with a bare "No ..." ("No reader can treat the
+delta as a lower bound") reads to the sweep as a sentence about a floor that does
+not refuse one. Widening the refusal words to a bare "no" was tried and rejected
+— it exempts "With no confound present, the delta is a floor", which is the
+inversion itself. Reword the doc rather than loosen the sweep.
 """
 from __future__ import annotations
 
@@ -54,6 +68,77 @@ def _decisions() -> str:
 #: Every workload-state token, as the doc writes them.
 _STATES = ("`same`", "`reduced`", "`increased`", "`changed`", "`unknown`")
 
+#: The doc with fenced code blocks blanked out. Section slicing counts markdown
+#: headings, and a ``# `` line inside a fence is not one — it would truncate a
+#: section early and leave its pins reading a prefix of the text they name.
+_SPEC_NO_FENCES = re.sub(
+    r"^```.*?^```", lambda m: "\n" * m.group(0).count("\n"), _SPEC,
+    flags=re.MULTILINE | re.DOTALL,
+)
+
+#: Words that turn a sentence about a rule into a statement WITHHOLDING it.
+#: The prose pins below are closed-world — every sentence that touches a rule
+#: must either restate it or refuse it — so this is the list that decides which.
+#: Matched on WORD boundaries. Substring matching reads "whenever" as "never"
+#: and quietly exempts the sentence it was meant to catch.
+_WITHHOLDING = re.compile(
+    r"(?i)\b(never|not|cannot|no floor|no lower bound|disallow\w*|withhold\w*|"
+    r"refuse\w*|denied|unsupported)\b|n't\b"
+)
+
+
+def _sentences(text: str) -> list[str]:
+    """The text's sentences, each flattened to one line.
+
+    Pass RAW text (`_SPEC`, `_raw_section`), never `_section`: the markdown line
+    structure is what separates a bullet, a table and a heading from the prose
+    after them, and `_section` has already flattened it away.
+
+    Prose rules live in sentences, so a sentence is the unit a pin can hold. A
+    doc-wide substring search cannot tell "never a floor" from "a floor";
+    splitting first and then asking what each sentence does is what makes the
+    checks below closed-world rather than a list of forbidden phrasings.
+    """
+    # Split on markdown block starts BEFORE splitting on punctuation. A table
+    # row or a bullet often carries no sentence-final punctuation at all, so
+    # flattening first glues it to the next block — and if that block happens to
+    # be a withholding sentence, the glued unit inherits its "not"/"disallow"
+    # and the sweep reads a grant as a refusal.
+    units: list[str] = []
+    for line in text.splitlines():
+        is_row = line.lstrip().startswith("|")
+        # A table is one unit. Row-per-unit would let "| clean attribution |" and
+        # "| `reduced` | yes |" sit in different units, so neither one names both
+        # the rule and the state it grants it to.
+        if is_row and units and units[-1].lstrip().startswith("|"):
+            units[-1] += " " + line.strip()
+        elif re.match(r"\s*([-*+]\s|\d+\.\s|\||#{1,6}\s|>)", line) or not units:
+            units.append(line)
+        elif not line.strip():
+            units.append("")
+        else:
+            units[-1] += " " + line
+    out: list[str] = []
+    for unit in units:
+        flat = re.sub(r"\s+", " ", unit).strip()
+        if not flat:
+            continue
+        out += [s.strip() for s in re.split(r"(?<=[.:;])\s+(?=[A-Z`\"*(-])", flat) if s.strip()]
+    return out
+
+
+#: Phrases by which the doc states a rule's EXCLUSIVITY rather than refusing it
+#: ("only `same` supports a clean claim, and any other state is reported with
+#: its confound"). Such a sentence names every state and grants to none of them,
+#: so it is as compliant as a withholding one.
+_EXCLUSIVE = re.compile(
+    r"(?i)only `same`|any other state|every other state|and no other"
+)
+
+
+def _withholds(sentence: str) -> bool:
+    return bool(_WITHHOLDING.search(sentence) or _EXCLUSIVE.search(sentence))
+
 
 def _raw_section(heading: str) -> str:
     """The doc text under `heading`, up to the next heading of the same or a
@@ -65,10 +150,20 @@ def _raw_section(heading: str) -> str:
     whole file can be satisfied by an unrelated occurrence elsewhere — which is
     exactly how "exact remote head SHA" survives rewriting eligibility item 2.
     """
-    m = re.search(rf"^{re.escape(heading)}.*$", _SPEC, re.MULTILINE)
-    assert m is not None, f"no heading starts with {heading!r}"
+    body = _SPEC_NO_FENCES
+    hits = re.findall(rf"^{re.escape(heading)}.*$", body, re.MULTILINE)
+    assert hits, f"no heading starts with {heading!r}"
+    # Exactly one, or the slice is forgeable: `re.search` takes the FIRST
+    # prefix match, so planting an earlier "### Eligibility (superseded)" that
+    # carries the pinned wording captures every section-scoped pin and frees the
+    # real section to be rewritten. Ambiguity is the bug, so it is the failure.
+    assert len(hits) == 1, (
+        f"heading {heading!r} matches {len(hits)} headings ({hits!r}); a "
+        "section-scoped pin cannot say which one it is reading"
+    )
+    m = re.search(rf"^{re.escape(heading)}.*$", body, re.MULTILINE)
     level = len(heading) - len(heading.lstrip("#"))
-    rest = _SPEC[m.end() :]
+    rest = body[m.end() :]
     nxt = re.search(rf"\n#{{1,{level}}} ", rest)
     return m.group(0) + (rest[: nxt.start()] if nxt else rest)
 
@@ -175,21 +270,30 @@ def test_confounded_workload_is_never_a_lower_bound():
         f"the three confounded ones: {rule!r}"
     )
 
-    # ...and nowhere may the doc GRANT a floor, however the grant is phrased.
-    # This catches the rewrite by meaning rather than by substring: any clause
-    # that permits a delta to be read as a lower bound / floor is out of
-    # contract, whatever verb it uses.
-    granted = [
-        m.group(0)
-        for m in re.finditer(
-            r"(?i)\b(may|can|could|might|is permitted|is allowed|permissible|"
-            r"acceptable)\b[^.;]{0,140}?\b(lower bound|floor)\b",
-            _FLAT,
-        )
+    # ...and nowhere may the doc GRANT a floor. Listing the verbs a grant might
+    # use is an open-world check and loses: "the delta serves as a floor",
+    # "treat the delta as a minimum", "the fix is worth at least the delta" name
+    # no modal verb at all and would each walk through such a list. Invert it —
+    # find every sentence that talks about a floor AT ALL and require each one
+    # to be withholding one. A new sentence granting a floor has to be written
+    # as a grant, so it arrives without a withholding word and reddens; and the
+    # inversion also stops the old check's false positive, where the correct
+    # sentence "the delta may NOT be reported as a floor" read as a permission.
+    floor_talk = [
+        s
+        for s in _sentences(_SPEC)
+        if re.search(r"(?i)\b(lower bound|floor|worth at least|at least this "
+                     r"big|as a minimum|bounds? the [a-z ]+ from below)\b", s)
     ]
-    assert not granted, (
-        f"the doc now permits quoting a floor under the fix's benefit: {granted!r}"
+    assert floor_talk, (
+        "the doc no longer says anything about a floor under the fix's "
+        "benefit; the prohibition has been deleted rather than weakened"
     )
+    for sentence in floor_talk:
+        assert _withholds(sentence), (
+            "a sentence lets the observed delta stand as a floor under the "
+            f"fix's benefit: {sentence!r}"
+        )
 
     # Pin the actual confound sentence. A `.*`/DOTALL search over the flattened
     # doc for the three state names in order proves nothing: the definition list
@@ -231,13 +335,46 @@ def test_the_same_work_attribution_gate_is_preserved():
     # in any clause that grants the clean attribution, however that clause is
     # worded or wherever in the doc it is added.
     granting = re.findall(r"unless the state is ([^.]{0,160})\.", _FLAT)
-    granting += re.findall(r"([^.]{0,80})\bunlocks\b", _FLAT)
     assert granting, "no attribution-granting clause found to check for exclusivity"
     for clause in granting:
+        # A clause naming NO state is left to the doc-wide sweep below; demanding
+        # every `unlocks` clause name `same` reddens on a correct sentence like
+        # "the gate unlocks the headline claim". What is out of contract is a
+        # clause that names a state OTHER than `same`.
         named = {s for s in _STATES if s in clause}
-        assert named == {"`same`"}, (
+        assert named <= {"`same`"}, (
             "a state other than `same` appears in an attribution-granting "
             f"clause: {clause!r} names {sorted(named)}"
+        )
+
+    # The two shapes above are the doc's current wording, so pinning only those
+    # enumerates two ways to grant the headline and misses every other: a new
+    # bullet, a new sentence, or a table row saying `reduced` qualifies is
+    # invisible to them. Sweep the whole doc instead — any sentence that talks
+    # about the clean attribution and names a state other than `same` must be
+    # WITHHOLDING it, which is what "`same`, and no other" means as a rule.
+    attribution_talk = [
+        s
+        for s in _sentences(_SPEC)
+        if re.search(r"(?i)(clean speedup|clean attribution|clean ci-only "
+                     r"attribution|same work, faster|headline)", s)
+    ]
+    assert attribution_talk, "the doc no longer states the clean-attribution rule"
+    # ...and the exclusivity phrasing that exempts a sentence from the sweep may
+    # not itself be widened: "only `same` and `reduced`" reads as exclusive to
+    # the sweep while granting to two states.
+    widened = re.findall(r"only `same`[^.]{0,40}", _FLAT)
+    for clause in widened:
+        assert not ({s for s in _STATES if s in clause} - {"`same`"}), (
+            f"the `same`-only exclusivity has been widened: {clause!r}"
+        )
+    for sentence in attribution_talk:
+        named = {s for s in _STATES if s in sentence}
+        if named <= {"`same`"}:
+            continue
+        assert _withholds(sentence), (
+            "a sentence grants the clean same-work attribution to a state "
+            f"other than `same`: {sentence!r} names {sorted(named)}"
         )
 
 
@@ -250,15 +387,33 @@ def test_eligibility_binds_to_an_exact_remote_head_sha():
     assert "exact remote head SHA" in _FLAT
     assert "authorized commit/push" in _FLAT
 
-    # Both phrases above occur elsewhere in the doc (the phase-7 placement
-    # section states the trigger condition too), so they survive rewriting the
-    # eligibility item itself to bind to a branch name. Pin the item where it
-    # lives, together with the reason it is a SHA.
+    # "exact remote head SHA" occurs twice (the phase-7 placement section states
+    # the trigger condition too), so the flat pin above survives rewriting the
+    # eligibility item itself to bind to a branch name. "authorized commit/push"
+    # happens to occur once today, which pins item 1 only by luck — a second
+    # occurrence anywhere would unpin it. So pin BOTH items where they live.
     eligibility = _section("### Eligibility")
+    assert "The **authorized commit/push** has occurred" in eligibility, (
+        "eligibility item 1 no longer requires the authorized commit/push"
+    )
     assert "bound to an **exact remote head SHA**, not a branch name" in eligibility, (
         "eligibility item 2 no longer binds the fix to an exact remote head SHA"
     )
     assert "A branch name is a moving target" in eligibility
+    # Closed-world: the two sentences above are the ONLY places eligibility may
+    # mention a branch name. An exception appended to the item ("where a SHA is
+    # unavailable, the branch name is an acceptable substitute") leaves both
+    # phrases intact and undoes the rule they state.
+    stray = [
+        s
+        for s in _sentences(_raw_section("### Eligibility"))
+        if "branch name" in s
+        and "**exact remote head SHA**, not a branch name" not in s
+        and "A branch name is a moving target" not in s
+    ]
+    assert not stray, (
+        f"eligibility mentions a branch name outside the binding rule: {stray!r}"
+    )
 
 
 def test_resume_is_scratch_context_not_a_daemon():
@@ -316,8 +471,11 @@ def test_phase_six_checkpoint_is_not_bypassed():
 
 def test_locked_decisions_are_pinned_where_the_amendments_implement_them():
     """`test_locked_decisions_are_unchanged` scans only the Decisions section,
-    so it cannot see a decision moved by amended text elsewhere. These are the
-    two places the amendments implement a locked decision in their own words.
+    so it cannot see a decision moved by amended text elsewhere. Pinned here are
+    the amendment sentences that carry a locked NUMBER or a locked automatic/
+    manual choice in their own words — the ones where a rewrite changes spend or
+    changes who starts the phase. Other restatements defer to the decisions
+    generically and are covered by `test_amendments_defer_to_the_locked_decisions`.
 
     Decision 4 (automatic, with the cost line disclosed) lives in the trigger
     contract as "continue automatically"; rewriting that to "ask the user to
@@ -331,10 +489,41 @@ def test_locked_decisions_are_pinned_where_the_amendments_implement_them():
         "the trigger contract no longer starts phase 7 automatically (Decision 4)"
     )
     assert "that is Decision 4's automatic behavior" in trigger
-    for gate in ("ask the user", "confirm before", "await confirmation", "prompt the user"):
-        assert gate not in trigger.lower(), (
-            f"the trigger contract now gates the automatic start on {gate!r} "
-            "(Decision 4 is automatic-with-disclosed-cost)"
+    # Naming four gating phrases enumerates four ways to gate the start, and a
+    # fifth wording ("only after the user approves", "requires an explicit
+    # re-invocation", "user sign-off") inverts Decision 4 with the pin green.
+    # Pin the pairing instead: no sentence in this section may put a user's
+    # permission in the way of the phase starting, however that is worded.
+    starts = re.compile(
+        r"(?i)\b(start|starts|starting|begin|begins|continue|continuing|"
+        r"proceed|proceeds|dispatch|dispatched|sampl\w+|phase 7|the runs)\b"
+    )
+    gating = re.compile(
+        r"(?i)(\bask\w*\b|\bconfirm\w*|\bapprov\w*|\bconsent\w*|"
+        r"\bprompt\w*|\bpermission\b|\bawait\w*|\bsign-?off\b|"
+        r"\bgo-?ahead\b|\bmanual\w*|\bre-?invocation\b|\bre-?invoke\w*)"
+    )
+    gated = [
+        s
+        for s in _sentences(_raw_section("## Trigger and resume contract"))
+        if starts.search(s) and gating.search(s)
+    ]
+    assert not gated, (
+        "the trigger contract now gates phase 7's start on a user action "
+        f"(Decision 4 is automatic-with-disclosed-cost): {gated!r}"
+    )
+
+    # Decision-adjacent: the doc's evidence rule is that equal job counts do not
+    # prove equal work. A sentence that classifies `same` from job counts alone
+    # reinstates the universal label this whole amendment removed, and it can be
+    # added far from any pinned phrase — so every sentence about job counts must
+    # be a withholding one.
+    for sentence in _sentences(_SPEC):
+        if not re.search(r"(?i)\bjob counts?\b", sentence):
+            continue
+        assert _withholds(sentence), (
+            "a sentence infers a workload state from job counts, which the doc "
+            f"elsewhere says does not prove equal work: {sentence!r}"
         )
 
     triggering = _section("## Triggering the runs (Decision 3)")
@@ -343,6 +532,14 @@ def test_locked_decisions_are_pinned_where_the_amendments_implement_them():
         "N, which raises the sampling spend Decision 1 locked"
     )
     assert "it does not raise or lower N" in triggering
+
+    # Decision 1 + 2 again, in the clause that governs a resample after the head
+    # moves: re-scoping THAT to its own N or its own threshold is a spend change
+    # the Decisions section would still read as locked.
+    assert "under the same locked N and threshold" in _FLAT, (
+        "a resample after the head moves no longer runs under the locked N and "
+        "variance threshold (Decisions 1 and 2)"
+    )
 
 
 # --------------------------------------------------------------------------

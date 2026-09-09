@@ -237,8 +237,11 @@ unversioned and updates by reinstall from `main`.
   to re-answer the same commit, discards in-flight samples when the branch head
   moves, requires the reported number to describe whichever check gates the
   merge *now* rather than a former slow check that has been overtaken, and
-  states that the first automatic branch run supplies sample one. No skill
-  behavior changes: this is the contract a later implementation follows, and all
+  states that the first automatic branch run supplies sample one. Where a
+  descriptive spread over the baseline's own observations is available, it may
+  now be shown as historical context beside the before figure — never as a
+  significance test, and never in place of the locked adaptive threshold. No
+  skill behavior changes: this is the contract a later implementation follows, and all
   six locked design decisions — two samples adaptive to four, the 20% variance
   threshold, sequential reruns with no empty commits, automatic with disclosed
   cost, environment-level configuration, wall-clock only — are unchanged and
