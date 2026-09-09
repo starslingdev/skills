@@ -216,28 +216,31 @@ def test_mode_split_is_identified_not_collapsed_into_one_variability_statement()
     assert modes[0]["max_s"] == 30.0 and modes[1]["min_s"] == 600.0
     # The mode split re-uses the engine's OWN bimodality definition (`_bimodal_split`), so
     # the summary never invents a second notion of "bimodal". It is applied to this
-    # summary's own selection, though — which drops skipped and undated executions and
-    # de-duplicates by job id where `_critical_path` does not — so on a sample containing
-    # those the summary and the pole's `bimodal` stamp CAN disagree about which samples
-    # qualify. By selection, never by definition.
+    # summary's own selection, though — which drops skipped executions and de-duplicates
+    # by job id where `_critical_path` does not — so on a sample containing those the
+    # summary and the pole's `bimodal` stamp CAN disagree about which samples qualify.
+    # By selection, never by definition. (Undated executions are NOT one of those
+    # differences: `_critical_path` drops them too, on its own `_job_duration_s` guard.)
     assert cr._bimodal_split(durs) is not None
     line = bp._timing_spread_sentence({"timing_spread": s}).lower()
     assert "mode" in line
 
     # The mode clause's NUMBERS, in role order. The fixture above is constant within each
-    # mode, so a renderer that swapped a mode's min and max would ship green; this one
-    # spreads both modes so the swap changes the rendered substring.
-    spread_modes = [28.0, 30.0, 32.0, 34.0, 36.0, 38.0,
-                    600.0, 610.0, 620.0, 630.0, 640.0, 650.0]
+    # mode AND equal-sized, so a renderer that swapped a mode's min and max — or printed
+    # one mode's run COUNT beside the other mode's range — would ship green against it.
+    # This one spreads both modes and gives them different sizes, so each of those three
+    # mis-pairings changes the rendered substring.
+    spread_modes = [28.0, 30.0, 32.0, 34.0, 38.0,
+                    600.0, 610.0, 620.0, 630.0, 640.0, 650.0, 660.0]
     s2 = _spread_for(spread_modes)
     m2 = s2.get("modes")
     assert m2 and len(m2) == 2, s2
     assert [(m["n"], m["min_s"], m["max_s"]) for m in m2] == [
-        (6, 28.0, 38.0), (6, 600.0, 650.0)], m2
+        (5, 28.0, 38.0), (7, 600.0, 660.0)], m2
     line2 = bp._timing_spread_sentence({"timing_spread": s2})
-    assert (f"Two modes in this sample, kept separate: 6 run(s) from {bp._clock(28.0)} "
-            f"to {bp._clock(38.0)} and 6 run(s) from {bp._clock(600.0)} to "
-            f"{bp._clock(650.0)}.") in line2, line2
+    assert (f"Two modes in this sample, kept separate: 5 run(s) from {bp._clock(28.0)} "
+            f"to {bp._clock(38.0)} and 7 run(s) from {bp._clock(600.0)} to "
+            f"{bp._clock(660.0)}.") in line2, line2
 
 
 def test_excluded_and_duplicate_attempts_do_not_inflate_n():
@@ -331,11 +334,71 @@ def test_a_cross_workflow_name_collision_does_not_borrow_one_workflows_durations
     for k in ("min_s", "median_s", "max_s"):
         assert k not in s, f"{k} was fabricated from another workflow's population: {s}"
     why = s["unavailable_reason"]
-    assert a_wf in why and b_wf in why, f"the collision is not named: {why}"
+    # Both colliding workflows are named, by basename and as code spans - the same shape
+    # the sibling collision disclosure in `summary.py` uses. The COUNT is pinned too: a
+    # reason that named the right files beside the wrong number would otherwise ship green.
+    assert "produced by 2 workflows" in why, why
+    assert bp._safe_span("a.yml") in why and bp._safe_span("b.yml") in why, (
+        f"the collision is not named as escaped basenames: {why}")
+    # A dead end is not an acceptable rendering: the reader is told what to change to get
+    # the summary back, in the same words the sibling disclosure already uses.
+    assert "rename one job" in why.lower(), f"the reason gives the reader no way out: {why}"
 
     line = bp._timing_spread_sentence({"timing_spread": s})
     assert "unavailable" in line, line
-    assert bp._clock(100.0) not in line and bp._clock(98.0) not in line, line
+    # The renderer terminates the sentence itself, so a reason carrying its own trailing
+    # period renders "spread..". Multi-sentence reasons are fine; a doubled stop is not.
+    assert ".." not in line, f"the reason double-punctuated the sentence: {line}"
+    # NONE of a.yml's three durations may reach the sentence - the max most of all, since
+    # it is the one a reader would mistake for the 400s gate's own slowest run.
+    for leaked in (98.0, 100.0, 105.0):
+        assert bp._clock(leaked) not in line, (
+            f"{leaked}s leaked from the unrelated workflow's population: {line}")
+
+
+def test_workflow_paths_cannot_break_out_of_the_collision_reason_markdown():
+    """Workflow file paths are REPOSITORY-CONTROLLED text, exactly like the runner labels
+    guarded above, and the collision reason interpolates them into a sentence the report
+    renders inside an italic `_..._` wrapper. A backtick in a filename would close a code
+    span early and render the rest of the pole's paragraph as code; a leading underscore
+    (`_shared.yml`, the common reusable-workflow convention) would break the emphasis. Both
+    take the same `_safe_span` route every other repo-text sink in this renderer takes.
+
+    The list is also BOUNDED: a monorepo can produce one check name from many workflows,
+    and one sentence naming thirty full paths is not a sentence anyone reads."""
+    def _crit(job: str, p50: float) -> dict:
+        return {"job_p50": {job: p50}, "job_p95": {job: p50},
+                "job_runner": {job: "ubuntu-latest"}, "job_bimodal": {},
+                "long_pole_job": job, "long_pole_p50": p50, "long_pole_p95": p50,
+                "floor_p50": 0.0, "runner_scope": "ubuntu-latest"}
+
+    hostile = ".github/workflows/_sha`red.yml"
+    other = ".github/workflows/b.yml"
+    crit_by_wf = {hostile: _crit("build", 100.0), other: _crit("Build", 400.0)}
+    jobs_per_run_by_wf = {hostile: _runs([98.0, 100.0, 105.0], name="build")}
+
+    s = cr._pole_timing_spread("build", hostile, "build", crit_by_wf,
+                               jobs_per_run_by_wf, [])
+    assert s["coverage"] == "unavailable", s
+    why = s["unavailable_reason"]
+    # The hostile basename survives only in its defused form - no raw backtick from repo
+    # text may reach the sentence, so every backtick left is a delimiter this code wrote.
+    assert "_sha`red.yml" not in why, f"a repo backtick survived verbatim: {why}"
+    assert bp._safe_span("_sha`red.yml") in why, why
+
+    line = bp._timing_spread_sentence({"timing_spread": s})
+    assert line.count("`") % 2 == 0, f"an unclosed code span was rendered: {line}"
+
+    # Bounded: many producers are summarised, not enumerated one path at a time.
+    many = {f".github/workflows/w{i}.yml": _crit("build" if i else "Build", 100.0 + i)
+            for i in range(9)}
+    s_many = cr._pole_timing_spread("build", ".github/workflows/w1.yml", "build",
+                                    many, {}, [])
+    why_many = s_many["unavailable_reason"]
+    assert "produced by 9 workflows" in why_many, why_many
+    assert why_many.count(".yml") <= 4, (
+        f"every producing workflow was enumerated into one sentence: {why_many}")
+    assert "more" in why_many, why_many
 
 
 def test_a_caller_pinned_mapping_is_its_own_timing_anchor():

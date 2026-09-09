@@ -4460,8 +4460,8 @@ def _timing_spread(observations: list[dict[str, Any]], *,
         "min_s": round(min(vals), 1),
         # The SAME `_percentile` estimator the pole's own p50 uses, over this summary's own
         # selection. Not an identity claim on the two numbers: the selection here also drops
-        # skipped and undated executions and de-duplicates by job id, which the headline's
-        # own list does not, so the two can differ on a sample containing those - by this
+        # skipped executions and de-duplicates by job id, which the headline's own list
+        # does not, so the two can differ on a sample containing those - by this
         # summary being the stricter of the pair, never by using a different definition.
         "median_s": round(_percentile(vals, 50), 1),
         "max_s": round(max(vals), 1),
@@ -4489,6 +4489,30 @@ def _timing_spread(observations: list[dict[str, Any]], *,
              "max_s": round(max(part), 1)}
             for label, part in (("fast", srt[:split]), ("slow", srt[split:]))]
     return out
+
+
+_COLLISION_WORKFLOWS_NAMED = 3
+
+
+def _safe_workflow_names(paths: list[str], cap: int = _COLLISION_WORKFLOWS_NAMED) -> str:
+    """Workflow file paths, rendered for a sentence a Markdown report prints.
+
+    Two properties, both borrowed rather than invented. BASENAMES, like the sibling
+    collision disclosure in `summary.py` — a repeated `.github/workflows/` prefix is noise,
+    and the file is what the reader recognises. And each one through `blocking_path`'s
+    `_safe_span`, because a workflow path is REPOSITORY-CONTROLLED text landing in a
+    Markdown sink: a backtick in a filename would close a code span early and render the
+    rest of the pole's paragraph as code, and a leading `_` (`_shared.yml`, the usual
+    reusable-workflow convention) would break the italic wrapper the report adds. That is
+    the same sink class as the runner labels this renderer already escapes.
+
+    BOUNDED at `cap`: a monorepo can produce one check name from a dozen workflows, and one
+    sentence enumerating a dozen paths is not a sentence anyone reads. The count is always
+    stated in full by the caller, so nothing is hidden — only the tail is summarised."""
+    import blocking_path as bp  # same-skill module; local import mirrors other call sites
+    shown = [bp._safe_span(Path(str(p)).name) for p in paths[:cap]]
+    rest = len(paths) - len(shown)
+    return ", ".join(shown) + (f" and {rest} more" if rest > 0 else "")
 
 
 def _pole_timing_spread(check: str, workflow_file: str, job: str,
@@ -4527,10 +4551,20 @@ def _pole_timing_spread(check: str, workflow_file: str, job: str,
             if len(producing) > 1:
                 unavailable = (
                     f"this check's name is produced by {len(producing)} workflows "
-                    f"({', '.join(producing)}), so its duration was measured as the "
-                    "slowest of them while these durations come from one — no single "
-                    "workflow's retained job durations share its timing basis")
+                    f"({_safe_workflow_names(producing)}), so its duration was measured "
+                    "as the slowest of them while these durations come from one — no "
+                    "single workflow's retained job durations share its timing basis. "
+                    # No trailing period: every `unavailable_reason` is rendered as the
+                    # tail of a sentence the renderer terminates itself.
+                    "Rename one job (or its matrix leg) so the check names differ, then "
+                    "re-run to get this check's own observed spread")
             else:
+                # NOT the "exactly one producer" case, which cannot reach here: on the
+                # unpinned path `_pole_mapping` returns `_map_check_to_job`'s answer
+                # whenever it is non-None, so a mismatch means that mapper returned None,
+                # and a single producer would have resolved it. The live case is ZERO
+                # producers — the file came from `_check_to_job_node_scanned` because the
+                # workflow was triage-skipped and has no retained timing at all.
                 unavailable = (
                     "this check's workflow was resolved from the scanned job graph, not "
                     "from the sampled timing that produced its duration, so no retained "

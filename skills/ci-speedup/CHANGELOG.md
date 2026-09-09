@@ -74,6 +74,13 @@ unversioned and updates by reinstall from `main`.
     reader, and the copy-paste agent prompt, that a 400-second gate was observed
     at 100 seconds. The summary is now withheld in that case and names the
     colliding workflows, instead of showing an unrelated workflow's numbers.
+    It names them by file name rather than full path, caps the list at three
+    with a count of the rest so a monorepo cannot turn the sentence into a
+    path dump, and closes with what to change to get the summary back — rename
+    one job so the check names differ. Workflow file names are repository text,
+    so they take the same escaping route the runner labels above take: a
+    backtick or a leading underscore in a workflow file name can no longer
+    break the formatting of the paragraph it is printed in.
 
 - **2026-09-02** — **A long pole whose job is declared advisory now says so.**
   Nothing in the engine read a job's `continue-on-error` setting, so a job could
