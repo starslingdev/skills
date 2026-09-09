@@ -8,8 +8,10 @@ NOT required status checks until someone adds them to branch protection, so the 
 work stops gating merges while everything stays green. The run only avoided a silently
 ungated main because the agent caught it unprompted.
 
-These pins make the caveat a durable invariant, on BOTH surfaces a user/agent actually
-reads: the rendered per-pole agent prompts (`_FIX_META` constraints) and the catalog doc.
+These pins make the caveat a durable invariant, on EVERY surface a user/agent actually
+reads: the rendered per-pole agent prompts (`_FIX_META` constraints), the rendered
+structural handoff (`_STRUCTURAL_META` guardrail, via `blocking_path.render`), and the
+catalog doc. A new split-into-new-jobs caveat has to be pinned on all three.
 Reword the caveat freely — but if you DROP it from any of these split-into-new-jobs sites,
 this fails loudly rather than letting the report hand out a silently-ungating fix.
 """
@@ -23,6 +25,7 @@ _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
 import blocking_path as bp  # noqa: E402  (uniquely-named module; no cross-skill clash)
+import collect_runs as cr  # noqa: E402  (same scripts/ dir, just added to sys.path)
 
 # Fix directions whose deliver INCLUDES a split-into-new-jobs / matrix path (primary for
 # cargo-test-shard and android-emulator-shard; a secondary "or"/"and/or" alternative for the
@@ -92,7 +95,7 @@ def test_caveat_predicate_discriminates_absent_from_present():
     assert _has_required_checks_caveat(with_it)
 
 
-# ── Relocation: preserving required coverage (spec 2026-09-08 workstream A) ───
+# ── Relocation: preserving required coverage ──────────────────────────────────
 # OPT75's relocate branch moves the dominant step OUT of the gating job. Moving the
 # work does not move the gate: the new job's check name is not required until an admin
 # adds it, and a `needs:` edge only orders jobs. Worse, a dependent skipped because a
@@ -101,30 +104,60 @@ def test_caveat_predicate_discriminates_absent_from_present():
 # the operator on the surfaces they read: the rendered structural handoff (built from
 # PRODUCTION `_STRUCTURAL_META`, not a fixture that supplies its own warning) and the
 # catalog.
-import collect_runs as cr  # noqa: E402  (same scripts/ dir already on sys.path)
-
-
 def _has_relocation_coverage_caveat(text: str) -> bool:
     """The relocation guardrail's load-bearing shape: moving work out of a required
-    check needs the coverage re-established (a required check name, or a required
-    verdict that inspects the moved job's outcome), and a bare `needs:` edge is called
-    out as insufficient."""
+    check needs the coverage re-established, and a bare `needs:` edge is called out as
+    insufficient.
+
+    Every clause keys on a CONTIGUOUS phrase, never on tokens that merely co-occur
+    somewhere in the passage. Co-occurrence accepted prose asserting the OPPOSITE
+    ("a `needs:` edge alone is fine"), because "needs" and "alone" both appeared —
+    a guard that green-lights the advice it exists to forbid. It also requires the
+    route an executing agent can actually TAKE: adding a check name to branch
+    protection is admin-only, so the re-gating instruction has to name keeping the
+    REQUIRED CHECK NAME on a verdict job rather than assume a suitable one exists.
+    """
     t = re.sub(r"\s+", " ", text).lower()
     names_the_gate = "required" in t and ("branch protection" in t or "ruleset" in t)
-    names_the_reestablishment = "verdict" in t or "aggregat" in t
-    names_the_insufficiency = "needs" in t and ("alone" in t or "not enough" in t
-                                                or "does not gate" in t)
+    names_the_reestablishment = (("verdict" in t or "aggregat" in t)
+                                 and "required check name" in t)
+    names_the_insufficiency = "does not gate" in t or "is not enough" in t
     return names_the_gate and names_the_reestablishment and names_the_insufficiency
 
 
 def _has_dependency_skip_caveat(text: str) -> bool:
     """The dependency-failure skip explanation: a dependent skipped by a FAILED
     dependency reports skipped (not failed) and can satisfy the gate, so the verdict
-    must propagate the dependency outcomes rather than merely run `always()`."""
+    must propagate the dependency outcomes rather than merely run `always()`.
+
+    The FAILURE SEMANTICS are load-bearing and asserted separately: presence of
+    `always()` plus the word "result" accepted "just add always() and it will report
+    the correct result", which is precisely the trap the caveat names. `!cancelled()`
+    is accepted alongside `always()` because the catalog itself blesses it, so a
+    correct reword must not turn this red.
+    """
     t = re.sub(r"\s+", " ", text).lower()
     names_the_skip = "skipped" in t and ("needs" in t or "dependenc" in t)
-    names_the_propagation = "always()" in t and ("result" in t or "outcome" in t)
-    return names_the_skip and names_the_propagation
+    runs_unconditionally = "always()" in t or "!cancelled()" in t
+    reads_the_results = "result" in t or "outcome" in t
+    rejects_non_success = "success" in t and ("fail" in t or "non-zero" in t)
+    return (names_the_skip and runs_unconditionally
+            and reads_the_results and rejects_non_success)
+
+
+def _rendered_opt75_guardrail(md: str) -> str:
+    """Scope the rendered assertions to OPT75's OWN guardrail bullet.
+
+    Matching the whole rendered document lets vocabulary borrowed from anywhere else
+    in the report satisfy the predicate with this guardrail deleted — and this same
+    change added a cross-link sentence to OPT22/24/25 that satisfies both predicates
+    single-handedly, so mirroring it onto another rendered surface (exactly the sync
+    this file already does for the older caveat) would silently defuse both guards.
+    The catalog assertion below is section-scoped for the same reason.
+    """
+    m = re.search(r"^- \*\*Guardrail:\*\*(.*)$", md, re.M)
+    assert m, "the rendered report has no Guardrail bullet — did the renderer change?"
+    return m.group(1)
 
 
 def _production_opt75_finding() -> dict:
@@ -163,7 +196,7 @@ def _render_production_opt75() -> str:
 
 
 def test_rendered_opt75_handoff_warns_about_preserving_required_coverage():
-    md = _render_production_opt75()
+    md = _rendered_opt75_guardrail(_render_production_opt75())
     assert _has_relocation_coverage_caveat(md), (
         "a rendered OPT75 handoff built from production _STRUCTURAL_META no longer "
         "warns that relocating the dominant step out of a required check must keep "
@@ -173,7 +206,7 @@ def test_rendered_opt75_handoff_warns_about_preserving_required_coverage():
 
 
 def test_rendered_opt75_handoff_warns_about_a_skipped_dependent():
-    md = _render_production_opt75()
+    md = _rendered_opt75_guardrail(_render_production_opt75())
     assert _has_dependency_skip_caveat(md), (
         "a rendered OPT75 handoff no longer warns that a dependent skipped by a "
         "failed `needs:` dependency reports skipped, not failed, so the verdict must "
@@ -185,8 +218,12 @@ def test_catalog_opt75_carries_both_relocation_explanations():
     anchor = "OPT75 — Long Pole: Optimize or Relocate the Dominant Step"
     assert anchor in _CATALOG, "OPT75 heading not found — was the pattern renamed?"
     start = _CATALOG.index(anchor)
-    nxt = _CATALOG.find("\n### ", start + 1)
-    section = _CATALOG[start:nxt] if nxt != -1 else _CATALOG[start:]
+    # OPT75 is currently the LAST `### ` pattern in the file, so bounding only on the
+    # next `### ` leaves the window running to EOF and silently annexing whatever gets
+    # appended later. Bound on the next heading of either level.
+    bounds = [i for i in (_CATALOG.find("\n### ", start + 1),
+                          _CATALOG.find("\n## ", start + 1)) if i != -1]
+    section = _CATALOG[start:min(bounds)] if bounds else _CATALOG[start:]
     assert _has_relocation_coverage_caveat(section), (
         "OPT75's catalog entry lost its preserve-required-coverage explanation"
     )
@@ -224,8 +261,19 @@ def test_relocation_predicates_discriminate_absent_from_present():
     needs_edge_only = ("Add a needs: edge from the new job so it runs before the "
                        "existing check.")
     assert not _has_relocation_coverage_caveat(needs_edge_only)
+
+    # The case that matters most: prose asserting the OPPOSITE of the guardrail. A
+    # predicate keyed on tokens that merely co-occur somewhere in the passage accepts
+    # this, i.e. it green-lights the exact advice it exists to forbid.
+    inverted = ("A job is skipped when its needs: dependency is skipped. Just add "
+                "if: always() to the verdict job and it will report the correct "
+                "result. Nothing else is required; branch protection needs no change "
+                "and a needs: edge alone is fine.")
+    assert not _has_relocation_coverage_caveat(inverted)
+    assert not _has_dependency_skip_caveat(inverted)
     full = needs_edge_only + (
-        " A needs: edge alone does not gate merges: add the new job's check name to "
-        "branch protection as a required check, or have an existing required verdict "
-        "job inspect its outcome and reject a failed dependency.")
+        " A needs: edge alone does not gate merges. Keep the required check name on a "
+        "verdict job that inspects the relocated job's outcome and rejects a failed "
+        "dependency, or have an admin add the new job's check name to branch "
+        "protection as a required check.")
     assert _has_relocation_coverage_caveat(full)

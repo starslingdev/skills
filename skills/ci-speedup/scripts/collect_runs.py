@@ -6795,15 +6795,19 @@ _STRUCTURAL_META: dict[str, dict[str, Any]] = {
             "carry the guardrail of the routed lever (e.g. OPT70's full-suite "
             "fallback if the dominant step is a test being scoped); never present "
             "the decomposition as free; if the remedy MOVES the step out of this "
-            "check, the required coverage has to move with it - a needs: edge "
-            "alone orders jobs, it does not gate merges, so either add the new "
-            "job's check name to branch protection (or the ruleset) as a required "
-            "check, or keep an existing required verdict/aggregator job that runs "
-            "with always() and fails unless every needs result is success, because "
+            "check, re-establish the required coverage in the SAME change - a "
+            "needs: edge alone orders jobs, it does not gate merges, so the "
+            "required check goes green while the moved work failed. The route "
+            "that needs no admin: keep the REQUIRED CHECK NAME on a verdict job "
+            "that needs: the relocated jobs, runs with always() (or "
+            "!cancelled()) and exits non-zero unless every needs.<job>.result is "
+            "success, treating failure, cancelled and skipped alike as a fail - "
             "a dependent skipped by a FAILED dependency reports skipped rather "
-            "than failed and would otherwise satisfy the gate with the work never "
-            "having run; changing branch protection or rulesets is an admin-only "
-            "step for the operator to take, never an action of this audit"),
+            "than failed, so always() WITHOUT propagating the results still "
+            "green-lights the merge. The alternative - adding the new job's "
+            "check name to branch protection or the ruleset as a required check "
+            "- is admin-only and is the operator's step, never an action of this "
+            "audit"),
         "rollout": (
             "the routed lever's rollout; re-measure the pole's p50 after the "
             "dominant step is attacked — the next-largest step becomes the target"),
