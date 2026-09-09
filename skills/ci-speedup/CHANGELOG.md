@@ -242,7 +242,9 @@ unversioned and updates by reinstall from `main`.
   six locked design decisions — two samples adaptive to four, the 20% variance
   threshold, sequential reruns with no empty commits, automatic with disclosed
   cost, environment-level configuration, wall-clock only — are unchanged and
-  continue to govern wherever an amendment touches them.
+  continue to govern wherever an amendment touches them. (#95)
+
+- **2026-08-20** — **The storage boundary is stated instead of implied.**
   `references/savings-methodology.md` sizes every finding on two axes — runner
   minutes and wall clock — and said nothing about artifact and cache storage,
   which is a separate line on the GitHub bill governed by `retention-days` and

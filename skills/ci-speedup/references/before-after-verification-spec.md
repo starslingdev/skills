@@ -6,8 +6,9 @@ This becomes the methodology doc for a new, lightweight, **built-in** ci-speedup
 phase once the implementation lands in a follow-up PR.
 
 **Amended 2026-09-08** with the workload-state vocabulary, the confounded-workload
-reporting rule, the trigger/resume contract, the gate-migration rule, and the
-bootstrap clarification. Those amendments narrow what may be *claimed* and define
+reporting rule, the trigger/resume contract, the gate-migration rule, the
+bootstrap clarification, and the optional descriptive baseline spread (historical
+context only — it never replaces the locked adaptive threshold). Those amendments narrow what may be *claimed* and define
 *when* the phase runs. **They change none of the six locked decisions**; where an
 amendment and a locked decision could be read as interacting, the locked decision
 governs.
