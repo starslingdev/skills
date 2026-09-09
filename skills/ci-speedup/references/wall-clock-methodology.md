@@ -27,6 +27,7 @@ illustrative figures from real audits, kept to anchor the model.
 - [5a. Observed timing spread is descriptive, never an inference](#5a-observed-timing-spread-is-descriptive-never-an-inference)
 - [6. Reliability is a wall-clock multiplier](#6-reliability-is-a-wall-clock-multiplier)
 - [7. Report structure](#7-report-structure)
+- [8. Joint scenarios for two concurrent checks (contract only — not yet produced)](#8-joint-scenarios-for-two-concurrent-checks-contract-only--not-yet-produced)
 
 ---
 
@@ -432,3 +433,108 @@ same-pattern residual findings that are not promoted into Runner-minute
 reductions. State the budget inversion plainly for wall-clock-negative rows:
 e.g. build-dedup spends developer-minutes of *wait* to save runner-minutes of
 *bill* — the two budgets move in opposite directions.
+
+---
+
+## 8. Joint scenarios for two concurrent checks (contract only — not yet produced)
+
+Two findings on two *different* concurrent checks can each be worth almost
+nothing alone and a great deal together. With A at 300s and B at 299s, cutting
+100s off A moves the gate by 1s and cutting 100s off B moves it by 0s — but
+doing both moves it by 100s. The report cannot say that today, and this section
+records the model that would let it, plus the reason it is not yet wired to
+live data.
+
+### The per-finding savings stamps CANNOT drive this
+
+`wall_clock_p50_s` is **not a post-fix duration**. It is an *effective merge-wait
+saving* that has already been through the cross-cutting bound cascade in §2 —
+developer-facing gate, measured population-weighted critical-path floor,
+cross-workflow floor. For the shape above it stamps A=1s and B=0s. Subtracting
+those from the observed durations gives post-fix durations of 299s/299s and a
+joint saving of **1s**: wrong by two orders of magnitude.
+
+`wall_clock_uncapped_p50_s` is not a substitute. It is a single workflow-level
+scalar. It does not describe each affected job, it does not decompose across
+matrix legs (a cluster finding stamps one number for *all* its legs), and it is
+absent entirely when no bound fired.
+
+### The model
+
+For observation `r`, check `j`, and a selected set of effects `S`:
+
+```text
+d_after(r,j,S) = d_before(r,j) − sum(eligible local reductions for j in S)
+T_before(r)    = max_j d_before(r,j)
+T_after(r,S)   = max_j d_after(r,j,S)
+delta(r,S)     = T_before(r) − T_after(r,S)
+scenario_delta_p50(S) = median_r delta(r,S)
+```
+
+`max` is taken **per observation, before any aggregation**. `median(max(checks))`
+is not `max(median(checks))`: with A and B alternating between 300s and 100s,
+both per-check medians are 200s while every observed gate is 300s. Per-check
+medians throw away exactly the co-occurrence information the gate is made of.
+
+`median(T_before)`, `median(T_after)` and `median(delta)` are **three separate
+summaries**. They are not required to subtract into one another, and a report
+must not present them as if they do.
+
+Every unaffected gating check stays in the `max` as a competitor, including
+unaffected matrix legs. Adding an untouched C=295s to the example caps the joint
+saving at 5s; C=300s caps it at 0s. **Zero is an honest supported answer** — it
+means C is the blocker — and it is a different answer from *unsupported*.
+
+The result is explicitly a **modeled concurrent-runtime change with unchanged
+scheduling**. It is not an observed before/after measurement and it does not
+replace or subtract from the report's merge-wait headline.
+
+### What a producer must stamp
+
+An effect is not derivable from what the engine stamps today. Each eligible
+effect has to record, explicitly:
+
+- the finding ID, the exact workflow / job / matrix-leg identity, the affected
+  step or work identity, and its source evidence references;
+- a modeled local duration reduction **per matched observation**, the assumption
+  that generated it, and a bound by that observation's affected work duration;
+- that it is a local runtime change with unchanged scheduling, coverage and job
+  set — relocation, new sharding, cancellation and trigger changes are
+  ineligible;
+- compatibility evidence. Only **disjoint affected work** is accepted; two
+  findings touching the same step are overlapping alternatives and are rejected,
+  never summed and never heuristically de-overlapped.
+
+Matched observations of the **whole** gating set are required on one
+configuration / runner / population basis, each validating concurrent execution
+against its timing span within a tested tolerance, with any tolerated residual
+disclosed and excluded from the runtime-only model. If timeline evidence is
+missing, concurrency is **not** assumed from similar durations.
+
+### When a numeric scenario is refused
+
+A `needs:` chain, a required aggregator, a shared serial upstream, an unmodelled
+staggered start or queue effect, an unresolved competitor, a conditional or
+missing check population, an ambiguous matrix identity, or insufficient per-job
+effect evidence all yield **unsupported**, with a concise limitation instead of
+a number. Non-finite or negative inputs, a reduction exceeding its affected
+work, and a negative modeled post-fix duration are refused the same way. This is
+deliberately not a general DAG scheduler; the existing single-finding
+chain-aware behaviour is unchanged.
+
+### Status: the contract exists, no producer feeds it
+
+`scripts/joint_scenario.py` holds the data contract, the calculator and the
+admission rules, unit-tested against every counterexample above. **Nothing in
+the engine stamps its inputs**, so no report renders a joint block. The gaps are
+listed in that module as `MISSING_PRODUCER_EVIDENCE`; in summary, the engine has
+no per-observation gating durations with run/attempt/era/runner identity (the
+nearest artifact is bimodal-gated, pole-capped and identity-free), no stamped
+concurrency validation (overlap is inferred from the `needs:` closure and
+*defaults to concurrent* when no job graph is available), no per-observation
+local reductions (raw pre-cascade estimates are one scalar per finding, and one
+scalar across all legs for a cluster finding), no affected-step identity beyond
+a single `decomposition.dominant_step`, no stable matrix-leg identity, and no
+certificate that a fix leaves scheduling, coverage and the job set unchanged.
+Adding an adapter before that evidence exists would produce confident numbers
+with nothing behind them.
