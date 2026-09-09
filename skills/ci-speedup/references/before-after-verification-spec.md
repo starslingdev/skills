@@ -261,10 +261,9 @@ knobs, and wall-clock-only all continue to govern once the phase is eligible.
 ### Eligibility
 
 Phase 6 still stops at a verified, **uncommitted** change and the existing user
-checkpoint before commit / PR. Nothing here authorizes bypassing that
-checkpoint — this work **does not authorize bypassing that checkpoint**, and no
-commit, push, or branch creation happens on the user's behalf to make
-verification possible.
+checkpoint before commit / PR. This work **does not authorize bypassing that
+checkpoint**: no commit, push, or branch creation happens on the user's behalf
+to make verification possible.
 
 Phase 7 becomes eligible when all of the following hold:
 
