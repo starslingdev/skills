@@ -4402,7 +4402,13 @@ def _timing_spread(observations: list[dict[str, Any]], *,
         return {**base, "n": 0, "coverage": "unavailable",
                 "unavailable_reason": unavailable}
 
-    scoped = runner_scope if runner_scope and runner_scope != "?" else ""
+    # `?` is `_critical_path`'s name for "these payloads carried no runner label", and it
+    # scopes the pole's own p50 to exactly that group - so it is a population like any
+    # other, not an absent scope. Treating it as absent disabled the filter and folded
+    # every other runner into the range, which both extends the range past the runs the
+    # headline was computed from and lets a RUNNER split re-surface as a fast/slow mode
+    # split. Only a genuinely unset scope (no `job_runner` entry) means all-runners.
+    scoped = runner_scope or ""
     seen: set[tuple[Any, ...]] = set()
     kept: list[tuple[Any, float]] = []
     other_runners: set[str] = set()

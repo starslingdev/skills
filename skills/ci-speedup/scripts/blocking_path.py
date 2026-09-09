@@ -2930,7 +2930,12 @@ def _timing_spread_sentence(pole: dict[str, Any]) -> str:
         # route every other repo-text sink in this renderer takes) maps each backtick to an
         # apostrophe and wraps, so a label can neither close its own span early nor render
         # as emphasis. Byte-identical for a clean label.
-        parts.append(f"Measured on {_safe_span(scope)} runs only; runs on "
+        # `?` is the internal placeholder for "the payload carried no runner label" - a
+        # real population (the pole's p50 is computed on it), but never a runner name to
+        # show a reader, so it is described rather than printed.
+        _where = ("runs whose payload named no runner" if scope == "?"
+                  else f"{_safe_span(scope)} runs")
+        parts.append(f"Measured on {_where} only; runs on "
                      f"{', '.join(_safe_span(o) for o in others)} are a "
                      "separate population and are not folded into this range.")
     era = str(sel.get("config_era") or "")

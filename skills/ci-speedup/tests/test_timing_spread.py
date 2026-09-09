@@ -440,3 +440,41 @@ def test_the_rendered_sentence_carries_the_right_numbers_in_the_right_roles():
     const = _spread_for([100.0] * 4)
     cline = bp._timing_spread_sentence({"timing_spread": const})
     assert f"Across 4 comparable sampled runs this check took {bp._clock(100.0)}" in cline, cline
+
+
+def test_an_unlabelled_dominant_runner_is_still_a_population_not_a_disabled_filter():
+    """`_critical_path` names a job's dominant runner `?` when the payloads carry no label,
+    and it computes that pole's p50 on THAT group. The summary must describe the same group.
+    Treating `?` as "no scope" instead of as the scope silently folds every other runner
+    into the range, so the sentence reports runs the pole's own median never saw - and the
+    runner split then re-surfaces as a fast/slow MODE split, which is exactly the
+    population-collapsing this summary is forbidden to do."""
+    def _unlabelled(job_id: int, dur_s: float) -> dict:
+        """A jobs-API payload carrying no runner label at all - what `_job_runner_label`
+        reads as `?`. Built here rather than via `_job` because the absence of the keys,
+        not a `None` value in them, is the case under test."""
+        j = _job(job_id, dur_s)
+        j.pop("labels", None)
+        j.pop("runner_name", None)
+        return j
+
+    jobs_per_run = ([[_unlabelled(300 + i, 100.0)] for i in range(5)]
+                    + _runs([900.0] * 3, runner="macos-14"))
+    crit = cr._critical_path(jobs_per_run)
+    assert crit["job_runner"][_JOB] == "?" and crit["job_p50"][_JOB] == 100.0, crit
+    s = cr._pole_timing_spread(_JOB, _WF, _JOB, {_WF: crit}, {_WF: jobs_per_run}, [])
+
+    assert s["n"] == 5, f"another runner's observations leaked into the range: {s}"
+    assert s["max_s"] == 100.0, f"the range extends past the pole's own population: {s}"
+    assert s["median_s"] == crit["job_p50"][_JOB], (
+        "the summary's median and the pole's headline describe different populations")
+    assert "macos-14" in (s.get("other_runner_labels") or []), s
+    assert not s.get("modes"), (
+        f"a RUNNER split was re-badged as a fast/slow mode split: {s.get('modes')}")
+
+    line = bp._timing_spread_sentence({"timing_spread": s})
+    assert "macos-14" in line and "separate population" in line, line
+    assert "mode" not in line, line
+    # `?` is an internal placeholder for "this payload carried no label", never a runner
+    # name to show a reader.
+    assert "`?`" not in line, f"the unlabelled placeholder rendered as a runner name: {line}"
