@@ -13,6 +13,26 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-09-08** — **A fix that moves the slowest step out of a merge gate now
+  says how to keep the gate.** The long-pole lever can hand back a fix that
+  relocates the dominant step into another job, and until now nothing in the
+  handoff said what that does to the merge gate: the work moves, the requirement
+  does not follow it, and a `needs:` edge only orders the jobs — so the moved work
+  can fail while the required check reports green and the pull request merges. The
+  guardrail carried by every emitted long-pole finding, and the catalog entry
+  behind it, now state the two ways to keep the coverage (make the new job's check
+  name required, or keep a required verdict job that inspects the moved job's
+  outcome and rejects a failure), and both spell out the second trap: a job skipped
+  because a job it depends on FAILED reports as skipped rather than failed, so a
+  verdict job must both run unconditionally *and* propagate every dependency
+  result, not merely add `always()`. The restriction on relocating anything but
+  genuinely advisory work is restated with it — a job feeding a required
+  aggregator is required in effect, and an unknown required status is treated as
+  required — and changing branch protection or rulesets stays an explicit
+  administrative step for the operator, never an action the audit takes. The
+  sharding and workflow-consolidation entries that split work into new check names
+  link to the same explanation.
+
 - **2026-09-02** — **A long pole whose job is declared advisory now says so.**
   Nothing in the engine read a job's `continue-on-error` setting, so a job could
   be reported as the slowest check on the pull-request path, and as the dominant

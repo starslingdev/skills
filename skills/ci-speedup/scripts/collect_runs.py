@@ -6794,7 +6794,16 @@ _STRUCTURAL_META: dict[str, dict[str, Any]] = {
         "guardrail": (
             "carry the guardrail of the routed lever (e.g. OPT70's full-suite "
             "fallback if the dominant step is a test being scoped); never present "
-            "the decomposition as free"),
+            "the decomposition as free; if the remedy MOVES the step out of this "
+            "check, the required coverage has to move with it - a needs: edge "
+            "alone orders jobs, it does not gate merges, so either add the new "
+            "job's check name to branch protection (or the ruleset) as a required "
+            "check, or keep an existing required verdict/aggregator job that runs "
+            "with always() and fails unless every needs result is success, because "
+            "a dependent skipped by a FAILED dependency reports skipped rather "
+            "than failed and would otherwise satisfy the gate with the work never "
+            "having run; changing branch protection or rulesets is an admin-only "
+            "step for the operator to take, never an action of this audit"),
         "rollout": (
             "the routed lever's rollout; re-measure the pole's p50 after the "
             "dominant step is attacked — the next-largest step becomes the target"),

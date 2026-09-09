@@ -90,3 +90,142 @@ def test_caveat_predicate_discriminates_absent_from_present():
                          "branch protection as required checks or the split-out tests silently "
                          "stop gating merges.")
     assert _has_required_checks_caveat(with_it)
+
+
+# ── Relocation: preserving required coverage (spec 2026-09-08 workstream A) ───
+# OPT75's relocate branch moves the dominant step OUT of the gating job. Moving the
+# work does not move the gate: the new job's check name is not required until an admin
+# adds it, and a `needs:` edge only orders jobs. Worse, a dependent skipped because a
+# `needs:` dependency FAILED reports as skipped, not failed, so a required check
+# satisfied by that job is satisfied while the work never ran. Both halves must reach
+# the operator on the surfaces they read: the rendered structural handoff (built from
+# PRODUCTION `_STRUCTURAL_META`, not a fixture that supplies its own warning) and the
+# catalog.
+import collect_runs as cr  # noqa: E402  (same scripts/ dir already on sys.path)
+
+
+def _has_relocation_coverage_caveat(text: str) -> bool:
+    """The relocation guardrail's load-bearing shape: moving work out of a required
+    check needs the coverage re-established (a required check name, or a required
+    verdict that inspects the moved job's outcome), and a bare `needs:` edge is called
+    out as insufficient."""
+    t = re.sub(r"\s+", " ", text).lower()
+    names_the_gate = "required" in t and ("branch protection" in t or "ruleset" in t)
+    names_the_reestablishment = "verdict" in t or "aggregat" in t
+    names_the_insufficiency = "needs" in t and ("alone" in t or "not enough" in t
+                                                or "does not gate" in t)
+    return names_the_gate and names_the_reestablishment and names_the_insufficiency
+
+
+def _has_dependency_skip_caveat(text: str) -> bool:
+    """The dependency-failure skip explanation: a dependent skipped by a FAILED
+    dependency reports skipped (not failed) and can satisfy the gate, so the verdict
+    must propagate the dependency outcomes rather than merely run `always()`."""
+    t = re.sub(r"\s+", " ", text).lower()
+    names_the_skip = "skipped" in t and ("needs" in t or "dependenc" in t)
+    names_the_propagation = "always()" in t and ("result" in t or "outcome" in t)
+    return names_the_skip and names_the_propagation
+
+
+def _production_opt75_finding() -> dict:
+    """A real OPT75 finding built by the PRODUCTION constructor, so its risk axis comes
+    from `_STRUCTURAL_META` — the fixture supplies only measurements, never prose."""
+    f = cr._new_structural_finding(
+        "OPT75", ".github/workflows/ci.yml", "test", 1,
+        evidence=("critical-path check `test` (600s): dominant step `Run integration "
+                  "suite` (test, 80% of job `test`)"),
+        measured_evidence=None,
+        size_note="sized from the dominant step's measured p50",
+        decomp={"dominant_step": "Run integration suite", "dominant_category": "test",
+                "dominant_p50": 480.0, "dominant_share": 0.8,
+                "redundant_ratio": 0.2, "job_p50": 600.0},
+    )
+    f["wall_clock_p50_s"] = 120.0
+    return f
+
+
+def _render_production_opt75() -> str:
+    doc = {
+        "repo": "o/r", "scanned_at": "2026-09-08T00:00:00Z",
+        "data_sources": {"runs_sampled": 100, "jobs_sampled": 300,
+                         "workflows_analyzed": 5},
+        "pr_critical_path": {
+            "sampled_pr_count": 3, "sample_target": 3, "sample_complete": True,
+            "poles": [{"check": "test", "p50_s": 600.0,
+                       "workflow_file": ".github/workflows/ci.yml", "job": "test",
+                       "dominant_step": "Run integration suite",
+                       "dominant_p50_s": 480.0, "dominant_share": 0.8,
+                       "steps": [{"step": "Run integration suite", "category": "test",
+                                  "p50_s": 480.0}]}]},
+        "findings": [_production_opt75_finding()],
+    }
+    return bp.render(doc, {}, {}, {}, "2026-09-08")
+
+
+def test_rendered_opt75_handoff_warns_about_preserving_required_coverage():
+    md = _render_production_opt75()
+    assert _has_relocation_coverage_caveat(md), (
+        "a rendered OPT75 handoff built from production _STRUCTURAL_META no longer "
+        "warns that relocating the dominant step out of a required check must keep "
+        "the required coverage (a new required check name, or a required verdict "
+        "that inspects the moved job's outcome; a `needs:` edge alone does not gate)."
+    )
+
+
+def test_rendered_opt75_handoff_warns_about_a_skipped_dependent():
+    md = _render_production_opt75()
+    assert _has_dependency_skip_caveat(md), (
+        "a rendered OPT75 handoff no longer warns that a dependent skipped by a "
+        "failed `needs:` dependency reports skipped, not failed, so the verdict must "
+        "run always() AND propagate the dependency results."
+    )
+
+
+def test_catalog_opt75_carries_both_relocation_explanations():
+    anchor = "OPT75 — Long Pole: Optimize or Relocate the Dominant Step"
+    assert anchor in _CATALOG, "OPT75 heading not found — was the pattern renamed?"
+    start = _CATALOG.index(anchor)
+    nxt = _CATALOG.find("\n### ", start + 1)
+    section = _CATALOG[start:nxt] if nxt != -1 else _CATALOG[start:]
+    assert _has_relocation_coverage_caveat(section), (
+        "OPT75's catalog entry lost its preserve-required-coverage explanation"
+    )
+    assert _has_dependency_skip_caveat(section), (
+        "OPT75's catalog entry lost its dependency-failure skip explanation"
+    )
+    # Behaviour 3: the advisory-only relocation restriction and the unknown-required-
+    # status rule stay covered.
+    low = re.sub(r"\s+", " ", section).lower()
+    assert "advisory" in low and "unknown" in low, (
+        "OPT75 lost the advisory-only relocation / unknown-required-status restriction"
+    )
+    # Behaviour 4: branch-protection changes stay an explicit administrative step the
+    # audit does not take.
+    assert "admin" in low, (
+        "OPT75 no longer states that re-gating is an administrative step"
+    )
+
+
+def test_relocation_predicates_discriminate_absent_from_present():
+    """Red-proof: neither new predicate may be a tautology. Prose that describes only
+    the DEFAULT dependency skip, or only a verdict that runs always(), must not pass;
+    only prose that also propagates the dependency results does."""
+    default_skip_only = ("When a job in the needs: list fails, the dependent job is "
+                         "skipped and reports skipped rather than failed.")
+    assert not _has_dependency_skip_caveat(default_skip_only)
+    always_only = ("Give the verdict job if: always() so it runs even when an "
+                   "upstream job fails.")
+    assert not _has_dependency_skip_caveat(always_only)
+    propagating = default_skip_only + (
+        " So the verdict job must run with if: always() AND read every "
+        "needs.<job>.result, failing unless each required upstream result is success.")
+    assert _has_dependency_skip_caveat(propagating)
+
+    needs_edge_only = ("Add a needs: edge from the new job so it runs before the "
+                       "existing check.")
+    assert not _has_relocation_coverage_caveat(needs_edge_only)
+    full = needs_edge_only + (
+        " A needs: edge alone does not gate merges: add the new job's check name to "
+        "branch protection as a required check, or have an existing required verdict "
+        "job inspect its outcome and reject a failed dependency.")
+    assert _has_relocation_coverage_caveat(full)
