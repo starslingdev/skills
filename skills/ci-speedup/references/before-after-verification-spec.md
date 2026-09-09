@@ -51,10 +51,13 @@ pauses before committing / opening a PR. Phase 7 presupposes the user then
 ```
 
 Trigger condition: the fix is bound to an exact remote head SHA AND that head's
-gating-workflow run has completed (see "Sampling", and "Trigger and resume
-contract" for the precise eligibility, binding, and resume rules). Until a
-push-to-branch step exists in the skill (phase 6 today ends at applying the fix,
-not pushing it), phase 7 is gated on that landing.
+initial relevant CI run has completed (see "Sampling", and "Trigger and resume
+contract" for the precise eligibility, binding, and resume rules). Those rules
+describe the phase once it exists; they do not make it live. Phase 6 today ends
+at applying the fix, so until the skill gains a push-to-branch step, **nothing
+reaches eligibility and phase 7 never runs** — the eligibility rules are what the
+implementation must satisfy on the day that step lands, not a claim that the
+phase is reachable now.
 
 ## Measurement design
 
@@ -248,6 +251,13 @@ sampling decision — where the two could interact, **the locked decision govern
   parallel** (≈ one run of wall-clock). But many workflows are `push`/`pull_request`
   only (the website's `ci.yml` is), so dispatch cannot be the primary path; use it
   for parallel sampling when available, otherwise accept serial reruns.
+  **Dispatch takes a ref, not a SHA, so it does not satisfy the exact-head
+  binding on its own:** a dispatched run builds whatever the ref points at when
+  it starts, so a follow-up commit silently swaps the commit under the sample.
+  Check each dispatched run's `head_sha` against the bound fix head and **discard
+  any sample that does not match** (the changed-head rule below then applies). A
+  rerun cannot drift this way — it re-uses the identical commit by construction —
+  which is the second reason it is the primary path.
 - **Never re-push** (empty commits pollute history) — explicitly rejected.
 - Guard: only the gating workflow needs sampling — don't fan out every workflow.
 
@@ -305,7 +315,9 @@ Bind the saved context to all of:
 Repeated invocation reuses completed samples and an existing verdict for that
 head. It **must not spend another set of reruns** to re-answer a question already
 answered for the same head — the disclosed cost is paid once, not once per
-invocation.
+invocation. Reuse is still subject to Decision 5's escape hatch:
+`CI_SPEEDUP_VERIFY_RUNS=0` disables phase 7 outright, so a saved verdict is not
+rendered either — the knob turns the phase off, not merely its spending.
 
 **A changed head invalidates in-flight comparison.** If the remote head moved
 (amended commit, force-push, new commits on the branch), samples collected
