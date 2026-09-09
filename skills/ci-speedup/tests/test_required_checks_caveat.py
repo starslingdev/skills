@@ -109,25 +109,40 @@ def _has_relocation_coverage_caveat(text: str) -> bool:
     check needs the coverage re-established, and a bare `needs:` edge is called out as
     insufficient.
 
-    How the clauses key, precisely — two of the seven clauses across this predicate
-    and `_has_dependency_skip_caveat` require a CONTIGUOUS phrase ("required check
-    name" here, and "success" paired with a failure word there); the other five
-    (`names_the_gate` here, and `names_the_skip` / `runs_unconditionally` /
-    `reads_the_results` there) are CO-OCCURRENCE checks over the whole passage. The
-    contiguous clauses are what stopped the inverted-prose case in
-    `test_relocation_predicates_discriminate_absent_from_present`, where pure
-    co-occurrence accepted prose asserting the OPPOSITE of the guardrail ("a
-    `needs:` edge alone is fine") because "needs" and "alone" both appeared. Keeping
-    "required check name" contiguous also pins the route an executing agent can
-    actually TAKE: adding a check name to branch protection is admin-only, so the
-    re-gating instruction must name keeping the REQUIRED CHECK NAME on a verdict job
-    rather than assume a suitable one exists.
+    How the clauses key, precisely. Seven clauses span this predicate and
+    `_has_dependency_skip_caveat`, and every one of them is an AND of substring
+    tests over the whole passage — none tests how the matched pieces RELATE to each
+    other. What varies is only how much each substring pins on its own:
 
-    KNOWN CEILING (follow-up, not this change): because five clauses are
-    co-occurrence, these predicates do NOT reject the two traps the OPT75 section
-    itself names — prose putting the `needs.*.result` test inside a job-level `if:`,
-    or using `contains(needs.*.result, 'failure')` — both of which supply every token
-    the clauses look for. Tightening them to reject those is tracked separately.
+    - Three require a multi-word CONTIGUOUS phrase: "branch protection" (in
+      `names_the_gate`), "required check name" (`names_the_reestablishment`), and
+      "does not gate" / "is not enough" (`names_the_insufficiency`).
+    - The rest are bare tokens that need only appear SOMEWHERE — "required",
+      "verdict"/"aggregat", "skipped", "needs"/"dependenc", "always()",
+      "result"/"outcome", "success", "fail"/"non-zero".
+
+    The inverted-prose case in `test_relocation_predicates_discriminate_absent_from_present`
+    — prose asserting the OPPOSITE of the guardrail ("a `needs:` edge alone is
+    fine") — is rejected by BOTH kinds, and it is worth being exact about which,
+    because the temptation is to credit the contiguous phrases alone. Here, all
+    three clauses miss it, the contiguous ones included. In
+    `_has_dependency_skip_caveat` the only clause that rejects it is
+    `rejects_non_success`, a pair of BARE tokens ("success" with "fail"/"non-zero"):
+    the inverted prose says "the correct result", never "success". So contiguity is
+    not what does the work there — specificity of vocabulary is.
+
+    Keeping "required check name" contiguous does pin something contiguity alone can
+    pin: the route an executing agent can actually TAKE. Adding a check name to
+    branch protection is admin-only, so the re-gating instruction must name keeping
+    the REQUIRED CHECK NAME on a verdict job rather than assume a suitable one
+    exists.
+
+    KNOWN CEILING (follow-up, not this change): because no clause tests how the
+    tokens relate, these predicates do NOT reject the two silent-pass traps the
+    OPT75 section itself names — prose putting the `needs.*.result` test inside a
+    job-level `if:`, or using `contains(needs.*.result, 'failure')` — both of which
+    supply every token the clauses look for. Tightening them to reject those is
+    tracked separately.
     """
     t = re.sub(r"\s+", " ", text).lower()
     names_the_gate = "required" in t and ("branch protection" in t or "ruleset" in t)
@@ -260,7 +275,7 @@ def test_catalog_opt75_carries_both_relocation_explanations():
     )
 
 
-# The advisory branch's escape hatch: "required in effect" is UNCONDITIONAL (spec
+# The advisory branch's escape hatch: "required in effect" is UNCONDITIONAL (behaviour
 # behaviour 3). Qualifying it on the aggregator propagating its result hands an agent a
 # de-scope argument built out of this same section's own trap #2 — "the aggregator uses
 # contains(needs.*.result, 'failure'), which does not propagate skipped/cancelled, so the
@@ -270,26 +285,109 @@ _REQUIRED_IN_EFFECT_CONDITIONED = (
     re.compile(r"required aggregator (?:that|which) propagat"),
     re.compile(r"aggregator (?:that|which) propagat[^.]{0,120}?is required"),
 )
+# A qualifier is recognisable by what it TALKS ABOUT, not by the words it picks, so
+# the scan below keys on three things co-occurring in one sentence or list item: the
+# aggregator as subject, the de-scope decision as the stake, and a connective that
+# makes the one contingent on the other.
+_AGGREGATOR_SUBJECT = re.compile(r"aggregat|verdict")
+_DESCOPE_STAKE = re.compile(
+    r"advisory|de-?scope|in effect|counts as required|relocatable|"
+    r"not itself required|does not gate anything"
+)
+_CONTINGENCY = re.compile(
+    r"\bunless\b|\bexcept\b|only where|only when|only if|\bprovided\b|so long as|"
+    r"as long as|\bwhere it does not\b|whose logic|\bthat propagat|\bwhich propagat|"
+    r"propagating|\bdrops\b|does not carry|carry the|\bforwards\b|\bwhen the aggregat|"
+    r"\bif the aggregat|\bwhere the verdict|\bwhere the aggregat|\bwhen the verdict"
+)
+# ...unless the same unit universalises the rule instead, which is how the correct
+# statement reads and how any future rewrite of it has to read.
+_STATED_UNCONDITIONALLY = re.compile(
+    r"full stop|whatever|no matter|regardless|unconditional|even if|even when|"
+    r"however the|never fewer|still counts|never a licence|never a license|"
+    r"never as permission|always counts|in every case"
+)
+
+
+def _prose_units(text: str):
+    """Sentences AND list items. A qualifier taken back in a later bullet is the shape
+    a real regression takes, and a scan that only splits on sentences never sees it."""
+    t = re.sub(r"[*`]", "", text).lower()
+    for line in t.split("\n"):
+        for unit in re.split(r"(?<=\.)\s+", re.sub(r"\s+", " ", line)):
+            if unit.strip():
+                yield unit.strip()
 
 
 def _conditions_required_in_effect_on_propagation(text: str) -> bool:
-    """True when the prose makes "required in effect" contingent on the aggregator
-    propagating its result. Emphasis markers are stripped first so the catalog's
-    *italicised* qualifier cannot hide from the pattern."""
-    t = re.sub(r"[*`_]", "", re.sub(r"\s+", " ", text)).lower()
-    return any(pat.search(t) for pat in _REQUIRED_IN_EFFECT_CONDITIONED)
+    """True when the prose makes "required in effect" contingent on what the
+    aggregator does with the upstream outcome.
+
+    Two layers, because the first alone pinned a SENTENCE rather than the RULE. The
+    literal patterns catch the exact qualifier this guard was written against — with
+    emphasis markers stripped, since the catalog wrote it *italicised*. The unit scan
+    then catches rewordings, and it has to be this broad because ordinary English
+    re-opens the loophole a dozen ways that share no vocabulary: a participle
+    ("aggregator propagating its result"), a subordinate clause ("provided…",
+    "unless…", "only where…"), the section's own synonym for the aggregator ("verdict
+    job"), a verb outside any fixed propagation vocabulary ("drops the outcome"), a
+    synonym that never says "in effect" ("counts as required when…"), the rule left
+    intact and taken back by the NEXT sentence, or by a later bullet in the section.
+    Keying on subject + stake + contingency catches all of them; keying on any fixed
+    phrase or verb list catches only the ones whose wording was guessed in advance.
+
+    A unit that universalises instead ("full stop", "whatever", "still counts") is
+    the rule stated correctly and never fires — which is what lets the shipped prose
+    name propagation in order to DISMISS it, as the catalog paragraph does.
+    """
+    flat = re.sub(r"[*`_]", "", re.sub(r"\s+", " ", text)).lower()
+    if any(pat.search(flat) for pat in _REQUIRED_IN_EFFECT_CONDITIONED):
+        return True
+    for unit in _prose_units(text):
+        if _STATED_UNCONDITIONALLY.search(unit):
+            continue
+        if (_AGGREGATOR_SUBJECT.search(unit) and _DESCOPE_STAKE.search(unit)
+                and _CONTINGENCY.search(unit)):
+            return True
+    return False
+
+
+def _states_required_in_effect_rule(text: str) -> bool:
+    """True when the prose actually STATES the rule. The conditioning check above is
+    negative-only, and a negative-only guard is green on the two worst regressions it
+    exists to catch: deleting the rule outright, and inverting it ("…is NOT itself
+    required, so it is advisory and may be relocated freely"). Neither conditions
+    anything, so neither fires it. This is the positive half."""
+    for unit in _prose_units(text):
+        if ("required in effect" in unit and _AGGREGATOR_SUBJECT.search(unit)
+                and " not " not in unit):
+            return True
+    return False
 
 
 def test_required_in_effect_is_unconditional_in_catalog_and_guardrail():
     section = _opt75_catalog_section()
+    # Positive first: a guard that only forbids qualifiers is green when the rule is
+    # simply gone, which is a larger regression than any qualifier.
+    assert _states_required_in_effect_rule(section), (
+        "OPT75's catalog entry no longer states the rule at all: a non-required job "
+        "feeding a required aggregator is required in effect. Behaviour 3 above "
+        "depends on it being present, not merely unqualified."
+    )
     assert not _conditions_required_in_effect_on_propagation(section), (
         "OPT75's catalog entry conditions \"required in effect\" on the aggregator "
-        "propagating its result. Spec behaviour 3 states it unconditionally: a "
+        "propagating its result. Behaviour 3 above states it unconditionally: a "
         "non-required job feeding a required aggregator is required in effect, full "
         "stop. The qualifier lets an agent argue that a partially-propagating "
         "aggregator (this section's own contains(needs.*.result, 'failure') trap) "
         "leaves the upstream job de-scopable under the advisory branch."
     )
+    # The guardrail half is a FORWARD guard, and says so rather than implying a
+    # parity that does not exist: the rendered OPT75 guardrail carries the two
+    # re-gating routes but not the advisory-branch rule, so there is nothing here for
+    # this assertion to bite on today. It exists so that the day the rule reaches the
+    # rendered handoff — the surface an executing agent actually reads, and a
+    # follow-up worth making — it cannot arrive already qualified.
     guardrail = _rendered_opt75_guardrail(_render_production_opt75())
     assert not _conditions_required_in_effect_on_propagation(guardrail), (
         "the rendered OPT75 guardrail conditions \"required in effect\" on the "
@@ -301,6 +399,67 @@ def test_required_in_effect_is_unconditional_in_catalog_and_guardrail():
         "result* is required *in effect*")
     assert not _conditions_required_in_effect_on_propagation(
         "a non-required job feeding a required aggregator is required *in effect*")
+
+
+def test_required_in_effect_guard_catches_reworded_qualifiers():
+    """The guard above pins a RULE, not one sentence, so it must survive rewording.
+
+    Matching only "aggregator that/which propagates" would let the identical
+    de-scope licence back in behind a participle, an "unless", or this section's
+    own synonym for the aggregator ("verdict job") — every one of which restores
+    the argument the rule exists to forbid while leaving the guard green.
+    """
+    for reworded in (
+        "a non-required job feeding a required aggregator propagating its result "
+        "is required in effect",
+        "a non-required job feeding a required aggregator, so long as it propagates "
+        "its result, is required in effect",
+        "a non-required job feeding a required aggregator is required in effect, "
+        "provided the aggregator propagates its result",
+        "a non-required job feeding a required aggregator is required in effect "
+        "unless the aggregator discards its result",
+        "a non-required job feeding a required aggregator is required in effect "
+        "only where the verdict job propagates the upstream outcome",
+        "a non-required job feeding a required verdict job *that propagates its "
+        "result* is required in effect",
+        "a non-required job feeding a propagating required aggregator is required "
+        "in effect",
+        "a non-required job feeding a required aggregator counts as required in "
+        "effect when the aggregator forwards its result",
+        # Verbs outside any fixed propagation vocabulary ("drops"), and the
+        # exception stated as its own clause rather than as a modifier.
+        "a non-required job feeding a required aggregator is required *in effect*, "
+        "except when the aggregator's verdict logic drops that job's outcome",
+        # The rule restated in a synonym that never says "in effect" at all.
+        "a non-required job feeding a required aggregator counts as required when "
+        "the aggregator propagates its result; where it does not, the job is "
+        "advisory and relocatable",
+        # The unconditional sentence kept intact, and taken back by the NEXT one.
+        "a non-required job feeding a required aggregator is required *in effect* — "
+        "full stop, whatever the aggregator's own verdict logic turns out to do. "
+        "This holds where the aggregator propagates the job's result; where the "
+        "verdict drops it, the job is advisory and may be de-scoped",
+        # ...or taken back by a later bullet in the same section.
+        "a non-required job feeding a required aggregator is required *in effect* — "
+        "full stop, whatever the aggregator's own verdict logic turns out to do.\n"
+        "\n- **Exception.** Where the aggregator's verdict logic does not carry the "
+        "job's outcome through, the job does not gate anything and may be treated "
+        "as advisory for relocation.",
+    ):
+        assert _conditions_required_in_effect_on_propagation(reworded), (
+            "a reworded qualifier slipped past the guard: " + reworded
+        )
+    # ...and the unconditional rule, however it is phrased, must stay green.
+    for unconditional in (
+        "a non-required job feeding a required aggregator is required *in effect*",
+        "a non-required job feeding a required aggregator is required in effect no "
+        "matter what the aggregator propagates",
+        "a non-required job feeding a required aggregator is required in effect, "
+        "full stop, whatever its verdict logic propagates",
+    ):
+        assert not _conditions_required_in_effect_on_propagation(unconditional), (
+            "the guard fires on unconditional prose it must accept: " + unconditional
+        )
 
 
 def test_relocation_predicates_discriminate_absent_from_present():
