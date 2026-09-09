@@ -448,9 +448,11 @@ live data.
 ### The per-finding savings stamps CANNOT drive this
 
 `wall_clock_p50_s` is **not a post-fix duration**. It is an *effective merge-wait
-saving* that has already been through the cross-cutting bound cascade in §2 —
-developer-facing gate, measured population-weighted critical-path floor,
-cross-workflow floor. For the shape above it stamps A=1s and B=0s. Subtracting
+saving* that has already been through the cross-cutting bound cascade in
+`scripts/wall_clock.py` — developer-facing gate, measured population-weighted
+critical-path floor, cross-workflow floor (ARCHITECTURE.md documents the
+cascade and its `bound_*` derivation labels). For the shape above it stamps
+A=1s and B=0s. Subtracting
 those from the observed durations gives post-fix durations of 299s/299s and a
 joint saving of **1s**: wrong by two orders of magnitude.
 
@@ -470,6 +472,23 @@ T_after(r,S)   = max_j d_after(r,j,S)
 delta(r,S)     = T_before(r) − T_after(r,S)
 scenario_delta_p50(S) = median_r delta(r,S)
 ```
+
+**How this sits with §7's stacked-model projection.** The two are not
+alternatives and neither supersedes the other. §7 projects a *modeled* future
+shape of the whole cluster from measured step durations, for the Projected
+Impact narrative; §8 measures *observed* joint behaviour of a fixed gating set,
+run by run, and is admissible only when every observation is matched. Where §8
+is available it is the stronger claim about the gate, because it never forms a
+per-check median. Nothing here licenses computing §7's REQUIRED monthly
+headline by any new route: that headline still comes from the stacked model as
+§7 specifies, and no joint block replaces or is added into it.
+
+**v1 is P50-only, and that is a scope limit rather than an exemption from §3,
+§5 and §7's tail requirement.** A joint tail figure needs a per-observation
+tail decomposition the contract does not define and no producer stamps, and a
+P95 of a max is not derivable from the P50 quantities above. Until that is
+specified, a joint block states its median and says nothing about the tail — it
+must never be read as a P95 line.
 
 `max` is taken **per observation, before any aggregation**. `median(max(checks))`
 is not `max(median(checks))`: with A and B alternating between 300s and 100s,
@@ -518,7 +537,12 @@ staggered start or queue effect, an unresolved competitor, a conditional or
 missing check population, an ambiguous matrix identity, or insufficient per-job
 effect evidence all yield **unsupported**, with a concise limitation instead of
 a number. Non-finite or negative inputs, a reduction exceeding its affected
-work, and a negative modeled post-fix duration are refused the same way. This is
+work, and a negative modeled post-fix duration are refused the same way. So are
+the identity failures, because each of them silently changes which comparison
+gets made rather than erroring: a missing or repeated finding ID, a missing
+workflow, affected-work or evidence identity, and one check name claimed by two
+different workflows — the gating set holds a single duration under that name, so
+the two cannot be modelled as one check. This is
 deliberately not a general DAG scheduler; the existing single-finding
 chain-aware behaviour is unchanged.
 
@@ -528,13 +552,18 @@ chain-aware behaviour is unchanged.
 admission rules, unit-tested against every counterexample above. **Nothing in
 the engine stamps its inputs**, so no report renders a joint block. The gaps are
 listed in that module as `MISSING_PRODUCER_EVIDENCE`; in summary, the engine has
-no per-observation gating durations with run/attempt/era/runner identity (the
-nearest artifact is bimodal-gated, pole-capped and identity-free), no stamped
+no per-observation durations for the *whole* gating set — `pr_critical_path.
+chain_facts` carries per-sha, era-scoped `member_spans_s`, but only for the
+members of that PR's winning chain and with no attempt or runner identity,
+while `populations` is bimodal-gated and identity-free — no stamped
 concurrency validation (overlap is inferred from the `needs:` closure and
 *defaults to concurrent* when no job graph is available), no per-observation
 local reductions (raw pre-cascade estimates are one scalar per finding, and one
 scalar across all legs for a cluster finding), no affected-step identity beyond
-a single `decomposition.dominant_step`, no stable matrix-leg identity, and no
+a cluster finding's `measured_evidence.waterfall.shared_step` and a single
+`decomposition.dominant_step`, no stable matrix-leg identity (`affected_jobs`
+holds YAML job keys on the scan path and display names on the measured path,
+and a job key names all of a job's legs at once), and no
 certificate that a fix leaves scheduling, coverage and the job set unchanged.
 Adding an adapter before that evidence exists would produce confident numbers
 with nothing behind them.

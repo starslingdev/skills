@@ -1,4 +1,5 @@
-"""Joint scenarios for supported parallel checks (SPEC-2026-09-08 §6).
+"""Joint scenarios for supported parallel checks
+(`references/wall-clock-methodology.md` §8).
 
 These tests pin the *numbers*, not the vocabulary. Every supported case asserts
 the exact seconds the calculator must produce; every unsupported case asserts
@@ -53,7 +54,9 @@ def gating(observations, *, topology="independent_concurrent", basis=BASIS,
 
 def effect(finding_id, work_id, per_obs, *, basis=BASIS, local=True,
            matrix_resolved=True, reduction_basis="step_p50_measured",
-           assumption="modeled: the named step is removed from the job"):
+           assumption="modeled: the named step is removed from the job",
+           workflow=".github/workflows/ci.yml",
+           evidence_refs=("run/1#step/3",)):
     """per_obs: {observation_id: {check_name: (reduction_s, affected_work_s)}}"""
     rows = []
     for oid, checks in per_obs.items():
@@ -63,11 +66,11 @@ def effect(finding_id, work_id, per_obs, *, basis=BASIS, local=True,
                 reduction_s=red, affected_work_s=work))
     return js.ScenarioEffect(
         finding_id=finding_id,
-        workflow=".github/workflows/ci.yml",
+        workflow=workflow,
         work_id=work_id,
         basis=basis,
         assumption=assumption,
-        evidence_refs=("run/1#step/3",),
+        evidence_refs=tuple(evidence_refs),
         local_runtime_only=local,
         matrix_identity_resolved=matrix_resolved,
         reduction_basis=reduction_basis,
@@ -82,7 +85,7 @@ def constant_effect(finding_id, work_id, check, reduction, work, oids,
 
 
 # --------------------------------------------------------------------------
-# §6 headline counterexample: A=300 / B=299, local reductions 100 each
+# §8 headline counterexample: A=300 / B=299, local reductions 100 each
 # --------------------------------------------------------------------------
 
 def _ab_gating(extra=None, n=3):
@@ -506,15 +509,29 @@ def test_affected_work_exceeding_the_observed_duration_is_rejected():
     assert res.rejection.code == "affected_work_exceeds_duration"
 
 
-def test_negative_post_fix_duration_is_rejected():
+def test_combined_reduction_beyond_the_job_duration_is_rejected():
+    """Two disjoint steps whose combined reduction exceeds the job duration are
+    caught by the affected-work budget, which fires before the arithmetic can
+    reach a negative post-fix duration: 200s + 150s of work did not happen in a
+    300s check, so the reductions were never both admissible."""
     g = _ab_gating()
     oids = [o.observation_id for o in g.observations]
-    # two disjoint steps whose combined reduction exceeds the job duration
     res = js.evaluate_scenario(g, [
         constant_effect("F-1", "A::install", "A", 200.0, 200.0, oids),
         constant_effect("F-2", "A::pytest", "A", 150.0, 150.0, oids)])
     assert res.supported is False
-    assert res.rejection.code == "negative_post_fix_duration"
+    assert res.rejection.code == "affected_work_sum_exceeds_duration"
+
+
+def test_the_negative_post_fix_floor_still_holds_under_the_budget():
+    """The budget guard makes a negative post-fix duration unreachable through
+    the public entry point, so the floor is pinned where it lives: reductions
+    that outrun the observed duration are refused, never clamped to zero."""
+    o = obs("r0", {"A": 300.0})
+    over = constant_effect("F-1", "A::install", "A", 400.0, 400.0, ["r0"])
+    rejection = js._after_durations(o, [over])
+    assert isinstance(rejection, js.ScenarioRejection)
+    assert rejection.code == "negative_post_fix_duration"
 
 
 # --------------------------------------------------------------------------
@@ -675,3 +692,199 @@ def test_the_missing_producer_evidence_is_named_in_the_module():
     missing = js.MISSING_PRODUCER_EVIDENCE
     assert isinstance(missing, tuple) and len(missing) >= 5
     assert all(isinstance(m, str) and m.strip() for m in missing)
+
+
+# --------------------------------------------------------------------------
+# attribution identity: a numeric result may not rest on unnamed or
+# indistinguishable findings, work, evidence or workflows
+# --------------------------------------------------------------------------
+
+def test_duplicate_finding_ids_are_rejected():
+    """Two effects sharing one id collapse into a single solo entry, so the
+    admission rule compares the joint saving against one half and not both."""
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-DUP", "A::pytest", "A", 100.0, 250.0, oids),
+        constant_effect("F-DUP", "B::npm-test", "B", 100.0, 250.0, oids)])
+    assert res.supported is False
+    assert res.rejection.code == "duplicate_finding_id"
+
+
+def test_duplicate_finding_ids_do_not_reach_block_selection():
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    assert js.select_joint_block(g, [
+        constant_effect("F-DUP", "A::pytest", "A", 100.0, 250.0, oids),
+        constant_effect("F-DUP", "B::npm-test", "B", 100.0, 250.0, oids)]) is None
+
+
+def test_every_supported_pair_carries_one_individual_per_finding():
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids),
+        constant_effect("F-B", "B::npm-test", "B", 100.0, 250.0, oids)])
+    assert res.supported is True
+    assert len(res.individual_delta_s) == len(res.finding_ids) == 2
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_finding_id_is_rejected(blank):
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect(blank, "A::pytest", "A", 100.0, 250.0, oids),
+        constant_effect("F-B", "B::npm-test", "B", 100.0, 250.0, oids)])
+    assert res.rejection.code == "missing_finding_id"
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_work_identity_is_rejected(blank):
+    """Unknown work is not disjoint work: an effect with no work id would key
+    the overlap check differently from a named step on the same check and be
+    summed with the alternative it may actually be."""
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", blank, "A", 60.0, 250.0, oids),
+        constant_effect("F-B", "A::pytest", "A", 80.0, 250.0, oids)])
+    assert res.supported is False
+    assert res.rejection.code == "missing_work_identity"
+
+
+def test_missing_evidence_refs_are_rejected():
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids,
+                        evidence_refs=()),
+        constant_effect("F-B", "B::npm-test", "B", 100.0, 250.0, oids)])
+    assert res.supported is False
+    assert res.rejection.code == "missing_evidence_refs"
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_workflow_identity_is_rejected(blank):
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids,
+                        workflow=blank),
+        constant_effect("F-B", "B::npm-test", "B", 100.0, 250.0, oids)])
+    assert res.rejection.code == "missing_workflow_identity"
+
+
+def test_one_check_name_claimed_by_two_workflows_is_rejected():
+    """Gating durations are keyed by check name. Two workflows with a check of
+    the same name are two different checks sharing one duration entry, so
+    summing both reductions onto it invents a saving that does not exist."""
+    g = gating([obs(f"r{i}", {"test": 300.0, "B": 299.0}) for i in range(3)])
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "test::pytest", "test", 100.0, 250.0, oids,
+                        workflow=".github/workflows/ci.yml"),
+        constant_effect("F-B", "test::npm", "test", 100.0, 250.0, oids,
+                        workflow=".github/workflows/release.yml")])
+    assert res.supported is False
+    assert res.rejection.code == "ambiguous_check_identity"
+
+
+def test_two_workflows_keep_composing_on_checks_of_different_names():
+    """The identity guard refuses conflation, not cross-workflow scenarios."""
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids,
+                        workflow=".github/workflows/ci.yml"),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids,
+                        workflow=".github/workflows/release.yml")])
+    assert res.supported is True
+    assert res.median_delta_s == 100.0
+
+
+# --------------------------------------------------------------------------
+# the displayed-precision admission rule, the disclosed residual, and the
+# affected-work budget of a single check
+# --------------------------------------------------------------------------
+
+def test_a_pair_that_only_beats_its_half_below_display_precision_is_refused():
+    """Joint 1.4s against a best half of 1.2s is a 0.2s improvement the report
+    cannot print. Both round to 1s, so the pair says nothing the single finding
+    did not already say and earns no block."""
+    g = gating([obs(f"r{i}", {"A": 300.0, "B": 298.8}) for i in range(3)])
+    oids = ["r0", "r1", "r2"]
+    ea = constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids)
+    eb = constant_effect("F-B", "B::npm", "B", 0.2, 250.0, oids)
+
+    res = js.evaluate_scenario(g, [ea, eb])
+    assert res.supported is True
+    assert res.median_delta_s == pytest.approx(1.4)
+    assert res.individual_delta_s["F-A"] == pytest.approx(1.2)
+    assert res.individual_delta_s["F-B"] == pytest.approx(0.0)
+
+    # 1.4 > 1.2 arithmetically, 1s vs 1s at the precision the reader sees
+    assert js.select_joint_block(g, [ea, eb]) is None
+
+
+def test_the_disclosed_residual_is_the_largest_one_tolerated():
+    """The reader is told the worst skew the scenario absorbed, not the best."""
+    g = gating([
+        obs("r0", {"A": 300.0, "B": 299.0}, residual=0.0),
+        obs("r1", {"A": 300.0, "B": 299.0}, residual=2.0),
+        obs("r2", {"A": 300.0, "B": 299.0}, residual=5.0),
+    ])
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, oids)])
+    assert res.supported is True
+    assert res.tolerated_residual_s == 5.0
+
+
+def test_affected_work_summed_over_one_check_may_not_exceed_its_duration():
+    """Two effects with different work ids that each claim 250s of a 300s check
+    cannot both be telling the truth: 500s of disjoint work did not happen in
+    300s. Summing their reductions would double-count one region of the job."""
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, oids),
+        constant_effect("F-B", "A::npm", "A", 100.0, 250.0, oids)])
+    assert res.supported is False
+    assert res.rejection.code == "affected_work_sum_exceeds_duration"
+
+
+def test_disjoint_work_that_fits_inside_the_check_still_composes():
+    """The budget guard refuses double-counting, not composition."""
+    g = _ab_gating()
+    oids = ["r0", "r1", "r2"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-1", "A::install", "A", 60.0, 70.0, oids),
+        constant_effect("F-2", "A::pytest", "A", 41.0, 180.0, oids)])
+    assert res.supported is True
+    assert res.modeled_check_after_s["A"] == 199.0
+
+
+# --------------------------------------------------------------------------
+# degenerate populations
+# --------------------------------------------------------------------------
+
+def test_a_single_matched_observation_is_supported():
+    g = gating([obs("r0", {"A": 300.0, "B": 299.0})])
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::pytest", "A", 100.0, 250.0, ["r0"]),
+        constant_effect("F-B", "B::npm", "B", 100.0, 250.0, ["r0"])])
+    assert res.supported is True
+    assert res.n_observations == 1
+    assert res.median_delta_s == 100.0
+
+
+def test_a_scenario_with_no_effects_saves_nothing():
+    g = _ab_gating()
+    res = js.evaluate_scenario(g, [])
+    assert res.supported is True
+    assert res.finding_ids == ()
+    assert res.median_t_before_s == 300.0
+    assert res.median_t_after_s == 300.0
+    assert res.median_delta_s == 0.0

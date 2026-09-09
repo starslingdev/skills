@@ -98,9 +98,13 @@ unversioned and updates by reinstall from `main`.
   one at 300s caps it at zero), the gate maximum taken per observation before
   any median is formed, and before/after/delta reported as three separate
   summaries that are not implied to subtract into one another. Only disjoint
-  affected work composes; two findings touching the same step, a `needs:` chain,
-  a required aggregator, a shared serial upstream, an unresolved competitor, an
-  ambiguous matrix identity, an unvalidated concurrent timing span, or
+  affected work composes, and it must fit inside the check that was observed —
+  two findings each claiming 250s of a 300s check are double-counting whatever
+  they call the work, not composing. Two findings touching the same step, a
+  `needs:` chain, a required aggregator, a shared serial upstream, an
+  unresolved competitor, an ambiguous matrix identity, an unvalidated
+  concurrent timing span, a missing or repeated finding, workflow, work or
+  evidence identity, one check name claimed by two different workflows, or
   insufficient per-observation evidence all yield an explicit *unsupported*
   verdict rather than a number — and a joint saving of zero is a supported,
   honest answer, not a failure. **No report renders a joint block today**: the

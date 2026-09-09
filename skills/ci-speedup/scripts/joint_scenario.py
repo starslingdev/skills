@@ -1,5 +1,8 @@
 """Joint scenarios for supported parallel checks — the data contract and the
-pure calculator (SPEC-2026-09-08 §6).
+pure calculator.
+
+The methodology this implements is
+`references/wall-clock-methodology.md` §8.
 
 WHY THIS MODULE EXISTS
 ----------------------
@@ -81,11 +84,13 @@ CAPPED_STAMP_FIELDS = frozenset({
 #: What no current producer stamps. This is the stop condition for the
 #: workstream, kept in code so a later adapter has a target rather than a guess.
 MISSING_PRODUCER_EVIDENCE = (
-    "per-observation gating durations: the engine keeps raw per-run job "
-    "durations only as a local in the collector and returns aggregated "
-    "job_p50/job_p95; `pr_critical_path.populations` is the closest artifact "
-    "and it is bimodal-gated, pole-capped, and carries no run, attempt, sha, "
-    "era or runner identity",
+    "per-observation gating durations for the WHOLE gating set: "
+    "`pr_critical_path.chain_facts` is the closest artifact and it does carry "
+    "per-sha, era-scoped `member_spans_s`, but only for the members of that "
+    "PR's winning chain, span-capped per check — never every competitor, and "
+    "with no attempt or runner identity. `populations` is bimodal-gated and "
+    "identity-free, and raw per-run job durations survive only as a local in "
+    "the collector, which returns aggregated job_p50/job_p95",
     "stamped concurrency validation: overlap is inferred structurally from the "
     "`needs:` closure and DEFAULTS TO CONCURRENT when no job graph is "
     "available; per-check start/finish intervals exist in memory but are "
@@ -94,12 +99,15 @@ MISSING_PRODUCER_EVIDENCE = (
     "one scalar per finding (and one scalar across ALL legs for a cluster "
     "finding), never a value per matched observation bounded by that "
     "observation's affected work",
-    "affected step/work identity: findings carry no `affected_steps` key; step "
-    "identity reaches a finding only as `decomposition.dominant_step`, which "
-    "cannot decide whether two findings touch disjoint work",
-    "stable matrix-leg identity: legs are display-name strings inside "
-    "`affected_jobs`, with no mapping from a finding to the exact legs it "
-    "changes",
+    "affected step/work identity: findings carry no `affected_steps` key. A "
+    "cluster finding does stamp `measured_evidence.waterfall.shared_step` (the "
+    "one step its fix changes) and every other finding reaches step identity "
+    "only as `decomposition.dominant_step` — one dominant step, which cannot "
+    "decide whether two findings touch disjoint work",
+    "stable matrix-leg identity: `affected_jobs` holds YAML job keys on the "
+    "scan path and GitHub display names on the measured path (`wall_clock.py` "
+    "bridges the two), and a job key names ALL of that job's legs at once, so "
+    "nothing maps a finding to the exact legs it changes",
     "a local-runtime-only certificate: nothing on a finding asserts that its "
     "fix leaves scheduling, coverage and the job set unchanged, which is the "
     "precondition for composing two effects at all",
@@ -137,10 +145,15 @@ class EffectObservation:
 class ScenarioEffect:
     """One finding's complete, explicit scenario effect."""
 
+    #: Unique within a scenario: solo reductions are keyed by it, so a blank or
+    #: repeated id would change which comparison the admission rule makes.
     finding_id: str
+    #: Required. Gating durations are keyed by bare check name, so two
+    #: workflows claiming one name are refused rather than conflated.
     workflow: str
-    #: Affected step/work identity. Two effects sharing a (check, work_id) pair
-    #: are overlapping alternatives and are rejected, never summed.
+    #: Affected step/work identity, required. Two effects sharing a
+    #: (check, work_id) pair are overlapping alternatives and are rejected,
+    #: never summed; blank work is not disjoint work and is refused too.
     work_id: str
     basis: str
     #: The assumption that generated the reductions, carried into the report.
@@ -293,6 +306,58 @@ def _validate_effects(g: GatingSet,
     obs_by_id = {o.observation_id: o for o in g.observations}
     all_ids = set(obs_by_id)
 
+    # Attribution identity comes first: a numeric result may not rest on an
+    # effect that cannot be told apart from another one. Solo results are keyed
+    # by finding ID and overlap is keyed by (check, work_id), so a blank or
+    # repeated identity silently changes which comparison the admission rule
+    # makes rather than producing an error.
+    seen_finding_ids: set[str] = set()
+    for e in effects:
+        if not (e.finding_id or "").strip():
+            return ScenarioRejection(
+                "missing_finding_id",
+                "an effect declares no finding id; solo reductions are keyed "
+                "by it and an unnamed effect cannot be compared against the "
+                "joint result")
+        if e.finding_id in seen_finding_ids:
+            return ScenarioRejection(
+                "duplicate_finding_id",
+                f"{e.finding_id!r} is declared by more than one effect; the "
+                "later solo reduction would overwrite the earlier one and the "
+                "joint result would be admitted against one half, not both")
+        seen_finding_ids.add(e.finding_id)
+        if not (e.workflow or "").strip():
+            return ScenarioRejection(
+                "missing_workflow_identity",
+                f"{e.finding_id} names no workflow; gating durations are keyed "
+                "by check name, so an unattributed check cannot be told apart "
+                "from a same-named check in another workflow")
+        if not (e.work_id or "").strip():
+            return ScenarioRejection(
+                "missing_work_identity",
+                f"{e.finding_id} names no affected work; unknown work is not "
+                "disjoint work, and it would key the overlap check differently "
+                "from the named step it may actually be")
+        if not [r for r in e.evidence_refs if (r or "").strip()]:
+            return ScenarioRejection(
+                "missing_evidence_refs",
+                f"{e.finding_id} carries no source evidence references; a "
+                "supported scenario states where its reductions came from")
+
+    # Gating durations are keyed by bare check name, so one name means one
+    # check. Two workflows claiming it are two different checks sharing one
+    # duration entry, and summing both reductions onto it invents a saving.
+    check_workflow: dict[str, str] = {}
+    for e in effects:
+        for check in sorted(e.check_names):
+            prior = check_workflow.setdefault(check, e.workflow)
+            if prior != e.workflow:
+                return ScenarioRejection(
+                    "ambiguous_check_identity",
+                    f"{check!r} is claimed by both {prior!r} and "
+                    f"{e.workflow!r}; the gating set carries one duration for "
+                    "that name, so the two cannot be modelled as one check")
+
     for e in effects:
         if not e.local_runtime_only:
             return ScenarioRejection(
@@ -394,6 +459,25 @@ def _validate_effects(g: GatingSet,
                     f"{check!r}; overlapping alternatives are rejected, never "
                     "summed or heuristically de-overlapped")
             owner[key] = e.finding_id
+
+    # Disjointness is a producer-declared label, so it is also budgeted against
+    # the observation. Two effects that each claim 250s of affected work in one
+    # 300s check cannot both be telling the truth, whatever their work ids say,
+    # and summing their reductions would take the same seconds off twice.
+    work_budget: dict[tuple[str, str], float] = {}
+    for e in effects:
+        for eo in e.observations:
+            key = (eo.observation_id, eo.check_name)
+            work_budget[key] = work_budget.get(key, 0.0) + float(eo.affected_work_s)
+    for (oid, check), claimed in sorted(work_budget.items()):
+        observed = float(obs_by_id[oid].check_durations[check])
+        if claimed > observed:
+            return ScenarioRejection(
+                "affected_work_sum_exceeds_duration",
+                f"the selected effects claim {claimed}s of affected work in "
+                f"{check!r} in {oid!r}, which observed only {observed}s; work "
+                "declared disjoint that does not fit inside the check is "
+                "double-counted, not composed")
     return None
 
 
