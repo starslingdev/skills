@@ -67,6 +67,13 @@ unversioned and updates by reinstall from `main`.
   constant *in this sample*, explicitly not as proof that future runs will not
   vary. A report produced before this summary existed renders nothing for it
   rather than any invented value.
+  - When the same check name is produced by more than one workflow — a monorepo
+    with copy-pasted `build` jobs — the reported duration is the slowest of them,
+    while the workflow the report links to is only one. Attaching that one
+    workflow's run times under the slowest workflow's headline would tell the
+    reader, and the copy-paste agent prompt, that a 400-second gate was observed
+    at 100 seconds. The summary is now withheld in that case and names the
+    colliding workflows, instead of showing an unrelated workflow's numbers.
 
 - **2026-09-02** — **A long pole whose job is declared advisory now says so.**
   Nothing in the engine read a job's `continue-on-error` setting, so a job could

@@ -214,11 +214,30 @@ def test_mode_split_is_identified_not_collapsed_into_one_variability_statement()
     assert modes and len(modes) == 2, s
     assert [m["n"] for m in modes] == [6, 6]
     assert modes[0]["max_s"] == 30.0 and modes[1]["min_s"] == 600.0
-    # The mode split re-uses the engine's OWN bimodality definition, so the summary and
-    # the pole's `bimodal` stamp can never disagree about whether this check has modes.
+    # The mode split re-uses the engine's OWN bimodality definition (`_bimodal_split`), so
+    # the summary never invents a second notion of "bimodal". It is applied to this
+    # summary's own selection, though — which drops skipped and undated executions and
+    # de-duplicates by job id where `_critical_path` does not — so on a sample containing
+    # those the summary and the pole's `bimodal` stamp CAN disagree about which samples
+    # qualify. By selection, never by definition.
     assert cr._bimodal_split(durs) is not None
     line = bp._timing_spread_sentence({"timing_spread": s}).lower()
     assert "mode" in line
+
+    # The mode clause's NUMBERS, in role order. The fixture above is constant within each
+    # mode, so a renderer that swapped a mode's min and max would ship green; this one
+    # spreads both modes so the swap changes the rendered substring.
+    spread_modes = [28.0, 30.0, 32.0, 34.0, 36.0, 38.0,
+                    600.0, 610.0, 620.0, 630.0, 640.0, 650.0]
+    s2 = _spread_for(spread_modes)
+    m2 = s2.get("modes")
+    assert m2 and len(m2) == 2, s2
+    assert [(m["n"], m["min_s"], m["max_s"]) for m in m2] == [
+        (6, 28.0, 38.0), (6, 600.0, 650.0)], m2
+    line2 = bp._timing_spread_sentence({"timing_spread": s2})
+    assert (f"Two modes in this sample, kept separate: 6 run(s) from {bp._clock(28.0)} "
+            f"to {bp._clock(38.0)} and 6 run(s) from {bp._clock(600.0)} to "
+            f"{bp._clock(650.0)}.") in line2, line2
 
 
 def test_excluded_and_duplicate_attempts_do_not_inflate_n():
@@ -267,6 +286,74 @@ def test_a_pole_whose_aggregate_uses_another_population_is_marked_unavailable():
     assert s["coverage"] == "unavailable"
     assert "min_s" not in s
     assert "check-runs" in s["unavailable_reason"]
+
+
+def test_a_cross_workflow_name_collision_does_not_borrow_one_workflows_durations():
+    """The other way a pole's aggregate can come from a different population than the
+    retained durations — and the one no `timing_source` stamp catches.
+
+    When the same check name is produced by TWO workflows, `_map_check_to_job` refuses to
+    pick a file, and the spine grounds the pole's magnitude on `_check_grounded_job_p50` —
+    the MAX p50 across every colliding workflow (here b.yml's 400s). That is still stamped
+    `timing_source == "workflow_jobs"`, because it IS a sampled job p50. But the pole's
+    FILE then resolves through the scanned job graph, which is unambiguous where the
+    timing mapper was not, and lands on a.yml. Attaching a.yml's ~100s durations under a
+    400s headline tells the reader — and the copy-paste agent prompt — that the 400s gate
+    was observed at 100s. The summary must be unavailable instead."""
+    def _crit(job: str, p50: float) -> dict:
+        return {"job_p50": {job: p50}, "job_p95": {job: p50},
+                "job_runner": {job: "ubuntu-latest"}, "job_bimodal": {},
+                "long_pole_job": job, "long_pole_p50": p50, "long_pole_p95": p50,
+                "floor_p50": 0.0, "runner_scope": "ubuntu-latest"}
+
+    a_wf, b_wf = ".github/workflows/a.yml", ".github/workflows/b.yml"
+    a_runs = _runs([98.0, 100.0, 105.0], name="build")
+    crit_by_wf = {a_wf: _crit("build", 100.0), b_wf: _crit("Build", 400.0)}
+    jobs_per_run_by_wf = {a_wf: a_runs, b_wf: _runs([400.0] * 3, name="Build")}
+    job_graph = {a_wf: {"build": {"name": "build"}}, b_wf: {"Build": {"name": "Build"}}}
+
+    # The production path, step by step: the timing mapper refuses the collision, the
+    # magnitude is grounded on the SLOWEST colliding job, and the scanned graph then
+    # resolves a single — different — workflow for the pole's file.
+    assert cr._map_check_to_job("build", crit_by_wf,
+                                require_developer_timing=True) is None
+    assert cr._check_grounded_job_p50("build", crit_by_wf,
+                                      require_developer_timing=True) == 400.0
+    assert cr._check_to_job_node_scanned("build", job_graph) == (a_wf, "build")
+    mapping = cr._pole_mapping("build", crit_by_wf, None, job_graph,
+                               require_developer_timing=True)
+    assert mapping == (a_wf, "build"), mapping
+
+    s = cr._pole_timing_spread("build", mapping[0], mapping[1], crit_by_wf,
+                               jobs_per_run_by_wf, [])
+    assert s["coverage"] == "unavailable", (
+        "a 400s pole was given a.yml's ~100s durations: " + repr(s))
+    for k in ("min_s", "median_s", "max_s"):
+        assert k not in s, f"{k} was fabricated from another workflow's population: {s}"
+    why = s["unavailable_reason"]
+    assert a_wf in why and b_wf in why, f"the collision is not named: {why}"
+
+    line = bp._timing_spread_sentence({"timing_spread": s})
+    assert "unavailable" in line, line
+    assert bp._clock(100.0) not in line and bp._clock(98.0) not in line, line
+
+
+def test_a_caller_pinned_mapping_is_its_own_timing_anchor():
+    """The PR-floor fallback pins `(workflow_file, job)` because its "check" IS a job name
+    that can collide across files — the pin exists precisely to break the tie the timing
+    mapper cannot. Its p50 comes from THAT workflow's own critical path, so the pinned
+    workflow's retained durations DO share its basis and must still be summarised."""
+    a_wf, b_wf = ".github/workflows/a.yml", ".github/workflows/b.yml"
+
+    def _crit(job: str, p50: float) -> dict:
+        return {"job_p50": {job: p50}, "job_runner": {job: "ubuntu-latest"}}
+
+    crit_by_wf = {a_wf: _crit("build", 100.0), b_wf: _crit("Build", 400.0)}
+    jobs_per_run_by_wf = {a_wf: _runs([98.0, 100.0, 105.0], name="build")}
+    s = cr._pole_timing_spread("build", a_wf, "build", crit_by_wf,
+                               jobs_per_run_by_wf, [], mapping_pinned=True)
+    assert s["coverage"] == "observed_spread", s
+    assert (s["n"], s["min_s"], s["max_s"]) == (3, 98.0, 105.0), s
 
 
 # --------------------------------------------------------------------------------------

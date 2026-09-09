@@ -4495,14 +4495,46 @@ def _pole_timing_spread(check: str, workflow_file: str, job: str,
                         crit_by_wf: dict[str, Any],
                         jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
                         config_era_facts: list[dict[str, Any]],
-                        *, unavailable: str = "") -> dict[str, Any]:
+                        *, unavailable: str = "",
+                        mapping_pinned: bool = False) -> dict[str, Any]:
     """Resolve ONE pole's descriptive summary from the pass's retained state.
 
     Every input is already in memory: `jobs_per_run_by_wf[wf]` is the exact retained
     per-run job list `_critical_path` measured this workflow from (era-scoped by the spine
     door and event-scoped by `_crit_for` upstream), and `crit_by_wf[wf]["job_runner"]`
     names the runner its p50 was computed on. No gh request is issued here, directly or
-    indirectly — the summary is a re-reading of data the pass already paid for."""
+    indirectly — the summary is a re-reading of data the pass already paid for.
+
+    THE (workflow, job) MUST BE THE POLE'S TIMING ANCHOR, not merely a file the pole was
+    bound to. `timing_source == "workflow_jobs"` does NOT prove it is: that stamp is also
+    worn by the AMBIGUITY-grounded branch, where `_map_check_to_job` refused a
+    cross-workflow same-name collision and `_check_grounded_job_p50` supplied the MAX p50
+    across every colliding workflow. `_pole_mapping` then falls through to
+    `_check_to_job_node_scanned`, which resolves ONE workflow whenever the scanned graph is
+    unambiguous even though the timing mapper was not — so the pole can headline b.yml's
+    400s while this function is handed a.yml, whose retained durations sit near 100s. That
+    is exactly the "aggregate uses a different population from the available durations"
+    case, and the summary is marked UNAVAILABLE (naming the collision) rather than
+    attaching the scanned-graph fallback's unrelated statistics. A caller-supplied PIN
+    (`mapping_pinned`, the PR-floor fallback) is its OWN anchor: its p50 is read straight
+    off THAT workflow's critical path, so the pinned workflow's durations do share its
+    basis."""
+    if not unavailable and workflow_file and not mapping_pinned:
+        if _map_check_to_job(check, crit_by_wf,
+                             require_developer_timing=True) != (workflow_file, job):
+            producing = sorted(_check_producing_workflows(
+                check, crit_by_wf, require_developer_timing=True))
+            if len(producing) > 1:
+                unavailable = (
+                    f"this check's name is produced by {len(producing)} workflows "
+                    f"({', '.join(producing)}), so its duration was measured as the "
+                    "slowest of them while these durations come from one — no single "
+                    "workflow's retained job durations share its timing basis")
+            else:
+                unavailable = (
+                    "this check's workflow was resolved from the scanned job graph, not "
+                    "from the sampled timing that produced its duration, so no retained "
+                    "job durations are known to share its timing basis")
     crit = crit_by_wf.get(workflow_file) or {}
     runner_scope = str((crit.get("job_runner") or {}).get(job) or "")
     # The kept configuration era for this workflow, when its sample straddled a change to
@@ -15127,6 +15159,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # `mapping` lets a caller pin the (workflow_file, job) directly — used by the
         # PR-floor fallback, whose "check" IS a job name and must bind to ITS workflow,
         # not whichever workflow `_map_check_to_job` happens to resolve a same-named job in.
+        _pinned = mapping is not None
         mapping = _pole_mapping(check_name, crit_by_wf, mapping,
                                 findings_doc.get("workflow_job_graph"),
                                 require_developer_timing=True)
@@ -15143,7 +15176,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 config_era_facts,
                 unavailable=("" if timing_source == "workflow_jobs" else
                              "this check's duration was measured from PR check-runs, so "
-                             "no sampled workflow-job durations share its timing basis"))
+                             "no sampled workflow-job durations share its timing basis"),
+                # A pinned mapping IS the pole's timing anchor; an unpinned one is only
+                # the anchor when the TIMING mapper resolved it (checked inside).
+                mapping_pinned=_pinned)
             if timing_source != "workflow_jobs":
                 entry["job_timing_unavailable"] = (
                     "PR check-run timing was measured, but no sampled workflow job "
