@@ -250,9 +250,10 @@ identity, same timing definition (the jobs-API `started_at` → `completed_at`
 span, queue time excluded), same retained configuration era, same dominant-runner
 scope, and the same one-observation-per-sampled-run/attempt policy. A blended
 range would describe a job that never ran. Existing population and mode splits
-are **preserved and named**, not collapsed: two runner populations stay two
-populations, and a bimodal check's fast and slow modes are reported as two modes
-beside the whole-sample range. A rerun attempt is one observation of the check;
+are **preserved and named**, not collapsed: the range covers the pole's own
+runner population only and any other runner the check also ran on is named as a
+separate population rather than silently folded in, and a bimodal check's fast
+and slow modes are reported as two modes beside the whole-sample range. A rerun attempt is one observation of the check;
 it is never counted as an independent pull request.
 
 **What it must never become.** The spread describes the sample. It is not:

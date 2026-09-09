@@ -4458,8 +4458,11 @@ def _timing_spread(observations: list[dict[str, Any]], *,
         **base, **extra,
         "n": n,
         "min_s": round(min(vals), 1),
-        # The SAME `_percentile` the pole's own p50 uses, so the summary's median and the
-        # pole's headline can never disagree about the middle of the sample.
+        # The SAME `_percentile` estimator the pole's own p50 uses, over this summary's own
+        # selection. Not an identity claim on the two numbers: the selection here also drops
+        # skipped and undated executions and de-duplicates by job id, which the headline's
+        # own list does not, so the two can differ on a sample containing those - by this
+        # summary being the stricter of the pair, never by using a different definition.
         "median_s": round(_percentile(vals, 50), 1),
         "max_s": round(max(vals), 1),
         "sample_ids": ids,
@@ -4471,8 +4474,10 @@ def _timing_spread(observations: list[dict[str, Any]], *,
         out["sample_ids_truncated"] = True
     # Existing mode split, PRESERVED and identified. `_bimodal_split` is the engine's own
     # bimodality definition (largest-gap split, both clusters substantial and separated),
-    # so a pole's `bimodal` stamp and this summary can never disagree about whether the
-    # sample has two modes. Reported alongside the whole-sample range so fast and slow
+    # so this summary never invents a second notion of "bimodal". It is applied to this
+    # summary's own selection, which is not always the list a pole's `bimodal` stamp was
+    # taken over, so the two can differ on which samples qualify - by selection, never by
+    # definition. Reported alongside the whole-sample range so fast and slow
     # modes are identified rather than collapsed into one variability statement.
     if _bimodal_split(vals) is not None:
         srt = sorted(vals)
