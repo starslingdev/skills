@@ -365,3 +365,18 @@ def test_the_summary_never_reaches_the_bottom_line_or_the_savings_numbers():
         f"{[ln for ln in added if sentence not in ln]}")
     removed = [ln for ln in without if ln not in with_s]
     assert not removed, f"adding the timing summary REMOVED report lines: {removed}"
+
+
+def test_the_gap_fill_prompt_carries_the_same_summary_sentence():
+    """A pole that matched no catalog detector hands off an LLM-AUTHORED prompt. That
+    body must carry the report's own sentence about what was observed, not the model's
+    account of how much the check varies - and not twice if it already quoted it."""
+    s = _spread_for([190.0, 205.0, 240.0, 268.0, 331.0])
+    pole = {"check": "tests-web", "timing_spread": s}
+    sentence = bp._timing_spread_sentence(pole)
+    assert sentence
+    out = bp._llm_agent_prompt("Root cause: the build re-downloads its toolchain.", pole)
+    assert sentence in out
+    twice = bp._llm_agent_prompt(
+        sentence + "\n\nRoot cause: the build re-downloads its toolchain.", pole)
+    assert twice.count(sentence) == 1, "the sentence was doubled in the gap-fill prompt"

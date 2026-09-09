@@ -3350,6 +3350,13 @@ def _llm_agent_prompt(body: str, pole: dict[str, Any] | None = None) -> str:
     _adv = _advisory_prompt_lines(_as_dict(pole))
     if _adv and "continue-on-error: true" not in body:
         body = _adv[0].lstrip("- ") + "\n\n" + body
+    # The observed timing spread, for the same reason: this body is LLM-authored, so the
+    # gap-fill hand-off gets the SAME sentence the pole section shows rather than the
+    # model's own account of how much the check varies. Idempotent - a body that already
+    # quoted the report's sentence is not doubled.
+    _ts = _timing_spread_sentence(_as_dict(pole))
+    if _ts and _ts not in body:
+        body = _ts + "\n\n" + body
     # The no-weakening rail is the renderer's too, for the same reason the disclaimer
     # is: the gap-fill body is LLM-authored, so the one rule the hand-off cannot afford
     # to have paraphrased away is appended here, not left to the author. The canonical
