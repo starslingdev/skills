@@ -4318,6 +4318,194 @@ def _bimodal_split(durs: list[float], *, min_n: int = 8, min_frac: float = 0.30,
             "low_p50_s": round(lo_med, 1), "high_p50_s": round(hi_med, 1)}
 
 
+# =============================================================================
+# Descriptive timing spread (workstream C)
+# =============================================================================
+#
+# WHY. A pole's p50 (and the long pole's p95) cannot express how much its duration
+# actually MOVED across the sampled runs. The exact counterexample: twenty observations
+# of 100s, and nine of 1s plus eleven of 100s, both give p50 = p95 = 100s under
+# `_percentile`. One sample never varies; the other varies by 99s. The reader cannot tell
+# them apart from the quantiles alone.
+#
+# WHAT THIS IS. A DESCRIPTION of the observations the sampler already fetched — `n`, the
+# minimum, the median and the maximum, plus the identifiers that say WHICH observations
+# they are. It reads no new data: every duration comes from `jobs_per_run_by_wf`, the same
+# retained per-run job lists `_critical_path` measured the pole's p50 from, so the summary
+# costs ZERO additional gh requests and no deeper sampling.
+#
+# WHAT THIS IS NOT. It is not a symmetric +/- band, not a minimum detectable effect, not an
+# "outside noise" verdict, and not any statistical-significance claim. Duration spread is
+# not uncertainty in an estimated change: detectability depends on sample size, pairing,
+# comparable populations and a comparison method, none of which a single sample supplies.
+# It never enters the Bottom-line savings number — the sizing cascade is untouched.
+_TIMING_SPREAD_VERSION = 1
+# The timing DEFINITION, named so a reader (and the verifier) can tell this range is the
+# same clock the pole's p50 is measured on — the jobs-API `started_at` -> `completed_at`
+# span (`_job_duration_s`), which excludes queue time.
+_TIMING_SPREAD_BASIS = "job_started_at_to_completed_at"
+# One eligible observation per sampler-selected run/attempt. A rerun attempt IS a distinct
+# execution and is counted as one observation; it is NEVER described as an independent PR.
+_TIMING_SPREAD_ATTEMPT_POLICY = "one_observation_per_sampler_selected_run_attempt"
+# The population the range describes: the pole's OWN dominant runner, the same per-job
+# runner scoping `_critical_path` computes its p50 on. Heterogeneous-runner repos are not
+# blended into one repo-wide variability statement.
+_TIMING_SPREAD_POPULATION = "pole_dominant_runner_sampled_runs"
+# Sample-id cap. The list exists so the summary is re-derivable from named executions, not
+# so the artifact carries an unbounded id dump; the sampler's window is far below this, so
+# the cap is inert in practice and disclosed (`sample_ids_truncated`) if it ever fires.
+_TIMING_SPREAD_MAX_SAMPLE_IDS = 60
+
+
+def _job_observation_key(job: dict[str, Any]) -> tuple[Any, ...]:
+    """Identity of ONE job execution, for de-duplication. The jobs-API `id` is unique per
+    execution (a rerun attempt gets its own id), so it is the key when present; the
+    (run, attempt, name) triple is the fallback for a payload that carries no id."""
+    jid = job.get("id")
+    if jid not in (None, ""):
+        return ("id", jid)
+    return ("run", job.get("run_id"), job.get("run_attempt"), str(job.get("name", "")))
+
+
+def _timing_spread(observations: list[dict[str, Any]], *,
+                   check: str, workflow_file: str, job: str,
+                   runner_scope: str, config_era: str,
+                   unavailable: str = "") -> dict[str, Any]:
+    """The versioned descriptive summary for ONE pole, over ALREADY-FETCHED job payloads.
+
+    `observations` is the pole's retained job executions (every run in the workflow's
+    kept sample, filtered to the pole's job name by the caller). Selection here mirrors
+    the pole's own timing basis exactly: the `_job_duration_s` clock, the dominant-runner
+    scope, and one observation per distinct execution.
+
+    Coverage is one of:
+      unavailable          - no comparable observation (or the pole's aggregate uses a
+                             different population). NEVER rendered as a zero.
+      single_observation   - exactly one. Described as "one observed run", never a spread.
+      constant_in_sample   - every observation identical. Described as constant IN THIS
+                             SAMPLE; it is never proof that future runs do not vary.
+      observed_spread      - a real min..max range.
+    """
+    sel = {"check": check or "?",
+           "workflow_file": workflow_file or "?",
+           "job": job or "?",
+           "runner_scope": runner_scope or "all-runners",
+           "config_era": config_era or "all_sampled",
+           "attempt_policy": _TIMING_SPREAD_ATTEMPT_POLICY,
+           "population": _TIMING_SPREAD_POPULATION}
+    base: dict[str, Any] = {"version": _TIMING_SPREAD_VERSION,
+                            "basis": _TIMING_SPREAD_BASIS,
+                            "selection": sel}
+    if unavailable:
+        # NO min/median/max keys at all — an unmeasured pole must not be able to render a
+        # fabricated number, and a missing key cannot be misread as 0.0.
+        return {**base, "n": 0, "coverage": "unavailable",
+                "unavailable_reason": unavailable}
+
+    scoped = runner_scope if runner_scope and runner_scope != "?" else ""
+    seen: set[tuple[Any, ...]] = set()
+    kept: list[tuple[Any, float]] = []
+    other_runners: set[str] = set()
+    dup = no_dur = 0
+    for j in observations:
+        label = _job_runner_label(j) or "?"
+        if scoped and label != scoped:
+            other_runners.add(label)
+            continue
+        key = _job_observation_key(j)
+        if key in seen:
+            dup += 1
+            continue
+        d = _job_duration_s(j)
+        if (j.get("conclusion") or "").lower() == "skipped" or d is None or d <= 0:
+            # A skipped job ran no work and an unparseable span is UNKNOWN, not zero
+            # seconds. Both are excluded and counted, never folded into the range.
+            no_dur += 1
+            seen.add(key)
+            continue
+        seen.add(key)
+        jid = j.get("id")
+        sid = (str(jid) if jid not in (None, "")
+               else f"run{j.get('run_id')}#attempt{j.get('run_attempt')}")
+        kept.append((sid, d))
+
+    excluded = {"duplicate": dup, "no_duration": no_dur,
+                "other_runner": sum(1 for j in observations
+                                    if scoped and (_job_runner_label(j) or "?") != scoped)}
+    extra: dict[str, Any] = {"excluded": excluded}
+    if other_runners:
+        # Named, not silently dropped: the range describes ONE runner population, and the
+        # reader is told which other populations exist rather than being left to assume
+        # the check has only ever run here.
+        extra["other_runner_labels"] = sorted(other_runners)
+
+    n = len(kept)
+    if n == 0:
+        return {**base, **extra, "n": 0, "coverage": "unavailable",
+                "unavailable_reason": (
+                    "no comparable job durations were retained for this check on its "
+                    "measured runner population")}
+
+    vals = [d for _k, d in kept]
+    ids = [str(k) for k, _d in kept][:_TIMING_SPREAD_MAX_SAMPLE_IDS]
+    out: dict[str, Any] = {
+        **base, **extra,
+        "n": n,
+        "min_s": round(min(vals), 1),
+        # The SAME `_percentile` the pole's own p50 uses, so the summary's median and the
+        # pole's headline can never disagree about the middle of the sample.
+        "median_s": round(_percentile(vals, 50), 1),
+        "max_s": round(max(vals), 1),
+        "sample_ids": ids,
+        "coverage": ("single_observation" if n == 1
+                     else "constant_in_sample" if min(vals) == max(vals)
+                     else "observed_spread"),
+    }
+    if len(ids) < n:
+        out["sample_ids_truncated"] = True
+    # Existing mode split, PRESERVED and identified. `_bimodal_split` is the engine's own
+    # bimodality definition (largest-gap split, both clusters substantial and separated),
+    # so a pole's `bimodal` stamp and this summary can never disagree about whether the
+    # sample has two modes. Reported alongside the whole-sample range so fast and slow
+    # modes are identified rather than collapsed into one variability statement.
+    if _bimodal_split(vals) is not None:
+        srt = sorted(vals)
+        split = max(range(1, len(srt)), key=lambda i: srt[i] - srt[i - 1])
+        out["modes"] = [
+            {"mode": label, "n": len(part),
+             "min_s": round(min(part), 1),
+             "median_s": round(_percentile(part, 50), 1),
+             "max_s": round(max(part), 1)}
+            for label, part in (("fast", srt[:split]), ("slow", srt[split:]))]
+    return out
+
+
+def _pole_timing_spread(check: str, workflow_file: str, job: str,
+                        crit_by_wf: dict[str, Any],
+                        jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
+                        config_era_facts: list[dict[str, Any]],
+                        *, unavailable: str = "") -> dict[str, Any]:
+    """Resolve ONE pole's descriptive summary from the pass's retained state.
+
+    Every input is already in memory: `jobs_per_run_by_wf[wf]` is the exact retained
+    per-run job list `_critical_path` measured this workflow from (era-scoped by the spine
+    door and event-scoped by `_crit_for` upstream), and `crit_by_wf[wf]["job_runner"]`
+    names the runner its p50 was computed on. No gh request is issued here, directly or
+    indirectly — the summary is a re-reading of data the pass already paid for."""
+    crit = crit_by_wf.get(workflow_file) or {}
+    runner_scope = str((crit.get("job_runner") or {}).get(job) or "")
+    # The kept configuration era for this workflow, when its sample straddled a change to
+    # it. Named so the range is never read as describing the current configuration when
+    # the spine door retained the other era's runs.
+    era = next((str(f.get("kept_era") or "") for f in (config_era_facts or [])
+                if str(f.get("workflow_file") or "") == workflow_file), "")
+    observations = [j for run in (jobs_per_run_by_wf.get(workflow_file) or [])
+                    for j in run if str(j.get("name", "")) == job]
+    return _timing_spread(observations, check=check, workflow_file=workflow_file,
+                          job=job, runner_scope=runner_scope, config_era=era,
+                          unavailable=unavailable)
+
+
 def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
     """For each job name, compute p50 ON THAT JOB'S OWN DOMINANT RUNNER, then
     long pole = max p50; floor = second-tallest. The model holds when
@@ -14935,6 +15123,16 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             wf_path, job_name = mapping
             entry["workflow_file"] = wf_path
             entry["job"] = job_name
+            # Descriptive timing spread (workstream C): re-read of the observations this
+            # pass already fetched, on this pole's OWN timing basis. Stamped before the
+            # step-drill early-return below so a pole whose step drill is withheld still
+            # carries an honest coverage status rather than nothing.
+            entry["timing_spread"] = _pole_timing_spread(
+                check_name, wf_path, job_name, crit_by_wf, jobs_per_run_by_wf,
+                config_era_facts,
+                unavailable=("" if timing_source == "workflow_jobs" else
+                             "this check's duration was measured from PR check-runs, so "
+                             "no sampled workflow-job durations share its timing basis"))
             if timing_source != "workflow_jobs":
                 entry["job_timing_unavailable"] = (
                     "PR check-run timing was measured, but no sampled workflow job "
@@ -14980,6 +15178,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 check_name, crit_by_wf, require_developer_timing=True)
             if len(producing) > 1:
                 entry["ambiguous_workflows"] = sorted(producing)
+            # No single sampled workflow job backs this check (fileless/managed, or
+            # produced by more than one workflow), so no retained duration sample shares
+            # its timing basis. UNAVAILABLE — never some other population's durations.
+            entry["timing_spread"] = _pole_timing_spread(
+                check_name, "", "", crit_by_wf, jobs_per_run_by_wf, config_era_facts,
+                unavailable=("this check maps to no single sampled workflow job, so no "
+                             "retained job durations share its timing basis"))
         return entry
 
     for check_name, check_p50 in _structural_pole_candidates(

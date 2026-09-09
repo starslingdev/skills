@@ -2884,6 +2884,78 @@ def _pole_gate_prompt_claim(check: str, wf: str, dur: str, gate_count: int, npop
     return cs.add(_claim) if cs is not None else _claim.rendered
 
 
+# --- Descriptive timing spread (workstream C) --------------------------------------
+# ONE sentence, built once and rendered in BOTH the pole section and that pole's agent
+# prompt, so the report and the hand-off can never disagree about what was observed.
+#
+# It DESCRIBES the observed sample. It is not a +/- band, not a minimum detectable effect,
+# not an "outside noise" verdict and not a significance claim - duration spread is not
+# uncertainty in an estimated change - and it never enters the Bottom line or any savings
+# figure. A legacy artifact with no stamped summary (or one stamped by a future producer
+# version) renders NOTHING rather than a fabricated value.
+_TIMING_SPREAD_VERSION = 1
+
+
+def _timing_spread_sentence(pole: dict[str, Any]) -> str:
+    """The pole's descriptive-spread sentence, or '' when there is nothing honest to say."""
+    ts = pole.get("timing_spread")
+    if not isinstance(ts, dict) or ts.get("version") != _TIMING_SPREAD_VERSION:
+        return ""
+    cov = str(ts.get("coverage") or "")
+    sel = ts.get("selection") or {}
+    n = int(ts.get("n") or 0)
+    if cov == "unavailable":
+        why = str(ts.get("unavailable_reason") or "no comparable observations were retained")
+        return f"Observed duration spread unavailable for this check: {why}."
+    lo, med, hi = (_num(ts.get("min_s")), _num(ts.get("median_s")), _num(ts.get("max_s")))
+    if lo is None or med is None or hi is None:
+        return ""
+    if cov == "single_observation":
+        head = (f"One observed run at {_clock(med)} - a single observation, "
+                "not a spread.")
+    elif cov == "constant_in_sample":
+        head = (f"Across {n} comparable sampled runs this check took {_clock(med)} every "
+                "time - constant in this sample. That describes these runs only; it is "
+                "not proof that future runs do not vary.")
+    else:
+        head = (f"Across {n} comparable sampled runs this check took {_clock(lo)} to "
+                f"{_clock(hi)} (median {_clock(med)}). That describes the observed "
+                "sample, not uncertainty in a future speedup.")
+    parts = [head]
+    scope = str(sel.get("runner_scope") or "")
+    others = [str(x) for x in (ts.get("other_runner_labels") or [])]
+    if scope and scope != "all-runners" and others:
+        parts.append(f"Measured on `{scope}` runs only; runs on {', '.join(others)} are a "
+                     "separate population and are not folded into this range.")
+    era = str(sel.get("config_era") or "")
+    if era and era != "all_sampled":
+        parts.append(f"Scoped to the `{era}`-change configuration era, the era this "
+                     "workflow's sample was narrowed to.")
+    modes = ts.get("modes")
+    if isinstance(modes, list) and len(modes) == 2:
+        f_m, s_m = modes[0], modes[1]
+        parts.append(
+            f"Two modes in this sample, kept separate: {f_m.get('n')} run(s) from "
+            f"{_clock(_num(f_m.get('min_s')))} to {_clock(_num(f_m.get('max_s')))} and "
+            f"{s_m.get('n')} run(s) from {_clock(_num(s_m.get('min_s')))} to "
+            f"{_clock(_num(s_m.get('max_s')))}.")
+    return " ".join(parts)
+
+
+def _timing_spread_report_lines(pole: dict[str, Any]) -> list[str]:
+    """The pole-section rendering of the sentence above (italic prose, then a blank)."""
+    s = _timing_spread_sentence(pole)
+    return [f"_{s}_", ""] if s else []
+
+
+def _timing_spread_prompt_lines(pole: dict[str, Any]) -> list[str]:
+    """The SAME sentence as a THE GATE bullet in that pole's agent prompt. The prompt is
+    built to be pasted on its own, so a fact the report gives the reader reaches the agent
+    only if it is repeated here - and it must be the identical sentence, not a paraphrase."""
+    s = _timing_spread_sentence(pole)
+    return [f"- {s}"] if s else []
+
+
 def _advisory_prompt_lines(pole: dict[str, Any]) -> list[str]:
     """The advisory-job bullet for the agent prompt's THE GATE section, or `[]`.
 
@@ -2948,6 +3020,7 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
            f"- Workflow `{wf}`, job `{check}`.",
            f"- {gate}",
            *_advisory_prompt_lines(pole),
+           *_timing_spread_prompt_lines(pole),
            ""]
 
     _bi = pole.get("bimodal")
@@ -3063,6 +3136,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             f"- Workflow `{wf}`, check `{check}`.",
             f"- {gate}",
             *_advisory_prompt_lines(pole),
+            *_timing_spread_prompt_lines(pole),
             "",
             "WHAT IS MISSING",
             f"- {reason}" if reason else (
@@ -3103,6 +3177,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
            f"- Workflow `{wf}`, job `{check}`.",
            f"- {gate}",
            *_advisory_prompt_lines(pole),
+           *_timing_spread_prompt_lines(pole),
            ""]
     wtg = ["WHERE THE TIME GOES" + (f" (representative run {rid})" if rid else "")]
     pole_dom = str(pole.get("dominant_step") or "")
@@ -9014,6 +9089,13 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
             out += [_LEAF_CROWN_MARKER.format(fk=str(leaf.get("fix_key", ""))), ""]
         if bi_caveat:
             out += [bi_caveat, ""]
+        # What the sampled runs actually DID - the observed min/median/max of this pole's
+        # own retained observations. Sits with the other qualifiers of the header duration,
+        # above the drill: it says how much the number above moved across the sample. It
+        # asserts no derived quantity and no framing-vocabulary phrase, so like the
+        # advisory line it is plain prose rather than a `Claim` - and it feeds nothing
+        # downstream (never the Bottom line, never a saving).
+        out += _timing_spread_report_lines(p)
         if _agg:
             # AGGREGATION GATE (issue #1): the section ENDS at the honest pointer. No
             # per-step drill and no "capture timing, then optimize this step" agent prompt
