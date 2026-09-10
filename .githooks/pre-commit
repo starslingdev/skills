@@ -2,6 +2,42 @@
 
 echo "Running tests..."
 
+# Drop git's repo-addressing environment before anything else runs (issue #14).
+# `git commit` exports GIT_DIR and GIT_INDEX_FILE to its hooks, and every child
+# inherits them. From a LINKED WORKTREE they are ABSOLUTE paths into the main
+# repo's .git, and they outrank both a subprocess's cwd and `git -C` — so every
+# fixture test that runs `git init` / `add` / `commit` inside its own tmp_path
+# executes against the real repository instead. That is the 2026-07-30 incident:
+# HEAD reset, the index truncated to one entry, fixture `init`/`base` commits
+# landing on real refs, `core.bare true` written into the developer checkout.
+# (From the main worktree git exports GIT_INDEX_FILE as the RELATIVE `.git/index`,
+# which resolves harmlessly inside each test's cwd — which is why this only ever
+# bit worktree users.)
+#
+# Measured on git 2.43.0, a linked-worktree hook receives GIT_DIR,
+# GIT_INDEX_FILE and GIT_CONFIG_PARAMETERS. The rest of the names below are
+# unset defensively: git does not export them here, but they address a repo just
+# as effectively if anything upstream of this hook does put them in the
+# environment. GIT_CONFIG_PARAMETERS is not an addressing variable — it carries
+# whatever `git -c ...` the developer typed — but it is inherited by every
+# fixture `git` in the suite all the same, so committing with
+# `git -c commit.gpgsign=true` would make each of them attempt to sign. Scrub it
+# here so the suite behaves the same however the commit was invoked.
+#
+# The list is kept in step with the root conftest.py, which scrubs the same
+# names at pytest import time. That is the last line of defense and covers only
+# a pytest process that actually loaded it; this is the layer where the
+# variables ENTER the process tree, so it drops them for everything the hook
+# runs. `tests/test_pre_commit_git_env.py` enforces that this unset is
+# unconditional, precedes anything that touches git, and names every variable
+# conftest.py scrubs.
+#
+# This sits above the `cd` on principle — nothing in the hook should run under
+# inherited addressing — not because `rev-parse --show-toplevel` is at risk: it
+# answers with the cwd's worktree either way. Ordering by default just means
+# there is no window to reason about.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CONFIG_PARAMETERS
+
 # Guarded: if this cd ever fails, the hook must NOT go on to run pytest from
 # whatever directory it happens to be in.
 cd "$(git rev-parse --show-toplevel)" || exit 1
