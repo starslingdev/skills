@@ -34,9 +34,13 @@ unversioned and updates by reinstall from `main`.
   handoff still gets it: a job feeding a required aggregator is required in effect
   whatever that aggregator's own verdict logic does, the rule chains through
   aggregators that are themselves only required in effect, and an unknown required
-  status is treated as required rather than as permission to de-scope. The
-  sharding and workflow-consolidation entries that split work into new check names
-  link to the same explanation.
+  status is treated as required rather than as permission to de-scope. Two facts
+  the catalog used to carry alone travel with it, because without them the
+  handoff argues against itself: a verdict that drops an upstream result is a
+  reason to fix the verdict rather than a licence to move the job beneath it, and
+  the relocation is not to be shipped ungated while the admin-only step is
+  pending. The sharding and workflow-consolidation entries that split work into
+  new check names link to the same explanation.
 
 - **2026-09-02** — **A long pole whose job is declared advisory now says so.**
   Nothing in the engine read a job's `continue-on-error` setting, so a job could

@@ -298,15 +298,56 @@ _CONTINGENCY = re.compile(
     r"\bunless\b|\bexcept\b|only where|only when|only if|\bprovided\b|so long as|"
     r"as long as|\bwhere it does not\b|whose logic|\bthat propagat|\bwhich propagat|"
     r"propagating|\bdrops\b|does not carry|carry the|\bforwards\b|\bwhen the aggregat|"
-    r"\bif the aggregat|\bwhere the verdict|\bwhere the aggregat|\bwhen the verdict"
+    r"\bif the aggregat|\bwhere the verdict|\bwhere the aggregat|\bwhen the verdict|"
+    # Hedges. A weakening reword rarely bothers with a subordinate clause — it just
+    # softens the verb, which costs one word and guts an absolute rule exactly as far
+    # as a qualifier does. "is typically required in effect" IS the loophole.
+    r"\bsometimes\b|\btypically\b|\busually\b|\bnormally\b|\bgenerally\b|\boften\b|"
+    r"in most cases|as a rule|\bmostly\b|\bordinarily\b|\bpresumptively\b"
 )
 # ...unless the same unit universalises the rule instead, which is how the correct
 # statement reads and how any future rewrite of it has to read.
+# The two inversions. A reword that weakens the rule does not have to drop a clause or
+# qualify it — it can keep every token and say the opposite, which is the one shape
+# every negative fixture built by DELETING a clause structurally cannot catch.
+_CHAIN_INVERTED = re.compile(
+    r"no further|not chain|does not chain|never chains|only one hop|a single hop|"
+    r"\bstops? at\b|\bbeyond\b|first hop only|one hop only|no deeper"
+)
+_UNKNOWN_INVERTED = re.compile(
+    r"unknown[^.]{0,60}?\bis not required\b|"
+    r"unknown[^.]{0,60}?\bnot treated as required\b|"
+    r"may be read as permission|is permission to de-?scope|"
+    r"unknown[^.]{0,60}?may be (?:de-?scoped|relocated|moved)"
+)
 _STATED_UNCONDITIONALLY = re.compile(
     r"full stop|whatever|no matter|regardless|unconditional|even if|even when|"
     r"however the|never fewer|still counts|never a licence|never a license|"
     r"never as permission|always counts|in every case"
 )
+
+
+# An outright grant of permission to move the job. The rule's whole content is that this
+# sentence must not exist, so it fires regardless of any universaliser keeping it company.
+# Note the shipped catalog's "never a licence to de-scope the job feeding it" does NOT
+# match: that is the grant being refused, not made.
+_EXPLICIT_LICENCE = re.compile(
+    r"may be relocated|may be de-?scoped|may be moved|can be relocated|"
+    r"relocated? freely|free to (?:move|relocate|de-?scope)|safe to relocate|"
+    r"\bis not required in effect\b|\baren'?t required in effect\b|"
+    r"\bis therefore advisory\b|may be treated as advisory"
+)
+
+
+def _qualified_after_universalising(unit: str) -> bool:
+    """True when a contingency FOLLOWS the last universaliser in this unit — the shape of
+    a rule stated absolutely and then taken back, as opposed to a contingency raised in
+    order to be dismissed (which is how the shipped catalog reads, and which leaves its
+    universaliser last)."""
+    last_u = max((m_.end() for m_ in _STATED_UNCONDITIONALLY.finditer(unit)), default=-1)
+    if last_u < 0:
+        return False
+    return _CONTINGENCY.search(unit, last_u) is not None
 
 
 def _prose_units(text: str):
@@ -344,7 +385,23 @@ def _conditions_required_in_effect_on_propagation(text: str) -> bool:
     if any(pat.search(flat) for pat in _REQUIRED_IN_EFFECT_CONDITIONED):
         return True
     for unit in _prose_units(text):
-        if _STATED_UNCONDITIONALLY.search(unit):
+        # An explicit grant of permission is a qualifier no matter what else the unit
+        # says. It has to be tested BEFORE the universaliser exemption, because the
+        # cheapest way to smuggle one in is to end the sentence with a universaliser.
+        if _EXPLICIT_LICENCE.search(unit):
+            return True
+        # The exemption is for a unit that universalises INSTEAD of qualifying — not
+        # for one that does both. Exempting on a universaliser found anywhere in the
+        # unit made this a one-phrase defusal switch: append a de-scope exception, end
+        # the sentence with the shipped text's own "never as permission to de-scope",
+        # and the guard went silent on both surfaces while the passage now granted the
+        # exception. Order is what separates the two: the shipped catalog raises a
+        # contingency in order to DISMISS it ("...propagates only some upstream
+        # outcomes ... still counts as propagating here"), so its universaliser comes
+        # AFTER the contingency it answers. A smuggled exception runs the other way —
+        # the rule is stated, then taken back. So the exemption holds only when no
+        # contingency FOLLOWS the last universaliser.
+        if _STATED_UNCONDITIONALLY.search(unit) and not _qualified_after_universalising(unit):
             continue
         if (_AGGREGATOR_SUBJECT.search(unit) and _DESCOPE_STAKE.search(unit)
                 and _CONTINGENCY.search(unit)):
@@ -382,12 +439,10 @@ def test_required_in_effect_is_unconditional_in_catalog_and_guardrail():
         "aggregator (this section's own contains(needs.*.result, 'failure') trap) "
         "leaves the upstream job de-scopable under the advisory branch."
     )
-    # The guardrail half is a FORWARD guard, and says so rather than implying a
-    # parity that does not exist: the rendered OPT75 guardrail carries the two
-    # re-gating routes but not the advisory-branch rule, so there is nothing here for
-    # this assertion to bite on today. It exists so that the day the rule reaches the
-    # rendered handoff — the surface an executing agent actually reads, and a
-    # follow-up worth making — it cannot arrive already qualified.
+    # The guardrail half is no longer a forward guard: the advisory-branch rule now
+    # rides the rendered handoff alongside the two re-gating routes, so this assertion
+    # bites on real shipped prose. It keeps the rule from arriving qualified on the
+    # surface an executing agent actually reads.
     guardrail = _rendered_opt75_guardrail(_render_production_opt75())
     assert not _conditions_required_in_effect_on_propagation(guardrail), (
         "the rendered OPT75 guardrail conditions \"required in effect\" on the "
@@ -533,11 +588,30 @@ def _has_advisory_relocation_restriction(text: str) -> bool:
         and not _CONTINGENCY.search(unit)
         for unit in _prose_units(text)
     )
-    chains_at_every_hop = (("chain" in t or "hop" in t)
-                           and ("every" in t or "until" in t or "follow" in t)
-                           and "required" in t)
-    unknown_is_required = ("unknown" in t and "required" in t
-                           and _DESCOPE_STAKE.search(t) is not None)
+    # Clauses 2 and 3 are UNIT-scoped too, and reject inversion explicitly. Scanned as
+    # bare tokens over the whole passage they were vocabulary bingo: prose saying the
+    # rule "chains no further than one hop" and that an unknown status "may be read as
+    # permission to de-scope" supplied every token and passed green — the guard vouching
+    # for prose asserting the opposite of what its failure message claims to pin.
+    # Clause 2 names the traversal AND its terminating condition in one unit. "required"
+    # alone was satisfied by the rule's own subject ("a non-required job feeding a
+    # required aggregator"), so any noise sharing that sentence inherited it; what makes
+    # chaining mean anything is that it runs until a REQUIRED CHECK is reached.
+    chains_at_every_hop = any(
+        ("chain" in unit or "hop" in unit or "successive link" in unit
+         or "each link" in unit)
+        and "required check" in unit
+        and not _CHAIN_INVERTED.search(unit)
+        for unit in _prose_units(text)
+    )
+    unknown_is_required = any(
+        "unknown" in unit and "required" in unit
+        and _DESCOPE_STAKE.search(unit)
+        and _STATED_UNCONDITIONALLY.search(unit)
+        and not _CONTINGENCY.search(unit)
+        and not _UNKNOWN_INVERTED.search(unit)
+        for unit in _prose_units(text)
+    )
     return states_in_effect and chains_at_every_hop and unknown_is_required
 
 
@@ -599,3 +673,144 @@ def test_advisory_restriction_predicate_discriminates_absent_from_present():
         "does", "is required in effect only where the aggregator propagates its result")
     assert not _has_advisory_relocation_restriction(qualified)
     assert _conditions_required_in_effect_on_propagation(qualified)
+
+
+# ── The rendered guardrail must not contradict itself, and must render ───────
+# Two facts the catalog carries and the emitted guardrail did not. Both matter only
+# to the handoff-only reader — the reader this whole entry exists to protect.
+def test_rendered_opt75_handoff_carries_the_leaky_verdict_bridge():
+    """The guardrail states that a verdict running `always()` WITHOUT propagating its
+    results still green-lights the merge, and then states that a job feeding a required
+    aggregator is required in effect "whatever the aggregator's verdict logic does".
+
+    Read end to end those are in tension: the first sentence describes the mechanism by
+    which the second is mechanically false. The catalog earns the unconditional phrasing
+    by supplying the normative bridge immediately — a leaky verdict is a reason to FIX
+    the verdict, never a licence to de-scope the job feeding it. Without that bridge the
+    handoff-only reader can only reconcile the two by deciding one is a mistake, and the
+    one that reads like a mistake is the restriction. Then the de-scope path reopens.
+    """
+    guardrail = _rendered_opt75_guardrail(_render_production_opt75())
+    low = re.sub(r"\s+", " ", re.sub(r"[*`_]", "", guardrail)).lower()
+    assert ("leaky verdict" in low or "partially propagat" in low
+            or "propagates only some" in low), (
+        "the rendered OPT75 guardrail names a non-propagating verdict as a thing that "
+        "green-lights a merge, but never says what to DO about it, so its own "
+        "\"required in effect, full stop\" rule reads as contradicted by the sentence "
+        "four before it."
+    )
+    assert _DESCOPE_STAKE.search(low) and re.search(
+        r"reason to fix|fix the verdict", low), (
+        "the rendered OPT75 guardrail does not carry the catalog's bridge: a leaky "
+        "verdict is a reason to FIX the verdict, never a licence to de-scope the job "
+        "feeding it."
+    )
+    # ...and porting it must not hand the anti-qualifier guard a false positive.
+    assert not _conditions_required_in_effect_on_propagation(guardrail)
+
+
+def test_rendered_opt75_handoff_forbids_shipping_the_relocation_ungated():
+    """Route 2 ends at "admin-only ... never an action of this audit", which reads to an
+    agent as *gating is someone else's problem*. The catalog closes that escape in the
+    next clause; the emitted guardrail did not, so the handoff-only agent could relocate,
+    note the admin step, and ship the change ungated in the meantime."""
+    guardrail = _rendered_opt75_guardrail(_render_production_opt75())
+    low = re.sub(r"\s+", " ", re.sub(r"[*`_]", "", guardrail)).lower()
+    assert re.search(r"do not ship .{0,40}ungated|not ship the relocation ungated", low), (
+        "the rendered OPT75 guardrail hands route 2 to the operator without forbidding "
+        "shipping the relocation ungated while that admin step is pending."
+    )
+
+
+def test_rendered_opt75_guardrail_has_no_bare_angle_bracket_placeholder():
+    """`_flatten_cell` escapes pipes and defuses backtick runs; it does NOT escape `<`.
+    The guardrail renders into a markdown bullet, so a bare `<job>` is eaten as an
+    unknown HTML tag and `needs.<job>.result` reaches the reader as `needs..result` —
+    gutting the one token that says WHICH value route 1's verdict job must read. Every
+    other shipped string with an angle-bracket placeholder wraps it in backticks, and so
+    does the catalog in all four places it writes this same token."""
+    guardrail = _rendered_opt75_guardrail(_render_production_opt75())
+    # Drop inline-code spans first: a placeholder inside one is rendered literally and
+    # is the correct shape. What must not survive is one in running prose.
+    outside_code = re.sub(r"`[^`]*`", "", guardrail)
+    bare = [m_.group(0) for m_ in re.finditer(r"<[a-z][a-z0-9_-]*>", outside_code)]
+    assert not bare, (
+        "bare angle-bracket placeholder(s) in the rendered OPT75 guardrail would be "
+        f"stripped by a markdown renderer: {bare}. Wrap in backticks."
+    )
+
+
+# ── The guard must reject prose that INVERTS the rule, not just prose that drops it ──
+# Every negative fixture above is built by DELETING a clause, so the guards only ever
+# proved deletion-detection. Prose that keeps all the vocabulary and states the opposite
+# passed them green. These are the shapes a weakening reword actually takes.
+def test_advisory_restriction_guard_rejects_inverted_and_hedged_rewordings():
+    rule = ("Moving a step off the PR path as advisory is open only to genuinely "
+            "advisory work: a non-required job feeding a required aggregator is "
+            "required in effect, full stop, whatever the aggregator's verdict logic "
+            "does with its result, and this chains at every hop - follow the chain "
+            "until it reaches a required check name or runs out.")
+    unknown = (" An unknown required status is treated as required, never as "
+               "permission to de-scope.")
+
+    # 1. HEDGED: "sometimes"/"usually" gut an absolute rule while keeping every token
+    #    the clauses look for, and defeat the anti-qualifier guard at the same time.
+    hedged = (rule.replace("is required in effect, full stop",
+                           "is sometimes required in effect")
+              + " An unknown required status is usually required, never as "
+                "permission to de-scope.")
+    assert not _has_advisory_relocation_restriction(hedged), (
+        "a hedged restatement (\"sometimes required in effect\", \"usually "
+        "required\") passed the restriction guard")
+
+    # 2. INVERTED: says the rule does NOT chain, and that unknown status IS licence.
+    inverted = (rule.replace(
+        "and this chains at every hop - follow the chain until it reaches a "
+        "required check name or runs out",
+        "though this chains no further than one hop - do not follow the chain "
+        "beyond every direct feeder of a required check name")
+        + " An unknown required status is not required, and may be read as "
+          "permission to de-scope.")
+    assert not _has_advisory_relocation_restriction(inverted), (
+        "prose stating that the rule does NOT chain and that an unknown required "
+        "status IS permission to de-scope passed the restriction guard")
+
+    # 3. KEYWORD NOISE: both facts deleted, their vocabulary scattered in prose that
+    #    says nothing. Passage-scoped bare-token clauses cannot tell this from the rule.
+    noise = (rule.replace(
+        "and this chains at every hop - follow the chain until it reaches a "
+        "required check name or runs out",
+        "and the hop count and the chain of unknown workflow files above are "
+        "every bit as follow-the-money as you like"))
+    assert not _has_advisory_relocation_restriction(noise), (
+        "prose containing only scattered hop/chain/unknown/every/follow vocabulary "
+        "passed the restriction guard")
+
+    # Positive control: the real shipped wording still passes.
+    assert _has_advisory_relocation_restriction(rule + unknown)
+
+
+def test_anti_qualifier_guard_is_not_defused_by_a_trailing_universaliser():
+    """The universaliser skip exempts any unit that universalises ANYWHERE in it. That
+    made it a one-phrase defusal switch: append a de-scope exception, end the sentence
+    with the shipped text's own "never as permission to de-scope", and the guard goes
+    silent on both surfaces. The exemption must not survive a contingency in the same
+    unit."""
+    smuggled = ("An unknown required status is treated as required, never as "
+                "permission to de-scope, except where the verdict job drops that "
+                "job's result.")
+    assert _conditions_required_in_effect_on_propagation(smuggled), (
+        "a de-scope exception smuggled into a sentence ending in a universaliser "
+        "did not fire the anti-qualifier guard")
+
+    licence = ("An unknown required status is treated as required, never as "
+               "permission to de-scope - though a job under an aggregator that does "
+               "not carry its result is not required in effect and may be relocated.")
+    assert _conditions_required_in_effect_on_propagation(licence), (
+        "an explicit relocation licence riding a universaliser did not fire the "
+        "anti-qualifier guard")
+
+    # The shipped surfaces must stay green under the tightened rule.
+    assert not _conditions_required_in_effect_on_propagation(_opt75_catalog_section())
+    assert not _conditions_required_in_effect_on_propagation(
+        _rendered_opt75_guardrail(_render_production_opt75()))

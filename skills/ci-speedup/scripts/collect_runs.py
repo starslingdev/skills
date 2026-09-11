@@ -6800,20 +6800,23 @@ _STRUCTURAL_META: dict[str, dict[str, Any]] = {
             "required check goes green while the moved work failed. The route "
             "that needs no admin: keep the REQUIRED CHECK NAME on a verdict job "
             "that needs: the relocated jobs, runs with always() (or "
-            "!cancelled()) and exits non-zero unless every needs.<job>.result is "
-            "success, treating failure, cancelled and skipped alike as a fail - "
+            "!cancelled()) and exits non-zero unless every `needs.<job>.result` "
+            "is success, treating failure, cancelled and skipped alike as a fail - "
             "a dependent skipped by a FAILED dependency reports skipped rather "
             "than failed, so always() WITHOUT propagating the results still "
             "green-lights the merge. The alternative - adding the new job's "
             "check name to branch protection or the ruleset as a required check "
             "- is admin-only and is the operator's step, never an action of this "
-            "audit. Moving a step off the PR path as advisory is open only to "
+            "audit. Do not ship the relocation ungated while waiting on it. "
+            "Moving a step off the PR path as advisory is open only to "
             "genuinely advisory work: a non-required job feeding a required "
             "aggregator is required in effect, full stop, whatever the "
             "aggregator's verdict logic does with its result, and this chains at "
             "every hop - follow the chain until it reaches a required check name "
-            "or runs out. An unknown required status is treated as required, "
-            "never as permission to de-scope"),
+            "or runs out. A leaky verdict is a reason to fix the verdict, never "
+            "a licence to de-scope the job feeding it; the nuance can only make "
+            "MORE things required, never fewer. An unknown required status is "
+            "treated as required, never as permission to de-scope"),
         "rollout": (
             "the routed lever's rollout; re-measure the pole's p50 after the "
             "dominant step is attacked — the next-largest step becomes the target"),
