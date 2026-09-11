@@ -42,6 +42,46 @@ unversioned and updates by reinstall from `main`.
   pending. The sharding and workflow-consolidation entries that split work into
   new check names link to the same explanation.
 
+- **2026-09-08** — **Each long pole now shows how much its duration actually
+  moved across the sampled runs.** The report ranked poles by their median and
+  carried a P95 for the slowest one, and neither number can express spread:
+  twenty runs of 100s and a mix of nine 1s runs with eleven 100s runs have the
+  same median *and* the same P95, so a reader could not tell a rock-steady check
+  apart from one that swings by 99 seconds. Every measured pole now carries a
+  descriptive summary — how many comparable runs were observed, and the fastest,
+  median and slowest of them — re-read from the runs already fetched for the
+  measurement, so it costs no extra GitHub requests and no deeper sampling. The
+  selection matches that pole's own timing basis exactly (same check, same
+  start-to-finish clock, same retained configuration era, same dominant runner,
+  one observation per sampled run or rerun attempt), existing runner populations
+  and fast/slow modes stay identified rather than being blended into one number,
+  and rerun attempts are never counted as separate pull requests. The same
+  sentence appears in the pole section and in that pole's copy-paste agent
+  prompt. It is deliberately a description of what was observed and nothing more:
+  no plus/minus band, no "smallest change you could detect", no "outside the
+  noise" verdict, and no statistical-significance claim — duration spread is not
+  uncertainty in a future speedup — and it never feeds the Bottom line or any
+  savings figure. Degenerate samples are stated honestly: no comparable
+  observations reads as unavailable (never as zero), a lone run reads as "one
+  observed run" and never as a spread, and an unvarying sample is described as
+  constant *in this sample*, explicitly not as proof that future runs will not
+  vary. A report produced before this summary existed renders nothing for it
+  rather than any invented value.
+  - When the same check name is produced by more than one workflow — a monorepo
+    with copy-pasted `build` jobs — the reported duration is the slowest of them,
+    while the workflow the report links to is only one. Attaching that one
+    workflow's run times under the slowest workflow's headline would tell the
+    reader, and the copy-paste agent prompt, that a 400-second gate was observed
+    at 100 seconds. The summary is now withheld in that case and names the
+    colliding workflows, instead of showing an unrelated workflow's numbers.
+    It names them by file name rather than full path, caps the list at three
+    with a count of the rest so a monorepo cannot turn the sentence into a
+    path dump, and closes with what to change to get the summary back — rename
+    one job so the check names differ. Workflow file names are repository text,
+    so they take the same escaping route the runner labels above take: a
+    backtick or a leading underscore in a workflow file name can no longer
+    break the formatting of the paragraph it is printed in.
+
 - **2026-09-02** — **A long pole whose job is declared advisory now says so.**
   Nothing in the engine read a job's `continue-on-error` setting, so a job could
   be reported as the slowest check on the pull-request path, and as the dominant

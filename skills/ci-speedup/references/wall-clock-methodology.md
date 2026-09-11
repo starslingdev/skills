@@ -24,6 +24,7 @@ illustrative figures from real audits, kept to anchor the model.
 - [3. Size every finding on BOTH axes](#3-size-every-finding-on-both-axes)
 - [4. Serial-gate / "consolidate-then-fan-out" findings can be wall-clock-NEGATIVE](#4-serial-gate--consolidate-then-fan-out-findings-can-be-wall-clock-negative)
 - [5. Don't average away the tail](#5-dont-average-away-the-tail)
+- [5a. Observed timing spread is descriptive, never an inference](#5a-observed-timing-spread-is-descriptive-never-an-inference)
 - [6. Reliability is a wall-clock multiplier](#6-reliability-is-a-wall-clock-multiplier)
 - [7. Report structure](#7-report-structure)
 
@@ -227,6 +228,57 @@ eliminating the tail as the headline benefit.
 > (`collect_runs.py` reads logs for the affected jobs) and quote the line(s)
 > that explain the slow run. Without a logged root cause the finding is a
 > probe, not a sized fix.
+
+---
+
+## 5a. Observed timing spread is descriptive, never an inference
+
+Quantiles cannot express how much a check's duration actually *moved*. Twenty
+observations of 100s, and nine observations of 1s plus eleven of 100s, have the
+**same P50 and the same P95 (100s)** — one sample never varies, the other varies
+by 99s. A reader given only the quantiles cannot tell those two repos apart, and
+a "P95 − P50 band" reports zero for both.
+
+So each measured pole also carries a **descriptive timing spread**: the count,
+minimum, median and maximum of its own observations, re-read from the runs the
+sampler already fetched. It costs **no additional GitHub requests and no deeper
+sampling** — it is a second reading of the durations the pole's P50 was already
+computed from.
+
+**Selection must match the pole's own timing basis, exactly.** Same check
+identity, same timing definition (the jobs-API `started_at` → `completed_at`
+span, queue time excluded), same retained configuration era, same dominant-runner
+scope, and the same one-observation-per-sampled-run/attempt policy. A blended
+range would describe a job that never ran. Existing population and mode splits
+are **preserved and named**, not collapsed: the range covers the pole's own
+runner population only and any other runner the check also ran on is named as a
+separate population rather than silently folded in, and a bimodal check's fast
+and slow modes are reported as two modes beside the whole-sample range. A rerun attempt is one observation of the check;
+it is never counted as an independent pull request.
+
+**What it must never become.** The spread describes the sample. It is not:
+
+- a symmetric ± band around the median;
+- a "minimum detectable effect" or an "outside noise / within noise" verdict;
+- any claim of statistical significance.
+
+Duration spread is **not** uncertainty in an estimated change. Detectability
+depends on sample size, pairing, comparable populations and a comparison method,
+none of which one observed sample supplies. The spread never enters the
+Bottom-line savings number or any sizing figure; it is context beside the pole,
+rendered identically in the pole section and that pole's agent prompt.
+
+**Honesty rules for degenerate samples.**
+
+| Sample | What the report says |
+| --- | --- |
+| No comparable observations | **unavailable**, with the reason — never `0s`, never an empty range |
+| Exactly one | "one observed run" — a single observation, explicitly *not* a spread |
+| All identical | "constant in this sample", with the explicit note that this is **not** proof future runs do not vary |
+| A different population backs the pole's aggregate | **unavailable** — never attach another population's durations |
+
+An artifact produced before this summary existed simply renders nothing for it.
+A missing summary is never rendered as a value.
 
 ---
 
