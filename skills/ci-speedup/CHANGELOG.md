@@ -13,6 +13,35 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-09-08** — **A fix that moves the slowest step out of a merge gate now
+  says how to keep the gate.** The long-pole lever can hand back a fix that
+  relocates the dominant step into another job, and until now nothing in the
+  handoff said what that does to the merge gate: the work moves, the requirement
+  does not follow it, and a `needs:` edge only orders the jobs — so the moved work
+  can fail while the required check reports green and the pull request merges. The
+  guardrail carried by every emitted long-pole finding, and the catalog entry
+  behind it, now state the two ways to keep the coverage and say which one the
+  agent can actually take: keeping the *required check name* on a verdict job that
+  inspects the moved job's outcome needs no administrator at all, while adding the
+  new job's check name to branch protection is admin-only and stays an explicit
+  step for the operator, never an action the audit takes. Both spell out the
+  second trap: a job skipped because a job it depends on FAILED reports as skipped
+  rather than failed, so a verdict job must both run unconditionally *and*
+  propagate every dependency result, not merely add `always()`. The catalog entry
+  adds the whole verdict job in YAML and names the three ways to write it wrong.
+  The restriction on relocating anything but genuinely advisory work now rides the
+  emitted guardrail as well as the catalog entry, so an agent that reads only the
+  handoff still gets it: a job feeding a required aggregator is required in effect
+  whatever that aggregator's own verdict logic does, the rule chains through
+  aggregators that are themselves only required in effect, and an unknown required
+  status is treated as required rather than as permission to de-scope. Two facts
+  the catalog used to carry alone travel with it, because without them the
+  handoff argues against itself: a verdict that drops an upstream result is a
+  reason to fix the verdict rather than a licence to move the job beneath it, and
+  the relocation is not to be shipped ungated while the admin-only step is
+  pending. The sharding and workflow-consolidation entries that split work into
+  new check names link to the same explanation.
+
 - **2026-09-02** — **A long pole whose job is declared advisory now says so.**
   Nothing in the engine read a job's `continue-on-error` setting, so a job could
   be reported as the slowest check on the pull-request path, and as the dominant

@@ -6794,7 +6794,29 @@ _STRUCTURAL_META: dict[str, dict[str, Any]] = {
         "guardrail": (
             "carry the guardrail of the routed lever (e.g. OPT70's full-suite "
             "fallback if the dominant step is a test being scoped); never present "
-            "the decomposition as free"),
+            "the decomposition as free; if the remedy MOVES the step out of this "
+            "check, re-establish the required coverage in the SAME change - a "
+            "needs: edge alone orders jobs, it does not gate merges, so the "
+            "required check goes green while the moved work failed. The route "
+            "that needs no admin: keep the REQUIRED CHECK NAME on a verdict job "
+            "that needs: the relocated jobs, runs with always() (or "
+            "!cancelled()) and exits non-zero unless every `needs.<job>.result` "
+            "is success, treating failure, cancelled and skipped alike as a fail - "
+            "a dependent skipped by a FAILED dependency reports skipped rather "
+            "than failed, so always() WITHOUT propagating the results still "
+            "green-lights the merge. The alternative - adding the new job's "
+            "check name to branch protection or the ruleset as a required check "
+            "- is admin-only and is the operator's step, never an action of this "
+            "audit. Do not ship the relocation ungated while waiting on it. "
+            "Moving a step off the PR path as advisory is open only to "
+            "genuinely advisory work: a non-required job feeding a required "
+            "aggregator is required in effect, full stop, whatever the "
+            "aggregator's verdict logic does with its result, and this chains at "
+            "every hop - follow the chain until it reaches a required check name "
+            "or runs out. A leaky verdict is a reason to fix the verdict, never "
+            "a licence to de-scope the job feeding it; the nuance can only make "
+            "MORE things required, never fewer. An unknown required status is "
+            "treated as required, never as permission to de-scope"),
         "rollout": (
             "the routed lever's rollout; re-measure the pole's p50 after the "
             "dominant step is attacked — the next-largest step becomes the target"),
