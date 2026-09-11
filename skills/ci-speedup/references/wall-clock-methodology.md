@@ -27,6 +27,7 @@ illustrative figures from real audits, kept to anchor the model.
 - [5a. Observed timing spread is descriptive, never an inference](#5a-observed-timing-spread-is-descriptive-never-an-inference)
 - [6. Reliability is a wall-clock multiplier](#6-reliability-is-a-wall-clock-multiplier)
 - [7. Report structure](#7-report-structure)
+- [8. Joint scenarios for two concurrent checks (contract only — not yet produced)](#8-joint-scenarios-for-two-concurrent-checks-contract-only--not-yet-produced)
 
 ---
 
@@ -432,3 +433,157 @@ same-pattern residual findings that are not promoted into Runner-minute
 reductions. State the budget inversion plainly for wall-clock-negative rows:
 e.g. build-dedup spends developer-minutes of *wait* to save runner-minutes of
 *bill* — the two budgets move in opposite directions.
+
+---
+
+## 8. Joint scenarios for two concurrent checks (contract only — not yet produced)
+
+Two findings on two *different* concurrent checks can each be worth almost
+nothing alone and a great deal together. With A at 300s and B at 299s, cutting
+100s off A moves the gate by 1s and cutting 100s off B moves it by 0s — but
+doing both moves it by 100s. The report cannot say that today, and this section
+records the model that would let it, plus the reason it is not yet wired to
+live data.
+
+### The per-finding savings stamps CANNOT drive this
+
+`wall_clock_p50_s` is **not a post-fix duration**. It is an *effective merge-wait
+saving* that has already been through the cross-cutting bound cascade in
+`scripts/wall_clock.py` — developer-facing gate, measured population-weighted
+critical-path floor, cross-workflow floor (ARCHITECTURE.md documents the
+cascade and its `bound_*` derivation labels). For the shape above it stamps
+A=1s and B=0s. Subtracting
+those from the observed durations gives post-fix durations of 299s/299s and a
+joint saving of **1s**: wrong by two orders of magnitude.
+
+`wall_clock_uncapped_p50_s` is not a substitute. It is a single workflow-level
+scalar. It does not describe each affected job, it does not decompose across
+matrix legs (a cluster finding stamps one number for *all* its legs), and it is
+absent entirely when no bound fired.
+
+### The model
+
+For observation `r`, check `j`, and a selected set of effects `S`:
+
+```text
+d_after(r,j,S) = d_before(r,j) − sum(eligible local reductions for j in S)
+T_before(r)    = max_j d_before(r,j)
+T_after(r,S)   = max_j d_after(r,j,S)
+delta(r,S)     = T_before(r) − T_after(r,S)
+scenario_delta_p50(S) = median_r delta(r,S)
+```
+
+**How this sits with §7's stacked-model projection.** The two are not
+alternatives and neither supersedes the other. §7 projects a *modeled* future
+shape of the whole cluster from measured step durations, for the Projected
+Impact narrative; §8 measures *observed* joint behaviour of a fixed gating set,
+run by run, and is admissible only when every observation is matched. Where §8
+is available it is the stronger claim about the gate, because it never forms a
+per-check median. Nothing here licenses computing §7's REQUIRED monthly
+headline by any new route: that headline still comes from the stacked model as
+§7 specifies, and no joint block replaces or is added into it.
+
+**v1 is P50-only, and that is a scope limit rather than an exemption from §3,
+§5 and §7's tail requirement.** A joint tail figure needs a per-observation
+tail decomposition the contract does not define and no producer stamps, and a
+P95 of a max is not derivable from the P50 quantities above. Until that is
+specified, a joint block states its median and says nothing about the tail — it
+must never be read as a P95 line.
+
+`max` is taken **per observation, before any aggregation**. `median(max(checks))`
+is not `max(median(checks))`: with A and B alternating between 300s and 100s,
+both per-check medians are 200s while every observed gate is 300s. Per-check
+medians throw away exactly the co-occurrence information the gate is made of.
+
+`median(T_before)`, `median(T_after)` and `median(delta)` are **three separate
+summaries**. They are not required to subtract into one another, and a report
+must not present them as if they do.
+
+Every unaffected gating check stays in the `max` as a competitor, including
+unaffected matrix legs. Adding an untouched C=295s to the example caps the joint
+saving at 5s; C=300s caps it at 0s. **Zero is an honest supported answer** — it
+means C is the blocker — and it is a different answer from *unsupported*.
+
+The result is explicitly a **modeled concurrent-runtime change with unchanged
+scheduling**. It is not an observed before/after measurement and it does not
+replace or subtract from the report's merge-wait headline.
+
+### What a producer must stamp
+
+An effect is not derivable from what the engine stamps today. Each eligible
+effect has to record, explicitly:
+
+- the finding ID, the exact workflow / job / matrix-leg identity, the affected
+  step or work identity, and its source evidence references;
+- a modeled local duration reduction **per matched observation**, the assumption
+  that generated it, and a bound by that observation's affected work duration;
+- that it is a local runtime change with unchanged scheduling, coverage and job
+  set — relocation, new sharding, cancellation and trigger changes are
+  ineligible;
+- compatibility evidence. Only **disjoint affected work** is accepted; two
+  findings touching the same step are overlapping alternatives and are rejected,
+  never summed and never heuristically de-overlapped.
+
+Matched observations of the **whole** gating set are required on one
+configuration / runner / population basis, each validating concurrent execution
+against its timing span within a tested tolerance, with any tolerated residual
+disclosed and excluded from the runtime-only model. If timeline evidence is
+missing, concurrency is **not** assumed from similar durations.
+
+### When a numeric scenario is refused
+
+A `needs:` chain, a required aggregator, a shared serial upstream, an unmodelled
+staggered start or queue effect, an unresolved competitor, a conditional or
+missing check population, an ambiguous matrix identity, or insufficient per-job
+effect evidence all yield **unsupported**, with a concise limitation instead of
+a number. Non-finite or negative inputs, a reduction exceeding its affected
+work, and a negative modeled post-fix duration are refused the same way. So are
+the identity failures, because each of them silently changes which comparison
+gets made rather than erroring: a missing or repeated finding ID, a missing
+workflow, affected-work or evidence identity, and one check name claimed by two
+different workflows — the gating set holds a single duration under that name, so
+the two cannot be modelled as one check. An observation that timed a check the
+gating set does not declare is refused for the mirror-image reason: the gate
+maximum is taken over the declared names, so an undeclared competitor would be
+dropped out of the competition instead of capping the saving. Affected work is
+also budgeted **across the selected effects**, not only per effect: two effects
+that each claim 250s of affected work in one 300s check cannot both be telling
+the truth whatever their work IDs say, so a per-check affected-work sum that
+exceeds the observed duration is refused rather than composed. And a reduction
+basis that *names* one of the capped savings stamps — in any case, punctuation
+or camelCase spelling of the field name, including inside a longer sentence
+such as "derived from `wall_clock_p50_s`" — is refused exactly as the bare
+field name is, because a sentence wrapped around that stamp is the same
+already-capped number under another name. That last check matches the **field
+name**, not the meaning: an English description that never names the field
+("derived from the capped merge-wait saving") is not caught, so it is defence
+in depth behind the producer's own declarations, not a substitute for them.
+Note that most of the refusals above fire on what the producer **declares** —
+the calculator does not detect a `needs:` chain or verify concurrency itself;
+it refuses when the contract says the topology is not independent-concurrent,
+or leaves the concurrency validation unstamped. This is
+deliberately not a general DAG scheduler; the existing single-finding
+chain-aware behaviour is unchanged.
+
+### Status: the contract exists, no producer feeds it
+
+`scripts/joint_scenario.py` holds the data contract, the calculator and the
+admission rules, unit-tested against every counterexample above. **Nothing in
+the engine stamps its inputs**, so no report renders a joint block. The gaps are
+listed in that module as `MISSING_PRODUCER_EVIDENCE`; in summary, the engine has
+no per-observation durations for the *whole* gating set —
+`pr_critical_path.chain_facts` carries per-sha, era-scoped `member_spans_s`,
+but only for the
+members of that PR's winning chain and with no attempt or runner identity,
+while `populations` is bimodal-gated and identity-free — no stamped
+concurrency validation (overlap is inferred from the `needs:` closure and
+*defaults to concurrent* when no job graph is available), no per-observation
+local reductions (raw pre-cascade estimates are one scalar per finding, and one
+scalar across all legs for a cluster finding), no affected-step identity beyond
+a cluster finding's `measured_evidence.waterfall.shared_step` and a single
+`decomposition.dominant_step`, no stable matrix-leg identity (`affected_jobs`
+holds YAML job keys on the scan path and display names on the measured path,
+and a job key names all of a job's legs at once), and no
+certificate that a fix leaves scheduling, coverage and the job set unchanged.
+Adding an adapter before that evidence exists would produce confident numbers
+with nothing behind them.

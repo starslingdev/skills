@@ -82,6 +82,47 @@ unversioned and updates by reinstall from `main`.
     backtick or a leading underscore in a workflow file name can no longer
     break the formatting of the paragraph it is printed in.
 
+- **2026-09-08** — **A contract for sizing two concurrent fixes together — and
+  an honest statement that nothing feeds it yet.** Two findings on two different
+  concurrent checks can each be worth almost nothing alone and a great deal
+  together: with one check at 300s and another at 299s, cutting 100s off either
+  one moves the merge gate by a second or not at all, while doing both moves it
+  by 100s. The obvious way to compute that — subtracting each finding's stamped
+  saving from its check's observed duration — is wrong, because that stamp is
+  already an effective merge-wait saving that has been through the floor-capping
+  and population-weighting cascade, not a post-fix duration; for the shape above
+  it would report a joint saving of one second instead of a hundred. This adds
+  the data contract and the calculator that would do it correctly: explicit
+  per-observation local reductions, every unaffected gating check retained as a
+  competitor (an untouched third check at 295s caps the joint saving at 5s, and
+  one at 300s caps it at zero), the gate maximum taken per observation before
+  any median is formed, and before/after/delta reported as three separate
+  summaries that are not implied to subtract into one another. Only disjoint
+  affected work composes, and it must fit inside the check that was observed —
+  two findings each claiming 250s of a 300s check are double-counting whatever
+  they call the work, not composing. Two findings touching the same step, a
+  `needs:` chain, a required aggregator, a shared serial upstream, an
+  unresolved competitor, a competitor an observation timed but the gating set
+  never declared (it would be dropped out of the gate maximum instead of
+  capping the saving), an ambiguous matrix identity, an unvalidated
+  concurrent timing span, a missing or repeated finding, workflow, work or
+  evidence identity, one check name claimed by two different workflows, or
+  insufficient per-observation evidence all yield an explicit *unsupported*
+  verdict rather than a number. The refusal that protects the whole design —
+  a reduction declared on top of an already-capped savings stamp — reads what
+  the basis says rather than matching one exact string, so a sentence built
+  around that stamp is refused as the bare field name is, in any case,
+  punctuation or camelCase spelling of it; it matches the field name rather
+  than the meaning, so it is defence in depth behind the producer's own
+  declarations rather than a substitute for them. The full refusal vocabulary
+  is a single exported set, so a refusal that is not declared there fails the
+  moment it fires. A joint saving of zero is a supported,
+  honest answer, not a failure. **No report renders a joint block today**: the
+  engine stamps none of the required inputs, and the specific gaps are recorded
+  in the module and in the wall-clock methodology so a later producer has a
+  target rather than a guess. Building an adapter before that evidence exists
+  would produce confident numbers with nothing behind them.
+
 - **2026-09-02** — **A long pole whose job is declared advisory now says so.**
   Nothing in the engine read a job's `continue-on-error` setting, so a job could
   be reported as the slowest check on the pull-request path, and as the dominant
