@@ -6807,7 +6807,13 @@ _STRUCTURAL_META: dict[str, dict[str, Any]] = {
             "green-lights the merge. The alternative - adding the new job's "
             "check name to branch protection or the ruleset as a required check "
             "- is admin-only and is the operator's step, never an action of this "
-            "audit"),
+            "audit. Moving a step off the PR path as advisory is open only to "
+            "genuinely advisory work: a non-required job feeding a required "
+            "aggregator is required in effect, full stop, whatever the "
+            "aggregator's verdict logic does with its result, and this chains at "
+            "every hop - follow the chain until it reaches a required check name "
+            "or runs out. An unknown required status is treated as required, "
+            "never as permission to de-scope"),
         "rollout": (
             "the routed lever's rollout; re-measure the pole's p50 after the "
             "dominant step is attacked — the next-largest step becomes the target"),

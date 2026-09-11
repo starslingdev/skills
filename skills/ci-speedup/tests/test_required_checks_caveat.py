@@ -496,3 +496,106 @@ def test_relocation_predicates_discriminate_absent_from_present():
         "dependency, or have an admin add the new job's check name to branch "
         "protection as a required check.")
     assert _has_relocation_coverage_caveat(full)
+
+
+# ── The advisory-relocation restriction must reach the RENDERED handoff ───────
+# The rule above lived only in the catalog. An agent that reads the rendered handoff
+# and never opens the catalog got the two re-gating routes but not the restriction on
+# the advisory-async branch — which is the half that decides whether a job may be moved
+# off the PR path at all. This pins it on the surface an executing agent actually reads.
+def _has_advisory_relocation_restriction(text: str) -> bool:
+    """The restriction's load-bearing shape, keyed on what the prose is ABOUT rather
+    than on chosen wording, in the same subject+stake style as the guards above:
+
+    1. the in-effect rule, stated UNCONDITIONALLY — the aggregator as subject, being
+       required in effect as the stake, and — in the SAME prose unit — one of round 2's
+       universalisers (`_STATED_UNCONDITIONALLY`) with no `_CONTINGENCY` alongside it,
+       so a qualified restatement cannot pass this half and be caught only by the
+       negative guard. Both halves are unit-scoped because clause 3's own wording
+       ("never as permission to de-scope") is itself a universaliser: scanned over the
+       whole passage it would vouch for a qualified rule sentences away;
+    2. the CHAINING — that it holds at every hop, so tracing one edge settles nothing;
+    3. the UNKNOWN required status — treated as required, with the de-scope decision
+       (`_DESCOPE_STAKE`) named as the stake, so a passing mention of "unknown"
+       elsewhere cannot satisfy it.
+
+    Deliberately NOT keyed on a sentence: reword any of the three freely, but drop one
+    from the rendered guardrail and this goes red.
+    """
+    t = re.sub(r"[*`_]", "", re.sub(r"\s+", " ", text)).lower()
+    # Clause 1 is UNIT-scoped, not passage-scoped: a universaliser sitting in some
+    # other sentence ("never as permission to de-scope", from clause 3) would
+    # otherwise vouch for a qualified statement of the rule two sentences away.
+    states_in_effect = any(
+        "required in effect" in unit
+        and _AGGREGATOR_SUBJECT.search(unit)
+        and _STATED_UNCONDITIONALLY.search(unit)
+        and not _CONTINGENCY.search(unit)
+        for unit in _prose_units(text)
+    )
+    chains_at_every_hop = (("chain" in t or "hop" in t)
+                           and ("every" in t or "until" in t or "follow" in t)
+                           and "required" in t)
+    unknown_is_required = ("unknown" in t and "required" in t
+                           and _DESCOPE_STAKE.search(t) is not None)
+    return states_in_effect and chains_at_every_hop and unknown_is_required
+
+
+def test_rendered_opt75_handoff_warns_about_the_advisory_relocation_restriction():
+    guardrail = _rendered_opt75_guardrail(_render_production_opt75())
+    assert _has_advisory_relocation_restriction(guardrail), (
+        "the rendered OPT75 guardrail no longer carries the advisory-relocation "
+        "restriction: a non-required job feeding a required aggregator is required in "
+        "effect whatever the aggregator's verdict logic does, the rule chains at every "
+        "hop, and an unknown required status is treated as required rather than as "
+        "permission to de-scope. An agent that reads the handoff and never opens the "
+        "catalog would relocate a job that is gating merges."
+    )
+    # ...and it must not arrive qualified (round 2's forward guard, now load-bearing).
+    assert not _conditions_required_in_effect_on_propagation(guardrail), (
+        "the rendered OPT75 guardrail conditions \"required in effect\" on the "
+        "aggregator propagating its result"
+    )
+
+
+def test_advisory_restriction_predicate_discriminates_absent_from_present():
+    """Red-proof: the predicate must reject prose missing ANY of the three facts, and
+    must reject a qualified statement of the in-effect rule as well."""
+    re_gating_only = ("If the remedy moves the step out of this check, keep the "
+                      "required check name on a verdict job that needs: the relocated "
+                      "jobs and exits non-zero unless every result is success.")
+    assert not _has_advisory_relocation_restriction(re_gating_only)
+
+    # The unknown-status fact is deliberately its OWN sentence here, exactly as the
+    # shipped guardrail writes it. Folding it into the rule's sentence would hand that
+    # sentence a universaliser ("never as permission to de-scope") it did not earn, and
+    # round 2's negative guard — which skips any unit that universalises — would then
+    # go quiet on a qualified rule sharing the sentence with it.
+    _RULE = (" A non-required job feeding a required aggregator is required in effect, "
+             "full stop, whatever the aggregator's verdict logic does")
+    _CHAIN = (", and this chains at every hop - follow the chain until it reaches a "
+              "required check name or runs out")
+    _UNKNOWN = (" An unknown required status is treated as required, never as "
+                "permission to de-scope.")
+
+    no_chaining = re_gating_only + _RULE + "." + _UNKNOWN
+    assert not _has_advisory_relocation_restriction(no_chaining)
+
+    no_unknown = re_gating_only + _RULE + _CHAIN + "."
+    assert not _has_advisory_relocation_restriction(no_unknown)
+
+    no_rule = re_gating_only + (
+        " Relocation chains at every hop - follow the chain until it reaches a "
+        "required check name or runs out.") + _UNKNOWN
+    assert not _has_advisory_relocation_restriction(no_rule)
+
+    complete = re_gating_only + _RULE + _CHAIN + "." + _UNKNOWN
+    assert _has_advisory_relocation_restriction(complete)
+
+    # A qualified restatement satisfies neither half: it loses the universaliser here,
+    # and round 2's negative guard fires on it.
+    qualified = complete.replace(
+        "is required in effect, full stop, whatever the aggregator's verdict logic "
+        "does", "is required in effect only where the aggregator propagates its result")
+    assert not _has_advisory_relocation_restriction(qualified)
+    assert _conditions_required_in_effect_on_propagation(qualified)

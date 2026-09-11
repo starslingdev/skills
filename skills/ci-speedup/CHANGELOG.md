@@ -28,13 +28,15 @@ unversioned and updates by reinstall from `main`.
   second trap: a job skipped because a job it depends on FAILED reports as skipped
   rather than failed, so a verdict job must both run unconditionally *and*
   propagate every dependency result, not merely add `always()`. The catalog entry
-  adds the whole verdict job in YAML, names the three ways to write it wrong, and
-  restates the restriction on relocating anything but genuinely advisory work — a
-  job feeding a required aggregator is required in effect whatever that
-  aggregator's own verdict logic does, the rule chains through aggregators that
-  are themselves only required in effect, and an unknown required status is
-  treated as required. The sharding and workflow-consolidation entries that split
-  work into new check names link to the same explanation.
+  adds the whole verdict job in YAML and names the three ways to write it wrong.
+  The restriction on relocating anything but genuinely advisory work now rides the
+  emitted guardrail as well as the catalog entry, so an agent that reads only the
+  handoff still gets it: a job feeding a required aggregator is required in effect
+  whatever that aggregator's own verdict logic does, the rule chains through
+  aggregators that are themselves only required in effect, and an unknown required
+  status is treated as required rather than as permission to de-scope. The
+  sharding and workflow-consolidation entries that split work into new check names
+  link to the same explanation.
 
 - **2026-09-02** — **A long pole whose job is declared advisory now says so.**
   Nothing in the engine read a job's `continue-on-error` setting, so a job could
