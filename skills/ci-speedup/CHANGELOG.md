@@ -218,6 +218,40 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-09-09** — **The planned before/after check can no longer claim a
+  speedup it did not measure.** The approved (still unimplemented) post-fix
+  verification methodology told the future implementation to stamp one universal
+  "less work run" label whenever the branch's CI workload differed from the
+  baseline's — a verdict that asserts a direction the evidence usually does not
+  support, and that says nothing at all when a branch does *more* work. The
+  methodology now carries five evidence-backed workload states — same, reduced,
+  increased, changed, unknown — with unknown as the default and a direction
+  claimed only where workload identity evidence exists (equal job counts do not
+  prove equal work; re-sharding a suite does not prove coverage was cut). Only
+  the same state permits a clean "same work, faster" attribution; the others are
+  reported together with the confound, and an added-work run is explicitly never
+  reported as proof that the fix is worth *at least* the measured delta. The
+  methodology also now fixes when the check may start (an authorized push bound
+  to an exact remote commit, resumed on a later invocation from saved scratch
+  context — never a background daemon), forbids spending a second set of reruns
+  to re-answer the same commit, discards in-flight samples when the branch head
+  moves, requires the reported number to describe whichever check gates the
+  merge *now* rather than a former slow check that has been overtaken, and
+  states that the first automatic branch run supplies sample one. Where a
+  descriptive spread over the baseline's own observations is available, it may
+  now be shown as historical context beside the before figure — never as a
+  significance test, and never in place of the locked adaptive threshold. No
+  skill behavior changes: this is the contract a later implementation follows, and all
+  six locked design decisions — two samples adaptive to four, the 20% variance
+  threshold, sequential reruns with no empty commits, automatic with disclosed
+  cost, environment-level configuration, wall-clock only — are unchanged and
+  continue to govern wherever an amendment touches them. Two rules the amendment
+  itself needed are stated with it: sampling by workflow dispatch targets a
+  branch ref rather than a commit, so a dispatched run's head is checked against
+  the bound fix commit and discarded on a mismatch; and the documented
+  `CI_SPEEDUP_VERIFY_RUNS=0` escape hatch turns the phase off outright, so a
+  saved verdict is not re-rendered either. (#95)
+
 - **2026-08-20** — **The storage boundary is stated instead of implied.**
   `references/savings-methodology.md` sizes every finding on two axes — runner
   minutes and wall clock — and said nothing about artifact and cache storage,
