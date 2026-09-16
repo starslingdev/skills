@@ -409,6 +409,32 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-09-16** — **`gh api` refuses to print a coloured response, and every
+  CI job log is coloured.** Since `gh` learned to defend the terminal from
+  hostile output it exits 1 on a response body containing terminal escape
+  sequences unless `--allow-escape-sequences` is passed — while the HTTP status
+  is a perfectly good 200. Job logs are fetched as expected-absent (an expired
+  log is a legitimate absence), so the failure was never counted toward partial
+  coverage either: the log simply was not there, silently, for any log with
+  colour in it, and every log-reading detector saw nothing. Measured on a live
+  repository: 13 of 13 failed runs reported their log unreadable while all 13
+  logs were served 200 at roughly 450KB each. The flag is now passed on every
+  `gh api` call, and because asking `gh` to hand over output it was withholding
+  moves the sanitising duty here, every response body is stripped of escape
+  sequences (colour and cursor codes, private-mode switches, hyperlinks and
+  titles, and the two-byte escapes) and stray control characters before any
+  consumer or rendered report sees it — tab, newline and carriage return are
+  kept, since a log is made of them. A `gh` too old to know the flag is
+  detected once per process from its "unknown flag" rejection and served with
+  the plain call for the rest of the run; a network error, a 5xx, or the
+  refusal message itself never flips that memo. (#99)
+- **2026-09-16** — **The plain re-issue after an old `gh` rejects the flag is
+  paced and counted.** It is a second real HTTP call, so it takes its own
+  token from the token-wide REST governor and is added to the run's query
+  count like any other live call. Under the prefetch pool every in-flight
+  worker meets the rejection in the same instant, so an unmetered re-issue
+  would have been a burst of up to pool-width calls that neither the pacing
+  nor the accounting ever saw. (#99)
 - **2026-09-02** — **`continue-on-error: yes` is no longer reported as an
   advisory job.** GitHub Actions reads only `true` and `false` as booleans; the
   YAML library this scan uses also reads `yes`, `on` and `y` that way. A workflow
