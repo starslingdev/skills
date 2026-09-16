@@ -36,13 +36,41 @@ import pathlib as _pathlib
 import sys as _sys
 
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent))
-from registry_scan_contract import NON_BLOCKING_RISKS  # noqa: E402
+from registry_scan_contract import NON_BLOCKING_RISKS, QUOTA_MESSAGE_MARKER  # noqa: E402
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+
+def publish(control_class: str) -> None:
+    """Record the control's outcome as `control_class` in `$GITHUB_OUTPUT`.
+
+    The workflow's verdict step reads it to tell a control the daily cap refused
+    (`quota`) from a control the scanner answered and ignored (`blind`): both fail
+    this step, and only one of them means the scanner cannot see. The classes:
+    `proven`, `quota`, `operational` (the scanner reported a runtime failure that is
+    not the cap), `blind` (it answered and never echoed the fixture), `inert` (it saw
+    the fixture and exited 0), `not-run` (it could not be started at all).
+    """
+    line = f"control_class={control_class}"
+    print(line)
+    path = os.environ.get("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+
+def not_proven(control_class: str, *problems: str) -> int:
+    print(
+        "REGISTRY SCAN GATE NOT PROVEN:\n  - " + "\n  - ".join(problems),
+        file=sys.stderr,
+    )
+    publish(control_class)
+    return 1
 
 # What the scanner must SAY about the fixture for this control to count.
 #
@@ -109,12 +137,11 @@ def build_violating_skill(root: Path) -> Path:
 
 def main() -> int:
     if not os.environ.get("SNYK_TOKEN"):
-        print(
-            "REGISTRY SCAN GATE NOT PROVEN: SNYK_TOKEN is unset, so the scanner "
-            "cannot run and the gate's ability to fail is unverified.",
-            file=sys.stderr,
+        return not_proven(
+            "not-run",
+            "SNYK_TOKEN is unset, so the scanner cannot run and the gate's ability to "
+            "fail is unverified.",
         )
-        return 1
 
     with tempfile.TemporaryDirectory(prefix="registry-scan-redprove-") as tmp:
         scan_path = build_violating_skill(Path(tmp))
@@ -142,21 +169,59 @@ def main() -> int:
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
         except FileNotFoundError:
-            print(
-                "REGISTRY SCAN GATE NOT PROVEN: `uvx` is not on PATH, so the scanner "
-                "could not be run at all.",
-                file=sys.stderr,
+            return not_proven(
+                "not-run", "`uvx` is not on PATH, so the scanner could not be run at all."
             )
-            return 1
         except subprocess.TimeoutExpired:
-            print(
-                "REGISTRY SCAN GATE NOT PROVEN: the scanner did not finish within 15 "
-                "minutes, so the gate's ability to fail is unverified.",
-                file=sys.stderr,
+            return not_proven(
+                "not-run",
+                "the scanner did not finish within 15 minutes, so the gate's ability to "
+                "fail is unverified.",
             )
-            return 1
         output = proc.stdout + proc.stderr
         print(output)
+
+        saw_fixture = expected_evidence() in output
+        if proc.returncode != 0 and saw_fixture:
+            print(
+                f"Red-proof passed: the scanner flagged {expected_evidence()} and exited "
+                f"{proc.returncode}. The gate can fail."
+            )
+            publish("proven")
+            return 0
+
+        # Before reading the scanner's silence as blindness, ask whether it answered at
+        # all. On 2026-09-14 the public tier's daily cap refused this call — HTTP 429,
+        # which the scanner reports as runtime failure X007 with its "Daily usage limit"
+        # text — and this script announced "a blind scanner, not a renamed rule" over
+        # it. A refused call analysed nothing, so the anchor's absence carries no
+        # information about what the scanner can see. It is still NOT PROVEN — the gate
+        # is unverified either way — but it is a different outcome with a different fix.
+        #
+        # Keyed on the message, not on X007: the scanner uses X007 for every
+        # analysis-endpoint failure (401, 413, 5xx, a timeout), and calling a rejected
+        # token "quota" would send the reader to the wrong cause.
+        if QUOTA_MESSAGE_MARKER.lower() in output.lower():
+            return not_proven(
+                "quota",
+                "QUOTA EXHAUSTED: the scanner's public tier refused this call because its "
+                "daily usage cap was hit, so the control's fixture was never analysed. "
+                "That says nothing about whether the scanner can see, and nothing about "
+                "its rule catalog — neither was exercised. The cap resets daily; "
+                "re-run this workflow after the reset. The cap is a property of the tier "
+                "SNYK_TOKEN authenticates against; the unlock is enabling Agent Scan on "
+                "the Snyk tenant and running the scanner with a tenant push key.",
+            )
+        runtime_failure = re.search(r"runtime failure codes:\s*([^)]*)", output)
+        if runtime_failure:
+            return not_proven(
+                "operational",
+                f"the scanner reported a runtime failure on the control (codes: "
+                f"{runtime_failure.group(1).strip()}), so it did not analyse the fixture "
+                f"and the gate's ability to fail is unverified. Read the scanner's output "
+                f"above for the cause: it names the reason next to the code. This is not a "
+                f"scanner that answered and saw nothing.",
+            )
 
         problems = []
         if proc.returncode == 0:
@@ -164,7 +229,7 @@ def main() -> int:
                 "scanner exited 0 on a skill that instructs the agent to download and "
                 "run a remote installer script — the gate would not have failed"
             )
-        if expected_evidence() not in output:
+        if not saw_fixture:
             problems.append(
                 f"scanner output never mentions {expected_evidence()}, the malicious host "
                 "this script just wrote into the fixture. The scanner cannot echo that "
@@ -173,26 +238,16 @@ def main() -> int:
                 "renamed rule. (Between 2026-08-18 and 2026-08-25 this was the standing "
                 "state: the analysis endpoint answered HTTP 200 with an empty finding "
                 "set on both API versions, and it was not the token, the free tier's "
-                "daily cap, or the version pin — each was tested.) Nothing in this "
+                "daily cap, or the version pin — each was tested. The cap has its own "
+                "outcome now and was not reported on this run.) Nothing in this "
                 "repository can fix a blind scanner; the compensating control is the "
                 "offline shape guard in tests/test_no_ioc_shaped_literals.py, which "
                 "runs in the required `test` check. Do NOT weaken this anchor to make "
                 "the red go away — an anchor that cannot fail turns an honest red into "
                 "a meaningless green"
             )
-
-        if problems:
-            print(
-                "REGISTRY SCAN GATE NOT PROVEN:\n  - " + "\n  - ".join(problems),
-                file=sys.stderr,
-            )
-            return 1
-
-    print(
-        f"Red-proof passed: the scanner flagged {expected_evidence()} and exited "
-        f"{proc.returncode}. The gate can fail."
-    )
-    return 0
+        # The scanner saw the fixture and still exited 0: the gate is inert, not blind.
+        return not_proven("blind" if not saw_fixture else "inert", *problems)
 
 
 if __name__ == "__main__":
