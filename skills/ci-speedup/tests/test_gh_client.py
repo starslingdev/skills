@@ -1694,3 +1694,37 @@ def test_an_interrupted_fixture_write_leaves_no_fixture_at_the_final_path(
         assert client.json(_COLLIDE_A) is not None      # an OSError stays best-effort
     assert not (tmp_path / fname).exists(), "a half-written fixture must never land"
     assert list(tmp_path.iterdir()) == [], "no temp-file litter either"
+
+
+def test_a_failed_write_keeps_the_claim_so_a_collider_still_raises_and_a_retry_still_lands(
+        tmp_path, monkeypatch):
+    """The claim is taken BEFORE the write and kept if the write fails: a collision is a
+    property of what the run REQUESTED, not of what reached the disk. So after endpoint
+    A's write fails (best-effort: warns, no file), a colliding endpoint B must still be
+    refused — otherwise B would land under the shared name and a later successful
+    re-record of A would silently overwrite it, which is the last-writer-wins corpus
+    the guard exists to prevent. And A itself, re-requested, is not a collision: it
+    lands normally, so a transient disk error costs nothing but one retry."""
+    fname = collect_runs._fixture_name(_COLLIDE_A, "json")
+    bodies = {_COLLIDE_A: '{"n": "a"}', _COLLIDE_B: '{"n": "b"}'}
+    _patch_run(monkeypatch, lambda cmd, *a, **kw: _completed(stdout=_ok(bodies[cmd[-1]])))
+    client = _record_client(monkeypatch, tmp_path)
+    real_write_text = collect_runs.Path.write_text
+
+    def _disk_full(self, *a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(collect_runs.Path, "write_text", _disk_full)
+    assert client.json(_COLLIDE_A) is not None, "a write error stays best-effort"
+    assert not (tmp_path / fname).exists()
+    monkeypatch.setattr(collect_runs.Path, "write_text", real_write_text)
+
+    with pytest.raises(RuntimeError, match="collision"):
+        client.json(_COLLIDE_B)
+    assert not (tmp_path / fname).exists(), (
+        "the collider must not land just because the claimant's write failed")
+
+    assert client.json(_COLLIDE_A) is not None
+    assert (tmp_path / fname).read_text(encoding="utf-8") == bodies[_COLLIDE_A], (
+        "re-recording the claimant after a failed write is a plain overwrite, not a collision")
+    assert list(tmp_path.iterdir()) == [tmp_path / fname], "no temp-file litter"
