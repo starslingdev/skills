@@ -137,8 +137,75 @@ def test_workflow_exists_and_parses(workflow: dict):
 
 
 def test_runs_on_pull_requests_and_pushes(triggers: dict):
+    """PRs are path-filtered; everything else is not.
+
+    A PR that touches nothing the scan reads gets no scan and no check — a deliberate
+    trade against the scanner's daily allowance, which a day of unfiltered PR runs now
+    exhausts. The push to main still scans every merge, the schedule still notices a
+    rule-catalog change that needed no commit, and dispatch is there for a maintainer.
+    Filtering any of those three would turn the trade into a hole.
+    """
     assert "pull_request" in triggers, "the gate must run on pull requests"
+    pr = triggers["pull_request"]
+    assert isinstance(pr, dict) and pr.get("paths"), (
+        "the pull_request trigger has no `paths:` filter, so every PR spends the day's "
+        "scanner allowance whether or not it touches a skill")
     assert "push" in triggers, "the gate must run on pushes to main"
+    push = triggers["push"]
+    assert push.get("branches") == ["main"], "the push trigger must be scoped to main"
+    assert "paths" not in push and "paths-ignore" not in push, (
+        "the push trigger is path-filtered; a merge to main must always be scanned, "
+        "because it is the run that certifies what ships")
+    assert not isinstance(triggers.get("schedule"), dict) or "paths" not in triggers["schedule"], (
+        "the schedule must not be path-filtered")
+    dispatch = triggers.get("workflow_dispatch")
+    assert dispatch is None or not (isinstance(dispatch, dict) and "paths" in dispatch), (
+        "workflow_dispatch must not be path-filtered")
+
+
+def _matches_path_filter(pattern: str, path: str) -> bool:
+    """GitHub's `paths:` glob, reduced to what these patterns use: `**` crosses
+    directory separators, `*` does not."""
+    regex = "".join(
+        ".*" if token == "**" else "[^/]*" if token == "*" else re.escape(token)
+        for token in re.findall(r"\*\*|\*|[^*]+", pattern))
+    return re.fullmatch(regex, path) is not None
+
+
+def test_the_pull_request_path_filter_names_every_file_the_scan_depends_on(workflow: dict, triggers: dict):
+    """Derived from the workflow, not hand-listed, so a new script cannot be forgotten.
+
+    Everything the scan's behaviour depends on: the tree it scans, the workflow
+    itself, every local script a `run:` line invokes (and every sibling
+    `registry_scan_*.py` on disk, since the scripts import each other), and the test
+    file that pins the workflow's shape. A change to any of these on a PR must run
+    the scan; a filter that misses one lets that change merge on a green PR that
+    never scanned it.
+    """
+    patterns = triggers["pull_request"]["paths"]
+    scan_path = workflow["env"]["SCAN_PATH"]
+    depends_on = {
+        f"{scan_path}/some-skill/SKILL.md",
+        f"{scan_path}/some-skill/scripts/helper.py",
+        _WORKFLOW.relative_to(_REPO).as_posix(),
+        Path(__file__).resolve().relative_to(_REPO).as_posix(),
+    }
+    for step in _scan_job(workflow)["steps"]:
+        depends_on.update(re.findall(r"\.github/scripts/[\w./-]+\.py", step.get("run") or ""))
+    depends_on.update(
+        p.relative_to(_REPO).as_posix()
+        for p in (_REPO / ".github" / "scripts").glob("registry_scan_*.py"))
+    assert len(depends_on) >= 8, f"derivation found too little: {sorted(depends_on)}"
+
+    unmatched = sorted(
+        path for path in depends_on
+        if not any(_matches_path_filter(pattern, path) for pattern in patterns))
+    assert not unmatched, (
+        f"the pull_request path filter {patterns} does not cover: {unmatched}. A PR "
+        f"changing one of these would merge without the scan running.")
+    # And it must not be so wide that the trade buys nothing.
+    assert not any(_matches_path_filter(p, "README.md") for p in patterns), (
+        "the path filter matches README.md; a docs-only PR would still spend the allowance")
 
 
 def test_scheduled_run_exists(triggers: dict):

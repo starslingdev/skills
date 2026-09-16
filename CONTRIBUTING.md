@@ -66,10 +66,13 @@ Skill registries publish third-party security audits of every skill they list, a
 a skill can fail one without failing anything in this repo — the text a skill ships
 is the thing being scanned, so an illustrative example can read to a scanner as the
 attack it describes. `.github/workflows/registry-scan.yml` runs one of those
-scanners (Snyk Agent Scan) over the installable trees under `skills/` on every
-internal pull request, on pushes to `main`, weekly on a schedule, and on demand, so
-a violation fails our build instead of appearing as a public FAIL badge days after
-release.
+scanners (Snyk Agent Scan) over the installable trees under `skills/` on internal
+pull requests that touch a skill or the scan itself, on every push to `main`, weekly
+on a schedule, and on demand, so a violation fails our build instead of appearing as
+a public FAIL badge days after release. A pull request that changes nothing under
+`skills/` (or the scan's own workflow, scripts and test) gets no scan and no check:
+the scanner's public tier has a small, undocumented daily allowance, and the push to
+`main` still scans every merge.
 
 Two things about that gate are worth knowing before you rely on it.
 

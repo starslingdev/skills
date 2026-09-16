@@ -23,8 +23,23 @@ name: Registry scan
 # `quota` class in .github/scripts/registry_scan_gate.py and the control's own quota
 # outcome, and both name the reset. The unlock is enabling Agent Scan on the Snyk tenant
 # and running the scanner with a tenant push key, not a different token.
+#
+# WHICH PULL REQUESTS ARE SCANNED. Only those that touch something the scan reads: a skill
+# tree, this workflow, the scripts it runs, or the test that pins its shape. A PR changing
+# nothing under those paths gets no scan and no `registry scan` check at all — not a green
+# one, none. That is a deliberate trade against the daily allowance above: a docs-only PR
+# used to spend the same calls as a skill change. The push to main is NOT filtered, so every
+# merge is still scanned; the schedule is not filtered either, because it is what notices a
+# rule-catalog change that needed no commit of ours. `tests/test_registry_scan_workflow.py`
+# derives the list of files the scan depends on from this file's own `run:` lines and fails
+# if the filter below misses one, so a new script cannot be forgotten here.
 on:
   pull_request:
+    paths:
+      - "skills/**"
+      - ".github/workflows/registry-scan.yml"
+      - ".github/scripts/registry_scan_*.py"
+      - "tests/test_registry_scan_workflow.py"
   push:
     branches: [main]
   # The scanner's rule catalog changes without any commit of ours: a renamed, retired, or newly
