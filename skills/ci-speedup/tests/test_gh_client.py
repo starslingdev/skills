@@ -462,7 +462,11 @@ def test_every_live_call_asks_for_headers_so_no_second_probe_is_ever_fired(monke
     _patch_run(monkeypatch, _run)
     client = GhClient()
     assert client.json("repos/o/r") == {"a": 1}
-    assert cmds == [["gh", "api", "-i", "repos/o/r"]]
+    assert cmds == [["gh", "api", "-i", "--allow-escape-sequences",
+                     "repos/o/r"]], (
+        "one call, carrying both `-i` (the server's own retry guidance, so a "
+        "blocked worker never re-probes) and the escape-sequence flag (without "
+        "which gh refuses to print a coloured job log at all)")
     assert client.queries == 1
 
 
@@ -1300,3 +1304,243 @@ def test_a_403_with_an_exhausted_bucket_is_a_rate_limit_even_without_the_keyword
     assert client.errors == 1, (
         "a rate-limited job log must count as a coverage gap, not vanish because the "
         "endpoint tolerates 404s")
+
+
+# =============================================================================
+# A COLOURED RESPONSE BODY  (gh's escape-sequence refusal)
+# =============================================================================
+
+_COLOURED = "2026-09-15T00:00:00Z \x1b[31mFAIL\x1b[0m tests/test_api.py::test_login\n"
+_OK_HEADERS = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n"
+_REFUSAL = ("the response contains terminal escape sequences; pass "
+            "--allow-escape-sequences to output it anyway\n")
+
+
+class _FakeGh:
+    """The `gh` binary's behaviour around coloured bodies, in both vintages."""
+
+    def __init__(self, *, supports_flag: bool = True) -> None:
+        self.supports_flag = supports_flag
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        has_flag = "--allow-escape-sequences" in argv
+        if has_flag and not self.supports_flag:
+            return _completed(returncode=2,
+                              stderr="unknown flag: --allow-escape-sequences\n")
+        if has_flag or not self.supports_flag:
+            return _completed(returncode=0, stdout=_OK_HEADERS + _COLOURED)
+        # Modern gh, asked without the flag, refuses to print the body.
+        return _completed(returncode=1, stdout=_OK_HEADERS, stderr=_REFUSAL)
+
+
+def test_a_coloured_job_log_is_read_not_silently_dropped(monkeypatch):
+    """`gh api` exits 1 on a body containing escape sequences unless told
+    otherwise — while the HTTP status is 200. CI logs are coloured, so without
+    the flag essentially every log fetch fails, and it fails invisibly: logs are
+    fetched `allow_missing=True`, so the failure is not even counted. Measured
+    2026-09-15 on a live repo: 13 of 13 reds reported as unreadable, all 13 logs
+    served 200 at ~450KB.
+    """
+    fake = _FakeGh()
+    monkeypatch.setattr(collect_runs.subprocess, "run", fake)
+    monkeypatch.setattr(collect_runs, "_ESCAPE_FLAG_SUPPORTED", True)
+
+    body = GhClient().text("repos/o/r/actions/jobs/1/logs", allow_missing=True)
+
+    assert body is not None and "test_login" in body
+    assert any("--allow-escape-sequences" in argv for argv in fake.calls)
+
+
+def test_the_escape_sequences_are_stripped_from_what_callers_see(monkeypatch):
+    """gh withholds that output to protect the terminal; asking for it anyway
+    moves the sanitising duty here. A job log is attacker-influenced content and
+    is quoted into a rendered report."""
+    monkeypatch.setattr(collect_runs.subprocess, "run", _FakeGh())
+    monkeypatch.setattr(collect_runs, "_ESCAPE_FLAG_SUPPORTED", True)
+
+    body = GhClient().text("repos/o/r/actions/jobs/1/logs", allow_missing=True)
+
+    assert "\x1b" not in body
+    assert "FAIL" in body
+
+
+def test_a_gh_too_old_for_the_flag_still_returns_its_log(monkeypatch):
+    fake = _FakeGh(supports_flag=False)
+    monkeypatch.setattr(collect_runs.subprocess, "run", fake)
+    monkeypatch.setattr(collect_runs, "_ESCAPE_FLAG_SUPPORTED", True)
+    client = GhClient()
+
+    body = client.text("repos/o/r/actions/jobs/1/logs", allow_missing=True)
+    assert body is not None and "test_login" in body
+
+    # And the rejection is remembered, so the next log costs one call.
+    before = len(fake.calls)
+    client.text("repos/o/r/actions/jobs/2/logs", allow_missing=True)
+    assert len(fake.calls) - before == 1
+
+
+def test_a_coloured_log_is_returned_stripped_whatever_the_client_calls_its_memo(monkeypatch):
+    """The BEHAVIOURAL contract, stated without reference to any implementation
+    symbol: a modern gh that refuses a coloured body unless asked must still yield
+    the log, and the log must arrive without its colour codes. A client that never
+    asks gets the refusal, returns None, and this fails on the assertion — not on
+    a missing attribute."""
+    monkeypatch.setattr(collect_runs, "_ESCAPE_FLAG_SUPPORTED", True, raising=False)
+    calls: list[list[str]] = []
+
+    def _modern_gh(argv, **kwargs):
+        calls.append(list(argv))
+        if "--allow-escape-sequences" in argv:
+            return _completed(returncode=0, stdout=_OK_HEADERS + _COLOURED)
+        return _completed(returncode=1, stdout=_OK_HEADERS, stderr=_REFUSAL)
+    monkeypatch.setattr(collect_runs.subprocess, "run", _modern_gh)
+
+    body = GhClient().text("repos/o/r/actions/jobs/1/logs", allow_missing=True)
+
+    assert body == "2026-09-15T00:00:00Z FAIL tests/test_api.py::test_login\n", (
+        f"expected the stripped log back, got {body!r} after {calls}")
+
+
+class _SpyGovernor:
+    """Stand-in for the token-wide REST governor: records every admission."""
+
+    def __init__(self) -> None:
+        self.routes: list[str] = []
+
+    def acquire(self, route: str = "") -> None:
+        self.routes.append(route)
+
+
+def test_the_fallback_reissue_is_paced_and_counted_like_any_other_live_call(monkeypatch):
+    """When an old gh rejects the flag, the plain re-issue is a SECOND real HTTP
+    call. It must take its own token from the token-wide governor and be counted
+    in `queries` — under the prefetch pool every in-flight worker pays its own
+    rejection at once, so an unmetered re-issue is a burst of up to pool-width
+    calls that neither the pacing nor the accounting ever saw."""
+    fake = _FakeGh(supports_flag=False)
+    monkeypatch.setattr(collect_runs.subprocess, "run", fake)
+    monkeypatch.setattr(collect_runs, "_ESCAPE_FLAG_SUPPORTED", True)
+    client = GhClient()
+    spy = _SpyGovernor()
+    client._governor = spy
+
+    body = client.text("repos/o/r/actions/jobs/1/logs", allow_missing=True)
+
+    assert body is not None and "test_login" in body
+    assert len(fake.calls) == 2, "one rejected call with the flag, one plain re-issue"
+    assert len(spy.routes) == 2, (
+        f"the re-issue must acquire the governor too; acquired {len(spy.routes)}x")
+    assert client.queries == 2, (
+        f"the re-issue is a real call and must be counted; queries == {client.queries}")
+
+
+@pytest.mark.parametrize("stderr", [
+    "gh: Bad Gateway (HTTP 502)\n",
+    "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com\n",
+    # The refusal itself NAMES the flag — that is the modern gh telling us to pass
+    # it, not an old gh rejecting it.
+    _REFUSAL,
+])
+def test_a_failure_that_is_not_a_flag_rejection_does_not_poison_the_memo(
+        monkeypatch, no_sleep, stderr):
+    """`_flag_was_rejected` must key on gh's "unknown flag" wording, not on the
+    flag's name appearing in stderr. A 5xx, a network error, or the refusal
+    message itself must leave the memo True — otherwise one transient failure
+    would silently downgrade every later log fetch to the plain call that gh
+    refuses on coloured bodies."""
+    assert collect_runs._flag_was_rejected(stderr) is False
+
+    monkeypatch.setattr(collect_runs, "_ESCAPE_FLAG_SUPPORTED", True)
+    calls: list[list[str]] = []
+    seq = [
+        _completed(returncode=1, stdout="HTTP/1.1 502 Bad Gateway\r\n\r\n", stderr=stderr),
+        _completed(returncode=0, stdout=_OK_HEADERS + _COLOURED),
+    ]
+
+    def _flaky_gh(argv, **kwargs):
+        calls.append(list(argv))
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+    monkeypatch.setattr(collect_runs.subprocess, "run", _flaky_gh)
+
+    body = GhClient().text("repos/o/r/actions/jobs/1/logs", allow_missing=True)
+
+    assert body is not None and "test_login" in body
+    assert collect_runs._ESCAPE_FLAG_SUPPORTED is True, "the memo must not flip on a non-flag failure"
+    assert all("--allow-escape-sequences" in argv for argv in calls), (
+        f"every attempt must keep asking for the coloured body: {calls}")
+
+
+def test_strip_keeps_the_whitespace_a_log_is_made_of_and_drops_the_rest():
+    strip = collect_runs._strip_terminal_escapes
+    # Tab, newline and carriage return are ordinary log text (CRLF logs, progress
+    # bars redrawn with \r, tab-indented stack traces) and must survive.
+    assert strip("a\tb\r\nc\rd\n") == "a\tb\r\nc\rd\n"
+    # CSI (colour, cursor, private modes), OSC (hyperlinks / titles, both
+    # terminators) and the two-character escapes are removed whole.
+    assert strip("\x1b[1;31mFAIL\x1b[0m") == "FAIL"
+    assert strip("\x1b[2K\x1b[1A\x1b[?25lstep\x1b[?25h") == "step"
+    assert strip("\x1b]8;;https://x.test\x07link\x1b]8;;\x07") == "link"
+    assert strip("\x1b]0;title\x1b\\body") == "body"
+    assert strip("\x1b(Bplain\x1b=\x1b>") == "plain"
+    # Stray C0 controls (a BEL, a NUL) go; the log text between them stays.
+    assert strip("ding\x07\x00dong") == "dingdong"
+    # Mixed: a real coloured pytest line keeps its \n and its text.
+    assert strip(_COLOURED) == "2026-09-15T00:00:00Z FAIL tests/test_api.py::test_login\n"
+
+
+def test_strip_removes_csi_sequences_with_private_parameter_bytes():
+    """ECMA-48 lets a CSI parameter string open with any of `<=>?`, not just `?`
+    — xterm's SGR-mouse reports (`ESC[<…M`), `ESC[=…h` screen modes and `ESC[>c`
+    device attributes all appear in captured terminal output. Leaving them in
+    would hand a rendered report a bare ESC followed by junk."""
+    strip = collect_runs._strip_terminal_escapes
+    assert strip("\x1b[<35;10;5Mclick") == "click"
+    assert strip("\x1b[=3hmode") == "mode"
+    assert strip("\x1b[>cattrs") == "attrs"
+    assert strip("\x1b[?1049hscreen\x1b[?1049l") == "screen"
+
+
+def test_four_workers_rejected_at_once_flip_the_memo_once_and_reissue_once_each(monkeypatch):
+    """The memo flip under the prefetch pool: every in-flight worker sees its own
+    rejection in the same instant. Each must re-issue its own call exactly once —
+    never twice (a worker that re-reads the memo and re-tries the flag), never
+    zero times (a worker that trusts another worker's re-issue for its own
+    endpoint) — and the memo must end False."""
+    monkeypatch.setattr(collect_runs, "_ESCAPE_FLAG_SUPPORTED", True)
+    n = 4
+    barrier = threading.Barrier(n, timeout=5)
+    lock = threading.Lock()
+    calls: list[list[str]] = []
+
+    def _old_gh(argv, **kwargs):
+        with lock:
+            calls.append(list(argv))
+        if "--allow-escape-sequences" in argv:
+            barrier.wait()          # all four rejections land together
+            return _completed(returncode=2,
+                              stderr="unknown flag: --allow-escape-sequences\n")
+        return _completed(returncode=0, stdout=_OK_HEADERS + _COLOURED)
+    monkeypatch.setattr(collect_runs.subprocess, "run", _old_gh)
+
+    client = GhClient()
+    endpoints = [f"repos/o/r/actions/jobs/{i}/logs" for i in range(n)]
+    results: dict[str, str | None] = {}
+
+    def _worker(ep):
+        results[ep] = client.text(ep, allow_missing=True)
+    threads = [threading.Thread(target=_worker, args=(ep,)) for ep in endpoints]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert collect_runs._ESCAPE_FLAG_SUPPORTED is False
+    assert all(results[ep] and "test_login" in results[ep] for ep in endpoints), results
+    for ep in endpoints:
+        flagged = [c for c in calls if c[-1] == ep and "--allow-escape-sequences" in c]
+        plain = [c for c in calls if c[-1] == ep and "--allow-escape-sequences" not in c]
+        assert len(flagged) == 1 and len(plain) == 1, (
+            f"{ep}: {len(flagged)} flagged, {len(plain)} plain re-issues")
+    assert len(calls) == 2 * n

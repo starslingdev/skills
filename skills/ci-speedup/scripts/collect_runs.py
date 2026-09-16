@@ -616,6 +616,70 @@ def _split_headers_body(stdout: str) -> tuple[int | None, dict[str, str], str]:
     return status, headers, body
 
 
+# `gh api` REFUSES to print a response containing terminal escape sequences unless
+# this flag is passed — it exits 1 with "the response contains terminal escape
+# sequences" while the HTTP status is a perfectly good 200. CI job logs are
+# COLOURED, so without the flag essentially every log fetch fails, and it fails in
+# the quietest possible way: job logs are always fetched `allow_missing=True` (an
+# expired log is a legitimate absence), so the failure is not even counted. Measured
+# 2026-09-15 against a live repo: all 13 reds came back `log-unavailable` while all
+# 13 logs were served 200 at ~450KB each.
+#
+# Asking for that output moves gh's duty onto us: whatever it hands back is
+# sanitised here (`_strip_terminal_escapes`) before any consumer — or any rendered
+# report — can see it. A log line is attacker-influenced content.
+_ESCAPE_FLAG = "--allow-escape-sequences"
+
+# Discovered ONCE per process, not per call: a gh too old to know the flag rejects
+# it with "unknown flag", and paying for that rejection on every one of a repo's
+# logs would double the log budget.
+_ESCAPE_FLAG_SUPPORTED = True
+_ESCAPE_FLAG_LOCK = threading.Lock()
+
+# CSI (`ESC[…`, with any of the `<=>?` private-parameter openers), OSC
+# (`ESC]…BEL` / `ESC]…ESC\`), and every other ESC-led sequence: an optional run
+# of intermediate bytes (0x20-0x2F) then one final byte (0x30-0x7E) — which
+# covers `ESC(B` (what `tput sgr0` emits), `ESC=`/`ESC>` keypad modes, `ESC c`,
+# and the classic two-character escapes alike.
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-9;:<=>?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[ -/]*[0-~]")
+# The remaining C0 controls, minus the three that are ordinary text in a log:
+# tab (\x09), newline (\x0a) and carriage return (\x0d).
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _strip_terminal_escapes(text: str) -> str:
+    """Remove escape sequences and stray control characters from a response body.
+
+    This is the other half of passing `_ESCAPE_FLAG`. gh withholds this output to
+    protect the terminal; we ask for it anyway, so we owe the sanitising. Colour
+    codes are dropped and the message they wrapped is kept — a log that says
+    `\x1b[31mFAIL\x1b[0m test_login` still says `FAIL test_login`.
+    """
+    if not text or "\x1b" not in text and not _CONTROL_CHAR_RE.search(text):
+        return text
+    return _CONTROL_CHAR_RE.sub("", _ANSI_ESCAPE_RE.sub("", text))
+
+
+def _gh_argv(endpoint: str) -> list[str]:
+    """The `gh api` command line, with the escape-sequence flag while it is known
+    to be supported."""
+    argv = ["gh", "api", "-i"]
+    if _ESCAPE_FLAG_SUPPORTED:
+        argv.append(_ESCAPE_FLAG)
+    argv.append(endpoint)
+    return argv
+
+
+def _flag_was_rejected(stderr: str) -> bool:
+    """Did this gh reject the flag itself (as opposed to failing the request)?"""
+    s = (stderr or "").lower()
+    return _ESCAPE_FLAG in s and ("unknown flag" in s or "unknown shorthand" in s
+                                  or "flag provided but not defined" in s)
+
+
 def _classify_gh_failure(stderr: str, status: int | None = None,
                          headers: dict[str, str] | None = None) -> str:
     """Bucket a failed `gh api` call by what the failure MEANS, which is what
@@ -1201,9 +1265,30 @@ class GhClient:
             status: int | None = None
             try:
                 r = subprocess.run(
-                    ["gh", "api", "-i", endpoint],
+                    _gh_argv(endpoint),
                     capture_output=True, text=True, timeout=timeout,
                 )
+                if r.returncode != 0 and _flag_was_rejected(r.stderr or ""):
+                    # This gh predates the flag — which means it predates the
+                    # REFUSAL too, so the plain call works. Remember it for the
+                    # rest of the process and re-issue once.
+                    global _ESCAPE_FLAG_SUPPORTED
+                    with _ESCAPE_FLAG_LOCK:
+                        _ESCAPE_FLAG_SUPPORTED = False
+                    logger.debug(
+                        "gh does not support %s — falling back to a plain "
+                        "`gh api` for the rest of this run", _ESCAPE_FLAG)
+                    # The re-issue is a SECOND real HTTP call: it takes its own
+                    # token from the token-wide governor and is counted. Under the
+                    # prefetch pool every in-flight worker pays its rejection at
+                    # once, so an unmetered re-issue would be a pool-width burst
+                    # the pacing never saw and the call budget never recorded.
+                    self._governor.acquire(_route_key(endpoint))
+                    self._bump(query=True)
+                    r = subprocess.run(
+                        _gh_argv(endpoint),
+                        capture_output=True, text=True, timeout=timeout,
+                    )
             except FileNotFoundError as e:      # gh isn't installed — retrying can't help
                 if not allow_missing:
                     self._bump(error=True)
@@ -1229,6 +1314,7 @@ class GhClient:
                 return None
             else:
                 status, headers, body = _split_headers_body(r.stdout or "")
+                body = _strip_terminal_escapes(body)
                 if r.returncode == 0:
                     # A success means the failure (if any) was transient — don't let two
                     # unlucky calls spread across a healthy audit trip the breaker.
