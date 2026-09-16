@@ -1611,7 +1611,7 @@ def test_two_threads_recording_colliding_endpoints_in_one_wave_raise_exactly_onc
     fname = collect_runs._fixture_name(_COLLIDE_A, "json")
     assert fname == collect_runs._fixture_name(_COLLIDE_B, "json")
     bodies = {_COLLIDE_A: '{"total_count": 1}', _COLLIDE_B: '{"total_count": 2}'}
-    _patch_run(monkeypatch, lambda cmd, *a, **kw: _completed(stdout=_ok(bodies[cmd[3]])))
+    _patch_run(monkeypatch, lambda cmd, *a, **kw: _completed(stdout=_ok(bodies[cmd[-1]])))
 
     gate = threading.Barrier(2, timeout=1.0)
     real_mkdir = collect_runs.Path.mkdir
