@@ -1578,3 +1578,153 @@ def test_four_workers_rejected_at_once_log_the_fallback_once_not_once_each(monke
     assert collect_runs._ESCAPE_FLAG_SUPPORTED is False
     assert len(fallback_lines) == 1, (
         f"one discovery, one line; got {len(fallback_lines)} lines from {n} workers")
+# -----------------------------------------------------------------------
+# Record mode (`CI_SPEEDUP_GH_RECORD`, maintainer-only) — the collision guard
+# must hold under the fetch pool, and a fixture must be whole or absent
+# -----------------------------------------------------------------------
+
+# Two DISTINCT endpoints that `_fixture_name` (lossy: every unsafe char becomes
+# `_`) maps to ONE file. This is the shape the guard exists for.
+_COLLIDE_A = "repos/o/r/actions/runs/1?x"
+_COLLIDE_B = "repos/o/r/actions/runs/1&x"
+
+
+def _record_client(monkeypatch, rec_dir) -> GhClient:
+    monkeypatch.setenv("CI_SPEEDUP_GH_RECORD", str(rec_dir))
+    monkeypatch.delenv("CI_SPEEDUP_GH_FIXTURES", raising=False)
+    return GhClient()
+
+
+def test_two_threads_recording_colliding_endpoints_in_one_wave_raise_exactly_once(
+        tmp_path, monkeypatch):
+    """The guard's docstring promises a collision RAISES. Under the shared fetch pool two
+    workers can reach `_record` for two colliding endpoints in the SAME wave; if the
+    check ("has this file been claimed?") and the claim are not one critical section,
+    both observe "unclaimed", both write, the last writer wins and the guard never
+    fires — exactly the silent valid-but-WRONG corpus the guard exists to refuse.
+
+    Both workers are held at a barrier placed AFTER the old check and BEFORE the file
+    write (the record dir's `mkdir`, which every write does first), so on the racy
+    code both are provably past the check before either writes. On the fixed code the
+    loser raises under the lock and never reaches the barrier, so the winner's wait
+    times out and it simply proceeds — the barrier is a gate, not an assertion."""
+    fname = collect_runs._fixture_name(_COLLIDE_A, "json")
+    assert fname == collect_runs._fixture_name(_COLLIDE_B, "json")
+    bodies = {_COLLIDE_A: '{"total_count": 1}', _COLLIDE_B: '{"total_count": 2}'}
+    _patch_run(monkeypatch, lambda cmd, *a, **kw: _completed(stdout=_ok(bodies[cmd[-1]])))
+
+    gate = threading.Barrier(2, timeout=1.0)
+    real_mkdir = collect_runs.Path.mkdir
+
+    def _gated_mkdir(self, *a, **kw):
+        try:
+            gate.wait()
+        except threading.BrokenBarrierError:
+            pass                    # the other worker already raised: nothing to wait for
+        return real_mkdir(self, *a, **kw)
+
+    monkeypatch.setattr(collect_runs.Path, "mkdir", _gated_mkdir)
+    client = _record_client(monkeypatch, tmp_path)
+
+    outcomes: dict[str, BaseException | None] = {}
+
+    def _worker(endpoint):
+        try:
+            client.json(endpoint)
+            outcomes[endpoint] = None
+        except BaseException as e:      # noqa: BLE001 — the raise IS the assertion
+            outcomes[endpoint] = e
+
+    threads = [threading.Thread(target=_worker, args=(e,)) for e in (_COLLIDE_A, _COLLIDE_B)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    raised = [e for e, exc in outcomes.items() if exc is not None]
+    assert len(raised) == 1, (
+        f"exactly one of the two colliding writers must raise; got raised={raised!r} "
+        f"outcomes={outcomes!r} — both succeeded means last-writer-wins and a silent "
+        f"wrong fixture")
+    assert isinstance(outcomes[raised[0]], RuntimeError)
+    assert "collision" in str(outcomes[raised[0]])
+    (winner,) = [e for e in outcomes if e != raised[0]]
+    assert client._recorded_from[fname] == winner
+    assert (tmp_path / fname).read_text(encoding="utf-8") == bodies[winner], (
+        "the surviving fixture must be the WINNER's body, not the loser's")
+
+
+def test_re_recording_the_same_endpoint_is_still_an_idempotent_overwrite(tmp_path, monkeypatch):
+    """The claim is per ENDPOINT: the same endpoint recorded twice (a legitimate
+    re-request — consumption is pop-once) overwrites its own fixture and is not a
+    collision. Preserved from before the guard moved under the lock."""
+    _patch_run(monkeypatch, lambda *a, **kw: _completed(stdout=_ok('{"n": 1}')))
+    client = _record_client(monkeypatch, tmp_path)
+    client.json(_COLLIDE_A)
+    _patch_run(monkeypatch, lambda *a, **kw: _completed(stdout=_ok('{"n": 2}')))
+    client.json(_COLLIDE_A)
+    fname = collect_runs._fixture_name(_COLLIDE_A, "json")
+    assert (tmp_path / fname).read_text(encoding="utf-8") == '{"n": 2}'
+    assert list(tmp_path.iterdir()) == [tmp_path / fname], "no temp-file litter"
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, OSError("disk full")])
+def test_an_interrupted_fixture_write_leaves_no_fixture_at_the_final_path(
+        tmp_path, monkeypatch, interrupt):
+    """A fixture is either COMPLETE or ABSENT. The write goes to a temp file in the
+    record dir and is renamed into place only once it is whole, so a Ctrl-C / crash /
+    disk error mid-write cannot leave a truncated file that replays as valid-but-short
+    JSON (a `{"jobs": [` prefix reads back as "no jobs"). Absent is honest: replay
+    reports the fixture missing. The temp file is removed on the way out, too."""
+    payload = '{"jobs": [' + ", ".join('{"id": %d}' % i for i in range(2000)) + "]}"
+    _patch_run(monkeypatch, lambda *a, **kw: _completed(stdout=_ok(payload)))
+    client = _record_client(monkeypatch, tmp_path)
+    fname = collect_runs._fixture_name(_COLLIDE_A, "json")
+    real_write_text = collect_runs.Path.write_text
+
+    def _half_then_die(self, data, *a, **kw):
+        real_write_text(self, data[: len(data) // 2], *a, **kw)   # a partial file exists…
+        raise interrupt                                           # …and the writer dies
+
+    monkeypatch.setattr(collect_runs.Path, "write_text", _half_then_die)
+    if isinstance(interrupt, type):
+        with pytest.raises(interrupt):
+            client.json(_COLLIDE_A)
+    else:
+        assert client.json(_COLLIDE_A) is not None      # an OSError stays best-effort
+    assert not (tmp_path / fname).exists(), "a half-written fixture must never land"
+    assert list(tmp_path.iterdir()) == [], "no temp-file litter either"
+
+
+def test_a_failed_write_keeps_the_claim_so_a_collider_still_raises_and_a_retry_still_lands(
+        tmp_path, monkeypatch):
+    """The claim is taken BEFORE the write and kept if the write fails: a collision is a
+    property of what the run REQUESTED, not of what reached the disk. So after endpoint
+    A's write fails (best-effort: warns, no file), a colliding endpoint B must still be
+    refused — otherwise B would land under the shared name and a later successful
+    re-record of A would silently overwrite it, which is the last-writer-wins corpus
+    the guard exists to prevent. And A itself, re-requested, is not a collision: it
+    lands normally, so a transient disk error costs nothing but one retry."""
+    fname = collect_runs._fixture_name(_COLLIDE_A, "json")
+    bodies = {_COLLIDE_A: '{"n": "a"}', _COLLIDE_B: '{"n": "b"}'}
+    _patch_run(monkeypatch, lambda cmd, *a, **kw: _completed(stdout=_ok(bodies[cmd[-1]])))
+    client = _record_client(monkeypatch, tmp_path)
+    real_write_text = collect_runs.Path.write_text
+
+    def _disk_full(self, *a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(collect_runs.Path, "write_text", _disk_full)
+    assert client.json(_COLLIDE_A) is not None, "a write error stays best-effort"
+    assert not (tmp_path / fname).exists()
+    monkeypatch.setattr(collect_runs.Path, "write_text", real_write_text)
+
+    with pytest.raises(RuntimeError, match="collision"):
+        client.json(_COLLIDE_B)
+    assert not (tmp_path / fname).exists(), (
+        "the collider must not land just because the claimant's write failed")
+
+    assert client.json(_COLLIDE_A) is not None
+    assert (tmp_path / fname).read_text(encoding="utf-8") == bodies[_COLLIDE_A], (
+        "re-recording the claimant after a failed write is a plain overwrite, not a collision")
+    assert list(tmp_path.iterdir()) == [tmp_path / fname], "no temp-file litter"

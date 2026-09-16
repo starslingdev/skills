@@ -810,7 +810,8 @@ class GhClient:
         # write would silently clobber the first's body, and replay would then
         # serve valid-but-WRONG JSON. We can't widen the filename scheme without
         # renaming the committed corpus, so instead we detect the collision at
-        # record time and log it (never raise — recording is best-effort).
+        # record time and RAISE (see `_record`). The check and the claim are one
+        # critical section under `_lock`: pooled workers record concurrently.
         self._recorded_from: dict[str, str] = {}
         # Replay-mode consumption log (test-only, like the seam above): when
         # `CI_SPEEDUP_GH_FIXTURES_LOG` names a file, every fixture the run
@@ -905,29 +906,54 @@ class GhClient:
         read-only dir, a bad path — stays best-effort and only warns; that damages
         nothing already on disk.
 
-        `_recorded_from` is read-modify-written from the pooled fetch threads, so
-        it is guarded by the same `_lock` as the counters."""
+        `_recorded_from` is read-modify-written from the pooled fetch threads
+        (`prefetch_json` / `prefetch_text` run `_FETCH_CONCURRENCY` workers through
+        one client), so the CHECK and the CLAIM are one critical section under the
+        same `_lock` as the counters. Checking under the lock, writing, and only
+        then claiming would let two colliding workers in one wave both see "unclaimed",
+        both write, and both succeed — last writer wins, and the guard above never
+        fires. The claim is therefore taken BEFORE the write, and is kept even if the
+        write then fails: a collision is a property of what this run REQUESTED, not of
+        what reached the disk, and a later colliding endpoint must still be refused.
+        Re-recording the SAME endpoint (a legitimate re-request — consumption is
+        pop-once) is not a collision and overwrites its own fixture.
+
+        The file itself is written to a temp file in the record dir and renamed into
+        place (`os.replace`, atomic on POSIX), so a fixture on disk is either COMPLETE
+        or ABSENT. A truncate-in-place write interrupted mid-body (Ctrl-C, a timeout, a
+        crash) would leave a prefix that replays as valid-but-SHORT JSON — a
+        `{"jobs": [` stub reads back as "no jobs" — where an absent file replays as
+        honestly missing. The temp file is removed on every exit path the interpreter
+        runs (success, an `OSError`, Ctrl-C); only a hard kill (SIGKILL, power loss)
+        between the write and the rename can leave it, and a leftover is harmless:
+        it is dot-prefixed, replay looks fixtures up by exact name and never reads
+        it, and the corpus-inventory test fails loudly if one is ever committed."""
         fname = _fixture_name(endpoint, ext)
         with self._lock:
             prior = self._recorded_from.get(fname)
-        if prior is not None and prior != endpoint:
-            raise RuntimeError(
-                f"gh record: fixture name collision on {fname!r} — endpoint "
-                f"{endpoint!r} maps to the same file already recorded from "
-                f"{prior!r} (the lossy _fixture_name mapping). Refusing to "
-                f"overwrite: the corpus could not replay both, and the survivor "
-                f"would be served under the loser's name (valid-but-WRONG JSON). "
-                f"Widen _fixture_name or record these endpoints separately.")
+            if prior is not None and prior != endpoint:
+                raise RuntimeError(
+                    f"gh record: fixture name collision on {fname!r} — endpoint "
+                    f"{endpoint!r} maps to the same file already recorded from "
+                    f"{prior!r} (the lossy _fixture_name mapping). Refusing to "
+                    f"overwrite: the corpus could not replay both, and the survivor "
+                    f"would be served under the loser's name (valid-but-WRONG JSON). "
+                    f"Widen _fixture_name or record these endpoints separately.")
+            self._recorded_from[fname] = endpoint      # claimed: a collider now raises
+        record_dir = Path(self._record_dir)
+        final = record_dir / fname
+        tmp = record_dir / f".{fname}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
-            Path(self._record_dir).mkdir(parents=True, exist_ok=True)
-            (Path(self._record_dir) / fname).write_text(payload, encoding="utf-8")
+            record_dir.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, final)                      # whole, or not there at all
         except OSError as e:
             logger.warning("gh record: failed to write fixture for %s: %s", endpoint, e)
-            return
-        # Record the source endpoint only after a successful write, so a failed
-        # write doesn't mask a real later collision as "already seen".
-        with self._lock:
-            self._recorded_from[fname] = endpoint
+        finally:
+            try:
+                tmp.unlink()                            # a no-op after a successful rename
+            except OSError:
+                pass
 
     def _note_replay_access(self, fname: str) -> None:
         """Append a successfully-read fixture filename to the replay-access log
