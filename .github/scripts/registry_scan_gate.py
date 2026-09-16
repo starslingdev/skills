@@ -45,7 +45,8 @@ reading the checks API — has to change. The classes, in the order they are dec
 
 Classification is structural — it reads the JSON's risk keys and error objects — never
 a substring search over prose. The evidence text of a scanned skill is untrusted, and
-these are CI-security skills whose own text says "risks found" as a matter of course.
+these are CI-security skills whose own text talks about found risks as a matter of
+course.
 
 Usage:  python3 .github/scripts/registry_scan_gate.py <findings.json>
         SCANNER_EXIT=<n>   the unfiltered pass's exit code (default 0), published as
