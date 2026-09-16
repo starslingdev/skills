@@ -1327,7 +1327,7 @@ class _FakeGh:
         self.calls.append(list(argv))
         has_flag = "--allow-escape-sequences" in argv
         if has_flag and not self.supports_flag:
-            return _completed(returncode=2,
+            return _completed(returncode=1,
                               stderr="unknown flag: --allow-escape-sequences\n")
         if has_flag or not self.supports_flag:
             return _completed(returncode=0, stdout=_OK_HEADERS + _COLOURED)
@@ -1519,7 +1519,7 @@ def test_four_workers_rejected_at_once_flip_the_memo_once_and_reissue_once_each(
             calls.append(list(argv))
         if "--allow-escape-sequences" in argv:
             barrier.wait()          # all four rejections land together
-            return _completed(returncode=2,
+            return _completed(returncode=1,
                               stderr="unknown flag: --allow-escape-sequences\n")
         return _completed(returncode=0, stdout=_OK_HEADERS + _COLOURED)
     monkeypatch.setattr(collect_runs.subprocess, "run", _old_gh)
@@ -1544,3 +1544,37 @@ def test_four_workers_rejected_at_once_flip_the_memo_once_and_reissue_once_each(
         assert len(flagged) == 1 and len(plain) == 1, (
             f"{ep}: {len(flagged)} flagged, {len(plain)} plain re-issues")
     assert len(calls) == 2 * n
+
+
+def test_four_workers_rejected_at_once_log_the_fallback_once_not_once_each(monkeypatch, caplog):
+    """The fallback is discovered once per PROCESS, and the DEBUG line that says so
+    is written once — not once per worker that happened to be in flight at the
+    instant of discovery. Under the prefetch pool that instant holds a pool-width
+    of workers, and N identical lines for one event misreads as N events."""
+    monkeypatch.setattr(collect_runs, "_ESCAPE_FLAG_SUPPORTED", True)
+    n = 4
+    barrier = threading.Barrier(n, timeout=5)
+
+    def _old_gh(argv, **kwargs):
+        if "--allow-escape-sequences" in argv:
+            barrier.wait()          # all four rejections land together
+            return _completed(returncode=1,
+                              stderr="unknown flag: --allow-escape-sequences\n")
+        return _completed(returncode=0, stdout=_OK_HEADERS + _COLOURED)
+    monkeypatch.setattr(collect_runs.subprocess, "run", _old_gh)
+
+    client = GhClient()
+    with caplog.at_level(logging.DEBUG, logger="collect_runs"):
+        threads = [threading.Thread(target=client.text,
+                                    args=(f"repos/o/r/actions/jobs/{i}/logs", True))
+                   for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+    fallback_lines = [r for r in caplog.records
+                      if "does not support --allow-escape-sequences" in r.getMessage()]
+    assert collect_runs._ESCAPE_FLAG_SUPPORTED is False
+    assert len(fallback_lines) == 1, (
+        f"one discovery, one line; got {len(fallback_lines)} lines from {n} workers")

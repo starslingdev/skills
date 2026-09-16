@@ -1274,10 +1274,14 @@ class GhClient:
                     # rest of the process and re-issue once.
                     global _ESCAPE_FLAG_SUPPORTED
                     with _ESCAPE_FLAG_LOCK:
-                        _ESCAPE_FLAG_SUPPORTED = False
-                    logger.debug(
-                        "gh does not support %s — falling back to a plain "
-                        "`gh api` for the rest of this run", _ESCAPE_FLAG)
+                        # Every in-flight worker meets the rejection at once;
+                        # the memo flips once and so does the log line.
+                        if _ESCAPE_FLAG_SUPPORTED:
+                            _ESCAPE_FLAG_SUPPORTED = False
+                            logger.debug(
+                                "gh does not support %s — falling back to a "
+                                "plain `gh api` for the rest of this run",
+                                _ESCAPE_FLAG)
                     # The re-issue is a SECOND real HTTP call: it takes its own
                     # token from the token-wide governor and is counted. Under the
                     # prefetch pool every in-flight worker pays its rejection at
