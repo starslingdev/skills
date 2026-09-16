@@ -38,6 +38,12 @@ _CI_WORKFLOW = _REPO / ".github" / "workflows" / "ci.yml"
 _REDPROVE = _REPO / ".github" / "scripts" / "registry_scan_redprove.py"
 _REPORT = _REPO / ".github" / "scripts" / "registry_scan_report.py"
 
+# The scanner's real 429 text, verbatim from `agent_scan/verify_api.py` at the pin.
+_QUOTA_MESSAGE = (
+    "Daily usage limit reached for the public version of Agent-Scan. Unlock higher "
+    "limits and enterprise features by contacting us at https://evo.ai.snyk.io/#contact-us."
+)
+
 @pytest.fixture(scope="module")
 def workflow() -> dict:
     # PyYAML parses the `on:` key as the boolean True (YAML 1.1); read it back the
@@ -1228,9 +1234,81 @@ def _run_redprove(tmp_path, *, scanner_output: str, scanner_exit: int):
     stub.write_text(f"#!/bin/sh\ncat <<'OUT'\n{scanner_output}\nOUT\nexit {scanner_exit}\n",
                     encoding="utf-8")
     stub.chmod(0o755)
-    return subprocess.run(
+    out_file = tmp_path / "gh_output"
+    out_file.touch()
+    proc = subprocess.run(
         [sys.executable, str(_REDPROVE)], capture_output=True, text=True,
-        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "SNYK_TOKEN": "stub"})
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "SNYK_TOKEN": "stub",
+             "GITHUB_OUTPUT": str(out_file)})
+    proc.control_class = dict(
+        line.split("=", 1) for line in out_file.read_text().splitlines() if "=" in line
+    ).get("control_class")
+    return proc
+
+
+# What the scanner prints, under `--ci --verbose`, when the control's one call is the
+# one the daily cap refuses (run logs, 2026-09-14): the 429 text as a warning, then the
+# exit line naming X007. No risk is reported because nothing was analysed.
+_QUOTA_SCANNER_OUTPUT = (
+    "Scanning /tmp/registry-scan-redprove-x\n"
+    f"WARNING  [X007 info]: {_QUOTA_MESSAGE}\n"
+    "CI (--ci): exiting with code 1 (runtime failure codes: X007)."
+)
+
+
+def test_the_red_proof_names_the_daily_cap_as_quota_not_as_a_blind_scanner(tmp_path):
+    """A control the cap refused is not a control the scanner ignored.
+
+    The blind-scanner message says "the scanner cannot echo that string back without
+    having read and flagged the file, so its absence means the scan did not see the
+    fixture" — true when the scanner answered and said nothing, false when it answered
+    HTTP 429 and analysed nothing. On 2026-09-14 the control printed that message over
+    a quota failure, and the run was announced as a blind scanner. It must still FAIL
+    (the gate is unproven either way), under its own outcome and its own words.
+    """
+    proc = _run_redprove(tmp_path, scanner_output=_QUOTA_SCANNER_OUTPUT, scanner_exit=1)
+    assert proc.returncode == 1, "a control the cap refused must not count as proven"
+    text = proc.stdout + proc.stderr
+    assert "NOT PROVEN" in text
+    assert "QUOTA" in text, "the control did not name the daily cap as its outcome"
+    assert "blind scanner" not in text.lower(), (
+        "the control announced a blind scanner over a quota failure")
+    assert "never mentions" not in text, "the anchor-missing message was printed over a quota failure"
+    assert "reset" in text.lower(), "the quota outcome must say the cap resets"
+    assert proc.control_class == "quota", (
+        "the control must publish control_class=quota so the verdict step can name it")
+
+
+def test_the_red_proof_publishes_its_outcome_for_the_verdict_step(tmp_path):
+    """Three distinct outcomes, three distinct classes: proven, blind, quota."""
+    spec = importlib.util.spec_from_file_location("registry_scan_redprove", _REDPROVE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    proven = _run_redprove(
+        tmp_path,
+        scanner_output=f"1 risk: Unverifiable URLs: {module.expected_evidence()}/install.sh\n"
+                       "CI (--ci): exiting with code 1 (risks found).",
+        scanner_exit=1)
+    assert proven.returncode == 0 and proven.control_class == "proven", proven.stdout + proven.stderr
+    blind = _run_redprove(tmp_path, scanner_output="Scan complete. No risks.", scanner_exit=0)
+    assert blind.returncode == 1 and blind.control_class == "blind"
+
+
+def test_an_analysis_error_that_is_not_the_cap_is_not_called_quota_by_the_control(tmp_path):
+    """X007 alone is any analysis-endpoint error (401, 413, 5xx, timeout). The control
+    must not call a rejected token 'quota' — that would send the fix to the wrong
+    place — and it must not call it 'blind' either: the scanner did not answer."""
+    proc = _run_redprove(
+        tmp_path,
+        scanner_output="WARNING  [X007 info]: Unauthorized. Please check your SNYK_TOKEN "
+                       "environment variable or your push key.\n"
+                       "CI (--ci): exiting with code 1 (runtime failure codes: X007).",
+        scanner_exit=1)
+    assert proc.returncode == 1
+    text = proc.stdout + proc.stderr
+    assert "QUOTA" not in text
+    assert "blind scanner" not in text.lower()
+    assert proc.control_class == "operational"
 
 
 def test_the_red_proof_fails_when_the_scanner_says_nothing(tmp_path):
@@ -1372,12 +1450,6 @@ def test_the_pin_is_stated_once_and_matches_everywhere(workflow: dict):
 # ---------------------------------------------------------------------------
 
 _GATE = _REPO / ".github" / "scripts" / "registry_scan_gate.py"
-
-# The scanner's real 429 text, verbatim from `agent_scan/verify_api.py` at the pin.
-_QUOTA_MESSAGE = (
-    "Daily usage limit reached for the public version of Agent-Scan. Unlock higher "
-    "limits and enterprise features by contacting us at https://evo.ai.snyk.io/#contact-us."
-)
 
 
 def _payload(skills=None, *, path_error=None):
