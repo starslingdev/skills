@@ -923,7 +923,11 @@ class GhClient:
         or ABSENT. A truncate-in-place write interrupted mid-body (Ctrl-C, a timeout, a
         crash) would leave a prefix that replays as valid-but-SHORT JSON — a
         `{"jobs": [` stub reads back as "no jobs" — where an absent file replays as
-        honestly missing. The temp file is removed on every exit path."""
+        honestly missing. The temp file is removed on every exit path the interpreter
+        runs (success, an `OSError`, Ctrl-C); only a hard kill (SIGKILL, power loss)
+        between the write and the rename can leave it, and a leftover is harmless:
+        it is dot-prefixed, replay looks fixtures up by exact name and never reads
+        it, and the corpus-inventory test fails loudly if one is ever committed."""
         fname = _fixture_name(endpoint, ext)
         with self._lock:
             prior = self._recorded_from.get(fname)

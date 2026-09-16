@@ -29,7 +29,9 @@ unversioned and updates by reinstall from `main`.
   place, so an interrupted write (Ctrl-C, a timeout, a crash mid-body) left a
   prefix that replays as valid-but-short JSON. The response is now written to a
   temp file in the record directory and renamed into place, so a fixture is
-  either complete or absent, and the temp file is removed on every exit path.
+  either complete or absent, and the temp file is removed on every exit path the
+  interpreter runs (only a hard kill mid-write can leave one; it is dot-prefixed
+  and replay never reads it).
   Red-first: the new two-thread collision test fails on the previous code with
   both writers succeeding and nothing raised. (#100)
 
