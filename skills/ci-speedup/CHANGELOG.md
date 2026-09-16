@@ -9,6 +9,30 @@ unversioned and updates by reinstall from `main`.
 > this repository's history. The numbers are kept for the maintainers' audit
 > trail; they are not links you can follow here.
 
+## 2026-09-15 — Fixed: fixture recording could silently keep the wrong response
+
+### Fixed
+
+- **2026-09-15** — **Recording a fixture now refuses a colliding name under the
+  lock, and writes the file atomically.** This only touches the maintainer-only,
+  opt-in record mode (`CI_SPEEDUP_GH_RECORD`); a normal audit never records and
+  replay behaviour is unchanged. Two defects. First, the fixture filename mapping
+  is lossy, so two different endpoints can target one file; the guard for that
+  promised to raise, but it read "is this file claimed?" under the client lock,
+  wrote the file outside it, and only then claimed the name — so two pooled
+  fetch workers colliding in the same wave both saw "unclaimed", both wrote, the
+  last writer won and nothing raised, leaving a corpus that replays one
+  endpoint's body under the other's name (valid-but-wrong JSON). The check and
+  the claim are now one critical section, the claim is taken before the write,
+  and the loser raises exactly as documented; re-recording the same endpoint
+  remains an idempotent overwrite. Second, the write truncated the file in
+  place, so an interrupted write (Ctrl-C, a timeout, a crash mid-body) left a
+  prefix that replays as valid-but-short JSON. The response is now written to a
+  temp file in the record directory and renamed into place, so a fixture is
+  either complete or absent, and the temp file is removed on every exit path.
+  Red-first: the new two-thread collision test fails on the previous code with
+  both writers succeeding and nothing raised. (#100)
+
 ## [Unreleased]
 
 ### Added
