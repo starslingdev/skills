@@ -1312,3 +1312,258 @@ def test_the_pin_is_stated_once_and_matches_everywhere(workflow: dict):
         f"scanner is invoked at {sorted(found)} but the contract pins {pin!r} — a "
         "half-bumped pin runs two different contracts in one job")
     assert pin in contract.STALE_PIN_HINT, "the hint no longer names the pinned version"
+
+
+# ---------------------------------------------------------------------------
+# The offline gate. One scanner call per run: the unfiltered `--json` pass is the
+# only network call over `skills/`, and `registry_scan_gate.py` derives the verdict
+# from that document instead of asking the scanner a second time under `--ci`.
+# Every branch below is executed against a fixture payload, not grepped.
+# ---------------------------------------------------------------------------
+
+_GATE = _REPO / ".github" / "scripts" / "registry_scan_gate.py"
+
+# The scanner's real 429 text, verbatim from `agent_scan/verify_api.py` at the pin.
+_QUOTA_MESSAGE = (
+    "Daily usage limit reached for the public version of Agent-Scan. Unlock higher "
+    "limits and enterprise features by contacting us at https://evo.ai.snyk.io/#contact-us."
+)
+
+
+def _payload(skills=None, *, path_error=None):
+    """A 0.6.0 `--json` document. Errors serialise with `category`, never a code."""
+    response = {"path": "skills", "skill_risks": skills or []}
+    if path_error is not None:
+        response["error"] = path_error
+    return {"scan_path_responses": [response]}
+
+
+def _skill(name, **risks):
+    return {"name": name, "risk_indexes": {
+        risk: {"score": 700, "evidence": f"{risk} evidence"} for risk in risks}}
+
+
+def _analysis_error(message):
+    """What `_analysis_error_response` writes for every path when the endpoint fails."""
+    return {"message": message, "exception": f"429, message='{message}'",
+            "is_failure": True, "category": "analysis_error"}
+
+
+def _run_gate(tmp_path, payload=None, *, raw=None, scanner_exit="0", missing=False):
+    """Execute the gate script the way the workflow does, and read back its outputs."""
+    findings = tmp_path / "registry-scan-findings.json"
+    if not missing:
+        findings.write_text(raw if raw is not None else json.dumps(payload), encoding="utf-8")
+    out_file = tmp_path / "gh_output"
+    out_file.touch()
+    proc = subprocess.run(
+        [sys.executable, str(_GATE), str(findings)],
+        cwd=tmp_path, capture_output=True, text=True,
+        env={"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(out_file),
+             "SCAN_PATH": "skills", "SCANNER_EXIT": scanner_exit, "HOME": str(tmp_path)},
+    )
+    outputs = dict(
+        line.split("=", 1) for line in out_file.read_text().splitlines() if "=" in line)
+    return proc, outputs
+
+
+def test_the_gate_classifies_a_blocking_risk_as_a_finding(tmp_path):
+    """The whole point, executed: a non-exempt risk in the JSON fails the build as a
+    FINDING, with a titled annotation naming the risk, and never says NOT A FINDING."""
+    proc, outputs = _run_gate(tmp_path, _payload([_skill("ci-secure", suspicious_download_url=1)]))
+    assert outputs.get("scan_class") == "finding", (proc.stdout, proc.stderr)
+    assert proc.returncode == 1
+    assert "::error title=REGISTRY SCAN FINDING" in proc.stdout
+    assert "suspicious_download_url" in proc.stdout and "ci-secure" in proc.stdout
+    assert "NOT A FINDING" not in proc.stdout + proc.stderr
+
+
+def test_the_gate_passes_a_scan_carrying_only_exempt_risks(tmp_path):
+    """The owner's ruling, applied offline: the one exempt risk never blocks."""
+    proc, outputs = _run_gate(
+        tmp_path, _payload([_skill("ci-speedup", third_party_content_exposure=1)]))
+    assert outputs.get("scan_class") == "clean", (proc.stdout, proc.stderr)
+    assert proc.returncode == 0
+
+
+def test_the_gate_passes_an_empty_scan(tmp_path):
+    proc, outputs = _run_gate(tmp_path, _payload([_skill("ci-secure")]))
+    assert outputs.get("scan_class") == "clean", (proc.stdout, proc.stderr)
+    assert proc.returncode == 0
+
+
+def test_the_gate_names_the_daily_cap_as_quota_and_still_fails(tmp_path):
+    """The 2026-09-14 state: HTTP 429 from the analysis endpoint, serialised as an
+    `analysis_error` (X007) whose message is the scanner's daily-cap text.
+
+    It is its own class, with its own title, because it is neither a finding nor a
+    broken scanner — and it still fails the job, because nothing was verified.
+    """
+    proc, outputs = _run_gate(tmp_path, _payload(path_error=_analysis_error(_QUOTA_MESSAGE)))
+    assert outputs.get("scan_class") == "quota", (proc.stdout, proc.stderr)
+    assert proc.returncode == 1, "a scan the cap prevented must not be green"
+    assert "::error title=REGISTRY SCAN QUOTA EXHAUSTED — NOT A FINDING::" in proc.stdout
+    lowered = proc.stdout.lower()
+    assert "daily" in lowered and "reset" in lowered, "the annotation must say the cap resets daily"
+    assert "DID NOT COMPLETE" not in proc.stdout, "the cap must not be reported as a broken scanner"
+
+
+def test_an_analysis_error_that_is_not_the_cap_is_operational(tmp_path):
+    """X007 is `analysis_error`, which the scanner also uses for 401, 413, 5xx and
+    timeouts. Only the 429 text means quota; the rest is DID NOT COMPLETE."""
+    proc, outputs = _run_gate(tmp_path, _payload(path_error=_analysis_error(
+        "Unauthorized. Please check your SNYK_TOKEN environment variable or your push key.")))
+    assert outputs.get("scan_class") == "operational", (proc.stdout, proc.stderr)
+    assert proc.returncode == 1
+    assert "::error title=REGISTRY SCAN DID NOT COMPLETE::" in proc.stdout
+    assert "X007" in proc.stdout, "the scanner's code must be named, as its own exit line would"
+    assert "QUOTA" not in proc.stdout
+
+
+def test_a_skill_scan_error_is_operational_and_carries_its_code(tmp_path):
+    """A serialised error has a `category`, not a code; the gate mints the code the
+    scanner's own `--ci` exit line would have printed (`skill_scan_error` -> X002)."""
+    proc, outputs = _run_gate(tmp_path, _payload([{
+        "name": "ci-secure", "risk_indexes": {},
+        "error": {"message": "skill scan failed", "is_failure": True,
+                  "category": "skill_scan_error"}}]))
+    assert outputs.get("scan_class") == "operational", (proc.stdout, proc.stderr)
+    assert "X002" in proc.stdout
+    assert proc.returncode == 1
+
+
+def test_an_informational_error_does_not_fail_the_gate(tmp_path):
+    """The scanner's `--ci` weighs only errors with `is_failure`; a `file_not_found`
+    is informational there, so it is informational here — the gate must agree with
+    the one it replaced, in both directions."""
+    proc, outputs = _run_gate(tmp_path, _payload(path_error={
+        "message": "no config here", "is_failure": False, "category": "file_not_found"}))
+    assert outputs.get("scan_class") == "clean", (proc.stdout, proc.stderr)
+    assert proc.returncode == 0
+
+
+def test_the_gate_reports_a_missing_document_as_did_not_run(tmp_path):
+    proc, outputs = _run_gate(tmp_path, missing=True, scanner_exit="2")
+    assert outputs.get("scan_class") == "did-not-run", (proc.stdout, proc.stderr)
+    assert proc.returncode == 1
+    assert "::error title=REGISTRY SCAN DID NOT RUN::" in proc.stdout
+    assert "exited 2" in proc.stdout, "a scanner that could not start must be reported with its exit"
+
+
+def test_the_gate_reports_unparseable_output_as_did_not_run(tmp_path):
+    proc, outputs = _run_gate(tmp_path, raw="the scanner crashed before writing anything\n")
+    assert outputs.get("scan_class") == "did-not-run", (proc.stdout, proc.stderr)
+    assert proc.returncode == 1
+
+
+def test_the_gate_never_reads_an_unrecognised_shape_as_clean(tmp_path):
+    """Valid JSON in a shape the contract cannot read is the 0.5.x failure: it parsed,
+    yielded nothing, and was read as clean for a week."""
+    proc, outputs = _run_gate(tmp_path, {"results": {"skills": {"issues": []}}})
+    assert outputs.get("scan_class") == "did-not-run", (proc.stdout, proc.stderr)
+    assert proc.returncode == 1
+
+
+def test_an_unknown_risk_name_is_a_finding(tmp_path):
+    """A risk outside the pinned vocabulary is not exempt, so it blocks — and the
+    annotation says the catalog moved, so the red is read as both."""
+    proc, outputs = _run_gate(tmp_path, _payload([_skill("ci-secure", brand_new_risk_2027=1)]))
+    assert outputs.get("scan_class") == "finding", (proc.stdout, proc.stderr)
+    assert proc.returncode == 1
+    assert "brand_new_risk_2027" in proc.stdout
+    assert "vocabulary" in proc.stdout.lower() or "catalog" in proc.stdout.lower()
+
+
+def test_a_real_finding_beside_a_quota_error_is_still_a_finding(tmp_path):
+    """The two are not exclusive in the document, and the finding must win: putting
+    NOT A FINDING over a run that found something is the label that most
+    discourages the one look a human most needs to take."""
+    proc, outputs = _run_gate(tmp_path, _payload(
+        [_skill("ci-secure", malicious_code=1)], path_error=_analysis_error(_QUOTA_MESSAGE)))
+    assert outputs.get("scan_class") == "finding", (proc.stdout, proc.stderr)
+    assert "NOT A FINDING" not in proc.stdout + proc.stderr
+
+
+def test_the_gate_classifies_on_structure_not_on_prose(tmp_path):
+    """The evidence text of a scanned skill is untrusted prose. A CI-security skill's
+    own evidence can say `risks found`, `X007` or the cap message; none of it is a
+    signal. The old shell grepped the log and once let scanned prose classify a run."""
+    prose = f"Reports risks found; mentions X007 and says: {_QUOTA_MESSAGE}"
+    proc, outputs = _run_gate(tmp_path, _payload([{
+        "name": "ci-secure", "risk_indexes": {
+            "third_party_content_exposure": {"score": 300, "evidence": prose}}}]))
+    assert outputs.get("scan_class") == "clean", (proc.stdout, proc.stderr)
+    assert proc.returncode == 0
+
+
+def test_a_clean_document_from_a_scanner_that_did_not_exit_zero_is_unclassified(tmp_path):
+    """A scan that broke is not a scan that passed. If the document reads clean but
+    the scanner did not exit 0, the honest answer is 'cannot say' — it fails the
+    build without claiming to be a security result."""
+    proc, outputs = _run_gate(tmp_path, _payload([_skill("ci-secure")]), scanner_exit="1")
+    assert outputs.get("scan_class") == "indeterminate", (proc.stdout, proc.stderr)
+    assert proc.returncode == 1
+    assert "::error title=REGISTRY SCAN RESULT UNCLASSIFIED::" in proc.stdout
+
+
+def test_the_gate_publishes_the_scanner_exit_for_the_verdict_step(tmp_path):
+    """The verdict annotation renders `exit <n>, class <c>`; both keys must be written
+    on every path, including the ones that never read the document."""
+    for kwargs, exit_code in (
+        ({"payload": _payload([_skill("ci-secure")])}, "0"),
+        ({"missing": True}, "2"),
+    ):
+        _, outputs = _run_gate(tmp_path, scanner_exit=exit_code, **kwargs)
+        assert outputs.get("scan_exit") == exit_code, outputs
+        assert outputs.get("scan_class"), outputs
+
+
+def _load_gate_module():
+    spec = importlib.util.spec_from_file_location("registry_scan_gate", _GATE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_an_exemption_the_vocabulary_does_not_carry_is_stale(tmp_path, monkeypatch, capsys):
+    """The scanner used to drop a retired exemption name with a yellow warning and
+    exit 0 — the silent way the 2026-08 outage hid. Offline, the same drift is a
+    NON_BLOCKING name outside the pinned vocabulary, and the gate refuses to run
+    under it rather than scanning under a policy nobody chose."""
+    module = _load_gate_module()
+    monkeypatch.setattr(module, "NON_BLOCKING_RISKS", ("third_party_content_exposure_v2",))
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(_payload([_skill("ci-secure")])), encoding="utf-8")
+    out_file = tmp_path / "gh_output"
+    out_file.touch()
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out_file))
+    assert module.main(["gate", str(findings)]) == 1
+    assert "scan_class=exemption-stale" in out_file.read_text()
+    assert "EXEMPTION IS STALE" in capsys.readouterr().out
+
+
+def test_the_gate_reads_its_exemption_list_from_the_shared_contract():
+    """The gate must not restate the ruling inline. An inline list would exempt the
+    very risk the red-proof anchors on while the red-proof — which reads the
+    contract — stayed green. Drift between the two is the single thing
+    `registry_scan_contract.py` exists to prevent."""
+    source = _GATE.read_text(encoding="utf-8")
+    assert re.search(r"from registry_scan_contract import \(?[^)]*\bNON_BLOCKING_RISKS\b", source), (
+        "the gate does not import NON_BLOCKING_RISKS from the shared contract")
+    contract = _load_contract_module()
+    code_lines = [ln for ln in source.splitlines() if not ln.lstrip().startswith("#")]
+    for risk in contract.SKILL_RISKS + contract.SERVER_RISKS:
+        assert not any(risk in ln for ln in code_lines), (
+            f"the gate names the risk {risk!r} inline; the ruling has exactly one home, "
+            f"in registry_scan_contract.py")
+
+
+def test_a_scan_error_row_carries_the_code_the_scanner_would_print():
+    """`ScanError` serialises a `category`, never a code. The contract must mint the
+    same X-code the CLI's exit line would, or the reporter's table and the gate's
+    annotation name `scan_error:unknown` on every real payload."""
+    contract = _load_contract_module()
+    rows = contract.iter_findings(_payload(path_error=_analysis_error(_QUOTA_MESSAGE)))
+    assert [r["risk"] for r in rows] == ["scan_error:X007"], rows
+    assert rows[0]["quota"] is True
+    assert contract.FAILURE_CATEGORY_TO_CODE["skill_scan_error"] == "X002"

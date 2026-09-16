@@ -101,6 +101,57 @@ BLOCKING_RISKS: tuple[str, ...] = tuple(
     r for r in SKILL_RISKS + SERVER_RISKS if r not in NON_BLOCKING_RISKS
 )
 
+# The scanner's runtime-failure codes, verbatim from `FAILURE_CATEGORY_TO_CODE` in
+# `agent_scan/models/errors.py` at the pinned version.
+#
+# These never appear in the `--json` payload. An error there is serialised as
+# `{"message", "category", "is_failure", ...}` — the category is the durable field —
+# and the X-code is minted by the CLI only when it prints its `--ci` exit line, which
+# JSON mode does not print. The gate reads the JSON, so it needs the same mapping the
+# CLI applies, or an `analysis_error` row would carry no code a human recognises.
+FAILURE_CATEGORY_TO_CODE: dict[str | None, str] = {
+    "server_startup": "X001",
+    "skill_scan_error": "X002",
+    "file_not_found": "X003",
+    "unknown_config": "X004",
+    "parse_error": "X005",
+    "server_http_error": "X006",
+    "analysis_error": "X007",
+    None: "X008",
+    "user_declined": "X009",
+}
+
+# What the scanner says when the public tier's daily cap is hit — the text it attaches
+# to an `analysis_error` for HTTP 429 (`agent_scan/verify_api.py`, pinned version).
+#
+# The CODE alone does not mean quota: X007 is `analysis_error`, which the scanner also
+# uses for a rejected token (401), an oversized request (413), a server error and a
+# timeout. Naming any of those "quota" would be the same mislabel this gate keeps
+# removing — a red that sends the reader to the wrong cause. So the quota class is
+# keyed on the message, which is the one thing that differs between them.
+QUOTA_MESSAGE_MARKER = "Daily usage limit"
+
+
+def failure_code(error: dict) -> str:
+    """The X-code the CLI would print for a serialised `ScanError`.
+
+    Reads `category` the way `_collect_response_failure_codes` does, falling back to an
+    explicit `code` key (which the scanner never writes, but a fixture may) and then to
+    the scanner's own catch-all, X008.
+    """
+    category = error.get("category")
+    if category in FAILURE_CATEGORY_TO_CODE:
+        return FAILURE_CATEGORY_TO_CODE[category]
+    return str(error.get("code") or FAILURE_CATEGORY_TO_CODE[None])
+
+
+def is_quota_error(error: dict) -> bool:
+    """True for the one `analysis_error` that means the daily cap, not a broken scanner."""
+    if not isinstance(error, dict):
+        return False
+    text = str(error.get("message") or error.get("exception") or "")
+    return QUOTA_MESSAGE_MARKER.lower() in text.lower()
+
 
 class UnrecognisedPayload(ValueError):
     """The scanner's JSON parsed, but is not a shape this contract understands."""
@@ -183,10 +234,14 @@ def _append_error(rows: list[dict], error, where: str) -> None:
     detail = " ".join(str(error.get("message") or error.get("code") or error).split())
     rows.append(
         {
-            "risk": f"scan_error:{error.get('code') or 'unknown'}",
+            "risk": f"scan_error:{failure_code(error)}",
             "skill": where,
             "score": None,
             "evidence": f"The scanner could not analyse this entry: {detail}",
-            "blocking": True,
+            # The scanner's own `--ci` weighs only errors with `is_failure` set: a
+            # `file_not_found` or `unknown_config` is informational and does not fail
+            # its exit. Mirrored, so the offline gate agrees with the one it replaced.
+            "blocking": bool(error.get("is_failure", True)),
+            "quota": is_quota_error(error),
         }
     )
