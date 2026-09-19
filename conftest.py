@@ -44,7 +44,7 @@ _REPO_ROOT = Path(__file__).resolve().parent
 # Guard 1: at import time — before collection, before any test subprocess.
 for _var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
              "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-             "GIT_NAMESPACE"):
+             "GIT_NAMESPACE", "GIT_CONFIG_PARAMETERS"):
     os.environ.pop(_var, None)
 
 
