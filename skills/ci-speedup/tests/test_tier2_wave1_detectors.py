@@ -2858,3 +2858,34 @@ def test_opt77_credits_only_runs_where_every_job_in_the_group_appeared():
     sc = out[0]["setup_consolidation"]
     assert sc["occurrences"] == 1
     assert sc["runner_min_saving"] == 133.3
+
+
+def test_setup_classifier_never_reads_a_build_or_test_command_as_setup():
+    """`_classify_step` is the ONE shared definition of a setup step, and OPT49
+    ("Slow Setup Step") and OPT51 (install ratio) consume it too — so a build or
+    test command misread as setup does not just inflate a consolidation, it invents
+    a sized "cache this setup" finding about a step that is neither.
+
+    `mvn install` COMPILES and tests; it is a build, not a dependency install. And
+    an install keyword must be the tool's own subcommand, never a word occurring
+    somewhere later on the line — a test filter naming a `Get*` class, or a spec
+    file called `get_spec.rb`, is not setup."""
+    for name in ("Run mvn install", "Run mvn -B install -DskipTests",
+                 "Run mvn verify", "Run mvn -B test -Dtest=GetUserIT",
+                 "Run gradle test --tests '*.GetSpec'",
+                 "Run gradle build", "Run bundle exec rspec spec/get_spec.rb",
+                 "Run poetry run pytest tests/get_user_test.py",
+                 "Run poetry run python scripts/get_data.py",
+                 "Run npm run download-fixtures"):
+        assert cr._classify_step(name) != "setup", name
+
+
+def test_setup_classifier_recognises_the_remaining_install_idioms():
+    """Complements the negative list above: the tool's own install subcommand still
+    has to classify as setup, including the ones the first pass missed entirely
+    (`mix deps.get` could never match, and `uv sync` is the modern uv idiom)."""
+    for name in ("Run mix deps.get", "Run uv sync", "Run uv pip install -r req.txt",
+                 "Run pipenv install --deploy", "Run npm i --prefer-offline",
+                 "Run python3 -m pip install -r requirements.txt",
+                 "Run mvn dependency:go-offline"):
+        assert cr._classify_step(name) == "setup", name

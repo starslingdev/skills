@@ -6276,10 +6276,21 @@ _SETUP_STEP_RE = _re.compile(
     # part of the measured setup prefix rather than "useful work". Without them
     # the single largest component of a real setup prefix is invisible unless
     # the workflow author happened to name the step.
-    r"(npm|pnpm|yarn|bun) (ci|install)|"
-    r"(pip3?|poetry|pipenv|uv|bundle|composer|mix deps\.get|"
-    r"go mod|cargo fetch|gradle|mvn)\b[^\n]*\b(install|download|get|dependencies)|"
-    r"go mod download|cargo fetch)",
+    #
+    # Each alternative pins the install verb as the TOOL'S OWN SUBCOMMAND. Do not
+    # bridge tool and verb with a wildcard: an install word appearing anywhere
+    # later on the line matches ordinary build and test commands (`mvn -B test
+    # -Dtest=GetUserIT`, `bundle exec rspec spec/get_spec.rb`), and because this
+    # definition is shared with OPT49 and OPT51 a false positive here does not
+    # just inflate a consolidation — it invents a sized "cache this slow setup
+    # step" finding about a step that is a build. `mvn install` and `gradle
+    # build` are builds, so only Maven's dependency plugin qualifies.
+    r"(npm|pnpm|yarn|bun) (ci|install|i)\b|"
+    r"(pip3?|pipenv|poetry|uv) (install|sync)\b|"
+    r"uv pip install\b|"
+    r"python3? -m pip install\b|"
+    r"bundle install\b|composer install\b|mix deps\.get\b|"
+    r"go mod download\b|cargo fetch\b|mvn dependency:)",
     _re.IGNORECASE,
 )
 _WORK_STEP_RE = _re.compile(
@@ -8176,9 +8187,11 @@ _CONSOLIDATION_MIN_JOBS = 3
 _CONSOLIDATION_MIN_SETUP_SHARE = 0.5
 
 
-def _leading_setup_prefix(job: dict[str, Any]) -> tuple[tuple[str, ...], float] | None:
-    """This job's LEADING setup prefix as (signature, measured seconds), or None
-    when the job has no timed steps or does not open with one.
+def _leading_setup_prefix(
+    job: dict[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...], float] | None:
+    """This job's LEADING setup prefix as (signature, display names, measured
+    seconds), or None when the job has no timed steps or does not open with one.
 
     "Setup" is `_classify_step(...) == "setup"` — the SAME coarse classifier the
     hygiene setup detectors (OPT49/OPT51) are defined against, so the skill has
@@ -8186,7 +8199,9 @@ def _leading_setup_prefix(job: dict[str, Any]) -> tuple[tuple[str, ...], float] 
     or a re-configure in the middle of a job is not part of the fixed prefix a
     consolidation would pay once.
 
-    The SIGNATURE is the ordered tuple of those steps' normalized names, and it is
+    The SIGNATURE is the ordered tuple of those steps' casefolded names, used only
+    for comparison and grouping; the display names are the same steps as written,
+    so the rendered evidence can name the prefix without lowercasing it. It is
     what lets the caller show that two jobs re-pay the SAME setup rather than merely
     equally expensive ones. Duration alone cannot: a Node check, a Python check and
     a Go check can each spend 80s installing entirely different dependencies, and
@@ -8198,12 +8213,15 @@ def _leading_setup_prefix(job: dict[str, Any]) -> tuple[tuple[str, ...], float] 
         return None
     total = 0.0
     sig: list[str] = []
+    shown: list[str] = []
     for name, dur in steps:
         if _classify_step(name) != "setup":
             break
-        sig.append(" ".join(str(name or "").split()).casefold())
+        tidy = " ".join(str(name or "").split())
+        shown.append(tidy)
+        sig.append(tidy.casefold())
         total += dur
-    return (tuple(sig), total) if total > 0 else None
+    return (tuple(sig), tuple(shown), total) if total > 0 else None
 
 
 def _consolidation_yaml_key(job_name: str, wf_doc: dict[str, Any]) -> str | None:
@@ -8299,6 +8317,7 @@ def _detect_opt77_repeated_setup_across_small_jobs(
     per_run: list[dict[str, tuple[float, float]]] = []
     observed_runner: dict[str, set[str]] = {}
     observed_setup_sig: dict[str, set[tuple[str, ...]]] = {}
+    observed_setup_display: dict[str, tuple[str, ...]] = {}
     # A display name carried by MORE THAN ONE job in a single run is not one job.
     # The usual cause is a matrix that declares a static `name:` (no ${{ matrix.* }}
     # in it), so every leg renders under that one name — which then resolves to
@@ -8325,13 +8344,14 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             prefix = _leading_setup_prefix(job)
             if dur <= 0 or prefix is None:
                 continue
-            sig, setup = prefix
+            sig, shown, setup = prefix
             if setup <= 0 or setup > dur:
                 continue
             split[name] = (setup, dur - setup)
             observed_runner.setdefault(name, set()).add(
                 _occurrence_runner_label(job) or "")
             observed_setup_sig.setdefault(name, set()).add(sig)
+            observed_setup_display.setdefault(name, shown)
         per_run.append(split)
 
     candidates: dict[str, dict[str, Any]] = {}
@@ -8369,6 +8389,7 @@ def _detect_opt77_repeated_setup_across_small_jobs(
         if setup_p50 < _CONSOLIDATION_MIN_SETUP_SHARE * (setup_p50 + useful_p50):
             continue
         candidates[name] = {"key": key, "runner": declared, "setup_sig": setup_sig,
+                            "setup_display": observed_setup_display.get(name, ()),
                             "setup_p50": setup_p50, "useful_p50": useful_p50}
 
     # Group by runner AND by the setup prefix itself, never by runner alone. The
@@ -8418,7 +8439,10 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                  f"{candidates[name]['useful_p50']:.0f}s",
                  f"{float(job_p50.get(name) or 0.0):.0f}s"]
                 for name in names]
-        prefix_render = " → ".join(setup_sig[:4]) + ("…" if len(setup_sig) > 4 else "")
+        shown_prefix = (tuple(candidates[names[0]].get("setup_display") or ())
+                        or setup_sig)
+        prefix_render = (" → ".join(shown_prefix[:4])
+                         + ("…" if len(shown_prefix) > 4 else ""))
         evidence = (
             f"{n_jobs} independent same-runner (`{runner}`) jobs each re-pay the same "
             f"measured setup prefix ({len(setup_sig)} step(s): {prefix_render}) "
