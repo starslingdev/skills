@@ -5836,6 +5836,16 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
     "OPT29": (_RM_DOOR_DERIVE,
               "merge-queue step-level skip — hit_rate x the affected job's measured billable "
               "(only runner provisioning is wasted; the credited figure is a ceiling)"),
+    # NOT DERIVABLE — but NOT for the generic `measured` reason below, which
+    # describes a run-elimination detector sized off an eliminated-runs /
+    # prior-attempt slice. OPT77 eliminates no run: its basis is the measured
+    # leading setup prefix of jobs that all keep running, just in one job
+    # instead of N. Letting it fall through would stamp every OPT77 finding
+    # with provenance text that misdescribes the number beside it.
+    "OPT77": (_RM_DOOR_NOT_DERIVABLE,
+              "measured setup-prefix detector — basis is the per-job leading setup "
+              "prefix measured from the jobs API steps[] timestamps (removed setup "
+              "runtime), not the per-job cost spine and not an eliminated-runs slice"),
     # CLAMP — the cluster-floor lever's MODELED shared-step credit (#43 proving
     # instance): clamp to the affected jobs' measured billable so it can never
     # exceed what the jobs consume (nx: 1919.7 -> <= 1404.4).
@@ -6258,7 +6268,18 @@ _SETUP_STEP_RE = _re.compile(
     r"^(run )?(set up |setup |checkout|install|cache|restore|fetch|"
     r"docker (login|pull|compose up)|configure|init |bootstrap|"
     r"actions/(checkout|setup-[\w.-]+|cache)|"
-    r"pnpm/action-setup|setup-node|setup-python|setup-go|setup-pnpm)",
+    r"pnpm/action-setup|setup-node|setup-python|setup-go|setup-pnpm|"
+    # The dependency install is usually an UNNAMED `run:` step, which GitHub
+    # renders as `Run <the command>` — so the install keyword is not at the
+    # front and none of the alternatives above reach it. These are the install
+    # commands themselves, which is what makes `Run npm ci` / `Run pip install`
+    # part of the measured setup prefix rather than "useful work". Without them
+    # the single largest component of a real setup prefix is invisible unless
+    # the workflow author happened to name the step.
+    r"(npm|pnpm|yarn|bun) (ci|install)|"
+    r"(pip3?|poetry|pipenv|uv|bundle|composer|mix deps\.get|"
+    r"go mod|cargo fetch|gradle|mvn)\b[^\n]*\b(install|download|get|dependencies)|"
+    r"go mod download|cargo fetch)",
     _re.IGNORECASE,
 )
 _WORK_STEP_RE = _re.compile(
@@ -8278,11 +8299,27 @@ def _detect_opt77_repeated_setup_across_small_jobs(
     per_run: list[dict[str, tuple[float, float]]] = []
     observed_runner: dict[str, set[str]] = {}
     observed_setup_sig: dict[str, set[tuple[str, ...]]] = {}
+    # A display name carried by MORE THAN ONE job in a single run is not one job.
+    # The usual cause is a matrix that declares a static `name:` (no ${{ matrix.* }}
+    # in it), so every leg renders under that one name — which then resolves to
+    # exactly one YAML job and slips past the matrix exclusion, while `split[name]`
+    # below would keep only whichever leg was iterated last. Crediting one "setup
+    # payment" for what is really N concurrent legs, with a projection describing a
+    # single arbitrary leg, is not a saving anyone can act on. Fail closed.
+    collided: set[str] = set()
+    for run_jobs in jobs_per_run:
+        seen_in_run: set[str] = set()
+        for job in run_jobs:
+            nm = str(job.get("name") or "").strip()
+            if nm in seen_in_run:
+                collided.add(nm)
+            seen_in_run.add(nm)
+
     for run_jobs in jobs_per_run:
         split: dict[str, tuple[float, float]] = {}
         for job in run_jobs:
             name = str(job.get("name") or "").strip()
-            if not name:
+            if not name or name in collided:
                 continue
             dur = _job_compute_s(job)
             prefix = _leading_setup_prefix(job)
@@ -8401,7 +8438,25 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                   "checkout, setup-* actions, dependency installs). The saving is "
                   "(N-1) x the SMALLEST setup p50 in the group — removed setup "
                   "runtime, not billing round-up — and no job runtime on the merge "
-                  "gate changes, so wall_clock_p50_s is 0."))
+                  "gate changes, so wall_clock_p50_s is 0. "
+                  # The GUARDRAIL token is what lifts this text into the copy-paste
+                  # agent prompt (`_tier2_guardrail_sentence`). Everything the agent
+                  # needs to know about how this fix goes wrong has to live after it:
+                  # the prompt is contracted to be self-contained, and neither the
+                  # size_note nor the catalog is rendered anywhere it can see.
+                  f"GUARDRAIL: consolidate exactly these jobs — {', '.join(names)} — "
+                  "into one job, and run their tasks CONCURRENTLY inside it. Run "
+                  "sequentially the consolidated job costs setup + the SUM of the "
+                  "tasks instead of setup + the slowest, which can push it past the "
+                  "merge gate and make this change wall-clock-negative. Consolidating "
+                  "also RENAMES the checks: if any of these jobs is a required status "
+                  "check, update branch protection to require the consolidated check, "
+                  "or the work silently stops gating merges. Before removing a job "
+                  "key, check whether any OTHER job in the workflow lists it in "
+                  "`needs:` — a dangling `needs:` reference makes the whole workflow "
+                  "fail to start. And weigh the cost this trades away: N separate "
+                  "checks are N independently-red, independently re-runnable units; "
+                  "one consolidated job is one red check that re-runs everything."))
         f = _new_finding(
             "OPT77", "MEDIUM", title, wf_path, "", evidence,
             "repeated-fixed-setup-across-independent-small-jobs",

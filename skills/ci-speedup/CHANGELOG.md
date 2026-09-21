@@ -67,13 +67,23 @@ unversioned and updates by reinstall from `main`.
   separately, because merging those would still have to run every install and so
   removes far less than it appears to. It
   withholds the finding entirely unless the consolidated job would still finish
-  comfortably faster than the merge gate, so the advice can never make the wait
-  for a pull request longer, and the fix it hands back says plainly that the
+  strictly faster than the workflow's cluster floor, so the advice can never make
+  the wait for a pull request longer, and the fix it hands back says plainly that the
   collapsed tasks must run concurrently inside the new job (run one after
   another they would cost the sum, not the slowest), that consolidating renames
   the checks so branch protection must be updated or the work silently stops
   gating merges, and that collapsing several checks into one trades away
   independently-red, independently-re-runnable checks.
+
+- **2026-09-21** — **The audit now recognises an unnamed dependency install as
+  setup.** The single shared definition of "this step is setup" keyed off the
+  step's name, and a step nobody named is shown by GitHub as the command it ran —
+  so `npm ci`, `pip install`, `bundle install` and their equivalents were read as
+  useful work rather than as the install they are. That made the largest part of a
+  typical setup prefix invisible to any measurement of it, on exactly the repos
+  least likely to have named their steps. The definition now also recognises
+  GitHub's rendering of an unnamed action step and the common install commands
+  themselves.
 
 - **2026-09-08** — **A fix that moves the slowest step out of a merge gate now
   says how to keep the gate.** The long-pole lever can hand back a fix that

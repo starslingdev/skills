@@ -730,10 +730,30 @@ saved:   (N - 1) x setup, every run
    collapsed tasks run concurrently inside it). If that projection reaches the
    workflow cluster floor, **withhold the finding**: consolidation serializes
    runner allocation and must never lengthen the merge gate.
-5. Credit `(N - 1) x setup_p50` runner-seconds per run, where `setup_p50` is the
-   **smallest** measured setup p50 in the group, scaled by the monthly volume for
+5. Credit `occurrences x (N - 1) x setup_p50` runner-seconds across the sample,
+   where `setup_p50` is the **smallest** measured setup p50 in the group and
+   `occurrences` is the number of sampled runs in which **every** credited job
+   actually ran — a run where one of them was skipped paid no duplicate setup for
+   it and so has none to remove. Scale that to a month by the monthly volume for
    the sampled event scope divided by sampled successful runs. This credits
    removed setup runtime only — no wall-clock speedup is ever claimed.
+
+**When this cannot fire (by construction).** A candidate must sit strictly below
+the workflow's cluster floor, and that floor is the **second-tallest** job p50 in
+the workflow. So the group can only be credited when at least two jobs in the
+workflow are taller than every member of it. A workflow that is one long job plus
+a flat row of equally-sized small checks sets its own floor from those checks and
+reports nothing — the saving is real there, but this detector will not claim it
+rather than reason about a floor the group itself defines.
+
+**What counts as the setup prefix.** Only the *leading* run of setup-classified
+steps, and only steps the classifier recognises: the implicit `Set up job`,
+`actions/checkout`, `setup-*` and `cache` actions, an explicitly named install
+step, and the common unnamed install commands (`npm ci`, `pnpm/yarn install`,
+`pip install`, `poetry`/`pipenv`/`uv`, `bundle install`, `composer install`,
+`go mod download`, `cargo fetch`). A setup step the classifier does not recognise
+ends the prefix, so its time lands in "useful work" and the group is sized
+conservatively or withheld — never inflated.
 
 **Fix**: Merge the group into one job that checks out and installs once, then
 runs the collapsed tasks **concurrently** inside that job (background processes
@@ -774,12 +794,14 @@ count) that lets `verify_report.py` re-derive both the credited minutes and the
 below-floor margin. It never claims a speedup; it credits only removed setup
 runtime.
 
-**Real-world example (Linear, 2026)**: seven independent checks each started a
-runner, checked out the repository and installed dependencies before doing only
-seconds of useful work. Consolidating them into two jobs, with the seven tasks
-running concurrently inside them, cut the number of times that setup overhead was
-paid from seven to two — about 87,000 runner-minutes a month, 11.8% of total CI
-usage.
+**Worked shape**: seven independent checks each start a runner, check out the
+repository and install dependencies before doing only seconds of useful work.
+Collapsing them into a single job, with the seven tasks running concurrently
+inside it, drops the number of times that setup prefix is paid from seven to one
+— `(7 - 1) x setup_p50` of removed setup runtime on every run of the workflow.
+Split across two consolidated jobs instead (say, because two of the checks need a
+different toolchain), the same arithmetic applies per group: each group of `n`
+pays its prefix once instead of `n` times.
 
 ---
 

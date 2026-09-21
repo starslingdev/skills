@@ -1385,7 +1385,7 @@ family):
 |---|---|---|---|
 | **derive** | OPT45 | `hit_rate × Σ(measured billable)` | `measured_spine_billable` |
 | **clamp** | OPT73 | `min(modeled, Σ(measured billable))` | `measured_spine_clamped` (or `measured_spine_billable` when already within) |
-| **not_spine_derivable** (the EXPLICIT whitelist) | the measured run-elimination detectors (OPT46/47/64/65 — basis is the eliminated-runs slice, not per-job billable); the modeled-static patterns (`direct` / `runner-min-only`, disclosed as modeled in the report's sized-of-total ratio); the other structural step-decomposition levers (OPT70/71/72/74/75, per-job step basis) | retained, with the reason recorded in `runner_min_door_note` | `not_spine_derivable` |
+| **not_spine_derivable** (the EXPLICIT whitelist) | the measured run-elimination detectors (OPT46/47/64/65 — basis is the eliminated-runs slice, not per-job billable); the measured setup-prefix detector (OPT77 — basis is the per-job leading setup prefix); the modeled-static patterns (`direct` / `runner-min-only`, disclosed as modeled in the report's sized-of-total ratio); the other structural step-decomposition levers (OPT70/71/72/74/75, per-job step basis) | retained, with the reason recorded in `runner_min_door_note` | `not_spine_derivable` |
 
 The whitelist is **visible, not a silent bypass**: a reasoned entry per family,
 and tightening the modeled/structural families from whitelist → clamp is tracked
@@ -1933,7 +1933,7 @@ wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -1987,7 +1987,7 @@ reported by `scan.py` as having no critical-path router.
   (dominant step/category, redundancy ratio, required-status, shared substep)
   annotate the pole they came from; the catalog OPT70–OPT75 findings are
   therefore **excluded** from the off-path "Also noticed" appendix
-  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76 only) since the pole already
+  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76/OPT77 only) since the pole already
   represents them. Like every pole, a structural lever carries an agent prompt
   rather than a prescribed fix; for a HIGH-risk lever (e.g. OPT70 scope-to-
   changed) the prompt's failure-mode/guard section tells the agent to state the

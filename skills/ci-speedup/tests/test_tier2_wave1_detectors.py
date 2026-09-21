@@ -2720,3 +2720,141 @@ def test_opt77_still_fires_when_every_job_shares_one_setup_prefix():
     assert len(out) == 1
     assert out[0]["pattern"] == "OPT77"
     assert out[0]["wall_clock_p50_s"] == 0.0
+
+
+def test_opt77_door_note_describes_its_own_basis():
+    """Every OPT77 finding stamps `runner_min_door_note`. The generic `measured`
+    branch describes a RUN-ELIMINATION detector whose basis is an eliminated-runs /
+    prior-attempt slice — which OPT77 is not, and does not use. Shipping that string
+    on an OPT77 finding is provenance text that misdescribes the number beside it."""
+    policy, reason = cr._rm_door_policy("OPT77")
+    assert policy == cr._RM_DOOR_NOT_DERIVABLE
+    low = reason.lower()
+    assert "run-elimination" not in low
+    assert "eliminated runs" not in low
+    assert "prior-attempt" not in low
+    assert "setup" in low
+
+
+def test_opt77_guardrail_reaches_the_copy_paste_agent_prompt():
+    """The rendered agent prompt is the artifact that performs the fix, and it is
+    built to be self-contained: `_tier2_guardrail_sentence` lifts the note's text
+    from the literal token GUARDRAIL to the end. Without that token OPT77's prompt
+    ships with no failure mode at all — not the intra-job concurrency requirement
+    (run sequentially the consolidated job costs setup + the SUM of the tasks), not
+    the required-status-check rename, not the lost failure isolation — and it never
+    names which jobs to merge."""
+    import importlib.util as _ilu
+    import pathlib as _pl
+    _bp_path = _pl.Path(cr.__file__).with_name("blocking_path.py")
+    _spec = _ilu.spec_from_file_location("_bp_for_opt77", _bp_path)
+    bp = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(bp)
+
+    out = _opt77()
+    assert len(out) == 1
+    sentence = bp._tier2_guardrail_sentence(out[0])
+    assert sentence, "OPT77's note carries no GUARDRAIL token, so the prompt has none"
+    low = sentence.lower()
+    assert "concurrent" in low            # the requirement
+    assert "sum" in low                   # and WHY it is load-bearing
+    assert "required status check" in low  # branch protection must be updated
+    assert "re-run" in low                # the failure-isolation trade
+    for name in _OPT77_NAMES:             # the group the fix must actually merge
+        assert name in sentence
+
+
+def test_opt77_withholds_a_job_name_that_is_not_one_job():
+    """`_consolidation_yaml_key` resolves an observed job name against the YAML.
+    A MATRIX job that declares a static `name:` (no ${{ matrix.* }} in it) renders
+    every leg under that one name, so it resolves to exactly one YAML job and slips
+    past the matrix exclusion — while `split[name]` keeps only the last leg seen, so
+    the credited medians describe one arbitrary leg of a matrix, not an independent
+    job. A name carried by more than one job in a single run is not one job."""
+    names = ("lint", "typecheck", "audit")
+    run = _opt77_run(names=names)
+    # `audit` is a 2-leg matrix with a static name: both legs render as "audit".
+    collided = run + [_setup_job("audit", 80.0, 10.0)]
+    assert _opt77(jpr=[collided, list(collided)],
+                  crit=_opt77_crit(names=names), wf=_opt77_wf(names=names)) == []
+
+
+def test_setup_classifier_counts_an_unnamed_dependency_install():
+    """GitHub names an unnamed `run:` step after its command, so the single largest
+    part of a real setup prefix arrives as `Run npm ci` / `Run pip install -r ...`.
+    Those have to classify as setup: `_leading_setup_prefix` stops at the first
+    non-setup step, so if the install is not setup it is both missing from the
+    measured prefix AND counted as "useful work", which withholds the finding on
+    exactly the shape the pattern exists to report."""
+    for name in ("Run npm ci", "Run pnpm install --frozen-lockfile",
+                 "Run yarn install", "Run pip install -r requirements.txt",
+                 "Run bundle install", "Run poetry install",
+                 "Run go mod download", "Run cargo fetch", "Run composer install"):
+        assert cr._classify_step(name) == "setup", name
+    # …and the widening must not swallow steps that are not setup.
+    for name in ("Run actions/upload-artifact@v4", "Run ./my-composite-action",
+                 "Run npm test", "Run eslint .", "Run docker/build-push-action@v5"):
+        assert cr._classify_step(name) != "setup", name
+
+
+def test_opt77_withholds_when_only_the_projection_reaches_the_floor():
+    """The projection-vs-floor gate is this pattern's ENTIRE wall-clock-safety
+    claim, and the homogeneous fixture cannot prove it: there every job p50 equals
+    the projection, so the per-job `p50 < floor` gate catches the case too and
+    either gate can be deleted with the suite still green. This group is
+    heterogeneous — every job p50 (90/102/100) is below the 110s floor, yet the
+    consolidated job projects to max(setup) + max(useful) = 100 + 40 = 140s, which
+    is NOT. Only the projection gate can withhold it."""
+    names = ("lint", "typecheck", "audit")
+    spec = {"lint": (80.0, 10.0), "typecheck": (100.0, 2.0), "audit": (60.0, 40.0)}
+    run = [_setup_job(n, s, w) for n, (s, w) in spec.items()]
+    crit = dict(_opt77_crit(names=names), floor_p50=110.0,
+                job_p50={n: s + w for n, (s, w) in spec.items()})
+    assert _opt77(jpr=[run, list(run)], crit=crit, wf=_opt77_wf(names=names)) == []
+
+
+def test_opt77_credits_the_smallest_setup_in_a_heterogeneous_group():
+    """The saving is deliberately `(N-1) x the SMALLEST` setup p50 — the conservative
+    floor on what each removed payment was worth. Every other fixture gives the jobs
+    an identical setup, so min == max and flipping one for the other changes nothing.
+    Here the setups differ (80/40/120), so `max` would stamp 120s and roughly triple
+    the credited runner-minutes."""
+    names = ("lint", "typecheck", "audit")
+    spec = {"lint": (80.0, 10.0), "typecheck": (40.0, 10.0), "audit": (120.0, 10.0)}
+    run = [_setup_job(n, s, w) for n, (s, w) in spec.items()]
+    crit = dict(_opt77_crit(names=names), floor_p50=600.0,
+                job_p50={n: s + w for n, (s, w) in spec.items()})
+    out = _opt77(jpr=[run, list(run)], crit=crit, wf=_opt77_wf(names=names))
+    assert len(out) == 1
+    sc = out[0]["setup_consolidation"]
+    assert sc["setup_p50_s"] == 40.0
+    assert sc["runner_min_saving"] == 133.3
+    assert sc["projected_consolidated_p50_s"] == 130.0
+
+
+def test_opt77_withholds_on_a_needs_chain_through_a_non_credited_job():
+    """Transitive independence, for real. The existing chain fixture links two
+    CREDITED jobs directly, so it never exercises the ancestor walk. Here the chain
+    runs `audit -> build -> lint` through `build`, which is far too big to be a
+    candidate and so never appears in the group — the only thing that can catch it
+    is the transitive walk."""
+    names = ("lint", "typecheck", "audit")
+    wf = _opt77_wf(names=names)
+    wf["jobs"]["build"] = {"runs-on": "ubuntu-latest", "needs": ["lint"]}
+    wf["jobs"]["audit"]["needs"] = ["build"]
+    assert _opt77(wf=wf) == []
+
+
+def test_opt77_credits_only_runs_where_every_job_in_the_group_appeared():
+    """`occurrences` counts runs in which ALL credited jobs ran, because a run where
+    one of them was skipped paid no setup for it and so had no duplicate payment to
+    remove. Counting runs where ANY of them appeared would over-credit."""
+    names = ("lint", "typecheck", "audit")
+    full = _opt77_run(names=names)
+    partial = _opt77_run(names=("lint", "typecheck"))     # `audit` did not run
+    out = _opt77(jpr=[full, partial], crit=_opt77_crit(names=names),
+                 wf=_opt77_wf(names=names))
+    assert len(out) == 1
+    sc = out[0]["setup_consolidation"]
+    assert sc["occurrences"] == 1
+    assert sc["runner_min_saving"] == 133.3

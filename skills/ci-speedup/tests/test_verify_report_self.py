@@ -8495,3 +8495,38 @@ def test_opt77_certificate_requires_setup_to_dominate():
         "setup_p50_s": 80.0, "useful_work_p50_s": 400.0}
     _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_DATA)
     assert any("does not dominate" in p for p in problems)
+
+
+def test_opt77_certificate_is_not_a_rubber_stamp_on_the_stamped_evidence():
+    """The arm has to re-derive the saving from the per-job medians, not re-read the
+    number the detector wrote beside them. Tampering only the TOP-LEVEL
+    `runner_min_saving` cannot tell the two apart: an arm that simply echoed
+    `setup_consolidation.runner_min_saving` would still catch that. This tampers the
+    EVIDENCE instead — one job's stamped setup median — and leaves every stamped
+    total untouched. A re-deriving arm reddens; an echoing one agrees with itself."""
+    vr = _load_verify_report()
+    f = _opt77_finding()
+    f["setup_consolidation"]["per_job"]["lint"]["setup_p50_s"] = 40.0
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_DATA)
+    assert any("setup_p50_s" in p for p in problems), problems
+    assert any("runner_min_saving" in p for p in problems), problems
+
+
+def test_opt77_certificate_arm_is_routed_from_the_neutrality_check():
+    """The arm is correct in isolation, but nothing pinned that
+    `check_tier2_neutrality_derived` actually ROUTES OPT77 to it. Delete the branch
+    and OPT77 falls back to the generic below-floor margin, which knows nothing
+    about the projected consolidated duration and would pass a group whose
+    consolidated job overruns the floor — with the whole suite green.
+
+    This is a source-level pin, not an execution one: driving the full artifact
+    pipeline with an OPT77 finding needs a recorded per-step job payload the
+    committed corpus does not have yet (the same gap that keeps OPT77 out of
+    `test_offline_pipeline_e2e.py`). It catches deletion of the branch, which is
+    the realistic regression; it cannot catch the branch being reached with the
+    wrong arguments."""
+    import inspect as _inspect
+    vr = _load_verify_report()
+    src = _inspect.getsource(vr.check_tier2_neutrality_derived)
+    assert "OPT77" in src
+    assert "_opt77_consolidation_rederived(" in src
