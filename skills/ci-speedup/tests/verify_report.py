@@ -5006,6 +5006,80 @@ def _opt65_rounding_rederived(f: dict, data: dict) -> tuple[float | None, list[s
     return round(floor - max_combined, 1), problems
 
 
+def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, list[str]]:
+    """Independently re-derive OPT77's saving and its below-floor margin from the
+    stamped `setup_consolidation` block — never from the finding's own prose.
+
+    Saving model: consolidating N independent same-runner jobs that each re-pay the
+    same measured setup prefix removes (N-1) payments of it per run, so
+    `runner_min = occurrences x (N-1) x setup_p50_s / 60 x monthly / sampled_runs`.
+    Neutrality: the consolidated job is projected at `max(setup_p50) +
+    max(useful_work_p50)` (the collapsed tasks run CONCURRENTLY inside it) and must
+    stay strictly below the workflow cluster floor."""
+    sc = _as_dict(f.get("setup_consolidation"))
+    problems: list[str] = []
+    if sc.get("kind") != "opt77_repeated_setup":
+        return None, ["missing opt77_repeated_setup evidence"]
+    per_job = _as_dict(sc.get("per_job"))
+    jobs = [str(j) for j in _as_list(sc.get("credited_jobs")) if str(j)]
+    monthly = _num(sc.get("monthly_volume"))
+    denom = _num(sc.get("sampled_successful_run_count"))
+    occurrences = _num(sc.get("occurrences"))
+    if len(jobs) < 3:
+        problems.append(f"only {len(jobs)} credited job(s); at least 3 required")
+    if sorted(jobs) != sorted(str(j) for j in _as_list(f.get("affected_jobs")) if str(j)):
+        problems.append("affected_jobs do not match credited consolidation jobs")
+    if monthly is None or monthly <= 0:
+        problems.append(f"monthly_volume={sc.get('monthly_volume')!r}")
+    if denom is None or denom <= 0:
+        problems.append(f"sampled_successful_run_count={sc.get('sampled_successful_run_count')!r}")
+    if occurrences is None or occurrences <= 0:
+        problems.append(f"occurrences={sc.get('occurrences')!r}")
+    setups: list[float] = []
+    usefuls: list[float] = []
+    for job in jobs:
+        entry = _as_dict(per_job.get(job))
+        s = _num(entry.get("setup_p50_s"))
+        u = _num(entry.get("useful_work_p50_s"))
+        if s is None or s <= 0 or u is None or u < 0:
+            problems.append(f"{job}: missing setup/useful-work p50")
+            continue
+        if s + 0.011 < 0.5 * (s + u):
+            problems.append(f"{job}: setup {s} does not dominate useful work {u}")
+        setups.append(float(s))
+        usefuls.append(float(u))
+    if not setups or len(setups) != len(jobs):
+        return None, problems
+    removed = len(jobs) - 1
+    if _num(sc.get("removed_setup_payments")) != removed:
+        problems.append(f"removed_setup_payments {sc.get('removed_setup_payments')!r} != {removed}")
+    setup_p50 = min(setups)
+    if abs((_num(sc.get("setup_p50_s")) or -1.0) - round(setup_p50, 1)) > 0.11:
+        problems.append(f"setup_p50_s {sc.get('setup_p50_s')!r} != {round(setup_p50, 1)}")
+    projected = round(max(setups) + max(usefuls), 1)
+    claimed_projected = _num(sc.get("projected_consolidated_p50_s"))
+    if claimed_projected is None or abs(claimed_projected - projected) > 0.11:
+        problems.append(
+            f"projected_consolidated_p50_s {claimed_projected!r} != {projected}")
+    if monthly is not None and denom is not None and denom > 0 and occurrences:
+        expected_rm = round(
+            float(occurrences) * removed * setup_p50 / 60.0 * monthly / denom, 1)
+        rm = _num(f.get("runner_min_saving"))
+        if rm is None or abs(rm - expected_rm) > 0.11:
+            problems.append(f"runner_min_saving {rm!r} != re-derived {expected_rm}")
+    wf = str(f.get("workflow_file") or "")
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    floor = _num(crit.get("floor_p50"))
+    if floor is None or floor <= 0:
+        problems.append("missing floor_p50")
+        return None, problems
+    if projected >= floor:
+        problems.append(
+            f"projected consolidated job {projected} is not below floor {floor}")
+        return None, problems
+    return round(floor - projected, 1), problems
+
+
 def _tier2_skip_or_data(findings_path: Path | None, name: str,
                         report: str | None = None) -> tuple[Check | None, dict]:
     data, err = _load_findings_doc(findings_path)
@@ -5072,6 +5146,12 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
             if str(f.get("pattern") or "") == "OPT65":
                 want, opt65_bad = _opt65_rounding_rederived(f, data)
                 bad.extend(f"{fid}: {msg}" for msg in opt65_bad)
+            elif str(f.get("pattern") or "") == "OPT77":
+                # OPT77's margin is floor - PROJECTED consolidated duration, not
+                # floor - max(job p50): the generic re-derivation would silently
+                # pass a group whose consolidated job overruns the floor.
+                want, opt77_bad = _opt77_consolidation_rederived(f, data)
+                bad.extend(f"{fid}: {msg}" for msg in opt77_bad)
             else:
                 want = _below_floor_margin(f, data)
             if got is None or want is None or abs(got - want) > 0.11:

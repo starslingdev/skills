@@ -4935,6 +4935,10 @@ _SIZING: dict[str, dict[str, Any]] = {
     "OPT63": {"model": "direct", "default_s": 30.0},  # dep install with cache disabled
     "OPT64": {"model": "measured"},  # rerun/attempt waste — measured prior-attempt jobs
     "OPT65": {"model": "measured"},  # billing rounding waste — exact sampled matrix legs
+    # OPT77 owns its numbers too: the detector measures the setup prefix from the
+    # jobs API steps[] and credits (N-1) removed payments of it. "measured" so
+    # _size_finding never overwrites that with a static hit_rate.
+    "OPT77": {"model": "measured"},  # repeated fixed setup across independent small jobs
     # Hidden Failures and Dead Config.
     "OPT68": {"model": "runner-min-only", "hit_rate": 0.0},  # broken step masked — reliability
     "OPT69": {"model": "runner-min-only", "hit_rate": 0.0},  # dead env vars — cosmetic
@@ -6243,9 +6247,17 @@ def _build_runner_minute_spine(
 import re as _re
 import statistics as _stats
 
+# The ONE definition of "this step is setup", shared by every detector that needs
+# it (the CUT hygiene detectors OPT49/OPT51, and OPT77's measured setup prefix).
+# An UNNAMED action step is rendered by GitHub as `Run <owner>/<action>@<ref>`, so
+# the optional `run ` prefix and the `actions/…` alternatives are what let the most
+# common real-world setup steps — `Run actions/checkout@v4`, `Run actions/setup-node@v4`
+# — classify as setup at all. Without them the prefix is invisible unless the
+# workflow author happened to give the step a name.
 _SETUP_STEP_RE = _re.compile(
-    r"^(set up |setup |checkout|install|cache|restore|fetch|"
+    r"^(run )?(set up |setup |checkout|install|cache|restore|fetch|"
     r"docker (login|pull|compose up)|configure|init |bootstrap|"
+    r"actions/(checkout|setup-[\w.-]+|cache)|"
     r"pnpm/action-setup|setup-node|setup-python|setup-go|setup-pnpm)",
     _re.IGNORECASE,
 )
@@ -7858,7 +7870,7 @@ _PER_MINUTE_BILLED_LABEL_RE = _re.compile(
     r"^(ubuntu-|windows-|macos-|starsling-)", _re.IGNORECASE)
 
 
-def _rounding_job_runner(job_name: str, crit: dict[str, Any]) -> str | None:
+def _billed_job_runner(job_name: str, crit: dict[str, Any]) -> str | None:
     """The runner label a matrix leg resolves to — or None when unresolvable OR
     when the label's billing rule is unknown. OPT65 uses runner-label equality to
     confirm all credited legs bill on the SAME runner before consolidating their
@@ -7873,11 +7885,11 @@ def _rounding_job_runner(job_name: str, crit: dict[str, Any]) -> str | None:
     return labels
 
 
-def _rounding_occurrence_runner(job: dict[str, Any]) -> str | None:
+def _occurrence_runner_label(job: dict[str, Any]) -> str | None:
     return _job_runner_label(job) or None
 
 
-def _opt65_scope_event(
+def _tier2_scope_event(
     crit: dict[str, Any],
     *,
     observed_events: set[str] | None = None,
@@ -7885,7 +7897,7 @@ def _opt65_scope_event(
 ) -> str | None:
     """The event OPT65 needs a scoped 30-day volume for, or None when the workflow's
     plain monthly volume already IS that number (single-event workflow) or the scope is
-    all-events. Pulled out of `_opt65_monthly_volume_for_scope` so the prefetch planner
+    all-events. Pulled out of `_tier2_monthly_volume_for_scope` so the prefetch planner
     can ask "will this workflow issue an event-volume call?" WITHOUT issuing it — one
     predicate, so the plan and the call site can never disagree about whether the call
     happens."""
@@ -7899,7 +7911,7 @@ def _opt65_scope_event(
     return event_scope
 
 
-def _opt65_monthly_volume_for_scope(
+def _tier2_monthly_volume_for_scope(
     client: GhClient | None,
     repo: str | None,
     wf_id: int | None,
@@ -7909,7 +7921,7 @@ def _opt65_monthly_volume_for_scope(
     observed_events: set[str] | None = None,
     wf_doc: dict[str, Any] | None = None,
 ) -> int | None:
-    if _opt65_scope_event(crit, observed_events=observed_events, wf_doc=wf_doc) is None:
+    if _tier2_scope_event(crit, observed_events=observed_events, wf_doc=wf_doc) is None:
         return monthly_volume
     if client is not None and repo and wf_id is not None:
         return _monthly_event_volume(
@@ -7956,7 +7968,7 @@ def _detect_opt65_billing_rounding_waste(
         p50s = [float(job_p50.get(name) or 0.0) for name in names]
         if any(p <= 0 or p >= floor or p >= _ROUNDING_TINY_JOB_MAX_S for p in p50s):
             continue
-        runners = {_rounding_job_runner(name, crit) for name in names}
+        runners = {_billed_job_runner(name, crit) for name in names}
         if None in runners or len(runners) != 1:
             continue
         safe_bases[base] = {"names": names, "runner": next(iter(runners))}
@@ -7993,7 +8005,7 @@ def _detect_opt65_billing_rounding_waste(
                     continue
                 dur = _job_compute_s(job)
                 if dur > 0:
-                    actual_runner = _rounding_occurrence_runner(job)
+                    actual_runner = _occurrence_runner_label(job)
                     if dur >= _ROUNDING_TINY_JOB_MAX_S or actual_runner != expected_runner:
                         unsafe_run = True
                         break
@@ -8114,6 +8126,303 @@ def _detect_opt65_billing_rounding_waste(
             "Apply only to off-spine tiny legs, or restructure setup/runner allocation "
             "without adding a serial `needs:` stage or lowering parallelism for the "
             "gating matrix.")
+        out.append(f)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# OPT77 — repeated fixed setup across independent small jobs.
+#
+# N independent checks in one workflow each start a runner, check out the repo
+# and install dependencies before doing seconds of real work. Consolidating them
+# into ONE job removes (N-1) payments of that setup prefix. This is a BILL lever
+# only: `wall_clock_p50_s` is always 0 and the group is credited only while the
+# projected consolidated job stays strictly below the workflow cluster floor.
+#
+# It is deliberately DISJOINT from OPT65: OPT65 credits per-job billing round-up
+# for legs of ONE matrix base, all strictly sub-minute. OPT77 credits removed
+# SETUP RUNTIME for separate YAML jobs, which are typically well over a minute
+# once checkout+install are paid. The name-resolution gate below (a credited job
+# must resolve to exactly one YAML job of that name) keeps matrix legs out.
+# --------------------------------------------------------------------------- #
+
+# At least this many independent jobs must share the setup prefix before a
+# consolidation is worth proposing (mirrors _ROUNDING_MIN_MATRIX_LEGS' role).
+_CONSOLIDATION_MIN_JOBS = 3
+# Setup must be at least this share of the job's measured duration — i.e. the
+# setup p50 is at least as large as the useful-work p50. Below that, the job is
+# mostly doing real work and consolidating it buys little for the coupling cost.
+_CONSOLIDATION_MIN_SETUP_SHARE = 0.5
+
+
+def _leading_setup_seconds(job: dict[str, Any]) -> float | None:
+    """Measured seconds this job spent in its LEADING setup prefix, or None when
+    the job has no timed steps or does not open with one.
+
+    "Setup" is `_classify_step(...) == "setup"` — the SAME coarse classifier the
+    hygiene setup detectors (OPT49/OPT51) are defined against, so the skill has
+    exactly one notion of a setup step. Only the LEADING run counts: a cache-save
+    or a re-configure in the middle of a job is not part of the fixed prefix a
+    consolidation would pay once.
+    """
+    steps = _step_durations(job)
+    if not steps:
+        return None
+    total = 0.0
+    for name, dur in steps:
+        if _classify_step(name) != "setup":
+            break
+        total += dur
+    return total if total > 0 else None
+
+
+def _consolidation_yaml_key(job_name: str, wf_doc: dict[str, Any]) -> str | None:
+    """The workflow's YAML job key that produced this observed job name, or None
+    when it cannot be resolved UNAMBIGUOUSLY. Fail-closed by design: the
+    independence gate below is evaluated on the YAML `needs:` graph, so a job we
+    cannot pin to a YAML node cannot be shown to be independent. A matrix leg
+    (`check (a)`) matches no YAML job name and therefore never resolves."""
+    jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
+    if not isinstance(jobs, dict):
+        return None
+    hits = [str(key) for key, spec in jobs.items()
+            if str((spec if isinstance(spec, dict) else {}).get("name")
+                   or key).strip() == job_name]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _consolidation_group_is_independent(keys: list[str],
+                                        wf_doc: dict[str, Any]) -> bool:
+    """True when NO credited job is a (transitive) `needs:` ancestor of another.
+
+    A direct edge is the obvious case; an indirect one (`c needs b`, `b needs a`)
+    is just as disqualifying — those three jobs are a chain, not a consolidatable
+    set, and merging them would change what runs when. A `needs:` cycle (invalid
+    YAML that GitHub would reject) returns False rather than being guessed at."""
+    jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
+    if not isinstance(jobs, dict):
+        return False
+    wanted = set(keys)
+
+    def _parents(key: str) -> list[str]:
+        spec = jobs.get(key)
+        needs = (spec if isinstance(spec, dict) else {}).get("needs") or []
+        if isinstance(needs, str):
+            needs = [needs]
+        return [str(n) for n in needs if str(n) in jobs]
+
+    memo: dict[str, set[str]] = {}
+
+    def _ancestors(key: str, seen: frozenset[str]) -> set[str] | None:
+        if key in memo:
+            return memo[key]
+        if key in seen:
+            return None                      # cycle — undecidable, fail closed
+        out: set[str] = set()
+        for parent in _parents(key):
+            out.add(parent)
+            up = _ancestors(parent, seen | {key})
+            if up is None:
+                return None
+            out |= up
+        memo[key] = out
+        return out
+
+    for key in keys:
+        anc = _ancestors(key, frozenset())
+        if anc is None or anc & (wanted - {key}):
+            return False
+    return True
+
+
+def _detect_opt77_repeated_setup_across_small_jobs(
+    wf_path: str,
+    jobs_per_run: list[list[dict[str, Any]]],
+    crit: dict[str, Any],
+    wf_doc: dict[str, Any] | None,
+    monthly_volume: int | None,
+    start_idx: int,
+) -> list[dict[str, Any]]:
+    """Repeated fixed setup across independent small jobs (catalog OPT77) — measured.
+
+    Saving model: consolidating N independent same-runner jobs that each re-pay
+    the same measured setup prefix into ONE job removes (N-1) payments of it, so
+    `runner_min_saved_per_run = (N - 1) x setup_p50_s / 60`, scaled to a month
+    exactly the way OPT65 scales (monthly volume / sampled runs). `setup_p50_s`
+    is the MINIMUM per-job setup p50 in the group — the conservative floor on
+    what each removed payment was actually worth.
+
+    No wall-clock saving is ever claimed, and the group is credited only when the
+    projected consolidated job (`max(setup_p50) + max(useful_work_p50)`, i.e. the
+    tasks run CONCURRENTLY inside the consolidated job) stays strictly below the
+    workflow cluster floor.
+    """
+    if not monthly_volume or monthly_volume <= 0 or not jobs_per_run:
+        return []
+    floor = float(crit.get("floor_p50") or 0.0)
+    job_p50 = crit.get("job_p50") or {}
+    doc = wf_doc if isinstance(wf_doc, dict) else {}
+    if floor <= 0 or not job_p50 or not isinstance(doc.get("jobs"), dict):
+        return []
+
+    # Per sampled run, each job's measured (setup_s, useful_work_s) split.
+    per_run: list[dict[str, tuple[float, float]]] = []
+    observed_runner: dict[str, set[str]] = {}
+    for run_jobs in jobs_per_run:
+        split: dict[str, tuple[float, float]] = {}
+        for job in run_jobs:
+            name = str(job.get("name") or "").strip()
+            if not name:
+                continue
+            dur = _job_compute_s(job)
+            setup = _leading_setup_seconds(job)
+            if dur <= 0 or setup is None or setup <= 0 or setup > dur:
+                continue
+            split[name] = (setup, dur - setup)
+            observed_runner.setdefault(name, set()).add(
+                _occurrence_runner_label(job) or "")
+        per_run.append(split)
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for name, seen_runners in sorted(observed_runner.items()):
+        setups = [s[name][0] for s in per_run if name in s]
+        useful = [s[name][1] for s in per_run if name in s]
+        if not setups:
+            continue
+        p50 = float(job_p50.get(name) or 0.0)
+        if p50 <= 0 or p50 >= floor:
+            continue
+        key = _consolidation_yaml_key(name, doc)
+        if not key:
+            continue
+        declared = _billed_job_runner(name, crit)
+        # One known per-minute-billed label, and the sampled occurrences all ran
+        # on exactly that label (an occurrence that drifted is not consolidatable
+        # with the rest without changing where the work runs).
+        if not declared or seen_runners != {declared}:
+            continue
+        setup_p50 = float(_stats.median(setups))
+        useful_p50 = float(_stats.median(useful))
+        if setup_p50 <= 0:
+            continue
+        if setup_p50 < _CONSOLIDATION_MIN_SETUP_SHARE * (setup_p50 + useful_p50):
+            continue
+        candidates[name] = {"key": key, "runner": declared,
+                            "setup_p50": setup_p50, "useful_p50": useful_p50}
+
+    by_runner: dict[str, list[str]] = {}
+    for name, meta in candidates.items():
+        by_runner.setdefault(str(meta["runner"]), []).append(name)
+
+    scale = float(monthly_volume) / float(len(jobs_per_run))
+    basis = f"{monthly_volume}/30d ÷ {len(jobs_per_run)} sampled successful run(s)"
+    title = "Repeated Fixed Setup Across Independent Small Jobs"
+    out: list[dict[str, Any]] = []
+    for runner, names in sorted(by_runner.items()):
+        names = sorted(names)
+        n_jobs = len(names)
+        if n_jobs < _CONSOLIDATION_MIN_JOBS:
+            continue
+        if not _consolidation_group_is_independent(
+                [str(candidates[n]["key"]) for n in names], doc):
+            continue
+        setup_p50 = min(float(candidates[n]["setup_p50"]) for n in names)
+        projected = round(max(float(candidates[n]["setup_p50"]) for n in names)
+                          + max(float(candidates[n]["useful_p50"]) for n in names), 1)
+        # Wall-clock safety: the consolidated job must stay strictly faster than
+        # the workflow cluster floor, or the consolidation can become the merge
+        # gate. Reaching the floor withholds the finding (OPT65 step 3's stance).
+        if projected <= 0 or projected >= floor:
+            continue
+        margin = round(floor - projected, 1)
+        if margin <= 0:
+            continue
+        occurrences = sum(1 for split in per_run
+                          if all(name in split for name in names))
+        if occurrences <= 0:
+            continue
+        removed = n_jobs - 1
+        sampled_saved_s = occurrences * removed * setup_p50
+        credited = round(sampled_saved_s / 60.0 * scale, 1)
+        if credited <= 0:
+            continue
+        rows = [[name,
+                 f"{candidates[name]['setup_p50']:.0f}s",
+                 f"{candidates[name]['useful_p50']:.0f}s",
+                 f"{float(job_p50.get(name) or 0.0):.0f}s"]
+                for name in names]
+        evidence = (
+            f"{n_jobs} independent same-runner (`{runner}`) jobs each re-pay the same "
+            f"measured setup prefix before seconds of useful work; the smallest "
+            f"measured setup p50 across them is {setup_p50:.0f}s. Consolidating them "
+            f"into one job removes {removed} setup payment(s) per run — "
+            f"{sampled_saved_s / 60.0:.1f} runner-min across {occurrences} sampled "
+            f"run(s), ~{credited:.0f} runner-min/mo ({basis}). The consolidated job "
+            f"projects to {projected:.0f}s (setup + the slowest task, run "
+            f"concurrently), {margin:.0f}s below the {floor:.0f}s cluster floor.")
+        me = _measured_evidence(
+            ["Job", "Setup p50", "Useful work p50", "Job p50"],
+            rows[:8],
+            summary=evidence,
+            note=("Setup is measured from the jobs API steps[] timestamps: the leading "
+                  "run of steps classified as setup (the implicit `Set up job`, "
+                  "checkout, setup-* actions, dependency installs). The saving is "
+                  "(N-1) x the SMALLEST setup p50 in the group — removed setup "
+                  "runtime, not billing round-up — and no job runtime on the merge "
+                  "gate changes, so wall_clock_p50_s is 0."))
+        f = _new_finding(
+            "OPT77", "MEDIUM", title, wf_path, "", evidence,
+            "repeated-fixed-setup-across-independent-small-jobs",
+            _catalog_anchor("OPT77", title), start_idx + len(out) + 1,
+            wc_p50=0.0, rm=credited,
+            size_note=(
+                "runner-minutes only — this removes repeated setup payments, not "
+                "job runtime on the merge gate. The projected consolidated duration "
+                f"({projected:.0f}s) assumes the {n_jobs} tasks run CONCURRENTLY "
+                "inside the consolidated job; run sequentially it would instead cost "
+                "setup + the SUM of the tasks, so the recipe requires intra-job "
+                "concurrency. Consolidating N checks into one also collapses N "
+                "independently-red, independently-re-runnable checks into one."),
+            realization="none", measured_evidence=me)
+        f["affected_jobs"] = names
+        f["sizing_basis"] = "measured"
+        f["measured_signal"] = (
+            f"(N-1) x setup_p50 removed setup payments for {n_jobs} independent "
+            f"`{runner}` jobs ({removed} x {setup_p50:.0f}s per run over "
+            f"{occurrences} sampled run(s); scale {scale:.3g})")
+        f["setup_consolidation"] = {
+            "kind": "opt77_repeated_setup",
+            "credited_jobs": names,
+            "credited_job_keys": [str(candidates[n]["key"]) for n in names],
+            "runner_label": runner,
+            "removed_setup_payments": removed,
+            "setup_p50_s": round(setup_p50, 1),
+            "per_job": {n: {"setup_p50_s": round(float(candidates[n]["setup_p50"]), 1),
+                            "useful_work_p50_s": round(float(candidates[n]["useful_p50"]), 1)}
+                        for n in names},
+            "projected_consolidated_p50_s": projected,
+            "occurrences": occurrences,
+            "sampled_saved_s": round(sampled_saved_s, 3),
+            "sampled_successful_run_count": len(jobs_per_run),
+            "monthly_volume": monthly_volume,
+            "scale": round(scale, 6),
+            "runner_min_saving": credited,
+        }
+        f["tier2_neutrality"] = {
+            "proof": "below_cluster_floor",
+            "margin_s": margin,
+            "ref": (f"per_workflow_timing[wf]: projected consolidated job "
+                    f"{projected:.1f}s below floor_p50 {floor:.1f}s"),
+        }
+        f["guardrail"] = (
+            "Consolidating checks RENAMES them. If any of these jobs is a required "
+            "status check, update branch protection to require the consolidated "
+            "check — otherwise the work silently stops gating merges. If the "
+            "consolidation introduces a `needs:` edge, the dependent must run with "
+            "always() (or !cancelled()) and fail explicitly, because a job skipped "
+            "because its dependency failed reports as skipped, not failed. Never "
+            "consolidate a job that can sit on the merge gate, never reduce what CI "
+            "verifies, and run the collapsed tasks concurrently inside the new job.")
         out.append(f)
     return out
 
@@ -15570,7 +15879,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # response nobody consumes is a gh call the serial path never made) and no fewer
     # (an unplanned one just falls through to a live fetch, which is merely slow). So
     # each entry mirrors its call site's guard, and the shared predicates
-    # (`_opt65_scope_event`, `_opt57_timeout_job_specs`, `_on_has_event`) are the very
+    # (`_tier2_scope_event`, `_opt57_timeout_job_specs`, `_on_has_event`) are the very
     # ones the loop re-evaluates — they cannot drift apart. `prefetch_json` dedups, and
     # consumption is pop-once, so a workflow whose event scope IS `schedule` (its OPT57
     # list and its schedule list being the same endpoint) still issues exactly the two
@@ -15584,7 +15893,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             crit = crit_by_wf[wf_path]
             wf_doc = _wf_docs.get(wf_path, {})
             monthly = vol_by_wf.get(wf_path)
-            scope_event = _opt65_scope_event(
+            scope_event = _tier2_scope_event(
                 crit, observed_events=events_by_wf.get(wf_path), wf_doc=wf_doc)
             if wf_id is None:
                 continue
@@ -15639,12 +15948,21 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
-        opt65_monthly = _opt65_monthly_volume_for_scope(
+        opt65_monthly = _tier2_monthly_volume_for_scope(
             client, repo, wf_id, crit, monthly, created_before,
             observed_events=events_by_wf.get(wf_path),
             wf_doc=_wf_docs.get(wf_path, {}))
         new = _detect_opt65_billing_rounding_waste(
             wf_path, jobs_per_run, crit, opt65_monthly, next_id)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+
+        # OPT77 shares OPT65's event-scoped monthly volume (same workflow, same
+        # scaling question) so it costs no extra gh call, and reads the workflow
+        # YAML for the `needs:` independence gate.
+        new = _detect_opt77_repeated_setup_across_small_jobs(
+            wf_path, jobs_per_run, crit, _wf_docs.get(wf_path, {}),
+            opt65_monthly, next_id)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 

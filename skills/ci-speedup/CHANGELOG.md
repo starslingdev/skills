@@ -50,6 +50,27 @@ unversioned and updates by reinstall from `main`.
   match. The saving is deliberately not credited: the audit reports the measured
   import share and says a benchmark is required. (#103)
 
+- **2026-09-21** — **A workflow that pays the same setup over and over, once per
+  small check, is now reported as the runner-minute lever it is.** Several small,
+  independent checks — lint, typecheck, a licence audit — each start a runner,
+  check out the repository and install dependencies before doing seconds of real
+  work, so one commit pays that fixed setup once per check. The audit previously
+  had no way to see this: the closest existing pattern credits per-job billing
+  round-up for sub-minute legs of one matrix, and these jobs are neither
+  sub-minute nor matrix legs, so the waste was invisible no matter how large it
+  got. The audit now measures each job's setup prefix from its real step
+  timings, and where at least three independent jobs on the same runner spend at
+  least half their time in that prefix, it credits the setup payments a
+  consolidation would remove — a runner-minute saving only, never a speedup. It
+  withholds the finding entirely unless the consolidated job would still finish
+  comfortably faster than the merge gate, so the advice can never make the wait
+  for a pull request longer, and the fix it hands back says plainly that the
+  collapsed tasks must run concurrently inside the new job (run one after
+  another they would cost the sum, not the slowest), that consolidating renames
+  the checks so branch protection must be updated or the work silently stops
+  gating merges, and that collapsing several checks into one trades away
+  independently-red, independently-re-runnable checks.
+
 - **2026-09-08** — **A fix that moves the slowest step out of a merge gate now
   says how to keep the gate.** The long-pole lever can hand back a fix that
   relocates the dominant step into another job, and until now nothing in the

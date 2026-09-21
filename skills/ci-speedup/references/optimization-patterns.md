@@ -35,7 +35,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 14. Structural / Critical-Path Levers
 
 - **Category 1 — Caching** (`OPT1`–): tool installs, build/test caches, dynamic cache keys.
-- **Category 2 — Redundancy**: duplicate env, repeated setup sequences, redundant build steps.
+- **Category 2 — Redundancy**: duplicate env, repeated setup sequences, redundant build steps, repeated fixed setup across independent small jobs (`OPT77`).
 - **Category 3 — Docker**: sleep-based readiness, over-broad `compose up`.
 - **Category 4 — Parallelization**: needless `needs:` serialization, unsharded long jobs.
 - **Category 5 — Actions and Checkout**: stale action pins, repeated setup, full-history checkout, submodule / Git LFS checkout payload.
@@ -669,6 +669,106 @@ done
 ```
 
 **Fix**: Remove the duplicate invocation. If the rebuild is a workaround for stale artifacts, fix the root cause (e.g., cache key, build system incremental support) instead.
+
+---
+
+### OPT77 — Repeated Fixed Setup Across Independent Small Jobs
+
+<!-- METADATA
+pattern: OPT77
+impact: MEDIUM
+class: data-driven
+detector: actions-job-setup-consolidation
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: repeated-fixed-setup-across-independent-small-jobs
+title_template: "Repeated Fixed Setup Across Independent Small Jobs"
+-->
+
+**Anti-pattern**: A workflow declares several small, independent checks — lint,
+typecheck, a licence audit, a formatting check, a spellcheck — and every one of
+them starts a runner, checks out the repository and installs dependencies before
+doing seconds of actual work. The same fixed setup prefix is paid N times for one
+commit. The jobs are not tiny in billed terms (each is comfortably over a minute
+once checkout and install are paid), so nothing about per-job billing round-up
+describes this; what is wasted is repeated setup *runtime*.
+
+Consolidating N such jobs into one, and running their tasks concurrently inside
+it, pays the setup once instead of N times.
+
+```
+before:  N jobs  →  N x (start runner + checkout + install)  +  N x seconds of work
+after:   1 job   →  1 x (start runner + checkout + install)  +  the same work, concurrent
+saved:   (N - 1) x setup, every run
+```
+
+**Detection heuristic**:
+
+1. For every sampled job, split its measured step timeline (jobs API `steps[]`
+   timestamps) into the **leading run of setup steps** — the implicit `Set up
+   job`, `actions/checkout`, `setup-*` actions, dependency installs — and the
+   remaining **useful work**. Take the p50 of each across the sampled runs.
+2. Keep a job as a candidate only if it resolves to exactly **one** job in the
+   workflow YAML by name (so matrix legs, which resolve to none, are excluded —
+   those are OPT65's territory, a different saving model), runs on a single known
+   per-minute-billed runner label, and its setup p50 is **at least as large as
+   its useful-work p50**.
+3. Group the candidates by resolved runner label. Emit only when the group has at
+   least **three** jobs and **no `needs:` edge**, direct or transitive, links any
+   two of them — a chain is not a consolidatable set.
+4. Project the consolidated job at `max(setup_p50) + max(useful_work_p50)` (the
+   collapsed tasks run concurrently inside it). If that projection reaches the
+   workflow cluster floor, **withhold the finding**: consolidation serializes
+   runner allocation and must never lengthen the merge gate.
+5. Credit `(N - 1) x setup_p50` runner-seconds per run, where `setup_p50` is the
+   **smallest** measured setup p50 in the group, scaled by the monthly volume for
+   the sampled event scope divided by sampled successful runs. This credits
+   removed setup runtime only — no wall-clock speedup is ever claimed.
+
+**Fix**: Merge the group into one job that checks out and installs once, then
+runs the collapsed tasks **concurrently** inside that job (background processes
+joined at the end, or a task runner's own parallel mode). The concurrency is not
+a nicety: run sequentially, the consolidated job costs `setup + the SUM of the
+tasks` instead of `setup + the slowest task`, which can push it past the merge
+gate and make the change wall-clock-negative. Do not consolidate any job that can
+sit on the merge gate, and do not drop or narrow any check in the process — the
+consolidated job must still run everything the separate jobs ran, and still fail
+the build when any of them fails.
+
+**Failure-isolation cost (a real cost, not a footnote)**: N separate checks give
+N independently-red checks and N independently re-runnable units. One
+consolidated job gives one red check and re-runs everything, and a reviewer
+reading the checks list loses the at-a-glance "which one broke". Surface each
+task's own result inside the job (per-task step, or an explicit summary) so the
+diagnosis is not lost, and weigh the lost re-run granularity against the saved
+minutes before consolidating.
+
+**Required-checks caveat**: consolidating jobs renames the checks (the old job
+names disappear). If any of the consolidated jobs was a required status check,
+add the new consolidated job's check name to branch protection as a required
+check (or the ruleset equivalent), or the consolidated work silently stops gating
+merges until that admin-only step is done. If the consolidation routes the old
+checks' work behind a `needs:` edge and an aggregator, see OPT75's
+[dependency-failure skip caveat](#opt75--long-pole-optimize-or-relocate-the-dominant-step)
+— a dependent skipped by a failed dependency reports skipped, not failed, so the
+aggregator must run with `always()` (or `!cancelled()`) and propagate every
+`needs.<job>.result`, and keeping the required check name on that aggregator
+re-gates the merge without an admin.
+
+**Tier-2 render note**: OPT77 can promote only with measured setup evidence and a
+`below_cluster_floor` certificate. The finding must stamp `wall_clock_p50_s=0`,
+`sizing_basis=measured`, the `(N-1) x setup_p50` model in `measured_signal`, and
+a structured `setup_consolidation` block (per-job setup / useful-work p50s, the
+projected consolidated duration, occurrences, monthly volume and sampled run
+count) that lets `verify_report.py` re-derive both the credited minutes and the
+below-floor margin. It never claims a speedup; it credits only removed setup
+runtime.
+
+**Real-world example (Linear, 2026)**: seven independent checks each started a
+runner, checked out the repository and installed dependencies before doing only
+seconds of useful work. Consolidating them into two jobs, with the seven tasks
+running concurrently inside them, cut the number of times that setup overhead was
+paid from seven to two — about 87,000 runner-minutes a month, 11.8% of total CI
+usage.
 
 ---
 

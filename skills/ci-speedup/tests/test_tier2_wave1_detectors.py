@@ -810,17 +810,17 @@ def test_opt65_monthly_volume_matches_critical_path_event_scope():
             return {"total_count": 7}
 
     client = Client()
-    out = cr._opt65_monthly_volume_for_scope(
+    out = cr._tier2_monthly_volume_for_scope(
         client, "owner/repo", 123, {"event_scope": "pull_request"}, 99,
         observed_events={"pull_request", "schedule"})
     assert out == 7
     assert "event=pull_request" in client.endpoint
     client.endpoint = ""
-    assert cr._opt65_monthly_volume_for_scope(
+    assert cr._tier2_monthly_volume_for_scope(
         client, "owner/repo", 123, {"event_scope": "pull_request"}, 99,
         observed_events={"pull_request"}) == 99
     assert client.endpoint == ""
-    assert cr._opt65_monthly_volume_for_scope(
+    assert cr._tier2_monthly_volume_for_scope(
         client, "owner/repo", 123, {"event_scope": "all-events"}, 99) == 99
 
 
@@ -2500,7 +2500,160 @@ def test_opt65_custom_runner_label_is_never_credited():
     # self-hosted label must resolve None (base skipped), never credit "measured"
     # waste that may not exist on that runner's (unknown) billing.
     crit = {"job_runner": {"t (1)": "my-custom-box"}, "job_p50": {"t (1)": 5.0}}
-    assert cr._rounding_job_runner("t (1)", crit) is None
+    assert cr._billed_job_runner("t (1)", crit) is None
     for lbl in ("ubuntu-latest", "windows-2022", "macos-14", "starsling-ubuntu-24.04-8"):
         crit = {"job_runner": {"t (1)": lbl}, "job_p50": {"t (1)": 5.0}}
-        assert cr._rounding_job_runner("t (1)", crit) == lbl
+        assert cr._billed_job_runner("t (1)", crit) == lbl
+
+
+# ============ OPT77 repeated fixed setup across independent small jobs ============
+#
+# The motivating shape: N independent checks in one workflow, each starting a
+# runner, checking out and installing before a few seconds of real work.
+# Consolidating them into ONE job removes (N-1) payments of that setup prefix.
+# Nothing here claims a speedup — every case pins `wall_clock_p50_s == 0.0`.
+
+def _setup_job(name, setup_s, work_s, runner="ubuntu-latest"):
+    """A job whose step timeline is a leading setup prefix then one work step."""
+    t = 0.0
+
+    def _stamp(offset):
+        m, s = divmod(int(offset), 60)
+        return f"2026-06-01T00:{m:02d}:{s:02d}Z"
+
+    steps = []
+    half = setup_s / 2.0
+    for step_name, dur in (("Set up job", half),
+                           ("Run actions/checkout@v4", setup_s - half),
+                           ("Run tests", work_s)):
+        steps.append({"name": step_name, "number": len(steps) + 1,
+                      "started_at": _stamp(t), "completed_at": _stamp(t + dur)})
+        t += dur
+    return {
+        "name": name,
+        "started_at": _stamp(0),
+        "completed_at": _stamp(setup_s + work_s),
+        "labels": [runner],
+        "steps": steps,
+    }
+
+
+_OPT77_NAMES = ("lint", "typecheck", "audit")
+
+
+def _opt77_run(setup_s=80.0, work_s=10.0, runner="ubuntu-latest", names=_OPT77_NAMES):
+    return [_setup_job(n, setup_s, work_s, runner) for n in names]
+
+
+def _opt77_crit(*, floor=600.0, setup_s=80.0, work_s=10.0, runner="ubuntu-latest",
+                names=_OPT77_NAMES):
+    job_p50 = {n: setup_s + work_s for n in names}
+    return {
+        "floor_p50": floor,
+        "long_pole_p50": floor + 60.0,
+        "job_p50": job_p50,
+        "job_runner": {n: runner for n in names},
+        "runner_scope": runner,
+    }
+
+
+def _opt77_wf(names=_OPT77_NAMES, needs=None):
+    jobs = {n: {"runs-on": "ubuntu-latest"} for n in names}
+    for key, parents in (needs or {}).items():
+        jobs[key]["needs"] = parents
+    return {"on": {"pull_request": {}}, "jobs": jobs}
+
+
+def _opt77(jpr=None, crit=None, wf=None, monthly=100):
+    return cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", jpr if jpr is not None else [_opt77_run(), _opt77_run()],
+        crit or _opt77_crit(), wf if wf is not None else _opt77_wf(), monthly, 0)
+
+
+def test_opt77_promotes_measured_setup_consolidation():
+    out = _opt77()
+    assert len(out) == 1
+    f = out[0]
+    assert f["pattern"] == "OPT77"
+    assert f["affected_jobs"] == ["audit", "lint", "typecheck"]
+    assert f["wall_clock_p50_s"] == 0.0
+    assert f["sizing_basis"] == "measured"
+    assert f["realization"] == "none"
+    # 2 sampled runs x (3-1) removed setups x 80s = 320s = 5.333 min sampled,
+    # scaled by 100/2 = 50  ->  266.7 runner-min/mo.
+    assert f["runner_min_saving"] == 266.7
+    sc = f["setup_consolidation"]
+    assert sc["kind"] == "opt77_repeated_setup"
+    assert sc["credited_jobs"] == ["audit", "lint", "typecheck"]
+    assert sc["removed_setup_payments"] == 2
+    assert sc["setup_p50_s"] == 80.0
+    assert sc["projected_consolidated_p50_s"] == 90.0
+    assert sc["occurrences"] == 2
+    assert f["tier2_neutrality"]["proof"] == "below_cluster_floor"
+    assert f["tier2_neutrality"]["margin_s"] == 510.0
+    # The recipe's concurrency precondition must be stated in the size note, with
+    # the sequential cost named — a serial consolidation costs setup + SUM(work).
+    assert "concurrently" in f["size_note"].lower()
+    assert "sequential" in f["size_note"].lower()
+    assert "required status check" in f["guardrail"]
+
+
+def test_opt77_needs_at_least_three_independent_jobs():
+    two = ("lint", "typecheck")
+    assert _opt77(
+        jpr=[_opt77_run(names=two), _opt77_run(names=two)],
+        crit=_opt77_crit(names=two), wf=_opt77_wf(names=two)) == []
+
+
+def test_opt77_requires_one_known_billed_runner_across_the_group():
+    run = _opt77_run()
+    run[2]["labels"] = ["windows-latest"]
+    crit = _opt77_crit()
+    crit["job_runner"]["audit"] = "windows-latest"
+    assert _opt77(jpr=[run, run]) == []          # observed label disagrees with crit
+    assert _opt77(crit=crit) == []               # declared labels disagree
+    assert _opt77(jpr=[_opt77_run(runner="self-hosted"), _opt77_run(runner="self-hosted")],
+                  crit=_opt77_crit(runner="self-hosted")) == []
+
+
+def test_opt77_withholds_when_a_needs_edge_links_the_group():
+    wf = _opt77_wf(needs={"audit": ["lint"]})
+    assert _opt77(wf=wf) == []
+    # Indirect edges count too: audit -> typecheck -> lint is still not a
+    # consolidatable set of independent jobs.
+    wf = _opt77_wf(needs={"typecheck": "lint", "audit": ["typecheck"]})
+    assert _opt77(wf=wf) == []
+
+
+def test_opt77_requires_setup_to_dominate_useful_work():
+    # 20s setup against 200s of useful work: consolidating saves almost nothing
+    # relative to what these jobs actually do, so the pattern must not fire.
+    jpr = [_opt77_run(setup_s=20.0, work_s=200.0),
+           _opt77_run(setup_s=20.0, work_s=200.0)]
+    assert _opt77(jpr=jpr, crit=_opt77_crit(setup_s=20.0, work_s=200.0)) == []
+
+
+def test_opt77_withholds_when_the_consolidated_job_reaches_the_cluster_floor():
+    # setup 80s + max useful 10s = 90s projected; a 90s floor means the merge
+    # gate would not stay strictly faster than the consolidated job.
+    assert _opt77(crit=_opt77_crit(floor=90.0)) == []
+
+
+def test_opt77_requires_jobs_resolvable_to_independent_yaml_jobs():
+    # No workflow YAML -> the independence gate cannot be evaluated -> withhold.
+    assert _opt77(wf={}) == []
+    # A matrix leg's display name resolves to no YAML job of that name.
+    legs = ("check (a)", "check (b)", "check (c)")
+    assert _opt77(jpr=[_opt77_run(names=legs), _opt77_run(names=legs)],
+                  crit=_opt77_crit(names=legs),
+                  wf={"jobs": {"check": {"runs-on": "ubuntu-latest"}}}) == []
+
+
+def test_opt77_requires_monthly_volume():
+    assert _opt77(monthly=0) == []
+    assert _opt77(monthly=None) == []
+
+
+def test_opt77_is_wired_into_collect():
+    import inspect
+    assert "_detect_opt77_repeated_setup_across_small_jobs(" in inspect.getsource(cr.collect)

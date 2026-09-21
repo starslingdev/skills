@@ -27,7 +27,7 @@ developer's wait. It gets its own prominent section below.
 ## 1. Purpose & scope
 
 ci-speedup audits a repository's GitHub Actions workflows against a 75-pattern
-catalog — 68 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76) plus 7 **structural /
+catalog — 69 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76 and OPT77) plus 7 **structural /
 critical-path** patterns (OPT70–OPT75 and OPT78, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -736,7 +736,7 @@ multiset invariant:
 
 The plans and the call sites share their endpoint builders (`_volume_endpoint`,
 `_run_list_endpoint`, `_status_count_endpoint`, `_run_jobs_endpoint`,
-`_job_log_endpoint`) and their guard predicates (`_opt65_scope_event`,
+`_job_log_endpoint`) and their guard predicates (`_tier2_scope_event`,
 `_opt57_timeout_job_specs`, `_on_has_event`, `_recovers`) precisely so the two cannot
 disagree about which URL, or whether a call happens at all. A predicate re-stated inline
 next to the plan that computed it is a drift bug waiting to happen; there is exactly one

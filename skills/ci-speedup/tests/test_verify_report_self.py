@@ -8420,3 +8420,78 @@ def test_gap_fill_grounding_rejects_text_spliced_across_adjacent_log_lines(tmp_p
     genuine = _with_gapfill_block("request failed")
     assert _tag_for(genuine, _GROUND, tmp_path,
                     findings=_gapfill_findings(str(tmp_path))) == "PASS"
+
+
+# ── OPT77: the verifier re-derives the consolidation saving, never trusts it ──
+# The Tier-2 certificate arm for OPT77 must recompute BOTH numbers from the
+# stamped per-job setup/useful-work p50s: the credited runner-minutes and the
+# below-floor margin (floor - the PROJECTED consolidated duration). These pin
+# that it fails on tampered numbers, so the arm can't decay into a rubber stamp.
+
+def _opt77_finding(**over):
+    f = {
+        "id": "f1",
+        "pattern": "OPT77",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": ["audit", "lint", "typecheck"],
+        "runner_min_saving": 266.7,
+        "wall_clock_p50_s": 0.0,
+        "sizing_basis": "measured",
+        "setup_consolidation": {
+            "kind": "opt77_repeated_setup",
+            "credited_jobs": ["audit", "lint", "typecheck"],
+            "runner_label": "ubuntu-latest",
+            "removed_setup_payments": 2,
+            "setup_p50_s": 80.0,
+            "per_job": {n: {"setup_p50_s": 80.0, "useful_work_p50_s": 10.0}
+                        for n in ("audit", "lint", "typecheck")},
+            "projected_consolidated_p50_s": 90.0,
+            "occurrences": 2,
+            "sampled_saved_s": 320.0,
+            "sampled_successful_run_count": 2,
+            "monthly_volume": 100,
+            "scale": 50.0,
+            "runner_min_saving": 266.7,
+        },
+    }
+    f.update(over)
+    return f
+
+
+_OPT77_DATA = {"per_workflow_timing": {".github/workflows/ci.yml": {"floor_p50": 600.0}}}
+
+
+def test_opt77_certificate_rederives_margin_and_saving():
+    vr = _load_verify_report()
+    margin, problems = vr._opt77_consolidation_rederived(_opt77_finding(), _OPT77_DATA)
+    assert problems == []
+    assert margin == 510.0
+
+
+def test_opt77_certificate_fails_on_tampered_numbers():
+    vr = _load_verify_report()
+    # An inflated credited saving is caught by the re-derivation.
+    _m, problems = vr._opt77_consolidation_rederived(
+        _opt77_finding(runner_min_saving=9999.0), _OPT77_DATA)
+    assert any("runner_min_saving" in p for p in problems)
+    # A projection that understates the consolidated duration is caught too.
+    f = _opt77_finding()
+    f["setup_consolidation"]["projected_consolidated_p50_s"] = 12.0
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_DATA)
+    assert any("projected_consolidated_p50_s" in p for p in problems)
+    # And a group whose consolidated job would reach the cluster floor is refused
+    # outright — no margin at all, rather than a small positive one.
+    margin, problems = vr._opt77_consolidation_rederived(
+        _opt77_finding(),
+        {"per_workflow_timing": {".github/workflows/ci.yml": {"floor_p50": 90.0}}})
+    assert margin is None
+    assert any("not below floor" in p for p in problems)
+
+
+def test_opt77_certificate_requires_setup_to_dominate():
+    vr = _load_verify_report()
+    f = _opt77_finding()
+    f["setup_consolidation"]["per_job"]["lint"] = {
+        "setup_p50_s": 80.0, "useful_work_p50_s": 400.0}
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_DATA)
+    assert any("does not dominate" in p for p in problems)
