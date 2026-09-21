@@ -3200,7 +3200,7 @@ title_template: "Per-file test isolation rebuilds the shared module graph for ev
 
 **Detection heuristic** (routed from the measured long pole, not a flat grep — ARCHITECTURE §12.3): this pattern is emitted by the drill-time `vitest-isolate-pool` leaf detector in `blocking_path.py`, not by the static scan and not by the structural router in `collect_runs.py`. It fires only when all of the following are read, never inferred:
 
-1. The drilled long-pole job's captured log shows a vitest run whose `Duration … (transform …, import …, tests …)` line has `import + transform` above `tests`, with `import` above 30s. **This is vitest 4.x's summary line.** Vitest ≤3 prints `collect` in place of `import`, and vitest 5 prints percentages rather than absolute seconds; neither shape is read, so on those majors the pattern simply does not fire.
+1. The drilled long-pole job's captured log shows a vitest run whose `Duration … (transform …, import …, tests …)` line has `import + transform` above `tests`, with `import` above 30s. **This is vitest 4.x's summary line**, which is the only shape read: vitest 3 prints `collect` where 4 prints `import`, and other majors format the breakdown differently again, so on those the pattern simply does not fire rather than guessing.
 2. `scan.py`'s `test_runner_isolation` block — read from the repo's own `vitest.config.*` / `vite.config.*` / `vitest.workspace.*` — reports **no** `isolate: false` anywhere, and the log carries neither documented spelling of the CLI opt-out (`--no-isolate`, `--isolate=false`).
 3. The pole's measured dominant step category is `test` (the off-category demotion in ARCHITECTURE §12.4b otherwise demotes this leaf to a secondary observation).
 

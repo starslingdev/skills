@@ -54,12 +54,21 @@ _TEST_BOUND_LOG = "\n".join([
 ])
 
 _ISO_ON = {"runner": "vitest", "readable": True, "isolation_opt_out": False,
+           "truncated": False,
            "configs": ["vitest.config.ts"], "opt_out_evidence": []}
 _ISO_OFF = {"runner": "vitest", "readable": True, "isolation_opt_out": True,
-            "configs": ["vitest.config.ts"],
+            "truncated": False, "configs": ["vitest.config.ts"],
             "opt_out_evidence": ["vitest.config.ts:7: isolate: false"]}
 _ISO_UNREADABLE = {"runner": None, "readable": False, "isolation_opt_out": False,
-                   "configs": [], "opt_out_evidence": []}
+                   "truncated": False, "configs": [], "opt_out_evidence": []}
+
+
+def test_a_bundle_predating_the_truncation_key_fails_closed():
+    """A findings.json from a scan that never reported whether its config search
+    was complete was produced by a root-only read - its silence is not evidence
+    of a complete search, so the lever must not fire off it."""
+    legacy = {k: v for k, v in _ISO_ON.items() if k != "truncated"}
+    assert bp._parse_log(_IMPORT_BOUND_LOG, legacy) is None
 
 
 def _have_yaml() -> bool:
@@ -274,6 +283,28 @@ def test_the_config_half_of_the_evidence_declares_it_is_not_log_text():
         "the config half must name its provenance where it renders")
     # The measured half stays a real, findable log line.
     assert any(e.lstrip().startswith("Duration ") for e in leaf["evidence"])
+
+
+@pytest.mark.parametrize("cfgs", [
+    ["vitest.config.ts"],                                   # the common shape
+    ["packages/api/vitest.config.ts", "vitest.config.ts"],  # a monorepo
+])
+def test_the_config_evidence_states_the_absence_not_its_opposite(cfgs: list):
+    """The finding fires only when NO opt-out was found, so its evidence must
+    say exactly that. A sentence reading "<config> sets `isolate: false`" states
+    the opposite of the fact that let the finding fire, and lands in the prompt
+    that tells the agent to go and change `test.isolate` - self-contradicting
+    evidence. Pinned for one config and for several, because the two render
+    through different branches."""
+    iso = {"runner": "vitest", "readable": True, "truncated": False,
+           "isolation_opt_out": False, "configs": cfgs, "opt_out_evidence": []}
+    leaf = bp._parse_log(_IMPORT_BOUND_LOG, iso)
+    assert leaf is not None
+    line = next(e for e in leaf["evidence"] if "not this log" in e)
+    assert "isolate: false" in line, "the evidence must name what it looked for"
+    # ...and must say it was NOT found.
+    assert ("does not set" in line or "none of" in line), (
+        f"evidence claims the opt-out IS configured: {line!r}")
 
 
 def test_leaf_does_not_fire_when_the_repo_already_opted_out():

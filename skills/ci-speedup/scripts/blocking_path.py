@@ -1649,7 +1649,9 @@ def _isolation_lever_available(
     # an unreadable directory) cannot establish "no opt-out ANYWHERE" — the
     # opt-out may sit in a config it never reached, and the repo that already
     # adopted this lever is precisely the one that must not be told to adopt it.
-    if iso.get("truncated"):
+    # Default True: a bundle from a scan that predates this key was produced by
+    # a root-only read, so its silence is not evidence of a complete search.
+    if iso.get("truncated", True):
         return False, ""
     if _NO_ISOLATE_FLAG_RE.search(joined):
         return False, ""
@@ -1663,12 +1665,20 @@ def _isolation_lever_available(
     # line to quote. It says so inline, so neither the reader nor the agent takes
     # it for log text they could go and find.
     n = len(cfgs)
-    scope = (f"none of the {n} vitest configs read" if n > 1
-             else f"`{cfgs[0]}`")
+    # Both branches must state the ABSENCE — this finding fires only when no
+    # opt-out was found, so a sentence reading "<config> sets `isolate: false`"
+    # would assert the opposite of the fact that let it fire, in the prompt that
+    # then tells the agent to go and change `test.isolate`.
+    if n > 1:
+        listed = ", ".join(cfgs[:4]) + (f", … ({n} in total)" if n > 4 else "")
+        scope = f"none of the {n} vitest configs read set `isolate: false`"
+        tail = f"; read: {listed}"
+    else:
+        scope = f"`{cfgs[0]}` does not set `isolate: false`"
+        tail = ""
     return True, ("(read from the repo's vitest config, not this log) "
-                  f"{scope} sets `isolate: false` — per-file isolation is "
-                  "vitest's default, so it is still in effect"
-                  + (f"; read: {', '.join(cfgs[:4])}" if n > 1 else ""))
+                  f"{scope} — per-file isolation is vitest's default, so it is "
+                  "still in effect" + tail)
 
 
 def _parse_log(text: str,
