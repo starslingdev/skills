@@ -8446,6 +8446,8 @@ def _opt77_finding(**over):
             "per_job": {n: {"setup_p50_s": 80.0, "useful_work_p50_s": 10.0}
                         for n in ("audit", "lint", "typecheck")},
             "projected_consolidated_p50_s": 90.0,
+            "remaining_tallest_job": "test",
+            "remaining_tallest_p50_s": 600.0,
             "occurrences": 2,
             "sampled_saved_s": 320.0,
             "sampled_successful_run_count": 2,
@@ -8454,11 +8456,20 @@ def _opt77_finding(**over):
             "runner_min_saving": 266.7,
         },
     }
+    tall = over.pop("remaining_tallest", None)
+    if tall:
+        f["setup_consolidation"].update(tall)
     f.update(over)
     return f
 
 
-_OPT77_DATA = {"per_workflow_timing": {".github/workflows/ci.yml": {"floor_p50": 600.0}}}
+# `job_p50` is what the arm re-derives the remaining-tallest job from: the
+# credited group (audit/lint/typecheck) minus out, `test` at 600s is what the
+# consolidated job must stay below.
+_OPT77_DATA = {"per_workflow_timing": {".github/workflows/ci.yml": {
+    "floor_p50": 600.0,
+    "job_p50": {"audit": 90.0, "lint": 90.0, "typecheck": 90.0, "test": 600.0},
+}}}
 
 
 def test_opt77_certificate_rederives_margin_and_saving():
@@ -8482,10 +8493,14 @@ def test_opt77_certificate_fails_on_tampered_numbers():
     # And a group whose consolidated job would reach the cluster floor is refused
     # outright — no margin at all, rather than a small positive one.
     margin, problems = vr._opt77_consolidation_rederived(
-        _opt77_finding(),
-        {"per_workflow_timing": {".github/workflows/ci.yml": {"floor_p50": 90.0}}})
+        _opt77_finding(remaining_tallest={"remaining_tallest_job": "test",
+                                          "remaining_tallest_p50_s": 90.0}),
+        {"per_workflow_timing": {".github/workflows/ci.yml": {
+            "floor_p50": 90.0,
+            "job_p50": {"audit": 90.0, "lint": 90.0, "typecheck": 90.0,
+                        "test": 90.0}}}})
     assert margin is None
-    assert any("not below floor" in p for p in problems)
+    assert any("not below the tallest remaining job" in p for p in problems)
 
 
 def test_opt77_certificate_requires_setup_to_dominate():
@@ -8530,3 +8545,32 @@ def test_opt77_certificate_arm_is_routed_from_the_neutrality_check():
     src = _inspect.getsource(vr.check_tier2_neutrality_derived)
     assert "OPT77" in src
     assert "_opt77_consolidation_rederived(" in src
+
+
+def test_opt77_certificate_rederives_the_remaining_tallest_job_itself():
+    """The comparison the certificate rests on is "the tallest job that REMAINS
+    after the consolidation". The arm must work that out itself from the workflow's
+    own per-job medians minus the credited group — not read back whichever job the
+    detector nominated. Naming a different job, or overstating its median, has to
+    redden even though every other stamped number is untouched."""
+    vr = _load_verify_report()
+    f = _opt77_finding(remaining_tallest={"remaining_tallest_job": "lint"})
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_DATA)
+    assert any("remaining_tallest_job" in p for p in problems), problems
+
+    f = _opt77_finding(remaining_tallest={"remaining_tallest_p50_s": 9999.0})
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_DATA)
+    assert any("remaining_tallest_p50_s" in p for p in problems), problems
+
+
+def test_opt77_certificate_refuses_a_group_with_nothing_left_to_measure_against():
+    """A workflow that is nothing but the credited checks has no remaining job, so
+    there is no evidence the consolidated job stays off the gate. Refuse outright
+    rather than fall back to a floor the group itself defines."""
+    vr = _load_verify_report()
+    data = {"per_workflow_timing": {".github/workflows/ci.yml": {
+        "floor_p50": 90.0,
+        "job_p50": {"audit": 90.0, "lint": 90.0, "typecheck": 90.0}}}}
+    margin, problems = vr._opt77_consolidation_rederived(_opt77_finding(), data)
+    assert margin is None
+    assert any("no job outside the credited group" in p for p in problems), problems

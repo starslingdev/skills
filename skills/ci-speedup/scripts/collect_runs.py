@@ -8171,11 +8171,13 @@ def _detect_opt65_billing_rounding_waste(
 # only: `wall_clock_p50_s` is always 0 and the group is credited only while the
 # projected consolidated job stays strictly below the workflow cluster floor.
 #
-# It is deliberately DISJOINT from OPT65: OPT65 credits per-job billing round-up
-# for legs of ONE matrix base, all strictly sub-minute. OPT77 credits removed
-# SETUP RUNTIME for separate YAML jobs, which are typically well over a minute
-# once checkout+install are paid. The name-resolution gate below (a credited job
-# must resolve to exactly one YAML job of that name) keeps matrix legs out.
+# It SUPERSEDES OPT65 where both claim the same jobs. OPT65 credits per-job
+# billing round-up; OPT77 credits removed SETUP RUNTIME for separate YAML jobs.
+# They are NOT disjoint: OPT65 never required a declared matrix — it groups on a
+# trailing parenthetical in the OBSERVED job name — so three ordinary jobs named
+# `lint (eslint)`, `lint (biome)`, `lint (stylelint)` trip both. The
+# name-resolution gate keeps INTERPOLATED matrix legs out, but it is
+# `_supersede_opt65_with_opt77` that stops one edit rendering as two levers.
 # --------------------------------------------------------------------------- #
 
 # At least this many independent jobs must share the setup prefix before a
@@ -8283,6 +8285,46 @@ def _consolidation_group_is_independent(keys: list[str],
     return True
 
 
+def _supersede_opt65_with_opt77(
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop every OPT65 finding whose jobs an OPT77 finding already claims, in the
+    same workflow. One edit must render as ONE lever.
+
+    The two were documented as disjoint because a matrix leg never resolves to a
+    single YAML job by name. That reasoning does not hold: OPT65 never required a
+    DECLARED matrix — it groups on a trailing parenthetical in the OBSERVED job
+    name, so three ordinary jobs named `lint (eslint)`, `lint (biome)`,
+    `lint (stylelint)` resolve to one YAML job each AND form an OPT65 base. Both
+    then fire on the same three jobs and describe the same consolidation, and the
+    report shows two levers for one change while double-counting part of it.
+
+    ACCEPTED COST: OPT65's billing round-up minutes are genuine and go unreported
+    whenever it is superseded, so the total slightly UNDERSTATES. They are not
+    folded into OPT77's number on purpose — OPT77 credits raw removed compute, and
+    mixing a billable-round-up quantity into that would break its measured basis.
+    Under-reporting a real saving is the safe direction; inventing a basis is not.
+    """
+    claimed: dict[str, set[str]] = {}
+    for f in findings:
+        if str(f.get("pattern") or "") != "OPT77":
+            continue
+        wf = str(f.get("workflow_file") or "")
+        claimed.setdefault(wf, set()).update(
+            str(j) for j in (f.get("affected_jobs") or []) if str(j))
+    if not claimed:
+        return findings
+    kept: list[dict[str, Any]] = []
+    for f in findings:
+        if str(f.get("pattern") or "") == "OPT65":
+            wf = str(f.get("workflow_file") or "")
+            jobs = {str(j) for j in (f.get("affected_jobs") or []) if str(j)}
+            if jobs and jobs & claimed.get(wf, set()):
+                continue
+        kept.append(f)
+    return kept
+
+
 def _detect_opt77_repeated_setup_across_small_jobs(
     wf_path: str,
     jobs_per_run: list[list[dict[str, Any]]],
@@ -8361,7 +8403,7 @@ def _detect_opt77_repeated_setup_across_small_jobs(
         if not setups:
             continue
         p50 = float(job_p50.get(name) or 0.0)
-        if p50 <= 0 or p50 >= floor:
+        if p50 <= 0:
             continue
         key = _consolidation_yaml_key(name, doc)
         if not key:
@@ -8417,12 +8459,24 @@ def _detect_opt77_repeated_setup_across_small_jobs(
         setup_p50 = min(float(candidates[n]["setup_p50"]) for n in names)
         projected = round(max(float(candidates[n]["setup_p50"]) for n in names)
                           + max(float(candidates[n]["useful_p50"]) for n in names), 1)
-        # Wall-clock safety: the consolidated job must stay strictly faster than
-        # the workflow cluster floor, or the consolidation can become the merge
-        # gate. Reaching the floor withholds the finding (OPT65 step 3's stance).
-        if projected <= 0 or projected >= floor:
+        # Wall-clock safety. The question is "does the merge gate get longer if
+        # these jobs are collapsed?", and the gate AFTERWARDS is set by the jobs
+        # that were not touched — so the consolidated job is measured against the
+        # tallest job that REMAINS, never against a floor the group's own members
+        # help define. Measuring against the latter compares the fix to something
+        # the fix removes: it silently withheld the motivating shape (one long
+        # test job beside a flat row of equally-sized small checks), where the
+        # second-tallest job in the workflow is itself a group member.
+        # Strict, and withheld when nothing outside the group is taller.
+        member_names = set(names)
+        remaining = [(float(v or 0.0), str(k)) for k, v in job_p50.items()
+                     if str(k) not in member_names and float(v or 0.0) > 0]
+        if not remaining:
             continue
-        margin = round(floor - projected, 1)
+        tallest_p50, tallest_job = max(remaining)
+        if projected <= 0 or projected >= tallest_p50:
+            continue
+        margin = round(tallest_p50 - projected, 1)
         if margin <= 0:
             continue
         occurrences = sum(1 for split in per_run
@@ -8452,7 +8506,8 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             f"{sampled_saved_s / 60.0:.1f} runner-min across {occurrences} sampled "
             f"run(s), ~{credited:.0f} runner-min/mo ({basis}). The consolidated job "
             f"projects to {projected:.0f}s (setup + the slowest task, run "
-            f"concurrently), {margin:.0f}s below the {floor:.0f}s cluster floor.")
+            f"concurrently), {margin:.0f}s below the {tallest_p50:.0f}s `{tallest_job}` "
+            f"job that remains afterwards and sets the gate from then on.")
         me = _measured_evidence(
             ["Job", "Setup p50", "Useful work p50", "Job p50"],
             rows[:8],
@@ -8514,6 +8569,8 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                             "useful_work_p50_s": round(float(candidates[n]["useful_p50"]), 1)}
                         for n in names},
             "projected_consolidated_p50_s": projected,
+            "remaining_tallest_job": tallest_job,
+            "remaining_tallest_p50_s": round(tallest_p50, 1),
             "occurrences": occurrences,
             "sampled_saved_s": round(sampled_saved_s, 3),
             "sampled_successful_run_count": len(jobs_per_run),
@@ -8525,7 +8582,9 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             "proof": "below_cluster_floor",
             "margin_s": margin,
             "ref": (f"per_workflow_timing[wf]: projected consolidated job "
-                    f"{projected:.1f}s below floor_p50 {floor:.1f}s"),
+                    f"{projected:.1f}s below the tallest NON-credited job "
+                    f"`{tallest_job}` at {tallest_p50:.1f}s (job_p50 minus the "
+                    f"credited group)"),
         }
         f["guardrail"] = (
             "Consolidating checks RENAMES them. If any of these jobs is a required "
@@ -16078,6 +16137,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             opt65_monthly, next_id)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
+        # OPT77 supersedes OPT65 on any job set both claim — one edit, one lever.
+        # Applied here, right after both have run for this workflow, so the two
+        # can never reach the report describing the same consolidation twice.
+        findings = _supersede_opt65_with_opt77(findings)
 
         # The sibling windows come from the SAME cached all-status page the
         # run-elimination block below fetches (net zero extra gh calls); with

@@ -2548,11 +2548,16 @@ def _opt77_run(setup_s=80.0, work_s=10.0, runner="ubuntu-latest", names=_OPT77_N
 def _opt77_crit(*, floor=600.0, setup_s=80.0, work_s=10.0, runner="ubuntu-latest",
                 names=_OPT77_NAMES):
     job_p50 = {n: setup_s + work_s for n in names}
+    # A real workflow has something besides the candidate checks, and the
+    # consolidated job is measured against the tallest job that REMAINS after the
+    # consolidation — so the fixture carries one. At `floor` it plays the part the
+    # old cluster-floor comparison played, keeping these cases' margins unchanged.
+    job_p50["test"] = floor
     return {
         "floor_p50": floor,
         "long_pole_p50": floor + 60.0,
         "job_p50": job_p50,
-        "job_runner": {n: runner for n in names},
+        "job_runner": dict({n: runner for n in names}, test=runner),
         "runner_scope": runner,
     }
 
@@ -2808,8 +2813,10 @@ def test_opt77_withholds_when_only_the_projection_reaches_the_floor():
     names = ("lint", "typecheck", "audit")
     spec = {"lint": (80.0, 10.0), "typecheck": (100.0, 2.0), "audit": (60.0, 40.0)}
     run = [_setup_job(n, s, w) for n, (s, w) in spec.items()]
+    # `test` at 110s is the tallest job that REMAINS after the consolidation, so
+    # it is what the projection is measured against.
     crit = dict(_opt77_crit(names=names), floor_p50=110.0,
-                job_p50={n: s + w for n, (s, w) in spec.items()})
+                job_p50=dict({n: s + w for n, (s, w) in spec.items()}, test=110.0))
     assert _opt77(jpr=[run, list(run)], crit=crit, wf=_opt77_wf(names=names)) == []
 
 
@@ -2823,7 +2830,7 @@ def test_opt77_credits_the_smallest_setup_in_a_heterogeneous_group():
     spec = {"lint": (80.0, 10.0), "typecheck": (40.0, 10.0), "audit": (120.0, 10.0)}
     run = [_setup_job(n, s, w) for n, (s, w) in spec.items()]
     crit = dict(_opt77_crit(names=names), floor_p50=600.0,
-                job_p50={n: s + w for n, (s, w) in spec.items()})
+                job_p50=dict({n: s + w for n, (s, w) in spec.items()}, test=600.0))
     out = _opt77(jpr=[run, list(run)], crit=crit, wf=_opt77_wf(names=names))
     assert len(out) == 1
     sc = out[0]["setup_consolidation"]
@@ -2889,3 +2896,133 @@ def test_setup_classifier_recognises_the_remaining_install_idioms():
                  "Run python3 -m pip install -r requirements.txt",
                  "Run mvn dependency:go-offline"):
         assert cr._classify_step(name) == "setup", name
+
+
+def test_opt77_reports_one_long_job_beside_a_flat_row_of_small_checks():
+    """The motivating shape, which used to be the one shape that could not fire.
+
+    The gate asks "does the merge gate get longer if these jobs are collapsed?",
+    and the gate afterwards is set by the jobs that were NOT touched. Measuring
+    against a floor the group's own members define measures against something the
+    fix removes. Here five equally-sized checks sit beside one 9-minute test job:
+    the second-tallest job in the workflow is itself a group member, so the old
+    comparison rejected every candidate and reported nothing. The consolidated job
+    projects to 90s against the 540s test job that remains."""
+    names = ("lint", "typecheck", "audit", "format-check", "spellcheck")
+    run = [_setup_job(n, 80.0, 10.0) for n in names]
+    job_p50 = {n: 90.0 for n in names}
+    job_p50["test"] = 540.0
+    crit = {"floor_p50": 90.0, "long_pole_p50": 540.0, "job_p50": job_p50,
+            "job_runner": dict({n: "ubuntu-latest" for n in names}, test="ubuntu-latest"),
+            "runner_scope": "ubuntu-latest"}
+    wf = _opt77_wf(names=names)
+    wf["jobs"]["test"] = {"runs-on": "ubuntu-latest"}
+    out = _opt77(jpr=[run, list(run)], crit=crit, wf=wf)
+    assert len(out) == 1, out
+    sc = out[0]["setup_consolidation"]
+    assert sorted(sc["credited_jobs"]) == sorted(names)
+    assert sc["remaining_tallest_job"] == "test"
+    assert sc["remaining_tallest_p50_s"] == 540.0
+    assert sc["projected_consolidated_p50_s"] == 90.0
+    assert out[0]["tier2_neutrality"]["margin_s"] == 450.0
+    assert out[0]["wall_clock_p50_s"] == 0.0
+
+
+def test_opt77_withholds_when_no_job_outside_the_group_is_taller():
+    """The complement: if nothing outside the group is taller than the consolidated
+    job, collapsing the group can only make the consolidated job the new gate.
+    A workflow that is nothing but the candidate checks has no remaining job to
+    measure against at all, and must report nothing rather than guess."""
+    names = ("lint", "typecheck", "audit")
+    run = [_setup_job(n, 80.0, 10.0) for n in names]
+    crit = {"floor_p50": 90.0, "long_pole_p50": 90.0,
+            "job_p50": {n: 90.0 for n in names},
+            "job_runner": {n: "ubuntu-latest" for n in names},
+            "runner_scope": "ubuntu-latest"}
+    assert _opt77(jpr=[run, list(run)], crit=crit, wf=_opt77_wf(names=names)) == []
+    # And a remaining job that is SHORTER than the projection is no protection.
+    crit2 = dict(crit, job_p50=dict({n: 90.0 for n in names}, docs=45.0))
+    wf2 = _opt77_wf(names=names)
+    wf2["jobs"]["docs"] = {"runs-on": "ubuntu-latest"}
+    assert _opt77(jpr=[run, list(run)], crit=crit2, wf=wf2) == []
+
+
+# ==== OPT77 supersedes OPT65 when both describe the same jobs ====
+#
+# The two were described as disjoint because matrix legs never resolve to a
+# single YAML job by name. But OPT65 never required a declared matrix: it groups
+# on a trailing parenthetical in the OBSERVED job name. Three ordinary jobs that
+# happen to be named `lint (eslint)`, `lint (biome)`, `lint (stylelint)` resolve
+# to one YAML job each AND form an OPT65 "matrix base", so both fire on the same
+# three jobs and one edit is reported as two levers.
+
+_OPT65_OVERLAP_NAMES = ("lint (biome)", "lint (eslint)", "lint (stylelint)")
+
+
+def _overlap_run():
+    """Three tiny same-runner checks sharing one setup prefix, beside two taller
+    jobs so there is something for the consolidation to be measured against."""
+    return [_setup_job(n, 14.0, 6.0) for n in _OPT65_OVERLAP_NAMES]
+
+
+def _overlap_crit():
+    p50 = {n: 20.0 for n in _OPT65_OVERLAP_NAMES}
+    p50["build"] = 300.0
+    p50["test"] = 540.0
+    return {"floor_p50": 300.0, "long_pole_p50": 540.0, "job_p50": p50,
+            "job_runner": {n: "ubuntu-latest" for n in p50},
+            "runner_scope": "ubuntu-latest"}
+
+
+def _overlap_wf():
+    jobs = {n.replace(" ", "-").replace("(", "").replace(")", ""): {
+        "runs-on": "ubuntu-latest", "name": n} for n in _OPT65_OVERLAP_NAMES}
+    jobs["build"] = {"runs-on": "ubuntu-latest"}
+    jobs["test"] = {"runs-on": "ubuntu-latest"}
+    return {"on": {"pull_request": {}}, "jobs": jobs}
+
+
+def test_both_levers_really_do_fire_on_the_same_three_plain_jobs():
+    """The premise of the supersede rule, pinned so it cannot quietly stop being
+    true: these are plain jobs, not a matrix, and both detectors claim them."""
+    runs = [_overlap_run(), _overlap_run()]
+    crit, wf = _overlap_crit(), _overlap_wf()
+    o65 = cr._detect_opt65_billing_rounding_waste("ci.yml", runs, crit, 100, 0)
+    o77 = cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", runs, crit, wf, 100, 0)
+    assert len(o65) == 1, o65
+    assert len(o77) == 1, o77
+    assert sorted(o65[0]["affected_jobs"]) == sorted(_OPT65_OVERLAP_NAMES)
+    assert sorted(o77[0]["affected_jobs"]) == sorted(_OPT65_OVERLAP_NAMES)
+
+
+def test_opt77_supersedes_opt65_so_one_edit_is_one_lever():
+    """One edit — merge those three checks into one job — must render as ONE
+    lever. OPT65's round-up minutes are real and go unreported in the overlap,
+    which slightly understates the total; that is accepted deliberately, because
+    OPT77's saving model is raw removed compute and folding a billable-round-up
+    quantity into it would break its measured basis."""
+    runs = [_overlap_run(), _overlap_run()]
+    crit, wf = _overlap_crit(), _overlap_wf()
+    findings = (cr._detect_opt65_billing_rounding_waste("ci.yml", runs, crit, 100, 0)
+                + cr._detect_opt77_repeated_setup_across_small_jobs(
+                    "ci.yml", runs, crit, wf, 100, 1))
+    kept = cr._supersede_opt65_with_opt77(findings)
+    assert [f["pattern"] for f in kept] == ["OPT77"], [f["pattern"] for f in kept]
+
+
+def test_opt65_survives_when_it_describes_different_jobs():
+    """The supersede is scoped to the overlapping job set, not to the pattern:
+    an OPT65 finding about a genuine matrix elsewhere in the workflow is
+    untouched."""
+    o65 = {"id": "f1", "pattern": "OPT65", "workflow_file": "ci.yml",
+           "affected_jobs": ["unit (3.9)", "unit (3.11)", "unit (3.12)"]}
+    o77 = {"id": "f2", "pattern": "OPT77", "workflow_file": "ci.yml",
+           "affected_jobs": list(_OPT65_OVERLAP_NAMES)}
+    kept = cr._supersede_opt65_with_opt77([o65, o77])
+    assert [f["id"] for f in kept] == ["f1", "f2"]
+    # …and a same-named job set in a DIFFERENT workflow is also untouched.
+    other = {"id": "f3", "pattern": "OPT65", "workflow_file": "release.yml",
+             "affected_jobs": list(_OPT65_OVERLAP_NAMES)}
+    kept = cr._supersede_opt65_with_opt77([other, o77])
+    assert [f["id"] for f in kept] == ["f3", "f2"]

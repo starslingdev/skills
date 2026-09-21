@@ -5069,15 +5069,36 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
             problems.append(f"runner_min_saving {rm!r} != re-derived {expected_rm}")
     wf = str(f.get("workflow_file") or "")
     crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
-    floor = _num(crit.get("floor_p50"))
-    if floor is None or floor <= 0:
-        problems.append("missing floor_p50")
+    # The consolidated job is measured against the tallest job that REMAINS after
+    # the consolidation, never against a floor the credited group helps define.
+    # Re-derived here from `per_workflow_timing[wf].job_p50` minus the credited
+    # jobs, so the detector's own stamped `remaining_tallest_*` is checked against
+    # an independent computation rather than taken at its word.
+    all_p50 = _as_dict(crit.get("job_p50"))
+    if not all_p50:
+        problems.append("missing job_p50")
         return None, problems
-    if projected >= floor:
+    member = {str(j) for j in jobs}
+    remaining = [(float(_num(v) or 0.0), str(k)) for k, v in all_p50.items()
+                 if str(k) not in member and (_num(v) or 0.0) > 0]
+    if not remaining:
+        problems.append("no job outside the credited group to measure against")
+        return None, problems
+    tallest_p50, tallest_job = max(remaining)
+    claimed_job = str(sc.get("remaining_tallest_job") or "")
+    if claimed_job != tallest_job:
         problems.append(
-            f"projected consolidated job {projected} is not below floor {floor}")
+            f"remaining_tallest_job {claimed_job!r} != re-derived {tallest_job!r}")
+    claimed_tall = _num(sc.get("remaining_tallest_p50_s"))
+    if claimed_tall is None or abs(claimed_tall - round(tallest_p50, 1)) > 0.11:
+        problems.append(
+            f"remaining_tallest_p50_s {claimed_tall!r} != {round(tallest_p50, 1)}")
+    if projected >= tallest_p50:
+        problems.append(
+            f"projected consolidated job {projected} is not below the tallest "
+            f"remaining job {tallest_job!r} at {tallest_p50}")
         return None, problems
-    return round(floor - projected, 1), problems
+    return round(tallest_p50 - projected, 1), problems
 
 
 def _tier2_skip_or_data(findings_path: Path | None, name: str,

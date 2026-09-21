@@ -75,6 +75,27 @@ unversioned and updates by reinstall from `main`.
   gating merges, and that collapsing several checks into one trades away
   independently-red, independently-re-runnable checks.
 
+- **2026-09-21** — **The repeated-setup lever now reports the shape it was built
+  for.** Whether consolidating a group of checks could lengthen the wait for a
+  pull request was decided by comparing the consolidated job against the
+  workflow's second-longest job — which, in a workflow that is one long test job
+  beside a flat row of equally-sized small checks, is one of those checks. The
+  advice was being measured against something the advice removes, so the single
+  most common version of this waste was never reported. The comparison is now
+  against the longest job that would still be there afterwards, which is what
+  actually sets the wait once the group is collapsed. Where nothing outside the
+  group is longer, the finding is still withheld entirely.
+
+- **2026-09-21** — **One edit is reported as one saving.** A group of checks could
+  be claimed by both this lever and the older billing round-up lever and shown
+  twice, because the older one recognises a group by how its jobs are named rather
+  than by whether they are really a build matrix — so three ordinary checks named
+  like matrix legs tripped both. The repeated-setup lever now takes precedence for
+  any group both describe. The round-up minutes the other lever would have
+  reported are real and are not added in, so the total for that group is slightly
+  conservative; that is deliberate, since the two are measured in different units
+  and combining them would make neither trustworthy.
+
 - **2026-09-21** — **The audit now recognises an unnamed dependency install as
   setup.** The single shared definition of "this step is setup" keyed off the
   step's name, and a step nobody named is shown by GitHub as the command it ran —

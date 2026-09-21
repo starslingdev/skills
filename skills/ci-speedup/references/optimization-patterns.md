@@ -710,8 +710,10 @@ saved:   (N - 1) x setup, every run
    record the prefix's **signature**: the ordered, normalized names of those
    setup steps.
 2. Keep a job as a candidate only if it resolves to exactly **one** job in the
-   workflow YAML by name (so matrix legs, which resolve to none, are excluded —
-   those are OPT65's territory, a different saving model), runs on a single known
+   workflow YAML by name (an interpolated matrix leg resolves to none and is
+   excluded; a name carried by more than one job in a single run is not one job
+   and is excluded too, which covers a matrix declaring a static `name:`), runs
+   on a single known
    per-minute-billed runner label, shows the **same setup signature in every
    sampled occurrence**, and its setup p50 is **at least as large as its
    useful-work p50**.
@@ -727,9 +729,19 @@ saved:   (N - 1) x setup, every run
    least **three** jobs and **no `needs:` edge**, direct or transitive, links any
    two of them — a chain is not a consolidatable set.
 4. Project the consolidated job at `max(setup_p50) + max(useful_work_p50)` (the
-   collapsed tasks run concurrently inside it). If that projection reaches the
-   workflow cluster floor, **withhold the finding**: consolidation serializes
-   runner allocation and must never lengthen the merge gate.
+   collapsed tasks run concurrently inside it) and compare it against **the
+   tallest job that REMAINS after the consolidation** — the tallest job in the
+   workflow that is not a member of the credited group. If the projection reaches
+   that job, **withhold the finding**; if nothing outside the group is taller,
+   withhold it too. Consolidation must never lengthen the merge gate.
+
+   The comparison is deliberately *not* against the workflow's cluster floor. The
+   question the gate answers is "does the merge gate get longer if these jobs are
+   collapsed?", and the gate afterwards is set by the jobs that were not touched.
+   A floor the group's own members help define measures the fix against something
+   the fix removes — which is a modelling error, not conservatism, and it silenced
+   the pattern on its own motivating shape (one long test job beside a flat row of
+   equally-sized small checks, where the second-tallest job is itself a member).
 5. Credit `occurrences x (N - 1) x setup_p50` runner-seconds across the sample,
    where `setup_p50` is the **smallest** measured setup p50 in the group and
    `occurrences` is the number of sampled runs in which **every** credited job
@@ -737,14 +749,6 @@ saved:   (N - 1) x setup, every run
    it and so has none to remove. Scale that to a month by the monthly volume for
    the sampled event scope divided by sampled successful runs. This credits
    removed setup runtime only — no wall-clock speedup is ever claimed.
-
-**When this cannot fire (by construction).** A candidate must sit strictly below
-the workflow's cluster floor, and that floor is the **second-tallest** job p50 in
-the workflow. So the group can only be credited when at least two jobs in the
-workflow are taller than every member of it. A workflow that is one long job plus
-a flat row of equally-sized small checks sets its own floor from those checks and
-reports nothing — the saving is real there, but this detector will not claim it
-rather than reason about a floor the group itself defines.
 
 **What counts as the setup prefix.** Only the *leading* run of setup-classified
 steps, and only steps the classifier recognises: the implicit `Set up job`,
@@ -754,6 +758,21 @@ step, and the common unnamed install commands (`npm ci`, `pnpm/yarn install`,
 `go mod download`, `cargo fetch`). A setup step the classifier does not recognise
 ends the prefix, so its time lands in "useful work" and the group is sized
 conservatively or withheld — never inflated.
+
+**Relationship to OPT65 (supersede, not disjoint).** These two were described as
+disjoint because a matrix leg never resolves to a single YAML job by name. That
+reasoning does not hold: OPT65 never required a *declared* matrix — it groups on a
+trailing parenthetical in the **observed** job name, so three ordinary jobs named
+`lint (eslint)`, `lint (biome)`, `lint (stylelint)` resolve to one YAML job each
+*and* form an OPT65 base. Both then describe the same consolidation. **OPT77
+supersedes OPT65 on any job set both claim**: one edit renders as one lever.
+
+The accepted cost: OPT65's billing round-up minutes are genuine, and they go
+unreported whenever it is superseded, so the report slightly **understates** that
+group's total. They are deliberately not folded into OPT77's credited number —
+OPT77 credits raw removed compute, and mixing a billable-round-up quantity into it
+would break its measured basis. Under-reporting a real saving is the safe
+direction; inventing a basis is not.
 
 **Fix**: Merge the group into one job that checks out and installs once, then
 runs the collapsed tasks **concurrently** inside that job (background processes
