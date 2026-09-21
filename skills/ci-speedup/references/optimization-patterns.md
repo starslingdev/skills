@@ -706,13 +706,24 @@ saved:   (N - 1) x setup, every run
 1. For every sampled job, split its measured step timeline (jobs API `steps[]`
    timestamps) into the **leading run of setup steps** — the implicit `Set up
    job`, `actions/checkout`, `setup-*` actions, dependency installs — and the
-   remaining **useful work**. Take the p50 of each across the sampled runs.
+   remaining **useful work**. Take the p50 of each across the sampled runs, and
+   record the prefix's **signature**: the ordered, normalized names of those
+   setup steps.
 2. Keep a job as a candidate only if it resolves to exactly **one** job in the
    workflow YAML by name (so matrix legs, which resolve to none, are excluded —
    those are OPT65's territory, a different saving model), runs on a single known
-   per-minute-billed runner label, and its setup p50 is **at least as large as
-   its useful-work p50**.
-3. Group the candidates by resolved runner label. Emit only when the group has at
+   per-minute-billed runner label, shows the **same setup signature in every
+   sampled occurrence**, and its setup p50 is **at least as large as its
+   useful-work p50**.
+3. Group the candidates by resolved runner label **and by setup signature** —
+   never by runner label alone. The saving model removes `(N-1)` payments of
+   *one* prefix and projects the consolidated job at `max(setup_p50)` rather than
+   the sum of the setups, and both steps are only valid for jobs re-paying the
+   **same setup work**. Three checks that each spend 80s installing *different*
+   toolchains (a Node one, a Python one, a Go one) share a runner and a duration
+   but not a prefix: consolidating them removes only the one shared checkout,
+   while every distinct install still has to run. Grouping on the signature keeps
+   them in separate groups, each sized on its own. Emit only when a group has at
    least **three** jobs and **no `needs:` edge**, direct or transitive, links any
    two of them — a chain is not a consolidatable set.
 4. Project the consolidated job at `max(setup_p50) + max(useful_work_p50)` (the

@@ -8155,25 +8155,34 @@ _CONSOLIDATION_MIN_JOBS = 3
 _CONSOLIDATION_MIN_SETUP_SHARE = 0.5
 
 
-def _leading_setup_seconds(job: dict[str, Any]) -> float | None:
-    """Measured seconds this job spent in its LEADING setup prefix, or None when
-    the job has no timed steps or does not open with one.
+def _leading_setup_prefix(job: dict[str, Any]) -> tuple[tuple[str, ...], float] | None:
+    """This job's LEADING setup prefix as (signature, measured seconds), or None
+    when the job has no timed steps or does not open with one.
 
     "Setup" is `_classify_step(...) == "setup"` — the SAME coarse classifier the
     hygiene setup detectors (OPT49/OPT51) are defined against, so the skill has
     exactly one notion of a setup step. Only the LEADING run counts: a cache-save
     or a re-configure in the middle of a job is not part of the fixed prefix a
     consolidation would pay once.
+
+    The SIGNATURE is the ordered tuple of those steps' normalized names, and it is
+    what lets the caller show that two jobs re-pay the SAME setup rather than merely
+    equally expensive ones. Duration alone cannot: a Node check, a Python check and
+    a Go check can each spend 80s installing entirely different dependencies, and
+    consolidating those removes only the one shared checkout — every distinct
+    install still has to run.
     """
     steps = _step_durations(job)
     if not steps:
         return None
     total = 0.0
+    sig: list[str] = []
     for name, dur in steps:
         if _classify_step(name) != "setup":
             break
+        sig.append(" ".join(str(name or "").split()).casefold())
         total += dur
-    return total if total > 0 else None
+    return (tuple(sig), total) if total > 0 else None
 
 
 def _consolidation_yaml_key(job_name: str, wf_doc: dict[str, Any]) -> str | None:
@@ -8268,6 +8277,7 @@ def _detect_opt77_repeated_setup_across_small_jobs(
     # Per sampled run, each job's measured (setup_s, useful_work_s) split.
     per_run: list[dict[str, tuple[float, float]]] = []
     observed_runner: dict[str, set[str]] = {}
+    observed_setup_sig: dict[str, set[tuple[str, ...]]] = {}
     for run_jobs in jobs_per_run:
         split: dict[str, tuple[float, float]] = {}
         for job in run_jobs:
@@ -8275,12 +8285,16 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             if not name:
                 continue
             dur = _job_compute_s(job)
-            setup = _leading_setup_seconds(job)
-            if dur <= 0 or setup is None or setup <= 0 or setup > dur:
+            prefix = _leading_setup_prefix(job)
+            if dur <= 0 or prefix is None:
+                continue
+            sig, setup = prefix
+            if setup <= 0 or setup > dur:
                 continue
             split[name] = (setup, dur - setup)
             observed_runner.setdefault(name, set()).add(
                 _occurrence_runner_label(job) or "")
+            observed_setup_sig.setdefault(name, set()).add(sig)
         per_run.append(split)
 
     candidates: dict[str, dict[str, Any]] = {}
@@ -8295,6 +8309,16 @@ def _detect_opt77_repeated_setup_across_small_jobs(
         key = _consolidation_yaml_key(name, doc)
         if not key:
             continue
+        # One STABLE setup prefix across the sampled occurrences. A job whose
+        # prefix changed between runs (a cache hit that skipped an install, a
+        # workflow edit mid-sample) has no single prefix a consolidation would
+        # pay once, so it cannot be shown to share one with anything.
+        sigs = observed_setup_sig.get(name) or set()
+        if len(sigs) != 1:
+            continue
+        setup_sig = next(iter(sigs))
+        if not setup_sig:
+            continue
         declared = _billed_job_runner(name, crit)
         # One known per-minute-billed label, and the sampled occurrences all ran
         # on exactly that label (an occurrence that drifted is not consolidatable
@@ -8307,18 +8331,24 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             continue
         if setup_p50 < _CONSOLIDATION_MIN_SETUP_SHARE * (setup_p50 + useful_p50):
             continue
-        candidates[name] = {"key": key, "runner": declared,
+        candidates[name] = {"key": key, "runner": declared, "setup_sig": setup_sig,
                             "setup_p50": setup_p50, "useful_p50": useful_p50}
 
-    by_runner: dict[str, list[str]] = {}
+    # Group by runner AND by the setup prefix itself, never by runner alone. The
+    # saving model — (N-1) payments of ONE prefix removed, and a consolidated job
+    # projected at max(setup) rather than the sum of the setups — is only valid
+    # for jobs that re-pay the SAME setup work. Jobs on the same runner with
+    # different prefixes form different groups; each is sized on its own.
+    by_group: dict[tuple[str, tuple[str, ...]], list[str]] = {}
     for name, meta in candidates.items():
-        by_runner.setdefault(str(meta["runner"]), []).append(name)
+        by_group.setdefault(
+            (str(meta["runner"]), tuple(meta["setup_sig"])), []).append(name)
 
     scale = float(monthly_volume) / float(len(jobs_per_run))
     basis = f"{monthly_volume}/30d ÷ {len(jobs_per_run)} sampled successful run(s)"
     title = "Repeated Fixed Setup Across Independent Small Jobs"
     out: list[dict[str, Any]] = []
-    for runner, names in sorted(by_runner.items()):
+    for (runner, setup_sig), names in sorted(by_group.items()):
         names = sorted(names)
         n_jobs = len(names)
         if n_jobs < _CONSOLIDATION_MIN_JOBS:
@@ -8351,9 +8381,11 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                  f"{candidates[name]['useful_p50']:.0f}s",
                  f"{float(job_p50.get(name) or 0.0):.0f}s"]
                 for name in names]
+        prefix_render = " → ".join(setup_sig[:4]) + ("…" if len(setup_sig) > 4 else "")
         evidence = (
             f"{n_jobs} independent same-runner (`{runner}`) jobs each re-pay the same "
-            f"measured setup prefix before seconds of useful work; the smallest "
+            f"measured setup prefix ({len(setup_sig)} step(s): {prefix_render}) "
+            f"before seconds of useful work; the smallest "
             f"measured setup p50 across them is {setup_p50:.0f}s. Consolidating them "
             f"into one job removes {removed} setup payment(s) per run — "
             f"{sampled_saved_s / 60.0:.1f} runner-min across {occurrences} sampled "
@@ -8395,6 +8427,7 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             "credited_jobs": names,
             "credited_job_keys": [str(candidates[n]["key"]) for n in names],
             "runner_label": runner,
+            "shared_setup_steps": list(setup_sig),
             "removed_setup_payments": removed,
             "setup_p50_s": round(setup_p50, 1),
             "per_job": {n: {"setup_p50_s": round(float(candidates[n]["setup_p50"]), 1),

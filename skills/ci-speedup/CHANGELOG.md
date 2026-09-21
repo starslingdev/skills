@@ -60,8 +60,12 @@ unversioned and updates by reinstall from `main`.
   sub-minute nor matrix legs, so the waste was invisible no matter how large it
   got. The audit now measures each job's setup prefix from its real step
   timings, and where at least three independent jobs on the same runner spend at
-  least half their time in that prefix, it credits the setup payments a
-  consolidation would remove — a runner-minute saving only, never a speedup. It
+  least half their time in **the same** prefix, it credits the setup payments a
+  consolidation would remove — a runner-minute saving only, never a speedup.
+  Sameness is measured, not assumed: checks that each spend the same amount of
+  time installing *different* toolchains are grouped separately and sized
+  separately, because merging those would still have to run every install and so
+  removes far less than it appears to. It
   withholds the finding entirely unless the consolidated job would still finish
   comfortably faster than the merge gate, so the advice can never make the wait
   for a pull request longer, and the fix it hands back says plainly that the

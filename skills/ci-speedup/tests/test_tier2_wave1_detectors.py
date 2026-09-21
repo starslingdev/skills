@@ -2657,3 +2657,66 @@ def test_opt77_requires_monthly_volume():
 def test_opt77_is_wired_into_collect():
     import inspect
     assert "_detect_opt77_repeated_setup_across_small_jobs(" in inspect.getsource(cr.collect)
+
+
+def _setup_job_named(name, setup_steps, work_s, runner="ubuntu-latest"):
+    """A job whose leading setup prefix is the GIVEN named steps, then one work step."""
+    t = 0.0
+
+    def _stamp(offset):
+        m, s = divmod(int(offset), 60)
+        return f"2026-06-01T00:{m:02d}:{s:02d}Z"
+
+    steps = []
+    for step_name, dur in list(setup_steps) + [("Run tests", work_s)]:
+        steps.append({"name": step_name, "number": len(steps) + 1,
+                      "started_at": _stamp(t), "completed_at": _stamp(t + dur)})
+        t += dur
+    return {"name": name, "started_at": _stamp(0), "completed_at": _stamp(t),
+            "labels": [runner], "steps": steps}
+
+
+_OPT77_DISTINCT_SETUPS = {
+    # Same runner, same setup DURATION, same useful work — but three different
+    # toolchains. A consolidation still has to install all three, so only the
+    # shared `Set up job` + checkout is actually removable.
+    "lint": [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+             ("Run actions/setup-node@v4", 15.0), ("Install npm dependencies", 50.0)],
+    "typecheck": [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+                  ("Run actions/setup-python@v5", 15.0), ("Install pip requirements", 50.0)],
+    "audit": [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+              ("Run actions/setup-go@v5", 15.0), ("Install go modules", 50.0)],
+}
+
+
+def _opt77_distinct_run(work_s=10.0, runner="ubuntu-latest"):
+    return [_setup_job_named(n, s, work_s, runner)
+            for n, s in _OPT77_DISTINCT_SETUPS.items()]
+
+
+def test_opt77_withholds_when_the_setup_prefixes_are_not_the_same_work():
+    """Jobs are grouped by runner label, so three checks with entirely DIFFERENT
+    dependency installs (node / python / go) can land in one group. Consolidating
+    them removes nothing but the one shared checkout — every distinct install must
+    still run. Crediting `(N-1) x setup_p50` there overstates the removable
+    runner-minutes, and projecting `max(setup) + max(useful)` understates the
+    consolidated job, so the cluster-floor guard can pass when the real job would
+    blow through the floor. The finding must be WITHHELD."""
+    names = tuple(_OPT77_DISTINCT_SETUPS)
+    jpr = [_opt77_distinct_run(), _opt77_distinct_run()]
+    crit = _opt77_crit(setup_s=80.0, work_s=10.0, names=names)
+    assert _opt77(jpr=jpr, crit=crit, wf=_opt77_wf(names=names)) == []
+
+
+def test_opt77_still_fires_when_every_job_shares_one_setup_prefix():
+    """The complement of the gate above: an identical prefix across the group is
+    exactly the shape the saving model is valid for, and must still be credited."""
+    shared = [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+              ("Run actions/setup-node@v4", 15.0), ("Install npm dependencies", 50.0)]
+    names = ("lint", "typecheck", "audit")
+    jpr = [[_setup_job_named(n, shared, 10.0) for n in names] for _ in range(2)]
+    out = _opt77(jpr=jpr, crit=_opt77_crit(setup_s=80.0, work_s=10.0, names=names),
+                 wf=_opt77_wf(names=names))
+    assert len(out) == 1
+    assert out[0]["pattern"] == "OPT77"
+    assert out[0]["wall_clock_p50_s"] == 0.0
