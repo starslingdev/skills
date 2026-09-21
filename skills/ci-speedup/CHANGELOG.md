@@ -29,9 +29,15 @@ unversioned and updates by reinstall from `main`.
   because an earlier file left state behind is an order-dependent green, which is
   worse than a red. Nothing is asserted that was not read: the finding appears
   only when the drilled run's own log shows the import-bound split AND the repo's
-  vitest config shows it has not already opted out, and it quotes both lines. A
-  repo that already opted out, a run that already passes the opt-out flag, or a
-  config that cannot be read produces no finding at all. The saving is
+  vitest config shows it has not already opted out, and it carries both — the
+  measured split verbatim from the log, and, labelled as a config read rather
+  than a log line, the file the second fact came from. A repo that already
+  opted out (in a config or by either spelling of the command-line flag), a
+  config that cannot be read, or a config search that could not cover the whole
+  repo produces no finding at all: "no opt-out was found" is not "no opt-out
+  exists", and a repo already running this lever must never be told to adopt
+  it. The pattern reads vitest 4.x's summary line; other majors print a
+  different shape and simply do not match. The saving is
   deliberately **not** credited — the audit reports the measured import share and
   says a benchmark is required, rather than crediting a number it did not
   measure.

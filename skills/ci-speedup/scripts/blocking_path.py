@@ -1628,7 +1628,10 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
 # or a `--no-isolate` in the run's own command line ⇒ no finding. The pole then
 # falls back to its generic dominant-step hand-off (and, having matched no
 # detector, is eligible for the log-grounded gap-fill) — never a silent drop.
-_NO_ISOLATE_FLAG_RE = re.compile(r"--no-isolate\b")
+# vitest documents BOTH spellings of the CLI opt-out (`--no-isolate` and
+# `--isolate=false`); matching only the first told a repo that had already
+# applied this exact lever from the command line to apply it again.
+_NO_ISOLATE_FLAG_RE = re.compile(r"--no-isolate\b|--isolate[= ]false\b")
 
 
 def _isolation_lever_available(
@@ -1642,14 +1645,30 @@ def _isolation_lever_available(
         return False, ""
     if iso.get("isolation_opt_out"):
         return False, ""
+    # A walk that left ground unvisited (file cap, depth bound, a pruned symlink,
+    # an unreadable directory) cannot establish "no opt-out ANYWHERE" — the
+    # opt-out may sit in a config it never reached, and the repo that already
+    # adopted this lever is precisely the one that must not be told to adopt it.
+    if iso.get("truncated"):
+        return False, ""
     if _NO_ISOLATE_FLAG_RE.search(joined):
         return False, ""
     cfgs = [str(c) for c in (iso.get("configs") or [])]
     if not cfgs:
         return False, ""
-    return True, (f"{cfgs[0]}: no `isolate: false` — per-file isolation is "
-                  "vitest's default and is still in effect"
-                  + (f" (also read: {', '.join(cfgs[1:4])})" if len(cfgs) > 1 else ""))
+    # NOT a log line. Both render sites head the evidence list "verbatim from the
+    # captured job log", and the agent prompt additionally wraps it in an
+    # UNTRUSTED-content fence — but this half is a statement composed from the
+    # repo's config about the ABSENCE of an opt-out, which by construction has no
+    # line to quote. It says so inline, so neither the reader nor the agent takes
+    # it for log text they could go and find.
+    n = len(cfgs)
+    scope = (f"none of the {n} vitest configs read" if n > 1
+             else f"`{cfgs[0]}`")
+    return True, ("(read from the repo's vitest config, not this log) "
+                  f"{scope} sets `isolate: false` — per-file isolation is "
+                  "vitest's default, so it is still in effect"
+                  + (f"; read: {', '.join(cfgs[:4])}" if n > 1 else ""))
 
 
 def _parse_log(text: str,
@@ -2444,9 +2463,10 @@ _FIX_META: dict[str, dict[str, Any]] = {
         "cause": "The gating vitest run spends more time in `import` (rebuilding the "
                  "module graph for every test file, which per-file isolation - "
                  "vitest's default - makes it re-pay) than in the tests themselves. "
-                 "The repo's vitest config does not opt out of that isolation; the "
-                 "evidence below quotes both the measured split and the config line "
-                 "that fact was read from.",
+                 "The repo's vitest config does not opt out of that isolation. The "
+                 "evidence below carries both halves: the measured split, verbatim "
+                 "from the log, and - labelled as such, because an absence has no "
+                 "line to quote - the config file that second fact was read from.",
         "look": "the vitest config the evidence names - `test.isolate`, `pool`, "
                 "`poolOptions`, and any workspace/project split - and what the "
                 "expensive imports actually are (an ORM entity graph, a GraphQL "

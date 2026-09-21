@@ -1,7 +1,11 @@
 # Structural / critical-path track — risk model & intent interrogation
 
-Depth for the structural finding class (catalog category 14, OPT70–OPT75) —
-the findings routed from the measured critical path rather than a YAML match.
+Depth for the structural finding class (catalog category 14, OPT70–OPT75 plus
+OPT78) — the findings routed from the measured critical path rather than a YAML
+match. OPT78 is routed by a drill-time log leaf rather than the critical-path
+router, so it emits no finding dict and the render boundary below never sees it;
+its equivalent risk / guardrail / rollout discipline rides in the agent prompt
+`blocking_path.py` builds for the `vitest-isolate-pool` leaf.
 Routing mechanics and the full risk model live in `ARCHITECTURE.md` §11; this
 doc covers what the render boundary enforces and the intent check baked into
 every per-finding prompt. A normal run does not construct any of this by hand

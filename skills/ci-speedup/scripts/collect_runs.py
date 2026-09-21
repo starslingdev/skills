@@ -13351,6 +13351,7 @@ def _magnitude_sample(
     bp: Any, client: "GhClient", repo: str, qual: list[tuple[float, dict[str, Any]]],
     repr_job: dict[str, Any], repr_log: str, k_probe: int = 3, k_max: int = 8,
     wide_rel: float = _MAG_WIDE_REL, state_fn: Any = None,
+    iso: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Cross-run check on the ONE load-bearing magnitude (migration share, cache-miss
     rate, import share, …) so the single drilled run's number isn't taken on faith.
@@ -13371,8 +13372,16 @@ def _magnitude_sample(
     job duration, and parsed cache state, from the SAME already-fetched log. This is
     what `_cache_distribution` reads to ground a cache pole in a per-event, fork-aware
     hit-rate distribution instead of the single drilled run's miss. No extra fetches:
-    it annotates the logs this function already downloads for the spread check."""
-    primary = bp._parse_log(repr_log) or {}
+    it annotates the logs this function already downloads for the spread check.
+
+    `iso` is scan's `test_runner_isolation` block, forwarded to EVERY `_parse_log`
+    here for the same reason the render path takes it: a config-gated leaf (OPT78 /
+    `vitest-isolate-pool`) is invisible to a parse that lacks the fact, so without it
+    this function reads a leaf-bearing pole as undetected and silently downgrades the
+    finding's load-bearing magnitude to a dominant-step wall sample — while the
+    renderer, which DOES have the fact, still labels the number "validated across
+    runs". The spine and the render path must read the same log the same way."""
+    primary = bp._parse_log(repr_log, iso) or {}
     mag = primary.get("magnitude")
     if not mag or mag.get("value") is None:
         return None  # categorical-only finding (e.g. sequential playwright)
@@ -13392,7 +13401,7 @@ def _magnitude_sample(
             return parsed[jid]
         log = (repr_log if jid == repr_job.get("id")
                else _fetch_job_log(client, repo, j))
-        leaf = bp._parse_log(log) if log else None
+        leaf = bp._parse_log(log, iso) if log else None
         v = (leaf or {}).get("magnitude")
         parsed[jid] = v["value"] if v and v.get("value") is not None else None
         units[jid] = (v or {}).get("unit")
@@ -13420,7 +13429,7 @@ def _magnitude_sample(
             for jid, log in _fetch_pool().map(
                     lambda j: (j.get("id"), _fetch_job_log(client, repo, j)),
                     chunk):
-                leaf = bp._parse_log(log) if log else None
+                leaf = bp._parse_log(log, iso) if log else None
                 v = (leaf or {}).get("magnitude")
                 parsed[jid] = v["value"] if v and v.get("value") is not None else None
                 units[jid] = (v or {}).get("unit")
@@ -13693,6 +13702,7 @@ def _persist_pole_logs(
     client: "GhClient", repo: str, poles: list[dict[str, Any]],
     jobs_per_run_by_wf: dict[str, list], data_dir: "Path", mag_runs: int = 3,
     events_jobs_by_wf: dict[str, dict[str, list]] | None = None,
+    iso: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Capture the long-pole jobs' raw logs ONCE into a local data bundle, so the
     report (and the fix-agent it hands off to) can read the step's INTERNAL timing
@@ -13874,12 +13884,12 @@ def _persist_pole_logs(
         # vs push and fork vs upstream, so the renderer can't frame a mostly-warm cache
         # as a top miss/churn lever off the single (slow-mode) drilled run. `state_fn`
         # annotates the SAME logs `_magnitude_sample` already fetches (no PR-bucket cost).
-        leaf0 = bp._parse_log(log) or {}
+        leaf0 = bp._parse_log(log, iso) or {}
         _cache_fk = leaf0.get("fix_key") if leaf0.get("fix_key") in _CACHE_LEAF_KEYS else None
         _state_fn = (lambda lg, _fk=_cache_fk: bp._cache_state_of_log(lg, _fk)) if _cache_fk else None
         mag_fn: str | None = None
         mag = _magnitude_sample(bp, client, repo, qual, repr_job, log, mag_runs,
-                                state_fn=_state_fn)
+                                state_fn=_state_fn, iso=iso)
         if _cache_fk and mag:
             p["cache_dist"] = _cache_distribution(
                 bp, client, repo, _cache_fk, mag, qual, p,
@@ -16066,7 +16076,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         if data_dir is not None:
             pole_logs = _persist_pole_logs(
                 client, repo, drill_poles or poles, jobs_per_run_by_wf, data_dir,
-                events_jobs_by_wf=events_jobs_by_wf)
+                events_jobs_by_wf=events_jobs_by_wf,
+                # scan's config fact, so the spine's leaf detection matches the
+                # renderer's (a config-gated leaf is invisible without it).
+                iso=findings_doc.get("test_runner_isolation"))
             logs_fetched = len(pole_logs)
             if pole_logs:
                 findings_doc["data_bundle"] = {

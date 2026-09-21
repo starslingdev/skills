@@ -482,6 +482,8 @@ asymmetry to know — a `data-driven` pattern that is **intentionally cut**
 retained but not dispatched) is NOT surfaced in any without-detector list; its
 cut is documented in the catalog body and this runbook. A `structural` entry
 with no router is NOT silently assumed covered — `scan.py` lists it in
-`catalog_structural_patterns_without_detector` (currently OPT74, the
-trust-boundary cache split, catalogued for human application but needing
-fork-PR cache signals the scanner doesn't sample).
+`catalog_structural_patterns_without_detector` (currently OPT74 and OPT78).
+OPT74 is the trust-boundary cache split, catalogued for human application but
+needing fork-PR cache signals the scanner doesn't sample; OPT78 is the vitest
+test-isolation lever, routed by a drill-time log leaf in `blocking_path.py`
+rather than by the critical-path router.

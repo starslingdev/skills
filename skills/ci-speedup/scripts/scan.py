@@ -2636,21 +2636,37 @@ _VITEST_SKIP_DIRS = {"node_modules", ".git", "dist", "build", "out", ".next",
 # literal, so ONE anchored regex covers them; a `--no-isolate` in a config's own
 # text counts too. Anything else (pool choice, `fileParallelism`, `singleThread`)
 # is NOT an isolation opt-out and is deliberately not matched — a narrower,
-# correct fact beats a broad, wrong one.
-_VITEST_ISOLATE_OFF_RE = re.compile(r"(?:^|[^\w.])isolate\s*:\s*false\b|--no-isolate\b")
+# correct fact beats a broad, wrong one. Both documented spellings of the CLI
+# opt-out count (`--no-isolate` and `--isolate=false`).
+# The key may be QUOTED: `vitest.config.json` is an accepted candidate and JSON
+# always quotes it, and TS/JS under `quoteProps: "consistent"` does too.
+_VITEST_ISOLATE_OFF_RE = re.compile(
+    r"""(?:^|[^\w.])["']?isolate["']?\s*:\s*false\b"""
+    r"|--no-isolate\b|--isolate[= ]false\b")
 # A vitest config is executable TS/JS, so `isolate` can be set to something this
 # text read cannot resolve (`isolate: shared`, a spread, a `mergeConfig` import).
 # Any `isolate:` whose value is not the literal `true`/`false` is therefore
 # UNKNOWN, and unknown is treated exactly like an opt-out: the lever's whole
 # claim is "you are still paying for isolation", and an unresolvable assignment
 # is not evidence of that.
-_VITEST_ISOLATE_ANY_RE = re.compile(r"(?:^|[^\w.])isolate\s*:\s*([^,}\s]+)")
+_VITEST_ISOLATE_ANY_RE = re.compile(
+    r"""(?:^|[^\w.])["']?isolate["']?\s*:\s*([^,}\s]+)""")
 _VITEST_ISOLATE_LITERAL = {"true", "false"}
 
 
-def _vitest_config_files(root: Path) -> list[Path]:
-    """Config candidates at the repo root plus a bounded walk beneath it."""
+def _vitest_config_files(root: Path) -> "tuple[list[Path], bool]":
+    """Config candidates at the repo root plus a bounded walk beneath it, as
+    ``(files, truncated)``.
+
+    ``truncated`` is True when the walk stopped with ground still unvisited —
+    the file cap was reached, or a directory was pruned for depth. That matters
+    because the consumer's claim is "no `isolate: false` ANYWHERE", which a
+    partial walk cannot establish: the opt-out may sit in a config the walk
+    never reached. "Walk exhausted" and "no config exists" must therefore reach
+    the SAME suppressed outcome, for different reasons, so both are reported.
+    """
     found: list[Path] = []
+    truncated = False
     root = root.resolve()
     stack: list[tuple[Path, int]] = [(root, 0)]
     while stack and len(found) < _VITEST_CONFIG_MAX_FILES:
@@ -2658,18 +2674,27 @@ def _vitest_config_files(root: Path) -> list[Path]:
         try:
             entries = sorted(base.iterdir())
         except OSError:
+            # An unreadable DIRECTORY is unvisited ground too, not a clean miss.
+            truncated = True
             continue
         for entry in entries:
             if entry.is_dir():
-                if (depth < _VITEST_CONFIG_MAX_DEPTH
-                        and entry.name not in _VITEST_SKIP_DIRS
-                        and not entry.is_symlink()):
+                if entry.name in _VITEST_SKIP_DIRS:
+                    continue            # vendored/build — deliberately not a gap
+                if entry.is_symlink():
+                    # Pruned for loop safety; a symlinked workspace package
+                    # could still hold the opt-out, so the walk is incomplete.
+                    truncated = True
+                elif depth < _VITEST_CONFIG_MAX_DEPTH:
                     stack.append((entry, depth + 1))
+                else:
+                    truncated = True    # below the depth bound — unvisited
             elif entry.name in _VITEST_CONFIG_NAMES:
                 found.append(entry)
                 if len(found) >= _VITEST_CONFIG_MAX_FILES:
+                    truncated = True
                     break
-    return found
+    return found, (truncated or bool(stack))
 
 
 def _read_test_runner_isolation(root: Path) -> dict[str, Any]:
@@ -2681,7 +2706,8 @@ def _read_test_runner_isolation(root: Path) -> dict[str, Any]:
     configs: list[str] = []
     unreadable: list[str] = []
     evidence: list[str] = []
-    for path in _vitest_config_files(root):
+    paths, truncated = _vitest_config_files(root)
+    for path in paths:
         try:
             name = str(path.relative_to(root.resolve()))
         except ValueError:                                  # pragma: no cover
@@ -2704,6 +2730,9 @@ def _read_test_runner_isolation(root: Path) -> dict[str, Any]:
         "configs": sorted(configs),
         "unreadable": sorted(unreadable),
         "readable": bool(configs),
+        # The walk left ground unvisited, so "no opt-out was found" is NOT the
+        # same as "no opt-out exists". The consumer must fail closed on this.
+        "truncated": truncated,
         "isolation_opt_out": bool(evidence),
         "opt_out_evidence": evidence[:4],
     }

@@ -100,7 +100,7 @@ that has produced confident-but-wrong findings before; they surface as a
 On real repos almost every hygiene hit (OPT1–OPT69 and OPT76, declarative YAML matching)
 moves **~0 developer wall-clock** — the true bottleneck is usually a check working
 as intended that is simply the slowest thing gating the merge, with no catalog
-match. The **structural track** (category 14, OPT70–OPT75) attacks that: a second
+match. The **structural track** (category 14, OPT70–OPT75 plus OPT78) attacks that: a second
 finding class **routed from the measured critical path** in `collect_runs.py` (the
 long-pole job decomposed to steps, required checks cross-referenced, shared cluster
 work detected), not a YAML match — still catalog OPT-ids. Routing + risk model:

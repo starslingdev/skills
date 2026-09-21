@@ -94,7 +94,16 @@ class Capture:
         return data if isinstance(data, dict) else {}
 
     def fires(self) -> dict[str, Any] | None:
-        """The live detector verdict on this capture's raw job log."""
+        """The live detector verdict on this capture's raw job log.
+
+        NOTE: config-gated leaves (OPT78 / `vitest-isolate-pool`) also need
+        scan's `test_runner_isolation` fact, which a capture dir does not carry
+        (`job.log` + `meta.json` + `analysis.json` only), so they always read as
+        "pending" here. Harmless today because `_gap_poles` passes the same fact
+        and therefore never CAPTURES a pole whose leaf fired — only a suppressed
+        one, for which "pending" is the right answer. A capture taken before that
+        gating existed can still mislead the loop; stamp the fact into meta.json
+        if this ever needs to be exact."""
         try:
             text = self.log_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
