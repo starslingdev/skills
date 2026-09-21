@@ -5050,6 +5050,14 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
         usefuls.append(float(u))
     if not setups or len(setups) != len(jobs):
         return None, problems
+    # The group is only creditable because its jobs re-pay the SAME setup prefix;
+    # without that, `(N-1) x one setup` is not a saving anyone can collect. The
+    # prefix the group was formed on must be stamped, or there is nothing here
+    # showing the jobs were grouped on anything but a shared runner label.
+    if not [x for x in _as_list(sc.get("shared_setup_steps")) if str(x).strip()]:
+        problems.append(
+            "shared_setup_steps missing or empty - cannot show the credited jobs "
+            "re-pay the same setup prefix rather than merely sharing a runner")
     removed = len(jobs) - 1
     if _num(sc.get("removed_setup_payments")) != removed:
         problems.append(f"removed_setup_payments {sc.get('removed_setup_payments')!r} != {removed}")

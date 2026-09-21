@@ -707,8 +707,16 @@ saved:   (N - 1) x setup, every run
    timestamps) into the **leading run of setup steps** — the implicit `Set up
    job`, `actions/checkout`, `setup-*` actions, dependency installs — and the
    remaining **useful work**. Take the p50 of each across the sampled runs, and
-   record the prefix's **signature**: the ordered, normalized names of those
-   setup steps.
+   record the prefix's **signature**: the ordered identities of those setup
+   steps. An identity is the step's name with two kinds of churn removed — an
+   action's version ref (`actions/setup-node@v4` and `@v3` are one identity) and
+   flag tokens (`npm ci` and `npm ci --prefer-offline` are one identity).
+   Everything else is kept, so a different toolchain (`pip install` vs `npm ci`),
+   a different thing installed (`npm ci frontend/package.json`) and an extra step
+   all remain different setup. Comparing the names exactly would be correct but
+   unusable: one pinned-version bump anywhere in the group would silence the
+   finding, and a lever that never fires on a real repo cannot be told apart from
+   a broken one.
 2. Keep a job as a candidate only if it resolves to exactly **one** job in the
    workflow YAML by name (an interpolated matrix leg resolves to none and is
    excluded; a name carried by more than one job in a single run is not one job

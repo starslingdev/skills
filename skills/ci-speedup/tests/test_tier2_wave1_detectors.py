@@ -2809,7 +2809,10 @@ def test_opt77_withholds_when_only_the_projection_reaches_the_floor():
     either gate can be deleted with the suite still green. This group is
     heterogeneous — every job p50 (90/102/100) is below the 110s floor, yet the
     consolidated job projects to max(setup) + max(useful) = 100 + 40 = 140s, which
-    is NOT. Only the projection gate can withhold it."""
+    is NOT. Nothing but the projection comparison can withhold it — the per-job
+    medians are all comfortably clear. (Two lines enforce that comparison: the
+    strict check and the float-precision margin guard behind it, so deleting
+    either one alone still withholds. This pins the property, not the line.)"""
     names = ("lint", "typecheck", "audit")
     spec = {"lint": (80.0, 10.0), "typecheck": (100.0, 2.0), "audit": (60.0, 40.0)}
     run = [_setup_job(n, s, w) for n, (s, w) in spec.items()]
@@ -3026,3 +3029,53 @@ def test_opt65_survives_when_it_describes_different_jobs():
              "affected_jobs": list(_OPT65_OVERLAP_NAMES)}
     kept = cr._supersede_opt65_with_opt77([other, o77])
     assert [f["id"] for f in kept] == ["f3", "f2"]
+
+
+# ==== what "the same setup prefix" tolerates, and what it must not ====
+#
+# Comparing the prefix as written makes the gate correct but unusably strict:
+# one job pinning `setup-node@v3` while the others are on `@v4`, or one passing
+# `--prefer-offline`, is the SAME setup work and must still group. A different
+# toolchain is not, and must still split. Without a stated contract the lever
+# quietly never fires on a real repo, which is indistinguishable from it working.
+
+def _prefix_variant_fires(first_job_steps):
+    names = ("lint", "typecheck", "audit")
+    base = [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+            ("Run actions/setup-node@v4", 15.0), ("Run npm ci", 50.0)]
+    jobs = [_setup_job_named(names[0], first_job_steps, 10.0)] + [
+        _setup_job_named(n, base, 10.0) for n in names[1:]]
+    crit = _opt77_crit(names=names)
+    return bool(_opt77(jpr=[jobs, list(jobs)], crit=crit, wf=_opt77_wf(names=names)))
+
+
+def test_opt77_tolerates_version_and_flag_churn_within_one_setup_prefix():
+    """A pinned-action bump and an extra command flag are not different setup."""
+    assert _prefix_variant_fires(
+        [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+         ("Run actions/setup-node@v4", 15.0), ("Run npm ci", 50.0)]), "control"
+    assert _prefix_variant_fires(
+        [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+         ("Run actions/setup-node@v3", 15.0), ("Run npm ci", 50.0)]), "action version bump"
+    assert _prefix_variant_fires(
+        [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+         ("Run actions/setup-node@v4", 15.0),
+         ("Run npm ci --prefer-offline --no-audit", 50.0)]), "extra command flags"
+
+
+def test_opt77_still_splits_on_genuinely_different_setup_work():
+    """The complement, and the reason the gate exists at all: a different
+    toolchain, a different thing being installed, or an extra step are different
+    setup work, and must not be merged into one credited group."""
+    assert not _prefix_variant_fires(
+        [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+         ("Run actions/setup-python@v5", 15.0),
+         ("Run pip install -r requirements.txt", 50.0)]), "different toolchain"
+    assert not _prefix_variant_fires(
+        [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+         ("Run actions/setup-node@v4", 15.0),
+         ("Run npm ci frontend/package.json", 50.0)]), "different install target"
+    assert not _prefix_variant_fires(
+        [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+         ("Run actions/cache@v4", 3.0), ("Run actions/setup-node@v4", 15.0),
+         ("Run npm ci", 47.0)]), "an extra step is a different prefix"

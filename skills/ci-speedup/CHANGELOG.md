@@ -96,6 +96,15 @@ unversioned and updates by reinstall from `main`.
   conservative; that is deliberate, since the two are measured in different units
   and combining them would make neither trustworthy.
 
+- **2026-09-21** — **Two checks that set up the same way are still recognised as
+  the same when one of them has drifted.** Deciding whether a group of checks
+  re-pays the same setup compared the setup steps exactly as written, so one check
+  pinning an older version of a setup action, or passing one extra flag to its
+  install, split the group and silenced the finding. Real repositories drift like
+  that constantly, which made the lever close to unreportable in practice. Action
+  versions and command flags are no longer treated as differences; a different
+  toolchain, a different thing being installed, or an extra step still are.
+
 - **2026-09-21** — **The audit now recognises an unnamed dependency install as
   setup.** The single shared definition of "this step is setup" keyed off the
   step's name, and a step nobody named is shown by GitHub as the command it ran —

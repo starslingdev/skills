@@ -8189,6 +8189,37 @@ _CONSOLIDATION_MIN_JOBS = 3
 _CONSOLIDATION_MIN_SETUP_SHARE = 0.5
 
 
+def _setup_step_identity(name: str) -> str:
+    """A setup step's IDENTITY — what work it does, with the churn taken out.
+
+    Two jobs re-pay "the same" setup when their prefixes do the same work, not
+    when they are byte-identical. Comparing the names as written is correct but
+    unusably strict: one job pinning `setup-node@v3` while the rest are on `@v4`,
+    or one passing `--prefer-offline`, splits the group and silences the finding —
+    and a lever that never fires on a real repo is indistinguishable from a broken
+    one. So two things are normalized away, and only these two:
+
+      * an action's version ref  (`actions/setup-node@v4` -> `actions/setup-node`)
+      * flag tokens             (`npm ci --prefer-offline` -> `npm ci`)
+
+    Everything else is kept, which is what preserves the precision this gate
+    exists for: a different toolchain (`pip install` vs `npm ci`), a different
+    thing installed (`npm ci frontend/package.json`), or an extra step remain
+    different setup, and still split the group.
+    """
+    s = " ".join(str(name or "").split()).casefold()
+    if s.startswith("run "):
+        s = s[4:]
+    kept = []
+    for tok in s.split(" "):
+        if tok.startswith("-"):          # a flag is not part of the identity
+            continue
+        if "@" in tok and "/" in tok:    # owner/action@ref -> owner/action
+            tok = tok.split("@", 1)[0]
+        kept.append(tok)
+    return " ".join(kept).strip()
+
+
 def _leading_setup_prefix(
     job: dict[str, Any],
 ) -> tuple[tuple[str, ...], tuple[str, ...], float] | None:
@@ -8219,9 +8250,8 @@ def _leading_setup_prefix(
     for name, dur in steps:
         if _classify_step(name) != "setup":
             break
-        tidy = " ".join(str(name or "").split())
-        shown.append(tidy)
-        sig.append(tidy.casefold())
+        shown.append(" ".join(str(name or "").split()))
+        sig.append(_setup_step_identity(name))
         total += dur
     return (tuple(sig), tuple(shown), total) if total > 0 else None
 
