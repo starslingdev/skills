@@ -2607,6 +2607,60 @@ def _ci_turbo_tasks(root: Path, parsed: list[tuple[str, dict, str]]) -> set[str]
     return tasks
 
 
+# --- Test-runner isolation (OPT78 corroboration, not a finding) --------------
+# The OPT78 lever ("per-file isolation is rebuilding shared module state") is
+# routed at DRILL time from the measured long pole's log (ARCHITECTURE §12.3),
+# but the log alone cannot say whether the repo is still PAYING for per-file
+# isolation — that is a config fact. This reader supplies it, and only it: it
+# reports what the vitest config says, never whether a finding should fire.
+# Emitted as a top-level `test_runner_isolation` block for `blocking_path.py`
+# to gate the `vitest-isolate-pool` leaf on.
+_VITEST_CONFIG_NAMES = tuple(
+    f"{stem}.{ext}"
+    for stem in ("vitest.config", "vite.config", "vitest.workspace",
+                 "vitest.projects")
+    for ext in ("ts", "mts", "cts", "js", "mjs", "cjs", "json")
+)
+# vitest's isolation opt-out, in the two places it can be written: the top-level
+# `test.isolate` and a pool's `poolOptions.<pool>.isolate`. Both spell the same
+# literal, so ONE anchored regex covers them; a `--no-isolate` in a config's own
+# text counts too. Anything else (pool choice, `fileParallelism`, `singleThread`)
+# is NOT an isolation opt-out and is deliberately not matched — a narrower,
+# correct fact beats a broad, wrong one.
+_VITEST_ISOLATE_OFF_RE = re.compile(r"(?:^|[^\w.])isolate\s*:\s*false\b|--no-isolate\b")
+
+
+def _read_test_runner_isolation(root: Path) -> dict[str, Any]:
+    """Read the repo's vitest config and report whether per-file isolation is
+    still on. FAILS CLOSED: no config file found, or every candidate unreadable,
+    yields ``readable: False`` — which the drill-time consumer treats as "cannot
+    establish the lever exists", not as "isolation is on"."""
+    configs: list[str] = []
+    unreadable: list[str] = []
+    evidence: list[str] = []
+    for name in _VITEST_CONFIG_NAMES:
+        path = root / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            unreadable.append(name)
+            continue
+        configs.append(name)
+        for i, line in enumerate(text.splitlines(), 1):
+            if _VITEST_ISOLATE_OFF_RE.search(line):
+                evidence.append(f"{name}:{i}: {line.strip()[:160]}")
+    return {
+        "runner": "vitest" if configs else None,
+        "configs": configs,
+        "unreadable": unreadable,
+        "readable": bool(configs),
+        "isolation_opt_out": bool(evidence),
+        "opt_out_evidence": evidence[:4],
+    }
+
+
 def _detect_turbo(root: Path, ci_turbo_tasks: set[str] | None = None):
     """OPT52/53/58/59/60 against turbo.json (catalog Stack-Specific heuristics).
     Each pattern emits at most one consolidated finding listing the affected
@@ -3349,6 +3403,11 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
         # collect_runs to scope the critical-path pole to merge-blocking (required-
         # reachable) work. Repo-agnostic; harmless if unconsumed.
         "workflow_job_graph": _build_workflow_job_graph(parsed),
+        # What the repo's vitest config says about per-file isolation. NOT a
+        # finding — the corroborating config fact the drill-time OPT78 leaf
+        # (`blocking_path`'s `vitest-isolate-pool`) must read before it can
+        # claim the repo is still paying for per-file isolation.
+        "test_runner_isolation": _read_test_runner_isolation(root),
         "catalog_patterns_total": len(catalog),
         "catalog_patterns_with_detector": len(static_entries) - len(unmatched_patterns),
         "catalog_patterns_without_detector": sorted(unmatched_patterns),

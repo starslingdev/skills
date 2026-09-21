@@ -13,6 +13,29 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-09-21** — **A slow test suite that spends its time re-loading the app,
+  not running tests, is now a named lever (OPT78).** When the merge-blocking long
+  pole is a vitest suite, the audit reads how that run's time actually splits and
+  says so: a suite whose imports outweigh its assertions is rebuilding the same
+  expensive module graph — an ORM entity registry, a GraphQL schema, decorator
+  registration — once for every test file, because the runner isolates every file
+  by default. Publicly this has been one of the largest single CI wins reported,
+  and the audit could not see it before. It is also the most dangerous lever in
+  the catalog after change-scoping, so it is presented as one: HIGH risk, with a
+  mandatory guardrail (files opt in one at a time into a separate project, each
+  with explicit teardown for the state it shares; files using fake timers stay
+  isolated) and a rollout that runs both projects side by side before any file
+  moves. The failure mode is named in plain words — a test that passes only
+  because an earlier file left state behind is an order-dependent green, which is
+  worse than a red. Nothing is asserted that was not read: the finding appears
+  only when the drilled run's own log shows the import-bound split AND the repo's
+  vitest config shows it has not already opted out, and it quotes both lines. A
+  repo that already opted out, a run that already passes the opt-out flag, or a
+  config that cannot be read produces no finding at all. The saving is
+  deliberately **not** credited — the audit reports the measured import share and
+  says a benchmark is required, rather than crediting a number it did not
+  measure.
+
 - **2026-09-08** — **A fix that moves the slowest step out of a merge gate now
   says how to keep the gate.** The long-pole lever can hand back a fix that
   relocates the dominant step into another job, and until now nothing in the

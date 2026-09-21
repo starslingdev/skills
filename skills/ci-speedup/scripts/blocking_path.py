@@ -1619,8 +1619,45 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
     return None
 
 
-def _parse_log(text: str) -> dict[str, Any] | None:
-    """Detect the leaf root cause in a captured job log. Returns a leaf dict:
+# --- OPT78: the isolation lever needs a CONFIG fact, not just a log ----------
+# The `vitest-isolate-pool` leaf claims the pole is still PAYING for per-file
+# isolation (vitest's default). A log cannot say that — a repo that already
+# runs an opt-in shared-registry project prints the same import/tests split.
+# So the leaf is gated on `scan.py`'s `test_runner_isolation` block, and FAILS
+# CLOSED: no block, an unreadable/absent config, an already-configured opt-out,
+# or a `--no-isolate` in the run's own command line ⇒ no finding. The pole then
+# falls back to its generic dominant-step hand-off (and, having matched no
+# detector, is eligible for the log-grounded gap-fill) — never a silent drop.
+_NO_ISOLATE_FLAG_RE = re.compile(r"--no-isolate\b")
+
+
+def _isolation_lever_available(
+    iso: dict[str, Any] | None, joined: str,
+) -> "tuple[bool, str]":
+    """`(available, evidence_line)`. `available` is True only when a scanned
+    vitest config was actually READ and does not already opt out of per-file
+    isolation. The evidence line names the file that fact came from, so the
+    finding quotes what it read instead of asserting it."""
+    if not isinstance(iso, dict) or not iso.get("readable"):
+        return False, ""
+    if iso.get("isolation_opt_out"):
+        return False, ""
+    if _NO_ISOLATE_FLAG_RE.search(joined):
+        return False, ""
+    cfgs = [str(c) for c in (iso.get("configs") or [])]
+    if not cfgs:
+        return False, ""
+    return True, (f"{cfgs[0]}: no `isolate: false` — per-file isolation is "
+                  "vitest's default and is still in effect"
+                  + (f" (also read: {', '.join(cfgs[1:4])})" if len(cfgs) > 1 else ""))
+
+
+def _parse_log(text: str,
+               iso: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Detect the leaf root cause in a captured job log. `iso` is `scan.py`'s
+    `test_runner_isolation` block — the config corroboration the OPT78
+    (`vitest-isolate-pool`) leaf needs; omitted ⇒ that leaf cannot fire.
+    Returns a leaf dict:
         {fix_key, unit_label, deeper: [ {rows, blocker_note, header?}, … ]}
     `deeper` is the list of drill-down levels below the dominant step (the first
     one's header is built by the renderer from `unit_label`; later ones carry
@@ -1763,13 +1800,20 @@ def _parse_log(text: str) -> dict[str, Any] | None:
          if (m := re.search(r"Duration +([\d.]+)s \(transform ([\d.]+)s, setup "
                             r"[\d.]+m?s, import ([\d.]+)s, tests ([\d.]+)s", l))),
         key=lambda x: -x[0])
-    if vd and not istanbul:
+    _iso_ok, _iso_ev = _isolation_lever_available(iso, joined)
+    if vd and not istanbul and _iso_ok:
         wall, tr, im, te = vd[0]
         if (im + tr) > te and im > 30 and te > 0:
             total = tr + im + te
-            ev = [l.strip() for l in lines if re.search(r"Test Files +[0-9]+ passed", l)][:1]
+            # The measured split first, then the CONFIG fact — the prompt quotes
+            # the first two evidence lines, and both halves of this finding's
+            # claim ("imports dominate" AND "isolation is still on") must reach
+            # the agent. Neither is asserted without the line it was read from.
+            ev = [l.strip() for l in lines
+                  if re.search(r"Duration .*transform .*import .*tests", l)][:1]
+            ev += [_iso_ev]
             ev += [l.strip() for l in lines
-                   if re.search(r"Duration .*transform .*import .*tests", l)][:2]
+                   if re.search(r"Test Files +[0-9]+ passed", l)][:1]
             return {
                 "fix_key": "vitest-isolate-pool",
                 "unit_label": f"the slowest vitest project ({_clock(wall)} wall) - "
@@ -2391,20 +2435,52 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "provider fits; apply the change to the vitest config / scripts, "
                    "verify the coverage consumer still works, and re-measure the step.",
     },
+    # OPT78 — see references/optimization-patterns.md. HIGH risk: this lever buys
+    # speed by letting test files SHARE a module registry, which can leak state
+    # between them. The guardrail/rollout below are not advice, they are the
+    # condition on which the lever is sane at all, so they ride in the prompt.
     "vitest-isolate-pool": {
-        "cause": "The gating vitest run spends as much time in `import` (re-loading "
-                 "the module graph per test file under per-file isolation) as in the "
-                 "tests themselves.",
-        "look": "the vitest config - `test.isolate`, `pool`, `poolOptions`, and "
-                "whether tests rely on per-file isolation (global/DB state set up per "
-                "file).",
-        "constraints": "State the failure mode (cross-file state leakage) and how you "
-                       "verified it's safe. Disabling isolation or sharing a pool only "
-                       "works if tests clean up their own global/DB state.",
+        "catalog": "OPT78",
+        "cause": "The gating vitest run spends more time in `import` (rebuilding the "
+                 "module graph for every test file, which per-file isolation - "
+                 "vitest's default - makes it re-pay) than in the tests themselves. "
+                 "The repo's vitest config does not opt out of that isolation; the "
+                 "evidence below quotes both the measured split and the config line "
+                 "that fact was read from.",
+        "look": "the vitest config the evidence names - `test.isolate`, `pool`, "
+                "`poolOptions`, and any workspace/project split - and what the "
+                "expensive imports actually are (an ORM entity graph, a GraphQL "
+                "schema, decorator registration). Then find which test files touch "
+                "module-level mutable state, fake timers, or a shared client.",
+        "constraints": "RISK: HIGH - correctness exposure, not a cache tweak. Sharing "
+                       "a module registry between test files can make a test pass "
+                       "only because an earlier file left state behind (or fail only "
+                       "because of it): an order-dependent green, which is worse than "
+                       "a red because CI stays green while the suite stops meaning "
+                       "anything.\n"
+                       "- GUARDRAIL (MANDATORY): opt IN per file, never a global flip. "
+                       "Add a SEPARATE vitest project/config that only named, reviewed "
+                       "files join (an explicit marker comment per file), keep the "
+                       "existing isolated project as the default, and write explicit "
+                       "teardown for every piece of shared state those files touch. "
+                       "Files using fake timers, or shared state you cannot untangle "
+                       "safely, STAY in the isolated project. Sharing a registry must "
+                       "not silently skip setup a test depends on.\n"
+                       "- ROLLOUT: run both projects in parallel over real PR traffic "
+                       "and compare results before moving any file across; move files "
+                       "in small batches; run the shared project in a randomized file "
+                       "order to smoke out order dependence; revert a file to the "
+                       "isolated project at the first unexplained failure.",
         "docs": ["Vitest performance guide (isolation and pools): "
-                 "https://vitest.dev/guide/improving-performance"],
-        "deliver": "Tune isolation/pool in the vitest config if the tests can safely "
-                   "share context; prove no cross-file leakage and re-measure the run.",
+                 "https://vitest.dev/guide/improving-performance",
+                 "Vitest config reference (`isolate`, `pool`, `poolOptions`, "
+                 "`projects`): https://vitest.dev/config/"],
+        "deliver": "A benchmark first: the skill measured the import share, NOT the "
+                   "saving. Run the candidate files in a shared-registry project and "
+                   "compare the suite's wall time and results against the isolated "
+                   "project before proposing the change. Then ship the opt-in project "
+                   "with its teardown, state which files joined and which deliberately "
+                   "did not, and re-measure the pole.",
     },
     "turbo-remote-cache": {
         "cause": "`turbo build` rebuilds every package from scratch each run - the "
@@ -4418,6 +4494,7 @@ def _demote_offcategory_leaf(
 
 def _derive_pole_leaf(
     pole: dict[str, Any], owner_key: str | None, logs: dict[str, str],
+    iso: dict[str, Any] | None = None,
 ) -> "tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]":
     """The ONE leaf-derivation pipeline a pole's log runs through — captured here so the
     Long pole map (which drills the descent pole = pole 1 up top) and the per-pole loop
@@ -4426,7 +4503,7 @@ def _derive_pole_leaf(
     pole owns none → no log), parse, reconcile the cache-hit distribution, then split off an
     off-category leaf. Pure over its inputs, so calling it twice on the same pole is exact."""
     log_text = logs.get(owner_key) if owner_key is not None else None
-    leaf = _parse_log(log_text) if log_text else None
+    leaf = _parse_log(log_text, iso) if log_text else None
     leaf = _apply_cache_dist(leaf, pole.get("cache_dist"))
     leaf, offcat_leaf = _demote_offcategory_leaf(leaf, pole)
     return log_text, leaf, offcat_leaf
@@ -8480,7 +8557,9 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # descent pole's entry; the loop reads its own pole's — the SAME object, so the map's
     # Level 3 and the pole's Level 3 can never disagree.
     _pole_leaves: dict[int, tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]] = {
-        id(p): _derive_pole_leaf(p, pole_owner_keys.get(id(p)), logs) for p in pole_wfs}
+        id(p): _derive_pole_leaf(p, pole_owner_keys.get(id(p)), logs,
+                                  doc.get("test_runner_isolation"))
+        for p in pole_wfs}
 
     # ── Long pole map (owner UX edit 2026-07-19) ─────────────────────────────────────────
     # The FULL blocker cascade, RESTORED up top (PR #73 flattened it to level 1; the trimmed
@@ -9614,6 +9693,9 @@ def _gap_poles(doc: dict[str, Any],
     # telling a maintainer to "draft a NEW detector" (phase 4c) is the bug this guards
     # against — the render path suppresses the gap for these poles, so the capture must too.
     findings = _dedupe_findings(list(doc.get("findings") or []))
+    # The SAME corroboration the render path gates the OPT78 leaf on, so a pole
+    # whose leaf was withheld for want of a config fact is a gap on BOTH paths.
+    _iso = doc.get("test_runner_isolation")
 
     def _catalog_covers(pole: dict[str, Any]) -> bool:
         return bool(_structural_for_pole(pole, findings)
@@ -9639,7 +9721,7 @@ def _gap_poles(doc: dict[str, Any],
                 if "=" in key:
                     continue  # an un-bindable key (summary flags it) — never borrow
                 log_text = logs.get(key)
-                if not log_text or _parse_log(log_text) is not None:
+                if not log_text or _parse_log(log_text, _iso) is not None:
                     continue
                 base = _pole_for_entry(poles, entry) or dict(entry)
                 if _catalog_covers(base):
@@ -9655,7 +9737,7 @@ def _gap_poles(doc: dict[str, Any],
     named = [p for p in poles if p.get("check")]
     for key, log_text in logs.items():
         pole = _sole_owner_pole(key, named)
-        if pole is None or not log_text or _parse_log(log_text) is not None:
+        if pole is None or not log_text or _parse_log(log_text, _iso) is not None:
             continue
         if _catalog_covers(pole):
             continue  # a catalog detector already covers it — not a gap

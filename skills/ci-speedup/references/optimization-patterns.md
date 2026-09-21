@@ -47,11 +47,13 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys.
 - **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds.
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
-- **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep.
+- **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT78` is routed by the drill-time leaf detector rather than the structural router.
 
 (Catalog OPT-ids are the static scan; the `blocking_path.py` `_parse_log` **leaf
 detectors** — prisma / vitest / turbo / playwright — are a separate render-time
-set, documented in ARCHITECTURE §12.3.)
+set, documented in ARCHITECTURE §12.3. `OPT78` is the one catalog entry routed by
+that render-time set: it documents and reserves the id for the
+`vitest-isolate-pool` leaf, and is not part of the static scan.)
 
 ---
 
@@ -2894,6 +2896,13 @@ by a per-candidate reasoning step. They carry an OPT-id so the report and tests
 stay catalog-keyed, but the catalog is no longer the only thing that can produce
 a finding.
 
+Most of them (OPT70–OPT75) are routed by the deterministic structural router in
+`collect_runs.py`. **OPT78** is routed instead by a drill-time leaf detector over
+the long pole's captured log (ARCHITECTURE §12.3), corroborated against the repo's
+test-runner config; it carries the same mandatory risk / guardrail / rollout
+discipline, and `scan.py` reports it as having no critical-path router so its
+coverage is never overstated.
+
 **The cost of the higher leverage is higher risk.** A hygiene fix at worst does
 nothing. A structural change can **degrade correctness** — drop coverage, turn a
 real failure into a false green, diverge from the shipped artifact. So every
@@ -3165,6 +3174,61 @@ Three ways to get this wrong: putting the `needs.*.result` test in the job-level
 **Guardrail**: Carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped). Never present the decomposition as free.
 
 **Rollout**: The routed lever's rollout. Re-measure the pole's p50 after the dominant step is attacked; the next-largest step (or the cluster floor) becomes the new target.
+
+---
+
+---
+
+### OPT78 — Per-File Test Isolation Rebuilding Shared Module State
+
+<!-- METADATA
+pattern: OPT78
+impact: HIGH
+class: structural
+detector: critical-path-log-leaf
+risk: HIGH
+affected_files: "vitest.config.*,vite.config.*,vitest.workspace.*"
+fix_strategy: test-isolation-shared-module-registry
+title_template: "Per-file test isolation rebuilds the shared module graph for every test file"
+-->
+
+**TL;DR**: Your slowest test job spends more time re-importing the app for each test file than running the tests — because the runner isolates every file and each one rebuilds the same expensive module graph from scratch.
+
+**Scope: vitest only.** The mechanism is `test.isolate`, which defaults to `true` and gives every test file a fresh module registry. Other runners are deliberately out of scope here rather than guessed at: jest's per-file module registry is not configurable the same way (`--runInBand` and `maxWorkers` change *where* files run, not whether the registry is rebuilt), and the pytest equivalents (`pytest-forked`, `pytest-xdist --dist` modes) have different semantics again. A narrower, correct pattern beats a broad, wrong one; widen this entry only with verified config facts for the runner being added.
+
+**Anti-pattern**: A vitest suite on the measured critical path whose `import` phase exceeds its `tests` phase. Every test file re-resolves, re-transforms and re-executes the same shared graph — an ORM entity registry, a GraphQL schema build, decorator registration, a DI container — and with hundreds of files in a shard that setup is paid hundreds of times. The tests themselves are not the cost; re-reaching the starting line is.
+
+**Detection heuristic** (routed from the measured long pole, not a flat grep — ARCHITECTURE §12.3): this pattern is emitted by the drill-time `vitest-isolate-pool` leaf detector in `blocking_path.py`, not by the static scan and not by the structural router in `collect_runs.py`. It fires only when all of the following are read, never inferred:
+
+1. The drilled long-pole job's captured log shows a vitest run whose `Duration … (transform …, import …, tests …)` line has `import + transform` above `tests`, with `import` above 30s.
+2. `scan.py`'s `test_runner_isolation` block — read from the repo's own `vitest.config.*` / `vite.config.*` / `vitest.workspace.*` — reports **no** `isolate: false` anywhere, and the run's command line carries no `--no-isolate`.
+3. The pole's measured dominant step category is `test` (the off-category demotion in ARCHITECTURE §12.4b otherwise demotes this leaf to a secondary observation).
+
+**Fails closed**: if no vitest config can be read, or one already opts out, or the log shows the opt-out flag, nothing is emitted. Both halves of the claim — "imports dominate" and "isolation is still on" — are quoted in the finding's evidence from the lines they were read from.
+
+**Fix recipe**: Let a reviewed subset of test files share one module registry per worker, as an **opt-in project** — never a global flip.
+
+1. Add a SECOND vitest project/config with `isolate: false`, and keep the existing isolated project as the default. Files join the shared project only by an explicit per-file marker (a required opt-in comment or a dedicated include glob), so joining is a reviewed act.
+2. Write explicit **teardown** for every piece of shared state the joining files touch — module-level caches, registries, singletons, DB/HTTP clients, global config. A shared registry means one file's leftovers are the next file's starting state.
+3. Files that use fake timers, or that hold shared state you cannot untangle safely, **stay in the isolated project**. Leaving files behind is the expected outcome, not a failure.
+4. Attack the underlying setup cost too where you can (lazier imports, a cheaper schema build) — that fix carries none of this risk.
+
+**Mandatory guardrail (this pattern is invalid without it)**:
+
+1. **Opt-in per file, never a global `isolate: false`.** A repo-wide flip silently changes the execution model of every test that already passes.
+2. **Teardown before a file joins.** No file joins the shared project until the state it mutates is explicitly reset between files.
+3. **Randomize file order in the shared project.** Order dependence that a fixed order hides is exactly what this change can introduce.
+4. **No-weakening rail**: speed is never bought by verifying less. Sharing a module registry must not skip setup a test depends on, and a file that only passes because an earlier file did its setup is not a passing test.
+
+**Failure mode, plainly**: a test that passes only because a previous file left state behind — or fails only because of it. That is an **order-dependent green**, which is worse than a red: CI stays green while the suite has quietly stopped checking what it claims to check.
+
+**Conservative rollout (REQUIRED)**: Run both projects in parallel over real PR traffic and compare results before moving any file across. Move files in small batches, each with its teardown, and revert a file to the isolated project at the first unexplained failure. Keep the full isolated run on the merge queue / default branch until the shared project has been stable across a representative stretch of PR traffic.
+
+**Sizing — deliberately uncredited**: the realizable saving **cannot** be derived from config, and this skill does not credit one. The only number it reports is the measured `import` share of the drilled run, which is an upper bound on what removing repeated imports could touch — not a saving, because part of that import cost is paid once per worker whatever you do. Turning the lever into a number requires a **benchmark**: run the candidate files in a shared-registry project and compare the suite's wall time against the isolated project. OPT78 therefore carries no `_SIZING` model and never contributes a credited wall-clock or runner-minute saving.
+
+**Real-world example (Linear, 2026)**: Linear reported this as their single largest CI improvement — roughly 17% of monthly CI spend. They introduced an opt-in vitest project with `isolate: false` so reviewed files could share a module registry within each worker, rather than rebuilding their entity, GraphQL and decorator graph per file. Their slowest shard fell from roughly 300–379s to about 195s and total API-shard runner time dropped from about 32.8 to 22 minutes per run. They also called it the optimization with the highest correctness risk: eligibility was explicit per file, teardown was added for the shared state, and files using fake timers or otherwise-untangleable state were left in the isolated project.
+
+**Risk**: **HIGH** — correctness exposure. NEVER list as a quick win.
 
 ---
 

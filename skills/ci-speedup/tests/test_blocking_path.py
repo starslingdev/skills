@@ -983,7 +983,12 @@ def test_parse_log_detects_vitest_import_bound_without_coverage():
         " Test Files  149 passed (149)",
         " Duration  96.12s (transform 8.97s, setup 1.01s, import 245.03s, tests 214.54s, environment 8ms)",
     ])
-    leaf = bp._parse_log(log)
+    # OPT78: the leaf also needs the scanned config fact that the repo has NOT
+    # already opted out of per-file isolation — a log alone cannot establish that,
+    # so without it the leaf fails closed (tests/test_vitest_isolation_lever.py).
+    iso = {"runner": "vitest", "readable": True, "isolation_opt_out": False,
+           "configs": ["vitest.config.ts"], "opt_out_evidence": []}
+    leaf = bp._parse_log(log, iso)
     assert leaf is not None and leaf["fix_key"] == "vitest-isolate-pool"
     rows = leaf["deeper"][-1]["rows"]
     assert rows[0][0].startswith("import")  # import is the blocker (first) row
@@ -2273,6 +2278,11 @@ def _doc_one_pole() -> dict:
         "repo": "o/r", "scanned_at": "2026-06-08T00:00:00Z",
         "data_sources": {"runs_sampled": 100, "jobs_sampled": 300,
                          "workflows_analyzed": 5},
+        # The scanned config fact the OPT78 (`vitest-isolate-pool`) leaf is gated
+        # on — this fixture's drill log is an import-bound vitest run.
+        "test_runner_isolation": {
+            "runner": "vitest", "readable": True, "isolation_opt_out": False,
+            "configs": ["vitest.config.ts"], "opt_out_evidence": []},
         "pr_critical_path": {
             "sampled_pr_count": 20, "sample_target": 20, "sample_complete": True,
             "poles": [{
@@ -2284,6 +2294,9 @@ def _doc_one_pole() -> dict:
             }]},
     }
 
+
+_ISOLATION_ON = {"runner": "vitest", "readable": True, "isolation_opt_out": False,
+                 "configs": ["vitest.config.ts"], "opt_out_evidence": []}
 
 _IMPORT_BOUND_LOG = "\n".join([
     " RUN  v4.1.4 /repo/web",
@@ -4252,7 +4265,7 @@ def test_leaf_detectors_carry_a_load_bearing_magnitude():
         " Duration  12.18s (transform 12.24s, setup 0ms, import 19.07s, tests 4.13s)",
     ])
     assert bp._parse_log(coverage)["magnitude"]["unit"] == "%"
-    assert bp._parse_log(_IMPORT_BOUND_LOG)["magnitude"]["value"] > 0
+    assert bp._parse_log(_IMPORT_BOUND_LOG, _ISOLATION_ON)["magnitude"]["value"] > 0
     pw = bp._parse_log("$ pnpm exec playwright test a.spec.ts\n"
                        "$ pnpm exec playwright test b.spec.ts")
     assert pw["magnitude"] is None
