@@ -2658,23 +2658,38 @@ def _vitest_config_files(root: Path) -> "tuple[list[Path], bool]":
     """Config candidates at the repo root plus a bounded walk beneath it, as
     ``(files, truncated)``.
 
-    ``truncated`` is True when the walk stopped with ground still unvisited —
-    the file cap was reached, or a directory was pruned for depth. That matters
-    because the consumer's claim is "no `isolate: false` ANYWHERE", which a
-    partial walk cannot establish: the opt-out may sit in a config the walk
-    never reached. "Walk exhausted" and "no config exists" must therefore reach
-    the SAME suppressed outcome, for different reasons, so both are reported.
+    ``truncated`` is True when the walk stopped with ground that could PLAUSIBLY
+    HOLD A CONFIG still unvisited. That matters because the consumer's claim is
+    "no `isolate: false` ANYWHERE", which a partial walk cannot establish: the
+    opt-out may sit in a config the walk never reached. "Walk exhausted" and "no
+    config exists" therefore reach the SAME suppressed outcome, for different
+    reasons, so both are reported.
+
+    The "plausibly" is load-bearing, and is why an unvisited directory is only
+    counted when it carries a `package.json`. A vitest config sits at a JS
+    package root, beside that file; ordinary source trees go far deeper than the
+    depth bound and hold no config at all. Counting every deep directory would
+    mark essentially every real repo truncated and silently retire the pattern —
+    trading a rare false finding for a permanent false silence, which is the
+    worse failure of the two.
     """
     found: list[Path] = []
     truncated = False
     root = root.resolve()
     stack: list[tuple[Path, int]] = [(root, 0)]
+
+    def _may_hold_config(d: Path) -> bool:
+        try:
+            return (d / "package.json").exists()
+        except OSError:                                     # pragma: no cover
+            return True     # cannot tell ⇒ assume it might, and fail closed
+
     while stack and len(found) < _VITEST_CONFIG_MAX_FILES:
         base, depth = stack.pop(0)
         try:
             entries = sorted(base.iterdir())
         except OSError:
-            # An unreadable DIRECTORY is unvisited ground too, not a clean miss.
+            # An unreadable DIRECTORY is unvisited ground, not a clean miss.
             truncated = True
             continue
         for entry in entries:
@@ -2683,17 +2698,20 @@ def _vitest_config_files(root: Path) -> "tuple[list[Path], bool]":
                     continue            # vendored/build — deliberately not a gap
                 if entry.is_symlink():
                     # Pruned for loop safety; a symlinked workspace package
-                    # could still hold the opt-out, so the walk is incomplete.
-                    truncated = True
+                    # could still hold the opt-out.
+                    truncated = truncated or _may_hold_config(entry)
                 elif depth < _VITEST_CONFIG_MAX_DEPTH:
                     stack.append((entry, depth + 1))
                 else:
-                    truncated = True    # below the depth bound — unvisited
+                    truncated = truncated or _may_hold_config(entry)
             elif entry.name in _VITEST_CONFIG_NAMES:
                 found.append(entry)
                 if len(found) >= _VITEST_CONFIG_MAX_FILES:
+                    # A cap hit says there is more of exactly the thing we are
+                    # looking for — always unvisited ground that matters.
                     truncated = True
                     break
+    # Anything still queued when the cap broke the loop is unvisited too.
     return found, (truncated or bool(stack))
 
 

@@ -183,11 +183,14 @@ def test_scan_fails_closed_when_the_config_walk_is_truncated(tmp_path: Path):
         "a truncated walk cannot establish 'no opt-out anywhere' - must suppress")
 
 
-def test_scan_fails_closed_when_a_config_sits_below_the_depth_bound(tmp_path: Path):
+def test_scan_fails_closed_when_a_package_sits_below_the_depth_bound(tmp_path: Path):
     """Same leak by the other bound: `apps/web/packages/x/...` reaches depth 5
-    on a real monorepo."""
-    deep = tmp_path / "a" / "b" / "c" / "d" / "e"
+    on a real monorepo. An unvisited PACKAGE root (it carries a package.json) is
+    exactly where an opt-out config lives, so the walk must call itself
+    incomplete rather than report a clean 'no opt-out anywhere'."""
+    deep = tmp_path / "apps" / "web" / "packages" / "inner" / "pkg"
     deep.mkdir(parents=True)
+    (deep / "package.json").write_text('{"name": "pkg"}\n', encoding="utf-8")
     (deep / "vitest.config.ts").write_text(
         "export default defineConfig({ test: { isolate: false } })\n",
         encoding="utf-8")
@@ -205,6 +208,39 @@ def test_scan_does_not_flag_truncation_on_an_ordinary_repo(tmp_path: Path):
         "export default defineConfig({ test: {} })\n", encoding="utf-8")
     iso = _scan(tmp_path)["test_runner_isolation"]
     assert iso["truncated"] is False
+    assert bp._parse_log(_IMPORT_BOUND_LOG, iso) is not None
+
+
+def test_a_deep_source_tree_is_not_truncation(tmp_path: Path):
+    """THE failure mode this guard must not have. Every real repo nests source
+    directories past the depth bound; none of them can hold a vitest config,
+    because a config lives at a package root. Counting them would mark
+    essentially every repo truncated and retire the pattern in silence - a
+    permanent false negative traded for a rare false positive."""
+    (tmp_path / "vitest.config.ts").write_text(
+        "export default defineConfig({ test: {} })\n", encoding="utf-8")
+    deep = tmp_path / "src" / "components" / "widgets" / "buttons" / "icons"
+    deep.mkdir(parents=True)
+    (deep / "Icon.tsx").write_text("export const Icon = () => null\n",
+                                   encoding="utf-8")
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert iso["truncated"] is False, (
+        "an ordinary deep source tree must not suppress the lever")
+    assert bp._parse_log(_IMPORT_BOUND_LOG, iso) is not None
+
+
+def test_a_realistic_monorepo_still_fires(tmp_path: Path):
+    """End to end on the shape this lever exists for: several packages, each
+    with its own config and its own nested source tree."""
+    for name in ("api", "web", "worker"):
+        pkg = tmp_path / "packages" / name
+        (pkg / "src" / "lib" / "helpers").mkdir(parents=True)
+        (pkg / "package.json").write_text('{"name": "p"}\n', encoding="utf-8")
+        (pkg / "vitest.config.ts").write_text(
+            "export default defineConfig({ test: {} })\n", encoding="utf-8")
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert iso["truncated"] is False
+    assert len(iso["configs"]) == 3
     assert bp._parse_log(_IMPORT_BOUND_LOG, iso) is not None
 
 
