@@ -2470,7 +2470,14 @@ _FIX_META: dict[str, dict[str, Any]] = {
                        "and compare results before moving any file across; move files "
                        "in small batches; run the shared project in a randomized file "
                        "order to smoke out order dependence; revert a file to the "
-                       "isolated project at the first unexplained failure.",
+                       "isolated project at the first unexplained failure.\n"
+                       "- SIZING: the addressable ceiling above is this POLE's "
+                       "measured wall, not this lever's saving, and the import "
+                       "share is an upper bound on what repeated imports could "
+                       "touch - part of that import cost is paid once per worker "
+                       "whatever you do. ci-speedup credits NO saving for this "
+                       "lever; the only honest number comes from the benchmark "
+                       "below.",
         "docs": ["Vitest performance guide (isolation and pools): "
                  "https://vitest.dev/guide/improving-performance",
                  "Vitest config reference (`isolate`, `pool`, `poolOptions`, "

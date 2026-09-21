@@ -3206,6 +3206,12 @@ title_template: "Per-file test isolation rebuilds the shared module graph for ev
 
 **Fails closed**: if no vitest config can be read, or one already opts out, or the log shows the opt-out flag, nothing is emitted. Both halves of the claim — "imports dominate" and "isolation is still on" — are quoted in the finding's evidence from the lines they were read from.
 
+Three deliberate limits follow from reading a config as text rather than executing it:
+
+- **An unresolvable `isolate:` counts as an opt-out.** A vitest config is executable TS/JS, so the value can come from an import, a spread, or `mergeConfig`. Any `isolate:` whose value is not the literal `true`/`false` is reported as an opt-out, because an unresolvable assignment is not evidence that isolation is still being paid for.
+- **Config discovery is a bounded walk.** Root configs plus a capped, vendor-pruned walk beneath it, so a monorepo's `packages/*/vitest.config.ts` is seen. A repo deeper or larger than the bound contributes fewer configs, and if none was read the finding does not fire.
+- **One opt-out anywhere silences the pattern for the repo.** A repo that has already stood up a shared-registry project is mid-rollout by this entry's own recipe, and telling it to adopt the lever again would be noise. The consequence is accepted: once the first file opts in, ci-speedup stops raising this, and extending the rollout to more files is the maintainer's call, informed by their own benchmark rather than by a repeat finding.
+
 **Fix recipe**: Let a reviewed subset of test files share one module registry per worker, as an **opt-in project** — never a global flip.
 
 1. Add a SECOND vitest project/config with `isolate: false`, and keep the existing isolated project as the default. Files join the shared project only by an explicit per-file marker (a required opt-in comment or a dedicated include glob), so joining is a reviewed act.

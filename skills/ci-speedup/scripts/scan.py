@@ -2615,12 +2615,22 @@ def _ci_turbo_tasks(root: Path, parsed: list[tuple[str, dict, str]]) -> set[str]
 # reports what the vitest config says, never whether a finding should fire.
 # Emitted as a top-level `test_runner_isolation` block for `blocking_path.py`
 # to gate the `vitest-isolate-pool` leaf on.
-_VITEST_CONFIG_NAMES = tuple(
-    f"{stem}.{ext}"
-    for stem in ("vitest.config", "vite.config", "vitest.workspace",
-                 "vitest.projects")
-    for ext in ("ts", "mts", "cts", "js", "mjs", "cjs", "json")
-)
+_VITEST_CONFIG_STEMS = ("vitest.config", "vite.config", "vitest.workspace",
+                        "vitest.projects")
+_VITEST_CONFIG_EXTS = ("ts", "mts", "cts", "js", "mjs", "cjs", "json")
+_VITEST_CONFIG_NAMES = tuple(f"{stem}.{ext}" for stem in _VITEST_CONFIG_STEMS
+                             for ext in _VITEST_CONFIG_EXTS)
+# A monorepo keeps its suites' configs under `packages/*/`, `apps/*/` etc., so a
+# root-only read would report "no config" on exactly the repos this lever is
+# about. Walk a BOUNDED slice of the tree instead — vendored/build dirs pruned,
+# depth and file count capped so a huge checkout can't turn the scan into a tree
+# crawl. A repo deeper or larger than the bound simply contributes fewer configs;
+# the consumer still fails closed when none was read.
+_VITEST_CONFIG_MAX_DEPTH = 4
+_VITEST_CONFIG_MAX_FILES = 40
+_VITEST_SKIP_DIRS = {"node_modules", ".git", "dist", "build", "out", ".next",
+                     ".turbo", ".yarn", "vendor", "target", "coverage",
+                     "__pycache__", ".venv"}
 # vitest's isolation opt-out, in the two places it can be written: the top-level
 # `test.isolate` and a pool's `poolOptions.<pool>.isolate`. Both spell the same
 # literal, so ONE anchored regex covers them; a `--no-isolate` in a config's own
@@ -2628,20 +2638,54 @@ _VITEST_CONFIG_NAMES = tuple(
 # is NOT an isolation opt-out and is deliberately not matched — a narrower,
 # correct fact beats a broad, wrong one.
 _VITEST_ISOLATE_OFF_RE = re.compile(r"(?:^|[^\w.])isolate\s*:\s*false\b|--no-isolate\b")
+# A vitest config is executable TS/JS, so `isolate` can be set to something this
+# text read cannot resolve (`isolate: shared`, a spread, a `mergeConfig` import).
+# Any `isolate:` whose value is not the literal `true`/`false` is therefore
+# UNKNOWN, and unknown is treated exactly like an opt-out: the lever's whole
+# claim is "you are still paying for isolation", and an unresolvable assignment
+# is not evidence of that.
+_VITEST_ISOLATE_ANY_RE = re.compile(r"(?:^|[^\w.])isolate\s*:\s*([^,}\s]+)")
+_VITEST_ISOLATE_LITERAL = {"true", "false"}
+
+
+def _vitest_config_files(root: Path) -> list[Path]:
+    """Config candidates at the repo root plus a bounded walk beneath it."""
+    found: list[Path] = []
+    root = root.resolve()
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    while stack and len(found) < _VITEST_CONFIG_MAX_FILES:
+        base, depth = stack.pop(0)
+        try:
+            entries = sorted(base.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.is_dir():
+                if (depth < _VITEST_CONFIG_MAX_DEPTH
+                        and entry.name not in _VITEST_SKIP_DIRS
+                        and not entry.is_symlink()):
+                    stack.append((entry, depth + 1))
+            elif entry.name in _VITEST_CONFIG_NAMES:
+                found.append(entry)
+                if len(found) >= _VITEST_CONFIG_MAX_FILES:
+                    break
+    return found
 
 
 def _read_test_runner_isolation(root: Path) -> dict[str, Any]:
-    """Read the repo's vitest config and report whether per-file isolation is
-    still on. FAILS CLOSED: no config file found, or every candidate unreadable,
-    yields ``readable: False`` — which the drill-time consumer treats as "cannot
-    establish the lever exists", not as "isolation is on"."""
+    """Read the repo's vitest config(s) and report whether per-file isolation is
+    still on. FAILS CLOSED in both directions: no config file found, or every
+    candidate unreadable, yields ``readable: False``; an `isolate:` assignment
+    this static read cannot resolve is reported as an opt-out, not as isolation
+    being on. The consumer treats either as "cannot establish the lever"."""
     configs: list[str] = []
     unreadable: list[str] = []
     evidence: list[str] = []
-    for name in _VITEST_CONFIG_NAMES:
-        path = root / name
-        if not path.is_file():
-            continue
+    for path in _vitest_config_files(root):
+        try:
+            name = str(path.relative_to(root.resolve()))
+        except ValueError:                                  # pragma: no cover
+            name = path.name
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -2649,12 +2693,16 @@ def _read_test_runner_isolation(root: Path) -> dict[str, Any]:
             continue
         configs.append(name)
         for i, line in enumerate(text.splitlines(), 1):
-            if _VITEST_ISOLATE_OFF_RE.search(line):
+            m = _VITEST_ISOLATE_ANY_RE.search(line)
+            unresolvable = bool(
+                m and m.group(1).strip().rstrip(";").lower()
+                not in _VITEST_ISOLATE_LITERAL)
+            if _VITEST_ISOLATE_OFF_RE.search(line) or unresolvable:
                 evidence.append(f"{name}:{i}: {line.strip()[:160]}")
     return {
         "runner": "vitest" if configs else None,
-        "configs": configs,
-        "unreadable": unreadable,
+        "configs": sorted(configs),
+        "unreadable": sorted(unreadable),
         "readable": bool(configs),
         "isolation_opt_out": bool(evidence),
         "opt_out_evidence": evidence[:4],

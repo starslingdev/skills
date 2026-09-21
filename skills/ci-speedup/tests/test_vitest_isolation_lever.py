@@ -117,6 +117,43 @@ def test_scan_reads_a_workspace_project_opt_out(tmp_path: Path):
     assert iso["isolation_opt_out"] is True
 
 
+def test_scan_finds_a_monorepo_package_config(tmp_path: Path):
+    """The suites this lever is about usually live under `packages/*` — a
+    root-only read would report "no config" on exactly those repos."""
+    pkg = tmp_path / "packages" / "api"
+    pkg.mkdir(parents=True)
+    (pkg / "vitest.config.ts").write_text(
+        "export default defineConfig({ test: {} })\n", encoding="utf-8")
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert iso["readable"] is True
+    assert any("packages/api/vitest.config.ts" in c for c in iso["configs"])
+
+
+def test_scan_does_not_descend_into_vendored_trees(tmp_path: Path):
+    dep = tmp_path / "node_modules" / "some-dep"
+    dep.mkdir(parents=True)
+    (dep / "vitest.config.ts").write_text("export default {}\n", encoding="utf-8")
+    assert _scan(tmp_path)["test_runner_isolation"]["readable"] is False
+
+
+def test_scan_treats_an_unresolvable_isolate_value_as_an_opt_out(tmp_path: Path):
+    """A config is executable TS/JS: `isolate` can come from an import, a spread
+    or a computed expression. Unresolvable is NOT evidence isolation is on."""
+    (tmp_path / "vitest.config.ts").write_text(
+        "import { shared } from './flags'\n"
+        "export default defineConfig({ test: { isolate: shared.isolate } })\n",
+        encoding="utf-8")
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert iso["isolation_opt_out"] is True
+    assert any("isolate: shared.isolate" in e for e in iso["opt_out_evidence"])
+
+
+def test_scan_accepts_an_explicit_isolate_true(tmp_path: Path):
+    (tmp_path / "vitest.config.ts").write_text(
+        "export default defineConfig({ test: { isolate: true } })\n", encoding="utf-8")
+    assert _scan(tmp_path)["test_runner_isolation"]["isolation_opt_out"] is False
+
+
 def test_scan_fails_closed_when_there_is_no_vitest_config(tmp_path: Path):
     iso = _scan(tmp_path)["test_runner_isolation"]
     assert iso["readable"] is False
@@ -187,6 +224,14 @@ def test_prompt_prescribes_opt_in_not_a_global_flip():
     assert "teardown" in p
     assert "fake timer" in p                      # stays isolated
     assert "order-dependent" in p                 # the failure mode, named plainly
+
+
+def test_prompt_says_the_ceiling_is_not_this_levers_saving():
+    """The pole's addressable ceiling is measured wall, not a benchmarked
+    saving for this lever — the prompt must not let the agent read it as one."""
+    p = _prompt()
+    assert "credits NO saving for this lever" in p
+    assert "benchmark" in p.lower()
 
 
 def test_prompt_keeps_the_no_weakening_rail():
