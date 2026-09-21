@@ -8454,9 +8454,10 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                   "or the work silently stops gating merges. Before removing a job "
                   "key, check whether any OTHER job in the workflow lists it in "
                   "`needs:` — a dangling `needs:` reference makes the whole workflow "
-                  "fail to start. And weigh the cost this trades away: N separate "
-                  "checks are N independently-red, independently re-runnable units; "
-                  "one consolidated job is one red check that re-runs everything."))
+                  f"fail to start. And weigh the cost this trades away: these "
+                  f"{n_jobs} checks are {n_jobs} independently-red, independently "
+                  "re-runnable units; one consolidated job is one red check that "
+                  "re-runs everything."))
         f = _new_finding(
             "OPT77", "MEDIUM", title, wf_path, "", evidence,
             "repeated-fixed-setup-across-independent-small-jobs",
