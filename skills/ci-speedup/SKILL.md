@@ -103,9 +103,8 @@ as intended that is simply the slowest thing gating the merge, with no catalog
 match. The **structural track** (category 14, OPT70–OPT75 plus OPT78) attacks that: a second
 finding class **routed from the measured critical path** in `collect_runs.py` (the
 long-pole job decomposed to steps, required checks cross-referenced, shared cluster
-work detected), not a YAML match — still catalog OPT-ids. OPT78 is the exception
-in routing: a drill-time log detector in `blocking_path.py`, gated on the repo's
-vitest config. Routing + risk model: `ARCHITECTURE.md` §11.
+work detected; OPT78 via a config-gated vitest log leaf), not a YAML match — still
+catalog OPT-ids. Routing + risk model: `ARCHITECTURE.md` §11.
 
 ### Risk & intent are mandatory (baked into every structural prompt)
 
@@ -120,10 +119,7 @@ safe quick win — always with a full-suite fallback + parallel-run rollout. And
 a detector firing says a pattern *matches*, not that the code is a mistake, every
 prompt instructs the user's agent to **recover the file's git history/intent first**
 and flag an intent-contradicting fix as a policy change needing owner sign-off, not a
-quick win. OPT78 emits no finding record, so it has no `Risk` row or banner: its
-HIGH risk is stamped on the pole's drill-down (`OPT78, HIGH RISK`) and its intent
-check, guardrail and rollout ride in its agent prompt. Details + the exact
-intent-recovery commands:
+quick win (OPT78 stamps HIGH on its drill-down). Details + intent-recovery commands:
 [references/structural-track.md](references/structural-track.md).
 
 ## Phases

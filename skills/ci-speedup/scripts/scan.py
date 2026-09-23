@@ -2789,7 +2789,7 @@ def _vitest_config_files(root: Path) -> "tuple[list[Path], bool, list[Path]]":
     return found, (truncated or bool(stack)), manifests
 
 
-def _line_of(text: str, pos: int) -> "tuple[int, str]":
+def _vitest_line_at(text: str, pos: int) -> "tuple[int, str]":
     start = text.rfind("\n", 0, pos) + 1
     end = text.find("\n", pos)
     return text.count("\n", 0, pos) + 1, text[start:end if end >= 0 else None].strip()
@@ -2875,11 +2875,11 @@ def _read_test_runner_isolation_unguarded(root: Path) -> dict[str, Any]:
             v = _VITEST_ISOLATE_VALUE_RE.match(text, m.end())
             if v and v.group(1) == "true":
                 continue                    # the one reading that is isolation ON
-            ln, src = _line_of(text, m.start())
+            ln, src = _vitest_line_at(text, m.start())
             hits.setdefault(ln, src)
         for rx in (_VITEST_NO_ISOLATE_FLAG_RE, _VITEST_SINGLE_WORKER_RE):
             for m in rx.finditer(text):
-                ln, src = _line_of(text, m.start())
+                ln, src = _vitest_line_at(text, m.start())
                 hits.setdefault(ln, src)
         evidence += [f"{name}:{ln}: {src[:160]}" for ln, src in sorted(hits.items())]
         vm_pool = vm_pool or bool(_VITEST_VM_POOL_RE.search(text))
@@ -2908,7 +2908,7 @@ def _read_test_runner_isolation_unguarded(root: Path) -> dict[str, Any]:
             unreadable.append(name)
             continue
         for m in _VITEST_NO_ISOLATE_FLAG_RE.finditer(text):
-            ln, src = _line_of(text, m.start())
+            ln, src = _vitest_line_at(text, m.start())
             evidence.append(f"{name}:{ln}: {src[:160]}")
         vm_pool = vm_pool or bool(_VITEST_VM_POOL_RE.search(text))
     return {
