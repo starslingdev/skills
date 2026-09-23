@@ -1623,41 +1623,70 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
 # The `vitest-isolate-pool` leaf claims the pole is still PAYING for per-file
 # isolation (vitest's default). A log cannot say that — a repo that already
 # runs an opt-in shared-registry project prints the same import/tests split.
-# So the leaf is gated on `scan.py`'s `test_runner_isolation` block, and FAILS
-# CLOSED: no block, an unreadable/absent config, an already-configured opt-out,
-# or a `--no-isolate` in the run's own command line ⇒ no finding. The pole then
-# falls back to its generic dominant-step hand-off (and, having matched no
-# detector, is eligible for the log-grounded gap-fill) — never a silent drop.
+# So that leaf is gated on `scan.py`'s `test_runner_isolation` block, and FAILS
+# CLOSED on every gap in it: no block at all, no config read, a config that
+# could not be read, a config import the read could not follow, a config walk
+# that could not cover the repo, an already-configured opt-out (config or
+# package script), a vm pool (where isolation cannot be turned off), or either
+# spelling of the CLI opt-out in the run's own log.
+#
+# Withholding the LEVER is not withholding the MEASUREMENT. The import-bound
+# split is still real, measured log fact, so a withheld pole gets the guarded
+# `vitest-import-bound` leaf instead: it names the split, says OPT78 was
+# withheld and why, and forbids flipping isolation from this finding. That
+# keeps the pole a catalog match — never a "no detector" coverage gap, which
+# would route it to an unguarded LLM gap-fill (SKILL.md 4a) and to the
+# maintainer loop's draft-a-new-detector step (4c) for a pattern the catalog
+# already has.
 # vitest documents BOTH spellings of the CLI opt-out (`--no-isolate` and
 # `--isolate=false`); matching only the first told a repo that had already
-# applied this exact lever from the command line to apply it again.
-_NO_ISOLATE_FLAG_RE = re.compile(r"--no-isolate\b|--isolate[= ]false\b")
+# applied this exact lever from the command line to apply it again. `--isolate`
+# takes no value, so `--isolate false` (a space) is not an opt-out.
+_NO_ISOLATE_FLAG_RE = re.compile(r"--no-isolate\b|--isolate=false\b")
 
 
 def _isolation_lever_available(
     iso: dict[str, Any] | None, joined: str,
 ) -> "tuple[bool, str]":
-    """`(available, evidence_line)`. `available` is True only when a scanned
-    vitest config was actually READ and does not already opt out of per-file
-    isolation. The evidence line names the file that fact came from, so the
-    finding quotes what it read instead of asserting it."""
-    if not isinstance(iso, dict) or not iso.get("readable"):
-        return False, ""
+    """`(True, evidence_line)` only when the scanned vitest config(s) were
+    actually READ, completely, and none opts out of per-file isolation — the
+    evidence line names the file(s) that fact came from, so the finding quotes
+    what it read instead of asserting it. Otherwise `(False, reason)`: a short
+    plain-English reason the lever was withheld, which the withheld leaf
+    carries into the report so the silence is never unexplained."""
+    if not isinstance(iso, dict):
+        return False, ("no vitest config was found to confirm per-file isolation "
+                       "is still on (the scan supplied no config fact)")
     if iso.get("isolation_opt_out"):
-        return False, ""
-    # A walk that left ground unvisited (file cap, depth bound, a pruned symlink,
-    # an unreadable directory) cannot establish "no opt-out ANYWHERE" — the
-    # opt-out may sit in a config it never reached, and the repo that already
-    # adopted this lever is precisely the one that must not be told to adopt it.
-    # Default True: a bundle from a scan that predates this key was produced by
-    # a root-only read, so its silence is not evidence of a complete search.
-    if iso.get("truncated", True):
-        return False, ""
+        ev = [str(e) for e in (iso.get("opt_out_evidence") or [])]
+        where = ev[0].split(": ", 1)[0].replace("`", "'") if ev else ""
+        return False, ("the repo already opts out of per-file isolation"
+                       + (f" (first at `{where}`)" if where else ""))
     if _NO_ISOLATE_FLAG_RE.search(joined):
-        return False, ""
+        return False, ("the repo already opts out of per-file isolation (this run "
+                       "passes the opt-out flag)")
+    if iso.get("vm_pool"):
+        return False, ("the suite runs on a vm pool, where vitest cannot turn "
+                       "per-file isolation off")
+    if iso.get("unreadable"):
+        return False, ("a vitest config could not be read, so an existing opt-out "
+                       "cannot be ruled out")
+    if iso.get("unresolved_imports"):
+        return False, ("a vitest config pulls settings from a module this read "
+                       "could not follow, so an existing opt-out cannot be ruled out")
+    # A walk that left ground unvisited (file cap, depth bound, a pruned symlink
+    # or package, an unreadable directory) cannot establish "no opt-out
+    # ANYWHERE" — the opt-out may sit in a config it never reached, and the repo
+    # that already adopted this lever is precisely the one that must not be told
+    # to adopt it. Default True: a bundle from a scan that predates this key was
+    # produced by a root-only read, so its silence is not a complete search.
+    if iso.get("truncated", True):
+        return False, ("the config search could not cover the whole repo, so an "
+                       "existing opt-out cannot be ruled out")
     cfgs = [str(c) for c in (iso.get("configs") or [])]
-    if not cfgs:
-        return False, ""
+    if not iso.get("readable") or not cfgs:
+        return False, ("no vitest config was found to confirm per-file isolation "
+                       "is still on")
     # NOT a log line. Both render sites head the evidence list "verbatim from the
     # captured job log", and the agent prompt additionally wraps it in an
     # UNTRUSTED-content fence — but this half is a statement composed from the
@@ -1668,10 +1697,10 @@ def _isolation_lever_available(
     # Both branches must state the ABSENCE — this finding fires only when no
     # opt-out was found, so a sentence reading "<config> sets `isolate: false`"
     # would assert the opposite of the fact that let it fire, in the prompt that
-    # then tells the agent to go and change `test.isolate`.
+    # then tells the agent to go and change `isolate`.
     if n > 1:
         listed = ", ".join(cfgs[:4]) + (f", … ({n} in total)" if n > 4 else "")
-        scope = f"none of the {n} vitest configs read set `isolate: false`"
+        scope = f"none of the {n} vitest config files read set `isolate: false`"
         tail = f"; read: {listed}"
     else:
         scope = f"`{cfgs[0]}` does not set `isolate: false`"
@@ -1685,7 +1714,8 @@ def _parse_log(text: str,
                iso: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Detect the leaf root cause in a captured job log. `iso` is `scan.py`'s
     `test_runner_isolation` block — the config corroboration the OPT78
-    (`vitest-isolate-pool`) leaf needs; omitted ⇒ that leaf cannot fire.
+    (`vitest-isolate-pool`) leaf needs; omitted ⇒ an import-bound vitest run
+    gets the guarded `vitest-import-bound` leaf (OPT78 withheld) instead.
     Returns a leaf dict:
         {fix_key, unit_label, deeper: [ {rows, blocker_note, header?}, … ]}
     `deeper` is the list of drill-down levels below the dominant step (the first
@@ -1822,29 +1852,48 @@ def _parse_log(text: str,
 
     # --- B2: vitest where IMPORT/transform dominates the tests (no coverage) ---
     # The dominant vitest invocation spends more on loading the module graph per
-    # test file than on assertions - per-file isolation re-pays the import cost.
+    # test file than on assertions. Sized from the SLOWEST run in the log (the
+    # one you wait for), and each tuple carries its source line index so the
+    # evidence quotes THAT run - never the first `Duration` line in log order,
+    # which on a multi-project log is a different, often test-bound, run.
+    # The gate reads `import + transform > tests`; vitest may already count part
+    # of the transform wait inside `import`, so the gate is looser than it reads.
+    # It only decides whether to name the split, never a credited saving.
     vd = sorted(
-        ((float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)))
-         for l in lines
+        ((float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)), i)
+         for i, l in enumerate(lines)
          if (m := re.search(r"Duration +([\d.]+)s \(transform ([\d.]+)s, setup "
                             r"[\d.]+m?s, import ([\d.]+)s, tests ([\d.]+)s", l))),
         key=lambda x: -x[0])
-    _iso_ok, _iso_ev = _isolation_lever_available(iso, joined)
-    if vd and not istanbul and _iso_ok:
-        wall, tr, im, te = vd[0]
+    if vd and not istanbul:
+        wall, tr, im, te, d_idx = vd[0]
         if (im + tr) > te and im > 30 and te > 0:
             total = tr + im + te
-            # The measured split first, then the CONFIG fact — the prompt quotes
+            _iso_ok, _iso_line = _isolation_lever_available(iso, joined)
+            # The measured split first, then the CONFIG fact - the prompt quotes
             # the first two evidence lines, and both halves of this finding's
-            # claim ("imports dominate" AND "isolation is still on") must reach
-            # the agent. Neither is asserted without the line it was read from.
-            ev = [l.strip() for l in lines
-                  if re.search(r"Duration .*transform .*import .*tests", l)][:1]
-            ev += [_iso_ev]
-            ev += [l.strip() for l in lines
-                   if re.search(r"Test Files +[0-9]+ passed", l)][:1]
+            # claim ("imports dominate" AND "isolation is still on", or "the
+            # lever was withheld, and why") must reach the agent.
+            ev = [lines[d_idx].strip()]
+            ev += [_iso_line if _iso_ok else
+                   "(from the repo's config scan, not this log) OPT78 withheld: "
+                   + _iso_line]
+            # The `Test Files` summary of the SAME run: the nearest one above its
+            # Duration line, never an earlier project's.
+            tf = next((lines[j].strip() for j in range(d_idx - 1, -1, -1)
+                       if re.search(r"Test Files +[0-9]+ passed", lines[j])), None)
+            if tf:
+                ev.append(tf)
+            if _iso_ok:
+                fix_key = "vitest-isolate-pool"
+                note = ("BIGGEST LEVER (OPT78, HIGH RISK) - caused by per-file "
+                        "isolation re-importing the app for each test file")
+            else:
+                fix_key = "vitest-import-bound"
+                note = ("BIGGEST SHARE - loading the module graph; the isolation "
+                        f"lever (OPT78) was withheld: {_iso_line}")
             return {
-                "fix_key": "vitest-isolate-pool",
+                "fix_key": fix_key,
                 "unit_label": f"the slowest vitest project ({_clock(wall)} wall) - "
                               "where that wall goes (import vs tests vs transform)",
                 "evidence": ev,
@@ -1858,8 +1907,7 @@ def _parse_log(text: str,
                     {"rows": [("import (load module graph per file)", im, None),
                               ("tests (run assertions)", te, None),
                               ("transform (compile)", tr, None)],
-                     "blocker_note": "BIGGEST LEVER - caused by per-file isolation "
-                                     "re-importing the app for each test file",
+                     "blocker_note": note,
                      "pct_of": "sum", "scale_to_secs": wall},
                 ],
             }
@@ -2464,12 +2512,13 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "provider fits; apply the change to the vitest config / scripts, "
                    "verify the coverage consumer still works, and re-measure the step.",
     },
-    # OPT78 — see references/optimization-patterns.md. HIGH risk: this lever buys
+    # OPT78 - see references/optimization-patterns.md. HIGH risk: this lever buys
     # speed by letting test files SHARE a module registry, which can leak state
     # between them. The guardrail/rollout below are not advice, they are the
     # condition on which the lever is sane at all, so they ride in the prompt.
+    # Keys target vitest 4 (top-level `isolate`, `projects`); `poolOptions` and
+    # `vitest.workspace.*` are 3.x spellings vitest 4 removed.
     "vitest-isolate-pool": {
-        "catalog": "OPT78",
         "cause": "The gating vitest run spends more time in `import` (rebuilding the "
                  "module graph for every test file, which per-file isolation - "
                  "vitest's default - makes it re-pay) than in the tests themselves. "
@@ -2477,30 +2526,40 @@ _FIX_META: dict[str, dict[str, Any]] = {
                  "evidence below carries both halves: the measured split, verbatim "
                  "from the log, and - labelled as such, because an absence has no "
                  "line to quote - the config file that second fact was read from.",
-        "look": "the vitest config the evidence names - `test.isolate`, `pool`, "
-                "`poolOptions`, and any workspace/project split - and what the "
-                "expensive imports actually are (an ORM entity graph, a GraphQL "
-                "schema, decorator registration). Then find which test files touch "
-                "module-level mutable state, fake timers, or a shared client.",
+        "look": "the vitest config the evidence names - the top-level `isolate` and "
+                "`pool` options and its `projects` list (a 3.x config may still spell "
+                "these `poolOptions` / `vitest.workspace.*`, which vitest 4 removed) - "
+                "and what the expensive imports actually are (an ORM entity graph, a "
+                "GraphQL schema, decorator registration). Then find which test files "
+                "touch module-level mutable state, fake timers, or a shared client.",
         "constraints": "RISK: HIGH - correctness exposure, not a cache tweak. Sharing "
                        "a module registry between test files can make a test pass "
                        "only because an earlier file left state behind (or fail only "
                        "because of it): an order-dependent green, which is worse than "
                        "a red because CI stays green while the suite stops meaning "
                        "anything.\n"
+                       "- INTENT: before changing the config, read its history "
+                       "(`git log -p` on the vitest config) for why isolation is set "
+                       "the way it is; if that history contradicts this change, stop "
+                       "and ask the owner.\n"
                        "- GUARDRAIL (MANDATORY): opt IN per file, never a global flip. "
-                       "Add a SEPARATE vitest project/config that only named, reviewed "
-                       "files join (an explicit marker comment per file), keep the "
-                       "existing isolated project as the default, and write explicit "
-                       "teardown for every piece of shared state those files touch. "
-                       "Files using fake timers, or shared state you cannot untangle "
-                       "safely, STAY in the isolated project. Sharing a registry must "
-                       "not silently skip setup a test depends on.\n"
-                       "- ROLLOUT: run both projects in parallel over real PR traffic "
-                       "and compare results before moving any file across; move files "
-                       "in small batches; run the shared project in a randomized file "
-                       "order to smoke out order dependence; revert a file to the "
-                       "isolated project at the first unexplained failure.\n"
+                       "Add a SEPARATE vitest project (in `projects`) with "
+                       "`isolate: false` that only named, reviewed files join (vitest "
+                       "selects a project's files by `include` globs, so use an "
+                       "explicit per-file list or a dedicated filename suffix), keep "
+                       "the existing isolated project as the default, and write "
+                       "explicit teardown for every piece of shared state those files "
+                       "touch. Files using fake timers, or shared state you cannot "
+                       "untangle safely, STAY in the isolated project. Sharing a "
+                       "registry must not silently skip setup a test depends on.\n"
+                       "- ROLLOUT: start in SHADOW mode - the candidate files run in "
+                       "BOTH projects, the shared one non-required - and compare "
+                       "results over real PR traffic; only then exclude a file from "
+                       "the isolated project's `include` (or it runs twice). Move "
+                       "files in small batches; run the shared project in a randomized "
+                       "file order (`sequence.shuffle`) to smoke out order "
+                       "dependence; revert a file to the isolated project at the "
+                       "first unexplained failure.\n"
                        "- SIZING: any addressable ceiling this report gives for "
                        "the pole is that POLE's measured wall, not this lever's "
                        "saving, and the import "
@@ -2511,14 +2570,51 @@ _FIX_META: dict[str, dict[str, Any]] = {
                        "below.",
         "docs": ["Vitest performance guide (isolation and pools): "
                  "https://vitest.dev/guide/improving-performance",
-                 "Vitest config reference (`isolate`, `pool`, `poolOptions`, "
-                 "`projects`): https://vitest.dev/config/"],
+                 "Vitest config reference (`isolate`, `pool`, `projects`): "
+                 "https://vitest.dev/config/"],
         "deliver": "A benchmark first: the skill measured the import share, NOT the "
-                   "saving. Run the candidate files in a shared-registry project and "
-                   "compare the suite's wall time and results against the isolated "
-                   "project before proposing the change. Then ship the opt-in project "
-                   "with its teardown, state which files joined and which deliberately "
-                   "did not, and re-measure the pole.",
+                   "saving. Then ship the opt-in project in SHADOW mode (candidate "
+                   "files still also run in the isolated project; the shared project "
+                   "is non-required) with its teardown, the benchmark of the shared "
+                   "run's wall time and results against the isolated one, and the "
+                   "list of which files are candidates and which deliberately are "
+                   "not. Moving files out of the isolated project is a follow-up "
+                   "once the shadow comparison has held over real PR traffic.",
+    },
+    # The same import-bound split, when the OPT78 lever was WITHHELD (the config
+    # scan could not establish that the repo is still paying for per-file
+    # isolation, or found it already opts out). The measurement is still real;
+    # the lever is not offered. The withheld reason reaches the agent as the
+    # second evidence line.
+    "vitest-import-bound": {
+        "cause": "The gating vitest run spends more time in `import` (loading the "
+                 "module graph) than in the tests themselves. The per-file-isolation "
+                 "lever (OPT78) was NOT raised for this pole: the evidence below says "
+                 "why (the repo already opts out, or its config could not be fully "
+                 "read). The measured split is verbatim from the log; the withheld "
+                 "reason is from the repo's config scan, not the log.",
+        "look": "what the expensive imports actually are - run the suite with "
+                "vitest's import-duration reporting where available, and read the "
+                "setup files and the heaviest shared modules (an ORM entity graph, a "
+                "GraphQL schema build, decorator registration, barrel files that pull "
+                "in the whole app).",
+        "constraints": "Do NOT turn per-file isolation off (`isolate: false`, "
+                       "`--no-isolate`) as the fix from this finding: the isolation "
+                       "lever was withheld for the reason in the evidence, and it "
+                       "carries HIGH correctness risk (an order-dependent green). If "
+                       "the repo already runs an opt-in shared-registry project, "
+                       "moving more files into it follows that project's own "
+                       "guardrail (per-file opt-in, teardown, fake-timer files stay "
+                       "isolated, shadow comparison first). Prefer cutting the "
+                       "import cost itself - lazier imports, a cheaper schema or "
+                       "entity build, narrower imports instead of barrels - which "
+                       "carries no correctness risk. The import share is an upper "
+                       "bound on what import work could touch, not a saving.",
+        "docs": ["Vitest performance guide: "
+                 "https://vitest.dev/guide/improving-performance"],
+        "deliver": "Name the heaviest imports with their measured cost, cut them, and "
+                   "re-measure the suite's import and total wall time against the "
+                   "drilled run.",
     },
     "turbo-remote-cache": {
         "cause": "`turbo build` rebuilds every package from scratch each run - the "
@@ -4466,6 +4562,7 @@ _LEAF_STEP_CATEGORY: dict[str, str] = {
     "prisma-migrate-once": "test",
     "vitest-v8-coverage": "test",
     "vitest-isolate-pool": "test",
+    "vitest-import-bound": "test",
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
     "cargo-test-shard": "test",
@@ -4483,6 +4580,11 @@ _LEAF_STEP_CATEGORY: dict[str, str] = {
 # token — else it is demoted. This separates eslint (lint) from a type-check step (both
 # bin `scan`), catching the sveltejs/svelte instance where scan is dominant but the
 # dominant step is the type-check, not the lint.
+# Leaves whose fix carries HIGH correctness risk: a demotion must say so rather
+# than framing them as a small cleanup.
+_HIGH_RISK_LEAVES: dict[str, str] = {
+    "vitest-isolate-pool": "a HIGH-risk change (OPT78, per-file test isolation)",
+}
 _LEAF_DOMINANT_STEP_TOKEN: dict[str, "re.Pattern[str]"] = {
     "eslint-no-cache": re.compile(r"lint", re.IGNORECASE),
 }
@@ -4563,6 +4665,13 @@ def _offcategory_note_block(leaf: dict[str, Any], pole: dict[str, Any]) -> list[
            "is not crowned as the cause and is not credited the pole's wall-clock ceiling. "
            "Address the dominant step above first, then treat this as a smaller, separate "
            "cleanup."]
+    if fk in _HIGH_RISK_LEAVES:
+        # A demoted HIGH-risk lever must not read as a low-stakes cleanup: the
+        # sentence above would present it as exactly the quick win the catalog forbids.
+        out[-1] = out[-1].replace(
+            "then treat this as a smaller, separate cleanup.",
+            f"and do not treat this as a quick cleanup: it is {_HIGH_RISK_LEAVES[fk]}, "
+            "and applying it needs that pattern's guardrail and rollout (see the catalog).")
     ev = leaf.get("evidence") or []
     if ev:
         out += ["", *_evidence_fence(ev)]
@@ -9731,8 +9840,10 @@ def _gap_poles(doc: dict[str, Any],
     # telling a maintainer to "draft a NEW detector" (phase 4c) is the bug this guards
     # against — the render path suppresses the gap for these poles, so the capture must too.
     findings = _dedupe_findings(list(doc.get("findings") or []))
-    # The SAME corroboration the render path gates the OPT78 leaf on, so a pole
-    # whose leaf was withheld for want of a config fact is a gap on BOTH paths.
+    # The SAME config fact the render path parses with. An import-bound vitest
+    # pole is never a gap on either path: the fact only picks WHICH leaf it gets
+    # (the OPT78 lever, or the guarded `vitest-import-bound` leaf when OPT78 is
+    # withheld), so the maintainer loop is never sent to draft a duplicate detector.
     _iso = doc.get("test_runner_isolation")
 
     def _catalog_covers(pole: dict[str, Any]) -> bool:

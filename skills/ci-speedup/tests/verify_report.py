@@ -7444,6 +7444,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str] = {
     "prisma-migrate-once": "test",
     "vitest-v8-coverage": "test",
     "vitest-isolate-pool": "test",
+    "vitest-import-bound": "test",
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
     "cargo-test-shard": "test",

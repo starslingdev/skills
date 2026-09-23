@@ -13,35 +13,6 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
-- **2026-09-21** — **A slow test suite that spends its time re-loading the app,
-  not running tests, is now a named lever (OPT78).** When the merge-blocking long
-  pole is a vitest suite, the audit reads how that run's time actually splits and
-  says so: a suite whose imports outweigh its assertions is rebuilding the same
-  expensive module graph — an ORM entity registry, a GraphQL schema, decorator
-  registration — once for every test file, because the runner isolates every file
-  by default. Publicly this has been one of the largest single CI wins reported,
-  and the audit could not see it before. It is also the most dangerous lever in
-  the catalog after change-scoping, so it is presented as one: HIGH risk, with a
-  mandatory guardrail (files opt in one at a time into a separate project, each
-  with explicit teardown for the state it shares; files using fake timers stay
-  isolated) and a rollout that runs both projects side by side before any file
-  moves. The failure mode is named in plain words — a test that passes only
-  because an earlier file left state behind is an order-dependent green, which is
-  worse than a red. Nothing is asserted that was not read: the finding appears
-  only when the drilled run's own log shows the import-bound split AND the repo's
-  vitest config shows it has not already opted out, and it carries both — the
-  measured split verbatim from the log, and, labelled as a config read rather
-  than a log line, the file the second fact came from. A repo that already
-  opted out (in a config or by either spelling of the command-line flag), a
-  config that cannot be read, or a config search that could not cover the whole
-  repo produces no finding at all: "no opt-out was found" is not "no opt-out
-  exists", and a repo already running this lever must never be told to adopt
-  it. The pattern reads vitest 4.x's summary line; other majors print a
-  different shape and simply do not match. The saving is
-  deliberately **not** credited — the audit reports the measured import share and
-  says a benchmark is required, rather than crediting a number it did not
-  measure.
-
 - **2026-09-08** — **A fix that moves the slowest step out of a merge gate now
   says how to keep the gate.** The long-pole lever can hand back a fix that
   relocates the dominant step into another job, and until now nothing in the
@@ -356,6 +327,34 @@ unversioned and updates by reinstall from `main`.
   re-rendered. (#72)
 
 ### Changed
+
+- **2026-09-23** — **The "slow test suite re-loading the app" diagnosis is now a
+  catalogued, guarded lever (OPT78), and it no longer tells a repo to apply a
+  change it has already applied.** The audit already noticed a vitest long pole
+  that spends more time importing the module graph than running tests, and
+  told the coding agent to tune isolation, with no warning attached. That
+  change can break correctness silently (a test passing only because an earlier
+  file left state behind), and the audit said it even to repos that had already
+  made it. Now it is catalog pattern OPT78 with HIGH risk stamped on the pole's
+  drill-down. Its prompt carries an intent check, a mandatory guardrail (files
+  opt in to a separate shared project one reviewed list at a time, with explicit
+  teardown, and fake-timer files stay isolated) and a rollout that runs the
+  candidate files in both projects, shadow-style, before any file moves. The
+  lever is offered only when the repo's own vitest configuration is read in full
+  and shows no opt-out: every vitest config file (not only the default names),
+  the local modules those configs merge in, and the package scripts beside them.
+  When that cannot be established, the lever is **withheld** and the pole names
+  the measured import-bound split, states why OPT78 was withheld, and tells the
+  agent not to turn isolation off. It is never left as a gap for an unguarded
+  analysis. Withholding happens when the repo already opts out, a config is
+  unreadable, an import cannot be followed, the search could not cover the repo,
+  or the suite runs on a vm pool. The evidence quotes the slowest run, the one
+  the finding sizes. The detector reads the summary line vitest 4.0.14 and later
+  print; earlier releases (which label the phase `collect`) and vitest 5 (which
+  prints percentages) do not match. The saving is deliberately not credited: the
+  audit reports the measured import share and says a benchmark is required. The
+  config reader can no longer crash the scan: a directory it cannot stat now
+  counts as unvisited ground rather than an error.
 
 - **2026-09-09** — **The planned before/after check can no longer claim a
   speedup it did not measure.** The approved (still unimplemented) post-fix

@@ -103,8 +103,9 @@ as intended that is simply the slowest thing gating the merge, with no catalog
 match. The **structural track** (category 14, OPT70–OPT75 plus OPT78) attacks that: a second
 finding class **routed from the measured critical path** in `collect_runs.py` (the
 long-pole job decomposed to steps, required checks cross-referenced, shared cluster
-work detected), not a YAML match — still catalog OPT-ids. Routing + risk model:
-`ARCHITECTURE.md` §11.
+work detected), not a YAML match — still catalog OPT-ids. OPT78 is the exception
+in routing: a drill-time log detector in `blocking_path.py`, gated on the repo's
+vitest config. Routing + risk model: `ARCHITECTURE.md` §11.
 
 ### Risk & intent are mandatory (baked into every structural prompt)
 
@@ -119,7 +120,10 @@ safe quick win — always with a full-suite fallback + parallel-run rollout. And
 a detector firing says a pattern *matches*, not that the code is a mistake, every
 prompt instructs the user's agent to **recover the file's git history/intent first**
 and flag an intent-contradicting fix as a policy change needing owner sign-off, not a
-quick win. Details + the exact intent-recovery commands:
+quick win. OPT78 emits no finding record, so it has no `Risk` row or banner: its
+HIGH risk is stamped on the pole's drill-down (`OPT78, HIGH RISK`) and its intent
+check, guardrail and rollout ride in its agent prompt. Details + the exact
+intent-recovery commands:
 [references/structural-track.md](references/structural-track.md).
 
 ## Phases
@@ -427,7 +431,7 @@ entry's METADATA block declares the pattern id, impact tier, finding class
 slug; structural entries add a `risk` rating + mandatory guardrail/rollout.
 
 Adding or cutting a pattern (catalog entry + detector registration, coverage
-bookkeeping, the intentionally-cut OPT49/50/51 / router-less OPT74 cases) is a
+bookkeeping, the intentionally-cut OPT49/50/51 / router-less OPT74 and OPT78 cases) is a
 contributor task — `maintainers/ci-speedup/MAINTAINERS.md` (source checkout
 only) § Adding a pattern to the catalog.
 
@@ -445,7 +449,7 @@ Reference docs (read on demand — each links one level deep from here; outside 
 - [references/spine-scoping.md](references/spine-scoping.md) — which checks
   form the spine (required-scoping, PR-floor fallback, one-path demotion).
 - [references/structural-track.md](references/structural-track.md) — the
-  OPT70–75 risk model + intent interrogation for structural prompts.
+  OPT70–75 and OPT78 risk model + intent interrogation for structural prompts.
 - [references/gap-fill.md](references/gap-fill.md) — the coverage-gap
   fallback (4a/4b/4c) for poles the catalog can't analyse.
 - [references/adversarial-review-rubric.md](references/adversarial-review-rubric.md) — the hostile-review contract ("Quality review").
@@ -498,8 +502,8 @@ The scannable rule list; each is detailed in the section named in parentheses.
   "sampled 0/20 PRs", "found no drill logs", "the spine is empty", or "I couldn't X, so
   let me Y". A genuine coverage limit is stated once by the report's banners, not narrated.
 - **Emit a finding whose pattern id is not in the catalog** — both tracks emit only
-  catalog-declared OPT-ids (structural OPT70–75 are *routed* from the critical path but
-  still catalog-declared).
+  catalog-declared OPT-ids (structural OPT70–75 and OPT78 are *routed* from the
+  critical path but still catalog-declared).
 - **Emit a generic "slow step" finding** — a step taking N seconds is an observation;
   every finding names a specific root cause ("admission gate").
 - **Present a structural change as a safe quick win** — each states its `risk`,

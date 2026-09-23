@@ -96,14 +96,14 @@ class Capture:
     def fires(self) -> dict[str, Any] | None:
         """The live detector verdict on this capture's raw job log.
 
-        NOTE: config-gated leaves (OPT78 / `vitest-isolate-pool`) also need
+        NOTE: the one config-gated leaf (OPT78 / `vitest-isolate-pool`) needs
         scan's `test_runner_isolation` fact, which a capture dir does not carry
-        (`job.log` + `meta.json` + `analysis.json` only), so they always read as
-        "pending" here. Harmless today because `_gap_poles` passes the same fact
-        and therefore never CAPTURES a pole whose leaf fired — only a suppressed
-        one, for which "pending" is the right answer. A capture taken before that
-        gating existed can still mislead the loop; stamp the fact into meta.json
-        if this ever needs to be exact."""
+        (`job.log` + `meta.json` + `analysis.json` only). Without it, an
+        import-bound vitest log still yields a leaf here - the guarded
+        `vitest-import-bound` one (OPT78 withheld) - so such a capture reads as
+        catalog-covered, never "pending", and the loop is never asked to draft a
+        duplicate detector for it. Which of the two leaves it is does not matter
+        to this verdict."""
         try:
             text = self.log_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
