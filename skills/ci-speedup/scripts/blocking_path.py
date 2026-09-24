@@ -9900,6 +9900,11 @@ def _gap_poles(doc: dict[str, Any],
     # pole is never a gap on either path: the fact only picks WHICH leaf it gets
     # (the OPT78 lever, or the guarded `vitest-import-bound` leaf when OPT78 is
     # withheld), so the maintainer loop is never sent to draft a duplicate detector.
+    # For OPT78 as it stands today this argument makes `_iso` INERT here — both
+    # branches return a leaf, so the gap verdict is the same with or without it.
+    # It is passed anyway: the invariant this function must hold is "parse exactly
+    # as the renderer does", and a future config-gated leaf that can return None
+    # would silently over-report gaps the day it lands.
     _iso = doc.get("test_runner_isolation")
 
     def _catalog_covers(pole: dict[str, Any]) -> bool:
