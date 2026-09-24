@@ -3059,7 +3059,7 @@ def test_opt66_stays_retired_not_silently_deleted():
     dropping (or reusing) an id — a removed pattern must keep a stub, like the
     OPT49/50/51 CUTs — so historical reports/evals/fix-strategy strings never
     collide. This guards against OPT66 vanishing (which also silently staled
-    every '74-pattern' doc claim, see the count test below)."""
+    every '76-pattern' doc claim, see the count test below)."""
     import sys as _sys
     _sys.path.insert(0, str(_SKILL_DIR / "scripts"))
     import scan  # noqa: E402
@@ -3079,7 +3079,7 @@ def test_opt66_stays_retired_not_silently_deleted():
 
 def test_catalog_pattern_count_matches_doc_claims():
     """Every '<N>-pattern' / 'all <N> patterns' claim in the shipped docs must use
-    the REAL current catalog count (75 with OPT78). OPT66's removal-as-a-retired-stub
+    the REAL current catalog count (76 with OPT77 and OPT78). OPT66's removal-as-a-retired-stub
     keeps OPT66 in that count; a silent delete drops it by one and staled five claims at once
     (SKILL.md, ARCHITECTURE.md, evals.json). This is the guard that was missing."""
     import sys as _sys
