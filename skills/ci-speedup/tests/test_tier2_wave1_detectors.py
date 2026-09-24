@@ -2638,9 +2638,10 @@ def test_opt77_requires_setup_to_dominate_useful_work():
     assert _opt77(jpr=jpr, crit=_opt77_crit(setup_s=20.0, work_s=200.0)) == []
 
 
-def test_opt77_withholds_when_the_consolidated_job_reaches_the_cluster_floor():
-    # setup 80s + max useful 10s = 90s projected; a 90s floor means the merge
-    # gate would not stay strictly faster than the consolidated job.
+def test_opt77_withholds_when_the_consolidated_job_reaches_the_tallest_remaining_job():
+    # setup 80s + max useful 10s = 90s projected. The fixture's `test` job — the
+    # tallest job that REMAINS once the group is consolidated — is also 90s, so
+    # the merge gate would not stay strictly longer than the consolidated job.
     assert _opt77(crit=_opt77_crit(floor=90.0)) == []
 
 
@@ -2705,8 +2706,9 @@ def test_opt77_withholds_when_the_setup_prefixes_are_not_the_same_work():
     them removes nothing but the one shared checkout — every distinct install must
     still run. Crediting `(N-1) x setup_p50` there overstates the removable
     runner-minutes, and projecting `max(setup) + max(useful)` understates the
-    consolidated job, so the cluster-floor guard can pass when the real job would
-    blow through the floor. The finding must be WITHHELD."""
+    consolidated job, so the neutrality guard can pass when the real consolidated
+    job would overrun the tallest job that remains. The finding must be
+    WITHHELD."""
     names = tuple(_OPT77_DISTINCT_SETUPS)
     jpr = [_opt77_distinct_run(), _opt77_distinct_run()]
     crit = _opt77_crit(setup_s=80.0, work_s=10.0, names=names)
@@ -2802,17 +2804,17 @@ def test_setup_classifier_counts_an_unnamed_dependency_install():
         assert cr._classify_step(name) != "setup", name
 
 
-def test_opt77_withholds_when_only_the_projection_reaches_the_floor():
-    """The projection-vs-floor gate is this pattern's ENTIRE wall-clock-safety
-    claim, and the homogeneous fixture cannot prove it: there every job p50 equals
-    the projection, so the per-job `p50 < floor` gate catches the case too and
-    either gate can be deleted with the suite still green. This group is
-    heterogeneous — every job p50 (90/102/100) is below the 110s floor, yet the
-    consolidated job projects to max(setup) + max(useful) = 100 + 40 = 140s, which
-    is NOT. Nothing but the projection comparison can withhold it — the per-job
-    medians are all comfortably clear. (Two lines enforce that comparison: the
-    strict check and the float-precision margin guard behind it, so deleting
-    either one alone still withholds. This pins the property, not the line.)"""
+def test_opt77_withholds_when_only_the_projection_reaches_the_tallest_remaining_job():
+    """The projection comparison is this pattern's ENTIRE wall-clock-safety claim,
+    and the homogeneous fixture cannot prove it: there every job p50 equals the
+    projection, so any per-job comparison catches the case too and the projection
+    check could be deleted with the suite still green. This group is heterogeneous
+    — every job p50 (90/102/100) is below the 110s `test` job that remains, yet the
+    CONSOLIDATED job projects to max(setup) + max(useful) = 100 + 40 = 140s, which
+    is not. Nothing but the projection comparison can withhold it: the per-job
+    medians are all comfortably clear. (Two lines enforce it — the strict check and
+    the float-precision margin guard behind it — so deleting either one alone still
+    withholds. This pins the property, not the line.)"""
     names = ("lint", "typecheck", "audit")
     spec = {"lint": (80.0, 10.0), "typecheck": (100.0, 2.0), "audit": (60.0, 40.0)}
     run = [_setup_job(n, s, w) for n, (s, w) in spec.items()]

@@ -5007,8 +5007,13 @@ def _opt65_rounding_rederived(f: dict, data: dict) -> tuple[float | None, list[s
 
 
 def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, list[str]]:
-    """Independently re-derive OPT77's saving and its below-floor margin from the
+    """Independently re-derive OPT77's saving and its neutrality margin from the
     stamped `setup_consolidation` block — never from the finding's own prose.
+
+    The certificate's `proof` token is `below_cluster_floor`, which for OPT77 is
+    HISTORICAL: the comparison is against the tallest job that remains after the
+    consolidation. The token is shared with OPT65 (a genuine cluster-floor
+    comparison) and kept as the dispatch key.
 
     Saving model: consolidating N independent same-runner jobs that each re-pay the
     same measured setup prefix removes (N-1) payments of it per run, so

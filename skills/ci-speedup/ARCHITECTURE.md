@@ -1032,6 +1032,40 @@ stamp bare run IDs for de-overlap: the credited unit is per-job billing round-up
 not whole-run elimination. The guardrail text must keep consolidation off the
 merge gate; lowering matrix parallelism or adding a serial `needs:` stage for an
 on-spine matrix is wall-clock-negative.
+OPT65 is also **superseded by OPT77** on any job set both claim, in
+`collect()` right after both have run for a workflow (`_supersede_opt65_with_opt77`).
+The two are not disjoint: OPT65 groups on a trailing parenthetical in the OBSERVED
+job name, so three ordinary jobs named `lint (eslint)` / `(biome)` / `(stylelint)`
+form an OPT65 base AND resolve to one YAML job each. One edit must render as one
+lever, so the consolidation wins; OPT65's round-up minutes for the overlap go
+unreported (a deliberate under-statement, since folding a billable-round-up
+quantity into OPT77's raw-compute basis would break it) and every drop is
+disclosed in `findings_doc["superseded_findings"]`.
+
+OPT77 (repeated fixed setup across independent small jobs) is the other measured
+Tier-2 consolidation lever. It splits each sampled job's step timeline into a
+LEADING setup prefix and useful work, using the same `_SETUP_STEP_RE` classifier
+the CUT hygiene detectors OPT49/OPT51 were defined against — widened in this wave
+to recognise GitHub's `Run <owner>/<action>@<ref>` rendering of an unnamed action
+step and the bare install commands (`npm ci`, `pip install`, …), without which
+the largest component of a real setup prefix was invisible. The prefix's SHAPE is
+read from every declared step and only its duration from the steps that measured
+above zero, because GitHub's one-second step granularity otherwise turns
+sub-second jitter into a change of signature.
+
+Its neutrality model is deliberately NOT the cluster floor: the projected
+consolidated job (`max(setup_p50) + max(useful_p50)`, tasks run concurrently
+inside it) is compared against the tallest job that REMAINS after the
+consolidation — a floor the group's own members help define would measure the fix
+against something the fix removes, and silenced the pattern on its own motivating
+shape. The certificate's `proof` token stays `below_cluster_floor` (shared with
+OPT65 as the dispatch key) and is historical for OPT77; `verify_report.py`'s
+`_opt77_consolidation_rederived` arm re-derives the saving, the margin, the
+grouping (each job's own stamped prefix must equal the credited shared one) and
+the eligible set the tallest-remaining job was chosen from. Like OPT65 it claims
+no speedup (`wall_clock_p50_s=0`, `realization=none`), and it shares
+`_billed_job_runner` and `_tier2_scope_event` with it.
+
 
 OPT57 now has a measured timeout-default-burn upgrade. A missing
 `timeout-minutes` key is only the structural gate: `collect_runs.py` emits a
