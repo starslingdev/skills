@@ -8473,6 +8473,7 @@ def _consolidation_yaml_setup_fingerprint(
 
 def _supersede_opt65_with_opt77(
     findings: list[dict[str, Any]],
+    disclosure: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Drop every OPT65 finding whose jobs an OPT77 finding already claims, in the
     same workflow. One edit must render as ONE lever.
@@ -8485,19 +8486,26 @@ def _supersede_opt65_with_opt77(
     then fire on the same three jobs and describe the same consolidation, and the
     report shows two levers for one change while double-counting part of it.
 
+    The overlap is tested on INTERSECTION, not containment: OPT65 on four legs
+    and OPT77 on three of them is still one edit, and rendering both would show
+    the reader two levers for it.
+
     ACCEPTED COST: OPT65's billing round-up minutes are genuine and go unreported
     whenever it is superseded, so the total slightly UNDERSTATES. They are not
     folded into OPT77's number on purpose — OPT77 credits raw removed compute, and
     mixing a billable-round-up quantity into that would break its measured basis.
     Under-reporting a real saving is the safe direction; inventing a basis is not.
+
+    Because that cost is real, every drop is DISCLOSED into `disclosure` (the
+    findings doc's `superseded_findings`) rather than being silently invisible,
+    and the entry names the jobs that did NOT overlap — those are round-up minutes
+    that went unreported without anything at all being said about them.
     """
-    claimed: dict[str, set[str]] = {}
+    claimed: dict[str, list[dict[str, Any]]] = {}
     for f in findings:
         if str(f.get("pattern") or "") != "OPT77":
             continue
-        wf = str(f.get("workflow_file") or "")
-        claimed.setdefault(wf, set()).update(
-            str(j) for j in (f.get("affected_jobs") or []) if str(j))
+        claimed.setdefault(str(f.get("workflow_file") or ""), []).append(f)
     if not claimed:
         return findings
     kept: list[dict[str, Any]] = []
@@ -8505,7 +8513,30 @@ def _supersede_opt65_with_opt77(
         if str(f.get("pattern") or "") == "OPT65":
             wf = str(f.get("workflow_file") or "")
             jobs = {str(j) for j in (f.get("affected_jobs") or []) if str(j)}
-            if jobs and jobs & claimed.get(wf, set()):
+            overlapping = [o for o in claimed.get(wf, [])
+                           if jobs & {str(j) for j in (o.get("affected_jobs") or [])}]
+            if jobs and overlapping:
+                covered: set[str] = set()
+                for o in overlapping:
+                    covered |= {str(j) for j in (o.get("affected_jobs") or [])}
+                if disclosure is not None:
+                    disclosure.append({
+                        "id": f.get("id"),
+                        "pattern": "OPT65",
+                        "workflow_file": wf,
+                        "affected_jobs": sorted(jobs),
+                        "superseded_by": [o.get("id") for o in overlapping],
+                        "unreported_jobs": sorted(jobs - covered),
+                        "reason": (
+                            "OPT77 already reports consolidating these jobs; one "
+                            "edit must render as one lever. This finding's billing "
+                            "round-up minutes are real and go unreported, which "
+                            "makes the total a slight UNDER-statement."),
+                    })
+                logger.debug(
+                    "OPT65 %s %s superseded by OPT77 %s; %d job(s) outside the "
+                    "overlap go unreported", wf, f.get("id"),
+                    [o.get("id") for o in overlapping], len(jobs - covered))
                 continue
         kept.append(f)
     return kept
@@ -16451,7 +16482,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # OPT77 supersedes OPT65 on any job set both claim — one edit, one lever.
         # Applied here, right after both have run for this workflow, so the two
         # can never reach the report describing the same consolidation twice.
-        findings = _supersede_opt65_with_opt77(findings)
+        findings = _supersede_opt65_with_opt77(
+            findings,
+            disclosure=findings_doc.setdefault("superseded_findings", []))
 
         # The sibling windows come from the SAME cached all-status page the
         # run-elimination block below fetches (net zero extra gh calls); with

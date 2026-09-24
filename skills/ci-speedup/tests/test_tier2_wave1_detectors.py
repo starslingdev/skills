@@ -3473,3 +3473,70 @@ def test_opt77_verifier_checks_the_restated_saving_numbers():
         _margin, problems = vr._opt77_consolidation_rederived(
             f, _opt77_findings_doc([f], crit))
         assert any(needle in p for p in problems), (field, problems)
+
+
+# ==== a dropped lever has to be visible somewhere ====
+#
+# Superseding OPT65 deliberately loses real minutes: its billing round-up for the
+# overlapping jobs goes unreported so one edit renders as one lever. Nothing said
+# so anywhere a reader could look, and the overlap is tested on INTERSECTION, so
+# a four-leg OPT65 can be dropped for a three-job OPT77 with the fourth leg's
+# round-up disappearing without a word.
+
+def test_supersede_discloses_every_dropped_lever_and_what_it_gave_up():
+    o65 = {"id": "f1", "pattern": "OPT65", "workflow_file": "ci.yml",
+           "affected_jobs": ["lint (a)", "lint (b)", "lint (c)", "lint (d)"]}
+    o77 = {"id": "f2", "pattern": "OPT77", "workflow_file": "ci.yml",
+           "affected_jobs": ["lint (a)", "lint (b)", "lint (c)"]}
+    disclosure = []
+    kept = cr._supersede_opt65_with_opt77([o65, o77], disclosure=disclosure)
+    assert [f["id"] for f in kept] == ["f2"]
+    assert len(disclosure) == 1, disclosure
+    d = disclosure[0]
+    assert d["id"] == "f1"
+    assert d["pattern"] == "OPT65"
+    assert d["workflow_file"] == "ci.yml"
+    assert d["superseded_by"] == ["f2"]
+    # The leg the consolidation does NOT cover is named: its round-up minutes are
+    # real and go unreported.
+    assert d["unreported_jobs"] == ["lint (d)"]
+    assert "one lever" in d["reason"]
+
+
+def test_supersede_discloses_nothing_when_it_drops_nothing():
+    o65 = {"id": "f1", "pattern": "OPT65", "workflow_file": "release.yml",
+           "affected_jobs": ["unit (3.9)", "unit (3.12)"]}
+    o77 = {"id": "f2", "pattern": "OPT77", "workflow_file": "ci.yml",
+           "affected_jobs": ["lint", "typecheck", "audit"]}
+    disclosure = []
+    assert len(cr._supersede_opt65_with_opt77([o65, o77], disclosure=disclosure)) == 2
+    assert disclosure == []
+
+
+def test_supersede_disclosure_reaches_the_findings_document():
+    import inspect
+    assert "superseded_findings" in inspect.getsource(cr.collect)
+
+
+def test_verifier_rejects_a_suppression_with_no_surviving_consolidation():
+    """The trade — lose OPT65's minutes so one edit renders once — is only
+    defensible while the lever that replaced it is actually in the report."""
+    import verify_report as vr
+    data = {"findings": [{"id": "f2", "pattern": "OPT77", "workflow_file": "ci.yml"}],
+            "superseded_findings": [
+                {"id": "f1", "pattern": "OPT65", "workflow_file": "ci.yml",
+                 "superseded_by": ["f2"], "unreported_jobs": []}]}
+    assert vr._opt65_suppressions_are_accounted_for(data) == []
+
+    orphan = {"findings": [],
+              "superseded_findings": [
+                  {"id": "f1", "pattern": "OPT65", "workflow_file": "ci.yml",
+                   "superseded_by": ["f2"], "unreported_jobs": []}]}
+    problems = vr._opt65_suppressions_are_accounted_for(orphan)
+    assert any("no such OPT77 consolidation survives" in p for p in problems), problems
+
+    unnamed = {"findings": [],
+               "superseded_findings": [
+                   {"id": "f1", "pattern": "OPT65", "workflow_file": "ci.yml"}]}
+    problems = vr._opt65_suppressions_are_accounted_for(unnamed)
+    assert any("without naming what superseded it" in p for p in problems), problems

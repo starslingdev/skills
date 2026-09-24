@@ -5174,6 +5174,38 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
     return round(tallest_p50 - projected, 1), problems
 
 
+def _opt65_suppressions_are_accounted_for(data: dict) -> list[str]:
+    """Every OPT65 finding dropped for overlapping an OPT77 consolidation must be
+    disclosed, and the consolidation that displaced it must actually be in the
+    report.
+
+    The drop deliberately loses real minutes — OPT65's billing round-up for the
+    overlapping jobs goes unreported so that one edit renders as one lever. That
+    trade is only defensible while the surviving lever is there to describe the
+    edit. A suppression naming an OPT77 that is not in the same workflow's
+    findings has removed a lever and replaced it with nothing."""
+    out: list[str] = []
+    dropped = [d for d in _as_list(data.get("superseded_findings"))
+               if isinstance(d, dict)]
+    if not dropped:
+        return out
+    surviving: dict[str, set[str]] = {}
+    for f in _as_list(data.get("findings")):
+        if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT77":
+            surviving.setdefault(str(f.get("workflow_file") or ""), set()).add(
+                str(f.get("id") or ""))
+    for d in dropped:
+        wf = str(d.get("workflow_file") or "")
+        by = {str(x) for x in _as_list(d.get("superseded_by")) if str(x)}
+        if not by:
+            out.append(f"{d.get('id')!r}: suppressed without naming what superseded it")
+        elif not (by & surviving.get(wf, set())):
+            out.append(
+                f"{d.get('id')!r}: suppressed by {sorted(by)!r} in {wf!r}, but no "
+                "such OPT77 consolidation survives in that workflow")
+    return out
+
+
 def _tier2_skip_or_data(findings_path: Path | None, name: str,
                         report: str | None = None) -> tuple[Check | None, dict]:
     data, err = _load_findings_doc(findings_path)
@@ -5287,6 +5319,7 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                 bad.append(f"{fid}: missing tier2_neutrality_line claim")
             elif str(claim.get("rendered") or "") not in body:
                 bad.append(f"{fid}: neutrality claim not bound to its R-row")
+    bad.extend(_opt65_suppressions_are_accounted_for(data))
     return Check(name, not bad, f"{len(ranked)} Tier-2 certificate(s) re-derived "
                  f"({len(expected)} visible R-row(s))" if not bad
                  else "; ".join(bad[:6]))
