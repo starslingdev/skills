@@ -8860,12 +8860,22 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             "shared_setup_steps": list(setup_sig),
             "removed_setup_payments": removed,
             "setup_p50_s": round(setup_p50, 1),
+            # Each job's OWN normalized prefix, not just the group's. Without it
+            # the verifier can check only that `shared_setup_steps` is non-empty —
+            # it has to take the grouping itself on faith, and the grouping is
+            # what the whole `(N-1) x one setup` model rests on.
             "per_job": {n: {"setup_p50_s": round(float(candidates[n]["setup_p50"]), 1),
-                            "useful_work_p50_s": round(float(candidates[n]["useful_p50"]), 1)}
+                            "useful_work_p50_s": round(float(candidates[n]["useful_p50"]), 1),
+                            "setup_steps": list(candidates[n]["setup_sig"])}
                         for n in names},
             "projected_consolidated_p50_s": projected,
             "remaining_tallest_job": tallest_job,
             "remaining_tallest_p50_s": round(tallest_p50, 1),
+            # The set the tallest-remaining job was chosen from, and every job
+            # left out of it with the reason — so the verifier re-derives the max
+            # over the same set rather than over all of `job_p50`.
+            "remaining_eligible_jobs": sorted(nm for _p, nm in eligible),
+            "remaining_excluded_jobs": dict(sorted(excluded.items())),
             "occurrences": occurrences,
             "sampled_saved_s": round(sampled_saved_s, 3),
             "sampled_successful_run_count": len(jobs_per_run),

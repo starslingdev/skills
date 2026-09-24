@@ -5015,7 +5015,15 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
     `runner_min = occurrences x (N-1) x setup_p50_s / 60 x monthly / sampled_runs`.
     Neutrality: the consolidated job is projected at `max(setup_p50) +
     max(useful_work_p50)` (the collapsed tasks run CONCURRENTLY inside it) and must
-    stay strictly below the workflow cluster floor."""
+    stay strictly below the TALLEST JOB THAT REMAINS after the consolidation — not
+    below a floor the credited group's own members help define, which would compare
+    the fix against something the fix removes.
+
+    The per-job setup and useful-work values are stamped ROUNDED to 0.1s, so the
+    re-derivation below runs on rounded inputs and compares at a 0.11 tolerance.
+    That is sound only because the underlying measurements come from
+    second-granular step timestamps, where 0.1s is already finer than the source
+    data; it is not a licence to widen either number."""
     sc = _as_dict(f.get("setup_consolidation"))
     problems: list[str] = []
     if sc.get("kind") != "opt77_repeated_setup":
@@ -5035,8 +5043,22 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
         problems.append(f"sampled_successful_run_count={sc.get('sampled_successful_run_count')!r}")
     if occurrences is None or occurrences <= 0:
         problems.append(f"occurrences={sc.get('occurrences')!r}")
+    # `occurrences` multiplies the whole saving and nothing else bounds it: it
+    # counts sampled runs in which every credited job produced a clean
+    # measurement, so it can never exceed the number of runs sampled.
+    if (occurrences is not None and denom is not None
+            and occurrences > denom):
+        problems.append(
+            f"occurrences {occurrences} exceeds the {denom} sampled run(s) it counts")
     setups: list[float] = []
     usefuls: list[float] = []
+    # The group is only creditable because its jobs re-pay the SAME setup prefix;
+    # without that, `(N-1) x one setup` is not a saving anyone can collect.
+    shared = [str(x) for x in _as_list(sc.get("shared_setup_steps")) if str(x).strip()]
+    if not shared:
+        problems.append(
+            "shared_setup_steps missing or empty - cannot show the credited jobs "
+            "re-pay the same setup prefix rather than merely sharing a runner")
     for job in jobs:
         entry = _as_dict(per_job.get(job))
         s = _num(entry.get("setup_p50_s"))
@@ -5046,18 +5068,22 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
             continue
         if s + 0.011 < 0.5 * (s + u):
             problems.append(f"{job}: setup {s} does not dominate useful work {u}")
+        # …and the prefix claimed for the GROUP has to be the prefix this job was
+        # actually measured with. Checking only that `shared_setup_steps` is
+        # non-empty takes the grouping on faith: it cannot tell a group of three
+        # jobs that genuinely re-pay one prefix from three jobs sharing a runner
+        # label and a plausible-looking list.
+        own = [str(x) for x in _as_list(entry.get("setup_steps"))]
+        if not own:
+            problems.append(f"{job}: no per-job setup_steps to check the grouping against")
+        elif own != shared:
+            problems.append(
+                f"{job}: measured setup prefix {own!r} is not the credited "
+                f"shared prefix {shared!r}")
         setups.append(float(s))
         usefuls.append(float(u))
     if not setups or len(setups) != len(jobs):
         return None, problems
-    # The group is only creditable because its jobs re-pay the SAME setup prefix;
-    # without that, `(N-1) x one setup` is not a saving anyone can collect. The
-    # prefix the group was formed on must be stamped, or there is nothing here
-    # showing the jobs were grouped on anything but a shared runner label.
-    if not [x for x in _as_list(sc.get("shared_setup_steps")) if str(x).strip()]:
-        problems.append(
-            "shared_setup_steps missing or empty - cannot show the credited jobs "
-            "re-pay the same setup prefix rather than merely sharing a runner")
     removed = len(jobs) - 1
     if _num(sc.get("removed_setup_payments")) != removed:
         problems.append(f"removed_setup_payments {sc.get('removed_setup_payments')!r} != {removed}")
@@ -5075,6 +5101,23 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
         rm = _num(f.get("runner_min_saving"))
         if rm is None or abs(rm - expected_rm) > 0.11:
             problems.append(f"runner_min_saving {rm!r} != re-derived {expected_rm}")
+        # The block restates the saving, its sampled basis and its scale factor.
+        # Duplicated numbers nobody reads drift; these are checked against the
+        # same re-derivation so a drift is a failure rather than a curiosity.
+        inner_rm = _num(sc.get("runner_min_saving"))
+        if inner_rm is None or abs(inner_rm - (rm if rm is not None else expected_rm)) > 0.11:
+            problems.append(
+                f"setup_consolidation.runner_min_saving {sc.get('runner_min_saving')!r} "
+                f"!= the finding's {rm!r}")
+        expected_sampled = round(float(occurrences) * removed * setup_p50, 3)
+        sampled = _num(sc.get("sampled_saved_s"))
+        if sampled is None or abs(sampled - expected_sampled) > 0.11:
+            problems.append(
+                f"sampled_saved_s {sc.get('sampled_saved_s')!r} != {expected_sampled}")
+        expected_scale = round(float(monthly) / float(denom), 6)
+        scale = _num(sc.get("scale"))
+        if scale is None or abs(scale - expected_scale) > 0.001:
+            problems.append(f"scale {sc.get('scale')!r} != {expected_scale}")
     wf = str(f.get("workflow_file") or "")
     crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
     # The consolidated job is measured against the tallest job that REMAINS after
@@ -5087,8 +5130,30 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
         problems.append("missing job_p50")
         return None, problems
     member = {str(j) for j in jobs}
-    remaining = [(float(_num(v) or 0.0), str(k)) for k, v in all_p50.items()
-                 if str(k) not in member and (_num(v) or 0.0) > 0]
+    # The detector does not max over every remaining job: a job that ran in a
+    # minority of the sampled runs cannot carry the neutrality proof, because on
+    # the other runs the group's own members are the tallest thing left. It
+    # stamps the set it DID max over, plus every job it left out and why — so the
+    # partition is total and visible here rather than implied.
+    eligible_names = [str(x) for x in _as_list(sc.get("remaining_eligible_jobs"))]
+    excluded_names = set(_as_dict(sc.get("remaining_excluded_jobs")))
+    outside = {str(k) for k in all_p50 if str(k) not in member}
+    if not eligible_names:
+        problems.append("remaining_eligible_jobs missing - the tallest-remaining "
+                        "job was not shown to be chosen from a stated set")
+        return None, problems
+    stray = [n for n in eligible_names if n in member or n not in all_p50]
+    if stray:
+        problems.append(
+            f"remaining_eligible_jobs names {sorted(stray)!r}, which are credited "
+            "group members or absent from job_p50")
+    unaccounted = outside - set(eligible_names) - excluded_names
+    if unaccounted:
+        problems.append(
+            f"jobs outside the credited group neither credited as eligible nor "
+            f"excluded with a reason: {sorted(unaccounted)!r}")
+    remaining = [(float(_num(all_p50.get(n)) or 0.0), n) for n in eligible_names
+                 if (_num(all_p50.get(n)) or 0.0) > 0]
     if not remaining:
         problems.append("no job outside the credited group to measure against")
         return None, problems

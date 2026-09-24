@@ -3384,3 +3384,92 @@ def test_opt77_withhold_counts_reach_the_findings_document():
     import inspect
     src = inspect.getsource(cr.collect)
     assert "opt77_withheld_by_gate" in src
+
+
+# ==== the detector and its verifier arm, coupled ====
+#
+# The verifier re-derives OPT77's saving and margin from the stamped block. A
+# hand-written block proves only that the verifier reads what the test wrote; the
+# coupling that matters is that what the DETECTOR stamps survives it.
+
+def _opt77_findings_doc(out, crit, wf_path="ci.yml"):
+    return {"findings": out,
+            "per_workflow_timing": {wf_path: {"job_p50": dict(crit["job_p50"])}}}
+
+
+def test_opt77_detector_output_passes_its_own_verifier_arm():
+    import verify_report as vr
+    names = ("lint", "typecheck", "audit")
+    crit = _opt77_crit(names=names)
+    out = _opt77(crit=crit, wf=_opt77_wf(names=names))
+    assert len(out) == 1
+    margin, problems = vr._opt77_consolidation_rederived(
+        out[0], _opt77_findings_doc(out, crit))
+    assert problems == [], problems
+    assert margin == out[0]["tier2_neutrality"]["margin_s"]
+
+
+def test_opt77_verifier_catches_a_credited_job_with_a_different_prefix():
+    """The grouping is the whole saving model, and until each job stamped its OWN
+    measured prefix the verifier could only check that the group's list was
+    non-empty — it had to take on faith that all N jobs re-pay it."""
+    import verify_report as vr
+    names = ("lint", "typecheck", "audit")
+    crit = _opt77_crit(names=names)
+    out = _opt77(crit=crit, wf=_opt77_wf(names=names))
+    f = out[0]
+    f["setup_consolidation"]["per_job"]["audit"]["setup_steps"] = [
+        "set up job", "actions/setup-python"]
+    _margin, problems = vr._opt77_consolidation_rederived(
+        f, _opt77_findings_doc(out, crit))
+    assert any("is not the credited shared prefix" in p for p in problems), problems
+
+
+def test_opt77_verifier_bounds_occurrences_by_the_sampled_run_count():
+    """`occurrences` multiplies the entire saving and nothing else bounds it."""
+    import verify_report as vr
+    names = ("lint", "typecheck", "audit")
+    crit = _opt77_crit(names=names)
+    out = _opt77(crit=crit, wf=_opt77_wf(names=names))
+    f = out[0]
+    f["setup_consolidation"]["occurrences"] = 40
+    _margin, problems = vr._opt77_consolidation_rederived(
+        f, _opt77_findings_doc(out, crit))
+    assert any("exceeds the" in p and "sampled run" in p for p in problems), problems
+
+
+def test_opt77_verifier_rejects_a_tallest_remaining_job_from_outside_the_stated_set():
+    """The tallest-remaining job must come from the set the detector said it chose
+    from, and every job outside the group must be either in that set or excluded
+    with a reason."""
+    import verify_report as vr
+    names = ("lint", "typecheck", "audit")
+    crit = _opt77_crit(names=names)
+    out = _opt77(crit=crit, wf=_opt77_wf(names=names))
+    f = out[0]
+    f["setup_consolidation"]["remaining_eligible_jobs"] = []
+    _margin, problems = vr._opt77_consolidation_rederived(
+        f, _opt77_findings_doc(out, crit))
+    assert any("remaining_eligible_jobs missing" in p for p in problems), problems
+
+    f = _opt77(crit=crit, wf=_opt77_wf(names=names))[0]
+    f["setup_consolidation"]["remaining_eligible_jobs"] = ["lint"]
+    _margin, problems = vr._opt77_consolidation_rederived(
+        f, _opt77_findings_doc([f], crit))
+    assert any("credited group members" in p for p in problems), problems
+
+
+def test_opt77_verifier_checks_the_restated_saving_numbers():
+    """The block restates the saving, its sampled basis and its scale factor.
+    Numbers nobody reads drift."""
+    import verify_report as vr
+    names = ("lint", "typecheck", "audit")
+    crit = _opt77_crit(names=names)
+    for field, bogus, needle in (("runner_min_saving", 9999.0, "runner_min_saving"),
+                                 ("sampled_saved_s", 1.0, "sampled_saved_s"),
+                                 ("scale", 999.0, "scale")):
+        f = _opt77(crit=crit, wf=_opt77_wf(names=names))[0]
+        f["setup_consolidation"][field] = bogus
+        _margin, problems = vr._opt77_consolidation_rederived(
+            f, _opt77_findings_doc([f], crit))
+        assert any(needle in p for p in problems), (field, problems)
