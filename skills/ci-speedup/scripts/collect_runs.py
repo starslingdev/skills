@@ -16427,9 +16427,15 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # OPT77 shares OPT65's event-scoped monthly volume (same workflow, same
         # scaling question) so it costs no extra gh call, and reads the workflow
         # YAML for the `needs:` independence gate.
+        # Every gate that stopped a consolidation is counted onto the findings
+        # doc. This detector withholds in about thirty places and returns the
+        # same empty list whether it declined on the evidence or is broken; a
+        # visible per-gate tally is what distinguishes "nothing to report here"
+        # from "this lever has quietly stopped working".
         new = _detect_opt77_repeated_setup_across_small_jobs(
             wf_path, jobs_per_run, crit, _wf_docs.get(wf_path, {}),
-            opt65_monthly, next_id)
+            opt65_monthly, next_id,
+            withheld=findings_doc.setdefault("opt77_withheld_by_gate", {}))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
         # OPT77 supersedes OPT65 on any job set both claim — one edit, one lever.

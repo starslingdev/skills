@@ -3337,3 +3337,50 @@ def test_opt77_withholds_when_the_tallest_remaining_job_barely_ever_runs():
     # Present throughout, the same group is credited.
     assert len(_opt77(jpr=[list(small) + [tall] for _ in range(4)],
                       crit=crit, wf=wf)) == 1
+
+
+# ==== a silent detector and a dead one look identical ====
+#
+# OPT77 has around thirty withhold points, and every "withholds" test asserts
+# `== []` — exactly what a detector broken into never firing also returns. Two
+# such bugs have already shipped on this lever. The gate that stopped a group is
+# counted and logged, so a zero firing rate is visible in the artifact instead of
+# being inferred from an absence.
+
+def test_opt77_names_the_gate_that_withheld_each_group():
+    names = ("lint", "typecheck", "audit")
+    counts = {}
+    wf = _opt77_wf(names=names)
+    wf["jobs"]["deploy"] = {"runs-on": "ubuntu-latest", "needs": list(names)}
+    assert cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", [_opt77_run(), _opt77_run()], _opt77_crit(), wf, 100, 0,
+        withheld=counts) == []
+    assert counts.get("downstream_job_needs_a_member") == 1, counts
+
+    counts = {}
+    two = ("lint", "typecheck")
+    assert cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", [_opt77_run(names=two), _opt77_run(names=two)],
+        _opt77_crit(names=two), _opt77_wf(names=two), 100, 0,
+        withheld=counts) == []
+    assert counts.get("fewer_than_min_jobs_share_the_prefix") == 1, counts
+
+    counts = {}
+    assert cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", [_opt77_run(), _opt77_run()], _opt77_crit(), {}, 100, 0,
+        withheld=counts) == []
+    assert counts.get("workflow_yaml_unparsed") == 1, counts
+
+    # A group that fires records nothing.
+    counts = {}
+    assert len(cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", [_opt77_run(), _opt77_run()], _opt77_crit(), _opt77_wf(),
+        100, 0, withheld=counts)) == 1
+    assert counts == {}, counts
+
+
+def test_opt77_withhold_counts_reach_the_findings_document():
+    """The counter is only useful if it is stamped where a reader can see it."""
+    import inspect
+    src = inspect.getsource(cr.collect)
+    assert "opt77_withheld_by_gate" in src
