@@ -1656,7 +1656,14 @@ def _isolation_lever_available(
     carries into the report so the silence is never unexplained."""
     if not isinstance(iso, dict):
         return False, ("no vitest config was found to confirm per-file isolation "
-                       "is still on (the scan supplied no config fact)")
+                       "is still on (the scan supplied no config fact) — re-run "
+                       "the scan to restore it")
+    if iso.get("error"):
+        # A CRASHED reader, not a fact about the repo. Without its own reason it
+        # rendered identically to a big monorepo's truncated walk, so a broken
+        # scanner would retire this pattern silently.
+        return False, (f"the config reader failed ({iso.get('error')}), so "
+                       "isolation could not be checked")
     if iso.get("isolation_opt_out"):
         ev = [str(e) for e in (iso.get("opt_out_evidence") or [])]
         where = ev[0].split(": ", 1)[0].replace("`", "'") if ev else ""
@@ -1674,6 +1681,12 @@ def _isolation_lever_available(
     if iso.get("unresolved_imports"):
         return False, ("a vitest config pulls settings from a module this read "
                        "could not follow, so an existing opt-out cannot be ruled out")
+    if iso.get("isolate_unresolved"):
+        uv = [str(e) for e in (iso.get("isolate_unresolved") or [])]
+        where = uv[0].split(": ", 1)[0].replace("`", "'") if uv else ""
+        return False, ("a vitest config sets `isolate` to a value this read could "
+                       "not resolve" + (f" (first at `{where}`)" if where else "")
+                       + ", so an existing opt-out cannot be ruled out")
     # A walk that left ground unvisited (file cap, depth bound, a pruned symlink
     # or package, an unreadable directory) cannot establish "no opt-out
     # ANYWHERE" — the opt-out may sit in a config it never reached, and the repo
@@ -1687,12 +1700,19 @@ def _isolation_lever_available(
     if not iso.get("readable") or not cfgs:
         return False, ("no vitest config was found to confirm per-file isolation "
                        "is still on")
-    # NOT a log line. Both render sites head the evidence list "verbatim from the
-    # captured job log", and the agent prompt additionally wraps it in an
-    # UNTRUSTED-content fence — but this half is a statement composed from the
-    # repo's config about the ABSENCE of an opt-out, which by construction has no
-    # line to quote. It says so inline, so neither the reader nor the agent takes
-    # it for log text they could go and find.
+    # The producer's ONE collapsed reading of the block, checked last so a fact
+    # whose per-field reasons all look clean but whose verdict is not
+    # `isolation_on` still fails closed — a renamed or dropped producer key
+    # reaches here as `unknown` (the default) and withholds, instead of every
+    # `.get()` above defaulting to False and letting the lever fire.
+    if str(iso.get("verdict", "unknown")) != "isolation_on":
+        return False, ("the scan's config fact does not confirm per-file "
+                       f"isolation is still on (verdict: "
+                       f"{iso.get('verdict', 'unknown')})")
+    # NOT a log line. This half is a statement composed from the repo's config
+    # about the ABSENCE of an opt-out, which by construction has no line to
+    # quote — so it is carried as the leaf's `config_fact`, rendered OUTSIDE the
+    # untrusted-log block and under its own label, and it says so inline too.
     n = len(cfgs)
     # Both branches must state the ABSENCE — this finding fires only when no
     # opt-out was found, so a sentence reading "<config> sets `isolate: false`"
@@ -1856,7 +1876,10 @@ def _parse_log(text: str,
     # one you wait for), and each tuple carries its source line index so the
     # evidence quotes THAT run - never the first `Duration` line in log order,
     # which on a multi-project log is a different, often test-bound, run.
-    # The gate reads `import + transform > tests`; vitest may already count part
+    # The full gate is `(import + transform) > tests AND import > 30s AND tests > 0`
+    # — the 30s floor keeps a fast suite whose ratio happens to tip from becoming a
+    # finding, and `tests > 0` keeps a run that reported no assertions out of it.
+    # On the ratio itself: vitest may already count part
     # of the transform wait inside `import`, so the gate is looser than it reads.
     # It only decides whether to name the split, never a credited saving.
     vd = sorted(
@@ -1870,18 +1893,30 @@ def _parse_log(text: str,
         if (im + tr) > te and im > 30 and te > 0:
             total = tr + im + te
             _iso_ok, _iso_line = _isolation_lever_available(iso, joined)
-            # The measured split first, then the CONFIG fact - the prompt quotes
-            # the first two evidence lines, and both halves of this finding's
-            # claim ("imports dominate" AND "isolation is still on", or "the
-            # lever was withheld, and why") must reach the agent.
+            # Only MEASURED log lines go in `evidence` - it renders inside the
+            # untrusted-log fence, under a heading that calls it verbatim run
+            # output. The CONFIG half is skill-composed text about the repo's
+            # config, so it travels separately as `config_fact` and renders
+            # outside that fence under its own label. Both halves of the claim
+            # ("imports dominate" AND "isolation is still on", or "the lever was
+            # withheld, and why") still reach the reader and the agent.
             ev = [lines[d_idx].strip()]
-            ev += [_iso_line if _iso_ok else
-                   "(from the repo's config scan, not this log) OPT78 withheld: "
-                   + _iso_line]
-            # The `Test Files` summary of the SAME run: the nearest one above its
-            # Duration line, never an earlier project's.
-            tf = next((lines[j].strip() for j in range(d_idx - 1, -1, -1)
-                       if re.search(r"Test Files +[0-9]+ passed", lines[j])), None)
+            config_fact = (_iso_line if _iso_ok else
+                           "OPT78 withheld: " + _iso_line)
+            # The `Test Files` summary of the SAME run: searched only back to the
+            # start of this run's own block (the previous run's Duration line, or
+            # its ` RUN ` banner), so a run whose own summary is missing borrows
+            # nobody else's. Failures count too - a red or flaky drill prints
+            # `Test Files  1 failed | 148 passed (149)`, and skipping that line
+            # walked the search into the PREVIOUS project and paired a 149-file
+            # run with another project's `12 passed`.
+            prev_d = max((j for _w, _t, _i, _e, j in vd if j < d_idx), default=-1)
+            own_run = max((j for j in range(d_idx - 1, -1, -1)
+                           if re.search(r"(?:^|\s)RUN\s+v?\d", lines[j])), default=-1)
+            floor = max(prev_d, own_run)
+            tf = next((lines[j].strip() for j in range(d_idx - 1, floor, -1)
+                       if re.search(r"Test Files +\d+ (?:passed|failed|skipped)\b",
+                                    lines[j])), None)
             if tf:
                 ev.append(tf)
             if _iso_ok:
@@ -1897,6 +1932,9 @@ def _parse_log(text: str,
                 "unit_label": f"the slowest vitest project ({_clock(wall)} wall) - "
                               "where that wall goes (import vs tests vs transform)",
                 "evidence": ev,
+                # Read from the repo's config, NOT from this log - rendered
+                # outside the untrusted-log fence, under its own label.
+                "config_fact": config_fact,
                 "search": ["Test Files ", "(transform "],
                 "magnitude": {"label": "import share of the vitest run",
                               "value": round(100 * im / total, 2) if total else 0.0,
@@ -3275,6 +3313,14 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
         safe = [_fence_safe(e) for e in ev]
         out += ["  Verbatim from the run:"] + [f"    {line}"
                                                 for line in uw.wrap_untrusted_block(safe)]
+    # A fact this skill READ FROM THE REPO'S CONFIG, never from the log: it must
+    # sit OUTSIDE the untrusted-log block (skill-authored text inside that
+    # boundary reads as run output the agent could go and find) and outside the
+    # "verbatim from the run" heading.
+    cf = str(leaf.get("config_fact") or "").strip()
+    if cf:
+        out += ["  One fact read from the repo's config (not from the log):",
+                f"    {_fence_safe(cf)}"]
     out += [""]
 
     addr = _addressable_plain(pole, candidates)
@@ -4675,6 +4721,9 @@ def _offcategory_note_block(leaf: dict[str, Any], pole: dict[str, Any]) -> list[
     ev = leaf.get("evidence") or []
     if ev:
         out += ["", *_evidence_fence(ev)]
+    cf = str(leaf.get("config_fact") or "").strip()
+    if cf:
+        out += ["", f"One fact read from the repo's config (not from the log): {cf}"]
     out.append("")
     return out
 
@@ -9454,10 +9503,17 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out += _cache_health_block(p.get("cache_dist"))
         if leaf is not None:
             ev = leaf.get("evidence") or []
+            cf = str(leaf.get("config_fact") or "").strip()
             if ev:
                 lead = ("Verbatim from one of those runs' log:" if sample
                         else "**🔬 Evidence** — verbatim from the captured job log:")
                 out += [lead, "", *_evidence_fence(ev), ""]
+            # Not log text: a fact read from the repo's config, so it renders
+            # outside the quoted-log fence and under its own heading rather than
+            # under one that calls it verbatim run output.
+            if cf:
+                out += ["**📄 One fact read from the repo's config** (not from "
+                        f"the log): {cf}", ""]
         elif analysis:
             # LLM gap-fill: no catalog match, so the agent's grounded reading of the
             # captured log stands in for the measured cause (clearly labelled).

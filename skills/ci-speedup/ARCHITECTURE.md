@@ -2589,7 +2589,7 @@ contradiction.
 ### 12.3 The leaf detectors and the load-bearing magnitude (`_parse_log`)
 
 `blocking_path._parse_log` is the single source of truth for root-cause detection —
-five regex-over-tool-output detectors, each returning `{fix_key, unit_label, deeper:
+the regex-over-tool-output detectors below, each returning `{fix_key, unit_label, deeper:
 [levels], evidence, magnitude}` (`fix_key` names the root-cause family + selects the
 agent prompt in `_PROMPTS`; it is **not** a prescribed fix):
 
@@ -2597,8 +2597,8 @@ agent prompt in `_PROMPTS`; it is **not** a prescribed fix):
 | --- | --- | --- |
 | `prisma-migrate-once` | `db push --force-reset` per test group | DB-migration share of the slowest test file |
 | `vitest-v8-coverage` | istanbul coverage instruments every file | compile+instrument share of test work |
-| `vitest-isolate-pool` | per-file isolation re-pays the import cost (OPT78, HIGH risk). Gated on `scan.py`'s `test_runner_isolation` config fact, so every `_parse_log` caller (render, `_gap_poles`, `_persist_pole_logs` / `_magnitude_sample`) must pass that block | import share of the vitest run |
-| `vitest-import-bound` | the same import-bound split when OPT78 is WITHHELD (opted out, config not fully read, vm pool): names the split and the withheld reason, forbids flipping isolation | import share of the vitest run |
+| `vitest-isolate-pool` | per-file isolation re-pays the import cost (OPT78, HIGH risk). Gated on `scan.py`'s `test_runner_isolation` config fact — whose `verdict` field must read `isolation_on` — so every `_parse_log` caller (render, `_gap_poles`, `_persist_pole_logs` / `_magnitude_sample`) must pass that block; a guard test pins that every call site does | import share of the vitest run |
+| `vitest-import-bound` | the same import-bound split when OPT78 is WITHHELD (opted out, config not fully read, an unresolvable `isolate` value, a crashed config reader, vm pool): names the split and the withheld reason, forbids flipping isolation. Its config sentence travels as the leaf's `config_fact`, rendered outside the untrusted-log block | import share of the vitest run |
 | `turbo-remote-cache` | remote caching off / 0 cached → every package rebuilt | packages rebuilt (cache-miss %) |
 | `turbo-partial-cache` | caching ON but ≥40% rebuilt every run → unstable cache key (cache-key churn) | packages rebuilt despite caching (cache-miss %) |
 | `install-lifecycle-build` | a root `prepare`/`postinstall` lifecycle script runs a build DURING `<pm> install` — "work runs during install", not a cache miss | build wall run inside install (**seconds**) |

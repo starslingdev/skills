@@ -2622,8 +2622,10 @@ def _ci_turbo_tasks(root: Path, parsed: list[tuple[str, dict, str]]) -> set[str]
 # the default `vitest.config.ts`, and a missed opt-out tells a repo that already
 # applied this HIGH-risk lever to apply it again. So every `vitest*` file with a
 # config extension is read (setup and `.d.ts` files excepted), plus any
-# `vite.*config*` file; `.json` stays only for vitest 3.x's `vitest.workspace` /
-# `vitest.projects` files — vitest itself never loads a JSON `vitest.config`.
+# `vite.*config*` file. `.json` is accepted because vitest 3.x's
+# `vitest.workspace.json` / `vitest.projects.json` carry project settings; the
+# name filter below is the only filter — a `vitest.config.json` is read too,
+# harmlessly, since vitest itself never loads one.
 _VITEST_CONFIG_EXTS = ("ts", "mts", "cts", "js", "mjs", "cjs", "json")
 
 
@@ -2642,10 +2644,14 @@ def _is_vitest_config_name(name: str) -> bool:
 # A monorepo keeps its suites' configs under `packages/*/`, `apps/*/` etc., so a
 # root-only read would report "no config" on exactly the repos this lever is
 # about. Walk a BOUNDED slice of the tree instead — build output and local
-# copies pruned, depth and file count capped so a huge checkout can't turn the
-# scan into a tree crawl. Whenever the bound leaves plausible config ground
-# unvisited the walk reports itself `truncated`, and the consumer withholds the
-# finding (it cannot claim "no opt-out ANYWHERE" from a partial walk).
+# copies pruned, and the walk stopped by a DEPTH bound and by a cap on how many
+# configs it will collect, so a huge checkout can't turn the scan into a deep
+# tree crawl. (Those two are the only real bounds: the cap counts MATCHED
+# configs, not directories visited, so a wide-but-shallow tree is still walked
+# in full. Depth 4 is what keeps that bounded in practice.) Whenever a bound
+# leaves plausible config ground unvisited the walk reports itself `truncated`,
+# and the consumer withholds the finding (it cannot claim "no opt-out ANYWHERE"
+# from a partial walk).
 _VITEST_CONFIG_MAX_DEPTH = 4
 # Sized for large monorepos (one real repo carries 200+ vitest/vite configs); a
 # cap hit still reports truncation rather than a clean read.
@@ -2654,11 +2660,16 @@ _VITEST_CONFIG_MAX_FILES = 400
 # this many extra files; past it, the rest are unresolved and the read fails
 # closed.
 _VITEST_CONFIG_MAX_FOLLOW = 20
-# Never a workspace package: pruned silently. (Every dot-directory is pruned
-# silently too — `.git`, `.next`, `.turbo`, and local, untracked copies of the
-# repo such as agent worktrees, which must not decide the verdict on the
-# committed config.)
+# Never a workspace package: pruned silently.
 _VITEST_SKIP_DIRS = {"node_modules", "dist", "coverage", "__pycache__"}
+# Dot-directories that are tool state, build output, or a local untracked copy
+# of the repo (an agent worktree) — never the committed config, so pruned
+# silently. Every OTHER dot-directory is walked like any other: `.config/` is a
+# conventional home for `vitest.config.ts`, and pruning it silently asserted
+# "no config exists" about a repo that has one.
+_VITEST_SKIP_DOT_DIRS = {".git", ".github", ".next", ".turbo", ".nuxt",
+                         ".svelte-kit", ".venv", ".claude", ".yarn", ".cache",
+                         ".idea", ".vscode", ".pytest_cache", ".gradle"}
 # Pruned as build output, but a real workspace package CAN carry one of these
 # names — so pruning one that holds a package root marks the walk truncated.
 _VITEST_PRUNE_MAYBE_WORKSPACE = {"build", "out", "vendor", "target"}
@@ -2668,13 +2679,18 @@ _VITEST_PRUNE_MAYBE_WORKSPACE = {"build", "out", "vendor", "target"}
 _VITEST_NO_ISOLATE_FLAG_RE = re.compile(r"--no-isolate\b|--isolate=false\b")
 # Every mention of an `isolate` key or identifier — quoted (`"isolate"` in a 3.x
 # workspace JSON, `['isolate']` computed), bare, shorthand (`{ isolate }`) or a
-# member (`shared.isolate`). What follows it decides: the literal `: true` is
-# isolation on, the literal `: false` is the opt-out, and ANYTHING else (a
-# shorthand, a computed value, an expression, a comment that says "isolate") is
-# UNKNOWN and treated exactly like an opt-out. The lever's whole claim is "you
-# are still paying for isolation", and an unresolvable mention is not evidence
-# of that. Matched over the WHOLE file, so a value on the next line
-# (`isolate:\n  false`) is read, not missed.
+# member (`shared.isolate`). What follows it decides, and the two outcomes are
+# reported SEPARATELY because they are different facts: the literal `: true` is
+# isolation on; the literal `: false` is a RESOLVED opt-out (`isolation_opt_out`,
+# quotable as "the repo already opts out"); anything else — a shorthand, a
+# computed value, an expression, the word in a comment — is UNRESOLVED
+# (`isolate_unresolved`). Both withhold the lever, because the lever's whole
+# claim is "you are still paying for isolation" and an unresolvable mention is
+# not evidence of that. They must not be conflated: reporting an unresolvable
+# mention as an opt-out made the report state, as a fact about the repo, that it
+# "already opts out (at vitest.config.ts:12)" when line 12 read
+# `isolate: process.env.X`. Matched over the WHOLE file, so a value on the next
+# line (`isolate:\n  false`) is read, not missed.
 _VITEST_ISOLATE_TOKEN_RE = re.compile(r"""(?<![\w$-])(["']?)isolate\1(?![\w$-])""")
 _VITEST_ISOLATE_VALUE_RE = re.compile(r"""\]?\s*:\s*(true|false)\b""")
 # vitest 3.x's `singleThread` / `singleFork` also disabled per-file isolation
@@ -2691,12 +2707,103 @@ _VITEST_VM_POOL_RE = re.compile(
 _VITEST_IMPORT_SPEC_RE = re.compile(
     r"""(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*|\bextends\s*:\s*)"""
     r"""(["'])([^"'\n]+)\1""")
-# A bare package specifier is treated as a SHARED TEST CONFIG the read cannot
-# follow when its package name carries one of these tokens (`@acme/vitest-config`,
-# `@repo/config`, `@org/test-config`). vitest's own entry points are exempt.
-_VITEST_SHARED_CONFIG_TOKENS = {"vitest", "config", "configs", "test", "tests",
-                                "testing"}
+# A BARE specifier (a package, not a file in this repo) is one this read cannot
+# follow. Whether that matters is decided by HOW THE CONFIG USES IT, never by
+# what it is called:
+#   * used as a CONFIG BASE — merged (`mergeConfig(base, …)`), spread
+#     (`...base`), read (`base.test`), named by `extends:`, or re-exported whole
+#     (`export default base`) — then the package may itself set `isolate: false`
+#     and the read must fail closed;
+#   * used as anything else — a plugin (`plugins: [nuxt()]`), an environment, a
+#     mock helper, a side-effect import (`import 'dotenv/config'`) — then it
+#     cannot carry the opt-out and is ignored.
+# A name-token test was tried first and was wrong in BOTH directions: it missed
+# `@acme/tooling` (a shared base whose name says nothing) and it withheld the
+# lever forever from every repo importing `@cloudflare/vitest-pool-workers`,
+# `vitest-environment-nuxt` or `@storybook/test-runner` — ordinary plugins that
+# happen to carry "vitest" or "test" in the name.
 _VITEST_RESOLVE_EXTS = (".ts", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json")
+# `import <clause> from "<spec>"` and `const <lhs> = require("<spec>")` /
+# `= await import("<spec>")` — the two shapes that BIND a module to a name.
+_VITEST_IMPORT_CLAUSE_RE = re.compile(
+    r"""\bimport\s+(?P<clause>[^;\n]*?)\s+from\s*(["'])(?P<spec>[^"'\n]+)\2""")
+_VITEST_REQUIRE_CLAUSE_RE = re.compile(
+    r"""\b(?:const|let|var)\s+(?P<clause>[^=;\n]+?)\s*=\s*(?:await\s+)?"""
+    r"""(?:require|import)\s*\(\s*(["'])(?P<spec>[^"'\n]+)\2\s*\)""")
+# A project's string `extends` names a config base outright — no binding needed.
+_VITEST_EXTENDS_SPEC_RE = re.compile(
+    r"""["']?extends["']?\s*:\s*(["'])([^"'\n]+)\1""")
+
+
+def _import_bindings(clause: str) -> list[str]:
+    """The local names an import/require clause binds (`X`, `* as ns`,
+    `{ a as b }`), so the reader can ask what the config DOES with them."""
+    names: list[str] = []
+    clause = clause.strip()
+    if clause.startswith("type "):
+        clause = clause[len("type "):]
+    star = re.search(r"\*\s*as\s+([\w$]+)", clause)
+    if star:
+        names.append(star.group(1))
+    brace = re.search(r"\{([^}]*)\}", clause)
+    if brace:
+        for part in brace.group(1).split(","):
+            name = re.split(r"\s+as\s+", part.strip())[-1].strip()
+            if re.fullmatch(r"[\w$]+", name):
+                names.append(name)
+        clause = clause[:brace.start()]
+    head = clause.split(",")[0].strip()
+    if re.fullmatch(r"[\w$]+", head):
+        names.append(head)
+    return names
+
+
+def _binding_is_config_base(text: str, name: str) -> bool:
+    """Does the config use this local binding AS A CONFIG BASE? (Merged, spread,
+    `.test`-read, `extends:`-ed, or exported as the whole config.)"""
+    n = re.escape(name)
+    # A config base is passed as a VALUE. `(?!\s*\()` everywhere is what keeps
+    # `export default defineConfig({…})` — the binding every config imports from
+    # `vitest/config` — from reading as "the config is this package".
+    for rx in (rf"\.\.\.\s*{n}(?![\w$])(?!\s*\()",
+               rf"(?<![\w$.]){n}\s*\.\s*test\b",
+               rf"""["']?extends["']?\s*:\s*{n}(?![\w$])(?!\s*\()""",
+               rf"\bexport\s+default\s+{n}(?![\w$])(?!\s*\()",
+               rf"\bmodule\.exports\s*=\s*{n}(?![\w$])(?!\s*\()"):
+        if re.search(rx, text):
+            return True
+    # `mergeConfig(base, defineConfig({…}))` — and the base can be either
+    # argument, so look across the call, not just up to the first `)`.
+    for m in re.finditer(r"\bmergeConfig\s*\(", text):
+        if re.search(rf"(?<![\w$.]){n}(?![\w$])(?!\s*\()",
+                     text[m.end():m.end() + 400]):
+            return True
+    return False
+
+
+def _unfollowable_config_bases(text: str) -> list[str]:
+    """Bare specifiers this config pulls its SETTINGS from — the ones whose
+    `isolate: false`, if any, is invisible to this read. A bare specifier the
+    config merely uses (a plugin, an environment, a side-effect import) is not
+    one of these and is ignored."""
+    out: list[str] = []
+
+    def _bare(spec: str) -> bool:
+        return not (spec.startswith("./") or spec.startswith("../"))
+
+    for rx in (_VITEST_IMPORT_CLAUSE_RE, _VITEST_REQUIRE_CLAUSE_RE):
+        for m in rx.finditer(text):
+            spec = m.group("spec").strip()
+            if not _bare(spec):
+                continue
+            if any(_binding_is_config_base(text, b)
+                   for b in _import_bindings(m.group("clause"))):
+                out.append(spec)
+    for m in _VITEST_EXTENDS_SPEC_RE.finditer(text):
+        spec = m.group(2).strip()
+        if _bare(spec):
+            out.append(spec)            # `extends` IS the base, by definition
+    return out
 
 
 def _vitest_config_files(root: Path) -> "tuple[list[Path], bool, list[Path]]":
@@ -2713,7 +2820,7 @@ def _vitest_config_files(root: Path) -> "tuple[list[Path], bool, list[Path]]":
     reasons, so both are reported.
 
     The "plausibly" is load-bearing, and is why an unvisited directory is only
-    counted when it is a package root (a `package.json` beside it) or holds one
+    counted when it is a package root (a `package.json` in it) or holds one
     ONE grouping level beneath it (`libs/x/package.json`). A vitest config sits
     at a JS package root; ordinary source trees go far deeper than the depth
     bound and hold no config at all. Counting every deep directory would mark
@@ -2759,7 +2866,9 @@ def _vitest_config_files(root: Path) -> "tuple[list[Path], bool, list[Path]]":
                 truncated = True
                 continue
             if is_dir:
-                if entry.name.startswith(".") or entry.name in _VITEST_SKIP_DIRS:
+                if entry.name in _VITEST_SKIP_DIRS or (
+                        entry.name.startswith(".")
+                        and entry.name in _VITEST_SKIP_DOT_DIRS):
                     continue            # never a workspace — deliberately not a gap
                 if is_link:
                     # Bazel's `bazel-*` convenience links mirror the workspace
@@ -2815,14 +2924,70 @@ def _resolve_local_import(frm: Path, spec: str, root: Path) -> "Path | None":
     return None
 
 
-def _is_shared_test_config_package(spec: str) -> bool:
-    if spec.startswith("node:") or spec == "vitest" or spec.startswith("vitest/"):
-        return False
-    scope, _, rest = spec.partition("/") if spec.startswith("@") else ("", "", spec)
-    if scope == "@vitest":
-        return False
-    tokens = set(re.split(r"[-/_.]", rest.lower()))
-    return bool(tokens & _VITEST_SHARED_CONFIG_TOKENS)
+def _read_config_text(path: Path) -> "str | None":
+    """A config's text, or None when the bytes on disk are not UTF-8 text this
+    read can search. Decoding a UTF-16 config with `errors="replace"` produced
+    garbage that matched no pattern and was then reported as a COMPLETE read
+    with no opt-out — a repo that had opted out being told to opt out again.
+    None routes the file to `unreadable`, which withholds the lever."""
+    data = path.read_bytes()                        # OSError → caller's handler
+    for bom in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff", b"\xff\xfe", b"\xfe\xff"):
+        if data.startswith(bom):
+            return None                             # UTF-16 / UTF-32
+    if data.startswith(b"\xef\xbb\xbf"):
+        data = data[3:]
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _iso_block(**overrides: Any) -> dict[str, Any]:
+    """The ONE definition of the `test_runner_isolation` block's shape, so the
+    crash fallback and the completed read cannot drift apart (a key present on
+    only one of them is a consumer default that fails OPEN). Defaults are the
+    fail-closed ones: nothing read, nothing proven, verdict unknown."""
+    block: dict[str, Any] = {
+        "runner": None,
+        "configs": [],
+        "unreadable": [],
+        "unresolved_imports": [],
+        "isolate_unresolved": [],
+        "readable": False,
+        "truncated": True,
+        "isolation_opt_out": False,
+        # The opt-out is a REPO-WIDE fact here: the lever is withheld for the
+        # whole repo when any config or package script opts out, not per project.
+        "opt_out_scope": "repo",
+        "opt_out_evidence": [],
+        "opt_out_evidence_count": 0,
+        "opt_out_configs": [],
+        "vm_pool": False,
+        "error": None,
+        "verdict": "unknown",
+    }
+    block.update(overrides)
+    return block
+
+
+def _isolation_verdict(block: dict[str, Any]) -> str:
+    """The block's ONE collapsed reading, computed here at the producer so no
+    consumer has to re-derive it from six booleans in the right order:
+
+      `opted_out`      resolved evidence that isolation is already off;
+      `unknown`        the read could not establish either way (fail closed);
+      `not_applicable` a vm pool, where `isolate` has no effect;
+      `isolation_on`   every config was read, completely, and none opts out.
+    """
+    if block.get("isolation_opt_out"):
+        return "opted_out"
+    if (block.get("error") or block.get("truncated") or block.get("unreadable")
+            or block.get("unresolved_imports") or block.get("isolate_unresolved")
+            or not block.get("configs")):
+        return "unknown"
+    if block.get("vm_pool"):
+        return "not_applicable"
+    return "isolation_on"
 
 
 def _read_test_runner_isolation(root: Path) -> dict[str, Any]:
@@ -2832,10 +2997,14 @@ def _read_test_runner_isolation(root: Path) -> dict[str, Any]:
     try:
         return _read_test_runner_isolation_unguarded(root)
     except Exception as e:  # noqa: BLE001 — fail closed, never take the scan down
-        return {"runner": None, "configs": [], "unreadable": [],
-                "unresolved_imports": [], "readable": False, "truncated": True,
-                "isolation_opt_out": False, "opt_out_evidence": [],
-                "vm_pool": False, "error": type(e).__name__}
+        # NEVER silently: a crashed reader and a genuinely huge monorepo both
+        # withhold the lever, and without this line they are indistinguishable —
+        # a broken reader would retire the pattern with nobody the wiser.
+        print(f"ci-speedup: the vitest config reader failed "
+              f"({type(e).__name__}: {e}); the per-file-isolation lever (OPT78) "
+              "will be WITHHELD for this repo — this is a scanner failure, not a "
+              "fact about the repo.", file=sys.stderr)
+        return _iso_block(error=type(e).__name__)
 
 
 def _read_test_runner_isolation_unguarded(root: Path) -> dict[str, Any]:
@@ -2843,12 +3012,16 @@ def _read_test_runner_isolation_unguarded(root: Path) -> dict[str, Any]:
     candidate unreadable, or an import the read cannot follow, or a walk that
     could not cover the repo, is reported as such (and the consumer withholds
     the finding); an `isolate` mention this static read cannot resolve is
-    reported as an opt-out, never as isolation being on."""
+    reported in `isolate_unresolved` — which also withholds — never as isolation
+    being on, and never as a resolved opt-out it is not."""
     root = root.resolve()
     configs: list[str] = []
     unreadable: list[str] = []
     unresolved: list[str] = []
+    unresolved_isolate: list[str] = []
     evidence: list[str] = []
+    opt_out_configs: list[str] = []
+    vitest_signal = False
     vm_pool = False
     paths, truncated, manifests = _vitest_config_files(root)
 
@@ -2865,23 +3038,36 @@ def _read_test_runner_isolation_unguarded(root: Path) -> dict[str, Any]:
         path = queue.pop(0)
         name = _rel(path)
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text = _read_config_text(path)
         except OSError:
+            text = None
+        if text is None:
             unreadable.append(name)
             continue
         configs.append(name)
+        if "vitest" in text.lower() or Path(name).name.lower().startswith("vitest"):
+            vitest_signal = True
         hits: dict[int, str] = {}
+        unresolved_hits: dict[int, str] = {}
         for m in _VITEST_ISOLATE_TOKEN_RE.finditer(text):
             v = _VITEST_ISOLATE_VALUE_RE.match(text, m.end())
+            ln, src = _vitest_line_at(text, m.start())
             if v and v.group(1) == "true":
                 continue                    # the one reading that is isolation ON
-            ln, src = _vitest_line_at(text, m.start())
-            hits.setdefault(ln, src)
+            if v and v.group(1) == "false":
+                hits.setdefault(ln, src)    # RESOLVED: the repo opts out
+            else:
+                unresolved_hits.setdefault(ln, src)   # cannot be read either way
         for rx in (_VITEST_NO_ISOLATE_FLAG_RE, _VITEST_SINGLE_WORKER_RE):
             for m in rx.finditer(text):
                 ln, src = _vitest_line_at(text, m.start())
                 hits.setdefault(ln, src)
+                unresolved_hits.pop(ln, None)
+        if hits:
+            opt_out_configs.append(name)
         evidence += [f"{name}:{ln}: {src[:160]}" for ln, src in sorted(hits.items())]
+        unresolved_isolate += [f"{name}:{ln}: {src[:160]}"
+                               for ln, src in sorted(unresolved_hits.items())]
         vm_pool = vm_pool or bool(_VITEST_VM_POOL_RE.search(text))
         for m in _VITEST_IMPORT_SPEC_RE.finditer(text):
             spec = m.group(2).strip()
@@ -2896,38 +3082,55 @@ def _read_test_runner_isolation_unguarded(root: Path) -> dict[str, Any]:
                         unresolved.append(f"{name}: {spec} (follow cap)")
                     else:
                         queue.append(target)
-            elif _is_shared_test_config_package(spec):
-                unresolved.append(f"{name}: {spec}")
+        # …and the bare specifiers this config takes its SETTINGS from.
+        unresolved += [f"{name}: {spec}" for spec in _unfollowable_config_bases(text)]
     # The CLI opt-out most often lives in a package script, not in the config or
     # the workflow line the job log echoes.
     for path in manifests:
         name = _rel(path)
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text = _read_config_text(path)
         except OSError:
+            text = None
+        if text is None:
             unreadable.append(name)
             continue
         for m in _VITEST_NO_ISOLATE_FLAG_RE.finditer(text):
             ln, src = _vitest_line_at(text, m.start())
             evidence.append(f"{name}:{ln}: {src[:160]}")
+            if name not in opt_out_configs:
+                opt_out_configs.append(name)
+        if re.search(r"(?<![\w-])vitest(?![\w-])", text):
+            vitest_signal = True
         vm_pool = vm_pool or bool(_VITEST_VM_POOL_RE.search(text))
-    return {
-        "runner": "vitest" if configs else None,
-        "configs": sorted(configs),
-        "unreadable": sorted(unreadable),
+    block = _iso_block(
+        # Only an actual vitest signal (a `vitest*` config name, the word in a
+        # config, or a `vitest` invocation in a package script) says vitest.
+        # A pure Vite app has `vite.config.ts` and no vitest at all.
+        runner=("vitest" if vitest_signal else ("vite" if configs else None)),
+        configs=sorted(configs),
+        unreadable=sorted(unreadable),
         # A config pulls settings from a module this read could not follow (a
         # missing file, a shared config package): its opt-out, if any, is
         # invisible here. The consumer must fail closed on this.
-        "unresolved_imports": sorted(set(unresolved)),
-        "readable": bool(configs),
+        unresolved_imports=sorted(set(unresolved)),
+        # An `isolate` mention whose value this static read cannot resolve. NOT
+        # an opt-out (saying so asserted a line as evidence of something it does
+        # not say) — but not evidence isolation is on either, so it withholds.
+        isolate_unresolved=sorted(set(unresolved_isolate)),
+        readable=bool(configs),
         # The walk left ground unvisited, so "no opt-out was found" is NOT the
         # same as "no opt-out exists". The consumer must fail closed on this.
-        "truncated": truncated,
-        "isolation_opt_out": bool(evidence),
-        "opt_out_evidence": evidence[:4],
+        truncated=truncated,
+        isolation_opt_out=bool(evidence),
+        opt_out_evidence=evidence[:4],
+        opt_out_evidence_count=len(evidence),
+        opt_out_configs=sorted(set(opt_out_configs)),
         # A vm pool cannot disable isolation, so the lever cannot apply.
-        "vm_pool": vm_pool,
-    }
+        vm_pool=vm_pool,
+    )
+    block["verdict"] = _isolation_verdict(block)
+    return block
 
 
 def _detect_turbo(root: Path, ci_turbo_tasks: set[str] | None = None):

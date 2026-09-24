@@ -22,6 +22,7 @@ Run: pytest -v skills/ci-speedup/tests/test_vitest_isolation_lever.py
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -53,14 +54,49 @@ _TEST_BOUND_LOG = "\n".join([
     "tests 214.54s, environment 8ms)",
 ])
 
-_ISO_ON = {"runner": "vitest", "readable": True, "isolation_opt_out": False,
-           "truncated": False,
-           "configs": ["vitest.config.ts"], "opt_out_evidence": []}
-_ISO_OFF = {"runner": "vitest", "readable": True, "isolation_opt_out": True,
-            "truncated": False, "configs": ["vitest.config.ts"],
-            "opt_out_evidence": ["vitest.config.ts:7: isolate: false"]}
-_ISO_UNREADABLE = {"runner": None, "readable": False, "isolation_opt_out": False,
-                   "truncated": False, "configs": [], "opt_out_evidence": []}
+# EVERY key `scan.py`'s `_iso_block` emits is spelled out here. A fixture that
+# omits one exercises the consumer's `.get()` default instead of the real fact -
+# which is exactly where a fail-open default hides - so
+# `test_the_fixtures_carry_every_key_the_scan_emits` pins these against the
+# producer's own shape.
+_ISO_BASE = {
+    "runner": "vitest",
+    "configs": ["vitest.config.ts"],
+    "unreadable": [],
+    "unresolved_imports": [],
+    "isolate_unresolved": [],
+    "readable": True,
+    "truncated": False,
+    "isolation_opt_out": False,
+    "opt_out_scope": "repo",
+    "opt_out_evidence": [],
+    "opt_out_evidence_count": 0,
+    "opt_out_configs": [],
+    "vm_pool": False,
+    "error": None,
+    "verdict": "isolation_on",
+}
+_ISO_ON = dict(_ISO_BASE)
+_ISO_OFF = dict(_ISO_BASE, isolation_opt_out=True, verdict="opted_out",
+                opt_out_evidence=["vitest.config.ts:7: isolate: false"],
+                opt_out_evidence_count=1, opt_out_configs=["vitest.config.ts"])
+_ISO_UNREADABLE = dict(_ISO_BASE, runner=None, readable=False, configs=[],
+                       verdict="unknown")
+
+
+def _verdict_from_fields(iso: dict) -> str:
+    """The verdict recomputed from the raw fields, INDEPENDENTLY of the producer
+    (the repo's mirror idiom): a collapsed field is only trustworthy while it
+    still agrees with the facts it collapses."""
+    if iso.get("isolation_opt_out"):
+        return "opted_out"
+    if (iso.get("error") or iso.get("truncated") or iso.get("unreadable")
+            or iso.get("unresolved_imports") or iso.get("isolate_unresolved")
+            or not iso.get("configs")):
+        return "unknown"
+    if iso.get("vm_pool"):
+        return "not_applicable"
+    return "isolation_on"
 
 
 def _fires(log: str, iso=None) -> bool:
@@ -94,7 +130,14 @@ def _scan(root: Path) -> dict:
         [sys.executable, str(_SCAN_SCRIPT), "--root", str(root)],
         capture_output=True, text=True, check=True,
     )
-    return json.loads(result.stdout)
+    doc = json.loads(result.stdout)
+    # EVERY fact this suite ever emits is checked against the independently
+    # recomputed verdict, so the collapsed field can never drift from the raw
+    # fields a second reader might use instead.
+    iso = doc.get("test_runner_isolation")
+    if isinstance(iso, dict):
+        assert iso.get("verdict") == _verdict_from_fields(iso), iso
+    return doc
 
 
 # --- the scan half: what the config actually says ----------------------------
@@ -153,16 +196,32 @@ def test_scan_does_not_descend_into_vendored_trees(tmp_path: Path):
     assert _scan(tmp_path)["test_runner_isolation"]["readable"] is False
 
 
-def test_scan_treats_an_unresolvable_isolate_value_as_an_opt_out(tmp_path: Path):
+def test_scan_reports_an_unresolvable_isolate_value_as_unresolved_not_an_opt_out(
+        tmp_path: Path):
     """A config is executable TS/JS: `isolate` can come from an import, a spread
-    or a computed expression. Unresolvable is NOT evidence isolation is on."""
+    or a computed expression. Unresolvable is NOT evidence isolation is on - and
+    it is NOT evidence of an opt-out either. Reporting it as one made the report
+    state, as a fact about the repo, "the repo already opts out of per-file
+    isolation (first at `vitest.config.ts:2`)" when line 2 reads
+    `isolate: shared.isolate`. Two different facts, two different messages, both
+    withholding."""
     (tmp_path / "vitest.config.ts").write_text(
         "import { shared } from './flags'\n"
         "export default defineConfig({ test: { isolate: shared.isolate } })\n",
         encoding="utf-8")
+    # The imported module IS readable — so the only thing this read cannot
+    # resolve is the `isolate` value itself.
+    (tmp_path / "flags.ts").write_text("export const shared = {}\n", encoding="utf-8")
     iso = _scan(tmp_path)["test_runner_isolation"]
-    assert iso["isolation_opt_out"] is True
-    assert any("isolate: shared.isolate" in e for e in iso["opt_out_evidence"])
+    assert iso["unresolved_imports"] == [], iso
+    assert iso["isolation_opt_out"] is False, iso
+    assert iso["opt_out_evidence"] == [], iso
+    assert any("isolate: shared.isolate" in e for e in iso["isolate_unresolved"]), iso
+    assert iso["verdict"] == "unknown", iso
+    assert not _fires(_IMPORT_BOUND_LOG, iso)
+    _ok, why = bp._isolation_lever_available(iso, "")
+    assert "could not resolve" in why, why
+    assert "already opts out" not in why, why
 
 
 def test_scan_accepts_an_explicit_isolate_true(tmp_path: Path):
@@ -273,9 +332,11 @@ def test_leaf_fires_when_the_pole_is_import_bound_and_isolation_is_on():
     leaf = bp._parse_log(_IMPORT_BOUND_LOG, _ISO_ON)
     assert leaf is not None and leaf["fix_key"] == "vitest-isolate-pool"
     assert leaf["deeper"][-1]["rows"][0][0].startswith("import")
-    # The config fact it read is named in the evidence — the finding never
-    # asserts "isolation is on" without showing where it read that.
-    assert any("vitest.config.ts" in e for e in leaf["evidence"])
+    # The config fact it read is named — the finding never asserts "isolation is
+    # on" without showing where it read that. It travels as `config_fact`, NOT in
+    # `evidence`, which is log text only.
+    assert "vitest.config.ts" in leaf["config_fact"]
+    assert not any("vitest.config.ts" in e for e in leaf["evidence"]), leaf["evidence"]
 
 
 def test_the_config_half_of_the_evidence_declares_it_is_not_log_text():
@@ -286,7 +347,7 @@ def test_the_config_half_of_the_evidence_declares_it_is_not_log_text():
     quote. It must say so where it is rendered, or the report presents a
     skill-derived assertion as quoted log text the reader can go and find."""
     leaf = bp._parse_log(_IMPORT_BOUND_LOG, _ISO_ON)
-    cfg_line = next(e for e in leaf["evidence"] if "vitest.config.ts" in e)
+    cfg_line = leaf["config_fact"]
     assert "not this log" in cfg_line, (
         "the config half must name its provenance where it renders")
     # The measured half stays a real, findable log line.
@@ -304,11 +365,11 @@ def test_the_config_evidence_states_the_absence_not_its_opposite(cfgs: list):
     that tells the agent to go and change `test.isolate` - self-contradicting
     evidence. Pinned for one config and for several, because the two render
     through different branches."""
-    iso = {"runner": "vitest", "readable": True, "truncated": False,
-           "isolation_opt_out": False, "configs": cfgs, "opt_out_evidence": []}
+    iso = dict(_ISO_BASE, configs=cfgs)
     leaf = bp._parse_log(_IMPORT_BOUND_LOG, iso)
     assert leaf is not None
-    line = next(e for e in leaf["evidence"] if "not this log" in e)
+    line = leaf["config_fact"]
+    assert "not this log" in line
     assert "isolate: false" in line, "the evidence must name what it looked for"
     # ...and must say it was NOT found.
     assert ("does not set" in line or "none of" in line), (
@@ -631,10 +692,15 @@ def test_scan_reads_an_isolate_value_on_the_next_line(tmp_path: Path):
     "export default defineConfig({ test: { pool: 'forks', isolate,\n } })\n",
     "export default defineConfig({ test: { ['isolate']: flag } })\n",
 ])
-def test_scan_treats_a_shorthand_or_computed_isolate_as_an_opt_out(tmp_path: Path,
+def test_scan_treats_a_shorthand_or_computed_isolate_as_unresolved(tmp_path: Path,
                                                                    body: str):
+    """Unreadable either way: it withholds the lever, but it is reported as
+    unresolved - never as a resolved opt-out the report would then quote."""
     (tmp_path / "vitest.config.ts").write_text(body, encoding="utf-8")
-    assert _scan(tmp_path)["test_runner_isolation"]["isolation_opt_out"] is True
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert iso["isolate_unresolved"], iso
+    assert iso["isolation_opt_out"] is False, iso
+    assert not _fires(_IMPORT_BOUND_LOG, iso)
 
 
 def test_an_explicit_isolate_true_on_the_next_line_is_still_isolation_on(tmp_path: Path):
@@ -847,8 +913,8 @@ def test_a_withheld_pole_gets_a_guarded_import_bound_leaf_not_silence():
     leaf = bp._parse_log(_IMPORT_BOUND_LOG, _ISO_OFF)
     assert leaf is not None and leaf["fix_key"] == "vitest-import-bound"
     assert leaf["magnitude"]["label"] == "import share of the vitest run"
-    assert any("OPT78 withheld" in e and "not this log" in e
-               for e in leaf["evidence"][:2]), leaf["evidence"]
+    assert "OPT78 withheld" in leaf["config_fact"], leaf["config_fact"]
+    assert not any("OPT78" in e for e in leaf["evidence"]), leaf["evidence"]
     pole = {"check": "api-tests", "job": "api-tests", "p50_s": 320.0,
             "workflow_file": ".github/workflows/ci.yml",
             "dominant_category": "test", "dominant_step": "Run vitest"}
@@ -952,3 +1018,369 @@ def test_the_config_half_of_the_evidence_reaches_the_agent_prompt():
     p = _prompt()
     assert "does not set `isolate: false`" in p
     assert "not this log" in p
+
+
+# --- round 2: what the config IMPORTS, and what the read can honestly claim ----
+#
+# A bare specifier (a package) is one this read cannot follow. Whether that
+# matters is decided by HOW THE CONFIG USES IT, not by its name — a name test
+# was wrong in both directions at once.
+
+def test_a_shared_config_base_the_read_cannot_follow_withholds_the_lever(
+        tmp_path: Path):
+    """The opt-out can live in a package whose name says nothing about tests
+    (`@acme/tooling`). Dropping unknown specifiers on the floor let the read
+    report itself COMPLETE and told a repo that had already opted out to opt out
+    again — the one outcome this HIGH-risk lever must never produce."""
+    (tmp_path / "vitest.config.ts").write_text(
+        "import { mergeConfig } from 'vitest/config'\n"
+        "import base from '@acme/tooling'\n"
+        "export default mergeConfig(base, { test: {} })\n", encoding="utf-8")
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert any("@acme/tooling" in u for u in iso["unresolved_imports"]), iso
+    assert iso["verdict"] == "unknown", iso
+    assert not _fires(_IMPORT_BOUND_LOG, iso)
+
+
+def test_a_bare_config_re_exported_whole_withholds_the_lever(tmp_path: Path):
+    """`export default shared` IS the config: whatever the package sets, the repo
+    gets — including `isolate: false`."""
+    (tmp_path / "vitest.config.ts").write_text(
+        "import shared from '@repo/vitest-config'\n"
+        "export default shared\n", encoding="utf-8")
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert any("@repo/vitest-config" in u for u in iso["unresolved_imports"]), iso
+    assert not _fires(_IMPORT_BOUND_LOG, iso)
+
+
+@pytest.mark.parametrize("body", [
+    # A test ENVIRONMENT — its name says "vitest", it cannot carry the opt-out.
+    "import nuxt from 'vitest-environment-nuxt'\n"
+    "export default defineConfig({ plugins: [nuxt()], test: {} })\n",
+    # A side-effect import: nothing is bound, so nothing can be merged.
+    "import '@cloudflare/vitest-pool-workers/config'\n"
+    "export default defineConfig({ test: {} })\n",
+    # `dotenv/config` — a subpath whose last segment is literally "config".
+    "import 'dotenv/config'\n"
+    "export default defineConfig({ test: {} })\n",
+    # A Storybook test runner used as a plugin.
+    "import { storybookTest } from '@storybook/test-runner'\n"
+    "export default defineConfig({ plugins: [storybookTest()], test: {} })\n",
+])
+def test_a_package_that_is_not_a_config_base_does_not_withhold(tmp_path: Path,
+                                                               body: str):
+    """Cloudflare Workers, Nuxt and Storybook repos are a large slice of the
+    vitest population. A name-token test withheld the lever from every one of
+    them, forever — a permanent false silence, which is the worse failure."""
+    (tmp_path / "vitest.config.ts").write_text(body, encoding="utf-8")
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert iso["unresolved_imports"] == [], iso
+    assert _fires(_IMPORT_BOUND_LOG, iso), iso
+
+
+def test_a_config_base_named_by_extends_withholds_the_lever(tmp_path: Path):
+    """A project's string `extends` IS its base, no binding involved."""
+    (tmp_path / "vitest.config.ts").write_text(
+        "export default defineConfig({ test: { projects: ["
+        "{ extends: '@acme/base-config' }] } })\n", encoding="utf-8")
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert any("@acme/base-config" in u for u in iso["unresolved_imports"]), iso
+
+
+# --- round 2: bytes the read cannot decode are UNREAD, not clean --------------
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-32"])
+def test_a_config_the_read_cannot_decode_is_unreadable_not_clean(tmp_path: Path,
+                                                                 encoding: str):
+    """Decoding a UTF-16 config with `errors="replace"` produced garbage that
+    matched no pattern — and the read then reported itself COMPLETE with no
+    opt-out. A repo that had opted out in that very file was told to opt out
+    again."""
+    (tmp_path / "vitest.config.ts").write_bytes(
+        "export default defineConfig({ test: { isolate: false } })\n".encode(encoding))
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert iso["unreadable"] == ["vitest.config.ts"], iso
+    assert iso["configs"] == [], iso
+    assert not _fires(_IMPORT_BOUND_LOG, iso)
+
+
+# --- round 2: a crashed reader says so ---------------------------------------
+
+def test_a_reader_crash_is_named_as_a_crash_not_a_big_monorepo(tmp_path: Path,
+                                                               monkeypatch,
+                                                               capsys):
+    """A broken reader and a huge monorepo both withhold the lever. Rendering
+    them identically (and reading nothing back) retires the pattern silently, so
+    the crash prints to stderr AND gets its own withheld reason."""
+    scan = _scan_mod()
+
+    def boom(_root):
+        raise PermissionError("denied")
+    monkeypatch.setattr(scan, "_vitest_config_files", boom)
+    iso = scan._read_test_runner_isolation(tmp_path)
+    err = capsys.readouterr().err
+    assert "PermissionError" in err and "OPT78" in err, err
+    assert iso["error"] == "PermissionError", iso
+    assert iso["verdict"] == "unknown", iso
+    ok, why = bp._isolation_lever_available(iso, "")
+    assert not ok
+    assert "config reader failed" in why and "PermissionError" in why, why
+    assert "could not cover the whole repo" not in why, why
+
+
+# --- round 2: the collapsed verdict ------------------------------------------
+
+def test_the_fixtures_carry_every_key_the_scan_emits():
+    """A fixture missing a producer key silently tests the consumer's `.get()`
+    default instead of the fact."""
+    scan = _scan_mod()
+    emitted = set(scan._iso_block().keys())
+    for name, fixture in (("_ISO_ON", _ISO_ON), ("_ISO_OFF", _ISO_OFF),
+                          ("_ISO_UNREADABLE", _ISO_UNREADABLE)):
+        assert set(fixture) == emitted, (name, emitted ^ set(fixture))
+
+
+def test_the_verdict_mirrors_the_raw_fields_the_producer_collapsed():
+    """The producer's own collapse, checked against an independent recompute."""
+    scan = _scan_mod()
+    for block in (
+        scan._iso_block(),
+        scan._iso_block(configs=["vitest.config.ts"], readable=True, truncated=False),
+        scan._iso_block(configs=["a"], truncated=False, isolation_opt_out=True),
+        scan._iso_block(configs=["a"], truncated=False, vm_pool=True),
+        scan._iso_block(configs=["a"], truncated=False, isolate_unresolved=["a:1: x"]),
+        scan._iso_block(configs=["a"], truncated=False, unresolved_imports=["a: @x/y"]),
+        scan._iso_block(configs=["a"], truncated=False, error="PermissionError"),
+    ):
+        block["verdict"] = scan._isolation_verdict(block)
+        assert block["verdict"] == _verdict_from_fields(block), block
+
+
+def test_a_fact_whose_verdict_is_not_isolation_on_withholds_the_lever():
+    """The four per-reason `.get()` checks all fail OPEN if the producer renames a
+    key. The collapsed verdict defaults to `unknown`, so the lever does not."""
+    renamed = {k: v for k, v in _ISO_ON.items() if k != "verdict"}
+    assert not _fires(_IMPORT_BOUND_LOG, renamed)
+    assert not _fires(_IMPORT_BOUND_LOG, dict(_ISO_ON, verdict="not_applicable"))
+
+
+def test_a_package_script_opt_out_with_no_config_file_still_withholds(tmp_path: Path):
+    """The contradictory state: nothing the walk calls a config, but a package
+    script passes `--no-isolate`. The repo HAS opted out — it must be told so,
+    not told "no config was found"."""
+    (tmp_path / "package.json").write_text(
+        '{"name": "app", "scripts": {"test": "vitest run --no-isolate"}}\n',
+        encoding="utf-8")
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert iso["configs"] == [], iso
+    assert iso["isolation_opt_out"] is True, iso
+    assert iso["verdict"] == "opted_out", iso
+    ok, why = bp._isolation_lever_available(iso, "")
+    assert not ok
+    assert "already opts out" in why, why
+
+
+# --- round 2: the fact actually reaches the measurement spine ----------------
+
+def test_collect_forwards_the_config_fact_to_the_measurement_spine(tmp_path: Path,
+                                                                   monkeypatch):
+    """Executed, not read: `collect()` must hand scan's config fact to the
+    pole-log pass, or the spine's leaf detection disagrees with the renderer's
+    (a config-gated leaf is invisible without it). Passing `iso=None` there left
+    every other test in this suite green."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "ci_speedup_opt78_collect_fakes",
+        _SKILL_DIR / "tests" / "test_disclosure_reaches_the_artifact.py")
+    fakes = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = fakes
+    spec.loader.exec_module(fakes)
+
+    seen: dict = {}
+
+    def _capture(*_a, **kw):
+        seen["iso"] = kw.get("iso", "NOT PASSED")
+        return {}
+
+    monkeypatch.setattr(cr, "GhClient", fakes._TwoWorkflowClient)
+    monkeypatch.setattr(cr, "_persist_pole_logs", _capture)
+    doc = fakes._doc()
+    doc["test_runner_isolation"] = _ISO_ON
+    cr.collect(doc, "o/r", max_runs=8, shallow_runs=8, with_logs=True,
+               data_dir=tmp_path / "bundle")
+    assert seen.get("iso") == _ISO_ON, seen
+
+
+def test_every_engine_parse_log_call_passes_the_config_fact():
+    """Grep-shaped guard: a `_parse_log(log)` anywhere in the engine silently
+    withholds OPT78 on that path (the fact defaults to absent), and no assertion
+    anywhere notices. Cheaper than making the parameter required."""
+    offenders = []
+    for path in sorted((_SKILL_DIR / "scripts").glob("*.py")):
+        src = path.read_text(encoding="utf-8")
+        for m in re.finditer(r"(?<!def )\b_parse_log\s*\(", src):
+            depth, args, cur, i = 0, [], "", m.end()
+            while i < len(src):
+                ch = src[i]
+                if ch in "([{":
+                    depth += 1
+                elif ch in ")]}":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif ch == "," and depth == 0:
+                    args.append(cur.strip())
+                    cur = ""
+                    i += 1
+                    continue
+                cur += ch
+                i += 1
+            if cur.strip():
+                args.append(cur.strip())
+            if len(args) < 2:
+                line = src[:m.start()].count("\n") + 1
+                offenders.append(f"{path.name}:{line}: _parse_log({', '.join(args)})")
+    assert not offenders, (
+        "these `_parse_log` calls drop the scanned config fact, which silently "
+        f"withholds the OPT78 lever on that path: {offenders}")
+
+
+# --- round 2: the report, the prompt, and the gap capture --------------------
+
+def _pole_doc(iso=None) -> dict:
+    """The one-pole findings doc the render tests share."""
+    doc = {
+        "repo": "o/r", "scanned_at": "2026-06-08T00:00:00Z",
+        "data_sources": {"runs_sampled": 100, "jobs_sampled": 300,
+                         "workflows_analyzed": 5},
+        "pr_critical_path": {
+            "sampled_pr_count": 20, "sample_target": 20, "sample_complete": True,
+            "poles": [{
+                "check": "tests-web", "p50_s": 255.0,
+                "workflow_file": ".github/workflows/pipeline.yml", "job": "tests-web",
+                "dominant_step": "run tests", "dominant_p50_s": 91.0,
+                "steps": [{"step": "run tests", "category": "test", "p50_s": 91.0}],
+            }]},
+    }
+    if iso is not None:
+        doc["test_runner_isolation"] = iso
+    return doc
+
+
+def _render(iso=None) -> str:
+    return bp.render(_pole_doc(iso), {"pipeline": _IMPORT_BOUND_LOG}, {},
+                     {"pipeline": "https://github.com/o/r/actions/runs/123"},
+                     "2026-06-08")
+
+
+def test_the_report_crowns_the_lever_with_its_risk_when_the_fact_confirms_it():
+    """The positive twin of `test_render_without_a_config_fact_never_crowns_...`:
+    when the config fact DOES confirm isolation is on, the reader must see the
+    HIGH-risk framing — on the biggest-lever line itself, not only further down
+    the section — and the provenance of the half that is not log text."""
+    md = _render(_ISO_ON)
+    lever = next(ln for ln in md.splitlines() if "BIGGEST LEVER" in ln)
+    assert "OPT78" in lever and "HIGH RISK" in lever, lever
+    assert "RISK: HIGH" in md
+    assert "GUARDRAIL (MANDATORY)" in md
+    assert "not this log" in md
+
+
+def test_the_config_fact_is_rendered_outside_the_untrusted_log_block():
+    """Skill-authored text inside the BEGIN/END UNTRUSTED LOG markers — and under
+    a heading that calls the block verbatim run output — presents a composed
+    statement as quoted log the agent could go and find."""
+    for text in (_render(_ISO_ON), _prompt()):
+        begin = text.index("BEGIN UNTRUSTED LOG CONTENT")
+        end = text.index("END UNTRUSTED LOG CONTENT")
+        assert "isolate: false" not in text[begin:end], text[begin:end]
+        assert "read from the repo's vitest config" in text[end:], text[end:end + 600]
+
+
+def test_a_withheld_isolation_lever_is_not_a_gap_on_the_bundle_path():
+    """`_gap_poles` has two binding paths and only the fallback was covered. The
+    bundle path is the one a real drill takes."""
+    doc = _gap_doc_with(_ISO_OFF)
+    doc["data_bundle"] = {"logs": [{
+        "check": "tests-web", "job": "tests-web",
+        "workflow_file": ".github/workflows/pipeline.yml",
+        "html_url": "https://github.com/o/r/actions/runs/1"}]}
+    try:
+        from summary import _render_keys
+        keys = _render_keys(doc["data_bundle"]["logs"])
+    except Exception:                                   # pragma: no cover
+        pytest.skip("summary._render_keys unavailable")
+    assert bp._gap_poles(doc, {keys[0]: _IMPORT_BOUND_LOG}) == []
+    assert len(bp._gap_poles(doc, {keys[0]: "nothing to see\n"})) == 1
+
+
+@pytest.mark.parametrize("body", [
+    '{"name": "api", "scripts": {"test": "vitest run --pool=vmThreads"}}\n',
+    '{"name": "api", "scripts": {"test": "vitest run --pool vmForks"}}\n',
+])
+def test_a_vm_pool_named_in_a_package_script_withholds_the_lever(tmp_path: Path,
+                                                                 body: str):
+    (tmp_path / "package.json").write_text(body, encoding="utf-8")
+    (tmp_path / "vitest.config.ts").write_text(
+        "export default defineConfig({ test: {} })\n", encoding="utf-8")
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert iso["vm_pool"] is True, iso
+    assert iso["verdict"] == "not_applicable", iso
+    assert not _fires(_IMPORT_BOUND_LOG, iso)
+
+
+def test_a_pure_vite_app_is_not_reported_as_a_vitest_repo(tmp_path: Path):
+    """`vite.config.ts` is read (it can hold `test: {}`), but a repo with no
+    vitest anywhere is not a vitest repo and must not be labelled one."""
+    (tmp_path / "vite.config.ts").write_text(
+        "import { defineConfig } from 'vite'\n"
+        "export default defineConfig({ build: {} })\n", encoding="utf-8")
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert iso["configs"] == ["vite.config.ts"], iso
+    assert iso["runner"] != "vitest", iso
+
+
+def test_a_config_under_a_dot_config_directory_is_found(tmp_path: Path):
+    """`.config/vitest.config.ts` is a conventional home for it. Pruning every
+    dot-directory asserted "no config exists" about a repo that has one."""
+    (tmp_path / ".config").mkdir()
+    (tmp_path / ".config" / "vitest.config.ts").write_text(
+        "export default defineConfig({ test: { isolate: false } })\n",
+        encoding="utf-8")
+    iso = _scan(tmp_path)["test_runner_isolation"]
+    assert iso["isolation_opt_out"] is True, iso
+    assert not _fires(_IMPORT_BOUND_LOG, iso)
+
+
+def test_the_missing_fact_message_says_how_to_restore_it():
+    _ok, why = bp._isolation_lever_available(None, "")
+    assert "re-run the scan" in why, why
+
+
+def test_the_test_files_line_is_never_borrowed_from_another_project():
+    """A red or flaky drill prints `Test Files  1 failed | 148 passed (149)`,
+    which the `passed`-only scan skipped — so the search walked up into the
+    PREVIOUS project's block and paired a 149-file run with its `12 passed`."""
+    log = "\n".join([
+        " RUN  v4.1.4 /repo/utils",
+        " Test Files  12 passed (12)",
+        " Duration  4.02s (transform 0.50s, setup 0ms, import 1.50s, tests 3.20s)",
+        " RUN  v4.1.4 /repo/api",
+        " Test Files  1 failed | 148 passed (149)",
+        " Duration  96.12s (transform 8.97s, setup 1.01s, import 245.03s, "
+        "tests 214.54s, environment 8ms)",
+    ])
+    leaf = bp._parse_log(log, _ISO_ON)
+    files = [e for e in leaf["evidence"] if e.startswith("Test Files")]
+    assert files == ["Test Files  1 failed | 148 passed (149)"], leaf["evidence"]
+    # ...and a run with NO summary of its own quotes nobody else's.
+    no_summary = "\n".join([
+        " RUN  v4.1.4 /repo/utils",
+        " Test Files  12 passed (12)",
+        " Duration  4.02s (transform 0.50s, setup 0ms, import 1.50s, tests 3.20s)",
+        " RUN  v4.1.4 /repo/api",
+        " Duration  96.12s (transform 8.97s, setup 1.01s, import 245.03s, "
+        "tests 214.54s, environment 8ms)",
+    ])
+    leaf2 = bp._parse_log(no_summary, _ISO_ON)
+    assert not [e for e in leaf2["evidence"] if e.startswith("Test Files")], leaf2

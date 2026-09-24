@@ -98,7 +98,8 @@ class Capture:
 
         NOTE: the one config-gated leaf (OPT78 / `vitest-isolate-pool`) needs
         scan's `test_runner_isolation` fact, which a capture dir does not carry
-        (`job.log` + `meta.json` + `analysis.json` only). Without it, an
+        (it holds the drilled job's log and the loop's own metadata, never scan
+        output). Without it, an
         import-bound vitest log still yields a leaf here - the guarded
         `vitest-import-bound` one (OPT78 withheld) - so such a capture reads as
         catalog-covered, never "pending", and the loop is never asked to draft a

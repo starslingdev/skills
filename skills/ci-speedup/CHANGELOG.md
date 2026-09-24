@@ -13,6 +13,43 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-09-24** — **The "slow test suite re-loading the app" diagnosis is now a
+  catalogued, guarded lever (OPT78), and it no longer tells a repo to apply a
+  change it has already applied.** The audit already noticed a vitest long pole
+  that spends more time importing the module graph than running tests, and told
+  the coding agent to tune isolation, with no warning attached. That change can
+  break correctness silently (a test passing only because an earlier file left
+  state behind), and the audit said it even to repos that had already made it.
+  Now it is catalog pattern OPT78 with HIGH risk stamped on the pole's
+  drill-down. Its prompt carries an intent check, a mandatory guardrail (files
+  opt in to a separate shared project one reviewed list at a time, with explicit
+  teardown, and fake-timer files stay isolated) and a rollout that runs the
+  candidate files in both projects, shadow-style, before any file moves. The
+  lever is offered only when the repo's own vitest configuration is read in full
+  and shows no opt-out: every vitest config file (not only the default names,
+  and including one kept under `.config/`), the modules those configs merge in,
+  and the package scripts beside them. When that cannot be established the lever
+  is **withheld**, and the pole still names the measured import-bound split,
+  states why OPT78 was withheld, and tells the agent not to turn isolation off —
+  it is never left as a gap for an unguarded analysis. Withholding happens when
+  the repo already opts out, a config cannot be read (including a config whose
+  bytes are not UTF-8 text, which used to read as an empty, clean config), a
+  config takes its settings from a package the read cannot follow whatever that
+  package is called, the `isolate` value itself cannot be resolved, the search
+  could not cover the repo, the config reader failed, or the suite runs on a vm
+  pool. A config that merely *uses* a package — a plugin, a test environment, a
+  side-effect import — does not withhold it, so ordinary Cloudflare Workers,
+  Nuxt and Storybook setups still get the lever. An `isolate` value the read
+  cannot resolve now says exactly that instead of being reported as an opt-out
+  the repo does not have, and a reader that fails outright says so on stderr
+  rather than passing for a repo too large to search. The evidence quotes the
+  slowest run, the one the finding sizes, and the one fact read from the repo's
+  config is shown separately from the quoted log, never inside it. The detector
+  reads the summary line vitest 4.0.14 and later print; earlier releases (which
+  label the phase `collect`) and vitest 5 (which prints percentages) do not
+  match. The saving is deliberately not credited: the audit reports the measured
+  import share and says a benchmark is required. (#103)
+
 - **2026-09-08** — **A fix that moves the slowest step out of a merge gate now
   says how to keep the gate.** The long-pole lever can hand back a fix that
   relocates the dominant step into another job, and until now nothing in the
@@ -328,34 +365,6 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
-- **2026-09-23** — **The "slow test suite re-loading the app" diagnosis is now a
-  catalogued, guarded lever (OPT78), and it no longer tells a repo to apply a
-  change it has already applied.** The audit already noticed a vitest long pole
-  that spends more time importing the module graph than running tests, and
-  told the coding agent to tune isolation, with no warning attached. That
-  change can break correctness silently (a test passing only because an earlier
-  file left state behind), and the audit said it even to repos that had already
-  made it. Now it is catalog pattern OPT78 with HIGH risk stamped on the pole's
-  drill-down. Its prompt carries an intent check, a mandatory guardrail (files
-  opt in to a separate shared project one reviewed list at a time, with explicit
-  teardown, and fake-timer files stay isolated) and a rollout that runs the
-  candidate files in both projects, shadow-style, before any file moves. The
-  lever is offered only when the repo's own vitest configuration is read in full
-  and shows no opt-out: every vitest config file (not only the default names),
-  the local modules those configs merge in, and the package scripts beside them.
-  When that cannot be established, the lever is **withheld** and the pole names
-  the measured import-bound split, states why OPT78 was withheld, and tells the
-  agent not to turn isolation off. It is never left as a gap for an unguarded
-  analysis. Withholding happens when the repo already opts out, a config is
-  unreadable, an import cannot be followed, the search could not cover the repo,
-  or the suite runs on a vm pool. The evidence quotes the slowest run, the one
-  the finding sizes. The detector reads the summary line vitest 4.0.14 and later
-  print; earlier releases (which label the phase `collect`) and vitest 5 (which
-  prints percentages) do not match. The saving is deliberately not credited: the
-  audit reports the measured import share and says a benchmark is required. The
-  config reader can no longer crash the scan: a directory it cannot stat now
-  counts as unvisited ground rather than an error.
-
 - **2026-09-09** — **The planned before/after check can no longer claim a
   speedup it did not measure.** The approved (still unimplemented) post-fix
   verification methodology told the future implementation to stamp one universal
@@ -436,6 +445,15 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-09-24** — **A vitest drill-down no longer quotes another project's test
+  count.** When the run the finding sized printed a summary with a failure in it
+  (`Test Files  1 failed | 148 passed`) — which is exactly what a red or flaky
+  drill prints, and bimodal poles are deliberately drilled in their slow mode —
+  the report skipped that line and walked back into the *previous* project's
+  block, pairing a 149-file run with some other run's `12 passed`. The search is
+  now bounded to the sized run's own block and reads summaries with failures in
+  them; a run with no summary of its own quotes none at all. (#103)
 
 - **2026-09-16** — **`gh api` refuses to print a coloured response, and every
   CI job log is coloured.** Since `gh` learned to defend the terminal from

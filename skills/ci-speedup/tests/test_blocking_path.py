@@ -987,7 +987,7 @@ def test_parse_log_detects_vitest_import_bound_without_coverage():
     # already opted out of per-file isolation — a log alone cannot establish that,
     # so without it the leaf fails closed (tests/test_vitest_isolation_lever.py).
     iso = {"runner": "vitest", "readable": True, "isolation_opt_out": False,
-           "truncated": False,
+           "truncated": False, "verdict": "isolation_on",
            "configs": ["vitest.config.ts"], "opt_out_evidence": []}
     leaf = bp._parse_log(log, iso)
     assert leaf is not None and leaf["fix_key"] == "vitest-isolate-pool"
@@ -2283,7 +2283,7 @@ def _doc_one_pole() -> dict:
         # on — this fixture's drill log is an import-bound vitest run.
         "test_runner_isolation": {
             "runner": "vitest", "readable": True, "isolation_opt_out": False,
-            "truncated": False,
+            "truncated": False, "verdict": "isolation_on",
             "configs": ["vitest.config.ts"], "opt_out_evidence": []},
         "pr_critical_path": {
             "sampled_pr_count": 20, "sample_target": 20, "sample_complete": True,
@@ -2298,7 +2298,7 @@ def _doc_one_pole() -> dict:
 
 
 _ISOLATION_ON = {"runner": "vitest", "readable": True, "isolation_opt_out": False,
-                 "truncated": False,
+                 "truncated": False, "verdict": "isolation_on",
                  "configs": ["vitest.config.ts"], "opt_out_evidence": []}
 
 _IMPORT_BOUND_LOG = "\n".join([
