@@ -2627,10 +2627,11 @@ _FIX_META: dict[str, dict[str, Any]] = {
     "vitest-import-bound": {
         "cause": "The gating vitest run spends more time in `import` (loading the "
                  "module graph) than in the tests themselves. The per-file-isolation "
-                 "lever (OPT78) was NOT raised for this pole: the evidence below says "
-                 "why (the repo already opts out, or its config could not be fully "
-                 "read). The measured split is verbatim from the log; the withheld "
-                 "reason is from the repo's config scan, not the log.",
+                 "lever (OPT78) was NOT raised for this pole, and the config fact "
+                 "below says why (the repo already opts out, its config could not be "
+                 "fully read, or the read itself failed). The measured split is "
+                 "verbatim from the log; the withheld reason is read from the repo's "
+                 "config, and is shown separately from the log for that reason.",
         "look": "what the expensive imports actually are - run the suite with "
                 "vitest's import-duration reporting where available, and read the "
                 "setup files and the heaviest shared modules (an ORM entity graph, a "
