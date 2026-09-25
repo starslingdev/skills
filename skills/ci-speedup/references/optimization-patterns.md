@@ -471,21 +471,28 @@ candidate gate requires the job to sit strictly below the workflow's cluster
 floor — which is exactly what makes that zero true and re-derivable, and is the
 finding's `below_cluster_floor` neutrality certificate.
 
-**A known coverage hole, stated plainly.** A net-negative cache on the workflow's
-**long pole** would be a genuine wall-clock lever — the one case where this waste
-sits on the merge wait rather than only on the bill — and this version does not
-look for it. The floor gate runs in the candidate selector, *before* any log is
-fetched, so a cache on the slowest job is not measured and found wanting; it is
-never measured at all. That is deliberate (sizing a speedup there needs the
-wall-clock bound cascade the measurement spine owns, and a guessed one is worse
-than none), and it is the pattern's most valuable missing case.
+**The long-pole case: measured, reported, not priced.** A net-negative cache on
+the workflow's **long pole** is the one place this waste sits on the merge wait
+rather than only on the bill, so it is worth the most — and it is exactly the
+case that cannot carry the neutrality certificate a credited runner-minute row
+needs. It is measured anyway, on the same evidence as every credited finding, and
+**reported with no number**:
 
-Be clear about what is and is not visible: the withhold is counted in the run's
-`opt79_withheld_by_gate` tally, which is a **maintainer-side** record in the
-scratch `findings.json`. It is **not rendered in the report**, so a repository
-whose only net-negative cache sits on its slowest job reads exactly like a
-repository with none. Nothing in the report claims otherwise, and nothing in the
-report tells the reader either.
+> a cache on `build` measured net-negative by 19s per cache hit (5 hit / 4 miss
+> run(s) sampled); `build` is this workflow's slowest job, so the saving is on the
+> merge wait and is **not credited** in this version.
+
+No runner-minutes, no wall-clock claim, no certificate, no Tier-2 row, and no
+contribution to any total — the measurement is complete, only the sizing is
+deferred. The fix is the same one the credited findings hand over; only the size
+of the win is unstated. Rendered next to the dropped-unprovable note, its nearest
+precedent: a measured fact deliberately kept out of the numbers and shown anyway.
+
+Sizing it is the follow-up: route the measured excess through the wall-clock
+bound cascade, where CAP 1 already caps an on-pole saving at
+`long_pole_p50 − floor_p50`. Until then the honest report is a line without a
+number, not silence — and silence is what this used to be, because the floor test
+ran in the candidate selector and the job's logs were never fetched at all.
 
 **Fix**: in this order, and never "just delete it".
 

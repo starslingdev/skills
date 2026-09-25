@@ -1090,17 +1090,23 @@ steps are being compared between runs. And the candidate gate requires the job's
 p50 to sit strictly BELOW the workflow's cluster floor, which is what makes
 `wall_clock_p50_s=0` literally true here — unlike OPT77, the
 `below_cluster_floor` token is not historical for OPT79, it is the proof. A
-net-negative cache on the long pole is a real wall-clock lever but needs the
-floor cascade the spine owns, so the pattern withholds there rather than guess.
-Note the withhold's true shape: the floor gate lives in `_opt79_candidates`,
-which is also what `_opt79_log_plan` selects from, so such a job's logs are never
-fetched and its cache is never classified — there is no measured net-negative
-cache being suppressed, only one never looked for. The withhold is counted into
-`opt79_withheld_by_gate`, which is maintainer-side: nothing renders it, so this
-coverage hole is invisible to the reader of the report. Closing it means passing
-the measured excess into `size_wall_clock` instead of hard-coding
-`wall_clock_p50_s=0`, and letting CAP 1 (§5) cap it at `long_pole_p50 -
-floor_p50` the way it caps every other on-pole finding.
+net-negative cache on the long pole is a real wall-clock lever that needs the
+floor cascade the spine owns, so it is not PRICED here — but it is measured and
+reported. The floor test lives in `_opt79_candidates`, which is also what
+`_opt79_log_plan` selects from, so gating on it there meant such a job's logs
+were never fetched and its cache never classified: not a suppressed measurement,
+an absent one, and one no reader could distinguish from a repository with no such
+cache. The test therefore records `below_cluster_floor` on the candidate instead
+of dropping it. The detector measures both populations as usual and then splits:
+below the floor → the credited finding described above; at or above it → a row on
+`findings_doc["opt79_uncredited_pole_caches"]`, which `blocking_path`'s
+`_opt79_uncredited_block` renders as one numberless line beside
+`_dropped_unprovable_banner`. Uncredited rows are not findings — no
+`runner_min_saving`, no `wall_clock_p50_s`, no certificate, no Tier-2 row, no
+contribution to any total — so no verifier arm applies to them. Pricing them is
+the follow-up: pass the measured excess into `size_wall_clock` instead of
+hard-coding `wall_clock_p50_s=0` and let CAP 1 (§5) cap it at `long_pole_p50 -
+floor_p50`, the way it caps every other on-pole finding.
 
 Its gh cost is the one new one in this wave: a capped log probe
 (`_OPT79_LOG_PROBE_MAX = 8` occurrences per candidate job,

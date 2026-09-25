@@ -34,14 +34,14 @@ unversioned and updates by reinstall from `main`.
   runner label, the hit path is slower by at least 5 seconds or 20%, the cache hits
   on at least a quarter of classified runs, and the job sits below the workflow's
   slowest-but-one job. A run whose log shows both a hit and a miss (a job with two
-  caches) is excluded, never guessed. It credits no wall-clock time, and it does
-  not look at the job that sets the merge gate at all: a cache there could shorten
-  the wait people actually feel, which needs sizing this version cannot do
-  honestly, so that case is skipped rather than guessed. The skip is recorded for
-  maintainers and is not shown in the report, so a repository whose only
-  net-negative cache sits on its slowest job reads like one with none — the
-  largest known gap in this pattern. Reading the logs is the one new cost, and it
-  is capped at eight
+  caches) is excluded, never guessed. It credits no wall-clock time. A cache on
+  the job that sets the merge gate is the case where this waste costs people
+  waiting time rather than money, and sizing that saving needs machinery this
+  version does not have — so it is measured on exactly the same evidence and
+  reported with no number attached: one line saying the cache was measured to cost
+  more than it saves, how much per cache hit, how many runs that came from, and
+  that the saving is not credited here. It adds nothing to any total. Reading the
+  logs is the one new cost, and it is capped at eight
   runs of one job, two jobs per workflow and twenty-four fetches across the whole
   repository; within a workflow the most expensive candidate goes first. The
   install step is recognised by the command it runs rather than by the name the

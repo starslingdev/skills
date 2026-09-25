@@ -7656,3 +7656,63 @@ def test_data_sources_footer_declares_the_cache_comparison_log_probe():
     doc4["data_sources"] = {**doc4["data_sources"], "tiers_run": ["gh-timing"]}
     assert "cache hit/miss log probe" not in "\n".join(
         bp._data_sources_footer(doc4, "o/r"))
+
+
+def test_uncredited_pole_cache_is_reported_even_though_it_is_not_sized():
+    """The most valuable instance of a net-negative cache is the one on the
+    workflow's SLOWEST job, because there the waste is on the merge wait rather
+    than only on the bill. This version cannot size that saving, and the old
+    behaviour was to skip the job in the candidate selector — so its logs were
+    never fetched, its cache was never classified, and the report was
+    byte-identical to one for a repository with no such cache.
+
+    It is measured like any other now and stated with NO number: the reader
+    learns the cache exists and that the saving is not credited here."""
+    doc = _doc_one_pole()
+    doc["opt79_uncredited_pole_caches"] = [{
+        "kind": "opt79_uncredited_pole_cache",
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "build",
+        "runner_label": "ubuntu-latest",
+        "restore_step": "Run actions/cache@v4",
+        "install_step": "Run npm ci",
+        "waste_s": 19.0, "hits": 5, "misses": 4,
+        "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
+        "job_p50_s": 600.0, "floor_p50_s": 300.0,
+    }]
+    lines = bp._opt79_uncredited_block(doc)
+    md = "\n".join(lines)
+    assert "build" in md
+    assert "19s" in md                      # the measured excess, per hit
+    assert "5 hit" in md and "4 miss" in md  # the sample it came from
+    assert "slowest job" in md
+    assert "not credited" in md
+    # It must NOT read as a sized saving: no runner-minutes, no wall-clock claim.
+    assert "min/mo" not in md
+    assert "runner-min" not in md
+
+    # Nothing measured -> nothing said.
+    assert bp._opt79_uncredited_block(_doc_one_pole()) == []
+    empty = _doc_one_pole()
+    empty["opt79_uncredited_pole_caches"] = []
+    assert bp._opt79_uncredited_block(empty) == []
+
+
+def test_uncredited_pole_cache_reaches_the_rendered_report():
+    """A helper nothing calls is not a disclosure. Pin that the block is actually
+    emitted into the report body."""
+    doc = _doc_one_pole()
+    doc["opt79_uncredited_pole_caches"] = [{
+        "kind": "opt79_uncredited_pole_cache",
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "build",
+        "runner_label": "ubuntu-latest",
+        "restore_step": "Run actions/cache@v4",
+        "install_step": "Run npm ci",
+        "waste_s": 19.0, "hits": 5, "misses": 4,
+        "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
+        "job_p50_s": 600.0, "floor_p50_s": 300.0,
+    }]
+    md = bp.render(doc, "o/r")
+    assert "not credited" in md
+    assert "`build`" in md

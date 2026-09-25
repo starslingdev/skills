@@ -5447,6 +5447,47 @@ def _pr_floor_fallback_banner(doc: dict[str, Any], cp: dict[str, Any]) -> list[s
             "the figures as the PR-floor accordingly.", ""]
 
 
+def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
+    """Caches MEASURED to cost more than they save on a job that is not below its
+    workflow's cluster floor — stated, with no number attached.
+
+    These are not findings and never enter a total: no runner-minutes, no
+    wall-clock claim, no neutrality certificate, no Tier-2 row. The measurement
+    is as real as a credited one; what is missing is the sizing, because the
+    waste sits on the merge wait and pricing that needs the wall-clock bound
+    cascade (a follow-up). Saying nothing was the worse answer — a repository
+    whose only net-negative cache is on its slowest job would read exactly like
+    one with no such cache, and that is the case worth the most.
+
+    Rendered beside `_dropped_unprovable_banner`, its nearest precedent: a
+    measured fact deliberately kept out of the numbers and shown anyway. [] when
+    there is nothing to say."""
+    rows = (doc or {}).get("opt79_uncredited_pole_caches") or []
+    rows = [r for r in rows if isinstance(r, dict) and r.get("job")]
+    if not rows:
+        return []
+    lines = ["> [!NOTE]",
+             f"> **{len(rows)} cache(s) measured net-negative on a job this audit "
+             "cannot price.** Measured the same way as the credited ones, and "
+             "listed with no number because the time is on the merge wait rather "
+             "than the bill:", ">"]
+    for r in rows:
+        job = str(r.get("job") or "")
+        wf = str(r.get("workflow_file") or "")
+        waste = r.get("waste_s")
+        hits, misses = r.get("hits"), r.get("misses")
+        waste_txt = f"{float(waste):.0f}s" if isinstance(waste, (int, float)) else "?"
+        where = f" in `{wf}`" if wf else ""
+        lines.append(
+            f"> - a cache on `{job}`{where} measured net-negative by {waste_txt} "
+            f"per cache hit ({hits} hit / {misses} miss run(s) sampled); `{job}` is "
+            "this workflow's slowest job, so the saving is on the merge wait and "
+            "is **not credited** in this version.")
+    lines += [">", "> Re-keying or narrowing such a cache is the same fix as the "
+              "credited ones; only the size of the win is unstated here.", ""]
+    return lines
+
+
 def _dropped_unprovable_banner(dropped: list[dict[str, Any]] | None) -> list[str]:
     """A note naming cache findings the `--with-logs` admission gate removed (the
     logs couldn't prove the cacheable work runs). Kept VISIBLE so the drop is
@@ -7857,6 +7898,10 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *tier2_lines]
     if also_lines:
         out += ["---", "", *also_lines]
+    # Measured net-negative caches that could not be PRICED (their job is not
+    # below the cluster floor). Beside the dropped-unprovable banner, its nearest
+    # precedent: a measured fact kept out of the numbers and shown anyway.
+    out += _opt79_uncredited_block(doc)
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
                                       or doc.get("dropped_unprovable"))
     # Issue #12: a static-only report (no measured pole to crown) can still carry a stamped
@@ -9660,6 +9705,10 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # (§5.5/G15; `check_cost_spine_shallow_disclosed` re-derives it from
         # `data_sources`, so dropping this line is a verify FAIL, not a style choice).
         out += ["---", "", f"> ⚠️ _{shallow_note}_", ""]
+    # Measured net-negative caches that could not be PRICED (their job is not
+    # below the cluster floor). Beside the dropped-unprovable banner, its nearest
+    # precedent: a measured fact kept out of the numbers and shown anyway.
+    out += _opt79_uncredited_block(doc)
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
                                       or doc.get("dropped_unprovable"))
     # The prose provenance block leads the Data sources section (owner UX edit

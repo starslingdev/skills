@@ -3939,9 +3939,18 @@ def test_opt79_log_plan_is_capped_and_matches_the_detector_selector():
     plan = cr._opt79_log_plan("ci.yml", jpr, _opt79_crit(), _opt79_wf())
     assert len(plan) == cr._OPT79_LOG_PROBE_MAX
     assert {str(j["name"]) for j in plan} == {_OPT79_JOB}
-    # …and a job the detector would never look at is never fetched for.
+    # A job ON the workflow's slowest position IS planned. It used to be skipped
+    # here, which meant the one case where this waste sits on the merge wait was
+    # never measured at all — indistinguishable, to a reader, from a repository
+    # with no such cache. It is measured now and reported uncredited.
+    assert len(cr._opt79_log_plan(
+        "ci.yml", jpr, _opt79_crit(floor=300.0, job_p50=600.0),
+        _opt79_wf())) == cr._OPT79_LOG_PROBE_MAX
+    # …but a job that declares no cache at all still costs no fetch: the point of
+    # answering every shape gate from data already in hand.
     assert cr._opt79_log_plan(
-        "ci.yml", jpr, _opt79_crit(job_p50=600.0), _opt79_wf()) == []
+        "ci.yml", jpr, _opt79_crit(),
+        _opt79_wf(steps=[{"run": "npm ci"}, {"run": "npm test"}])) == []
 
 
 def test_opt79_log_probe_has_a_repo_wide_ceiling():
@@ -4177,3 +4186,55 @@ def test_opt79_verifier_matchers_recognise_every_line_the_engine_does():
     # …and neither side reads a hit as a miss or the reverse.
     assert not vr._VR_OPT79_MISS_RE.search("Cache restored from key: abc")
     assert not vr._VR_OPT79_HIT_RE.search("npm cache is not found")
+
+
+def test_opt79_measures_a_pole_cache_and_reports_it_uncredited():
+    """The cache on the workflow's SLOWEST job is where this waste lands on the
+    merge wait, so it is worth the most — and it used to be skipped in the
+    candidate selector, which meant its logs were never fetched and its cache was
+    never classified. That is not "withheld pending sizing"; it is never looked
+    at, and it read to the user exactly like a repository with no such cache.
+
+    It must now be measured like any other and reported with NO number: the
+    sizing needs the wall-clock bound cascade, the measurement does not."""
+    jpr, logs = _opt79_sample()
+    # the cached job IS the workflow's slowest: its p50 sits above the floor
+    crit = _opt79_crit(floor=300.0, job_p50=600.0)
+    withheld: dict = {}
+    uncredited: list = []
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, crit, _opt79_wf(), 100, 0,
+        logs_by_job_id=logs, withheld=withheld, uncredited=uncredited)
+
+    # NOT credited: no finding, so no minutes, no certificate, no Tier-2 row.
+    assert out == []
+    assert withheld.get("job_not_strictly_below_the_workflow_cluster_floor") == 1
+
+    # …but measured, and reported.
+    assert len(uncredited) == 1, uncredited
+    u = uncredited[0]
+    assert u["job"] == _OPT79_JOB
+    assert u["kind"] == "opt79_uncredited_pole_cache"
+    assert u["hits"] == 4 and u["misses"] == 4
+    assert u["waste_s"] == 19.0            # 31s hit path vs 12s miss path
+    assert u["hit_path_p50_s"] == 31.0 and u["miss_path_p50_s"] == 12.0
+    # it carries no sizing of any kind — that is the whole point
+    assert "runner_min_saving" not in u and "wall_clock_p50_s" not in u
+
+    # And its logs really were fetched: the plan must include the pole job, or
+    # there would be nothing to measure.
+    plan = cr._opt79_log_plan("ci.yml", jpr, crit, _opt79_wf())
+    assert len(plan) == 8, len(plan)
+
+
+def test_opt79_below_the_floor_is_still_credited_and_never_listed_uncredited():
+    """The uncredited path must not swallow the case this pattern does size."""
+    jpr, logs = _opt79_sample()
+    uncredited: list = []
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), _opt79_wf(), 100, 0,
+        logs_by_job_id=logs, uncredited=uncredited)
+    assert len(out) == 1
+    assert out[0]["wall_clock_p50_s"] == 0.0
+    assert out[0]["runner_min_saving"] > 0
+    assert uncredited == []

@@ -14506,22 +14506,26 @@ def _opt79_candidates(
         if not declared:
             _no("runner_label_not_one_known_billed_label", job=name)
             continue
-        # THE NEUTRALITY GATE, and the reason this lever credits runner-minutes
+        # THE NEUTRALITY TEST, and the reason this lever credits runner-minutes
         # only. A job strictly below the workflow's cluster floor cannot set the
         # merge gate, so making it faster provably cannot make the gate longer —
-        # which is the certificate this finding ships. On the long pole itself
-        # the fix IS a wall-clock win, but crediting that needs the floor cascade
-        # the spine owns, so OPT79 withholds there rather than guess. The gate is
-        # counted, so that coverage hole is visible in every run.
-        if not p50 < floor:
-            _no("job_not_strictly_below_the_workflow_cluster_floor", job=name,
-                job_p50=round(p50, 1), floor_p50=round(floor, 1))
-            continue
+        # which is the certificate a credited finding ships.
+        #
+        # It is recorded here and NOT gated on. A cache on the slowest job is the
+        # case where this waste sits on the merge wait, so it is worth the most;
+        # skipping it in the selector meant its logs were never fetched and its
+        # cache was never classified, which is not "withheld pending sizing", it
+        # is never looked at. Such a job is measured like any other and reported
+        # UNCREDITED (no minutes, no certificate) — see the detector. Sizing the
+        # speedup needs the wall-clock bound cascade the spine owns and is a
+        # follow-up; saying nothing at all was the worse answer.
+        below = bool(p50 < floor)
         block = dict(block)
         block["yaml_key"] = str(key)
         block["runner_label"] = declared
         block["job_p50_s"] = round(p50, 1)
         block["floor_p50_s"] = round(floor, 1)
+        block["below_cluster_floor"] = below
         out.append((p50, name, block))
 
     out.sort(key=lambda t: (-t[0], t[1]))
@@ -14567,6 +14571,7 @@ def _detect_opt79_net_negative_cache(
     start_idx: int,
     logs_by_job_id: dict[Any, str] | None = None,
     withheld: dict[str, int] | None = None,
+    uncredited: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """A cache that costs more than it saves (catalog OPT79) — measured.
 
@@ -14581,12 +14586,20 @@ def _detect_opt79_net_negative_cache(
     how often this job actually ran in the sample (`_effective_volume`), so a
     conditional job is not billed at the whole workflow's frequency.
 
-    `wall_clock_p50_s` is always 0 and the finding carries a `below_cluster_floor`
-    certificate: the candidate gate already required the job's p50 to sit strictly
-    below the workflow's cluster floor, so shrinking it cannot lengthen the merge
-    gate. A net-negative cache on the long pole IS a wall-clock lever, but sizing
-    that needs the spine's floor cascade — until then the candidate gate withholds
-    it, and counts the withhold rather than guessing.
+    A CREDITED finding stamps `wall_clock_p50_s = 0` and a `below_cluster_floor`
+    certificate: its job's p50 sits strictly below the workflow's cluster floor,
+    so shrinking it cannot lengthen the merge gate.
+
+    A job that measures net-negative but is NOT strictly below the floor is
+    reported UNCREDITED, through `uncredited` rather than the return value: no
+    minutes, no certificate, no Tier-2 row — one honest line saying the cache was
+    measured and that the saving lands on the merge wait, which this version does
+    not size. That case is the most valuable one this pattern sees, and it is
+    measured exactly like any other; only the sizing is deferred (routing the
+    excess through the wall-clock bound cascade, capped at the next-tallest job,
+    is the follow-up). Reporting it uncredited beats the old behaviour, which
+    skipped it in the selector so its logs were never fetched at all — a silence
+    no reader could tell from "this repository has no such cache".
 
     Every exit is COUNTED into `withheld` (a `{gate: count}` accumulator the
     caller stamps onto the findings doc) and logged at DEBUG. An empty return is
@@ -14700,6 +14713,31 @@ def _detect_opt79_net_negative_cache(
             _no("hit_path_not_slower_than_the_miss_path_by_the_floor", job=name,
                 hit_p50=round(hit_p50, 1), miss_p50=round(miss_p50, 1),
                 waste=waste, floor=waste_floor)
+            continue
+        # MEASURED net-negative. Everything above is the measurement; the floor
+        # decides only whether it can be PRICED. A job that is not strictly below
+        # the workflow's cluster floor carries its waste on the merge wait, which
+        # this version cannot size honestly — so it is reported with no number
+        # rather than dropped, and takes no part in the credited total.
+        if not block.get("below_cluster_floor"):
+            _no("job_not_strictly_below_the_workflow_cluster_floor", job=name,
+                job_p50=block.get("job_p50_s"), floor_p50=block.get("floor_p50_s"))
+            if uncredited is not None:
+                uncredited.append({
+                    "kind": "opt79_uncredited_pole_cache",
+                    "workflow_file": wf_path,
+                    "job": name,
+                    "runner_label": declared,
+                    "restore_step": block["restore"],
+                    "install_step": block["install"],
+                    "waste_s": waste,
+                    "hits": len(hits),
+                    "misses": len(misses),
+                    "hit_path_p50_s": hit_p50,
+                    "miss_path_p50_s": miss_p50,
+                    "job_p50_s": block.get("job_p50_s"),
+                    "floor_p50_s": block.get("floor_p50_s"),
+                })
             continue
         effective = _effective_volume(monthly_volume, job_runs, sampled)
         credited = round(waste * hit_share * effective / 60.0, 1)
@@ -17249,7 +17287,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         new = _detect_opt79_net_negative_cache(
             wf_path, jobs_per_run, crit, _wf_docs.get(wf_path, {}),
             opt65_monthly, next_id, logs_by_job_id=opt79_logs,
-            withheld=findings_doc.setdefault("opt79_withheld_by_gate", {}))
+            withheld=findings_doc.setdefault("opt79_withheld_by_gate", {}),
+            # Measured net-negative caches that cannot be PRICED because their
+            # job is not below the cluster floor. Not findings (no minutes, no
+            # certificate, no Tier-2 row) — the renderer states them as one
+            # uncredited line each, so the case worth the most is not silent.
+            uncredited=findings_doc.setdefault("opt79_uncredited_pole_caches", []))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
