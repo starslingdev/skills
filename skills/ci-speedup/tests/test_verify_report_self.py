@@ -8669,3 +8669,419 @@ def test_opt77_neutrality_refuses_the_generic_below_floor_margin(tmp_path: Path)
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
     assert not chk.ok and "below-floor margin" in chk.detail, chk
+
+# ── OPT80: the verifier re-derives the checkout tail, never trusts it ──
+# The pattern is admissible only because it PROVES the stall instead of
+# inferring it from a duration (the reason OPT49 was cut). So the arm has to
+# recompute both halves — the distribution and the log-proven pause — from the
+# stamped per-run inputs. These pin that it fails on tampered numbers, and the
+# coupling test below feeds it the REAL detector's output rather than a
+# hand-written block (which would only prove the verifier reads what the test
+# wrote).
+
+def _opt80_verifier_finding(**over):
+    per_run = [{"job_id": 8000 + i, "run_url": f"https://x/runs/{8000 + i}",
+                "checkout_s": d, "tail": d >= 40.0}
+               for i, d in enumerate([10.0] * 8 + [120.0, 120.0])]
+    proven = [{"job_id": r["job_id"], "run_url": r["run_url"],
+               "checkout_s": r["checkout_s"], "gap_s": 40.0,
+               "before": {"ts": "2026-06-01T00:00:14Z",
+                          "line": "Receiving objects:  12% (14400/120000)"},
+               "after": {"ts": "2026-06-01T00:00:54Z",
+                         "line": "Receiving objects:  12% (14400/120000)"},
+               "stalled_at_pct": "12"}
+              for r in per_run if r["tail"]]
+    f = {
+        "id": "f1",
+        "pattern": "OPT80",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": ["build"],
+        "runner_min_saving": 36.7,
+        "wall_clock_p50_s": 0.0,
+        "sizing_basis": "measured",
+        "tier2_neutrality": {"proof": "checkout_tail_excess", "margin_s": 22.0},
+        "checkout_stall": {
+            "kind": "opt80_checkout_tail_stall",
+            "job": "build",
+            "checkout_step": "Run actions/checkout@v4",
+            "checkout_step_identity": "actions/checkout",
+            "checkout_step_source": "actions/checkout",
+            "runner_label": "ubuntu-latest",
+            "sampled_successful_run_count": 10,
+            "occurrences": 10,
+            "per_run_checkout_s": per_run,
+            "p50_s": 10.0, "p95_s": 120.0, "mean_s": 32.0, "max_s": 120.0,
+            "tail_p95_multiple": 3.0, "tail_p95_abs_s": 30.0,
+            "tail_threshold_s": 40.0, "min_tail_runs": 2,
+            "min_sampled_occurrences": 6,
+            "tail_run_job_ids": [r["job_id"] for r in per_run if r["tail"]],
+            "min_gap_s": 20.0, "min_proven_tail_runs": 2,
+            "proven_tail_runs": proven,
+            "logs_fetched": 2, "log_probe_max": 4,
+            "tail_excess_s": 22.0, "tail_run_longest_pause_s": 40.0,
+            "on_critical_path": True,
+            "monthly_volume": 100, "effective_monthly_volume": 100.0,
+            "runner_min_saving": 36.7,
+        },
+    }
+    f.update(over)
+    return f
+
+
+def test_opt80_certificate_rederives_a_clean_claim():
+    vr = _load_verify_report()
+    assert vr._opt80_checkout_stall_rederived(_opt80_verifier_finding()) == []
+
+
+def test_opt80_certificate_fails_on_tampered_numbers():
+    vr = _load_verify_report()
+    # An inflated credited saving is caught by the re-derivation.
+    problems = vr._opt80_checkout_stall_rederived(
+        _opt80_verifier_finding(runner_min_saving=9999.0))
+    assert any("runner_min_saving" in p for p in problems), problems
+    # A tail excess restated as something the distribution does not support.
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_excess_s"] = 110.0
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("tail_excess_s" in p for p in problems), problems
+    # A p50 quietly lowered to make the excess look bigger.
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["p50_s"] = 1.0
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("p50_s" in p for p in problems), problems
+    # A gap that the quoted lines' own timestamps do not support.
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["proven_tail_runs"][0]["gap_s"] = 300.0
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("gap_s" in p for p in problems), problems
+    # A stamped line whose timestamp does not parse. The arm must REPORT that,
+    # not raise — a crash here would abort the whole verifier run instead of
+    # failing the one claim, so the guard is load-bearing and pinned.
+    for bad in ("not-a-timestamp", None):
+        f = _opt80_verifier_finding()
+        if bad is None:
+            f["checkout_stall"]["proven_tail_runs"][0]["before"].pop("ts", None)
+        else:
+            f["checkout_stall"]["proven_tail_runs"][0]["before"]["ts"] = bad
+        problems = vr._opt80_checkout_stall_rederived(f)
+        assert any("parseable log timestamps" in p for p in problems), (bad, problems)
+    # A pause under the 20s bar.
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["proven_tail_runs"][0]["after"]["ts"] = "2026-06-01T00:00:19Z"
+    f["checkout_stall"]["proven_tail_runs"][0]["gap_s"] = 5.0
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("below the" in p and "stall requires" in p for p in problems), problems
+    # A certificate margin that is not the tail excess.
+    f = _opt80_verifier_finding()
+    f["tier2_neutrality"]["margin_s"] = 500.0
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("margin_s" in p for p in problems), problems
+
+
+def test_opt80_certificate_refuses_a_tail_with_no_proven_stall():
+    """THE OPT49 TRAP, closed at the verifier too: a heavy tail with no quoted
+    pause is a duration with no cause attached."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["proven_tail_runs"] = []
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("log-proven" in p for p in problems), problems
+
+
+def test_opt80_certificate_refuses_a_proof_without_a_tail():
+    """…and the other direction: runs labelled as tail runs that the re-derived
+    threshold does not put in the tail."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_run_job_ids"] = [8000, 8001, 8008, 8009]
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("tail_run_job_ids" in p for p in problems), problems
+
+
+def test_opt80_certificate_bounds_every_count():
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["sampled_successful_run_count"] = 3
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("exceed the 3" in p and "sampled run" in p for p in problems), problems
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["logs_fetched"] = 99
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("probe cap" in p for p in problems), problems
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["occurrences"] = 99
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("occurrences" in p for p in problems), problems
+    # A "proven" run that the re-derived threshold does not put in the tail.
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["proven_tail_runs"][0]["job_id"] = 8000
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("is not one of the tail runs" in p for p in problems), problems
+    # More logs fetched than there were tail runs to fetch them for.
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["logs_fetched"] = 3
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("more logs fetched" in p for p in problems), problems
+    # The "never the full p95" bound is deliberately NOT pinned by a case: it is
+    # unreachable once the excess is re-derived, because `mean - p50 > p95 - p50`
+    # requires `mean > p95`, which no distribution has. Any attempt to stamp a
+    # bigger excess trips the re-derivation above first, which is the check that
+    # actually holds the line — the bound stays as a belt-and-braces guard for a
+    # future percentile change.
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_excess_s"] = 200.0
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("tail_excess_s" in p for p in problems), problems
+
+
+def test_opt80_certificate_requires_the_measured_step_to_be_identified():
+    """Which step, on which runner, read from where. A block missing any of the
+    three is a distribution with nothing attached to it."""
+    vr = _load_verify_report()
+    for key, want in (("checkout_step", "the measured step is unidentified"),
+                      ("checkout_step_source", "local composite"),
+                      ("runner_label", "runner class")):
+        f = _opt80_verifier_finding()
+        f["checkout_stall"].pop(key)
+        problems = vr._opt80_checkout_stall_rederived(f)
+        assert any(want in p for p in problems), (key, problems)
+
+
+def test_opt80_certificate_rederives_the_predicate_that_makes_a_gap_a_stall():
+    """The arm used to recompute the SECONDS between the two quoted lines and take
+    their SHAPE on trust. The shape is the claim: a gap is a stall only when both
+    lines are `Receiving objects: N%` at the same N, below 100."""
+    vr = _load_verify_report()
+    # A pair the transfer ADVANCED across, stamped with a 40s gap.
+    f = _opt80_verifier_finding()
+    p = f["checkout_stall"]["proven_tail_runs"][0]
+    p["before"]["line"] = "Receiving objects:   5% (6000/120000)"
+    p["after"]["line"] = "Receiving objects:  60% (72000/120000)"
+    p["stalled_at_pct"] = "5"
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("advanced across the pause" in p2 for p2 in problems), problems
+    # A pair that is not a transfer line at all.
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["proven_tail_runs"][0]["after"]["line"] = \
+        "remote: Compressing objects: 100% (9/9)"
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("not a `Receiving objects" in p2 for p2 in problems), problems
+    # A pause at 100%: the transfer had finished, so no network timeout applies.
+    f = _opt80_verifier_finding()
+    p = f["checkout_stall"]["proven_tail_runs"][0]
+    p["before"]["line"] = "Receiving objects: 100% (120000/120000)"
+    p["after"]["line"] = "Receiving objects: 100% (120000/120000), done."
+    p["stalled_at_pct"] = "100"
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("had completed" in p2 for p2 in problems), problems
+    # The rendered percentage must be the one the quoted lines report.
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["proven_tail_runs"][0]["stalled_at_pct"] = "99"
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("stalled_at_pct" in p2 for p2 in problems), problems
+
+
+def test_opt80_certificate_rescans_the_quoted_lines_for_credentials():
+    """The quoted line reaches the reader THROUGH this arm, so the arm re-scans it
+    rather than trusting that the detector's backstop ran."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    token = "gh" + "p_" + "C" * 36
+    f["checkout_stall"]["proven_tail_runs"][0]["after"]["line"] += " " + token
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("credential shape" in p for p in problems), problems
+
+
+def test_opt80_certificate_compares_every_stamped_bound_to_its_own_copy():
+    """The stamped constants used to be decoration: a comment said the verifier
+    re-derived on them, and it read none of them — `log_probe_max: 999` passed the
+    probe-cap check because the check compared it to itself."""
+    vr = _load_verify_report()
+    for key in ("tail_p95_multiple", "tail_p95_abs_s", "min_gap_s", "min_tail_runs",
+                "min_proven_tail_runs", "min_sampled_occurrences", "log_probe_max"):
+        f = _opt80_verifier_finding()
+        f["checkout_stall"][key] = 999
+        problems = vr._opt80_checkout_stall_rederived(f)
+        assert any(f"stamped {key}" in p for p in problems), (key, problems)
+    # …and the probe cap is now enforced against the PINNED value, so stamping a
+    # bigger cap no longer licenses a bigger probe.
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["log_probe_max"] = 999
+    f["checkout_stall"]["logs_fetched"] = 40
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("probe cap 4" in p for p in problems), problems
+
+
+def test_opt80_certificate_rederives_the_longest_pause_it_renders():
+    """`tail_run_longest_pause_s` is named in the evidence as the upper bound on
+    what capping the stall recovers, and was a bare assertion."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_run_longest_pause_s"] = 500.0
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("tail_run_longest_pause_s" in p for p in problems), problems
+
+
+def test_opt80_certificate_requires_a_distribution_worth_a_p95():
+    """Below the minimum sample the "tail" is whichever run happened to be
+    slowest. The detector's gate is re-derived here rather than assumed."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    cs = f["checkout_stall"]
+    cs["per_run_checkout_s"] = cs["per_run_checkout_s"][6:]
+    cs["occurrences"] = len(cs["per_run_checkout_s"])
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("below the 6" in p for p in problems), problems
+
+
+def test_opt80_certificate_rederives_the_effective_volume_scaling():
+    """A job behind an `if:` gate credited at the workflow's full frequency is the
+    commonest way a measured saving gets inflated."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["sampled_successful_run_count"] = 20
+    problems = vr._opt80_checkout_stall_rederived(f)
+    assert any("effective_monthly_volume" in p for p in problems), problems
+
+
+def test_opt80_certificate_requires_the_finding_to_name_one_job():
+    vr = _load_verify_report()
+    problems = vr._opt80_checkout_stall_rederived(
+        _opt80_verifier_finding(affected_jobs=["build", "other"]))
+    assert any("affected_jobs" in p for p in problems), problems
+
+
+def test_opt80_verifier_constants_stay_coupled_to_the_engine():
+    """verify_report is import-free from the engine by design, so its copies of
+    OPT80's bounds are duplicates. A duplicate that drifts would silently accept
+    a claim the detector could never have made."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import collect_runs as cr  # noqa: E402
+    for vr_name, cr_name in (
+            ("_VR_OPT80_TAIL_P95_MULTIPLE", "_OPT80_TAIL_P95_MULTIPLE"),
+            ("_VR_OPT80_TAIL_P95_ABS_S", "_OPT80_TAIL_P95_ABS_S"),
+            ("_VR_OPT80_MIN_TAIL_RUNS", "_OPT80_MIN_TAIL_RUNS"),
+            ("_VR_OPT80_MIN_PROVEN_TAIL_RUNS", "_OPT80_MIN_PROVEN_TAIL_RUNS"),
+            ("_VR_OPT80_MIN_GAP_S", "_OPT80_MIN_GAP_S"),
+            ("_VR_OPT80_LOG_PROBE_MAX", "_OPT80_LOG_PROBE_MAX"),
+            ("_VR_OPT80_MIN_SAMPLED_OCCURRENCES", "_OPT80_MIN_SAMPLED_OCCURRENCES")):
+        assert getattr(vr, vr_name) == getattr(cr, cr_name), vr_name
+
+
+def test_opt80_real_detector_output_survives_its_own_verifier_arm():
+    """The coupling that matters: what the DETECTOR stamps, fed straight into the
+    arm. A hand-written block proves only that the verifier reads what the test
+    wrote."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    out, _gh = t._opt80()
+    assert len(out) == 1
+    f = out[0]
+    assert f["tier2_neutrality"]["proof"] == "checkout_tail_excess"
+    assert vr._opt80_checkout_stall_rederived(f) == []
+    # …and the arm is not a rubber stamp on real output either.
+    f["runner_min_saving"] = f["runner_min_saving"] * 3
+    assert vr._opt80_checkout_stall_rederived(f)
+
+
+def test_opt80_certificate_token_is_dispatched_to_its_own_arm():
+    """A new proof token that no branch handles falls into the `unsupported
+    proof` arm and the whole report FAILs — so the dispatch is load-bearing and
+    is pinned at source level, the same way OPT77's is."""
+    src = _VERIFY.read_text(encoding="utf-8")
+    assert 'elif proof == "checkout_tail_excess":' in src
+    assert "_opt80_checkout_stall_rederived(f)" in src
+    renderer = (_SKILL_DIR / "scripts" / "blocking_path.py").read_text(encoding="utf-8")
+    assert 'proof == "checkout_tail_excess"' in renderer, (
+        "the renderer must describe OPT80's certificate token, or the report "
+        "prints a bare token to the reader")
+
+
+def _opt80_pole_doc():
+    """A report whose rendered long pole IS the job the checkout stall is on."""
+    doc = _tier2_doc_for_verify()
+    f = _opt80_verifier_finding(
+        id="f-promoted",
+        severity="MEDIUM",
+        title="Checkout Stalls on the Tail",
+        line=12,
+        evidence="checkout p50 10s, p95 120s; 2 tail runs with a 40s proven pause",
+        realization="none",
+        runner_min_range_s=[30.0, 45.0],
+    )
+    doc["findings"] = [f]
+    return doc
+
+
+def test_tier2_accepts_a_checkout_stall_on_the_rendered_long_pole(tmp_path: Path):
+    """The pole rule is a PROXY for "the credited work is not on the merge gate".
+    `checkout_tail_excess` carries the thing the proxy stands in for: mean - p50
+    of one step cannot move the median, and the arm re-derives that subtraction
+    from the stamped per-run inputs. Suppressing the finding would hide the
+    pattern's most valuable case to satisfy an inference a measurement replaced."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "Long pole" in report and "build" in report, report[:400]
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert chk.ok and not chk.skipped, chk
+
+
+def test_tier2_still_rejects_a_non_checkout_stall_finding_on_the_rendered_long_pole(
+        tmp_path: Path):
+    """The RULE the OPT80 exemption is carved out of, pinned. Without this, the
+    carve-out's edge can regress invisibly: deleting the pole rejection entirely
+    left the whole suite green, so nothing said a below-cluster-floor claim on the
+    workflow's slowest job must still fail."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    f = doc["findings"][0]
+    f["pattern"] = "OPT65"
+    f.pop("checkout_stall", None)
+    f["tier2_neutrality"] = {"proof": "below_cluster_floor", "margin_s": 22.0}
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok, chk
+    assert "Long pole" in str(chk.detail), chk
+
+
+def test_checkout_tail_excess_token_is_refused_from_a_non_opt80_pattern(
+        tmp_path: Path):
+    """`checkout_tail_excess` buys an exemption from the pole rule AND dispatches
+    to OPT80's re-derivation. A pattern that is not OPT80 stamping the token would
+    take the exemption and skip the re-derivation that pays for it."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    doc["findings"][0]["pattern"] = "OPT65"
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok, chk
+    assert "OPT80's certificate" in str(chk.detail), chk
+
+
+def test_tier2_rederives_on_critical_path_against_the_rendered_poles(tmp_path: Path):
+    """`on_critical_path` is what the evidence's "this workflow's slowest job"
+    sentence is rendered from, and it is the exact fact the exemption turns the
+    blanket check off for. It was a bare assertion."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    doc["findings"][0]["checkout_stall"]["on_critical_path"] = False
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok, chk
+    assert "on_critical_path" in str(chk.detail), chk
+
+
+def test_tier2_still_rejects_a_non_zero_wall_clock_on_that_same_finding(tmp_path: Path):
+    """The exemption is narrow. It drops ONE inference; it does not drop the
+    direct check the inference stood in for."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    doc["findings"][0]["wall_clock_p50_s"] = 12.0
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok, chk
+    assert "wall_clock_p50_s" in str(chk.detail), chk

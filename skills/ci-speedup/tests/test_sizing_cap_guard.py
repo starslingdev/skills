@@ -321,8 +321,15 @@ _RUNTIME_MEASURED_COVERED = {"OPT19", "OPT24", "OPT25", "OPT49", "OPT50", "OPT51
 # bound to cap.
 # Their runner-minute/bill-minute sizing is covered by
 # test_tier2_wave1_detectors.py.
+# OPT80 credits a checkout step's TAIL EXCESS (mean - p50) as runner-minutes and
+# stamps wall_clock_p50_s = 0 by construction: the median run has no stall, so
+# capping the tail cannot move the p50 merge gate. With no positive wall-clock
+# claim there is no physical bound to cap — the tail runs' own improvement is
+# stamped (`tail_run_longest_pause_s`) and deliberately left uncredited. Its
+# runner-minute sizing is covered by test_tier2_wave1_detectors.py and
+# independently re-derived by verify_report's OPT80 certificate arm.
 _MEASURED_EXEMPT = {
-    "OPT43", "OPT48", "OPT46", "OPT47", "OPT64", "OPT65", "OPT77",
+    "OPT43", "OPT48", "OPT46", "OPT47", "OPT64", "OPT65", "OPT77", "OPT80",
 }  # queue/advisory/bill-only
 
 

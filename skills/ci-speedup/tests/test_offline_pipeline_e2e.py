@@ -87,7 +87,13 @@ _JOB_ID = 9001
 #            (per_page=2 also returns the PRIOR boundary, still a single call).
 #            The runs API exposes no workflow-content hash, so per-run content diffing
 #            would cost one `/contents/` fetch per run, N >> K; this is O(1) per workflow.)
-_GOLDEN_GH_QUERY_COUNT = 38
+#   40  now  (+2 OPT80 tail-run job logs. `matrix.yml`'s `smoke` job checks out in 8s on
+#            ten sampled runs and 120s on two; OPT80 fetches the log of each TAIL run —
+#            and only of a tail run — to prove the stall from the fetch's own progress
+#            lines. A job with no tail costs nothing, so this is +1 call per tail run on
+#            a firing job, bounded by `_OPT80_LOG_PROBE_MAX`, and 0 on every other repo
+#            shape.)
+_GOLDEN_GH_QUERY_COUNT = 40
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).
@@ -164,6 +170,12 @@ jobs:
       - uses: actions/checkout@v4
       - run: npm ci
       - run: npm run lint:stylelint
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run smoke
+        run: npm run smoke
 """
 
 
@@ -386,6 +398,41 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert isinstance(data.get("opt77_withheld_by_gate"), dict), (
         "the per-gate withhold tally must be stamped on every collected run")
 
+    # OPT80 end to end. `matrix.yml`'s `smoke` job checks out in 8s on ten of the
+    # twelve sampled runs and 120s on two, and each of those two runs ships a
+    # recorded checkout log whose git progress stops for 85s. This executes the
+    # detector's DISPATCH, its bounded tail-run log fetch, and the renderer +
+    # verifier arms for its certificate token — none of which any unit test can
+    # reach. Two mutants must redden it: short-circuiting the call
+    # (`new = [] if True else _detect_opt80_…`) and discarding its result
+    # (dropping the `findings.extend(new)`).
+    o80 = [f for f in data["findings"] if f.get("pattern") == "OPT80"]
+    assert len(o80) == 1, (
+        "matrix.yml's `smoke` job must promote exactly one OPT80 finding "
+        f"(got {[f.get('affected_jobs') for f in o80]!r})")
+    cs = o80[0].get("checkout_stall") or {}
+    assert cs.get("kind") == "opt80_checkout_tail_stall", cs
+    assert cs.get("job") == "smoke" and o80[0]["affected_jobs"] == ["smoke"]
+    assert cs.get("checkout_step_source") == "actions/checkout", cs
+    assert o80[0].get("wall_clock_p50_s") in (0, 0.0), (
+        "capping a tail cannot move the p50 merge gate, so no wall-clock is credited")
+    assert float(cs.get("tail_excess_s") or 0.0) > 0.0
+    assert float(cs.get("p95_s") or 0.0) >= float(cs.get("tail_threshold_s") or 0.0)
+    # The proof, not an inference from the duration: two tail runs, each with the
+    # two verbatim git progress lines that bracket the pause.
+    proven = cs.get("proven_tail_runs") or []
+    assert len(proven) == 2, proven
+    for p in proven:
+        assert float(p.get("gap_s") or 0.0) >= 20.0, p
+        assert "Receiving objects" in str((p.get("before") or {}).get("line") or ""), p
+    # The log fetch is bounded AND targeted: one call per tail run, none for the
+    # ten typical runs.
+    assert cs.get("logs_fetched") == 2, cs
+    assert cs.get("logs_fetched") <= cs.get("log_probe_max")
+    assert o80[0].get("tier2_neutrality", {}).get("proof") == "checkout_tail_excess"
+    assert isinstance(data.get("opt80_withheld_by_gate"), dict), (
+        "the per-gate withhold tally must be stamped on every collected run")
+
     # The static-scan findings come from scan.py parsing the YAML — they exist
     # regardless of gh replay, so they do NOT prove the replay wired up. Assert
     # them, but they are not the backstop.
@@ -531,6 +578,20 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert verify.returncode == 0, (
         "verify_report rejected the offline-replayed report:\n"
         f"{verify.stdout}\n{verify.stderr}")
+
+    # OPT80 reaches the READER, not just the findings document. The block above
+    # proves the detector fired and the verifier accepted it; a renderer that
+    # dropped the row would leave both green and ship a report with the stall
+    # missing. The certificate token's rendered sentence is asserted with it,
+    # because that is the one place the reader is told why a credited saving on
+    # this job does not move the merge gate.
+    o80_rendered = [f for f in data["findings"] if f.get("pattern") == "OPT80"]
+    assert "Checkout Stalls on the Tail" in report, (
+        "the OPT80 finding is in the findings document but not in the rendered "
+        "report — the renderer dropped it")
+    assert "checkout_tail_excess" in report, (
+        "OPT80's neutrality certificate must be described to the reader")
+    assert str(o80_rendered[0]["id"]) in report, o80_rendered[0]["id"]
 
     # ---- PR-H1 (G5): the promoted-path backstop — UNCONDITIONAL. -------------
     # Before this, the replay corpus promoted nothing, so the Tier-2 render

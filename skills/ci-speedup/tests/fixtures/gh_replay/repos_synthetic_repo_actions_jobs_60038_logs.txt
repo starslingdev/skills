@@ -1,0 +1,11 @@
+2026-06-24T03:00:05.0000000Z ##[group]Run actions/checkout@v4
+2026-06-24T03:00:06.0000000Z Syncing repository: synthetic/repo
+2026-06-24T03:00:07.0000000Z Fetching the repository
+2026-06-24T03:00:08.0000000Z remote: Enumerating objects: 90000, done.
+2026-06-24T03:00:10.0000000Z Receiving objects:  17% (15300/90000)
+2026-06-24T03:01:35.0000000Z Receiving objects:  17% (15300/90000)
+2026-06-24T03:02:03.0000000Z Receiving objects: 100% (90000/90000), done.
+2026-06-24T03:02:05.0000000Z ##[endgroup]
+2026-06-24T03:02:05.0000000Z ##[group]Run npm run smoke
+2026-06-24T03:02:10.0000000Z smoke ok
+2026-06-24T03:02:10.0000000Z ##[endgroup]
