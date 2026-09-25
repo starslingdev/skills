@@ -1,5 +1,5 @@
 {
- "total_count": 8,
+ "total_count": 9,
  "jobs": [
   {
    "id": 60110,
@@ -292,6 +292,69 @@
      "number": 4,
      "started_at": "2026-06-24T11:00:19Z",
      "completed_at": "2026-06-24T11:00:25Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 60119,
+   "run_id": 6011,
+   "name": "deps",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-24T01:00:40Z",
+   "completed_at": "2026-06-24T01:01:20Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/6011/job/60119",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-24T01:00:40Z",
+     "completed_at": "2026-06-24T01:00:41Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-24T01:00:41Z",
+     "completed_at": "2026-06-24T01:00:43Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/cache@v4",
+     "number": 3,
+     "started_at": "2026-06-24T01:00:43Z",
+     "completed_at": "2026-06-24T01:01:11Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm ci",
+     "number": 4,
+     "started_at": "2026-06-24T01:01:11Z",
+     "completed_at": "2026-06-24T01:01:14Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm run typecheck",
+     "number": 5,
+     "started_at": "2026-06-24T01:01:14Z",
+     "completed_at": "2026-06-24T01:01:20Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Post Run actions/cache@v4",
+     "number": 6,
+     "started_at": "2026-06-24T01:01:20Z",
+     "completed_at": "2026-06-24T01:01:20Z",
      "status": "completed",
      "conclusion": "success"
     }

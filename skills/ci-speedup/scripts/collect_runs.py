@@ -4939,6 +4939,9 @@ _SIZING: dict[str, dict[str, Any]] = {
     # jobs API steps[] and credits (N-1) removed payments of it. "measured" so
     # _size_finding never overwrites that with a static hit_rate.
     "OPT77": {"model": "measured"},  # repeated fixed setup across independent small jobs
+    # OPT79 measures both of its paths from the run logs' own hit/miss lines and
+    # the cache block's step timings; nothing static could size it.
+    "OPT79": {"model": "measured"},  # a cache that costs more than it saves
     # Hidden Failures and Dead Config.
     "OPT68": {"model": "runner-min-only", "hit_rate": 0.0},  # broken step masked — reliability
     "OPT69": {"model": "runner-min-only", "hit_rate": 0.0},  # dead env vars — cosmetic
@@ -5846,6 +5849,15 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
               "measured setup-prefix detector — basis is the per-job leading setup "
               "prefix measured from the jobs API steps[] timestamps (removed setup "
               "runtime), not the per-job cost spine and not an eliminated-runs slice"),
+    # NOT DERIVABLE — same reason, different basis. OPT79 eliminates no run
+    # either: it credits the measured excess of one job's cache block on the runs
+    # where the cache hit over the same block on the runs where it missed. The
+    # generic `measured` text would describe an eliminated-runs slice this lever
+    # does not have.
+    "OPT79": (_RM_DOOR_NOT_DERIVABLE,
+              "measured cache-block detector — basis is one job's restore + install "
+              "+ post-save step timings split by the run log's own cache hit/miss "
+              "line, not the per-job cost spine and not an eliminated-runs slice"),
     # CLAMP — the cluster-floor lever's MODELED shared-step credit (#43 proving
     # instance): clamp to the affected jobs' measured billable so it can never
     # exceed what the jobs consume (nx: 1919.7 -> <= 1404.4).
@@ -14116,6 +14128,1063 @@ _CACHE_LEAF_KEYS = frozenset({
     "install-lifecycle-build",
 })
 
+# =============================================================================
+# OPT79 — A cache that costs more than it saves (measured, Tier-2 bill lever).
+#
+# Every other cache pattern in this catalog says "add a cache". This one is the
+# same machinery pointed the other way: for a job that declares a cache-restore
+# step followed by a dependency install, the sampled runs already split into HIT
+# and MISS by the VERBATIM log line `_CACHE_HIT_RE` / `_CACHE_MISS_RE` read. If
+# the block of steps the cache owns (restore + install + the post save) measures
+# SLOWER on the runs where the cache hit than on the runs where it missed, the
+# cache is net-negative: the repo is paying to restore something it could have
+# rebuilt more cheaply.
+#
+# THE COMPARISON IS SYMMETRIC ON PURPOSE. Both sides measure the SAME step set —
+# restore + install + post — identified from the workflow YAML, never from what
+# happened to be timed in a given run. Measuring the hit path with the restore
+# step and the miss path without it would compare two different things and would
+# bias the comparison toward firing. It also makes the credited number a LOWER
+# BOUND on the real saving: after the cache is removed the miss side loses its
+# restore and its save too, so the job ends up cheaper than the miss block this
+# detector prices it at.
+# =============================================================================
+
+# Both populations must be big enough that a median means something. Three is
+# the floor the evidence guards impose on any two-population comparison: with
+# two, the "median" is an average of the only two values there are.
+_OPT79_MIN_HITS = 3
+_OPT79_MIN_MISSES = 3
+# The hit path has to be slower by more than measurement noise. GitHub stamps
+# step timestamps at ONE-SECOND granularity and this block sums up to three of
+# them, so a 1–3s "loss" is rounding, not a finding. Whichever of the two is
+# larger applies, so a 2s miss path cannot be beaten by a 20% (0.4s) margin and
+# a 200s one cannot be flagged on 5s.
+_OPT79_MIN_WASTE_S = 5.0
+_OPT79_MIN_WASTE_FRAC = 0.20
+# gh cost. Job logs are the expensive call in this engine, so the probe is
+# capped THREE times: at most this many sampled occurrences of ONE job…
+_OPT79_LOG_PROBE_MAX = 8
+# …at most this many candidate jobs per workflow. Candidates are ranked by
+# measured job p50 (the longest-running cached job first), so the cap spends the
+# budget where a net-negative cache is most likely to be worth finding. Job p50
+# is a PROXY for what the cache costs, not a measurement of it — the cache's own
+# block is only measured once its logs are read.
+_OPT79_MAX_CANDIDATE_JOBS = 2
+# …and a REPO-WIDE ceiling on top of both, because the two caps above are
+# per-workflow and a monorepo with thirty workflows would multiply them into
+# hundreds of log fetches. 24 is three full per-job probes: enough to reach the
+# two or three longest-running candidate caches in a large repo, and a hard
+# answer to "how much can this lever cost me" that does not depend on how many
+# workflow files happen to exist. The repo-wide plan is ORDERED by candidate job
+# p50 before it is sliced (`_opt79_trim_repo_probe_plan`), so the budget is spent
+# on the costliest jobs rather than on whichever workflow file was walked first.
+_OPT79_REPO_LOG_BUDGET = 24
+
+# A cache-RESTORE step, from the YAML `uses:`. `actions/cache` restores on entry
+# and saves in its post phase; `actions/cache/restore` only restores.
+_OPT79_CACHE_USES_RE = _re.compile(r"^actions/cache(/restore)?(@|$)", _re.I)
+# …and the RESTORE-ONLY spelling, which has no post phase at all. Constructing a
+# `Post <name>` label for it invents a step GitHub never renders, and an invented
+# step that measures 0s in every occurrence silently removes the save from both
+# sides of the comparison. Such a block stamps `post_step: None` instead.
+_OPT79_RESTORE_ONLY_USES_RE = _re.compile(r"^actions/cache/restore(@|$)", _re.I)
+# A `setup-*` action, whose `cache:` input turns it into a cache-restore step
+# with a built-in post-save (`actions/setup-node`, `actions/setup-python`,
+# `astral-sh/setup-uv`, …). The `setup-` must follow the slash, so
+# `pnpm/action-setup` is deliberately NOT one of these — it takes no `cache:`
+# input and does no restoring of its own.
+_OPT79_SETUP_USES_RE = _re.compile(r"^[\w.-]+/setup-[\w.-]+(@|$)", _re.I)
+# The `setup-*` family does NOT print the cache action's wording. On a miss
+# `actions/setup-node` / `setup-python` / `setup-java` / `setup-go` all emit
+# `<package manager> cache is not found` from the shared cache-distributor
+# helper, which `_CACHE_MISS_RE` ("cache not found for") cannot match — the line
+# reads "cache IS not found", with no "for". Matching only the cache action's
+# phrasing classified every setup-* HIT and no setup-* MISS, so the population
+# gate withheld on the commonest caching mechanism on GitHub, and the tally
+# blamed a thin miss population rather than an unreadable one.
+#
+# `astral-sh/setup-uv` is a third spelling again — it says neither of the above,
+# so naming it as a supported mechanism while matching neither of its lines made
+# it a candidate that burned eight log probes and then classified every run
+# `none`. Its two wordings are matched explicitly.
+#
+# Both matchers are kept LOCAL to OPT79 rather than widened into the shared
+# `_CACHE_HIT_RE` / `_CACHE_MISS_RE`, which eight other cache patterns read for a
+# different purpose. Every alternative here is a wording this repository has a
+# named vendor action for; an alternation nobody can attribute to an action is
+# not kept on the chance that something somewhere prints it.
+_OPT79_EXTRA_MISS_RE = _re.compile(
+    r"cache is not found\b|"                       # actions/setup-{node,python,java,go}
+    r"no github actions cache found for key\b",    # astral-sh/setup-uv
+    _re.I)
+_OPT79_EXTRA_HIT_RE = _re.compile(
+    r"cache restored from github actions cache with key\b",   # astral-sh/setup-uv
+    _re.I)
+# The INSTALL verbs, and only those. This is deliberately NARROWER than
+# `_SETUP_STEP_RE`, which also classifies checkout / configure / cache / restore
+# as setup: the step the cache is supposed to make cheaper is the dependency
+# install, and pairing a cache with a checkout step would price an unrelated
+# block. Every alternative here is one of `_SETUP_STEP_RE`'s install
+# alternatives (pinned by a coupling test), so the two can never disagree about
+# what an install is.
+_OPT79_INSTALL_RE = _re.compile(
+    r"^(run )?((npm|pnpm|yarn|bun) (ci|install|i)\b|"
+    r"(pip3?|pipenv|poetry|uv) (install|sync)\b|"
+    r"uv pip install\b|python3? -m pip install\b|"
+    r"bundle install\b|composer install\b|mix deps\.get\b|"
+    r"go mod download\b|cargo fetch\b|mvn dependency:)",
+    _re.IGNORECASE,
+)
+
+# THE stamped contract between this detector and `verify_report.py`'s
+# re-derivation arm. The verifier cannot import this module (it is standalone by
+# design), so it declares the same tuple and a coupling test asserts the two are
+# identical — one list, two readers, no drift.
+#
+# ONE tuple for BOTH outputs. A credited finding and an uncredited pole row are
+# the same measurement; only the sizing differs. The uncredited row used to be a
+# hand-built subset that shipped `waste_s` and the two medians as bare
+# assertions, with no `per_run` to re-derive them from — unverifiable by the
+# report's own self-check, and missing exactly the fields the sizing follow-up
+# needs. Both are now built by `_opt79_stamp`.
+_OPT79_STAMP_KEYS = (
+    "kind",
+    "job",
+    "runner_label",
+    "cache_ref",
+    "restore_step", "install_step", "post_step",
+    "per_run",
+    "hits", "misses", "classified_runs", "ambiguous_runs",
+    "occurrences_on_other_runner",
+    "hit_path_p50_s", "miss_path_p50_s", "waste_s",
+    "waste_floor_s", "hit_share",
+    "job_runs", "sampled_successful_run_count",
+    "monthly_volume", "effective_monthly_volume",
+    "runner_min_saving",
+)
+# The two `kind` tags the stamp carries, and the findings-doc key the uncredited
+# rows travel under. The key is a STRING CONTRACT between the collector (which
+# writes it) and `blocking_path` (which renders it); renaming it on one side used
+# to silently stop the line rendering, so it is a named constant on both sides
+# and a coupling test pins them equal.
+_OPT79_CREDITED_KIND = "opt79_net_negative_cache"
+_OPT79_UNCREDITED_KIND = "opt79_uncredited_pole_cache"
+_OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
+
+
+def _opt79_yaml_step_display(step: dict[str, Any]) -> str | None:
+    """A YAML step's name AS GITHUB RENDERS IT in the jobs API `steps[]` — the
+    `name:` when there is one, else `Run <uses>` for an action and
+    `Run <first line of run:>` for a script. Same construction
+    `_consolidation_yaml_setup_fingerprint` uses; it is what lets a step be
+    identified in the YAML and then measured in the run data."""
+    if not isinstance(step, dict):
+        return None
+    if step.get("name"):
+        return " ".join(str(step["name"]).split())
+    uses = str(step.get("uses") or "").strip()
+    if uses:
+        return f"Run {uses}"
+    run = str(step.get("run") or "")
+    if run.strip():
+        return "Run " + " ".join(run.strip().splitlines()[0].split())
+    return None
+
+
+def _opt79_yaml_step_command(step: dict[str, Any]) -> str | None:
+    """What a step DOES, ignoring whatever it was named — `Run <uses>` for an
+    action, `Run <first line of run:>` for a script.
+
+    This is what the install classifier must read. `_opt79_yaml_step_display`
+    prefers the author's `name:`, which is the right answer for finding the
+    step's DURATION in the run data (GitHub renders the name), and the wrong one
+    for deciding what the step IS: `- name: Install dependencies / run: npm ci`
+    is the commonest spelling of the very step this pattern prices, and no
+    install verb appears in its display name."""
+    if not isinstance(step, dict):
+        return None
+    uses = str(step.get("uses") or "").strip()
+    if uses:
+        return f"Run {uses}"
+    run = str(step.get("run") or "")
+    if run.strip():
+        return "Run " + " ".join(run.strip().splitlines()[0].split())
+    return None
+
+
+def _opt79_run_is_only_installs(step: dict[str, Any]) -> bool | None:
+    """`True` when EVERY command line of a step's `run:` block is a dependency
+    install, `False` when it mixes one with something else, `None` when the step
+    runs no script at all.
+
+    `_opt79_yaml_step_command` reads the FIRST line only, which is the right
+    answer for what a step is called and the wrong one for what it costs:
+    `run: |` / `pip install -e .` / `pytest -q` classifies as "the install" and
+    then charges the entire test suite to both sides of the comparison. A block
+    that does more than install is not the step this pattern prices, so it
+    withholds rather than measuring the wrong thing."""
+    if not isinstance(step, dict) or str(step.get("uses") or "").strip():
+        return None
+    lines = [ln.strip() for ln in str(step.get("run") or "").splitlines()]
+    lines = [ln for ln in lines if ln and not ln.startswith("#")]
+    if not lines:
+        return None
+    return all(bool(_OPT79_INSTALL_RE.match(ln)) for ln in lines)
+
+
+def _opt79_cache_block(key: str, wf_doc: dict[str, Any]
+                       ) -> tuple[dict[str, Any] | None, str]:
+    """`({restore, install, post, cache_ref}, "")` for a job whose YAML declares
+    ONE cache-restore step followed by an install step, else `(None, gate)`.
+
+    Read entirely from the workflow file, never from the observed step list. The
+    run data supplies DURATIONS only: GitHub's one-second step granularity drops
+    a sub-second step from `_step_durations` entirely, so a restore that measured
+    0s in one run and 1s in the next would otherwise change which step this
+    detector thinks is the restore — and a comparison whose step set moves
+    between runs is not a comparison.
+
+    Fail-closed in six places, each its own gate so a zero firing rate is
+    attributable:
+
+      * MORE THAN ONE cache-restore step in the job. A job restoring two caches
+        cannot be priced from one hit/miss verdict — the log's hit line may
+        belong to either. Never guessed.
+      * NO install step after the cache step. Then the cache is not paying for an
+        install and the two-path model does not describe it.
+      * an AMBIGUOUS display name (the same rendered name on two declared steps).
+        The durations are matched back by that name, so a duplicate makes the
+        measurement unattributable.
+      * a `setup-*` action whose `cache:` input is an UNEVALUATED EXPRESSION
+        (`cache: ${{ inputs.cache }}`). The static parse cannot know whether it
+        resolves to a package manager or to `false`, and the truthy non-empty
+        string used to buy eight log probes for a job that may cache nothing.
+      * a job with NO YAML steps at all.
+      * an install step whose `run:` block runs MORE than the install.
+    """
+    jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
+    spec = jobs.get(key) if isinstance(jobs, dict) else None
+    steps = (spec if isinstance(spec, dict) else {}).get("steps")
+    if not isinstance(steps, list) or not steps:
+        return None, "job_has_no_yaml_steps"
+
+    displays: list[str | None] = [_opt79_yaml_step_display(s) for s in steps]
+    cache_idx: list[int] = []
+    cache_ref = ""
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        uses = str(step.get("uses") or "").strip()
+        if not uses:
+            continue
+        if _OPT79_CACHE_USES_RE.match(uses):
+            cache_idx.append(i)
+            cache_ref = uses
+            continue
+        if _OPT79_SETUP_USES_RE.match(uses):
+            with_in = step.get("with") if isinstance(step.get("with"), dict) else {}
+            cache_in = str((with_in or {}).get("cache") or "").strip()
+            # `cache: ${{ … }}` is not a yes. It is a non-empty truthy string
+            # whose value this static parse cannot know, and reading it as "this
+            # job caches" bought eight job-log fetches for a job whose cache may
+            # be switched off on every run that matters.
+            if "${{" in cache_in:
+                return None, "setup_cache_input_is_an_unevaluated_expression"
+            # `cache: ''` / `cache: false` is the action's own "no cache" spelling
+            # and must not be read as one.
+            if cache_in and cache_in.lower() not in ("false", "no", "off"):
+                cache_idx.append(i)
+                cache_ref = uses
+    if not cache_idx:
+        return None, "job_declares_no_cache_restore_step"
+    if len(cache_idx) > 1:
+        return None, "job_declares_more_than_one_cache_restore_step"
+
+    ci = cache_idx[0]
+    restore = displays[ci]
+    if not restore:
+        return None, "cache_step_has_no_renderable_name"
+    install = None
+    for j in range(ci + 1, len(steps)):
+        d = displays[j]
+        if not d:
+            continue
+        # Classify on the COMMAND, and ONLY on the command when there is one: a
+        # named step (`name: Install dependencies`) hides its verb, an unnamed
+        # one is its verb — but a step NAMED `npm ci` that RUNS `npm run build`
+        # is not an install, and the old `name OR command` test priced it as one.
+        # The display name is still what the duration is looked up by.
+        cmd = _opt79_yaml_step_command(steps[j])
+        is_install = bool(_OPT79_INSTALL_RE.match(cmd)) if cmd \
+            else bool(_OPT79_INSTALL_RE.match(d))
+        if not is_install:
+            continue
+        if _opt79_run_is_only_installs(steps[j]) is False:
+            return None, "install_step_also_runs_non_install_commands"
+        install = d
+        break
+    if not install:
+        return None, "no_install_step_after_the_cache_step"
+    # GitHub renders an action's post phase as `Post ` + the step's display name.
+    # Whether it actually RAN is a duration question; whether it EXISTS is not —
+    # `actions/cache/restore` has no post phase, so there is no save to measure
+    # and the block says so with `None` rather than inventing a label that would
+    # measure 0s forever and quietly drop the save from the miss side.
+    post = None if _OPT79_RESTORE_ONLY_USES_RE.match(cache_ref) \
+        else f"Post {restore}"
+    named = [d for d in displays if d]
+    for label in (restore, install):
+        if named.count(label) > 1:
+            return None, "step_display_name_is_ambiguous_within_the_job"
+    return ({"restore": restore, "install": install, "post": post,
+             "cache_ref": cache_ref}, "")
+
+
+def _opt79_block_durations(job: dict[str, Any], block: dict[str, Any]
+                           ) -> tuple[dict[str, float], dict[str, bool], str]:
+    """`({restore, install, post}, {slot: present}, "")` in seconds for one job
+    occurrence, else `({}, {}, gate)`.
+
+    A step the YAML declares that the run RENDERED but did not time measures
+    0.0s: `_step_durations` drops every 0-duration step, and letting that drop
+    change the block would make a sub-second restore look like a different job
+    shape. A name that appears TWICE in the timed list is unattributable and
+    withholds the occurrence rather than picking one.
+
+    "Rendered but sub-second" and "not there at all" are DIFFERENT facts, and
+    conflating them fails OPEN on the term that matters most. On `actions/cache`
+    the save runs on a MISS, so the post step is a big number on the miss side
+    and nothing on the hit side; zeroing it because the label never matched (a
+    constructed `Post <name>` that does not match what GitHub rendered) or
+    because the step never finished removes that term from the miss path and
+    MANUFACTURES the excess this pattern reports. So the second return value says
+    whether each slot's label was rendered in this occurrence at all — the
+    detector requires it to be true SOMEWHERE — and a step that started and never
+    completed withholds the occurrence outright."""
+    rendered: set[str] = set()
+    incomplete: set[str] = set()
+    for s in job.get("steps") or []:
+        if not isinstance(s, dict):
+            continue
+        nm = " ".join(str(s.get("name", "")).split())
+        rendered.add(nm)
+        if s.get("started_at") and not s.get("completed_at"):
+            incomplete.add(nm)
+    timed: dict[str, list[float]] = {}
+    for name, dur in _step_durations(job):
+        timed.setdefault(" ".join(str(name).split()), []).append(float(dur))
+    out: dict[str, float] = {}
+    present: dict[str, bool] = {}
+    for slot in ("restore", "install", "post"):
+        label = block.get(slot)
+        if not label:
+            # `actions/cache/restore` declares no post phase. Nothing to find,
+            # nothing to fail open on.
+            out[slot] = 0.0
+            present[slot] = True
+            continue
+        label = " ".join(str(label).split())
+        if label in incomplete:
+            return {}, {}, "step_did_not_complete_in_this_occurrence"
+        vals = timed.get(label) or []
+        if len(vals) > 1:
+            return {}, {}, "step_measured_more_than_once_in_one_occurrence"
+        out[slot] = float(vals[0]) if vals else 0.0
+        present[slot] = label in rendered
+    # The install has to have actually run. A 0s install is either a job that
+    # short-circuited or a step this occurrence never reached; either way there
+    # is no install cost to compare.
+    if out["install"] <= 0:
+        return {}, {}, "install_step_did_not_measure_in_this_occurrence"
+    return out, present, ""
+
+
+def _opt79_restore_step_group(log: str, block: dict[str, Any]
+                              ) -> tuple[list[str], str]:
+    """The lines of the job log that belong to the cache RESTORE step, and the
+    `##[group]` header they were found under — `([], "")` when that group is not
+    in the log.
+
+    GitHub wraps each step's output in `##[group]<the step's rendered command>` …
+    `##[endgroup]`. The header is `Run <uses>` for an action, so a cache step
+    carrying an author's `name:` is matched on `Run <cache_ref>` as well as on
+    its display name."""
+    wanted = {" ".join(str(block.get("restore") or "").split())}
+    ref = str(block.get("cache_ref") or "").strip()
+    if ref:
+        wanted.add(f"Run {ref}")
+    wanted.discard("")
+    header = ""
+    picked: list[str] = []
+    inside = False
+    for raw_line in (log or "").splitlines():
+        if "##[group]" in raw_line:
+            if inside:
+                break
+            name = " ".join(raw_line.split("##[group]", 1)[1].split())
+            if name in wanted:
+                inside, header = True, name
+            continue
+        if not inside:
+            continue
+        if "##[endgroup]" in raw_line:
+            break
+        picked.append(raw_line)
+    return (picked, header) if inside else ([], "")
+
+
+def _opt79_classify_log(log: str, block: dict[str, Any]) -> tuple[str, str, str]:
+    """`(status, verbatim line, the log group the line came from)` for one job
+    log: `hit`, `miss`, `both` (a multi-cache job — excluded, never guessed),
+    `none`, or `unscoped` when the restore step's log group is not in the log.
+
+    SCOPED to the restore step's own `##[group]` block, which is the difference
+    between reading this job's cache and reading the repository's build tools.
+    Turborepo prints `cache miss, executing <task>` for every uncached task,
+    Gradle prints `Build cache miss for task …` and buildx prints its own — all
+    matched by `_CACHE_MISS_RE`, all in the TEST step's output, none of them
+    about the `actions/cache` step. Unscoped, every genuine cache HIT in a
+    JavaScript monorepo read as `both` and was discarded, and the withhold tally
+    blamed "a job with two caches" on a job the YAML gate had already proved has
+    exactly one. The lever was deadest where `node_modules` is largest.
+
+    A MISS line FOLLOWED BY a HIT line inside that one group is not two caches:
+    it is `restore-keys`, the commonest `actions/cache` spelling, reporting that
+    the exact key missed and a prefix fallback was restored. The restore ran and
+    was paid for, so it is a `hit`. A HIT followed by a MISS is still `both`."""
+    lines, group = _opt79_restore_step_group(log, block)
+    if not group:
+        return "unscoped", "", ""
+    hit_line = miss_line = ""
+    hit_at = miss_at = -1
+    for idx, raw_line in enumerate(lines):
+        if not miss_line and (_CACHE_MISS_RE.search(raw_line)
+                              or _OPT79_EXTRA_MISS_RE.search(raw_line)):
+            miss_line, miss_at = _clean_log_line(raw_line), idx
+        if not hit_line and (_CACHE_HIT_RE.search(raw_line)
+                             or _OPT79_EXTRA_HIT_RE.search(raw_line)):
+            hit_line, hit_at = _clean_log_line(raw_line), idx
+        if hit_line and miss_line:
+            break
+    if hit_line and miss_line:
+        if miss_at < hit_at:
+            return "hit", hit_line, group
+        return "both", hit_line, group
+    if hit_line:
+        return "hit", hit_line, group
+    if miss_line:
+        return "miss", miss_line, group
+    return "none", "", group
+
+
+def _opt79_candidates(
+    wf_path: str,
+    jobs_per_run: list[list[dict[str, Any]]],
+    crit: dict[str, Any],
+    wf_doc: dict[str, Any] | None,
+    withheld: dict[str, int] | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    """The jobs worth spending a log probe on, most expensive first — the ONE
+    selector shared by the log plan and the detector, so the two can never
+    disagree about which jobs were measured.
+
+    Every gate here is answered from data already in hand (workflow YAML + the
+    sampled jobs' own timings), so a job whose SHAPE rules it out — no cache, two
+    caches, no install after the cache — costs no log fetch. It is no longer true
+    that a fetched log always belongs to a job that could produce a CREDITED
+    finding: since the cluster-floor test left this selector, the workflow's
+    slowest job is probed too, and what it produces is an uncredited line.
+
+    Deliberately NOT gated on the monthly volume: the plan pass has only the
+    unscoped volume in hand while the detector uses the event-scoped one, and a
+    selector that disagreed with itself between the two would fetch logs for a
+    job the detector never measures (or, worse, measure a job whose logs were
+    never fetched). The volume gate lives in the detector, which is the only
+    place the credited figure is computed.
+
+    `withheld` is passed ONLY by the detector pass. The plan pass runs the same
+    gates to decide what to fetch and must not double-count them."""
+    def _no(gate: str, **ctx: Any) -> None:
+        if withheld is not None:
+            withheld[gate] = withheld.get(gate, 0) + 1
+        logger.debug("OPT79 %s: withheld by %s%s", wf_path, gate,
+                     (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items())) if ctx else "")
+
+    if not jobs_per_run:
+        _no("no_sampled_runs")
+        return []
+    doc = wf_doc if isinstance(wf_doc, dict) else {}
+    if not isinstance(doc.get("jobs"), dict):
+        # The cache block is read from the YAML, so an unparsed workflow (or a run
+        # with PyYAML unavailable) disables OPT79 for it. Silently, until this line.
+        _no("workflow_yaml_unparsed")
+        return []
+    job_p50 = crit.get("job_p50") or {}
+    if not job_p50:
+        _no("no_job_p50")
+        return []
+    floor = float(crit.get("floor_p50") or 0.0)
+    if floor <= 0:
+        _no("workflow_has_no_cluster_floor")
+        return []
+    lp_job = str(crit.get("long_pole_job") or "")
+    lp_p50 = float(crit.get("long_pole_p50") or 0.0)
+
+    # A display name carried by more than one job in a single run is not one job
+    # (a matrix declaring a static `name:`), and its steps cannot be attributed.
+    collided: set[str] = set()
+    for run_jobs in jobs_per_run:
+        seen: set[str] = set()
+        for job in run_jobs:
+            nm = str(job.get("name") or "").strip()
+            if nm in seen:
+                collided.add(nm)
+            seen.add(nm)
+    # Counted PER JOB, not once for the workflow: the tally's unit everywhere
+    # else is the candidate, and a matrix collapsing six names into one used to
+    # add 1 to the gate while six jobs went unmeasured.
+    for _nm in sorted(collided):
+        _no("job_name_is_not_one_job", job=_nm)
+
+    names: list[str] = []
+    for run_jobs in jobs_per_run:
+        for job in run_jobs:
+            nm = str(job.get("name") or "").strip()
+            if nm and nm not in names:
+                names.append(nm)
+
+    out: list[tuple[float, str, dict[str, Any]]] = []
+    for name in sorted(names):
+        if name in collided:
+            continue
+        p50 = float(job_p50.get(name) or 0.0)
+        if p50 <= 0:
+            _no("job_no_strict_p50", job=name)
+            continue
+        key = _consolidation_yaml_key(name, doc)
+        if not key:
+            _no("job_name_resolves_to_no_single_yaml_job", job=name)
+            continue
+        # The cache-shape gates run BEFORE the runner and floor gates on purpose.
+        # Most jobs in a workflow declare no cache at all, and counting them
+        # against a runner or floor gate would bury the counts that matter under
+        # the whole workflow's job list — the tally exists to say why a REAL
+        # candidate was withheld.
+        block, gate = _opt79_cache_block(str(key), doc)
+        if block is None:
+            _no(gate, job=name)
+            continue
+        declared = _billed_job_runner(name, crit)
+        if not declared:
+            _no("runner_label_not_one_known_billed_label", job=name)
+            continue
+        # THE NEUTRALITY TEST, and the reason this lever credits runner-minutes
+        # only. A job strictly below the workflow's cluster floor cannot set the
+        # merge gate, so making it faster provably cannot make the gate longer —
+        # which is the certificate a credited finding ships.
+        #
+        # It is recorded here and NOT gated on. A cache on the slowest job is the
+        # case where this waste sits on the merge wait, so it is worth the most;
+        # skipping it in the selector meant its logs were never fetched and its
+        # cache was never classified, which is not "withheld pending sizing", it
+        # is never looked at. Such a job is measured like any other and reported
+        # UNCREDITED (no minutes, no certificate) — see the detector. Sizing the
+        # speedup needs the wall-clock bound cascade the spine owns and is a
+        # follow-up; saying nothing at all was the worse answer.
+        below = bool(p50 < floor)
+        block = dict(block)
+        block["yaml_key"] = str(key)
+        block["runner_label"] = declared
+        block["job_p50_s"] = round(p50, 1)
+        block["floor_p50_s"] = round(floor, 1)
+        block["below_cluster_floor"] = below
+        # WHICH job is at or above the floor matters to what the report may say.
+        # `not below` covers everything from the SECOND-ranked job upwards, and
+        # only the long pole itself sets the merge wait. Stamped so the renderer
+        # can tell the two apart instead of calling both of them "the slowest
+        # job" (the second-slowest job's saving is pure runner-minutes, and
+        # telling its owner the time is on the merge wait is simply false).
+        block["long_pole_job"] = lp_job
+        block["long_pole_p50_s"] = round(lp_p50, 1)
+        block["is_long_pole"] = bool(lp_job) and name == lp_job
+        out.append((p50, name, block))
+
+    out.sort(key=lambda t: (-t[0], t[1]))
+    if len(out) > _OPT79_MAX_CANDIDATE_JOBS:
+        for _p, name, _b in out[_OPT79_MAX_CANDIDATE_JOBS:]:
+            _no("beyond_the_per_workflow_candidate_log_budget", job=name,
+                budget=_OPT79_MAX_CANDIDATE_JOBS)
+    return [(name, block) for _p, name, block in out[:_OPT79_MAX_CANDIDATE_JOBS]]
+
+
+def _opt79_log_plan(
+    wf_path: str,
+    jobs_per_run: list[list[dict[str, Any]]],
+    crit: dict[str, Any],
+    wf_doc: dict[str, Any] | None,
+) -> list[tuple[float, str, dict[str, Any]]]:
+    """The job occurrences whose logs OPT79 needs, as
+    `(candidate job p50, workflow file, job dict)` so the caller can plan the
+    fetch in one wave, order the repo-wide budget by cost, and hand the result
+    straight back to the detector.
+
+    At most `_OPT79_LOG_PROBE_MAX` occurrences per candidate job, taken in the
+    order `jobs_per_run` arrives in. THAT ORDER IS THE SAMPLER'S, newest run
+    first, and this function does not re-sort — `test_opt79_log_plan_takes_the_
+    runs_in_the_order_it_is_given` pins the assumption so a sampler that starts
+    handing runs over oldest-first cannot silently change which occurrences the
+    comparison is built from."""
+    out: list[tuple[float, str, dict[str, Any]]] = []
+    for name, block in _opt79_candidates(wf_path, jobs_per_run, crit, wf_doc):
+        p50 = float(block.get("job_p50_s") or 0.0)
+        picked = 0
+        for run_jobs in jobs_per_run:
+            if picked >= _OPT79_LOG_PROBE_MAX:
+                break
+            job = next((j for j in run_jobs
+                        if str(j.get("name") or "").strip() == name
+                        and _job_has_log(j) and j.get("id")), None)
+            if job is None:
+                # This run either did not carry the job or carries no fetchable
+                # log for it. Not a withhold (the detector counts the occurrence
+                # it never got a log for), but not silent either.
+                logger.debug("OPT79 %s: no log-bearing occurrence of %r in one "
+                             "sampled run", wf_path, name)
+                continue
+            out.append((p50, wf_path, job))
+            picked += 1
+    return out
+
+
+def _opt79_trim_repo_probe_plan(
+    plan: list[tuple[float, str, dict[str, Any]]],
+    withheld: dict[str, int] | None = None,
+) -> list[tuple[float, str, dict[str, Any]]]:
+    """The repo-wide log-probe plan cut to `_OPT79_REPO_LOG_BUDGET`, COSTLIEST
+    CANDIDATE FIRST.
+
+    The two caps inside the plan are per workflow; this is the ceiling over all
+    of them. It used to slice the list in the order the workflow files happened
+    to be walked, so in a monorepo the budget was spent on whichever files came
+    first and the longest-running cached job in the repository could be dropped
+    for a trivial one. Sorting by the candidate's measured job p50 (a proxy for
+    what its cache can cost, not a measurement of it) spends the budget where a
+    net-negative cache is worth most. The sort is stable, so occurrences of one
+    job keep their newest-first order.
+
+    Everything cut is COUNTED. A dropped occurrence reaches the detector as a job
+    with no captured log; leaving the drop untallied made a budget decision this
+    engine took look like data GitHub did not have."""
+    ordered = sorted(plan, key=lambda t: -t[0])
+    kept, dropped = ordered[:_OPT79_REPO_LOG_BUDGET], ordered[_OPT79_REPO_LOG_BUDGET:]
+    if dropped:
+        logger.debug("OPT79: log probe plan of %d occurrence(s) trimmed to the "
+                     "repo-wide budget of %d, costliest candidate first",
+                     len(plan), _OPT79_REPO_LOG_BUDGET)
+        if withheld is not None:
+            withheld["beyond_the_repo_wide_log_budget"] = (
+                withheld.get("beyond_the_repo_wide_log_budget", 0) + len(dropped))
+    return kept
+
+
+def _opt79_stamp(
+    *,
+    kind: str,
+    job: str,
+    block: dict[str, Any],
+    rows: list[dict[str, Any]],
+    hits: int,
+    misses: int,
+    ambiguous: int,
+    other_runner: int,
+    hit_p50: float,
+    miss_p50: float,
+    waste: float,
+    waste_floor: float,
+    hit_share: float,
+    job_runs: int,
+    sampled: int,
+    monthly_volume: int | None,
+    effective: float,
+    runner_min_saving: float | None,
+) -> dict[str, Any]:
+    """THE measured block, built ONCE for both of this detector's outputs.
+
+    A credited finding and an uncredited pole row differ in exactly two things:
+    the `kind` tag and whether there are minutes. Everything else — the per-run
+    rows the verifier re-derives the medians from, the populations, the
+    multipliers — is the same measurement, so it is the same builder. The
+    uncredited row used to be assembled by hand from a subset: `waste_s` and both
+    medians shipped as bare assertions with no `per_run` behind them, which made
+    them unverifiable by the report's own self-check and useless to the sizing
+    follow-up, which needs the volumes and the hit share this drops."""
+    return {
+        "kind": kind,
+        "job": job,
+        "runner_label": str(block["runner_label"]),
+        "cache_ref": str(block.get("cache_ref") or ""),
+        "restore_step": block["restore"],
+        "install_step": block["install"],
+        "post_step": block["post"],
+        "per_run": rows,
+        "hits": hits,
+        "misses": misses,
+        "classified_runs": hits + misses,
+        "ambiguous_runs": ambiguous,
+        "occurrences_on_other_runner": other_runner,
+        "hit_path_p50_s": round(hit_p50, 1),
+        "miss_path_p50_s": round(miss_p50, 1),
+        "waste_s": waste,
+        "waste_floor_s": waste_floor,
+        "hit_share": round(hit_share, 4),
+        "job_runs": job_runs,
+        "sampled_successful_run_count": sampled,
+        "monthly_volume": int(monthly_volume or 0),
+        "effective_monthly_volume": round(effective, 3),
+        "runner_min_saving": runner_min_saving,
+    }
+
+
+def _detect_opt79_net_negative_cache(
+    wf_path: str,
+    jobs_per_run: list[list[dict[str, Any]]],
+    crit: dict[str, Any],
+    wf_doc: dict[str, Any] | None,
+    monthly_volume: int | None,
+    start_idx: int,
+    logs_by_job_id: dict[Any, str] | None = None,
+    withheld: dict[str, int] | None = None,
+    uncredited: list[dict[str, Any]] | None = None,
+    is_pr: bool = False,
+) -> list[dict[str, Any]]:
+    """A cache that costs more than it saves (catalog OPT79) — measured.
+
+    Sizing model: the cache's own step block (restore + install + post save)
+    measured on the runs where the cache HIT, against the same block on the runs
+    where it MISSED, both classified by the verbatim log line. The excess is per
+    HIT run, so the month's worth of it is
+
+        runner_min = waste_s x hit_share x effective_monthly_volume / 60
+
+    where `effective_monthly_volume` is the workflow's monthly volume scaled by
+    how often this job actually ran in the sample (`_effective_volume`), so a
+    conditional job is not billed at the whole workflow's frequency.
+
+    A CREDITED finding stamps `wall_clock_p50_s = 0` and a `below_cluster_floor`
+    certificate: its job's p50 sits strictly below the workflow's cluster floor,
+    so shrinking it cannot lengthen the merge gate.
+
+    A job that measures net-negative but is NOT strictly below the floor is
+    reported UNCREDITED, through `uncredited` rather than the return value: no
+    minutes, no certificate, no Tier-2 row — one honest line saying the cache was
+    measured and that this version cannot prove shrinking it leaves the merge
+    gate alone. Only the workflow's LONG POLE, on a workflow that can gate a PR,
+    actually carries the merge wait (`on_critical_path`); the second-slowest job
+    and everything at the floor carries pure runner-minutes, and is uncredited
+    only because this version has not sized the neutrality argument for it. That
+    distinction is stamped on the row, not left to the renderer to guess. The
+    long-pole case is the most valuable one this pattern sees, and it is
+    measured exactly like any other; only the sizing is deferred (routing the
+    excess through the wall-clock bound cascade, capped at the next-tallest job,
+    is the follow-up). Reporting it uncredited beats the old behaviour, which
+    skipped it in the selector so its logs were never fetched at all — a silence
+    no reader could tell from "this repository has no such cache".
+
+    Every exit is COUNTED into `withheld` (a `{gate: count}` accumulator the
+    caller stamps onto the findings doc) and logged at DEBUG. An empty return is
+    otherwise indistinguishable from a dead detector — the failure mode that
+    shipped twice on this lever's two predecessors — and the tests that pin
+    "withholds nothing" assert exactly what a broken detector returns."""
+    def _no(gate: str, **ctx: Any) -> None:
+        if withheld is not None:
+            withheld[gate] = withheld.get(gate, 0) + 1
+        logger.debug("OPT79 %s: withheld by %s%s", wf_path, gate,
+                     (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items())) if ctx else "")
+
+    if not monthly_volume or monthly_volume <= 0 or not jobs_per_run:
+        _no("no_monthly_volume_or_no_sampled_runs", monthly_volume=monthly_volume,
+            sampled_runs=len(jobs_per_run))
+        return []
+    logs = logs_by_job_id or {}
+    candidates = _opt79_candidates(
+        wf_path, jobs_per_run, crit, wf_doc, withheld=withheld)
+    if not candidates:
+        return []
+
+    sampled = len(jobs_per_run)
+    title = "A Cache That Costs More Than It Saves"
+    out: list[dict[str, Any]] = []
+    for name, block in candidates:
+        declared = str(block["runner_label"])
+        job_runs = 0
+        rows: list[dict[str, Any]] = []
+        ambiguous = 0
+        unread = 0
+        other_runner: list[str] = []
+        seen_any = {"restore": False, "post": False}
+        for run_jobs in jobs_per_run:
+            job = next((j for j in run_jobs
+                        if str(j.get("name") or "").strip() == name), None)
+            if job is None:
+                continue
+            dur = _job_duration_s(job)
+            if dur is None or dur <= 0:
+                # A job with no readable wall time is not a run that did not
+                # happen. It also never reaches `job_runs`, which scales the
+                # monthly volume, so an unparseable occurrence quietly makes the
+                # job look more conditional than it is.
+                _no("occurrence_duration_unparseable", job=name,
+                    started_at=job.get("started_at"),
+                    completed_at=job.get("completed_at"))
+                continue
+            job_runs += 1
+            log = logs.get(job.get("id"))
+            if not log:
+                unread += 1
+                # NOT a thin hit/miss population — a run nobody looked at. The
+                # repo-wide probe budget, an expired log and a 404 all land
+                # here, and folding them into the population gates would report
+                # "we looked and found little" for "we never looked".
+                _no("occurrence_has_no_captured_log", job=name)
+                continue
+            status, line, group = _opt79_classify_log(log, block)
+            if status == "unscoped":
+                # Without the restore step's own `##[group]` block there is no
+                # way to tell its cache line from a build tool's. Never guessed:
+                # `cache miss, executing …` from Turborepo in the test step would
+                # otherwise classify a hit run as a two-cache job.
+                _no("restore_step_log_group_not_found_in_the_run_log", job=name)
+                continue
+            if status == "both":
+                # A job whose log shows BOTH lines restored one cache and missed
+                # another: the block's cost cannot be attributed to one verdict.
+                ambiguous += 1
+                _no("run_log_shows_both_a_hit_and_a_miss_line", job=name)
+                continue
+            if status == "none":
+                _no("run_log_shows_no_cache_hit_or_miss_line", job=name)
+                continue
+            label = _occurrence_runner_label(job) or ""
+            if label != declared:
+                other_runner.append(label)
+                _no("occurrence_ran_on_another_runner_label", job=name,
+                    declared=declared, observed=label)
+                continue
+            durs, present, gate = _opt79_block_durations(job, block)
+            if not durs:
+                _no(gate, job=name)
+                continue
+            for _slot in ("restore", "post"):
+                seen_any[_slot] = seen_any[_slot] or bool(present.get(_slot))
+            rows.append({
+                "run_url": str(job.get("html_url", "")).split("/job/")[0],
+                "job_url": str(job.get("html_url", "")),
+                "status": status,
+                "log_line": line,
+                "log_line_group": group,
+                "runner_label": label,
+                "restore_s": round(durs["restore"], 1),
+                "install_s": round(durs["install"], 1),
+                "post_s": round(durs["post"], 1),
+                "block_s": round(durs["restore"] + durs["install"] + durs["post"], 1),
+            })
+
+        # A step the YAML declares that NO occurrence rendered was never
+        # measured, and a slot that was never measured is 0.0s on every run —
+        # which for the post save is a fail-OPEN zero on the miss side, where the
+        # save actually runs. The commonest cause is the constructed
+        # `Post <name>` label not matching what GitHub rendered; the effect is a
+        # manufactured excess. `actions/cache/restore` declares no post phase at
+        # all and is exempt by construction (`post_step` is None).
+        if rows and not seen_any["restore"]:
+            _no("restore_step_never_measured_in_any_occurrence", job=name,
+                step=block["restore"])
+            continue
+        if rows and block.get("post") and not seen_any["post"]:
+            _no("post_step_never_measured_in_any_occurrence", job=name,
+                step=block["post"])
+            continue
+
+        hits = [r for r in rows if r["status"] == "hit"]
+        misses = [r for r in rows if r["status"] == "miss"]
+        classified = len(hits) + len(misses)
+        if unread and (len(hits) < _OPT79_MIN_HITS
+                       or len(misses) < _OPT79_MIN_MISSES):
+            # A partially-failed probe wave is not a thin hit/miss population. A
+            # budget trim, an expired log and a 404 all land here, and reporting
+            # them as `fewer_than_min_*_runs_classified` says "we looked and this
+            # cache rarely misses" about runs nobody read.
+            _no("population_truncated_by_unread_logs", job=name,
+                unread=unread, classified=classified,
+                hits=len(hits), misses=len(misses))
+            continue
+        if len(hits) < _OPT79_MIN_HITS:
+            _no("fewer_than_min_hit_runs_classified", job=name, hits=len(hits),
+                minimum=_OPT79_MIN_HITS)
+            continue
+        if len(misses) < _OPT79_MIN_MISSES:
+            _no("fewer_than_min_miss_runs_classified", job=name,
+                misses=len(misses), minimum=_OPT79_MIN_MISSES)
+            continue
+        hit_share = len(hits) / float(classified)
+        if hit_share < _CACHE_TAIL_MIN_FRAC:
+            # A cache that almost never hits has a KEY problem, not a cost
+            # problem — OPT6/OPT8 own that. Route there; never double-report.
+            _no("hit_share_below_the_tail_floor", job=name,
+                hit_share=round(hit_share, 3), floor=_CACHE_TAIL_MIN_FRAC)
+            continue
+        # Rounded BEFORE the waste is taken, because these are the numbers that
+        # get stamped and the verifier re-derives the waste from the stamped
+        # medians. Subtracting the unrounded pair can differ by 0.1 from
+        # subtracting the rounded one, which on an even-sized population is
+        # enough to re-derive a floor-passing finding just under the floor and
+        # redden an honest report.
+        hit_p50 = round(float(_stats.median([r["block_s"] for r in hits])), 1)
+        miss_p50 = round(float(_stats.median([r["block_s"] for r in misses])), 1)
+        waste = round(hit_p50 - miss_p50, 1)
+        waste_floor = round(max(_OPT79_MIN_WASTE_S,
+                                _OPT79_MIN_WASTE_FRAC * miss_p50), 1)
+        if waste < waste_floor:
+            _no("hit_path_not_slower_than_the_miss_path_by_the_floor", job=name,
+                hit_p50=round(hit_p50, 1), miss_p50=round(miss_p50, 1),
+                waste=waste, floor=waste_floor)
+            continue
+        # MEASURED net-negative. Everything above is the measurement; the floor
+        # decides only whether it can be PRICED. A job that is not strictly below
+        # the workflow's cluster floor carries its waste on the merge wait, which
+        # this version cannot size honestly — so it is reported with no number
+        # rather than dropped, and takes no part in the credited total.
+        if not block.get("below_cluster_floor"):
+            _no("job_not_strictly_below_the_workflow_cluster_floor", job=name,
+                job_p50=block.get("job_p50_s"), floor_p50=block.get("floor_p50_s"))
+            if uncredited is not None:
+                row = _opt79_stamp(
+                    kind=_OPT79_UNCREDITED_KIND, job=name, block=block, rows=rows,
+                    hits=len(hits), misses=len(misses), ambiguous=ambiguous,
+                    other_runner=len(other_runner),
+                    hit_p50=hit_p50, miss_p50=miss_p50, waste=waste,
+                    waste_floor=waste_floor, hit_share=hit_share,
+                    job_runs=job_runs, sampled=sampled,
+                    monthly_volume=monthly_volume,
+                    effective=_effective_volume(monthly_volume, job_runs, sampled),
+                    runner_min_saving=None)
+                row["workflow_file"] = wf_path
+                # WHERE the job sits, stated rather than implied. `not below the
+                # floor` spans everything from the second-ranked job upwards;
+                # only the long pole itself carries the merge wait, and only when
+                # the workflow can gate a PR at all. Without these the renderer
+                # told the owner of a second-slowest job that it was the slowest
+                # and that the saving was on the merge wait — neither true, and
+                # that job's saving is pure runner-minutes that could have been
+                # credited.
+                row["long_pole_job"] = str(block.get("long_pole_job") or "")
+                row["long_pole_p50_s"] = block.get("long_pole_p50_s")
+                row["job_p50_s"] = block.get("job_p50_s")
+                row["floor_p50_s"] = block.get("floor_p50_s")
+                row["on_critical_path"] = bool(block.get("is_long_pole")) and bool(is_pr)
+                uncredited.append(row)
+            continue
+        effective = _effective_volume(monthly_volume, job_runs, sampled)
+        credited = round(waste * hit_share * effective / 60.0, 1)
+        if credited <= 0:
+            _no("credited_runner_minutes_round_to_zero", job=name)
+            continue
+        job_p50 = float(block["job_p50_s"])
+        margin = round(float(block["floor_p50_s"]) - job_p50, 1)
+        if margin <= 0:                      # re-checked after rounding
+            _no("neutrality_margin_not_positive", job=name)
+            continue
+
+        ref = str(block.get("cache_ref") or "the cache step")
+        _post_txt = " + its post step" if block.get("post") else ""
+        evidence = (
+            f"On `{name}` (`{declared}`), the cache block — `{block['restore']}` "
+            f"+ `{block['install']}`{_post_txt} — measured a p50 of "
+            f"{hit_p50:.0f}s across {len(hits)} sampled run(s) whose log reported a "
+            f"cache HIT, against {miss_p50:.0f}s across {len(misses)} run(s) whose "
+            f"log reported a MISS: the hit path is {waste:.0f}s SLOWER, so restoring "
+            f"this cache costs more than not having it. The cache hit on "
+            f"{hit_share * 100:.0f}% of the {classified} classified run(s); over "
+            f"{effective:.0f} run(s)/30d of this job that is ~{credited:.0f} "
+            f"runner-min/mo. Comparison measured on `{declared}` only.")
+        rows_render = [[r["status"].upper(), f"{r['restore_s']:.0f}s",
+                        f"{r['install_s']:.0f}s", f"{r['post_s']:.0f}s",
+                        f"{r['block_s']:.0f}s", r["log_line"]]
+                       for r in (hits[:4] + misses[:4])]
+        me = _measured_evidence(
+            ["Cache", "Restore", "Install", "Post", "Block total", "Log line"],
+            rows_render,
+            summary=evidence,
+            note=(
+                "HIT and MISS are read from the run log's own cache line, never "
+                "inferred from a duration; a run whose log shows both lines (a job "
+                "with two caches) is excluded, not guessed. Both paths measure the "
+                "SAME three steps, identified in the workflow file — a step the run "
+                "did not time counts as 0s, so GitHub's one-second step granularity "
+                "cannot change which steps are compared. The credited figure is a "
+                "LOWER BOUND: removing the cache also removes the restore and the "
+                "save from the miss path. Runner-minutes only — this job's p50 "
+                f"({job_p50:.0f}s) is below the workflow's cluster floor "
+                f"({block['floor_p50_s']:.0f}s), so no merge-gate time changes. "
+                "GUARDRAIL: re-key or narrow the cache FIRST and re-measure — cache "
+                f"`{ref}` on this job, scoped to the package manager's store or to "
+                "the packages this job actually needs, is usually the fix; only "
+                "remove the cache step (and its post save) when a narrowed install "
+                "is already faster than any restore. Removing it makes the miss path "
+                "the only path, so confirm the miss-path numbers above are the ones "
+                "you are willing to pay on every run. This comparison is valid for "
+                f"`{declared}` and for this job only: a runner class with slower "
+                "network or disk flips it, so re-measure before applying the same "
+                "conclusion to another job or another runner. Never drop the install "
+                "itself or narrow what it installs to make the number smaller — that "
+                "reduces what CI verifies."))
+        f = _new_finding(
+            "OPT79", "MEDIUM", title, wf_path, name, evidence,
+            "cache-costs-more-than-it-saves",
+            _catalog_anchor("OPT79", title), start_idx + len(out) + 1,
+            wc_p50=0.0, rm=credited,
+            size_note=(
+                "runner-minutes only. The job's measured p50 sits below the "
+                "workflow's cluster floor, so the time this removes is off the merge "
+                "gate. The figure is the measured excess of the hit path over the "
+                "miss path, charged only to the share of runs that actually hit; the "
+                "saving from removing the cache outright is larger, because the miss "
+                "path still pays the restore and the save today."),
+            realization="none", measured_evidence=me)
+        f["sizing_basis"] = "measured"
+        f["measured_signal"] = (
+            f"p50 cache block {hit_p50:.0f}s on {len(hits)} log-confirmed hit run(s) "
+            f"vs {miss_p50:.0f}s on {len(misses)} log-confirmed miss run(s) on "
+            f"`{declared}` ({waste:.0f}s excess per hit run, hit share "
+            f"{hit_share:.2f}, {effective:.0f} run(s)/30d)")
+        f["cache_net_negative"] = _opt79_stamp(
+            kind=_OPT79_CREDITED_KIND, job=name, block=block, rows=rows,
+            hits=len(hits), misses=len(misses), ambiguous=ambiguous,
+            other_runner=len(other_runner),
+            hit_p50=hit_p50, miss_p50=miss_p50, waste=waste,
+            waste_floor=waste_floor, hit_share=hit_share,
+            job_runs=job_runs, sampled=sampled, monthly_volume=monthly_volume,
+            effective=effective, runner_min_saving=credited)
+        f["tier2_neutrality"] = {
+            "proof": "below_cluster_floor",
+            "margin_s": margin,
+            "ref": (f"per_workflow_timing[wf]: `{name}` at {job_p50:.1f}s is "
+                    f"{margin:.1f}s below the workflow cluster floor "
+                    f"{float(block['floor_p50_s']):.1f}s"),
+        }
+        f["guardrail"] = (
+            "Re-key or narrow the cache first and re-measure; only then remove it. "
+            "Removing a cache step also removes its post save, which makes the miss "
+            "path the only path — so the miss-path numbers in the evidence are what "
+            "every run will pay. The comparison holds for the runner class it was "
+            "measured on; a runner with slower network or disk can flip it. Never "
+            "buy the saving by narrowing what the install installs or by dropping "
+            "the step the cache feeds — that reduces what CI verifies.")
+        out.append(f)
+    return out
+
+
 # Setup/teardown step names that are NOT the load-bearing work, so they don't get
 # picked as a pole's "dominant step" for the generic cross-run check.
 _NON_WORK_STEP_RE = _re.compile(
@@ -16464,6 +17533,50 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
 
     _prefetch_json(client, _detector_run_list_plan())
 
+    # OPT79 needs the candidate jobs' LOGS: hit and miss are read from the run's
+    # own cache line, never inferred from a duration. The selector
+    # (`_opt79_candidates`) answers every SHAPE gate from data already in hand,
+    # so a job with no cache (or two) costs no fetch — and the whole (capped) set
+    # is planned here and fanned out in ONE wave (LEVER 3) instead of one
+    # round-trip per job inside the detector loop.
+    _opt79_gates = findings_doc.setdefault("opt79_withheld_by_gate", {})
+    _opt79_plan: list[tuple[float, str, dict[str, Any]]] = []
+    for _wf_path, _jpr in jobs_per_run_by_wf.items():
+        if not _jpr:
+            continue
+        _opt79_plan.extend(_opt79_log_plan(
+            _wf_path, _jpr, crit_by_wf[_wf_path], _wf_docs.get(_wf_path, {})))
+    _opt79_planned = len(_opt79_plan)
+    # The two caps inside the plan are PER WORKFLOW; this is the repo-wide
+    # ceiling on top of them, so a monorepo with thirty workflow files cannot
+    # multiply them into hundreds of fetches. It spends the budget COSTLIEST
+    # CANDIDATE FIRST and counts everything it cuts, so a job dropped here
+    # reaches the detector as a job whose logs went unread — a disclosed budget
+    # decision, never a silent one.
+    _opt79_kept = _opt79_trim_repo_probe_plan(_opt79_plan, withheld=_opt79_gates)
+    _opt79_probe_jobs = [_j for _p, _wf, _j in _opt79_kept]
+    _prefetch_text(client, [_job_log_endpoint(repo, j["id"])
+                            for j in _opt79_probe_jobs])
+    opt79_logs: dict[Any, str] = {}
+    for _job in _opt79_probe_jobs:
+        _log = _fetch_job_log(client, repo, _job)
+        if _log:
+            opt79_logs[_job.get("id")] = _log
+    if _opt79_probe_jobs:
+        logger.debug("OPT79: probed %d job log(s), %d returned content",
+                     len(_opt79_probe_jobs), len(opt79_logs))
+    # Probes planned and NOTHING came back (expired retention, a 404 wave, a
+    # token without the scope): OPT79 was not evaluated for those workflows, and
+    # a detector that returned nothing reads exactly like a detector that found
+    # nothing. Disclosed through the same channel every other unevaluated
+    # detector uses, so the report NAMES it rather than shrugging.
+    if _opt79_probe_jobs and not opt79_logs:
+        for _wf_path in sorted({_wf for _p, _wf, _j in _opt79_kept}):
+            _skip_detectors(
+                _wf_path, ["OPT79"],
+                f"OPT79 not evaluated: 0 of {len(_opt79_probe_jobs)} cache-probe "
+                "job log(s) returned content")
+
     next_id = max((int(f["id"][1:]) for f in findings if f.get("id", "").startswith("f") and f["id"][1:].isdigit()), default=0)
     for wf_path, jobs_per_run in jobs_per_run_by_wf.items():
         if not jobs_per_run:
@@ -16509,6 +17622,27 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             withheld=findings_doc.setdefault("opt77_withheld_by_gate", {}))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
+        # OPT79 shares OPT65/OPT77's event-scoped monthly volume (same workflow,
+        # same scaling question) so it costs no extra run-list call; its own cost
+        # is the capped log probe planned above. Like OPT77 it withholds in many
+        # places and returns the same empty list whether it declined on the
+        # evidence or is broken, so every gate is counted onto the findings doc.
+        new = _detect_opt79_net_negative_cache(
+            wf_path, jobs_per_run, crit, _wf_docs.get(wf_path, {}),
+            opt65_monthly, next_id, logs_by_job_id=opt79_logs,
+            withheld=_opt79_gates,
+            # Measured net-negative caches that cannot be PRICED because their
+            # job is not below the cluster floor. Not findings (no minutes, no
+            # certificate, no Tier-2 row) — the renderer states them as one
+            # uncredited line each, so the case worth the most is not silent.
+            uncredited=findings_doc.setdefault(_OPT79_UNCREDITED_DOC_KEY, []),
+            # Whether this workflow can gate a PR at all. Without it the row
+            # cannot say whether the waste is on a merge wait, and the renderer
+            # claimed one on schedule-only workflows.
+            is_pr=is_pr)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+
         # OPT77 supersedes OPT65 on any job set both claim — one edit, one lever.
         # Applied here, right after both have run for this workflow, so the two
         # can never reach the report describing the same consolidation twice.
@@ -17039,6 +18173,22 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "cost_spine_triaged_runs_sampled": cost_spine_triaged_runs_sampled,
         "cost_spine_triaged_jobs_sampled": cost_spine_triaged_jobs_sampled,
         "logs_fetched": logs_fetched,
+        # The cache-cost comparison's OWN log reads, kept apart from
+        # `logs_fetched` (which counts the pole-drill logs persisted into the
+        # data bundle, and which `verify_report` re-derives from that bundle).
+        # These happen during collection whether or not `--with-logs` was
+        # passed, so without this the provenance table could say no job logs
+        # were read in a report that quotes them.
+        "cache_probe_logs": {
+            # PLANNED is what the selector asked for; PROBED is what the
+            # repo-wide budget allowed. When they differ the comparison saw less
+            # of the repository than it could have, which is a fact about the
+            # report, not an implementation detail.
+            "planned": _opt79_planned,
+            "probed": len(_opt79_probe_jobs),
+            "returned": len(opt79_logs),
+            "budget": _OPT79_REPO_LOG_BUDGET,
+        },
         # Where each workflow's YAML was PARSED from. The two sources can disagree (the
         # checkout is what the report stamps as audited; `GET /contents/` is the DEFAULT
         # BRANCH's HEAD), so which one fed the detectors is a fact about the report, not

@@ -670,6 +670,70 @@ def _job_logs_count_violation(report: str, findings_path: Path | None) -> tuple[
     return None, f"; job-logs coverage honest ({logs_n} fetched)"
 
 
+_DS_CACHE_PROBE_ROW_RE = re.compile(
+    r"^\|\s*cache hit/miss log probe\s*\|\s*(.+?)\s*\|", re.MULTILINE)
+
+
+def _cache_probe_count_violation(report: str, findings_path: Path | None
+                                 ) -> tuple[str | None, str]:
+    """Re-derive the `cache hit/miss log probe` row from `findings.json`.
+
+    That row exists because the cache-cost comparison reads job logs during
+    COLLECTION — outside the pole drill and regardless of `--with-logs` — so the
+    `job logs` row above it can legitimately read "not run" in a report that
+    quotes real log lines. Two ways for the row to lie, and both are checked
+    here: claiming a count the collector did not record, and appearing at all on
+    a run where nothing was probed (a disclosure of a cost the reader never
+    paid). Ground truth mirrors the renderer's keying exactly:
+    `data_sources.cache_probe_logs.{probed,returned}`."""
+    if not findings_path:
+        return None, ""
+    m = _DS_CACHE_PROBE_ROW_RE.search(report)
+    try:
+        data = json.loads(Path(findings_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        # An unreadable findings file is not a clean bill of health. Returning
+        # "no problem, no note" here made a corrupt or missing bundle
+        # indistinguishable from a re-derivation that passed — the one outcome a
+        # self-check must never produce silently.
+        return (f"the cache-probe row could not be re-derived: findings JSON at "
+                f"{findings_path} is unreadable ({type(exc).__name__})"), ""
+    probe = _as_dict(_as_dict(_as_dict(data).get("data_sources")).get("cache_probe_logs"))
+    probed = probe.get("probed")
+    probed = probed if isinstance(probed, int) else 0
+    returned = probe.get("returned")
+    returned = returned if isinstance(returned, int) else 0
+    planned = probe.get("planned")
+    planned = planned if isinstance(planned, int) else 0
+    if not m:
+        if probed > 0:
+            return (f"{probed} job log(s) were read for the cache hit/miss comparison "
+                    "but the Data sources table has no row for them"), ""
+        return None, ""
+    if probed <= 0:
+        return ("Data sources declares a cache hit/miss log probe, but the run "
+                "recorded none"), ""
+    cell = _strip_render_artifacts(m.group(1)).lower()
+    if returned == probed:
+        claimed = re.search(r"(\d+)\s+job log", cell)
+        if not claimed or int(claimed.group(1)) != returned:
+            return (f"Data sources cache-probe cell {cell!r} does not state the "
+                    f"{returned} log(s) actually read"), ""
+    else:
+        pair = re.search(r"(\d+)\s+of\s+(\d+)", cell)
+        if not pair or (int(pair.group(1)), int(pair.group(2))) != (returned, probed):
+            return (f"Data sources cache-probe cell {cell!r} does not state that "
+                    f"{returned} of {probed} probed log(s) returned content"), ""
+    # The repo-wide budget did not merely cap the cost — it dropped candidates.
+    # A row that reports only what was read hides that the comparison saw less of
+    # the repository than its own selector asked for.
+    if planned > probed and f"{probed} of {planned} planned" not in cell:
+        return (f"the cache probe planned {planned} job log(s) and the repo-wide "
+                f"budget allowed {probed}, but the Data sources cell {cell!r} does "
+                "not say so"), ""
+    return None, f"; cache-probe count honest ({returned}/{probed} read)"
+
+
 def _gh_errors_disclosure_violation(report: str, findings_path: Path | None) -> tuple[str | None, str]:
     """Require rendered disclosure when collection recorded failed GitHub calls."""
     if not findings_path:
@@ -746,6 +810,9 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
     logs_violation, logs_note = _job_logs_count_violation(report, findings_path)
     if logs_violation:
         return Check(name, False, logs_violation)
+    probe_violation, probe_note = _cache_probe_count_violation(report, findings_path)
+    if probe_violation:
+        return Check(name, False, probe_violation)
     gh_violation, gh_note = _gh_errors_disclosure_violation(report, findings_path)
     if gh_violation:
         return Check(name, False, gh_violation)
@@ -757,8 +824,9 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
         if "**" not in banner:
             return Check(name, False, "Incomplete-coverage banner names no file")
         return Check(name, True, "coverage gap disclosed and files named"
-                     + logs_note + gh_note + skip_note)
-    return Check(name, True, "data basis disclosed" + logs_note + gh_note + skip_note)
+                     + logs_note + probe_note + gh_note + skip_note)
+    return Check(name, True,
+                 "data basis disclosed" + logs_note + probe_note + gh_note + skip_note)
 
 
 # The two `data_sources` lists naming workflows that left the MEASURED sample: the
@@ -5179,6 +5247,309 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
     return round(tallest_p50 - projected, 1), problems
 
 
+
+# OPT79's stamped contract. This file never imports collect_runs.py (standalone
+# by design), so the key list is declared in both places and pinned identical by
+# a coupling test — one contract, two readers, and a stamp renamed on one side
+# reddens instead of silently unverifying the finding.
+_VR_OPT79_STAMP_KEYS = (
+    "kind",
+    "job",
+    "runner_label",
+    "cache_ref",
+    "restore_step", "install_step", "post_step",
+    "per_run",
+    "hits", "misses", "classified_runs", "ambiguous_runs",
+    "occurrences_on_other_runner",
+    "hit_path_p50_s", "miss_path_p50_s", "waste_s",
+    "waste_floor_s", "hit_share",
+    "job_runs", "sampled_successful_run_count",
+    "monthly_volume", "effective_monthly_volume",
+    "runner_min_saving",
+)
+_VR_OPT79_CREDITED_KIND = "opt79_net_negative_cache"
+_VR_OPT79_UNCREDITED_KIND = "opt79_uncredited_pole_cache"
+_VR_OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
+# The cache-verdict matchers, restated here rather than imported — this file is
+# standalone by design, and the point of the re-derivation is to judge a stamped
+# verdict with its OWN matcher: a verifier sharing the engine's object could not
+# catch a run stamped `hit` whose quoted line says the cache was not found.
+# Three spellings of a miss: `actions/cache`'s, the `setup-*` family's
+# (`<package manager> cache is not found`), and `astral-sh/setup-uv`'s.
+#
+# PINNED vs SPOT-CHECKED: the stamp-key tuple and the four numeric thresholds
+# below are asserted IDENTICAL to the engine's by
+# `test_opt79_stamp_keys_match_the_verifier_contract` and
+# `test_opt79_verifier_thresholds_are_pinned_to_the_engines`; the tail fraction
+# is pinned to the shared `_CACHE_TAIL_MIN_FRAC`. The regexes are deliberately
+# NOT pinned identical — they are independent re-readings — so they are only
+# spot-checked, line by line, by
+# `test_opt79_verifier_matchers_recognise_every_line_the_engine_does`.
+_VR_OPT79_MISS_RE = re.compile(
+    r"cache not found for|cache miss|no cache entry|"
+    r"cache is not found\b|no github actions cache found for key\b", re.I)
+_VR_OPT79_HIT_RE = re.compile(
+    r"cache restored from key|cache hit for|cache restored successfully|"
+    r"cache hit, replaying|"
+    r"cache restored from github actions cache with key\b", re.I)
+_VR_OPT79_MIN_HITS = 3
+_VR_OPT79_MIN_MISSES = 3
+_VR_OPT79_MIN_WASTE_S = 5.0
+_VR_OPT79_MIN_WASTE_FRAC = 0.20
+_VR_OPT79_TAIL_MIN_FRAC = 0.25
+
+
+def _opt79_block_rederived(cn: dict, *, credited: bool,
+                           finding_rm: float | None) -> list[str]:
+    """Re-derive one stamped OPT79 measurement block — the credited finding's
+    `cache_net_negative`, or an uncredited pole row, which is the SAME block with
+    a different `kind` and no minutes.
+
+    Everything except the two sizing branches is shared, because the two rows are
+    the same measurement. The uncredited row used to be a hand-built subset with
+    no `per_run`, so its medians and its `waste_s` were bare assertions no check
+    could contradict; running the row/median/floor/bounds re-derivation over it
+    is what makes tampering with an uncredited `waste_s` redden."""
+    problems: list[str] = []
+    missing = [k for k in _VR_OPT79_STAMP_KEYS if k not in cn]
+    if missing:
+        problems.append(f"cache_net_negative is missing stamped key(s) {missing}")
+
+    runner = str(cn.get("runner_label") or "")
+    if not runner:
+        problems.append("runner_label missing - the comparison cannot be shown to "
+                        "have been made on one runner class")
+    restore_step = " ".join(str(cn.get("restore_step") or "").split())
+    for slot in ("restore_step", "install_step"):
+        if not str(cn.get(slot) or "").strip():
+            problems.append(f"{slot} missing - the compared step block is not stated")
+    # `post_step` is legitimately NULL for `actions/cache/restore`, which has no
+    # post phase. Null is a statement ("there is no save"); an empty string is a
+    # step that was not named.
+    post_step = cn.get("post_step")
+    if post_step is not None and not str(post_step).strip():
+        problems.append("post_step missing - the compared step block is not stated")
+    # The group a cache line came from IS its provenance. Without it the quoted
+    # line could be Turborepo's `cache miss, executing …` from the test step, and
+    # re-deriving the verdict from it would confirm a classification the engine
+    # should never have made.
+    group_ok = {restore_step, f"Run {str(cn.get('cache_ref') or '').strip()}"}
+    group_ok.discard("Run ")
+    group_ok.discard("")
+
+    rows = [r for r in _as_list(cn.get("per_run")) if isinstance(r, dict)]
+    if not rows:
+        return problems + ["per_run missing - no measured runs to re-derive from"]
+    hit_blocks: list[float] = []
+    miss_blocks: list[float] = []
+    for i, r in enumerate(rows):
+        status = str(r.get("status") or "")
+        line = str(r.get("log_line") or "")
+        label = str(r.get("runner_label") or "")
+        group = " ".join(str(r.get("log_line_group") or "").split())
+        parts = [_num(r.get(k)) for k in ("restore_s", "install_s", "post_s")]
+        if any(v is None or v < 0 for v in parts):
+            problems.append(f"per_run[{i}]: missing or negative step duration")
+            continue
+        block = round(sum(float(v) for v in parts if v is not None), 1)
+        claimed_block = _num(r.get("block_s"))
+        if claimed_block is None or abs(claimed_block - block) > 0.11:
+            problems.append(
+                f"per_run[{i}]: block_s {r.get('block_s')!r} != restore+install+post {block}")
+        if label != runner:
+            problems.append(
+                f"per_run[{i}]: ran on {label!r}, not the credited runner {runner!r}")
+        if group not in group_ok:
+            problems.append(
+                f"per_run[{i}]: quoted line is stamped to log group {group!r}, which "
+                f"is not the cache restore step {restore_step!r} - a cache verdict "
+                "read outside the restore step's own output is not this cache's")
+            continue
+        hit_line = bool(_VR_OPT79_HIT_RE.search(line))
+        miss_line = bool(_VR_OPT79_MISS_RE.search(line))
+        if hit_line and miss_line:
+            problems.append(
+                f"per_run[{i}]: quoted line matches BOTH a hit and a miss - a "
+                "multi-cache run must be excluded, not credited")
+            continue
+        if status == "hit":
+            if not hit_line:
+                problems.append(
+                    f"per_run[{i}]: labelled a cache hit but its quoted line is "
+                    f"not a hit line: {line!r}")
+                continue
+            hit_blocks.append(block)
+        elif status == "miss":
+            if not miss_line:
+                problems.append(
+                    f"per_run[{i}]: labelled a cache miss but its quoted line is "
+                    f"not a miss line: {line!r}")
+                continue
+            miss_blocks.append(block)
+        else:
+            problems.append(f"per_run[{i}]: unknown cache status {status!r}")
+
+    hits, misses = len(hit_blocks), len(miss_blocks)
+    if _num(cn.get("hits")) != hits:
+        problems.append(f"hits {cn.get('hits')!r} != {hits} re-derived from per_run")
+    if _num(cn.get("misses")) != misses:
+        problems.append(f"misses {cn.get('misses')!r} != {misses} re-derived from per_run")
+    if hits < _VR_OPT79_MIN_HITS:
+        problems.append(f"only {hits} hit run(s); at least {_VR_OPT79_MIN_HITS} required")
+    if misses < _VR_OPT79_MIN_MISSES:
+        problems.append(f"only {misses} miss run(s); at least {_VR_OPT79_MIN_MISSES} required")
+    classified = hits + misses
+    if _num(cn.get("classified_runs")) != classified:
+        problems.append(
+            f"classified_runs {cn.get('classified_runs')!r} != {classified}")
+    job_runs = _num(cn.get("job_runs"))
+    denom = _num(cn.get("sampled_successful_run_count"))
+    monthly = _num(cn.get("monthly_volume"))
+    if job_runs is None or job_runs <= 0:
+        problems.append(f"job_runs={cn.get('job_runs')!r}")
+    if denom is None or denom <= 0:
+        problems.append(f"sampled_successful_run_count={cn.get('sampled_successful_run_count')!r}")
+    if monthly is None or monthly <= 0:
+        problems.append(f"monthly_volume={cn.get('monthly_volume')!r}")
+    if job_runs is not None and denom is not None and job_runs > denom:
+        problems.append(
+            f"job_runs {job_runs} exceeds the {denom} sampled run(s) it counts")
+    if job_runs is not None and classified > job_runs:
+        problems.append(
+            f"{classified} classified run(s) exceed the {job_runs} run(s) the job was "
+            "observed in")
+    if not hit_blocks or not miss_blocks:
+        return problems
+
+    hit_p50 = round(statistics.median(hit_blocks), 1)
+    miss_p50 = round(statistics.median(miss_blocks), 1)
+    if not _close(cn.get("hit_path_p50_s"), hit_p50, 0.11):
+        problems.append(f"hit_path_p50_s {cn.get('hit_path_p50_s')!r} != {hit_p50}")
+    if not _close(cn.get("miss_path_p50_s"), miss_p50, 0.11):
+        problems.append(f"miss_path_p50_s {cn.get('miss_path_p50_s')!r} != {miss_p50}")
+    waste = round(hit_p50 - miss_p50, 1)
+    if not _close(cn.get("waste_s"), waste, 0.11):
+        problems.append(f"waste_s {cn.get('waste_s')!r} != {waste}")
+    waste_floor = round(max(_VR_OPT79_MIN_WASTE_S,
+                            _VR_OPT79_MIN_WASTE_FRAC * miss_p50), 1)
+    if not _close(cn.get("waste_floor_s"), waste_floor, 0.11):
+        problems.append(f"waste_floor_s {cn.get('waste_floor_s')!r} != {waste_floor}")
+    if waste < waste_floor:
+        problems.append(
+            f"hit path is only {waste}s slower than the miss path, under the "
+            f"{waste_floor}s floor - the cache is not shown to be net-negative")
+    hit_share = hits / float(classified) if classified else 0.0
+    if not _close(cn.get("hit_share"), round(hit_share, 4), 0.001):
+        problems.append(f"hit_share {cn.get('hit_share')!r} != {round(hit_share, 4)}")
+    if hit_share < _VR_OPT79_TAIL_MIN_FRAC:
+        problems.append(
+            f"hit share {round(hit_share, 3)} is below the {_VR_OPT79_TAIL_MIN_FRAC} "
+            "floor - a cache that rarely hits is a key problem, not a cost one")
+
+    if job_runs is not None and denom is not None and denom > 0 and monthly:
+        effective = round(float(monthly) * min(max(job_runs / denom, 0.0), 1.0), 3)
+        if not _close(cn.get("effective_monthly_volume"), effective, 0.011):
+            problems.append(
+                f"effective_monthly_volume {cn.get('effective_monthly_volume')!r} != {effective}")
+        if not credited:
+            # An uncredited row must carry NO sizing. A number here would enter a
+            # total through the first reader that treated the two rows alike.
+            if cn.get("runner_min_saving") is not None:
+                problems.append(
+                    f"an uncredited pole cache stamps runner_min_saving "
+                    f"{cn.get('runner_min_saving')!r}; it must carry no sizing")
+            return problems
+        expected_rm = round(waste * hit_share * effective / 60.0, 1)
+        rm = finding_rm
+        if rm is None or abs(rm - expected_rm) > 0.11:
+            problems.append(f"runner_min_saving {rm!r} != re-derived {expected_rm}")
+        inner = _num(cn.get("runner_min_saving"))
+        if inner is None or abs(inner - (rm if rm is not None else expected_rm)) > 0.11:
+            problems.append(
+                f"cache_net_negative.runner_min_saving {cn.get('runner_min_saving')!r} "
+                f"!= the finding's {rm!r}")
+    return problems
+
+
+def _opt79_uncredited_rows_rederived(data: dict) -> list[str]:
+    """Every uncredited OPT79 pole row re-derived from its own `per_run`, and
+    checked to contribute to no total.
+
+    These rows are rendered as prose with no number, which is exactly why they
+    needed a check: nothing else in the report contradicts a `waste_s` somebody
+    edited, and the sizing follow-up will be built on them."""
+    out: list[str] = []
+    rows = _as_list(data.get(_VR_OPT79_UNCREDITED_DOC_KEY))
+    for i, row in enumerate(rows):
+        cn = _as_dict(row)
+        tag = f"{_VR_OPT79_UNCREDITED_DOC_KEY}[{i}]"
+        if cn.get("kind") != _VR_OPT79_UNCREDITED_KIND:
+            out.append(f"{tag}: kind {cn.get('kind')!r} is not "
+                       f"{_VR_OPT79_UNCREDITED_KIND!r}")
+            continue
+        if not str(cn.get("workflow_file") or "").strip():
+            out.append(f"{tag}: no workflow_file - the row cannot be placed")
+        if "on_critical_path" not in cn:
+            out.append(f"{tag}: no on_critical_path - the report cannot say "
+                       "whether this saving is on the merge wait")
+        elif cn.get("on_critical_path") and \
+                str(cn.get("job") or "") != str(cn.get("long_pole_job") or ""):
+            out.append(
+                f"{tag}: claims the critical path, but {cn.get('job')!r} is not "
+                f"this workflow's long pole {cn.get('long_pole_job')!r}")
+        out.extend(f"{tag}: {msg}" for msg in _opt79_block_rederived(
+            cn, credited=False, finding_rm=None))
+    return out
+
+
+def _opt79_net_negative_cache_rederived(f: dict, data: dict) -> tuple[float | None, list[str]]:
+    """Independently re-derive OPT79's credited minutes and its neutrality margin
+    from the stamped `cache_net_negative` block — never from the finding's prose.
+
+    Nothing here is read as an answer. The per-run rows carry each run's cache
+    verdict, the VERBATIM log line that verdict came from, its runner label and
+    the three step durations; this recomputes
+
+        block_s       = restore_s + install_s + post_s          (per run)
+        hit_path_p50  = median(block_s over the HIT runs)
+        miss_path_p50 = median(block_s over the MISS runs)
+        waste_s       = hit_path_p50 - miss_path_p50
+        runner_min    = waste_s x hit_share x effective_monthly / 60
+
+    and re-checks every gate the detector claimed to pass, including that each
+    row's quoted line actually matches the verdict it is stamped with (and only
+    that verdict — a row quoting both is a multi-cache job and must never have
+    been credited).
+
+    Every multiplier is bounded: `hits + misses` must equal the classified count
+    and cannot exceed the runs the job was observed in, which cannot exceed the
+    sampled run count. Without those an inflated count would scale the saving
+    arbitrarily and nothing else in the block would contradict it.
+
+    The margin is the same quantity the generic `below_cluster_floor` arm
+    computes — the job's own p50 below the workflow's cluster floor — re-derived
+    from `per_workflow_timing`, because that is what makes `wall_clock_p50_s=0`
+    true for this finding."""
+    cn = _as_dict(f.get("cache_net_negative"))
+    if cn.get("kind") != _VR_OPT79_CREDITED_KIND:
+        return None, ["missing opt79_net_negative_cache evidence"]
+    job = str(cn.get("job") or "")
+    problems: list[str] = []
+    affected = [str(j) for j in _as_list(f.get("affected_jobs")) if str(j)]
+    if affected != [job] or not job:
+        problems.append(
+            f"affected_jobs {affected!r} do not match the credited job {job!r}")
+    problems.extend(_opt79_block_rederived(
+        cn, credited=True, finding_rm=_num(f.get("runner_min_saving"))))
+
+    margin = _below_floor_margin(f, data)
+    if margin is None:
+        problems.append(
+            "the credited job's p50 is not strictly below the workflow cluster "
+            "floor, so wall_clock_p50_s=0 is not established")
+    return margin, problems
+
+
 def _opt65_suppressions_are_accounted_for(data: dict) -> list[str]:
     """Every OPT65 finding dropped for overlapping an OPT77 consolidation must be
     disclosed, and the consolidation that displaced it must actually be in the
@@ -5277,6 +5648,13 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
             if str(f.get("pattern") or "") == "OPT65":
                 want, opt65_bad = _opt65_rounding_rederived(f, data)
                 bad.extend(f"{fid}: {msg}" for msg in opt65_bad)
+            elif str(f.get("pattern") or "") == "OPT79":
+                # OPT79's margin IS the generic floor - job p50, but the arm also
+                # re-derives the two measured paths and the credited minutes from
+                # the stamped per-run rows. Routing it to the generic arm would
+                # check the margin and take the whole cache comparison on faith.
+                want, opt79_bad = _opt79_net_negative_cache_rederived(f, data)
+                bad.extend(f"{fid}: {msg}" for msg in opt79_bad)
             elif str(f.get("pattern") or "") == "OPT77":
                 # OPT77's margin is floor - PROJECTED consolidated duration, not
                 # floor - max(job p50): the generic re-derivation would silently
@@ -5328,6 +5706,27 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
     return Check(name, not bad, f"{len(ranked)} Tier-2 certificate(s) re-derived "
                  f"({len(expected)} visible R-row(s))" if not bad
                  else "; ".join(bad[:6]))
+
+
+def check_opt79_uncredited_rows_rederived(report: str,
+                                          findings_path: Path | None) -> Check:
+    """Every uncredited net-negative-cache row re-derives from its own per-run
+    measurements, and none of them carries a number.
+
+    A TOP-LEVEL check rather than part of the Tier-2 pass, because the Tier-2
+    pass compat-SKIPs a report with no Tier-2 stamps — and a repository whose
+    only OPT79 result is an uncredited row is exactly that report."""
+    name = "uncredited net-negative caches re-derive from their own runs"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    rows = _as_list(_as_dict(data).get(_VR_OPT79_UNCREDITED_DOC_KEY))
+    if not rows:
+        return Check(name, True, "no uncredited net-negative caches")
+    bad = _opt79_uncredited_rows_rederived(_as_dict(data))
+    return Check(name, not bad,
+                 f"{len(rows)} uncredited cache row(s) re-derived"
+                 if not bad else "; ".join(bad[:6]))
 
 
 def check_tier2_measured_basis(report: str, findings_path: Path | None) -> Check:
@@ -8097,6 +8496,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_claims_cover_framing_vocabulary(report, report_path),
         check_tier2_neutrality_derived(report, findings_path, report_path),
         check_tier2_measured_basis(report, findings_path),
+        check_opt79_uncredited_rows_rederived(report, findings_path),
         check_tier2_total_deoverlapped(report, findings_path, report_path),
         check_no_timing_endpoint_citation(report, report_path),
         check_tier2_claims_derivation_basis(report, findings_path, report_path),

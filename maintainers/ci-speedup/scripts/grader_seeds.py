@@ -111,6 +111,7 @@ TRIAGE_ALLOWLIST = {
     "every 'slowest ... waits on' framing phrase is a registered claim": AUTO_SEED,               # check_claims_cover_framing_vocabulary
     "Tier-2 R-rows carry re-derived wall-clock-neutral certificates": AUTO_SEED,                  # check_tier2_neutrality_derived
     "Tier-2 R-rows use measured sizing basis": AUTO_SEED,                                        # check_tier2_measured_basis
+    "uncredited net-negative caches re-derive from their own runs": AUTO_SEED,                   # check_opt79_uncredited_rows_rederived
     "Tier-2 section-lead totals match de-overlapped findings": AUTO_SEED,                         # check_tier2_total_deoverlapped
     "no claim or prose cites the closing-down /timing endpoints": AUTO_SEED,                     # check_no_timing_endpoint_citation
     "Tier-2 claims carry the jobs-API derivation-basis field": AUTO_SEED,                        # check_tier2_claims_derivation_basis
@@ -206,6 +207,7 @@ CHECK_CLASS = {
     "every 'slowest ... waits on' framing phrase is a registered claim": "fabricated-or-unsupported-finding",  # a rendered framing sentence not backed by a registered claim
     "Tier-2 R-rows carry re-derived wall-clock-neutral certificates": "fabricated-or-unsupported-finding",  # a promoted row's proof is not backed by the data
     "Tier-2 R-rows use measured sizing basis": "estimated-not-measured",  # exact match: promoted bill rows must be measured, not modeled
+    "uncredited net-negative caches re-derive from their own runs": "fabricated-or-unsupported-finding",  # a numberless cache row whose measurements the data does not support
     "Tier-2 section-lead totals match de-overlapped findings": "fabricated-or-unsupported-finding",  # rendered totals not backed by findings
     "no claim or prose cites the closing-down /timing endpoints": "fabricated-or-unsupported-finding",  # cites a data source the pipeline does not use
     "Tier-2 claims carry the jobs-API derivation-basis field": "fabricated-or-unsupported-finding",  # a Tier-2 claim without its machine-readable data-source field

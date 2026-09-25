@@ -4969,6 +4969,27 @@ def test_also_noticed_distinct_opt73_levers_render_as_separate_rows():
     assert body.count("<summary>") == 2
 
 
+
+def test_also_noticed_distinct_opt79_caches_render_as_separate_rows():
+    # OPT79 is per JOB: one workflow can carry two net-negative caches, each with its
+    # own measured hit/miss comparison, its own runner class and its own re-key-or-remove
+    # edit. Folded by pattern id (the default), one job's evidence would be advertised
+    # beside BOTH jobs' minutes and the prompt would name only the first job — the same
+    # failure the OPT73 and OPT77 cases above exist for.
+    def _f(fid, job, waste, rm):
+        return {"pattern": "OPT79", "title": "A Cache That Costs More Than It Saves",
+                "id": fid, "workflow_file": ".github/workflows/ci.yml", "line": 0,
+                "affected_jobs": [job], "wall_clock_p50_s": 0.0,
+                "runner_min_saving": rm, "severity": "MEDIUM",
+                "evidence": f"on `{job}` the cache block is {waste}s slower on hit runs"}
+
+    lines, n, _ = bp._also_noticed_block([_f("f1", "deps", 19, 400.0),
+                                          _f("f2", "docs", 7, 90.0)], "http://cat")
+    body = "\n".join(lines)
+    assert n == 2
+    assert body.count("<summary>") == 2
+    assert "`deps`" in body and "`docs`" in body
+
 def test_also_noticed_bill_only_group_evidence_covers_all_listed_jobs():
     # Regression (OPT12-style bill-only aggregate): a bill-only "Also noticed" group folds
     # multiple FUNGIBLE occurrences of one fix recipe into ONE row whose displayed magnitude
@@ -7591,3 +7612,147 @@ def test_distinct_opt77_consolidations_render_as_separate_rows():
     # …and two identical consolidations still fold, exactly as OPT73 does.
     assert len([ms for pat, ms in bp._group_by_pattern_ranked([node, dict(node, id="f3")])
                 if pat == "OPT77"]) == 1
+
+
+def test_data_sources_footer_declares_the_cache_comparison_log_probe():
+    """The cache-cost comparison reads job logs during collection, outside the
+    pole drill and regardless of `--with-logs`. Until this row existed the
+    provenance table could print "job logs | not run" in the very report whose
+    evidence quotes eight fetched log lines — the table that exists to say what
+    was read from the user's repository, denying it read anything.
+
+    It is its OWN row on purpose: `logs_fetched` counts the pole-drill logs the
+    data bundle persists, and the report's self-check re-derives that cell from
+    that bundle, so folding a second kind of fetch into it would trade a false
+    statement for a broken invariant."""
+    doc = _doc_one_pole()
+    doc["data_sources"] = {**doc["data_sources"], "tiers_run": ["gh-timing"],
+                           "cache_probe_logs": {"probed": 8, "returned": 8,
+                                                "budget": 24}}
+    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    assert "| cache hit/miss log probe |" in foot
+    assert "8 job log(s) read" in foot
+    # the pole-drill row keeps its own, separate truth
+    assert "job logs | not run" in foot
+
+    # Probed but nothing came back (expired logs) must not read as 8 read.
+    doc2 = _doc_one_pole()
+    doc2["data_sources"] = {**doc2["data_sources"], "tiers_run": ["gh-timing"],
+                            "cache_probe_logs": {"probed": 8, "returned": 0,
+                                                 "budget": 24}}
+    foot2 = "\n".join(bp._data_sources_footer(doc2, "o/r"))
+    assert "| cache hit/miss log probe |" in foot2
+    assert "0 of 8" in foot2
+
+    # No probe planned -> no row at all. A repo with no cache-then-install job
+    # pays nothing and must not be told about a probe that never ran.
+    doc3 = _doc_one_pole()
+    doc3["data_sources"] = {**doc3["data_sources"], "tiers_run": ["gh-timing"],
+                            "cache_probe_logs": {"probed": 0, "returned": 0,
+                                                 "budget": 24}}
+    assert "cache hit/miss log probe" not in "\n".join(
+        bp._data_sources_footer(doc3, "o/r"))
+    doc4 = _doc_one_pole()
+    doc4["data_sources"] = {**doc4["data_sources"], "tiers_run": ["gh-timing"]}
+    assert "cache hit/miss log probe" not in "\n".join(
+        bp._data_sources_footer(doc4, "o/r"))
+
+
+def test_uncredited_pole_cache_is_reported_even_though_it_is_not_sized():
+    """The most valuable instance of a net-negative cache is the one on the
+    workflow's SLOWEST job, because there the waste is on the merge wait rather
+    than only on the bill. This version cannot size that saving, and the old
+    behaviour was to skip the job in the candidate selector — so its logs were
+    never fetched, its cache was never classified, and the report was
+    byte-identical to one for a repository with no such cache.
+
+    It is measured like any other now and stated with NO number: the reader
+    learns the cache exists and that the saving is not credited here."""
+    doc = _doc_one_pole()
+    doc["opt79_uncredited_pole_caches"] = [{
+        "kind": "opt79_uncredited_pole_cache",
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "build",
+        "runner_label": "ubuntu-latest",
+        "restore_step": "Run actions/cache@v4",
+        "install_step": "Run npm ci",
+        "waste_s": 19.0, "hits": 5, "misses": 4,
+        "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
+        "job_p50_s": 600.0, "floor_p50_s": 300.0,
+        "long_pole_job": "build", "long_pole_p50_s": 600.0,
+        "on_critical_path": True,
+    }]
+    lines = bp._opt79_uncredited_block(doc)
+    md = "\n".join(lines)
+    assert "build" in md
+    assert "19s" in md                      # the measured excess, per hit
+    assert "5 hit" in md and "4 miss" in md  # the sample it came from
+    assert "this workflow's slowest job" in md
+    assert "merge wait" in md
+    assert "not credited" in md
+    # It must NOT read as a sized saving: no runner-minutes, no wall-clock claim.
+    assert "min/mo" not in md
+    assert "runner-min" not in md
+
+    # Nothing measured -> nothing said.
+    assert bp._opt79_uncredited_block(_doc_one_pole()) == []
+    empty = _doc_one_pole()
+    empty["opt79_uncredited_pole_caches"] = []
+    assert bp._opt79_uncredited_block(empty) == []
+
+
+def test_uncredited_pole_cache_reaches_the_rendered_report():
+    """A helper nothing calls is not a disclosure. Pin that the block is actually
+    emitted into the report body."""
+    doc = _doc_one_pole()
+    doc["opt79_uncredited_pole_caches"] = [{
+        "kind": "opt79_uncredited_pole_cache",
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "build",
+        "runner_label": "ubuntu-latest",
+        "restore_step": "Run actions/cache@v4",
+        "install_step": "Run npm ci",
+        "waste_s": 19.0, "hits": 5, "misses": 4,
+        "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
+        "job_p50_s": 600.0, "floor_p50_s": 300.0,
+        "long_pole_job": "build", "long_pole_p50_s": 600.0,
+        "on_critical_path": True,
+    }]
+    md = bp.render(doc, "o/r")
+    assert "not credited" in md
+    assert "`build`" in md
+
+
+def test_uncredited_pole_cache_survives_a_report_with_nothing_else_in_it():
+    """A schedule-only repository with no measured poles and no other findings
+    renders through the degenerate arms, where every other input is empty. The
+    uncredited line was dropped with them and the whole report collapsed to the
+    50-byte "no measured critical path" note — the exact silence this block
+    exists to break, in the one repository where it is the only thing to say."""
+    doc = {
+        "repo": "o/r",
+        "findings": [],
+        "pr_critical_path": {"poles": []},
+        "data_sources": {},
+        "opt79_uncredited_pole_caches": [{
+            "kind": "opt79_uncredited_pole_cache",
+            "workflow_file": ".github/workflows/nightly.yml",
+            "job": "build",
+            "runner_label": "ubuntu-latest",
+            "restore_step": "Run actions/cache@v4",
+            "install_step": "Run npm ci",
+            "waste_s": 19.0, "hits": 5, "misses": 4,
+            "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
+            "job_p50_s": 600.0, "floor_p50_s": 300.0,
+            "long_pole_job": "build", "long_pole_p50_s": 600.0,
+            "on_critical_path": False,
+        }],
+    }
+    static = bp._render_static_only(doc)
+    assert static, "the static-only body must not be empty with a measured cache"
+    assert "not credited" in static and "`build`" in static
+    md = bp.render(doc, "o/r")
+    assert "No measured critical path" not in md, md
+    assert "not credited" in md and "`build`" in md
+    # …and a schedule-only workflow is never told its saving is on a merge wait.
+    assert "merge wait" not in md, md

@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+import blocking_path as bp  # noqa: E402
 import collect_runs as cr  # noqa: E402
 
 
@@ -3542,3 +3543,1142 @@ def test_verifier_rejects_a_suppression_with_no_surviving_consolidation():
                    {"id": "f1", "pattern": "OPT65", "workflow_file": "ci.yml"}]}
     problems = vr._opt65_suppressions_are_accounted_for(unnamed)
     assert any("without naming what superseded it" in p for p in problems), problems
+
+
+# ============ OPT79 a cache that costs more than it saves ============
+#
+# The motivating shape: a job restores a dependency cache and then installs, and
+# restoring takes longer than the install it was meant to shorten. HIT and MISS
+# come from the run log's own cache line; both paths measure the SAME three
+# steps, identified in the workflow YAML. Nothing here claims a speedup — every
+# case pins `wall_clock_p50_s == 0.0`.
+
+_OPT79_JOB = "unit"
+_OPT79_HIT_LINE = "Cache restored from key: node-modules-abc123"
+_OPT79_MISS_LINE = "Cache not found for input keys: node-modules-abc123"
+_OPT79_GROUP = "Run actions/cache@v4"
+
+
+def _opt79_log(*lines, group=_OPT79_GROUP, before=(), after=()):
+    """A job log with the cache-restore step's own `##[group]` block, which is
+    what the classifier scopes to. `before` / `after` land OUTSIDE that block —
+    where a build tool's own `cache miss` chatter lives."""
+    out = [f"2026-06-01T00:00:00.0Z ##[group]Run npm test"]
+    out += [f"2026-06-01T00:00:00.5Z {ln}" for ln in before]
+    out.append(f"2026-06-01T00:00:00.9Z ##[endgroup]")
+    out.append(f"2026-06-01T00:00:01.0Z ##[group]{group}")
+    out += [f"2026-06-01T00:00:01.5Z {ln}" for ln in lines]
+    out.append("2026-06-01T00:00:01.9Z ##[endgroup]")
+    out.append("2026-06-01T00:00:02.0Z ##[group]Run npm ci")
+    out += [f"2026-06-01T00:00:02.5Z {ln}" for ln in after]
+    return "\n".join(out) + "\n"
+
+
+def _opt79_job(job_id, *, restore, install, post, work=10.0,
+               runner="ubuntu-latest", name=_OPT79_JOB,
+               restore_step="Run actions/cache@v4",
+               install_step="Run npm ci"):
+    """One sampled occurrence: Set up job → cache restore → install → tests →
+    the cache action's post phase. A step passed a duration of 0 is OMITTED from
+    the timeline entirely, which is exactly what GitHub does with a sub-second
+    step — the detector must treat it as 0s, not as a different job shape."""
+    def _stamp(offset):
+        m, s = divmod(int(offset), 60)
+        return f"2026-06-01T00:{m:02d}:{s:02d}Z"
+
+    t = 0.0
+    steps = []
+    for step_name, dur in (("Set up job", 1.0),
+                           (restore_step, restore),
+                           (install_step, install),
+                           ("Run npm test", work),
+                           (f"Post {restore_step}", post)):
+        if dur <= 0:
+            continue
+        steps.append({"name": step_name, "number": len(steps) + 1,
+                      "started_at": _stamp(t), "completed_at": _stamp(t + dur)})
+        t += dur
+    return {
+        "id": job_id,
+        "name": name,
+        "conclusion": "success",
+        "html_url": f"https://github.com/o/r/actions/runs/{job_id}/job/{job_id}",
+        "started_at": _stamp(0),
+        "completed_at": _stamp(t),
+        "labels": [runner],
+        "steps": steps,
+    }
+
+
+def _opt79_sample(hits=4, misses=4, *, runner="ubuntu-latest",
+                  hit=(28.0, 3.0, 0.0), miss=(1.0, 7.0, 4.0),
+                  hit_line=_OPT79_HIT_LINE, miss_line=_OPT79_MISS_LINE,
+                  extra_runs=0, group=_OPT79_GROUP):
+    """`(jobs_per_run, logs_by_job_id)` for `hits` cache-hit runs followed by
+    `misses` cache-miss runs, plus `extra_runs` runs in which the job ran but no
+    log was captured."""
+    jpr, logs = [], {}
+    jid = 900
+    for kind, n in (("hit", hits), ("miss", misses)):
+        r, i, p = hit if kind == "hit" else miss
+        line = hit_line if kind == "hit" else miss_line
+        for _ in range(n):
+            jid += 1
+            job = _opt79_job(jid, restore=r, install=i, post=p, runner=runner)
+            jpr.append([job, _span_job("integration", 600.0)])
+            logs[jid] = _opt79_log(line, group=group)
+    for _ in range(extra_runs):
+        jid += 1
+        jpr.append([_opt79_job(jid, restore=1.0, install=7.0, post=4.0),
+                    _span_job("integration", 600.0)])
+    return jpr, logs
+
+
+def _opt79_crit(*, floor=600.0, job_p50=42.0, runner="ubuntu-latest",
+                name=_OPT79_JOB):
+    return {
+        "floor_p50": floor,
+        "long_pole_p50": floor + 60.0,
+        "job_p50": {name: job_p50, "integration": floor, "e2e": floor + 60.0},
+        "job_runner": {name: runner, "integration": runner, "e2e": runner},
+        "runner_scope": runner,
+    }
+
+
+def _opt79_wf(*, steps=None, name=_OPT79_JOB):
+    return {"on": {"pull_request": {}},
+            "jobs": {name: {"runs-on": "ubuntu-latest",
+                            "steps": steps if steps is not None else [
+                                {"uses": "actions/cache@v4",
+                                 "with": {"path": "node_modules",
+                                          "key": "node-modules-${{ hashFiles('**/package-lock.json') }}"}},
+                                {"run": "npm ci"},
+                                {"run": "npm test"},
+                            ]},
+                     "integration": {"runs-on": "ubuntu-latest",
+                                     "steps": [{"run": "npm run integration"}]}}}
+
+
+def _opt79(jpr=None, logs=None, crit=None, wf=None, monthly=100, withheld=None):
+    if jpr is None:
+        jpr, default_logs = _opt79_sample()
+        if logs is None:
+            logs = default_logs
+    return cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, crit or _opt79_crit(),
+        wf if wf is not None else _opt79_wf(), monthly, 0,
+        logs_by_job_id=logs or {}, withheld=withheld)
+
+
+def _load_verify_report_for_opt79():
+    """This skill's verify_report, loaded BY PATH under a unique module name —
+    ci-secure ships a `verify_report.py` too, so a plain import can bind the
+    wrong module on the shared pytest pythonpath."""
+    import importlib.util as _ilu
+    name = "ci_speedup_verify_report_opt79"
+    mod = sys.modules.get(name)
+    if mod is not None:
+        return mod
+    spec = _ilu.spec_from_file_location(
+        name, Path(__file__).resolve().parent / "verify_report.py")
+    mod = _ilu.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_opt79_promotes_a_measured_net_negative_cache():
+    f_all = _opt79()
+    assert len(f_all) == 1
+    f = f_all[0]
+    assert f["pattern"] == "OPT79"
+    assert f["affected_jobs"] == [_OPT79_JOB]
+    assert f["wall_clock_p50_s"] == 0.0
+    assert f["sizing_basis"] == "measured"
+    assert f["realization"] == "none"
+    cn = f["cache_net_negative"]
+    assert cn["kind"] == "opt79_net_negative_cache"
+    # hit block 28+3+0 = 31s; miss block 1+7+4 = 12s; waste 19s.
+    assert cn["hit_path_p50_s"] == 31.0
+    assert cn["miss_path_p50_s"] == 12.0
+    assert cn["waste_s"] == 19.0
+    assert cn["hits"] == 4 and cn["misses"] == 4 and cn["classified_runs"] == 8
+    assert cn["hit_share"] == 0.5
+    # the job ran in all 8 sampled runs, so the effective volume is the whole
+    # monthly volume: 19s x 0.5 x 100 / 60 = 15.83 -> 15.8 runner-min/mo.
+    assert cn["effective_monthly_volume"] == 100.0
+    assert f["runner_min_saving"] == 15.8 == cn["runner_min_saving"]
+    assert f["tier2_neutrality"]["proof"] == "below_cluster_floor"
+    assert f["tier2_neutrality"]["margin_s"] == 558.0
+    # The verbatim line is what the classification rests on, so it must ship.
+    assert all(r["log_line"] for r in cn["per_run"])
+    assert {r["status"] for r in cn["per_run"]} == {"hit", "miss"}
+
+
+def test_opt79_recipe_puts_re_keying_before_removal():
+    """"Just delete it" is never the recipe: the prompt has to offer re-keying
+    first, and say what removing the cache makes the miss path."""
+    note = _opt79()[0]["measured_evidence"]["note"]
+    assert "GUARDRAIL:" in note
+    tail = note.split("GUARDRAIL:", 1)[1]
+    assert tail.index("re-key") < tail.index("remove the cache step"), tail
+    assert "the only path" in tail
+    # …and the runner class the comparison came from must be named in the prompt.
+    assert "ubuntu-latest" in tail
+
+
+def test_opt79_evidence_names_the_runner_class_it_measured_on():
+    f = _opt79()[0]
+    assert "ubuntu-latest" in f["evidence"]
+    assert f["cache_net_negative"]["runner_label"] == "ubuntu-latest"
+
+
+def test_opt79_zero_second_steps_do_not_change_the_compared_block():
+    """GitHub drops a sub-second step from the timing data entirely. The step set
+    comes from the YAML, so a restore that measured 0s in one run must count as
+    0s — not silently shift which step is read as the install."""
+    jpr, logs = _opt79_sample(hit=(28.0, 3.0, 0.0), miss=(0.0, 7.0, 4.0))
+    cn = _opt79(jpr, logs)[0]["cache_net_negative"]
+    assert cn["miss_path_p50_s"] == 11.0
+    miss_rows = [r for r in cn["per_run"] if r["status"] == "miss"]
+    assert all(r["restore_s"] == 0.0 and r["install_s"] == 7.0 for r in miss_rows)
+
+
+# --- every rejection gate rejects, and is COUNTED ------------------------------
+# A "withholds" assertion of `== []` is also what a dead detector returns, so
+# each case pins the GATE that stopped it.
+
+def _opt79_withheld(**kw):
+    w = {}
+    out = _opt79(withheld=w, **kw)
+    return out, w
+
+
+def test_opt79_two_hits_is_not_a_population():
+    jpr, logs = _opt79_sample(hits=2)
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert out == []
+    assert w.get("fewer_than_min_hit_runs_classified") == 1, w
+
+
+def test_opt79_two_misses_is_not_a_population():
+    jpr, logs = _opt79_sample(misses=2)
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert out == []
+    assert w.get("fewer_than_min_miss_runs_classified") == 1, w
+
+
+def test_opt79_withholds_when_the_runs_span_two_runner_labels():
+    jpr, logs = _opt79_sample()
+    jpr2, logs2 = _opt79_sample(hits=0, misses=3, runner="ubuntu-24.04-arm")
+    for job_list in jpr2:
+        job_list[0]["id"] += 50
+    logs.update({k + 50: v for k, v in logs2.items()})
+    out, w = _opt79_withheld(jpr=jpr + jpr2, logs=logs)
+    # The 3 arm occurrences are dropped, and the ubuntu-latest sample still
+    # stands on its own — but every drop is counted.
+    assert w.get("occurrence_ran_on_another_runner_label") == 3, w
+    assert len(out) == 1
+    assert out[0]["cache_net_negative"]["classified_runs"] == 8
+
+
+def test_opt79_withholds_a_difference_under_the_floor():
+    # 12s miss path -> floor is max(5s, 2.4s) = 5s; a 3s loss must not render.
+    jpr, logs = _opt79_sample(hit=(4.0, 7.0, 4.0))
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert out == []
+    assert w.get("hit_path_not_slower_than_the_miss_path_by_the_floor") == 1, w
+
+
+def test_opt79_fires_just_above_the_floor():
+    """The tolerance side of the same gate: exactly the floor still fires, so the
+    rejection above is a floor and not a dead branch."""
+    jpr, logs = _opt79_sample(hit=(6.0, 7.0, 4.0))   # 17s vs 12s = 5s = the floor
+    out = _opt79(jpr, logs)
+    assert len(out) == 1
+    assert out[0]["cache_net_negative"]["waste_s"] == 5.0
+    assert out[0]["cache_net_negative"]["waste_floor_s"] == 5.0
+
+
+def test_opt79_percentage_floor_bites_on_a_slow_miss_path():
+    """On a 100s miss path the 20% floor (20s) applies, not the 5s one."""
+    jpr, logs = _opt79_sample(hit=(28.0, 82.0, 0.0), miss=(1.0, 95.0, 4.0))
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)   # 110 vs 100 = 10s < 20s
+    assert out == []
+    assert w.get("hit_path_not_slower_than_the_miss_path_by_the_floor") == 1, w
+
+
+def test_opt79_withholds_when_the_cache_almost_never_hits():
+    """Below the tail floor the cache has a KEY problem (OPT6/OPT8), not a cost
+    one — route there rather than double-report."""
+    jpr, logs = _opt79_sample(hits=3, misses=12)     # hit share 0.2 < 0.25
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert out == []
+    assert w.get("hit_share_below_the_tail_floor") == 1, w
+
+
+def test_opt79_withholds_with_no_install_step_after_the_cache_step():
+    wf = _opt79_wf(steps=[{"uses": "actions/cache@v4", "with": {"path": "x", "key": "k"}},
+                          {"run": "npm test"}])
+    out, w = _opt79_withheld(wf=wf)
+    assert out == []
+    assert w.get("no_install_step_after_the_cache_step") == 1, w
+
+
+def test_opt79_withholds_when_the_install_comes_before_the_cache():
+    """Order is load-bearing: a cache saved AFTER the install is not restoring
+    anything the install could have used."""
+    wf = _opt79_wf(steps=[{"run": "npm ci"},
+                          {"uses": "actions/cache@v4", "with": {"path": "x", "key": "k"}},
+                          {"run": "npm test"}])
+    out, w = _opt79_withheld(wf=wf)
+    assert out == []
+    assert w.get("no_install_step_after_the_cache_step") == 1, w
+
+
+def test_opt79_withholds_a_job_with_two_caches():
+    wf = _opt79_wf(steps=[{"uses": "actions/cache@v4", "with": {"path": "a", "key": "k1"}},
+                          {"uses": "actions/cache@v4", "with": {"path": "b", "key": "k2"}},
+                          {"run": "npm ci"}])
+    out, w = _opt79_withheld(wf=wf)
+    assert out == []
+    assert w.get("job_declares_more_than_one_cache_restore_step") == 1, w
+
+
+def test_opt79_excludes_a_run_whose_log_shows_both_a_hit_and_a_miss():
+    """A multi-cache job: the block's cost cannot be attributed to one verdict,
+    so the run is dropped — never guessed at, and never quietly counted as the
+    verdict that happened to be matched first."""
+    jpr, logs = _opt79_sample(hits=5)
+    both = sorted(logs)[0]
+    logs[both] = _opt79_log(_OPT79_HIT_LINE, _OPT79_MISS_LINE)
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("run_log_shows_both_a_hit_and_a_miss_line") == 1, w
+    cn = out[0]["cache_net_negative"]
+    assert cn["ambiguous_runs"] == 1
+    assert cn["hits"] == 4 and cn["misses"] == 4 and cn["classified_runs"] == 8
+    assert len(cn["per_run"]) == 8
+    # …and once the exclusion eats into the population, the finding goes.
+    jpr, logs = _opt79_sample()
+    for jid in sorted(logs)[:2]:
+        logs[jid] = _opt79_log(_OPT79_HIT_LINE, _OPT79_MISS_LINE)
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert out == []
+    assert w.get("run_log_shows_both_a_hit_and_a_miss_line") == 2, w
+    assert w.get("fewer_than_min_hit_runs_classified") == 1, w
+
+
+def test_opt79_withholds_a_run_whose_log_has_no_cache_line():
+    jpr, logs = _opt79_sample()
+    for jid in sorted(logs)[:2]:
+        logs[jid] = _opt79_log("Installing dependencies")
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("run_log_shows_no_cache_hit_or_miss_line") == 2, w
+    assert out == []
+
+
+def test_opt79_withholds_a_job_at_or_above_the_cluster_floor():
+    """The deliberate v1 scope limit, and the reason wall_clock is 0: a job that
+    can set the merge gate is withheld rather than credited with a wall-clock
+    saving this lever cannot yet size. The withhold is COUNTED so the coverage
+    hole is visible."""
+    out, w = _opt79_withheld(crit=_opt79_crit(job_p50=600.0))
+    assert out == []
+    assert w.get("job_not_strictly_below_the_workflow_cluster_floor") == 1, w
+
+
+def test_opt79_withholds_a_setup_action_with_caching_switched_off():
+    wf = _opt79_wf(steps=[{"uses": "actions/setup-node@v4",
+                           "with": {"node-version": "20", "cache": "false"}},
+                          {"run": "npm ci"}])
+    out, w = _opt79_withheld(wf=wf)
+    assert out == []
+    # 2: the candidate job, plus the `integration` job that declares no cache
+    # either — which is what this gate counts for every ordinary job.
+    assert w.get("job_declares_no_cache_restore_step") == 2, w
+
+
+def test_opt79_reads_a_setup_action_with_caching_on_as_the_cache_step():
+    """The tolerance side of the same gate: `setup-*` with `cache:` set IS a
+    cache-restore step, so the rejection above is a value check and not a blanket
+    refusal to look at setup actions."""
+    wf = _opt79_wf(steps=[{"uses": "actions/setup-node@v4",
+                           "with": {"node-version": "20", "cache": "npm"}},
+                          {"run": "npm ci"},
+                          {"run": "npm test"}])
+    jpr, logs = _opt79_sample(group="Run actions/setup-node@v4")
+    for run_jobs in jpr:
+        for step in run_jobs[0]["steps"]:
+            step["name"] = step["name"].replace("Run actions/cache@v4",
+                                                "Run actions/setup-node@v4")
+    out = _opt79(jpr, logs, wf=wf)
+    assert len(out) == 1
+    assert out[0]["cache_net_negative"]["restore_step"] == "Run actions/setup-node@v4"
+
+
+def test_opt79_withholds_when_the_workflow_yaml_is_unparsed():
+    out, w = _opt79_withheld(wf={})
+    assert out == []
+    assert w.get("workflow_yaml_unparsed") == 1, w
+
+
+def test_opt79_withholds_without_a_monthly_volume():
+    out, w = _opt79_withheld(monthly=None)
+    assert out == []
+    assert w.get("no_monthly_volume_or_no_sampled_runs") == 1, w
+
+
+def test_opt79_withholds_an_occurrence_whose_install_never_measured():
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr[:2]:
+        run_jobs[0]["steps"] = [s for s in run_jobs[0]["steps"]
+                                if s["name"] != "Run npm ci"]
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("install_step_did_not_measure_in_this_occurrence") == 2, w
+    assert out == []
+
+
+def test_opt79_scales_a_conditional_job_by_its_own_frequency():
+    """A job present in half the sampled runs must not be billed at the whole
+    workflow's monthly volume."""
+    jpr, logs = _opt79_sample(extra_runs=0)
+    jpr = jpr + [[_span_job("integration", 600.0)] for _ in range(8)]
+    cn = _opt79(jpr, logs)[0]["cache_net_negative"]
+    assert cn["job_runs"] == 8 and cn["sampled_successful_run_count"] == 16
+    assert cn["effective_monthly_volume"] == 50.0
+    assert cn["runner_min_saving"] == 7.9      # 19 x 0.5 x 50 / 60
+
+
+def test_opt79_log_plan_is_capped_and_matches_the_detector_selector():
+    """The plan and the detector share ONE selector, and the probe is bounded:
+    at most _OPT79_LOG_PROBE_MAX occurrences of a candidate job."""
+    jpr, _logs = _opt79_sample(hits=10, misses=10)
+    plan = cr._opt79_log_plan("ci.yml", jpr, _opt79_crit(), _opt79_wf())
+    assert len(plan) == cr._OPT79_LOG_PROBE_MAX
+    assert {str(j["name"]) for _p, _wf, j in plan} == {_OPT79_JOB}
+    assert {wf for _p, wf, _j in plan} == {"ci.yml"}
+    assert {p for p, _wf, _j in plan} == {42.0}   # the candidate's measured p50
+    # A job ON the workflow's slowest position IS planned. It used to be skipped
+    # here, which meant the one case where this waste sits on the merge wait was
+    # never measured at all — indistinguishable, to a reader, from a repository
+    # with no such cache. It is measured now and reported uncredited.
+    assert len(cr._opt79_log_plan(
+        "ci.yml", jpr, _opt79_crit(floor=300.0, job_p50=600.0),
+        _opt79_wf())) == cr._OPT79_LOG_PROBE_MAX
+    # …but a job that declares no cache at all still costs no fetch: the point of
+    # answering every shape gate from data already in hand.
+    assert cr._opt79_log_plan(
+        "ci.yml", jpr, _opt79_crit(),
+        _opt79_wf(steps=[{"run": "npm ci"}, {"run": "npm test"}])) == []
+
+
+def test_opt79_log_probe_has_a_repo_wide_ceiling():
+    """The per-job and per-workflow caps are both PER WORKFLOW. Without a
+    repo-wide ceiling a monorepo with thirty workflow files would multiply them
+    into hundreds of log fetches — the exact cost this engine is frugal about."""
+    assert cr._OPT79_REPO_LOG_BUDGET >= cr._OPT79_LOG_PROBE_MAX
+    assert (cr._OPT79_REPO_LOG_BUDGET
+            < 10 * cr._OPT79_LOG_PROBE_MAX * cr._OPT79_MAX_CANDIDATE_JOBS)
+    src = (Path(cr.__file__).read_text(encoding="utf-8"))
+    body = src.split("def collect(", 1)[1]
+    assert "_OPT79_REPO_LOG_BUDGET" in body, (
+        "collect() no longer trims the OPT79 log plan to the repo-wide budget")
+
+
+def test_opt79_log_plan_does_not_count_withholds():
+    """The plan pass runs the same gates to decide what to fetch. If it shared
+    the detector's counter every gate would be tallied twice and the per-gate
+    numbers would be fiction."""
+    w = {}
+    jpr, logs = _opt79_sample()
+    cr._opt79_log_plan("ci.yml", jpr, _opt79_crit(job_p50=600.0), _opt79_wf())
+    assert w == {}
+    _opt79(jpr, logs, crit=_opt79_crit(job_p50=600.0), withheld=w)
+    assert w.get("job_not_strictly_below_the_workflow_cluster_floor") == 1, w
+
+
+def test_opt79_install_classifier_is_a_subset_of_the_shared_setup_classifier():
+    """OPT79's install matcher is deliberately narrower than `_SETUP_STEP_RE`
+    (which also classifies checkout / configure / cache as setup), but it must
+    never recognise an install the shared classifier would not."""
+    for name in ("Run npm ci", "Run pnpm install --frozen-lockfile", "Run yarn install",
+                 "Run pip install -r requirements.txt", "Run poetry install",
+                 "Run bundle install", "Run go mod download", "Run cargo fetch",
+                 "Run composer install", "Run mix deps.get", "Run uv sync",
+                 "Run mvn dependency:go-offline"):
+        assert cr._OPT79_INSTALL_RE.match(name), name
+        assert cr._SETUP_STEP_RE.match(name), name
+    for name in ("Run actions/checkout@v4", "Set up job", "Run actions/cache@v4",
+                 "Run npm test", "Run mvn install", "Configure AWS"):
+        assert not cr._OPT79_INSTALL_RE.match(name), name
+
+
+def test_opt79_stamp_keys_match_the_verifier_contract():
+    """The verifier cannot import this module, so the stamped key list is
+    declared in both places. A rename on one side must redden, not silently stop
+    verifying the finding."""
+    vr = _load_verify_report_for_opt79()
+    assert tuple(cr._OPT79_STAMP_KEYS) == tuple(vr._VR_OPT79_STAMP_KEYS)
+    # …and the block the detector actually emits carries every one of them.
+    cn = _opt79()[0]["cache_net_negative"]
+    assert not [k for k in cr._OPT79_STAMP_KEYS if k not in cn]
+
+
+def test_opt79_verifier_rederives_the_real_detector_output():
+    """THE coupling test: a finding built by the REAL detector, fed straight into
+    the verifier arm. A unit-tested arm and a unit-tested detector can each be
+    right about a contract they disagree on."""
+    vr = _load_verify_report_for_opt79()
+    f = _opt79()[0]
+    data = {"per_workflow_timing": {"ci.yml": _opt79_crit()}, "findings": [f]}
+    margin, problems = vr._opt79_net_negative_cache_rederived(f, data)
+    assert problems == [], problems
+    assert margin == f["tier2_neutrality"]["margin_s"]
+
+    # …and it is not a rubber stamp. Every tampered input must redden.
+    import copy
+    bad = copy.deepcopy(f)
+    bad["runner_min_saving"] = 9999.0
+    assert vr._opt79_net_negative_cache_rederived(bad, data)[1]
+
+    bad = copy.deepcopy(f)
+    bad["cache_net_negative"]["waste_s"] = 900.0
+    assert any("waste_s" in p for p in
+               vr._opt79_net_negative_cache_rederived(bad, data)[1])
+
+    bad = copy.deepcopy(f)          # a hit relabelled as a miss to widen the gap
+    next(r for r in bad["cache_net_negative"]["per_run"]
+         if r["status"] == "hit")["status"] = "miss"
+    assert any("quoted line" in p for p in
+               vr._opt79_net_negative_cache_rederived(bad, data)[1])
+
+    bad = copy.deepcopy(f)          # the verbatim line dropped
+    bad["cache_net_negative"]["per_run"][0]["log_line"] = ""
+    assert vr._opt79_net_negative_cache_rederived(bad, data)[1]
+
+    bad = copy.deepcopy(f)          # multipliers inflated past the sample
+    bad["cache_net_negative"]["job_runs"] = 9999
+    assert any("exceeds" in p for p in
+               vr._opt79_net_negative_cache_rederived(bad, data)[1])
+
+    bad = copy.deepcopy(f)          # a step duration edited without its block
+    bad["cache_net_negative"]["per_run"][0]["install_s"] = 0.5
+    assert any("block_s" in p for p in
+               vr._opt79_net_negative_cache_rederived(bad, data)[1])
+
+    bad = copy.deepcopy(f)          # the job moved to (or above) the floor
+    floored = {"per_workflow_timing": {"ci.yml": _opt79_crit(job_p50=600.0)}}
+    assert any("cluster" in p for p in
+               vr._opt79_net_negative_cache_rederived(bad, floored)[1])
+
+
+def test_opt79_finds_an_install_step_that_carries_a_human_name():
+    """`- name: Install dependencies / run: npm ci` is the COMMONEST spelling of
+    the step this pattern exists to price. Classifying the install off the
+    rendered display name alone misses every one of them, so the detector
+    withholds on the majority of real workflows for a reason no tally explains.
+    The command decides what a step IS; the display name only says where to find
+    its duration."""
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr:                    # rename the install step in the run data
+        for st in run_jobs[0]["steps"]:
+            if st["name"] == "Run npm ci":
+                st["name"] = "Install dependencies"
+    wf = _opt79_wf(steps=[
+        {"uses": "actions/cache@v4", "with": {"path": "node_modules", "key": "k"}},
+        {"name": "Install dependencies", "run": "npm ci"},
+        {"run": "npm test"},
+    ])
+    withheld: dict = {}
+    out = _opt79(jpr, logs, wf=wf, withheld=withheld)
+    assert len(out) == 1, withheld
+    assert out[0]["cache_net_negative"]["install_step"] == "Install dependencies"
+
+
+def test_opt79_reads_a_setup_action_miss_line_in_that_action_s_own_words():
+    """`actions/setup-node` and friends are named as a supported cache mechanism,
+    but they do not print `actions/cache`'s miss wording — on a miss they say
+    `<pm> cache is not found`. Matching only the cache action's phrasing
+    classifies every setup-* HIT and no setup-* MISS, so the population gate
+    always trips and the commonest caching mechanism on GitHub can never fire."""
+    jpr, logs = _opt79_sample(
+        miss_line="npm cache is not found",
+        hit_line="Cache restored from key: node-cache-Linux-x64-npm-abc123",
+        group="Run actions/setup-node@v4")
+    for run_jobs in jpr:
+        for st in run_jobs[0]["steps"]:
+            st["name"] = st["name"].replace("actions/cache@v4",
+                                            "actions/setup-node@v4")
+    wf = _opt79_wf(steps=[
+        {"uses": "actions/setup-node@v4", "with": {"node-version": "20",
+                                                   "cache": "npm"}},
+        {"run": "npm ci"},
+        {"run": "npm test"},
+    ])
+    withheld: dict = {}
+    out = _opt79(jpr, logs, wf=wf, withheld=withheld)
+    assert len(out) == 1, withheld
+    cn = out[0]["cache_net_negative"]
+    assert cn["misses"] == 4 and cn["hits"] == 4
+    vr = _load_verify_report_for_opt79()
+    data = {"per_workflow_timing": {"ci.yml": _opt79_crit()}, "findings": [out[0]]}
+    assert vr._opt79_net_negative_cache_rederived(out[0], data)[1] == []
+
+
+def test_opt79_compares_medians_not_means_and_the_verifier_agrees():
+    """Every fixture population used to be uniform, so median, mean and max were
+    the same number and the central statistic of the detector was unpinned. A
+    dispersed sample also catches the rounding drift that matters: the detector
+    must derive the waste from the SAME rounded medians it stamps, or a finding
+    it passed at the floor can be re-derived below it and redden the report."""
+    jpr, logs = [], {}
+    jid = 800
+    for blocks, line in (((23.0, 25.0, 33.0, 43.0), _OPT79_HIT_LINE),
+                         ((12.0, 13.0, 14.0), _OPT79_MISS_LINE)):
+        for b in blocks:
+            jid += 1
+            jpr.append([_opt79_job(jid, restore=b - 3.0, install=2.0, post=1.0),
+                        _span_job("integration", 600.0)])
+            logs[jid] = _opt79_log(line)
+    withheld: dict = {}
+    out = _opt79(jpr, logs, withheld=withheld)
+    assert len(out) == 1, withheld
+    cn = out[0]["cache_net_negative"]
+    assert cn["hit_path_p50_s"] == 29.0
+    assert cn["miss_path_p50_s"] == 13.0
+    assert cn["waste_s"] == 16.0
+    assert cn["waste_s"] == round(cn["hit_path_p50_s"] - cn["miss_path_p50_s"], 1)
+    vr = _load_verify_report_for_opt79()
+    data = {"per_workflow_timing": {"ci.yml": _opt79_crit()}, "findings": [out[0]]}
+    assert vr._opt79_net_negative_cache_rederived(out[0], data)[1] == []
+
+
+def test_opt79_counts_the_occurrences_whose_log_it_never_captured():
+    """A run the probe never fetched a log for is not evidence of a cache that
+    hits and misses evenly — it is evidence of nothing. Dropping it silently
+    makes a repo-wide budget trim, an expired log and a 404 all surface as
+    `fewer_than_min_*_runs_classified`, which is the one thing the withhold tally
+    exists to prevent: attributing 'we never looked' to 'we looked and found
+    little'."""
+    jpr, logs = _opt79_sample(extra_runs=3)
+    withheld: dict = {}
+    out = _opt79(jpr, logs, withheld=withheld)
+    assert len(out) == 1, withheld
+    assert withheld.get("occurrence_has_no_captured_log") == 3
+    assert out[0]["cache_net_negative"]["job_runs"] == 11
+    assert out[0]["cache_net_negative"]["classified_runs"] == 8
+
+
+def test_opt79_verifier_thresholds_are_pinned_to_the_engines():
+    """The verifier restates the detector's gates because it must be able to
+    judge a finding without importing the engine. Restated is not the same as
+    coupled: until this test, loosening `_VR_OPT79_MIN_HITS` to 1 or dropping the
+    20% waste fraction to 0 left the whole suite green, so the verifier could
+    quietly stop enforcing the thresholds the catalog promises. The stamp-key
+    tuple was pinned; the numbers it guards were not."""
+    vr = _load_verify_report_for_opt79()
+    assert vr._VR_OPT79_MIN_HITS == cr._OPT79_MIN_HITS
+    assert vr._VR_OPT79_MIN_MISSES == cr._OPT79_MIN_MISSES
+    assert vr._VR_OPT79_MIN_WASTE_S == cr._OPT79_MIN_WASTE_S
+    assert vr._VR_OPT79_MIN_WASTE_FRAC == cr._OPT79_MIN_WASTE_FRAC
+    # the detector reads the SHARED cache tail floor, so another cache pattern
+    # retuning it must not silently desynchronise the two sides.
+    assert vr._VR_OPT79_TAIL_MIN_FRAC == cr._CACHE_TAIL_MIN_FRAC
+
+
+def test_opt79_verifier_matchers_recognise_every_line_the_engine_does():
+    """Both sides keep their own copy of the hit/miss matchers on purpose — the
+    re-derivation has to be able to catch a mislabelled row, which it could not
+    do sharing the engine's object. They must still recognise the same lines: a
+    verifier left behind when the engine learns a new vendor's wording rejects
+    honest findings with 'its quoted line is not a hit line'."""
+    vr = _load_verify_report_for_opt79()
+    for line in ("Cache restored from key: node-modules-abc123",
+                 "Cache restored from key: node-cache-Linux-x64-npm-abc123"):
+        assert cr._CACHE_HIT_RE.search(line), line
+        assert vr._VR_OPT79_HIT_RE.search(line), line
+    for line in ("Cache not found for input keys: node-modules-abc123",
+                 "npm cache is not found",
+                 "pip cache is not found"):
+        assert (cr._CACHE_MISS_RE.search(line)
+                or cr._OPT79_EXTRA_MISS_RE.search(line)), line
+        assert vr._VR_OPT79_MISS_RE.search(line), line
+    # …and neither side reads a hit as a miss or the reverse.
+    assert not vr._VR_OPT79_MISS_RE.search("Cache restored from key: abc")
+    assert not vr._VR_OPT79_HIT_RE.search("npm cache is not found")
+
+
+def test_opt79_measures_a_pole_cache_and_reports_it_uncredited():
+    """The cache on the workflow's SLOWEST job is where this waste lands on the
+    merge wait, so it is worth the most — and it used to be skipped in the
+    candidate selector, which meant its logs were never fetched and its cache was
+    never classified. That is not "withheld pending sizing"; it is never looked
+    at, and it read to the user exactly like a repository with no such cache.
+
+    It must now be measured like any other and reported with NO number: the
+    sizing needs the wall-clock bound cascade, the measurement does not."""
+    jpr, logs = _opt79_sample()
+    # the cached job IS the workflow's slowest: its p50 sits above the floor
+    crit = _opt79_crit(floor=300.0, job_p50=600.0)
+    withheld: dict = {}
+    uncredited: list = []
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, crit, _opt79_wf(), 100, 0,
+        logs_by_job_id=logs, withheld=withheld, uncredited=uncredited)
+
+    # NOT credited: no finding, so no minutes, no certificate, no Tier-2 row.
+    assert out == []
+    assert withheld.get("job_not_strictly_below_the_workflow_cluster_floor") == 1
+
+    # …but measured, and reported.
+    assert len(uncredited) == 1, uncredited
+    u = uncredited[0]
+    assert u["job"] == _OPT79_JOB
+    assert u["kind"] == "opt79_uncredited_pole_cache"
+    assert u["hits"] == 4 and u["misses"] == 4
+    assert u["waste_s"] == 19.0            # 31s hit path vs 12s miss path
+    assert u["hit_path_p50_s"] == 31.0 and u["miss_path_p50_s"] == 12.0
+    # it carries no sizing of any kind — that is the whole point
+    assert u["runner_min_saving"] is None and "wall_clock_p50_s" not in u
+    # …but it IS the same measurement as a credited one, stamped by the same
+    # builder: every contract key, and the per-run rows the verifier re-derives
+    # the medians from. A hand-built subset made `waste_s` an assertion nothing
+    # could contradict, and dropped the volumes the sizing follow-up needs.
+    assert not [k for k in cr._OPT79_STAMP_KEYS if k not in u], u
+    assert len(u["per_run"]) == 8
+    assert u["hit_share"] == 0.5 and u["job_runs"] == 8
+    assert u["monthly_volume"] == 100 and u["effective_monthly_volume"] == 100.0
+
+    # And its logs really were fetched: the plan must include the pole job, or
+    # there would be nothing to measure.
+    plan = cr._opt79_log_plan("ci.yml", jpr, crit, _opt79_wf())
+    assert len(plan) == 8, len(plan)
+
+
+def test_opt79_below_the_floor_is_still_credited_and_never_listed_uncredited():
+    """The uncredited path must not swallow the case this pattern does size."""
+    jpr, logs = _opt79_sample()
+    uncredited: list = []
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), _opt79_wf(), 100, 0,
+        logs_by_job_id=logs, uncredited=uncredited)
+    assert len(out) == 1
+    assert out[0]["wall_clock_p50_s"] == 0.0
+    assert out[0]["runner_min_saving"] > 0
+    assert uncredited == []
+
+
+# ---- the uncredited row says what it can prove, and nothing more ----
+
+def _opt79_pole_crit(**kw):
+    """The reviewers' shape: three jobs, two of them tied at the cluster floor.
+    `unit` carries the cache and sits AT the floor, so it is not strictly below
+    it — but it is the SECOND-slowest job, not the slowest, and `e2e` is the long
+    pole."""
+    base = {
+        "floor_p50": 600.0,
+        "long_pole_p50": 660.0,
+        "long_pole_job": "e2e",
+        "job_p50": {"unit": 600.0, "integration": 600.0, "e2e": 660.0},
+        "job_runner": {"unit": "ubuntu-latest", "integration": "ubuntu-latest",
+                       "e2e": "ubuntu-latest"},
+        "runner_scope": "ubuntu-latest",
+    }
+    base.update(kw)
+    return base
+
+
+def _opt79_uncredited(crit, *, is_pr=True):
+    jpr, logs = _opt79_sample()
+    rows: list = []
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, crit, _opt79_wf(), 100, 0,
+        logs_by_job_id=logs, uncredited=rows, is_pr=is_pr)
+    assert out == []
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_opt79_does_not_call_the_second_slowest_job_this_workflow_s_slowest():
+    """The uncredited branch fires on `not (p50 < floor)`, and the floor is the
+    SECOND-ranked job's p50 — so every job from second place upwards took it. The
+    report told all of them they were this workflow's slowest job and that the
+    saving was on the merge wait. For the second-slowest job neither is true: its
+    saving is pure runner-minutes, and the only reason it is uncredited is that
+    this version has not sized the neutrality argument for it."""
+    row = _opt79_uncredited(_opt79_pole_crit())
+    assert row["job"] == _OPT79_JOB              # "unit", tied AT the floor
+    assert row["long_pole_job"] == "e2e"
+    assert row["job_p50_s"] == 600.0 and row["floor_p50_s"] == 600.0
+    assert row["long_pole_p50_s"] == 660.0
+    assert row["on_critical_path"] is False
+
+    rendered = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": [row]}))
+    assert "this workflow's slowest job" not in rendered, rendered
+    assert "merge wait" not in rendered, rendered
+    assert "second-slowest job" in rendered, rendered
+    assert "not credited" in rendered
+
+
+def test_opt79_says_merge_wait_only_for_the_long_pole_of_a_pr_workflow():
+    """…and the long pole of a workflow that can gate a PR still gets the
+    original sentence, because there it is true."""
+    pole = _opt79_pole_crit(long_pole_job=_OPT79_JOB,
+                            job_p50={_OPT79_JOB: 660.0, "integration": 600.0,
+                                     "e2e": 600.0})
+    row = _opt79_uncredited(pole)
+    assert row["on_critical_path"] is True
+    rendered = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": [row]}))
+    assert "this workflow's slowest job" in rendered
+    assert "merge wait" in rendered
+
+    # …and never on a workflow that cannot gate a PR at all.
+    off_pr = _opt79_uncredited(pole, is_pr=False)
+    assert off_pr["on_critical_path"] is False
+    assert "merge wait" not in "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": [off_pr]}))
+
+
+def test_opt79_uncredited_rows_are_re_derived_by_the_report_self_check():
+    """The uncredited row ships numbers no total contradicts, so without its own
+    re-derivation an edited `waste_s` reached the page unchallenged."""
+    vr = _load_verify_report_for_opt79()
+    row = _opt79_uncredited(_opt79_pole_crit())
+    data = {"opt79_uncredited_pole_caches": [row]}
+    assert vr._opt79_uncredited_rows_rederived(data) == []
+    assert vr.check_opt79_uncredited_rows_rederived("", None).skipped
+
+    import copy
+    bad = copy.deepcopy(data)
+    bad["opt79_uncredited_pole_caches"][0]["waste_s"] = 900.0
+    assert any("waste_s" in p for p in vr._opt79_uncredited_rows_rederived(bad))
+
+    bad = copy.deepcopy(data)          # a number sneaks onto an uncredited row
+    bad["opt79_uncredited_pole_caches"][0]["runner_min_saving"] = 12.0
+    assert any("must carry no sizing" in p
+               for p in vr._opt79_uncredited_rows_rederived(bad))
+
+    bad = copy.deepcopy(data)          # claims the merge wait it is not on
+    bad["opt79_uncredited_pole_caches"][0]["on_critical_path"] = True
+    assert any("long pole" in p for p in vr._opt79_uncredited_rows_rederived(bad))
+
+
+# ---- the post (save) step may not be assumed to be zero ----
+
+def test_opt79_withholds_an_occurrence_whose_post_step_never_completed():
+    """A step with a start and no end did not measure 0s — it did not measure.
+    On `actions/cache` the save runs on a MISS, so zeroing it strips the big term
+    off the miss side and MANUFACTURES the excess this pattern reports."""
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr[4:6]:                    # two of the miss runs
+        for st in run_jobs[0]["steps"]:
+            if st["name"].startswith("Post "):
+                st.pop("completed_at")
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("step_did_not_complete_in_this_occurrence") == 2, w
+    assert out == []
+
+
+def test_opt79_withholds_when_the_post_step_matched_no_occurrence_at_all():
+    """The `Post <name>` label is CONSTRUCTED. When it matches nothing GitHub
+    rendered, the save measures 0s on every run — fail-open, and invisible."""
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr:
+        for st in run_jobs[0]["steps"]:
+            if st["name"].startswith("Post "):
+                st["name"] = "Post Cache node modules"
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("post_step_never_measured_in_any_occurrence") == 1, w
+    assert out == []
+
+
+def test_opt79_stamps_no_post_step_for_a_restore_only_cache():
+    """`actions/cache/restore` HAS no post phase, so there is no save to find and
+    nothing to fail open on. The block says so with null rather than inventing a
+    label, and the verifier accepts null."""
+    wf = _opt79_wf(steps=[
+        {"uses": "actions/cache/restore@v4", "with": {"path": "n", "key": "k"}},
+        {"run": "npm ci"}, {"run": "npm test"}])
+    jpr, logs = _opt79_sample(hit=(28.0, 3.0, 0.0), miss=(1.0, 7.0, 0.0),
+                              group="Run actions/cache/restore@v4")
+    for run_jobs in jpr:
+        for st in run_jobs[0]["steps"]:
+            st["name"] = st["name"].replace("Run actions/cache@v4",
+                                            "Run actions/cache/restore@v4")
+    withheld: dict = {}
+    out = _opt79(jpr, logs, wf=wf, withheld=withheld)
+    assert len(out) == 1, withheld
+    cn = out[0]["cache_net_negative"]
+    assert cn["post_step"] is None
+    assert all(r["post_s"] == 0.0 for r in cn["per_run"])
+    vr = _load_verify_report_for_opt79()
+    data = {"per_workflow_timing": {"ci.yml": _opt79_crit()}, "findings": [out[0]]}
+    assert vr._opt79_net_negative_cache_rederived(out[0], data)[1] == []
+
+
+# ---- reading the cache line, and only the cache line ----
+
+def test_opt79_reads_a_restore_keys_partial_hit_as_a_hit():
+    """`restore-keys` is the commonest `actions/cache` spelling: the exact key
+    misses, a prefix fallback is restored, and BOTH lines appear in the restore
+    step's own output. Classifying that `both` discarded the run and blamed a job
+    the YAML gate had already proved has exactly one cache."""
+    jpr, logs = _opt79_sample()
+    for jid in sorted(logs)[:4]:                 # the four hit runs
+        logs[jid] = _opt79_log(
+            "Cache not found for input keys: node-modules-abc123",
+            "Cache restored from key: node-modules-")
+    withheld: dict = {}
+    out = _opt79(jpr, logs, withheld=withheld)
+    assert len(out) == 1, withheld
+    cn = out[0]["cache_net_negative"]
+    assert cn["hits"] == 4 and cn["misses"] == 4
+    assert withheld.get("run_log_shows_both_a_hit_and_a_miss_line") is None
+    # …and the other order is still two caches, not a fallback.
+    jpr, logs = _opt79_sample()
+    logs[sorted(logs)[0]] = _opt79_log(
+        "Cache restored from key: other-abc", "Cache not found for input keys: x")
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("run_log_shows_both_a_hit_and_a_miss_line") == 1, w
+
+
+def test_opt79_ignores_a_build_tool_cache_line_outside_the_restore_step():
+    """Turborepo prints `cache miss, executing <task>` for every uncached task,
+    Gradle prints `Build cache miss for task …`, and both land in the TEST step.
+    Unscoped, every genuine cache HIT in a JavaScript monorepo classified `both`
+    and was discarded — the lever was deadest exactly where `node_modules` is
+    largest."""
+    jpr, logs = _opt79_sample()
+    for jid in sorted(logs)[:4]:
+        logs[jid] = _opt79_log(_OPT79_HIT_LINE,
+                               after=["cache miss, executing 4f0c1a2b",
+                                      "Build cache miss for task ':app:test'"])
+    withheld: dict = {}
+    out = _opt79(jpr, logs, withheld=withheld)
+    assert len(out) == 1, withheld
+    assert out[0]["cache_net_negative"]["hits"] == 4
+    assert withheld.get("run_log_shows_both_a_hit_and_a_miss_line") is None
+    # the row carries the group the verdict was read in, and the verifier
+    # requires it to name the restore step.
+    cn = out[0]["cache_net_negative"]
+    assert all(r["log_line_group"] == "Run actions/cache@v4" for r in cn["per_run"])
+    vr = _load_verify_report_for_opt79()
+    data = {"per_workflow_timing": {"ci.yml": _opt79_crit()}, "findings": [out[0]]}
+    assert vr._opt79_net_negative_cache_rederived(out[0], data)[1] == []
+    import copy
+    bad = copy.deepcopy(out[0])
+    bad["cache_net_negative"]["per_run"][0]["log_line_group"] = "Run npm test"
+    assert any("log group" in p for p in
+               vr._opt79_net_negative_cache_rederived(bad, data)[1])
+
+
+def test_opt79_withholds_a_log_with_no_restore_step_group():
+    """No group marker, no provenance for the line — so no verdict."""
+    jpr, logs = _opt79_sample()
+    for jid in list(logs):
+        logs[jid] = f"2026-06-01T00:00:01.0Z {_OPT79_HIT_LINE}\n"
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert out == []
+    assert w.get("restore_step_log_group_not_found_in_the_run_log") == 8, w
+
+
+# ---- the shape gates ----
+
+def test_opt79_withholds_a_setup_cache_input_that_is_an_expression():
+    """`cache: ${{ inputs.cache }}` is a non-empty truthy string whose value the
+    static parse cannot know. Reading it as "this job caches" bought eight job
+    log fetches for a job that may cache nothing."""
+    wf = _opt79_wf(steps=[{"uses": "actions/setup-node@v4",
+                           "with": {"node-version": "20",
+                                    "cache": "${{ inputs.cache }}"}},
+                          {"run": "npm ci"}, {"run": "npm test"}])
+    out, w = _opt79_withheld(wf=wf)
+    assert out == []
+    assert w.get("setup_cache_input_is_an_unevaluated_expression") == 1, w
+    # …and it costs no log probe.
+    jpr, _ = _opt79_sample()
+    assert cr._opt79_log_plan("ci.yml", jpr, _opt79_crit(), wf) == []
+
+
+def test_opt79_withholds_an_install_step_that_also_runs_something_else():
+    """A multi-line `run:` block is classified on its FIRST line, so
+    `pip install -e .` / `pytest -q` read as "the install" and the whole step —
+    test suite included — was charged to both sides of the comparison."""
+    wf = _opt79_wf(steps=[
+        {"uses": "actions/cache@v4", "with": {"path": "n", "key": "k"}},
+        {"run": "pip install -e .\npytest -q"},
+        {"run": "npm test"}])
+    out, w = _opt79_withheld(wf=wf)
+    assert out == []
+    assert w.get("install_step_also_runs_non_install_commands") == 1, w
+    # …a block whose every line IS an install is still the install step.
+    wf_ok = _opt79_wf(steps=[
+        {"uses": "actions/cache@v4", "with": {"path": "n", "key": "k"}},
+        {"name": "Run npm ci", "run": "npm ci\nnpm install --no-save x"},
+        {"run": "npm test"}])
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf_ok)
+    assert gate == "" and block["install"] == "Run npm ci", (block, gate)
+
+
+def test_opt79_reads_what_the_install_step_runs_not_what_it_is_called():
+    """The classifier was `name matches OR command matches`, so a step NAMED
+    `npm ci` that RUNS `npm run build` was priced as the install. The command
+    decides what a step IS; the name only says where to find its duration."""
+    wf = _opt79_wf(steps=[
+        {"uses": "actions/cache@v4", "with": {"path": "n", "key": "k"}},
+        {"name": "npm ci", "run": "npm run build"}])
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None and gate == "no_install_step_after_the_cache_step"
+    wf = _opt79_wf(steps=[
+        {"uses": "actions/cache@v4", "with": {"path": "n", "key": "k"}},
+        {"name": "Install dependencies", "run": "npm test"}])
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None and gate == "no_install_step_after_the_cache_step"
+
+
+# ---- the counts nobody could see ----
+
+def test_opt79_blames_unread_logs_rather_than_a_thin_population():
+    """A partially-failed probe wave is not evidence that a cache rarely misses.
+    Reported as `fewer_than_min_*`, a budget trim and an expired log read as "we
+    looked and found little" about runs nobody read."""
+    jpr, logs = _opt79_sample(hits=2, misses=4, extra_runs=6)
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert out == []
+    assert w.get("occurrence_has_no_captured_log") == 6, w
+    assert w.get("population_truncated_by_unread_logs") == 1, w
+    assert w.get("fewer_than_min_hit_runs_classified") is None, w
+
+
+def test_opt79_counts_an_occurrence_whose_duration_will_not_parse():
+    """It also never reaches `job_runs`, which scales the monthly volume — so an
+    unparseable occurrence quietly makes the job look more conditional."""
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr[:2]:
+        run_jobs[0]["completed_at"] = None
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("occurrence_duration_unparseable") == 2, w
+    assert out == []
+
+
+def test_opt79_counts_a_colliding_job_name_once_per_job():
+    """The tally's unit is the candidate everywhere else; a matrix collapsing
+    two names into one used to add 1 while two jobs went unmeasured."""
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr:
+        run_jobs.append(_span_job("integration", 601.0))
+        run_jobs.append(_opt79_job(70000 + len(run_jobs), restore=1.0,
+                                   install=2.0, post=1.0, name=_OPT79_JOB))
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("job_name_is_not_one_job") == 2, w      # `unit` and `integration`
+
+
+def test_opt79_stamps_the_occurrences_it_dropped_for_the_wrong_runner():
+    """The set was built and never read, so a comparison that discarded part of
+    its sample to a runner-label change said nothing about it."""
+    jpr, logs = _opt79_sample()
+    jpr2, logs2 = _opt79_sample(hits=0, misses=3, runner="ubuntu-24.04-arm")
+    for job_list in jpr2:
+        job_list[0]["id"] += 50
+    logs.update({k + 50: v for k, v in logs2.items()})
+    cn = _opt79(jpr + jpr2, logs)[0]["cache_net_negative"]
+    assert cn["occurrences_on_other_runner"] == 3, cn
+
+
+# ---- the repo-wide probe budget ----
+
+def _opt79_plan_entry(p50, wf, jid):
+    return (p50, wf, {"id": jid, "name": _OPT79_JOB})
+
+
+def test_opt79_repo_probe_budget_keeps_the_costliest_candidates():
+    """The budget used to slice the plan in the order the workflow files happened
+    to be walked, so in a monorepo the longest-running cached job could be
+    dropped for a trivial one — and the drop was never counted."""
+    plan = []
+    for wf, p50 in (("a.yml", 10.0), ("b.yml", 900.0),
+                    ("c.yml", 20.0), ("d.yml", 500.0)):
+        plan += [_opt79_plan_entry(p50, wf, f"{wf}-{i}") for i in range(8)]
+    assert len(plan) == 32
+    w: dict = {}
+    kept = cr._opt79_trim_repo_probe_plan(plan, withheld=w)
+    assert len(kept) == cr._OPT79_REPO_LOG_BUDGET == 24
+    assert [wf for _p, wf, _j in kept[:8]] == ["b.yml"] * 8
+    assert [wf for _p, wf, _j in kept[8:16]] == ["d.yml"] * 8
+    assert [wf for _p, wf, _j in kept[16:]] == ["c.yml"] * 8
+    assert "a.yml" not in {wf for _p, wf, _j in kept}
+    assert w["beyond_the_repo_wide_log_budget"] == 8, w
+    # …and a plan inside the budget passes through untouched, counting nothing.
+    small = plan[:16]
+    w2: dict = {}
+    assert cr._opt79_trim_repo_probe_plan(small, withheld=w2) == sorted(
+        small, key=lambda t: -t[0])
+    assert w2 == {}
+
+
+def test_opt79_log_plan_takes_the_runs_in_the_order_it_is_given():
+    """`_opt79_log_plan` documents "the NEWEST N per candidate job" — which is
+    only true because the sampler hands runs over newest-first and this function
+    does not re-sort. Pinned, so a sampler that changes that order cannot
+    silently change which occurrences the comparison is built from."""
+    jpr, _logs = _opt79_sample(hits=10, misses=10)
+    ids = [rj[0]["id"] for rj in jpr]
+    plan = cr._opt79_log_plan("ci.yml", jpr, _opt79_crit(), _opt79_wf())
+    assert [j["id"] for _p, _wf, j in plan] == ids[:cr._OPT79_LOG_PROBE_MAX]
+
+
+# ---- the rounding the sizing rests on ----
+
+def test_opt79_takes_the_excess_from_the_medians_it_stamps():
+    """Every other fixture stamps whole seconds, so median, rounded median and
+    raw median are the same number and the rounding order is unpinned. It is not
+    cosmetic: the detector stamps ROUNDED medians and the verifier re-derives the
+    waste from them, so subtracting the RAW pair can pass a finding at the floor
+    that then re-derives below it and reddens an honest report."""
+    def _job(jid, block_s):
+        def _st(off):
+            m, s = divmod(off, 60.0)
+            return "2026-06-01T00:%02d:%06.3fZ" % (int(m), s)
+        steps, t = [], 0.0
+        for nm, dur in (("Run actions/cache@v4", block_s - 2.0),
+                        ("Run npm ci", 1.0),
+                        ("Post Run actions/cache@v4", 1.0)):
+            steps.append({"name": nm, "number": len(steps) + 1,
+                          "started_at": _st(t), "completed_at": _st(t + dur)})
+            t += dur
+        return {"id": jid, "name": _OPT79_JOB, "conclusion": "success",
+                "html_url": f"https://github.com/o/r/actions/runs/{jid}/job/{jid}",
+                "started_at": _st(0), "completed_at": _st(t),
+                "labels": ["ubuntu-latest"], "steps": steps}
+
+    jpr, logs = [], {}
+    jid = 700
+    for blocks, line in (((15.0, 15.0, 15.1, 15.1), _OPT79_HIT_LINE),
+                         ((10.1, 10.1, 10.2, 10.2), _OPT79_MISS_LINE)):
+        for b in blocks:
+            jid += 1
+            jpr.append([_job(jid, b), _span_job("integration", 600.0)])
+            logs[jid] = _opt79_log(line)
+    withheld: dict = {}
+    out = _opt79(jpr, logs, withheld=withheld)
+    # medians 15.05 -> 15.1 and 10.15 -> 10.1; rounded-first excess is exactly
+    # the 5.0s floor. Taken from the RAW medians it is 4.9s and nothing fires.
+    assert len(out) == 1, withheld
+    cn = out[0]["cache_net_negative"]
+    assert cn["hit_path_p50_s"] == 15.1 and cn["miss_path_p50_s"] == 10.1
+    assert cn["waste_s"] == 5.0 == cn["waste_floor_s"]
+    vr = _load_verify_report_for_opt79()
+    data = {"per_workflow_timing": {"ci.yml": _opt79_crit()}, "findings": [out[0]]}
+    assert vr._opt79_net_negative_cache_rederived(out[0], data)[1] == []
+
+
+def test_opt79_uncredited_doc_key_is_one_contract():
+    """A string key written in one file and read in another: renaming it in the
+    collector used to stop the line rendering with nothing going red."""
+    assert cr._OPT79_UNCREDITED_DOC_KEY == bp._OPT79_UNCREDITED_DOC_KEY
+    vr = _load_verify_report_for_opt79()
+    assert vr._VR_OPT79_UNCREDITED_DOC_KEY == cr._OPT79_UNCREDITED_DOC_KEY
+    assert vr._VR_OPT79_UNCREDITED_KIND == cr._OPT79_UNCREDITED_KIND
+    assert vr._VR_OPT79_CREDITED_KIND == cr._OPT79_CREDITED_KIND

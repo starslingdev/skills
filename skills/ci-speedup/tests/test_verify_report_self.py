@@ -8669,3 +8669,112 @@ def test_opt77_neutrality_refuses_the_generic_below_floor_margin(tmp_path: Path)
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
     assert not chk.ok and "below-floor margin" in chk.detail, chk
+
+
+def _cache_probe_doc(tmp_path, probed, returned, budget=24, planned=None):
+    import json as _json
+    p = tmp_path / "findings.json"
+    probe = {"probed": probed, "returned": returned, "budget": budget}
+    if planned is not None:
+        probe["planned"] = planned
+    p.write_text(_json.dumps({"data_sources": {"cache_probe_logs": probe}}),
+                 encoding="utf-8")
+    return p
+
+
+def test_cache_probe_row_must_state_the_logs_actually_read(tmp_path):
+    """The cache-cost comparison reads job logs during collection, so the
+    pole-drill `job logs` row can honestly say "not run" in a report that quotes
+    them. Its own row therefore has to be re-derived, or the report can claim a
+    number of reads the run never made."""
+    vr = _load_verify_report()
+    row = "| cache hit/miss log probe | {} | Splitting a cached job's runs |"
+    honest = row.format("8 job log(s) read (capped at 24 for the repository)")
+    bad, note = vr._cache_probe_count_violation(
+        honest, _cache_probe_doc(tmp_path, 8, 8))
+    assert bad is None, bad
+    assert "8/8" in note
+
+    # claims eight reads when only three came back
+    bad, _ = vr._cache_probe_count_violation(
+        honest, _cache_probe_doc(tmp_path, 8, 3))
+    assert bad and "3 of 8" in bad
+
+    # states the shortfall honestly
+    partial = row.format("3 of 8 job log(s) returned content")
+    bad, _ = vr._cache_probe_count_violation(
+        partial, _cache_probe_doc(tmp_path, 8, 3))
+    assert bad is None, bad
+
+
+def test_cache_probe_row_is_absent_exactly_when_nothing_was_probed(tmp_path):
+    """Both silences are failures. A report that read eight logs and shows no row
+    is the bug this row was added for — the provenance table denying a read it
+    made. A report that shows the row having probed nothing bills the reader for
+    a cost they never paid."""
+    vr = _load_verify_report()
+    row = "| cache hit/miss log probe | 8 job log(s) read | Splitting runs |"
+    bad, _ = vr._cache_probe_count_violation(
+        "## Data sources\n| job logs | not run |\n",
+        _cache_probe_doc(tmp_path, 8, 8))
+    assert bad and "no row" in bad
+
+    bad, _ = vr._cache_probe_count_violation(
+        row, _cache_probe_doc(tmp_path, 0, 0))
+    assert bad and "recorded none" in bad
+
+    # nothing probed and no row: correct, and silent
+    bad, note = vr._cache_probe_count_violation(
+        "## Data sources\n| job logs | not run |\n",
+        _cache_probe_doc(tmp_path, 0, 0))
+    assert bad is None and note == ""
+
+
+def test_coverage_check_fails_on_a_dishonest_cache_probe_row(tmp_path):
+    """The cache-probe re-derivation was unit-tested and its WIRING was not:
+    replacing the two lines that call it inside `check_coverage_disclosed` with a
+    no-op left every test green, so the check could stop running without anything
+    going red."""
+    vr = _load_verify_report()
+    head = ("## Where this data comes from\n\n"
+            "| Source | Coverage | Used for |\n|---|---|---|\n")
+    row = "| cache hit/miss log probe | {} | Splitting a cached job's runs |\n"
+
+    dishonest = head + row.format("8 job log(s) read")
+    chk = vr.check_coverage_disclosed(dishonest, _cache_probe_doc(tmp_path, 8, 3))
+    assert not chk.ok, chk
+    assert "3 of 8" in chk.detail, chk
+
+    honest = head + row.format("3 of 8 job log(s) returned content")
+    chk = vr.check_coverage_disclosed(honest, _cache_probe_doc(tmp_path, 8, 3))
+    assert chk.ok, chk
+    assert "cache-probe count honest" in chk.detail, chk
+
+
+def test_cache_probe_row_states_the_candidates_the_budget_dropped(tmp_path):
+    """The repo-wide budget does not only cap the cost, it removes candidates.
+    A row reporting only what was READ hides that the comparison saw less of the
+    repository than its own selector asked for."""
+    vr = _load_verify_report()
+    row = "| cache hit/miss log probe | {} | Splitting a cached job's runs |"
+    silent = row.format("24 job log(s) read (capped at 24 for the repository)")
+    bad, _ = vr._cache_probe_count_violation(
+        silent, _cache_probe_doc(tmp_path, 24, 24, planned=32))
+    assert bad and "planned 32" in bad, bad
+
+    honest = row.format(
+        "24 job log(s) read (24 of 32 planned) (capped at 24 for the repository)")
+    bad, _ = vr._cache_probe_count_violation(
+        honest, _cache_probe_doc(tmp_path, 24, 24, planned=32))
+    assert bad is None, bad
+
+
+def test_cache_probe_check_says_so_when_it_cannot_read_the_findings(tmp_path):
+    """An unreadable findings bundle is not a clean bill of health. Swallowing
+    the error made a corrupt file indistinguishable from a re-derivation that
+    passed — the one outcome a self-check must never produce silently."""
+    vr = _load_verify_report()
+    broken = tmp_path / "findings.json"
+    broken.write_text("{not json", encoding="utf-8")
+    bad, note = vr._cache_probe_count_violation("## Data sources\n", broken)
+    assert bad and "unreadable" in bad, (bad, note)

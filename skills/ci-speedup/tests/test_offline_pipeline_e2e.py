@@ -87,7 +87,15 @@ _JOB_ID = 9001
 #            (per_page=2 also returns the PRIOR boundary, still a single call).
 #            The runs API exposes no workflow-content hash, so per-run content diffing
 #            would cost one `/contents/` fetch per run, N >> K; this is O(1) per workflow.)
-_GOLDEN_GH_QUERY_COUNT = 38
+#   46  now  (+8 OPT79: the net-negative-cache lever reads the run LOG's own cache
+#            hit/miss line, which nothing else in the plain path fetches. The probe is
+#            capped at _OPT79_LOG_PROBE_MAX (8) occurrences of one candidate job and
+#            _OPT79_MAX_CANDIDATE_JOBS (2) candidate jobs per workflow; `matrix.yml`'s
+#            `deps` is the corpus's only job declaring a cache followed by an install,
+#            so it costs exactly the per-job cap once. Every other OPT79 gate is
+#            answered from data already in hand, so no log is fetched for a job that
+#            could not produce a finding.)
+_GOLDEN_GH_QUERY_COUNT = 46
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).
@@ -164,6 +172,16 @@ jobs:
       - uses: actions/checkout@v4
       - run: npm ci
       - run: npm run lint:stylelint
+  deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ hashFiles('**/package-lock.json') }}
+      - run: npm ci
+      - run: npm run typecheck
 """
 
 
@@ -385,6 +403,55 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # would be visible rather than silent.
     assert isinstance(data.get("opt77_withheld_by_gate"), dict), (
         "the per-gate withhold tally must be stamped on every collected run")
+
+    # OPT79 end to end, including the LOG fetch nothing else in the plain path
+    # makes. `matrix.yml`'s `deps` job restores a cache and then installs; the
+    # corpus alternates cache-hit and cache-miss runs, and the hit path's block
+    # (restore + install + post) measures 31s against the miss path's 12s. Both
+    # the detector's DISPATCH and the capped log probe that feeds it are only
+    # reachable through collect(): short-circuiting the detector call, or
+    # discarding its result, leaves every unit test green.
+    o79 = [f for f in data["findings"] if f.get("pattern") == "OPT79"]
+    assert len(o79) == 1, (
+        "the `deps` job in matrix.yml must promote one OPT79 net-negative cache "
+        f"(got {[f.get('affected_jobs') for f in o79]!r})")
+    cn = o79[0].get("cache_net_negative") or {}
+    assert cn.get("kind") == "opt79_net_negative_cache", cn
+    assert cn.get("job") == "deps" and o79[0].get("affected_jobs") == ["deps"], cn
+    assert cn.get("hits") == 4 and cn.get("misses") == 4, cn
+    assert cn.get("hit_path_p50_s") == 31.0 and cn.get("miss_path_p50_s") == 12.0, cn
+    assert cn.get("waste_s") == 19.0, cn
+    assert o79[0].get("wall_clock_p50_s") in (0, 0.0)
+    assert o79[0].get("sizing_basis") == "measured"
+    assert (o79[0].get("runner_min_saving") or 0) > 0, o79[0]
+    # The verbatim cache line each verdict came from must reach the findings JSON —
+    # it is the only thing a human can check the classification against.
+    assert all(r.get("log_line") for r in (cn.get("per_run") or [])), cn
+    assert any("Cache restored from key" in str(r.get("log_line"))
+               for r in cn["per_run"]), cn
+    assert any("Cache not found for" in str(r.get("log_line"))
+               for r in cn["per_run"]), cn
+    # …every verdict names the log group it was read in, so a build tool's own
+    # `cache miss` line in the test step can never be mistaken for this cache's.
+    assert all(r.get("log_line_group") == "Run actions/cache@v4"
+               for r in cn["per_run"]), cn
+    # …and the probe stayed inside its budget. Counted ONCE, in the provenance
+    # row the report renders and `verify_report` re-derives — a second copy on
+    # the findings doc was a number nothing checked and nothing rendered.
+    assert isinstance(data.get("opt79_withheld_by_gate"), dict), (
+        "the per-gate withhold tally must be stamped on every collected run")
+    # …and the run DECLARES those reads in its provenance, as its own row. The
+    # pole-drill `logs_fetched` field counts a different thing and the report's
+    # self-check re-derives that cell from the persisted bundle, so a report that
+    # quotes eight cache log lines while its Data sources table says no job logs
+    # were read is the failure this separate row exists to prevent.
+    _probe = (data.get("data_sources") or {}).get("cache_probe_logs")
+    assert isinstance(_probe, dict), data.get("data_sources")
+    assert _probe.get("probed") == 8 and _probe.get("returned") == 8, _probe
+    # PLANNED is stamped beside them: when the repo-wide budget cuts the plan the
+    # comparison saw less of the repository than its selector asked for, and the
+    # row has to say so. Here nothing was cut, so the two agree.
+    assert _probe.get("planned") == 8, _probe
 
     # The static-scan findings come from scan.py parsing the YAML — they exist
     # regardless of gh replay, so they do NOT prove the replay wired up. Assert
