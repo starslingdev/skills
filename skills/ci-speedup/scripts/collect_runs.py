@@ -14182,8 +14182,22 @@ _OPT79_REPO_LOG_BUDGET = 24
 _OPT79_CACHE_USES_RE = _re.compile(r"^actions/cache(/restore)?(@|$)", _re.I)
 # A `setup-*` action, whose `cache:` input turns it into a cache-restore step
 # with a built-in post-save (`actions/setup-node`, `actions/setup-python`,
-# `pnpm/action-setup`, `astral-sh/setup-uv`, …).
+# `astral-sh/setup-uv`, …). The `setup-` must follow the slash, so
+# `pnpm/action-setup` is deliberately NOT one of these — it takes no `cache:`
+# input and does no restoring of its own.
 _OPT79_SETUP_USES_RE = _re.compile(r"^[\w.-]+/setup-[\w.-]+(@|$)", _re.I)
+# The `setup-*` family does NOT print the cache action's miss wording. On a miss
+# `actions/setup-node` / `setup-python` / `setup-java` / `setup-go` all emit
+# `<package manager> cache is not found` from the shared cache-distributor
+# helper, which `_CACHE_MISS_RE` ("cache not found for") cannot match — the line
+# reads "cache IS not found", with no "for". Matching only the cache action's
+# phrasing classified every setup-* HIT and no setup-* MISS, so the population
+# gate withheld on the commonest caching mechanism on GitHub, and the tally
+# blamed a thin miss population rather than an unreadable one. Kept LOCAL to
+# OPT79 rather than widened into the shared matcher, which eight other cache
+# patterns read for a different purpose.
+_OPT79_EXTRA_MISS_RE = _re.compile(
+    r"cache is not found\b|dependencies are not cached\b", _re.I)
 # The INSTALL verbs, and only those. This is deliberately NARROWER than
 # `_SETUP_STEP_RE`, which also classifies checkout / configure / cache / restore
 # as setup: the step the cache is supposed to make cheaper is the dependency
@@ -14229,6 +14243,27 @@ def _opt79_yaml_step_display(step: dict[str, Any]) -> str | None:
         return None
     if step.get("name"):
         return " ".join(str(step["name"]).split())
+    uses = str(step.get("uses") or "").strip()
+    if uses:
+        return f"Run {uses}"
+    run = str(step.get("run") or "")
+    if run.strip():
+        return "Run " + " ".join(run.strip().splitlines()[0].split())
+    return None
+
+
+def _opt79_yaml_step_command(step: dict[str, Any]) -> str | None:
+    """What a step DOES, ignoring whatever it was named — `Run <uses>` for an
+    action, `Run <first line of run:>` for a script.
+
+    This is what the install classifier must read. `_opt79_yaml_step_display`
+    prefers the author's `name:`, which is the right answer for finding the
+    step's DURATION in the run data (GitHub renders the name), and the wrong one
+    for deciding what the step IS: `- name: Install dependencies / run: npm ci`
+    is the commonest spelling of the very step this pattern prices, and no
+    install verb appears in its display name."""
+    if not isinstance(step, dict):
+        return None
     uses = str(step.get("uses") or "").strip()
     if uses:
         return f"Run {uses}"
@@ -14301,7 +14336,13 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any]
     install = None
     for j in range(ci + 1, len(steps)):
         d = displays[j]
-        if d and _OPT79_INSTALL_RE.match(d):
+        if not d:
+            continue
+        # Classify on the COMMAND, fall back to the display name: a named step
+        # (`name: Install dependencies`) hides its verb, an unnamed one is its
+        # verb. The display name is still what the duration is looked up by.
+        cmd = _opt79_yaml_step_command(steps[j])
+        if _OPT79_INSTALL_RE.match(d) or (cmd and _OPT79_INSTALL_RE.match(cmd)):
             install = d
             break
     if not install:
@@ -14356,7 +14397,8 @@ def _opt79_classify_log(log: str) -> tuple[str, str]:
     hit_line = ""
     miss_line = ""
     for raw_line in (log or "").splitlines():
-        if not miss_line and _CACHE_MISS_RE.search(raw_line):
+        if not miss_line and (_CACHE_MISS_RE.search(raw_line)
+                              or _OPT79_EXTRA_MISS_RE.search(raw_line)):
             miss_line = _clean_log_line(raw_line)
         if not hit_line and _CACHE_HIT_RE.search(raw_line):
             hit_line = _clean_log_line(raw_line)
@@ -14587,6 +14629,11 @@ def _detect_opt79_net_negative_cache(
             job_runs += 1
             log = logs.get(job.get("id"))
             if not log:
+                # NOT a thin hit/miss population — a run nobody looked at. The
+                # repo-wide probe budget, an expired log and a 404 all land
+                # here, and folding them into the population gates would report
+                # "we looked and found little" for "we never looked".
+                _no("occurrence_has_no_captured_log", job=name)
                 continue
             status, line = _opt79_classify_log(log)
             if status == "both":
@@ -14638,8 +14685,14 @@ def _detect_opt79_net_negative_cache(
             _no("hit_share_below_the_tail_floor", job=name,
                 hit_share=round(hit_share, 3), floor=_CACHE_TAIL_MIN_FRAC)
             continue
-        hit_p50 = float(_stats.median([r["block_s"] for r in hits]))
-        miss_p50 = float(_stats.median([r["block_s"] for r in misses]))
+        # Rounded BEFORE the waste is taken, because these are the numbers that
+        # get stamped and the verifier re-derives the waste from the stamped
+        # medians. Subtracting the unrounded pair can differ by 0.1 from
+        # subtracting the rounded one, which on an even-sized population is
+        # enough to re-derive a floor-passing finding just under the floor and
+        # redden an honest report.
+        hit_p50 = round(float(_stats.median([r["block_s"] for r in hits])), 1)
+        miss_p50 = round(float(_stats.median([r["block_s"] for r in misses])), 1)
         waste = round(hit_p50 - miss_p50, 1)
         waste_floor = round(max(_OPT79_MIN_WASTE_S,
                                 _OPT79_MIN_WASTE_FRAC * miss_p50), 1)

@@ -399,7 +399,9 @@ named here are the detector's constants, not restatements of them.
    declare exactly **one** cache-restore step — `actions/cache`,
    `actions/cache/restore`, or an `owner/setup-*` action with a `cache:` input
    set to anything other than `false` / `no` / `off` — followed by an **install**
-   step. The install verbs are the install alternatives of the shared setup
+   step. An install step is recognised by **what it runs**, not by what it was
+   called, so `name: Install dependencies` over `run: npm ci` is found like any
+   other. The install verbs are the install alternatives of the shared setup
    classifier and nothing else: `npm|pnpm|yarn|bun ci|install|i`,
    `pip|pip3|pipenv|poetry|uv install|sync`, `uv pip install`,
    `python -m pip install`, `bundle install`, `composer install`,
@@ -412,8 +414,12 @@ named here are the detector's constants, not restatements of them.
    in a single run is not one job), and to one known per-minute-billed runner
    label.
 3. Across the sampled runs, each occurrence's log is classified **HIT** or
-   **MISS** by the **verbatim cache line** — the same two matchers the rest of
-   the cache family reads — never by a duration. A log showing **both** lines is
+   **MISS** by the **verbatim cache line** — the matchers the rest of the cache
+   family reads, plus the `setup-*` family's own miss wording (those actions
+   print `<package manager> cache is not found`, which the cache action's
+   phrasing does not match) — never by a duration. An occurrence whose log was
+   never fetched is **counted as unread**, not folded into the populations. A
+   log showing **both** lines is
    a job with more than one cache: it is **excluded and counted**, never guessed.
    At least **3 hits and 3 misses** are required; a comparison with one side
    unmeasured is the shape-assumption the evidence guards forbid.
@@ -437,10 +443,12 @@ Job logs are the expensive call in this engine, so the probe is capped three
 times: at most **8** sampled occurrences of one job, at most **2** candidate jobs
 per workflow, and at most **24** log fetches across the whole repository — the
 first two are per workflow, and without the third a monorepo with thirty workflow
-files would multiply them into hundreds of calls. Candidates are ranked by
-measured job p50, so the budget is spent where a net-negative cache costs most,
-and every other gate is answered from data already in hand, so no log is fetched
-for a job that could not produce a finding.
+files would multiply them into hundreds of calls. Within a workflow, candidates
+are ranked by measured job p50, so the two that are probed are the two whose
+cache costs most; the repo-wide ceiling is then applied in workflow order, so on
+a repo large enough to hit it some workflows go unprobed. Every gate except the
+run-frequency one is answered from data already in hand, so a job that could not
+produce a finding for any other reason costs no log fetch.
 
 **Sizing (measured)**:
 
@@ -512,6 +520,7 @@ one number as an answer. Every key below is hard-required by that re-derivation:
 
 | key | what it carries |
 |---|---|
+| `kind` | `opt79_net_negative_cache` — the block's type tag, which is what routes the finding to this re-derivation instead of the generic one |
 | `job` | the credited job; must be the finding's only `affected_jobs` entry |
 | `runner_label` | the one runner class every credited run ran on |
 | `restore_step` / `install_step` / `post_step` | the three steps, as named in the YAML, that both paths measure |
@@ -531,7 +540,6 @@ effective volume and the credited minutes, and re-derives the margin from
 report.
 
 ---
-
 
 ### OPT11 — Redundant Environment Variables
 

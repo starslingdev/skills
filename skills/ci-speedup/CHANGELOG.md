@@ -38,9 +38,17 @@ unversioned and updates by reinstall from `main`.
   that sets the merge gate the pattern withholds rather than size a speedup it
   cannot yet prove. Reading the logs is the one new cost, and it is capped at eight
   runs of one job, two jobs per workflow and twenty-four fetches across the whole
-  repository, spent on the most expensive candidate first. A repo that acts on this finding will still be marked down by ci-score's
-  dependency-caching check, which reads configuration only; reconciling the two is
-  an open decision, not a behaviour either skill implements today. (#106)
+  repository; within a workflow the most expensive candidate goes first. The
+  install step is recognised by the command it runs rather than by the name the
+  author gave it, so the near-universal "Install dependencies" spelling is not
+  missed, and a cache miss is read in the `setup-` actions' own wording as well as
+  the cache action's, so a job that caches through `setup-node` or `setup-python`
+  can report. A sampled run whose log was never fetched is counted as unread
+  rather than as a run with nothing to say, so a thin result never gets blamed on
+  the repository. A repo that acts on this finding will still be marked down by
+  ci-score's dependency-caching check, which reads configuration only; reconciling
+  the two is an open decision, not a behaviour either skill implements today.
+  (#106)
 
 - **2026-09-24** — **The "slow test suite re-loading the app" diagnosis is now a
   catalogued, guarded lever (OPT78), and it no longer tells a repo to apply a

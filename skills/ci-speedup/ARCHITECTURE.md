@@ -1071,10 +1071,18 @@ lever, and the first one to read job LOGS in `collect()` rather than in the dril
 For a job whose workflow file declares exactly one cache-restore step
 (`actions/cache`, `actions/cache/restore`, or an `owner/setup-*` action with
 `cache:` set) followed by an install step, it classifies the sampled occurrences
-HIT or MISS from the verbatim cache line — the same `_CACHE_HIT_RE` /
-`_CACHE_MISS_RE` the rest of the cache family reads — and compares the p50 of the
-SAME three steps (restore + install + post save) across the two populations. A
-log showing both lines is a multi-cache job and is excluded, never guessed.
+HIT or MISS from the verbatim cache line — the `_CACHE_HIT_RE` / `_CACHE_MISS_RE`
+the rest of the cache family reads, plus `_OPT79_EXTRA_MISS_RE` for the `setup-*`
+family's own miss wording (`<package manager> cache is not found`, which the
+cache action's "cache not found for" cannot match; kept OPT79-local so the eight
+other cache patterns reading the shared matcher are unaffected) — and compares
+the p50 of the SAME three steps (restore + install + post save) across the two
+populations. A log showing both lines is a multi-cache job and is excluded, never
+guessed; an occurrence whose log was never fetched is counted as unread rather
+than folded into a population. The install step is recognised from what it RUNS
+rather than from its display name, so the near-universal `name: Install
+dependencies` spelling is found; the display name is still what the step's
+duration is looked up by.
 
 Two things keep it honest. The step set comes from the YAML and a step the run
 did not time counts as 0s, so GitHub's one-second granularity cannot change which
@@ -1093,9 +1101,13 @@ and `_OPT79_REPO_LOG_BUDGET = 24` across the whole repo — the first two are pe
 workflow, so without the third a thirty-workflow monorepo would multiply them
 into hundreds of fetches), planned across every workflow up front by
 `_opt79_log_plan` and fanned out in one `_prefetch_text` wave before the detector
-loop. `_opt79_candidates` is the ONE
-selector shared by the plan and the detector, so the two can never disagree about
-which jobs were measured. `verify_report.py`'s
+loop. The p50 ranking is per workflow; the repo-wide ceiling is a prefix cut in
+workflow order, so on a repo that exceeds it the later workflows go unprobed —
+their occurrences then count under `occurrence_has_no_captured_log` rather than
+looking like a thin hit/miss population. `_opt79_candidates` is the ONE selector
+shared by the plan and the detector, so the two can never disagree about which
+jobs are ELIGIBLE (which of those actually got logs is the budget's business, and
+is counted). `verify_report.py`'s
 `_opt79_net_negative_cache_rederived` arm recomputes every per-run block from its
 three parts, re-reads each row's quoted line against its stamped verdict, and
 re-derives both medians, the waste, the floor, the hit share, the effective

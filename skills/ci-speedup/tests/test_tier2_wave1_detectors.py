@@ -4042,3 +4042,99 @@ def test_opt79_verifier_rederives_the_real_detector_output():
     floored = {"per_workflow_timing": {"ci.yml": _opt79_crit(job_p50=600.0)}}
     assert any("cluster" in p for p in
                vr._opt79_net_negative_cache_rederived(bad, floored)[1])
+
+
+def test_opt79_finds_an_install_step_that_carries_a_human_name():
+    """`- name: Install dependencies / run: npm ci` is the COMMONEST spelling of
+    the step this pattern exists to price. Classifying the install off the
+    rendered display name alone misses every one of them, so the detector
+    withholds on the majority of real workflows for a reason no tally explains.
+    The command decides what a step IS; the display name only says where to find
+    its duration."""
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr:                    # rename the install step in the run data
+        for st in run_jobs[0]["steps"]:
+            if st["name"] == "Run npm ci":
+                st["name"] = "Install dependencies"
+    wf = _opt79_wf(steps=[
+        {"uses": "actions/cache@v4", "with": {"path": "node_modules", "key": "k"}},
+        {"name": "Install dependencies", "run": "npm ci"},
+        {"run": "npm test"},
+    ])
+    withheld: dict = {}
+    out = _opt79(jpr, logs, wf=wf, withheld=withheld)
+    assert len(out) == 1, withheld
+    assert out[0]["cache_net_negative"]["install_step"] == "Install dependencies"
+
+
+def test_opt79_reads_a_setup_action_miss_line_in_that_action_s_own_words():
+    """`actions/setup-node` and friends are named as a supported cache mechanism,
+    but they do not print `actions/cache`'s miss wording — on a miss they say
+    `<pm> cache is not found`. Matching only the cache action's phrasing
+    classifies every setup-* HIT and no setup-* MISS, so the population gate
+    always trips and the commonest caching mechanism on GitHub can never fire."""
+    jpr, logs = _opt79_sample(
+        miss_line="npm cache is not found",
+        hit_line="Cache restored from key: node-cache-Linux-x64-npm-abc123")
+    for run_jobs in jpr:
+        for st in run_jobs[0]["steps"]:
+            st["name"] = st["name"].replace("actions/cache@v4",
+                                            "actions/setup-node@v4")
+    wf = _opt79_wf(steps=[
+        {"uses": "actions/setup-node@v4", "with": {"node-version": "20",
+                                                   "cache": "npm"}},
+        {"run": "npm ci"},
+        {"run": "npm test"},
+    ])
+    withheld: dict = {}
+    out = _opt79(jpr, logs, wf=wf, withheld=withheld)
+    assert len(out) == 1, withheld
+    cn = out[0]["cache_net_negative"]
+    assert cn["misses"] == 4 and cn["hits"] == 4
+    vr = _load_verify_report_for_opt79()
+    data = {"per_workflow_timing": {"ci.yml": _opt79_crit()}, "findings": [out[0]]}
+    assert vr._opt79_net_negative_cache_rederived(out[0], data)[1] == []
+
+
+def test_opt79_compares_medians_not_means_and_the_verifier_agrees():
+    """Every fixture population used to be uniform, so median, mean and max were
+    the same number and the central statistic of the detector was unpinned. A
+    dispersed sample also catches the rounding drift that matters: the detector
+    must derive the waste from the SAME rounded medians it stamps, or a finding
+    it passed at the floor can be re-derived below it and redden the report."""
+    jpr, logs = [], {}
+    jid = 800
+    for blocks, line in (((23.0, 25.0, 33.0, 43.0), _OPT79_HIT_LINE),
+                         ((12.0, 13.0, 14.0), _OPT79_MISS_LINE)):
+        for b in blocks:
+            jid += 1
+            jpr.append([_opt79_job(jid, restore=b - 3.0, install=2.0, post=1.0),
+                        _span_job("integration", 600.0)])
+            logs[jid] = f"2026-06-01T00:00:01.0Z {line}\n"
+    withheld: dict = {}
+    out = _opt79(jpr, logs, withheld=withheld)
+    assert len(out) == 1, withheld
+    cn = out[0]["cache_net_negative"]
+    assert cn["hit_path_p50_s"] == 29.0
+    assert cn["miss_path_p50_s"] == 13.0
+    assert cn["waste_s"] == 16.0
+    assert cn["waste_s"] == round(cn["hit_path_p50_s"] - cn["miss_path_p50_s"], 1)
+    vr = _load_verify_report_for_opt79()
+    data = {"per_workflow_timing": {"ci.yml": _opt79_crit()}, "findings": [out[0]]}
+    assert vr._opt79_net_negative_cache_rederived(out[0], data)[1] == []
+
+
+def test_opt79_counts_the_occurrences_whose_log_it_never_captured():
+    """A run the probe never fetched a log for is not evidence of a cache that
+    hits and misses evenly — it is evidence of nothing. Dropping it silently
+    makes a repo-wide budget trim, an expired log and a 404 all surface as
+    `fewer_than_min_*_runs_classified`, which is the one thing the withhold tally
+    exists to prevent: attributing 'we never looked' to 'we looked and found
+    little'."""
+    jpr, logs = _opt79_sample(extra_runs=3)
+    withheld: dict = {}
+    out = _opt79(jpr, logs, withheld=withheld)
+    assert len(out) == 1, withheld
+    assert withheld.get("occurrence_has_no_captured_log") == 3
+    assert out[0]["cache_net_negative"]["job_runs"] == 11
+    assert out[0]["cache_net_negative"]["classified_runs"] == 8

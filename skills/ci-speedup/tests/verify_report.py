@@ -5200,7 +5200,13 @@ _VR_OPT79_STAMP_KEYS = (
 # The same two regexes the engine classifies on. Restated here on purpose: a
 # verifier that re-derived the labels with the detector's own matcher could not
 # catch a run stamped `hit` whose quoted line says the cache was not found.
-_VR_OPT79_MISS_RE = re.compile(r"cache not found for|cache miss|no cache entry", re.I)
+# The two spellings of a cache miss: `actions/cache`'s, and the `setup-*`
+# family's own (`<package manager> cache is not found`). Restated here rather
+# than imported — this file is standalone by design, and the point of the
+# re-derivation is to judge a stamped verdict with its OWN matcher.
+_VR_OPT79_MISS_RE = re.compile(
+    r"cache not found for|cache miss|no cache entry|"
+    r"cache is not found\b|dependencies are not cached\b", re.I)
 _VR_OPT79_HIT_RE = re.compile(
     r"cache restored from key|cache hit for|cache restored successfully|"
     r"cache hit, replaying", re.I)
