@@ -579,6 +579,20 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
         "verify_report rejected the offline-replayed report:\n"
         f"{verify.stdout}\n{verify.stderr}")
 
+    # OPT80 reaches the READER, not just the findings document. The block above
+    # proves the detector fired and the verifier accepted it; a renderer that
+    # dropped the row would leave both green and ship a report with the stall
+    # missing. The certificate token's rendered sentence is asserted with it,
+    # because that is the one place the reader is told why a credited saving on
+    # this job does not move the merge gate.
+    o80_rendered = [f for f in data["findings"] if f.get("pattern") == "OPT80"]
+    assert "Checkout Stalls on the Tail" in report, (
+        "the OPT80 finding is in the findings document but not in the rendered "
+        "report — the renderer dropped it")
+    assert "checkout_tail_excess" in report, (
+        "OPT80's neutrality certificate must be described to the reader")
+    assert str(o80_rendered[0]["id"]) in report, o80_rendered[0]["id"]
+
     # ---- PR-H1 (G5): the promoted-path backstop — UNCONDITIONAL. -------------
     # Before this, the replay corpus promoted nothing, so the Tier-2 render
     # guard only ever exercised its weakest (modeled-fallback) branch and a

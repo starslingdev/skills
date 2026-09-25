@@ -3554,6 +3554,13 @@ def test_verifier_rejects_a_suppression_with_no_surviving_consolidation():
 
 _OPT80_WF_PATH = "ci.yml"
 
+# A window wide enough to contain every fixture log below. `_opt80_stall_in_log`
+# takes it as a REQUIRED argument: the clamp to the checkout step's own span is
+# what stops a later `git submodule` step supplying the proof, so a call that
+# omitted it used to scan the whole job log unclamped.
+_OPT80_WIDE = (_dt.datetime(2026, 6, 1, 0, 0, 0, tzinfo=_dt.timezone.utc),
+               _dt.datetime(2026, 6, 1, 23, 59, 0, tzinfo=_dt.timezone.utc))
+
 
 def _opt80_stamp(offset):
     m, s = divmod(int(offset), 60)
@@ -3798,12 +3805,36 @@ def test_opt80_withholds_when_the_abort_env_is_already_set():
         assert counts.get("retry_or_abort_already_configured") == 1, (where, counts)
 
 
-def test_opt80_withholds_when_a_retry_wrapper_is_already_present():
+def test_opt80_a_retry_wrapper_on_another_step_is_not_a_checkout_retry():
+    """`nick-fields/retry` wrapping `npm test`, three steps below a BARE
+    `actions/checkout@v4`, retries the tests. It is one of the commonest layouts
+    there is, and reading it as "the checkout already retries" disabled this
+    pattern for that whole class of repo while the tally claimed the fix was
+    already applied. The wrapper only counts on the checkout step itself."""
     counts: dict = {}
-    wf = _opt80_wf(steps=[{"uses": "nick-fields/retry@v3"},
-                          {"uses": "actions/checkout@v4"},
-                          {"run": "npm test"}])
+    wf = _opt80_wf(steps=[{"uses": "actions/checkout@v4"},
+                          {"uses": "nick-fields/retry@v3",
+                           "with": {"command": "npm test"}}])
     out, _gh = _opt80(wf=wf, withheld=counts)
+    assert len(out) == 1, (out, counts)
+    assert "retry_or_abort_already_configured" not in counts, counts
+
+
+def test_opt80_withholds_when_a_retry_wrapper_is_already_present(tmp_path):
+    """The shape that IS a checkout retry: a local composite used as the checkout
+    step, whose body wraps the checkout in a retry action. The fix is applied, so
+    the finding is withheld."""
+    counts: dict = {}
+    d = tmp_path / ".github" / "actions" / "co"
+    d.mkdir(parents=True)
+    (d / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n"
+        "    - uses: nick-fields/retry@v3\n"
+        "      with:\n        command: echo retry\n"
+        "    - uses: actions/checkout@v4\n")
+    wf = _opt80_wf(steps=[{"uses": "./.github/actions/co"}, {"run": "npm test"}])
+    runs = _opt80_runs(checkout_step="Run ./.github/actions/co")
+    out, _gh = _opt80(jpr=runs, wf=wf, root=tmp_path, withheld=counts)
     assert out == []
     assert counts.get("retry_or_abort_already_configured") == 1, counts
 
@@ -3871,8 +3902,13 @@ def test_opt80_identifies_the_checkout_step_by_yaml_identity_not_by_timing():
 
 
 def test_opt80_withholds_a_credential_shaped_progress_line():
-    """Log text is untrusted. A quoted line carrying a credential shape withholds
-    the finding — a masked git progress line is no longer evidence of anything."""
+    """Log text is untrusted. A quoted line carrying a credential shape DROPS that
+    run's proof — a masked git progress line is no longer evidence of anything —
+    and with every proof dropped the finding is withheld.
+
+    The drop is one of the reasons the tail went unproven, so it is the reason
+    recorded. It must NOT also read as `tail_without_log_gap`, which asserts the
+    logs showed a smooth fetch: these logs showed a stall we refused to quote."""
     counts: dict = {}
     # Assembled at runtime from harmless parts. A literal token or credential URL
     # in a SHIPPED file (this tests/ tree installs with the skill) is what got a
@@ -3890,7 +3926,7 @@ def test_opt80_withholds_a_credential_shaped_progress_line():
                       withheld=counts)
     assert out == []
     assert counts.get("quoted_progress_line_is_credential_shaped") == 1, counts
-    assert counts.get("tail_without_log_gap") == 1, counts
+    assert "tail_without_log_gap" not in counts, counts
 
 
 def test_opt80_log_probe_is_bounded_by_the_named_cap():
@@ -3905,11 +3941,11 @@ def test_opt80_log_probe_is_bounded_by_the_named_cap():
 
 
 def test_opt80_stall_parser_reads_the_non_advancing_receiving_line():
-    stall, _reason = cr._opt80_stall_in_log(_OPT80_STALLED_LOG)
+    stall, _reason = cr._opt80_stall_in_log(_OPT80_STALLED_LOG, _OPT80_WIDE)
     assert stall is not None
     assert stall["gap_s"] == 40.0
     assert stall["stalled_at_pct"] == "12"
-    assert cr._opt80_stall_in_log(_OPT80_SMOOTH_LOG)[0] is None
+    assert cr._opt80_stall_in_log(_OPT80_SMOOTH_LOG, _OPT80_WIDE)[0] is None
 
 
 def test_opt80_stall_parser_refuses_a_gap_before_the_transfer_starts():
@@ -3922,7 +3958,7 @@ def test_opt80_stall_parser_refuses_a_gap_before_the_transfer_starts():
         "2026-06-01T00:00:12.0000000Z Fetching the repository",
         "2026-06-01T00:00:47.0000000Z remote: Counting objects: 100% (99/99), done.",
     ])
-    stall, reason = cr._opt80_stall_in_log(log)
+    stall, reason = cr._opt80_stall_in_log(log, _OPT80_WIDE)
     assert stall is None
     assert reason == "tail_pause_was_advancing_or_pre_transfer", reason
 
@@ -3935,7 +3971,7 @@ def test_opt80_stall_parser_refuses_a_pause_across_enumeration():
         "2026-06-01T00:01:05.0000000Z remote: Compressing objects: 100% (900000/900000)",
         "2026-06-01T00:01:10.0000000Z Receiving objects: 100% (900000/900000), done.",
     ])
-    stall, reason = cr._opt80_stall_in_log(log)
+    stall, reason = cr._opt80_stall_in_log(log, _OPT80_WIDE)
     assert stall is None
     assert reason == "tail_pause_was_advancing_or_pre_transfer", reason
 
@@ -3947,7 +3983,7 @@ def test_opt80_stall_parser_refuses_a_transfer_that_is_slow_but_advancing():
         "2026-06-01T00:00:10.0000000Z Receiving objects:  17% (15300/90000)",
         "2026-06-01T00:00:43.0000000Z Receiving objects:  40% (36000/90000)",
     ])
-    stall, reason = cr._opt80_stall_in_log(log)
+    stall, reason = cr._opt80_stall_in_log(log, _OPT80_WIDE)
     assert stall is None
     assert reason == "tail_pause_was_advancing_or_pre_transfer", reason
 
@@ -3959,9 +3995,9 @@ def test_opt80_stall_parser_separates_the_reasons_it_found_nothing():
         "2026-06-01T00:00:10.0000000Z ##[group]Run actions/checkout@v4",
         "2026-06-01T00:02:10.0000000Z ##[endgroup]",
     ])
-    assert cr._opt80_stall_in_log(quiet)[1] == "log_carries_no_progress_vocabulary"
+    assert cr._opt80_stall_in_log(quiet, _OPT80_WIDE)[1] == "log_carries_no_progress_vocabulary"
     untimed = "Receiving objects:  17% (15300/90000)\nReceiving objects:  17% (15300/90000)"
-    assert cr._opt80_stall_in_log(untimed)[1] == "log_carries_no_parseable_timestamps"
+    assert cr._opt80_stall_in_log(untimed, _OPT80_WIDE)[1] == "log_carries_no_parseable_timestamps"
 
 
 def test_opt80_every_withhold_records_the_gate_that_caused_it():
@@ -4256,3 +4292,396 @@ def test_opt80_names_the_slowest_job_case_in_plain_words():
     other, _gh2 = _opt80(crit=_opt80_crit(long_pole="deploy"))
     assert "slowest job" not in other[0]["evidence"], other[0]["evidence"]
     assert other[0]["checkout_stall"]["on_critical_path"] is False
+
+
+# ---- the log READER: what a record is, and what a dropped line costs ----------
+#
+# git writes fetch progress with a CARRIAGE RETURN, so one timestamped log RECORD
+# carries the whole animation. Reading only each record's first fragment threw
+# every later percentage away — and the surviving fragments could then bracket a
+# long gap at the same N while the transfer had in fact advanced the whole time.
+
+def test_opt80_reads_every_carriage_return_fragment_of_a_record():
+    """A `\\r`-packed record whose fragments ADVANCE must not yield a same-N pair.
+
+    The first and last timestamped records both sit at 12%, 40s apart — which is
+    exactly the shape of a stall. The record between them carries the transfer
+    climbing 55% -> 88% in its own `\\r` fragments, so nothing stood still."""
+    log = "\n".join([
+        "2026-06-01T00:00:14.0000000Z Receiving objects:  12% (1/9)",
+        "2026-06-01T00:00:30.0000000Z Receiving objects:  55% (5/9)\r"
+        "Receiving objects:  88% (8/9)",
+        "2026-06-01T00:00:54.0000000Z Receiving objects:  12% (1/9)",
+    ])
+    stall, reason = cr._opt80_stall_in_log(log, _OPT80_WIDE)
+    assert stall is None, stall
+    assert reason == "tail_pause_was_advancing_or_pre_transfer", reason
+    # …and the fragments are genuinely READ, not merely absent from the pair.
+    records, untimestamped, total = cr._opt80_log_records(log)
+    assert [t for _ts, t in records] == [
+        "Receiving objects:  12% (1/9)",
+        "Receiving objects:  55% (5/9)",
+        "Receiving objects:  88% (8/9)",
+        "Receiving objects:  12% (1/9)"], records
+    assert (untimestamped, total) == (0, 3)
+
+
+def test_opt80_carriage_return_fragments_inherit_their_records_timestamp():
+    """The fragment has no timestamp of its own; the record's is propagated, so a
+    real stall packed into one record is still derivable rather than dropped."""
+    records, _u, _t = cr._opt80_log_records(
+        "2026-06-01T00:00:14.0000000Z Receiving objects:  12% (1/9)\r"
+        "Receiving objects:  12% (1/9)")
+    assert len(records) == 2
+    assert records[0][0] == records[1][0]
+
+
+def test_opt80_log_line_accepts_a_numeric_utc_offset():
+    """`Z` is what GitHub serves, but a numeric offset is valid RFC3339 and a
+    capture carrying one used to be dropped line by line — which turns a log with
+    real progress in it into "the fetch was smooth"."""
+    tz = _dt.timezone(_dt.timedelta(hours=-7))
+    log = "\n".join([
+        "2026-06-01T00:00:14.000000-07:00 Receiving objects:  12% (1/9)",
+        "2026-06-01T00:00:54.000000-07:00 Receiving objects:  12% (1/9)",
+    ])
+    window = (_dt.datetime(2026, 6, 1, 0, 0, tzinfo=tz),
+              _dt.datetime(2026, 6, 1, 1, 0, tzinfo=tz))
+    stall, reason = cr._opt80_stall_in_log(log, window)
+    assert stall is not None, reason
+    assert stall["gap_s"] == 40.0
+
+
+def test_opt80_refuses_a_log_that_is_mostly_untimestamped():
+    """The timestamp check used to be all-or-nothing: ONE parseable line licensed a
+    proof derived from whatever survived. A capture where a real share of the
+    records cannot be timestamped is a capture whose gaps are not derivable, and
+    a dropped advancing line is what makes a false pair possible."""
+    lines = ["2026-06-01T00:00:14.0000000Z Receiving objects:  12% (1/9)"]
+    lines += ["Receiving objects:  %d%% (1/9)" % p for p in range(20, 90, 10)]
+    lines.append("2026-06-01T00:00:54.0000000Z Receiving objects:  12% (1/9)")
+    stall, reason = cr._opt80_stall_in_log("\n".join(lines), _OPT80_WIDE)
+    assert stall is None, stall
+    assert reason == "log_lines_without_timestamps", reason
+
+
+def test_opt80_refuses_a_pause_at_one_hundred_percent():
+    """git prints the final `Receiving objects: 100%` update and then the
+    `, done.` line once index-pack has written the pack to disk. A gap between
+    those two is LOCAL disk work; `GIT_HTTP_LOW_SPEED_*` cannot act on it, and the
+    evidence would have told the reader the fetch was "stuck at 100%"."""
+    log = "\n".join([
+        "2026-06-01T00:00:14.0000000Z Receiving objects: 100% (9/9)",
+        "2026-06-01T00:00:54.0000000Z Receiving objects: 100% (9/9), done.",
+    ])
+    stall, reason = cr._opt80_stall_in_log(log, _OPT80_WIDE)
+    assert stall is None, stall
+    assert reason == "tail_pause_was_after_the_transfer_completed", reason
+
+
+def test_opt80_quotes_the_longest_pause_not_the_first_one():
+    """`tail_run_longest_pause_s` is rendered as the UPPER BOUND on what capping
+    the stall recovers. Keeping the first qualifying gap would understate it and
+    quote the wrong pair of lines."""
+    log = "\n".join([
+        "2026-06-01T00:00:10.0000000Z Receiving objects:  12% (1/9)",
+        "2026-06-01T00:00:35.0000000Z Receiving objects:  12% (1/9)",
+        "2026-06-01T00:00:40.0000000Z Receiving objects:  30% (3/9)",
+        "2026-06-01T00:02:10.0000000Z Receiving objects:  30% (3/9)",
+    ])
+    stall, _reason = cr._opt80_stall_in_log(log, _OPT80_WIDE)
+    assert stall["gap_s"] == 90.0, stall
+    assert stall["stalled_at_pct"] == "30", stall
+    assert stall["before"]["ts"] == "2026-06-01T00:00:40Z", stall
+
+
+def test_opt80_separates_a_window_mismatch_from_progress_being_switched_off():
+    """A log FULL of progress, none of it inside the step window we were handed, is
+    a window/clock disagreement — a re-run's step timestamps read against another
+    attempt's log. Reporting it as `show-progress: false` blames the repo for a
+    setting it never made."""
+    log = "\n".join([
+        "2026-06-01T05:00:14.0000000Z Receiving objects:  12% (1/9)",
+        "2026-06-01T05:00:54.0000000Z Receiving objects:  12% (1/9)",
+    ])
+    window = (_dt.datetime(2026, 6, 1, 0, 0, tzinfo=_dt.timezone.utc),
+              _dt.datetime(2026, 6, 1, 0, 5, tzinfo=_dt.timezone.utc))
+    stall, reason = cr._opt80_stall_in_log(log, window)
+    assert stall is None
+    assert reason == "progress_lines_all_outside_step_window", reason
+
+
+# ---- the probe: what "we looked" is allowed to mean ---------------------------
+
+def test_opt80_counts_a_tail_run_with_no_log_to_fetch():
+    """An in-flight or skipped tail run has no log to serve. Filtering it out
+    SILENTLY and then labelling the empty result `tail_without_log_gap` claims we
+    looked at that run's fetch and found it smooth. We never looked."""
+    counts: dict = {}
+    runs = _opt80_runs()
+    for run in runs[-2:]:
+        run[0]["conclusion"] = None                    # still in flight
+        run[0]["status"] = "in_progress"
+    out, gh = _opt80(jpr=runs, withheld=counts)
+    assert out == [], out
+    assert gh.calls == [], gh.calls
+    assert counts.get("tail_run_has_no_log_to_fetch") == 1, counts
+    assert "tail_without_log_gap" not in counts, counts
+
+
+def test_opt80_probe_skips_the_unfetchable_tail_run_without_spending_a_call():
+    """Three tail runs, one of them skipped. The budget is four calls; burning one
+    on a run the client would refuse is how a real stall goes unproven."""
+    runs = _opt80_runs([10.0] * 9 + [120.0] * 3)
+    runs[-1][0]["conclusion"] = "skipped"
+    logs = {r[0]["id"]: _OPT80_STALLED_LOG for r in runs}
+    counts: dict = {}
+    out, gh = _opt80(jpr=runs, logs=logs, withheld=counts)
+    assert len(out) == 1, (out, counts)
+    assert len(gh.calls) == 2, gh.calls
+    assert out[0]["checkout_stall"]["logs_fetched"] == 2
+
+
+def test_opt80_counts_every_distinct_reason_the_tail_went_unproven():
+    """Two runs whose fetch was merely slow and two with progress switched off is a
+    different picture from four of either. Recording only the modal (in practice,
+    alphabetically first) reason is the one thing the tally exists to prevent."""
+    counts: dict = {}
+    runs = _opt80_runs([10.0] * 8 + [120.0] * 4)
+    logs = {runs[-4][0]["id"]: _OPT80_ADVANCING_LOG,
+            runs[-3][0]["id"]: _OPT80_ADVANCING_LOG,
+            runs[-2][0]["id"]: _OPT80_NO_PROGRESS_LOG,
+            runs[-1][0]["id"]: _OPT80_NO_PROGRESS_LOG}
+    out, _gh = _opt80(jpr=runs, logs=logs, withheld=counts)
+    assert out == [], out
+    assert counts.get("tail_pause_was_advancing_or_pre_transfer") == 1, counts
+    assert counts.get("log_carries_no_progress_vocabulary") == 1, counts
+
+
+def test_opt80_a_dropped_credential_line_on_a_firing_finding_is_not_a_withhold():
+    """A count in `opt80_withheld_by_gate` means exactly one thing: A FINDING WAS
+    SUPPRESSED. A poisoned line dropped from a finding that still FIRED belongs in
+    the separate notes tally, or the withhold count asserts something false."""
+    fake_token = "gh" + "p_" + "B" * 36
+    token_url = "https://" + "x-access" + "-token:" + fake_token + "@github.com/acme/app"
+    poisoned = _OPT80_STALLED_LOG.replace(
+        "Receiving objects:  12% (14400/120000)",
+        "Receiving objects:  12% (14400/120000) from " + token_url)
+    runs = _opt80_runs([10.0] * 8 + [120.0] * 4)
+    logs = {r[0]["id"]: _OPT80_STALLED_LOG for r in runs}
+    logs[runs[-1][0]["id"]] = poisoned            # one dropped, three still clean
+    counts: dict = {}
+    notes: dict = {}
+    out = cr._detect_opt80_checkout_tail_stall(
+        _Opt80Gh(logs), "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(),
+        _opt80_wf(), None, 100, 0, withheld=counts, notes=notes)
+    assert len(out) == 1, (out, counts)
+    assert counts == {}, counts
+    assert notes.get("quoted_progress_line_is_credential_shaped") == 1, notes
+
+
+# ---- identity: the step the YAML names, and the step a run reports ------------
+
+def test_opt80_matches_a_templated_step_name_by_its_uses_identity():
+    """A `${{ }}`-templated (or matrix-expanded) step NAME is rendered before the
+    jobs API reports it, so the YAML spelling matches nothing on any run and the
+    job's whole sample vanishes under "fewer sampled occurrences than the
+    minimum" with occurrences=0. The `uses:` identity is the one spelling a
+    template cannot move."""
+    wf = _opt80_wf(steps=[{"uses": "actions/checkout@v4",
+                           "name": "checkout ${{ matrix.shard }}"},
+                          {"run": "npm test"}])
+    out, _gh = _opt80(wf=wf)
+    assert len(out) == 1, out
+    assert out[0]["checkout_stall"]["checkout_step"] == "checkout ${{ matrix.shard }}"
+
+
+def test_opt80_names_an_identity_that_matched_no_observed_step():
+    """"the step was never found" and "the job did not run often enough" are
+    different failures, and only the second is a statement about the repository."""
+    counts: dict = {}
+    wf = _opt80_wf(steps=[{"uses": "actions/checkout@v4", "name": "Fetch sources"},
+                          {"run": "npm test"}])
+    out, _gh = _opt80(wf=wf, withheld=counts)
+    assert out == [], out
+    assert counts.get("checkout_step_identity_never_matched_in_steps") == 1, counts
+    assert counts.get("checkout_step_measured_on_no_sampled_run") == 1, counts
+    assert "fewer_sampled_occurrences_than_the_minimum" not in counts, counts
+
+
+# ---- the "already configured" reader ------------------------------------------
+
+def test_opt80_a_composite_that_unsets_the_abort_has_not_applied_it(tmp_path):
+    """Inside a composite the abort used to be searched for with the WRAPPER
+    regex, which matches a bare `http.lowspeedlimit` anywhere — so a composite
+    that `--unset`s the setting read as having applied it. That is precisely the
+    repo this pattern exists for."""
+    d = tmp_path / ".github" / "actions" / "co"
+    d.mkdir(parents=True)
+    (d / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n"
+        "    - run: git config --unset http.lowSpeedLimit\n      shell: bash\n"
+        "    - uses: actions/checkout@v4\n")
+    wf = _opt80_wf(steps=[{"uses": "./.github/actions/co"}, {"run": "npm test"}])
+    runs = _opt80_runs(checkout_step="Run ./.github/actions/co")
+    counts: dict = {}
+    out, _gh = _opt80(jpr=runs, wf=wf, root=tmp_path, withheld=counts)
+    assert len(out) == 1, (out, counts)
+
+
+def test_opt80_a_commented_or_echoed_git_config_is_not_a_fix():
+    """The `git config` invocation must START its line. A mention inside an echo,
+    or a commented-out one, is not a setting anybody applied."""
+    for cmd in ("# git config http.lowSpeedLimit 1000",
+                'echo "git config http.lowSpeedLimit 1000" >> notes.txt'):
+        wf = _opt80_wf(steps=[{"run": cmd},
+                              {"uses": "actions/checkout@v4"},
+                              {"run": "npm test"}])
+        out, _gh = _opt80(wf=wf)
+        assert len(out) == 1, (cmd, out)
+
+
+def test_opt80_fails_closed_on_an_unreadable_composite_that_is_not_the_checkout(tmp_path):
+    """A fix that cannot be SEEN is not a fix that may be assumed absent — and the
+    composite need not be the checkout step to hold one, because the env and
+    git-config forms are inherited wherever they are set. A missing local action
+    ANYWHERE in the job therefore withholds, even with a plain
+    `actions/checkout@v4` sitting right there."""
+    counts: dict = {}
+    wf = _opt80_wf(steps=[{"uses": "actions/checkout@v4"},
+                          {"uses": "./.github/actions/gone"},
+                          {"run": "npm test"}])
+    out, _gh = _opt80(wf=wf, root=tmp_path, withheld=counts)
+    assert out == [], out
+    assert counts.get("local_composite_action_unreadable") == 1, counts
+
+
+def test_opt80_retry_reader_fails_closed_when_it_cannot_read_the_graph(tmp_path):
+    """The retry reader's own fail-closed path, pinned directly: the step-scan gate
+    upstream normally catches an unreadable local action first, so this is the
+    second line of defence and nothing else exercises it."""
+    assert cr._opt80_retry_already_configured(
+        {}, {"steps": [{"uses": "actions/checkout@v4"},
+                       {"uses": "./.github/actions/gone"}]},
+        tmp_path, None) is None
+    # …and a job whose `steps:` is not a list is not a job we can read either.
+    assert cr._opt80_retry_already_configured({}, {"steps": "nope"}, None, None) is None
+
+
+def test_opt80_walks_a_composite_inside_a_composite(tmp_path):
+    """The indexing is TRANSITIVE. An outer composite that delegates to an inner
+    one must be read through, in both directions: the checkout it hides, and the
+    fix it hides."""
+    for inner_body, fires in (
+            ("runs:\n  using: composite\n  steps:\n"
+             "    - uses: actions/checkout@v4\n", True),
+            ("runs:\n  using: composite\n  steps:\n"
+             "    - uses: actions/checkout@v4\n"
+             "      env:\n        GIT_HTTP_LOW_SPEED_TIME: '30'\n", False)):
+        outer = tmp_path / ".github" / "actions" / "outer"
+        inner = tmp_path / ".github" / "actions" / "inner"
+        outer.mkdir(parents=True, exist_ok=True)
+        inner.mkdir(parents=True, exist_ok=True)
+        (outer / "action.yml").write_text(
+            "runs:\n  using: composite\n  steps:\n"
+            "    - uses: ./.github/actions/inner\n")
+        (inner / "action.yml").write_text(inner_body)
+        counts: dict = {}
+        wf = _opt80_wf(steps=[{"uses": "./.github/actions/outer"},
+                              {"run": "npm test"}])
+        runs = _opt80_runs(checkout_step="Run ./.github/actions/outer")
+        out, _gh = _opt80(jpr=runs, wf=wf, root=tmp_path, withheld=counts)
+        if fires:
+            assert len(out) == 1, (inner_body, out, counts)
+            assert out[0]["checkout_stall"]["checkout_step_source"] == (
+                "local composite ./.github/actions/outer")
+        else:
+            assert out == [], inner_body
+            assert counts.get("retry_or_abort_already_configured") == 1, counts
+
+
+def test_opt80_fails_closed_on_a_cyclic_local_composite(tmp_path):
+    """An action that transitively invokes itself has no readable body. Returning
+    the text collected so far let the gate above conclude "no fix present" from a
+    graph it could not finish reading."""
+    a = tmp_path / ".github" / "actions" / "a"
+    b = tmp_path / ".github" / "actions" / "b"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    (a / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n"
+        "    - uses: ./.github/actions/b\n    - uses: actions/checkout@v4\n")
+    (b / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n"
+        "    - uses: ./.github/actions/a\n")
+    counts: dict = {}
+    wf = _opt80_wf(steps=[{"uses": "./.github/actions/a"}, {"run": "npm test"}])
+    runs = _opt80_runs(checkout_step="Run ./.github/actions/a")
+    out, _gh = _opt80(jpr=runs, wf=wf, root=tmp_path, withheld=counts)
+    assert out == [], out
+    assert counts.get("local_composite_action_cyclic") == 1, counts
+
+
+def test_opt80_a_diamond_in_the_local_action_graph_is_not_a_cycle(tmp_path):
+    """Two branches reaching the same leaf is legal, and its text is simply
+    already in hand. Only the current recursion PATH is a cycle — failing closed
+    on a diamond would silence the pattern on every repo with a shared helper."""
+    base = tmp_path / ".github" / "actions"
+    for leg in ("top", "left", "right", "leaf"):
+        (base / leg).mkdir(parents=True, exist_ok=True)
+    (base / "top" / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n"
+        "    - uses: ./.github/actions/left\n"
+        "    - uses: ./.github/actions/right\n"
+        "    - uses: actions/checkout@v4\n")
+    for leg in ("left", "right"):
+        (base / leg / "action.yml").write_text(
+            "runs:\n  using: composite\n  steps:\n"
+            "    - uses: ./.github/actions/leaf\n")
+    (base / "leaf" / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - run: echo hi\n      shell: bash\n")
+    wf = _opt80_wf(steps=[{"uses": "./.github/actions/top"}, {"run": "npm test"}])
+    runs = _opt80_runs(checkout_step="Run ./.github/actions/top")
+    counts: dict = {}
+    out, _gh = _opt80(jpr=runs, wf=wf, root=tmp_path, withheld=counts)
+    assert len(out) == 1, (out, counts)
+
+
+def test_opt80_an_empty_or_templated_abort_value_fails_closed():
+    """`GIT_HTTP_LOW_SPEED_TIME: ${{ inputs.t }}` may expand to nothing, so the
+    abort may not really be in force. The reader keys on the NAME and withholds
+    anyway, deliberately: a false withhold costs one unreported finding, while
+    reading it as absent tells a repo to add a setting it may already have."""
+    counts: dict = {}
+    wf = _opt80_wf(steps=[{"uses": "actions/checkout@v4",
+                           "env": {"GIT_HTTP_LOW_SPEED_TIME": "${{ inputs.t }}"}},
+                          {"run": "npm test"}])
+    out, _gh = _opt80(wf=wf, withheld=counts)
+    assert out == [], out
+    assert counts.get("retry_or_abort_already_configured") == 1, counts
+
+
+# ---- scaling and rendering ----------------------------------------------------
+
+def test_opt80_credits_a_gated_job_at_its_own_run_frequency():
+    """A job behind an `if:` gate must not be credited at the WORKFLOW's monthly
+    volume. Every other fixture has the job in every sampled run, so the scaling
+    was invisible; here it runs in eight of twelve."""
+    runs = [[_opt80_job(8400 + i, 10.0)] for i in range(6)]
+    runs += [[_opt80_job(8500 + i, 120.0)] for i in range(2)]
+    runs += [[] for _ in range(4)]                       # four runs without the job
+    logs = {j["id"]: _OPT80_STALLED_LOG for run in runs for j in run}
+    out, _gh = _opt80(jpr=runs, logs=logs, monthly=120)
+    assert len(out) == 1, out
+    cs = out[0]["checkout_stall"]
+    assert cs["occurrences"] == 8 and cs["sampled_successful_run_count"] == 12
+    assert cs["effective_monthly_volume"] == round(120 * 8 / 12, 3)
+    assert out[0]["runner_min_saving"] == round(
+        cs["tail_excess_s"] * cs["effective_monthly_volume"] / 60.0, 1)
+
+
+def test_opt80_evidence_names_the_percentage_the_transfer_stuck_at():
+    """"a 40s pause" and "a 40s pause at 12%" are different claims: the second is
+    what makes it a stall rather than a slow link."""
+    out, _gh = _opt80()
+    assert "stuck at 12%" in out[0]["evidence"], out[0]["evidence"]

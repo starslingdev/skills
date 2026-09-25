@@ -1462,14 +1462,22 @@ repository (that is [OPT28](#opt28--full-git-history-checkout)'s lever and
 **Detection heuristic** (every gate required; all fail closed):
 
 1. The step is `uses: actions/checkout@*`, or a **local composite action** whose
-   body checks out (the same transitive local-action indexing OPT76 uses; an
-   unreadable local action fails closed and the job is skipped). A hand-rolled
+   body checks out (this mirrors OPT76's transitive local-action indexing — it is
+   re-implemented against the workflow-YAML vintage the tail was measured on, not
+   imported. A local action that is unreadable, or that transitively invokes
+   itself, fails closed and the job is skipped). A hand-rolled
    `git clone` in a `run:` block is **not** matched — its fix is flags on the
    user's own command. A job declaring more than one checkout step is skipped:
    which one the timing belongs to is ambiguous.
    The step is located in the **YAML**, never by its timing. GitHub stamps step
    timestamps at one-second granularity, so a warm checkout measures 0s; a
    timing-based search would drop that run from the sample and inflate the p50.
+   A step `name:` carrying a `${{ }}` expression is rendered before the jobs API
+   reports it, so for those the step is matched on its `uses:` identity instead —
+   otherwise a repo that templates its step names is silently unreachable. When
+   the identity still matches no observed step, that is counted as
+   `checkout_step_identity_never_matched_in_steps` /
+   `checkout_step_measured_on_no_sampled_run`, never as "the job ran too rarely".
 2. At least **6** sampled occurrences of the job, all on **one** known
    per-minute-billed runner label. A "tail" that is really some runs on a
    different runner class is a runner comparison, not a stall.
@@ -1477,11 +1485,25 @@ repository (that is [OPT28](#opt28--full-git-history-checkout)'s lever and
    `p95 ≥ max(3 × p50, p50 + 30s)`, with at least **2** runs at or above that
    threshold. Both parts of the bound are named constants: the multiple keeps a
    uniformly slow checkout out, the absolute floor keeps sub-minute jitter out.
-4. No retry or abort is configured already — no `GIT_HTTP_LOW_SPEED_LIMIT` /
-   `GIT_HTTP_LOW_SPEED_TIME` in the workflow-, job- or step-level `env:`, and no
-   retry-wrapper action or local composite that sets either. If one is present
-   the fix is already applied and the finding is **withheld**. A retry
-   configuration that cannot be read is withheld too.
+4. No retry or abort is configured already. Four doors, read with two different
+   scopes:
+
+   - **anywhere in the job** (the checkout inherits these wherever they are set):
+     `GIT_HTTP_LOW_SPEED_LIMIT` / `GIT_HTTP_LOW_SPEED_TIME` in the workflow-,
+     job- or step-level `env:` or in a local composite's body; and
+     **`git config http.lowSpeedLimit` / `http.lowSpeedTime`** — git's own
+     documented equivalent — in a `run:` step or a composite's body. Step order
+     is deliberately not checked: the setting is usually made in a setup step.
+   - **on the checkout step only**: a retry-wrapper action used *as* the checkout
+     step, or the body of the local composite that *is* the checkout step. A
+     retry wrapping `npm test` three steps below a bare `actions/checkout@v4`
+     retries the tests, not the fetch, and must not read as the fix.
+
+   A `git config` that `--unset`s, `--get`s or `--list`s the setting, and a
+   mention inside an `echo`, a `grep` or a `#` comment, never read as applied —
+   a repo that just removed the abort is the repo this pattern exists for. If a
+   door is open the fix is already applied and the finding is **withheld**. A
+   retry configuration that cannot be read is withheld too.
 5. For at least **2** of the tail runs, the captured checkout log shows the
    transfer **standing still**: a gap of **≥ 20s** between two consecutive
    `Receiving objects: N%` lines reporting the **same N**. A stall is progress
@@ -1493,9 +1515,13 @@ repository (that is [OPT28](#opt28--full-git-history-checkout)'s lever and
      (the server building the pack, during which the client legitimately
      receives nothing);
    - two `Receiving objects` lines whose percentage **advanced** (a transfer
-     that is slow, not one that stopped).
+     that is slow, not one that stopped);
+   - a pair at **100%** (`tail_pause_was_after_the_transfer_completed`) — the
+     transfer is already over, and the gap is the runner writing the pack to
+     disk. A low-speed network timeout cannot act on it, and the evidence would
+     have said the fetch was "stuck at 100%".
 
-   All three are a large repository — OPT28's lever, not this one — and each
+   The first three are a large repository — OPT28's lever, not this one — and each
    would be aborted by the low-speed timeout this pattern recommends, so
    reporting them would hand the reader a fix that reds their CI. They are
    withheld under `tail_pause_was_advancing_or_pre_transfer`, so a big-repo tail
@@ -1507,14 +1533,40 @@ repository (that is [OPT28](#opt28--full-git-history-checkout)'s lever and
    and only lines inside the checkout step's own time window are read, so a
    later `git submodule` or `git lfs` step cannot supply the proof. Logs are
    fetched for **tail runs only**, newest-first, bounded by a named probe cap
-   (4) — never for the whole sample, and never at all for a job with no tail.
-   The four ways a probe can fail to prove a stall are counted separately —
-   a smooth fetch (`tail_without_log_gap`), a big-repo pause
-   (`tail_pause_was_advancing_or_pre_transfer`), progress switched off with
-   `show-progress: false` (`log_carries_no_progress_vocabulary`), and a log that
-   is gone or carries no timestamps (`tail_run_log_unavailable`,
-   `log_carries_no_parseable_timestamps`) — because only the first is evidence
-   about the repository.
+   (4) — never for the whole sample, and never at all for a job with no tail. A
+   tail run whose job has no log to serve (in flight, skipped) or whose step
+   window is unreadable is dropped **before** the fetch, so the bounded budget is
+   never spent on a run the result would be refused for.
+
+   The log is split on newlines only; within one record git's progress animation
+   is separated by **carriage returns**, and every fragment is read with the
+   record's timestamp. Reading only the first fragment threw the intermediate
+   percentages away, which is how a transfer that kept moving could look as
+   though it stood still. A log where more than a small named share of records
+   carry no parseable timestamp is refused (`log_lines_without_timestamps`)
+   rather than proved from what survived.
+
+   Every way a probe can fail to prove a stall is counted **separately**, and
+   every distinct reason across the probed runs is counted — not just the most
+   common one — because only some of them are evidence about the repository:
+
+   | gate | what it means |
+   |---|---|
+   | `tail_without_log_gap` | we looked, and the fetch was smooth. The only one that is evidence about the repo |
+   | `tail_pause_was_advancing_or_pre_transfer` | a big-repo pause: advancing, or before any byte moved |
+   | `tail_pause_was_after_the_transfer_completed` | a pause at 100% — local pack writing, not the network |
+   | `log_carries_no_progress_vocabulary` | `show-progress: false`; the checkout printed nothing |
+   | `progress_lines_all_outside_step_window` | the log has progress, none of it inside the step's own window (a clock/attempt mismatch) |
+   | `log_carries_no_parseable_timestamps` / `log_lines_without_timestamps` | the capture's gaps are not derivable |
+   | `tail_run_log_unavailable` | the log was fetched and was not there |
+   | `tail_run_has_no_log_to_fetch` | the run is in flight or skipped; no fetch was attempted |
+   | `tail_run_step_window_unreadable` | the step timestamps do not parse, so no log could be clamped |
+   | `quoted_progress_line_is_credential_shaped` | a stall was found and its proof dropped unquoted |
+   | `no_tail_run_log_was_probed` | the fallback when no run was reached at all |
+
+   A count in `opt80_withheld_by_gate` means one thing only: **a finding was
+   suppressed**. A poisoned line dropped from a finding that still fired is
+   recorded in a separate `opt80_notes` tally instead.
 
 Every one of those exits increments a stamped per-gate counter
 (`opt80_withheld_by_gate` on the findings document) and logs at DEBUG, so a
@@ -1624,13 +1676,15 @@ instead of being silently trusted:
 | `per_run_checkout_s` | each sampled occurrence's job id, run URL and checkout seconds — the inputs p50 / p95 / mean / max are recomputed from |
 | `p50_s` / `p95_s` / `mean_s` / `max_s` | **re-derived** — the distribution, recomputed from `per_run_checkout_s` |
 | `tail_threshold_s` | **re-derived** — the threshold the tail test produced |
-| `tail_p95_multiple` / `tail_p95_abs_s` / `min_tail_runs` / `min_gap_s` / `min_proven_tail_runs` | the constants the detector used, stamped for audit; the arm compares against its own copies |
+| `tail_p95_multiple` / `tail_p95_abs_s` / `min_tail_runs` / `min_gap_s` / `min_proven_tail_runs` / `min_sampled_occurrences` / `log_probe_max` | **re-derived** — the bounds the detector used. The arm re-derives on its OWN `_VR_OPT80_*` copies (a bound read out of the artifact under audit proves nothing) and then compares each stamped value to its copy, failing the claim on any disagreement; an engine/verifier coupling test pins the copies to the engine's constants |
 | `tail_run_job_ids` | **re-derived** — which runs were tail runs, against the threshold, bounded by the sampled occurrences |
-| `proven_tail_runs` | **re-derived** — per proven run the two quoted lines, their log timestamps and the derived gap; the gap is recomputed from the timestamps and an unparseable one fails the claim |
-| `logs_fetched` / `log_probe_max` | **re-derived** — the bounded probe; can never exceed the cap or the number of tail runs |
+| `proven_tail_runs` | **re-derived** — per proven run the two quoted lines, their log timestamps and the derived gap. The gap is recomputed from the timestamps, and so is the PREDICATE: the arm re-runs its own copy of the `Receiving objects: N%` regex over both quoted lines and fails the claim unless both match, report the same N, and that N is below 100 — otherwise a stamped `5% → 60%` pair would render as proof of a stall. Both lines are re-scanned for credential shapes here too |
+| `logs_fetched` | **re-derived** — against the verifier's PINNED probe cap (never the stamped `log_probe_max`, which is only compared to it), and against the number of tail runs |
 | `tail_excess_s` / `runner_min_saving` | **re-derived** — the credited quantity and the minutes it becomes |
-| `tail_run_longest_pause_s` / `on_critical_path` | the uncredited upper bound on the stalled runs' own improvement, and whether it lands on the gate |
-| `monthly_volume` / `effective_monthly_volume` / `sampled_successful_run_count` / `occurrences` | **re-derived** — the scaling; `occurrences` can never exceed the sampled run count |
+| `tail_run_longest_pause_s` | **re-derived** — must equal the largest gap across the proven runs, because the evidence renders it as the upper bound on what capping the stall recovers |
+| `on_critical_path` | **re-derived** — against the report's own rendered Long-pole sections, since this is the exact fact the pole-rule exemption below turns the blanket check off for |
+| `monthly_volume` / `sampled_successful_run_count` | bounds-checked, not re-derivable — they come from the collection, not from anything in the block. `monthly_volume` must be positive and the sampled count must be at least the occurrences |
+| `effective_monthly_volume` / `occurrences` | **re-derived** — the scaling; `occurrences` can never exceed the sampled run count, and the effective volume must be the monthly volume scaled by `occurrences / sampled` |
 
 **The slowest job is not excluded.** Every other Tier-2 proof argues its credited
 work is off the merge gate by showing the job is not the long pole; the report

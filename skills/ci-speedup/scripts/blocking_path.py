@@ -5664,6 +5664,12 @@ def _tier2_cert_summary(f: dict[str, Any]) -> str:
         # comparison nor the post-completion argument describes it. Nothing the
         # fix does changes what a job runs or what a check is called, which is
         # what makes it merge-safe; the margin IS the tail excess.
+        #
+        # `margin is not None` never falls through in practice: `verify_report`'s
+        # arm fails any `checkout_tail_excess` row whose `margin_s` is not the
+        # re-derived tail excess, so a row reaching here without one would already
+        # have reddened the report. The guard is kept so a renderer run over an
+        # UNVERIFIED doc degrades to the bare token below rather than raising.
         msg = (f"`checkout_tail_excess` - {_clock(margin)} of stalled-fetch tail "
                "removed from the average run; no job runtime on the merge gate "
                "changes and no check is renamed")

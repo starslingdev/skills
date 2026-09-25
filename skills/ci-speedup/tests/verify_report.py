@@ -5188,6 +5188,20 @@ _VR_OPT80_TAIL_P95_ABS_S = 30.0
 _VR_OPT80_MIN_TAIL_RUNS = 2
 _VR_OPT80_MIN_PROVEN_TAIL_RUNS = 2
 _VR_OPT80_MIN_GAP_S = 20.0
+_VR_OPT80_LOG_PROBE_MAX = 4
+_VR_OPT80_MIN_SAMPLED_OCCURRENCES = 6
+# The arm's own copy of the detector's transfer-progress regex. The stamped
+# `stalled_at_pct` and the "same N on both sides" predicate are what make a gap a
+# STALL rather than a slow fetch; re-reading the quoted lines here is the only
+# way the verifier checks the predicate instead of the detector's word for it.
+_VR_OPT80_RECEIVING_RE = re.compile(r"Receiving objects:\s*(\d+)%", re.I)
+# …and its own copy of the credential backstop, for the same reason: a quoted
+# line reaches the report through this arm, so the arm re-scans it.
+_VR_OPT80_CREDENTIAL_RE = re.compile(
+    r"(gh[pousr]_[A-Za-z0-9]{16,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|x-access-token:[^\s@]+"
+    r"|://[^\s/@:]+:[^\s/@]+@)")
 
 
 def _vr_percentile(values: list[float], pct: float) -> float:
@@ -5242,8 +5256,31 @@ def _opt80_checkout_stall_rederived(f: dict) -> list[str]:
         return ["per_run_checkout_s missing or carries a non-numeric duration"]
     vals = [float(d) for d in durs if d is not None]
 
+    # The stamped bounds are not what the arm re-derives on — it re-derives on
+    # its own copies above — but a block stamping bounds the detector could not
+    # have used is a block whose numbers were computed under other rules. Each
+    # one is compared, so a constant that moved on one side only fails here.
+    for key, want in (("tail_p95_multiple", _VR_OPT80_TAIL_P95_MULTIPLE),
+                      ("tail_p95_abs_s", _VR_OPT80_TAIL_P95_ABS_S),
+                      ("min_gap_s", _VR_OPT80_MIN_GAP_S),
+                      ("min_tail_runs", float(_VR_OPT80_MIN_TAIL_RUNS)),
+                      ("min_proven_tail_runs", float(_VR_OPT80_MIN_PROVEN_TAIL_RUNS)),
+                      ("min_sampled_occurrences",
+                       float(_VR_OPT80_MIN_SAMPLED_OCCURRENCES)),
+                      ("log_probe_max", float(_VR_OPT80_LOG_PROBE_MAX))):
+        got = _num(cs.get(key))
+        if got is None or abs(got - want) > 0.011:
+            problems.append(
+                f"stamped {key} {cs.get(key)!r} != the {want} this verifier "
+                "enforces - the claim was computed under a different bound")
+
     sampled = _num(cs.get("sampled_successful_run_count"))
     occurrences = _num(cs.get("occurrences"))
+    if len(per_run) < _VR_OPT80_MIN_SAMPLED_OCCURRENCES:
+        problems.append(
+            f"{len(per_run)} sampled occurrence(s) is below the "
+            f"{_VR_OPT80_MIN_SAMPLED_OCCURRENCES} a distribution needs to have a "
+            "p95 at all")
     if occurrences is None or int(occurrences) != len(per_run):
         problems.append(
             f"occurrences {cs.get('occurrences')!r} != the {len(per_run)} stamped "
@@ -5308,19 +5345,52 @@ def _opt80_checkout_stall_rederived(f: dict) -> list[str]:
             "stall is a duration with no cause attached")
     if len(proven) > len(tail_ids):
         problems.append("more log-proven runs than tail runs")
+    gaps: list[float] = []
     for p in proven:
         pid = p.get("job_id")
         if pid not in tail_ids:
             problems.append(f"log-proven run {pid!r} is not one of the tail runs")
         before, after = _as_dict(p.get("before")), _as_dict(p.get("after"))
         t0, t1 = _vr_opt80_ts(before.get("ts")), _vr_opt80_ts(after.get("ts"))
+        line_a = str(before.get("line") or "").strip()
+        line_b = str(after.get("line") or "").strip()
+        # The PREDICATE, re-derived. A gap is a stall only when both quoted lines
+        # are `Receiving objects: N%` at the SAME N below 100 — that is the whole
+        # difference between "the transfer stood still" and "the transfer was
+        # slow" (or "the transfer had finished"). Recomputing the seconds while
+        # taking the shape on trust would let a stamped 5% -> 60% pair render as
+        # proof of a stall.
+        ma = _VR_OPT80_RECEIVING_RE.search(line_a)
+        mb = _VR_OPT80_RECEIVING_RE.search(line_b)
+        if not ma or not mb:
+            problems.append(
+                f"{pid}: a quoted line is not a `Receiving objects: N%` line - "
+                "only the transfer phase standing still is a stall")
+        elif ma.group(1) != mb.group(1):
+            problems.append(
+                f"{pid}: quoted lines report {ma.group(1)}% then {mb.group(1)}% - "
+                "the transfer advanced across the pause, it did not stop")
+        elif int(ma.group(1)) >= 100:
+            problems.append(
+                f"{pid}: quoted pause sits at 100% - the transfer had completed, "
+                "so this is local pack processing a network timeout cannot touch")
+        elif str(p.get("stalled_at_pct") or "") != ma.group(1):
+            problems.append(
+                f"{pid}: stalled_at_pct {p.get('stalled_at_pct')!r} != the "
+                f"{ma.group(1)}% the quoted lines report")
+        for side, line in (("before", line_a), ("after", line_b)):
+            if line and _VR_OPT80_CREDENTIAL_RE.search(line):
+                problems.append(
+                    f"{pid}: the quoted `{side}` line carries a credential shape "
+                    "and must never have reached the report")
         if t0 is None or t1 is None:
             problems.append(
                 f"{pid}: pause is not bracketed by two parseable log timestamps")
             continue
-        if not str(before.get("line") or "").strip() or not str(after.get("line") or "").strip():
+        if not line_a or not line_b:
             problems.append(f"{pid}: pause is not bracketed by two quoted log lines")
         gap = round(t1 - t0, 1)
+        gaps.append(gap)
         got_gap = _num(p.get("gap_s"))
         if got_gap is None or abs(got_gap - gap) > 0.11:
             problems.append(
@@ -5329,6 +5399,18 @@ def _opt80_checkout_stall_rederived(f: dict) -> list[str]:
         elif gap + 0.11 < _VR_OPT80_MIN_GAP_S:
             problems.append(
                 f"{pid}: {gap}s pause is below the {_VR_OPT80_MIN_GAP_S}s a stall requires")
+    # The uncredited upper bound the evidence names in prose. Stamped, so
+    # re-derived: it is the LONGEST proven pause, not the first one found.
+    longest = _num(cs.get("tail_run_longest_pause_s"))
+    if gaps:
+        want_longest = round(max(gaps), 1)
+        if longest is None or abs(longest - want_longest) > 0.11:
+            problems.append(
+                f"tail_run_longest_pause_s {cs.get('tail_run_longest_pause_s')!r} "
+                f"!= the longest re-derived pause {want_longest}")
+    elif longest is not None:
+        problems.append(
+            "tail_run_longest_pause_s is stamped with no proven pause to derive it from")
 
     tail_excess = round(mean - p50, 1)
     got_excess = _num(cs.get("tail_excess_s"))
@@ -5367,11 +5449,13 @@ def _opt80_checkout_stall_rederived(f: dict) -> list[str]:
                 f"!= the finding's {rm!r}")
 
     logs_fetched = _num(cs.get("logs_fetched"))
-    cap = _num(cs.get("log_probe_max"))
-    if logs_fetched is None or cap is None or logs_fetched > cap:
+    # The PINNED cap, never the stamped one: checking a value against its own
+    # echo is not a bound, and a block stamping `log_probe_max: 999` used to pass
+    # this line.
+    if logs_fetched is None or logs_fetched > _VR_OPT80_LOG_PROBE_MAX:
         problems.append(
             f"logs_fetched {cs.get('logs_fetched')!r} is unstated or exceeds the "
-            f"probe cap {cs.get('log_probe_max')!r} - the log fetch must stay bounded")
+            f"probe cap {_VR_OPT80_LOG_PROBE_MAX} - the log fetch must stay bounded")
     elif logs_fetched > len(tail_ids):
         problems.append("more logs fetched than there were tail runs to fetch them for")
 
@@ -5529,6 +5613,18 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
             else:
                 bad.extend(f"{fid}: {msg}"
                            for msg in _opt80_checkout_stall_rederived(f))
+                # `on_critical_path` is what the evidence's "this workflow's
+                # slowest job" sentence is rendered from, and it is exactly the
+                # fact the exemption above turns off the blanket check for. It is
+                # re-derived here rather than trusted, from the same rendered
+                # poles the rule itself reads.
+                if rendered_poles:
+                    claimed = _as_dict(f.get("checkout_stall")).get("on_critical_path")
+                    if bool(claimed) != bool(jobs & rendered_poles):
+                        bad.append(
+                            f"{fid}: on_critical_path={claimed!r} but the job is "
+                            f"{'' if jobs & rendered_poles else 'not '}rendered as "
+                            "a Long pole")
         elif proof == "non_pr_event":
             if not _non_pr_event_corroborated(f, data):
                 bad.append(f"{fid}: non_pr_event lacks stamped event-subset evidence")

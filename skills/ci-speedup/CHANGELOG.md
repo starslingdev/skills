@@ -39,7 +39,20 @@ unversioned and updates by reinstall from `main`.
   retry wrapper, or the equivalent `git config http.lowSpeedLimit` is told
   nothing. The proof is read only from inside the checkout step's own time
   window, so a later `git submodule` or `git lfs` step that prints the same
-  progress lines can never be quoted as a stalled checkout. The credited saving is only the amount the stall adds
+  progress lines can never be quoted as a stalled checkout. Git writes its
+  progress as one long line that overwrites itself, and every update inside it is
+  read, so a fetch that kept moving is seen to have kept moving instead of
+  looking as though it stopped. A pause after the transfer already reached 100%
+  is the runner writing the download to disk, which no network timeout can help,
+  so it is never reported as a stall either. "The fix is already here" is read
+  narrowly and correctly: a retry wrapper counts only when it is wrapping the
+  checkout, not when it sits on some other step in the same job, and a setting
+  the repository has just *removed* never reads as one it applied. Where the
+  workflow's own files cannot be followed to the end — a shared action that is
+  missing, or one that refers back to itself — nothing is reported rather than
+  something guessed. Every reason a finding was held back is counted and named
+  separately, so "we looked and the fetch was fine" can never stand in for "we
+  never managed to look". The credited saving is only the amount the stall adds
   to the average run, never the worst run and never the whole step, and no
   wall-clock saving is claimed at all, because the typical run was never stalled.
   Logs are downloaded only for the slow runs, and only after every cheaper check
