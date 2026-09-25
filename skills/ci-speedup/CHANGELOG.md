@@ -24,11 +24,15 @@ unversioned and updates by reinstall from `main`.
   deliberately **not** reported: a long fetch with no pause in it is a large
   repository, which is a different lever, and inferring a cause from a duration
   is precisely why the older "slow setup step" pattern was cut. The recommended
-  fix is ordered and honest — a low-speed abort first, then a retry with
-  backoff, then a narrower checkout only where the job is known not to read
-  history — and it says plainly that retry and abort cap the damage rather than
-  fix the network. A repository that already configures the abort or a retry
-  wrapper is told nothing. The credited saving is only the amount the stall adds
+  fix is ordered and honest — the low-speed abort and the retry with backoff
+  ship as one change, then a narrower checkout only where the job is known not
+  to read history — and it says plainly both that retry and abort cap the damage
+  rather than fix the network, and that the abort on its own would turn today's
+  slow-but-green runs red. A repository that already configures the abort, a
+  retry wrapper, or the equivalent `git config http.lowSpeedLimit` is told
+  nothing. The proof is read only from inside the checkout step's own time
+  window, so a later `git submodule` or `git lfs` step that prints the same
+  progress lines can never be quoted as a stalled checkout. The credited saving is only the amount the stall adds
   to the average run, never the worst run and never the whole step, and no
   wall-clock saving is claimed at all, because the typical run was never stalled.
   Logs are downloaded only for the slow runs, and only after every cheaper check

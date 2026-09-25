@@ -8753,6 +8753,17 @@ def test_opt80_certificate_fails_on_tampered_numbers():
     f["checkout_stall"]["proven_tail_runs"][0]["gap_s"] = 300.0
     problems = vr._opt80_checkout_stall_rederived(f)
     assert any("gap_s" in p for p in problems), problems
+    # A stamped line whose timestamp does not parse. The arm must REPORT that,
+    # not raise — a crash here would abort the whole verifier run instead of
+    # failing the one claim, so the guard is load-bearing and pinned.
+    for bad in ("not-a-timestamp", None):
+        f = _opt80_verifier_finding()
+        if bad is None:
+            f["checkout_stall"]["proven_tail_runs"][0]["before"].pop("ts", None)
+        else:
+            f["checkout_stall"]["proven_tail_runs"][0]["before"]["ts"] = bad
+        problems = vr._opt80_checkout_stall_rederived(f)
+        assert any("parseable log timestamps" in p for p in problems), (bad, problems)
     # A pause under the 20s bar.
     f = _opt80_verifier_finding()
     f["checkout_stall"]["proven_tail_runs"][0]["after"]["ts"] = "2026-06-01T00:00:19Z"

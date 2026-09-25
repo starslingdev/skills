@@ -9010,9 +9010,12 @@ _OPT80_MIN_TAIL_RUNS = 2
 # reason: one proven gap could be a one-off GitHub incident.
 _OPT80_MIN_PROVEN_TAIL_RUNS = 2
 # The intra-fetch gap that counts as a stall: 20s of no progress between two
-# consecutive git progress lines. Sized against the recipe it recommends
-# (`GIT_HTTP_LOW_SPEED_TIME: 30`) — a gap the fix would not have aborted is not
-# evidence for the fix.
+# consecutive git progress lines. It is deliberately BELOW the 30s abort the
+# recipe recommends: this bar decides whether the fetch stalled at all, not
+# whether this particular pause would have tripped the abort. A 20-29s pause is
+# real evidence of the shape even though the recommended `GIT_HTTP_LOW_SPEED_TIME`
+# would have let it through — and the credited saving is the distribution's tail
+# excess, not any one pause.
 _OPT80_MIN_GAP_S = 20.0
 # A distribution needs enough runs to have a p95 at all. Below this the
 # "tail" is whichever run happened to be slowest.
@@ -9041,8 +9044,10 @@ _OPT80_LOG_LINE_RE = _re.compile(
 # vocabulary above, so a credential in one is already close to impossible — but
 # "close to impossible" is not a guarantee about third-party text, and the cost
 # of being wrong is a secret printed into a report. A quoted line that carries a
-# credential shape WITHHOLDS the finding rather than being masked, because a
-# masked git progress line is no longer evidence of anything.
+# credential shape DROPS that run's proof rather than being masked, because a
+# masked git progress line is no longer evidence of anything — and if that leaves
+# fewer than `_OPT80_MIN_PROVEN_TAIL_RUNS` clean proofs the finding is withheld
+# outright. The poisoned line is never quoted either way.
 _OPT80_CREDENTIAL_RE = _re.compile(
     r"(gh[pousr]_[A-Za-z0-9]{16,}"
     r"|github_pat_[A-Za-z0-9_]{20,}"
@@ -9053,8 +9058,10 @@ _OPT80_CREDENTIAL_RE = _re.compile(
 # composite action the job invokes.
 _OPT80_RETRY_ENV_KEYS = ("GIT_HTTP_LOW_SPEED_LIMIT", "GIT_HTTP_LOW_SPEED_TIME")
 _OPT80_RETRY_WRAPPER_RE = _re.compile(
-    r"(nick-fields/retry|Wandalen/wretry|retry[-_]?action|GIT_HTTP_LOW_SPEED_LIMIT)",
+    r"(nick-fields/retry|Wandalen/wretry|retry[-_]?action"
+    r"|GIT_HTTP_LOW_SPEED_(LIMIT|TIME)|http\.lowspeed(limit|time))",
     _re.I)
+_OPT80_GIT_CONFIG_RE = _re.compile(r"http\.lowspeed(limit|time)", _re.I)
 _OPT80_LOCAL_USES_RE = _re.compile(r"uses:\s*['\"]?(\./[^\s'\"#]+)")
 _OPT80_CHECKOUT_USES_RE = _re.compile(r"^actions/checkout(@|$)", _re.I)
 
@@ -9180,6 +9187,11 @@ def _opt80_retry_already_configured(wf_doc: dict[str, Any], job_spec: dict[str, 
         if isinstance(env_block, dict) and any(
                 str(k).upper() in _OPT80_RETRY_ENV_KEYS for k in env_block):
             return True
+        # `git config http.lowSpeedLimit` is git's own documented equivalent of
+        # the env vars, and setting it in a `run:` step before the checkout is a
+        # common way to apply this fix. A repo that did that has applied it.
+        if _OPT80_GIT_CONFIG_RE.search(str(step.get("run") or "")):
+            return True
         uses = str(step.get("uses") or "").strip()
         if uses and _OPT80_RETRY_WRAPPER_RE.search(uses):
             return True
@@ -9192,8 +9204,16 @@ def _opt80_retry_already_configured(wf_doc: dict[str, Any], job_spec: dict[str, 
     return False
 
 
-def _opt80_stall_in_log(log: str) -> "dict[str, Any] | None":
+def _opt80_stall_in_log(log: str, window: "tuple[_dt.datetime, _dt.datetime] | None" = None,
+                        ) -> "dict[str, Any] | None":
     """The largest intra-fetch stall this checkout log proves, or None.
+
+    `window` is the checkout STEP's own (start, end) from the jobs API. A job
+    log is the whole job, and a later `git submodule update` or `git lfs pull`
+    step emits the same git progress vocabulary — so without the clamp a pause
+    in one of those steps could be quoted as proof of a stalled checkout. Only
+    lines inside the step's own window are ever considered. The window is
+    required: a run whose step timestamps do not parse proves nothing here.
 
     A stall is a gap of at least `_OPT80_MIN_GAP_S` between two CONSECUTIVE
     checkout progress lines — including the case the spec calls out separately, a
@@ -9211,6 +9231,8 @@ def _opt80_stall_in_log(log: str) -> "dict[str, Any] | None":
         if parsed is None:
             continue
         ts, text = parsed
+        if window is not None and not (window[0] <= ts <= window[1]):
+            continue
         if _OPT80_PROGRESS_RE.search(text):
             events.append((ts, text))
     best: dict[str, Any] | None = None
@@ -9263,14 +9285,16 @@ def _detect_opt80_checkout_tail_stall(
     step across the sample. Never the full p95, never the whole step.
     `wall_clock_p50_s` is 0 by construction: the MEDIAN run has no stall, so
     capping the tail cannot move the p50 merge gate. The tail runs' own
-    wall-clock does improve, and that is stamped (`tail_run_wall_clock_s`) and
-    described — but it is not credited, because it is not a p50 quantity.
+    wall-clock does improve, and the longest observed pause is stamped
+    (`tail_run_longest_pause_s`) and named in the rendered evidence as an UPPER
+    BOUND on what capping recovers — but it is not credited, because it is not a
+    p50 quantity, and because the recommended abort leaves a residual.
 
     Every exit is COUNTED into `withheld` (a `{gate: count}` accumulator the
     caller stamps onto the findings doc) and logged at DEBUG. An empty return is
     what a DEAD detector also produces; a visible per-gate tally is the only
-    thing that tells the two apart, and this detector has more than twenty
-    withhold points."""
+    thing that tells the two apart, and this detector withholds at nineteen
+    named gates."""
     def _no(gate: str, **ctx: Any) -> None:
         if withheld is not None:
             withheld[gate] = withheld.get(gate, 0) + 1
@@ -9292,19 +9316,33 @@ def _detect_opt80_checkout_tail_stall(
     sampled_runs = len(jobs_per_run)
     # Every observed job name in the sample, with its occurrences in run order.
     occurrences_by_job: dict[str, list[dict[str, Any]]] = {}
+    # A name carried twice in ONE run is not one job (a matrix with a static
+    # `name:`), and its two legs' checkout durations are not one distribution.
+    # Keeping whichever leg the API happened to list first would mix them, and
+    # the API does not promise leg order — so the whole name is dropped, in a
+    # first pass, before any of its occurrences is collected.
+    doubled: set[str] = set()
     for run_jobs in jobs_per_run:
         seen_in_run: set[str] = set()
         for job in run_jobs:
             name = str(job.get("name") or "").strip()
-            if not name or name in seen_in_run:
-                # A name carried twice in one run is not one job (a matrix with a
-                # static `name:`), and its two legs' checkout durations are not
-                # one distribution. Fail closed on the whole name.
-                if name:
-                    seen_in_run.add(name)
+            if not name:
+                continue
+            if name in seen_in_run:
+                doubled.add(name)
+            seen_in_run.add(name)
+    for run_jobs in jobs_per_run:
+        seen_in_run = set()
+        for job in run_jobs:
+            name = str(job.get("name") or "").strip()
+            if not name or name in doubled or name in seen_in_run:
                 continue
             seen_in_run.add(name)
             occurrences_by_job.setdefault(name, []).append(job)
+    for name in sorted(doubled):
+        # Counted like every other exit: a sample quietly halved by a
+        # static-name matrix must not look like "this job has no tail".
+        _no("job_name_is_carried_twice_in_one_run", job=name)
 
     out: list[dict[str, Any]] = []
     for job_name in sorted(occurrences_by_job):
@@ -9330,6 +9368,7 @@ def _detect_opt80_checkout_tail_stall(
         # A 0-second checkout is a real measurement (a warm one-second-granular
         # step), so it is kept — it is the p50 side of the distribution.
         per_run: list[dict[str, Any]] = []
+        step_window: dict[Any, tuple[Any, Any]] = {}
         for job in instances:
             match = None
             for step in job.get("steps") or []:
@@ -9344,9 +9383,14 @@ def _detect_opt80_checkout_tail_stall(
             if dur is None or dur < 0:
                 continue
             url = str(job.get("html_url", "") or "")
-            per_run.append({"job_id": job.get("id"),
-                            "run_url": url.split("/job/")[0],
-                            "checkout_s": round(float(dur), 1)})
+            row = {"job_id": job.get("id"),
+                   "run_url": url.split("/job/")[0],
+                   "checkout_s": round(float(dur), 1)}
+            # Kept off the stamped row (see below) — it exists only to clamp the
+            # log search to this step's own window.
+            step_window[job.get("id")] = (_parse_dt(match.get("started_at")),
+                                          _parse_dt(match.get("completed_at")))
+            per_run.append(row)
         if len(per_run) < _OPT80_MIN_SAMPLED_OCCURRENCES:
             _no("fewer_sampled_occurrences_than_the_minimum", job=job_name,
                 occurrences=len(per_run), minimum=_OPT80_MIN_SAMPLED_OCCURRENCES)
@@ -9392,15 +9436,28 @@ def _detect_opt80_checkout_tail_stall(
         # ---- the proof. Logs are fetched ONLY for tail runs, newest-first, and
         # only up to `_OPT80_LOG_PROBE_MAX` of them — never for the whole sample.
         by_id = {j.get("id"): j for j in instances}
-        probe = [r for r in reversed(tail_runs) if by_id.get(r["job_id"])
-                 and _job_has_log(by_id[r["job_id"]])][:_OPT80_LOG_PROBE_MAX]
+        # Newest-first EXPLICITLY, on the job's own start time rather than on the
+        # order the sample happens to be in: GitHub deletes job logs at retention,
+        # so spending a 4-call budget on the oldest tail runs is how a real stall
+        # gets mis-recorded as "the logs showed no gap".
+        probe = sorted(
+            (r for r in tail_runs if by_id.get(r["job_id"])
+             and _job_has_log(by_id[r["job_id"]])),
+            key=lambda r: (_parse_dt(by_id[r["job_id"]].get("started_at"))
+                           or _dt.datetime.min.replace(tzinfo=_dt.timezone.utc)),
+            reverse=True)[:_OPT80_LOG_PROBE_MAX]
         proven: list[dict[str, Any]] = []
         credential_shaped = False
         for r in probe:
             log = _fetch_job_log(client, repo, by_id[r["job_id"]])
             if not log:
                 continue
-            stall = _opt80_stall_in_log(log)
+            win = step_window.get(r["job_id"])
+            if not win or win[0] is None or win[1] is None:
+                # No parseable step window — the log cannot be attributed to the
+                # checkout step, so it proves nothing.
+                continue
+            stall = _opt80_stall_in_log(log, window=win)
             if stall is None:
                 continue
             if any(_OPT80_CREDENTIAL_RE.search(str(stall[side]["line"]))
@@ -9451,7 +9508,13 @@ def _detect_opt80_checkout_tail_stall(
             f"{float(worst['gap_s']):.0f}s between two consecutive git progress lines"
             f"{stalled_note}. That is a stalled transfer, not a large one. The tail "
             f"excess (mean {mean:.0f}s minus p50 {p50:.0f}s = {tail_excess:.0f}s per run) is "
-            f"~{credited:.0f} runner-min/mo at this job's measured run frequency.")
+            f"~{credited:.0f} runner-min/mo at this job's measured run frequency. "
+            f"No wall-clock is credited — the MEDIAN run never stalled, so capping the "
+            f"tail cannot move the p50 merge gate. What does improve is the stalled runs "
+            f"themselves, by at most the {float(worst['gap_s']):.0f}s pause quoted below "
+            f"(less, once the 30s abort and the re-fetch are paid)"
+            + (f", and `{job_name}` IS this workflow's long pole, so that uncredited "
+               f"improvement lands on the critical path." if on_pole else "."))
         me = _measured_evidence(
             ["Tail run", "Checkout", "Pause", "Last progress line before the pause",
              "First progress line after it"],
@@ -9465,13 +9528,17 @@ def _detect_opt80_checkout_tail_stall(
                   "timing. Logs were fetched for tail runs only "
                   f"({len(probe)} fetched, cap {_OPT80_LOG_PROBE_MAX}), never for the "
                   "whole sample. "
-                  "GUARDRAIL: apply these in order. (1) Set `GIT_HTTP_LOW_SPEED_LIMIT: "
+                  "GUARDRAIL: apply these in order. (1) The abort and the retry are ONE "
+                  "change, not two — ship them together. Set `GIT_HTTP_LOW_SPEED_LIMIT: "
                   "1000` and `GIT_HTTP_LOW_SPEED_TIME: 30` in the checkout step's `env:` "
-                  "— git then aborts a transfer that stays under 1 KB/s for 30s instead "
-                  "of hanging. (2) Wrap the checkout in a retry with backoff (a retry "
-                  "action, or a local composite); the abort from (1) is what makes the "
-                  "retry fast, so do not add a retry without it or the retry inherits "
-                  "the same hang. (3) Where the job does not need history, a shallow, "
+                  "so git aborts a transfer that stays under 1 KB/s for 30s instead of "
+                  "hanging, AND wrap the checkout in a retry with backoff (a retry "
+                  "action, or a local composite). The abort without the retry turns the "
+                  "stalled-but-succeeding runs measured above into FAILING runs; the "
+                  "retry without the abort inherits the same hang and doubles the worst "
+                  "case. (2) Re-measure the same step afterwards — the runs that used to "
+                  "stall should now be short, not red. (3) Where the job does not need "
+                  "history, a shallow, "
                   "blobless or sparse checkout shrinks what can stall at all — check "
                   "OPT28 first for whether this job reads history. (4) A persistent git "
                   "mirror on the runner removes the fetch entirely; that is a "
@@ -9491,9 +9558,10 @@ def _detect_opt80_checkout_tail_stall(
                 f"the checkout step ({mean:.0f}s - {p50:.0f}s = {tail_excess:.0f}s per run) — "
                 "never the full p95 and never the whole step. `wall_clock_p50_s` is 0 "
                 "because the MEDIAN run has no stall, so capping the tail cannot move "
-                "the p50 merge gate; what improves is the tail runs' own wall-clock "
-                f"({float(worst['gap_s']):.0f}s on the worst proven run), which is "
-                "stamped but deliberately not credited as a p50 saving"
+                "the p50 merge gate; what improves is the tail runs' own wall-clock, by "
+                f"at most the {float(worst['gap_s']):.0f}s pause observed on the worst "
+                "proven run — an upper bound, stamped but deliberately not credited as a "
+                "p50 saving"
                 + (" — and this job IS the workflow's long pole, so that uncredited "
                    "improvement lands on the critical path." if on_pole else ".")),
             realization="none", measured_evidence=me)
@@ -9532,7 +9600,10 @@ def _detect_opt80_checkout_tail_stall(
             "logs_fetched": len(probe),
             "log_probe_max": _OPT80_LOG_PROBE_MAX,
             "tail_excess_s": tail_excess,
-            "tail_run_wall_clock_s": round(float(worst["gap_s"]), 1),
+            # The longest pause OBSERVED, which is an upper bound on what capping
+            # it recovers on that run — the recommended abort fires at 30s and the
+            # retry re-fetches, so the realised gain is smaller. Never credited.
+            "tail_run_longest_pause_s": round(float(worst["gap_s"]), 1),
             "on_critical_path": on_pole,
             "monthly_volume": monthly_volume,
             "effective_monthly_volume": eff_volume,
@@ -17125,7 +17196,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # job logs per firing job, fetched for TAIL RUNS ONLY and only after
         # every cheap gate has already passed — a job with no tail costs nothing.
         # Like OPT77, every gate that stopped a finding is counted onto the
-        # findings doc: this detector withholds in more than twenty places and
+        # findings doc: this detector withholds at nineteen named gates and
         # returns the same empty list whether it declined on the evidence or is
         # broken.
         new = _detect_opt80_checkout_tail_stall(

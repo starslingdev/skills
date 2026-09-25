@@ -3944,3 +3944,80 @@ def test_opt80_sizing_model_is_registered_as_measured():
     assert cr._SIZING["OPT80"] == {"model": "measured"}
     assert cr._rm_door_policy("OPT80")[0] == cr._RM_DOOR_NOT_DERIVABLE
     assert cr._rm_door_policy("OPT80")[1]
+
+
+# A log whose checkout finished cleanly, and whose ONLY >=20s pause between two
+# progress lines happens later, in a `git submodule` / `git lfs pull` step that
+# emits the same git vocabulary. Quoting those two lines as proof of an
+# intra-fetch stall would attribute another step's pause to the checkout.
+_OPT80_LATE_STEP_LOG = "\n".join([
+    "2026-06-01T00:00:01.0000000Z ##[group]Run actions/checkout@v4",
+    "2026-06-01T00:00:02.0000000Z Fetching the repository",
+    "2026-06-01T00:00:03.0000000Z remote: Enumerating objects: 120000, done.",
+    "2026-06-01T00:00:05.0000000Z Receiving objects:  50% (60000/120000)",
+    "2026-06-01T00:00:09.0000000Z Receiving objects: 100% (120000/120000), done.",
+    "2026-06-01T00:00:11.0000000Z ##[endgroup]",
+    # The checkout step itself ends at 00:02:01 on a tail run; everything below
+    # belongs to the NEXT step.
+    "2026-06-01T00:02:02.0000000Z ##[group]Run git submodule update --init",
+    "2026-06-01T00:02:03.0000000Z Receiving objects:  30% (300/1000)",
+    "2026-06-01T00:03:30.0000000Z Receiving objects:  30% (300/1000)",
+    "2026-06-01T00:03:31.0000000Z ##[endgroup]",
+])
+
+
+def test_opt80_ignores_a_pause_outside_the_checkout_step_window():
+    """A pause in a LATER step is not evidence about the checkout. The stall
+    search is clamped to the checkout step's own start/end, so a `git submodule`
+    or `git lfs pull` step that emits the same git progress vocabulary can never
+    supply OPT80's proof."""
+    counts: dict = {}
+    runs = _opt80_runs()
+    logs = {run[0]["id"]: _OPT80_LATE_STEP_LOG for run in runs}
+    out, _gh = _opt80(jpr=runs, logs=logs, withheld=counts)
+    assert out == [], out
+    assert counts.get("tail_without_log_gap") == 1, counts
+
+
+def test_opt80_fails_closed_on_a_job_name_carried_twice_in_one_run():
+    """A static-name matrix puts two legs under one name in one run. Their
+    checkout durations are not one distribution, so the WHOLE name is dropped —
+    not just the second leg — and the skip is counted like every other exit."""
+    counts: dict = {}
+    runs = _opt80_runs()
+    # Run 0 carries a second `build` leg whose checkout is nothing like the first.
+    runs[0].append(_opt80_job(8901, 500.0))
+    out, _gh = _opt80(jpr=runs, withheld=counts)
+    assert out == [], out
+    assert counts.get("job_name_is_carried_twice_in_one_run") == 1, counts
+
+
+def test_opt80_withholds_when_git_config_already_sets_the_low_speed_abort():
+    """`git config http.lowSpeedLimit` is git's documented equivalent of the
+    env vars the recipe recommends. A repo that already set it that way has
+    applied the fix and must not be told to apply it."""
+    for cmd in ("git config --global http.lowSpeedLimit 1000\n"
+                "git config --global http.lowSpeedTime 30",
+                "git config http.lowspeedlimit 1000"):
+        counts: dict = {}
+        wf = _opt80_wf(steps=[{"run": cmd},
+                              {"uses": "actions/checkout@v4"},
+                              {"run": "npm test"}])
+        out, _gh = _opt80(wf=wf, withheld=counts)
+        assert out == [], cmd
+        assert counts.get("retry_or_abort_already_configured") == 1, (cmd, counts)
+
+
+def test_opt80_needs_two_separately_proven_tail_runs():
+    """`_OPT80_MIN_PROVEN_TAIL_RUNS` is the load-bearing answer to OPT49's cut:
+    ONE stalled log is an anecdote. Two tail runs, only one of which stalls, is
+    withheld — and this pins the constant by BEHAVIOUR, not by comparing two
+    copies of the number to each other."""
+    counts: dict = {}
+    runs = _opt80_runs()
+    logs = {run[0]["id"]: _OPT80_SMOOTH_LOG for run in runs}
+    logs[runs[-1][0]["id"]] = _OPT80_STALLED_LOG      # exactly one proven pause
+    out, _gh = _opt80(jpr=runs, logs=logs, withheld=counts)
+    assert out == [], out
+    assert counts.get("tail_without_log_gap") == 1, counts
+    assert cr._OPT80_MIN_PROVEN_TAIL_RUNS == 2

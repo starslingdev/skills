@@ -1498,9 +1498,10 @@ with nothing to report.
 
 **Log text is untrusted third-party data.** Only lines from the closed progress
 vocabulary above are ever read, the two quoted lines are quoted and never acted
-on, and a quoted line carrying a credential shape withholds the finding outright
-rather than being masked — a masked git progress line is no longer evidence of
-anything.
+on, and a quoted line carrying a credential shape drops that run's proof rather
+than being masked — a masked git progress line is no longer evidence of
+anything. If that leaves fewer than two clean proofs the finding is withheld
+outright. Either way the poisoned line is never quoted.
 
 **Sizing (measured — the tail-excess model)**:
 
@@ -1517,17 +1518,23 @@ frequency. The evidence renders p50 / p95 / max so the reader sees the spread.
 
 `wall_clock_p50_s` is **0 by construction**, and this is deliberate: the median
 run has no stall, so capping the tail cannot move the p50 merge gate. What does
-improve is the tail runs' own wall-clock, which is measured and stamped
-(`tail_run_wall_clock_s`) and named in the finding — including whether the job
-sits on the critical path — but is **not credited**, because a mean-minus-median
-quantity is not a p50 saving and must not be rendered as one.
+improve is the tail runs' own wall-clock, bounded above by the longest observed
+pause — stamped as `tail_run_longest_pause_s` and named in the rendered evidence,
+along with whether the job sits on the critical path — but **not credited**,
+because a mean-minus-median quantity is not a p50 saving and must not be rendered
+as one. It is an upper bound, not a forecast: the recommended abort fires at 30
+seconds and the retry re-fetches, so the realised gain on a stalled run is
+smaller than the pause it replaces.
 
 **Fix recipe**, in this order, with the caveat that **retry and abort cap the
 damage; they do not fix the network**:
 
 1. Set `GIT_HTTP_LOW_SPEED_LIMIT: 1000` and `GIT_HTTP_LOW_SPEED_TIME: 30` in the
-   checkout step's `env:`. Git then aborts a transfer that stays under 1 KB/s
-   for 30 seconds instead of waiting indefinitely. Cheapest, no wrapper.
+   checkout step's `env:` **and** wrap the checkout in a retry (step 2) in the
+   same change. Git then aborts a transfer that stays under 1 KB/s for 30
+   seconds instead of waiting indefinitely. The abort on its own is not a
+   half-measure but a regression: the runs this pattern measured stalled and
+   then *succeeded*, and aborting without a retry turns them into failures.
 2. Wrap the checkout in a retry with backoff (a retry action, or a local
    composite). The abort from (1) is what makes the retry fast — **never add a
    retry without it**, or the retry inherits the same hang and doubles the worst
@@ -1545,13 +1552,17 @@ damage; they do not fix the network**:
 Expect the tail to shorten, not to disappear, and re-measure the same step after
 the change.
 
-**Risk**: **LOW**. No check is renamed, so branch protection is untouched, and
-steps 1 and 2 change only how a failing transfer is handled. Step 3 is the one
-that can break a job (a narrowed checkout the job silently depended on), which
-is why it is third and gated on OPT28.
+**Risk**: **MEDIUM**. No check is renamed, so branch protection is untouched.
+But the abort in step 1 does change how a *succeeding* transfer is handled: the
+runs this pattern measures stalled and then completed, so an abort shipped
+without the retry converts them into red runs. Shipped together, steps 1 and 2
+turn a long stall into a short retry; shipped apart, step 1 alone is a
+regression. Step 3 is the one that can break a job outright (a narrowed checkout
+the job silently depended on), which is why it is third and gated on OPT28.
 
 **Guardrail**: never present this as a fix for a checkout that is merely large;
-never add a retry without the abort; never narrow the checkout without
+never add a retry without the abort, and never add the abort without the retry;
+never narrow the checkout without
 confirming the job reads no history and no excluded path; never describe the
 runner-side mirror as part of the change.
 
@@ -1572,25 +1583,34 @@ summary and this note.
 
 The finding must stamp `wall_clock_p50_s=0`, `sizing_basis=measured`, the
 tail-excess model in `measured_signal`, and a structured `checkout_stall` block
-that lets `verify_report.py` re-derive the whole claim. Every one of these keys
-is hard-required by that re-derivation:
+that lets `verify_report.py` re-derive the whole claim. The block must carry all
+of these keys. The ones marked **re-derived** are recomputed by the neutrality
+arm and fail the report when they disagree; the rest are stamped so the claim can
+be audited by hand, and the arm reads its own copies of the constants rather than
+the stamped ones, so a drifted constant fails the engine/verifier coupling test
+instead of being silently trusted:
 
 | key | what it carries |
 |---|---|
-| `job` | the credited job; must equal `affected_jobs` |
+| `kind` | **re-derived** — `opt80_checkout_tail_stall`; a block without it is not this claim |
+| `job` | **re-derived** — the credited job; must equal `affected_jobs` |
 | `checkout_step` / `checkout_step_identity` / `checkout_step_source` | which step was measured, and whether it is `actions/checkout` directly or a local composite that wraps one |
 | `runner_label` | the one billed label every credited occurrence ran on |
 | `per_run_checkout_s` | each sampled occurrence's job id, run URL and checkout seconds — the inputs p50 / p95 / mean / max are recomputed from |
-| `p50_s` / `p95_s` / `mean_s` / `max_s` | the distribution, each re-derived |
-| `tail_p95_multiple` / `tail_p95_abs_s` / `tail_threshold_s` / `min_tail_runs` | the tail test's constants and the threshold they produce |
-| `tail_run_job_ids` | which runs were tail runs; re-derived against the threshold, and bounded by the sampled occurrences |
-| `min_gap_s` / `min_proven_tail_runs` / `proven_tail_runs` | the stall bar, and per proven run the two quoted lines, their log timestamps and the derived gap — the gap is recomputed from the timestamps |
-| `logs_fetched` / `log_probe_max` | the bounded probe; can never exceed the cap or the number of tail runs |
-| `tail_excess_s` / `tail_run_wall_clock_s` / `on_critical_path` | the credited quantity, the uncredited tail-run improvement, and whether it lands on the gate |
-| `monthly_volume` / `effective_monthly_volume` / `sampled_successful_run_count` / `occurrences` | the scaling; `occurrences` can never exceed the sampled run count |
+| `p50_s` / `p95_s` / `mean_s` / `max_s` | **re-derived** — the distribution, recomputed from `per_run_checkout_s` |
+| `tail_threshold_s` | **re-derived** — the threshold the tail test produced |
+| `tail_p95_multiple` / `tail_p95_abs_s` / `min_tail_runs` / `min_gap_s` / `min_proven_tail_runs` | the constants the detector used, stamped for audit; the arm compares against its own copies |
+| `tail_run_job_ids` | **re-derived** — which runs were tail runs, against the threshold, bounded by the sampled occurrences |
+| `proven_tail_runs` | **re-derived** — per proven run the two quoted lines, their log timestamps and the derived gap; the gap is recomputed from the timestamps and an unparseable one fails the claim |
+| `logs_fetched` / `log_probe_max` | **re-derived** — the bounded probe; can never exceed the cap or the number of tail runs |
+| `tail_excess_s` / `runner_min_saving` | **re-derived** — the credited quantity and the minutes it becomes |
+| `tail_run_longest_pause_s` / `on_critical_path` | the uncredited upper bound on the stalled runs' own improvement, and whether it lands on the gate |
+| `monthly_volume` / `effective_monthly_volume` / `sampled_successful_run_count` / `occurrences` | **re-derived** — the scaling; `occurrences` can never exceed the sampled run count |
 
-It never claims a speedup on the typical run; it credits only the tail the fix
-removes from the average.
+It never claims a speedup on the typical run. It credits the tail excess in full,
+which assumes the stall is fully capped — the residual the abort and re-fetch
+leave behind is not netted out, so treat the credited minutes as the optimistic
+end of the range.
 
 **Worked shape**: a `smoke` job checks out in eight seconds on ten of twelve
 sampled runs and in two minutes on the other two. Both slow runs' logs sit at

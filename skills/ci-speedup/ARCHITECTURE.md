@@ -1085,16 +1085,17 @@ OPT49 read a CAUSE ("uncached") out of a DURATION. OPT80 rejects in both
 directions — a tail whose logs show a smooth fetch is withheld
 (`tail_without_log_gap`), and no log is fetched for a job with no tail, so a gap
 alone can never produce a finding. Log text is untrusted: only the closed
-progress vocabulary is read, and a quoted line carrying a credential shape
-withholds the finding rather than being masked.
+progress vocabulary is read, and a quoted line carrying a credential shape drops
+that run's proof rather than being masked — withholding the finding outright if
+that leaves fewer than the two proofs the gate requires.
 
 Sizing is the tail-excess model — `mean - p50` of the checkout step, scaled by
 the job's own observed run frequency (`_effective_volume`) — never the full p95
 and never the whole step. `wall_clock_p50_s` is 0 by construction: the median
 run has no stall, so capping the tail cannot move the p50 merge gate; the tail
-runs' own improvement is stamped (`tail_run_wall_clock_s`, with
-`on_critical_path`) and deliberately left uncredited rather than rendered as a
-p50 saving. Its certificate carries its own `proof` token,
+runs' own improvement is bounded above by the longest observed pause, stamped
+(`tail_run_longest_pause_s`, with `on_critical_path`), named in the rendered
+evidence and deliberately left uncredited rather than rendered as a p50 saving. Its certificate carries its own `proof` token,
 `checkout_tail_excess`, and `verify_report.py`'s
 `_opt80_checkout_stall_rederived` arm recomputes the distribution, the tail
 threshold, which runs were tail runs, each pause's seconds from the quoted
@@ -1668,8 +1669,10 @@ before the timestamp.
   same finding set instead of re-sampling live history.
 
 gh usage is frugal: one workflow-list, one total-count per workflow, one
-job-list per sampled run (default 8), and one log per hottest cache job under
-`--with-logs` - no per-step API calls (step timings come from the job JSON).
+job-list per sampled run (default 8), one log per hottest cache job under
+`--with-logs`, and - only for a job that has already cleared every cheap OPT80
+gate - up to four job logs for that job's tail runs (`_OPT80_LOG_PROBE_MAX`),
+newest-first. No per-step API calls (step timings come from the job JSON).
 *How* those calls are issued (one shared pool, bounded prefetch waves, a token-wide
 rate governor) is §2.2; it changes the wall-clock of the pass, never its contents.
 
