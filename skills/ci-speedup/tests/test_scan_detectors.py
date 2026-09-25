@@ -3079,8 +3079,8 @@ def test_opt66_stays_retired_not_silently_deleted():
 
 def test_catalog_pattern_count_matches_doc_claims():
     """Every '<N>-pattern' / 'all <N> patterns' claim in the shipped docs must use
-    the REAL current catalog count. OPT66's removal-as-a-retired-stub keeps that
-    count at 74; a silent delete drops it to 73 and staled five claims at once
+    the REAL current catalog count (75 with OPT78). OPT66's removal-as-a-retired-stub
+    keeps OPT66 in that count; a silent delete drops it by one and staled five claims at once
     (SKILL.md, ARCHITECTURE.md, evals.json). This is the guard that was missing."""
     import sys as _sys
     _sys.path.insert(0, str(_SKILL_DIR / "scripts"))

@@ -26,9 +26,9 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 74-pattern
-catalog — 68 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76) plus 6 **structural /
-critical-path** patterns (OPT70–OPT75, routed from the measured long pole; see
+ci-speedup audits a repository's GitHub Actions workflows against a 75-pattern
+catalog — 68 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76) plus 7 **structural /
+critical-path** patterns (OPT70–OPT75 and OPT78, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
 runner-minutes (the cloud bill). Detection, ranking, and every measured number
@@ -1938,9 +1938,12 @@ static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
 catalog match. The old catalog-spine report used to dead-end there ("inherent
-cost, outside this catalog"). The **structural track** (catalog category 14, OPT70–OPT75,
+cost, outside this catalog"). The **structural track** (catalog category 14, OPT70–OPT75 plus OPT78,
 `class: structural`) is a **second finding class that is not catalog-bound** —
 it is routed from the measured critical path instead of matched against YAML.
+OPT70–OPT75 are routed by the deterministic router described below; **OPT78** is
+routed by the drill-time `vitest-isolate-pool` leaf detector (§12.3) and is
+reported by `scan.py` as having no critical-path router.
 
 ### Where it lives
 
@@ -2586,7 +2589,7 @@ contradiction.
 ### 12.3 The leaf detectors and the load-bearing magnitude (`_parse_log`)
 
 `blocking_path._parse_log` is the single source of truth for root-cause detection —
-five regex-over-tool-output detectors, each returning `{fix_key, unit_label, deeper:
+the regex-over-tool-output detectors below, each returning `{fix_key, unit_label, deeper:
 [levels], evidence, magnitude}` (`fix_key` names the root-cause family + selects the
 agent prompt in `_PROMPTS`; it is **not** a prescribed fix):
 
@@ -2594,7 +2597,8 @@ agent prompt in `_PROMPTS`; it is **not** a prescribed fix):
 | --- | --- | --- |
 | `prisma-migrate-once` | `db push --force-reset` per test group | DB-migration share of the slowest test file |
 | `vitest-v8-coverage` | istanbul coverage instruments every file | compile+instrument share of test work |
-| `vitest-isolate-pool` | per-file isolation re-pays the import cost | import share of the vitest run |
+| `vitest-isolate-pool` | per-file isolation re-pays the import cost (OPT78, HIGH risk). Gated on `scan.py`'s `test_runner_isolation` config fact — whose `verdict` field must read `isolation_on` — so every `_parse_log` caller (render, `_gap_poles`, `_persist_pole_logs` / `_magnitude_sample`) must pass that block; a guard test pins that every call site does | import share of the vitest run |
+| `vitest-import-bound` | the same import-bound split when OPT78 is WITHHELD (opted out, config not fully read, an unresolvable `isolate` value, a crashed config reader, vm pool): names the split and the withheld reason, forbids flipping isolation. Its config sentence travels as the leaf's `config_fact`, rendered outside the untrusted-log block | import share of the vitest run |
 | `turbo-remote-cache` | remote caching off / 0 cached → every package rebuilt | packages rebuilt (cache-miss %) |
 | `turbo-partial-cache` | caching ON but ≥40% rebuilt every run → unstable cache key (cache-key churn) | packages rebuilt despite caching (cache-miss %) |
 | `install-lifecycle-build` | a root `prepare`/`postinstall` lifecycle script runs a build DURING `<pm> install` — "work runs during install", not a cache miss | build wall run inside install (**seconds**) |
@@ -2871,7 +2875,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 74-pattern catalog (METADATA + body per pattern); the source of truth for
+  the 75-pattern catalog (METADATA + body per pattern); the source of truth for
   detection and the report's TL;DR / pattern background.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.
