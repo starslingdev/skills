@@ -4138,3 +4138,42 @@ def test_opt79_counts_the_occurrences_whose_log_it_never_captured():
     assert withheld.get("occurrence_has_no_captured_log") == 3
     assert out[0]["cache_net_negative"]["job_runs"] == 11
     assert out[0]["cache_net_negative"]["classified_runs"] == 8
+
+
+def test_opt79_verifier_thresholds_are_pinned_to_the_engines():
+    """The verifier restates the detector's gates because it must be able to
+    judge a finding without importing the engine. Restated is not the same as
+    coupled: until this test, loosening `_VR_OPT79_MIN_HITS` to 1 or dropping the
+    20% waste fraction to 0 left the whole suite green, so the verifier could
+    quietly stop enforcing the thresholds the catalog promises. The stamp-key
+    tuple was pinned; the numbers it guards were not."""
+    vr = _load_verify_report_for_opt79()
+    assert vr._VR_OPT79_MIN_HITS == cr._OPT79_MIN_HITS
+    assert vr._VR_OPT79_MIN_MISSES == cr._OPT79_MIN_MISSES
+    assert vr._VR_OPT79_MIN_WASTE_S == cr._OPT79_MIN_WASTE_S
+    assert vr._VR_OPT79_MIN_WASTE_FRAC == cr._OPT79_MIN_WASTE_FRAC
+    # the detector reads the SHARED cache tail floor, so another cache pattern
+    # retuning it must not silently desynchronise the two sides.
+    assert vr._VR_OPT79_TAIL_MIN_FRAC == cr._CACHE_TAIL_MIN_FRAC
+
+
+def test_opt79_verifier_matchers_recognise_every_line_the_engine_does():
+    """Both sides keep their own copy of the hit/miss matchers on purpose — the
+    re-derivation has to be able to catch a mislabelled row, which it could not
+    do sharing the engine's object. They must still recognise the same lines: a
+    verifier left behind when the engine learns a new vendor's wording rejects
+    honest findings with 'its quoted line is not a hit line'."""
+    vr = _load_verify_report_for_opt79()
+    for line in ("Cache restored from key: node-modules-abc123",
+                 "Cache restored from key: node-cache-Linux-x64-npm-abc123"):
+        assert cr._CACHE_HIT_RE.search(line), line
+        assert vr._VR_OPT79_HIT_RE.search(line), line
+    for line in ("Cache not found for input keys: node-modules-abc123",
+                 "npm cache is not found",
+                 "pip cache is not found"):
+        assert (cr._CACHE_MISS_RE.search(line)
+                or cr._OPT79_EXTRA_MISS_RE.search(line)), line
+        assert vr._VR_OPT79_MISS_RE.search(line), line
+    # …and neither side reads a hit as a miss or the reverse.
+    assert not vr._VR_OPT79_MISS_RE.search("Cache restored from key: abc")
+    assert not vr._VR_OPT79_HIT_RE.search("npm cache is not found")
