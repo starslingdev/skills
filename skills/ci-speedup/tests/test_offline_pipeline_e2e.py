@@ -435,6 +435,14 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert data.get("opt79_logs_fetched") == 8, data.get("opt79_logs_fetched")
     assert isinstance(data.get("opt79_withheld_by_gate"), dict), (
         "the per-gate withhold tally must be stamped on every collected run")
+    # …and the run DECLARES those reads in its provenance, as its own row. The
+    # pole-drill `logs_fetched` field counts a different thing and the report's
+    # self-check re-derives that cell from the persisted bundle, so a report that
+    # quotes eight cache log lines while its Data sources table says no job logs
+    # were read is the failure this separate row exists to prevent.
+    _probe = (data.get("data_sources") or {}).get("cache_probe_logs")
+    assert isinstance(_probe, dict), data.get("data_sources")
+    assert _probe.get("probed") == 8 and _probe.get("returned") == 8, _probe
 
     # The static-scan findings come from scan.py parsing the YAML — they exist
     # regardless of gh replay, so they do NOT prove the replay wired up. Assert

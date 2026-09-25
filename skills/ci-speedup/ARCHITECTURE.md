@@ -1091,8 +1091,16 @@ p50 to sit strictly BELOW the workflow's cluster floor, which is what makes
 `wall_clock_p50_s=0` literally true here — unlike OPT77, the
 `below_cluster_floor` token is not historical for OPT79, it is the proof. A
 net-negative cache on the long pole is a real wall-clock lever but needs the
-floor cascade the spine owns, so the pattern withholds there and counts the
-withhold rather than guess.
+floor cascade the spine owns, so the pattern withholds there rather than guess.
+Note the withhold's true shape: the floor gate lives in `_opt79_candidates`,
+which is also what `_opt79_log_plan` selects from, so such a job's logs are never
+fetched and its cache is never classified — there is no measured net-negative
+cache being suppressed, only one never looked for. The withhold is counted into
+`opt79_withheld_by_gate`, which is maintainer-side: nothing renders it, so this
+coverage hole is invisible to the reader of the report. Closing it means passing
+the measured excess into `size_wall_clock` instead of hard-coding
+`wall_clock_p50_s=0`, and letting CAP 1 (§5) cap it at `long_pole_p50 -
+floor_p50` the way it caps every other on-pole finding.
 
 Its gh cost is the one new one in this wave: a capped log probe
 (`_OPT79_LOG_PROBE_MAX = 8` occurrences per candidate job,

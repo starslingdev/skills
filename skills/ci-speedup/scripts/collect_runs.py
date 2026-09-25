@@ -17783,6 +17783,17 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "cost_spine_triaged_runs_sampled": cost_spine_triaged_runs_sampled,
         "cost_spine_triaged_jobs_sampled": cost_spine_triaged_jobs_sampled,
         "logs_fetched": logs_fetched,
+        # The cache-cost comparison's OWN log reads, kept apart from
+        # `logs_fetched` (which counts the pole-drill logs persisted into the
+        # data bundle, and which `verify_report` re-derives from that bundle).
+        # These happen during collection whether or not `--with-logs` was
+        # passed, so without this the provenance table could say no job logs
+        # were read in a report that quotes them.
+        "cache_probe_logs": {
+            "probed": len(_opt79_probe_jobs),
+            "returned": len(opt79_logs),
+            "budget": _OPT79_REPO_LOG_BUDGET,
+        },
         # Where each workflow's YAML was PARSED from. The two sources can disagree (the
         # checkout is what the report stamps as audited; `GET /contents/` is the DEFAULT
         # BRANCH's HEAD), so which one fed the detectors is a fact about the report, not

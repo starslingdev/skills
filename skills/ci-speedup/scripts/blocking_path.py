@@ -5191,6 +5191,29 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
     else:
         rows.append(("job logs", "not run",
                      "Sampled only for a slow pole worth log-level inspection"))
+    # The cache-cost comparison (OPT79) reads job logs during COLLECTION, not in
+    # the pole drill and not behind `--with-logs`, so the row above can honestly
+    # say "not run" while that comparison quotes real log lines. A separate row,
+    # deliberately: `logs_fetched` counts the pole logs the data bundle persists
+    # and `verify_report` re-derives that cell from the bundle, so folding a
+    # second kind of fetch into it would swap a false statement for a broken
+    # invariant. No probe planned → no row; a probe the reader never paid for is
+    # not a disclosure, it is noise.
+    _probe = ds.get("cache_probe_logs")
+    if isinstance(_probe, dict) and isinstance(_probe.get("probed"), int) \
+            and _probe["probed"] > 0:
+        _pn = _probe["probed"]
+        _rn = _probe.get("returned")
+        _rn = _rn if isinstance(_rn, int) else 0
+        # Probed-but-empty is its own fact: expired retention reads as "0 of 8",
+        # never as a comparison that had eight logs to work from.
+        cov = (f"{_pn} job log(s) read" if _rn == _pn
+               else f"{_rn} of {_pn} job log(s) returned content")
+        _bud = _probe.get("budget")
+        if isinstance(_bud, int) and _bud > 0:
+            cov += f" (capped at {_bud} for the repository)"
+        rows.append(("cache hit/miss log probe", cov,
+                     "Splitting a cached job's runs into cache hits and misses"))
     # WHICH workflow YAML fed the detectors. `collect_runs` stamps this, and until now
     # nothing rendered it — so the reader could not tell whether the `on:`/matrix/timeout
     # signals came off the audited checkout or off the default branch's HEAD (the two

@@ -469,12 +469,23 @@ save today, and both disappear with the cache.
 **Why this credits no wall-clock time.** `wall_clock_p50_s` is always 0, and the
 candidate gate requires the job to sit strictly below the workflow's cluster
 floor — which is exactly what makes that zero true and re-derivable, and is the
-finding's `below_cluster_floor` neutrality certificate. A net-negative cache on
-the workflow's **long pole** is a genuine wall-clock lever, but sizing it needs
-the floor cascade the measurement spine owns, so the pattern **withholds** there
-for now rather than guess. That withhold is counted like every other, so the
-coverage hole is visible in each run's `opt79_withheld_by_gate` tally instead of
-looking like "nothing to report".
+finding's `below_cluster_floor` neutrality certificate.
+
+**A known coverage hole, stated plainly.** A net-negative cache on the workflow's
+**long pole** would be a genuine wall-clock lever — the one case where this waste
+sits on the merge wait rather than only on the bill — and this version does not
+look for it. The floor gate runs in the candidate selector, *before* any log is
+fetched, so a cache on the slowest job is not measured and found wanting; it is
+never measured at all. That is deliberate (sizing a speedup there needs the
+wall-clock bound cascade the measurement spine owns, and a guessed one is worse
+than none), and it is the pattern's most valuable missing case.
+
+Be clear about what is and is not visible: the withhold is counted in the run's
+`opt79_withheld_by_gate` tally, which is a **maintainer-side** record in the
+scratch `findings.json`. It is **not rendered in the report**, so a repository
+whose only net-negative cache sits on its slowest job reads exactly like a
+repository with none. Nothing in the report claims otherwise, and nothing in the
+report tells the reader either.
 
 **Fix**: in this order, and never "just delete it".
 

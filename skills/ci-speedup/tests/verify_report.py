@@ -670,6 +670,56 @@ def _job_logs_count_violation(report: str, findings_path: Path | None) -> tuple[
     return None, f"; job-logs coverage honest ({logs_n} fetched)"
 
 
+_DS_CACHE_PROBE_ROW_RE = re.compile(
+    r"^\|\s*cache hit/miss log probe\s*\|\s*(.+?)\s*\|", re.MULTILINE)
+
+
+def _cache_probe_count_violation(report: str, findings_path: Path | None
+                                 ) -> tuple[str | None, str]:
+    """Re-derive the `cache hit/miss log probe` row from `findings.json`.
+
+    That row exists because the cache-cost comparison reads job logs during
+    COLLECTION — outside the pole drill and regardless of `--with-logs` — so the
+    `job logs` row above it can legitimately read "not run" in a report that
+    quotes real log lines. Two ways for the row to lie, and both are checked
+    here: claiming a count the collector did not record, and appearing at all on
+    a run where nothing was probed (a disclosure of a cost the reader never
+    paid). Ground truth mirrors the renderer's keying exactly:
+    `data_sources.cache_probe_logs.{probed,returned}`."""
+    if not findings_path:
+        return None, ""
+    m = _DS_CACHE_PROBE_ROW_RE.search(report)
+    try:
+        data = json.loads(Path(findings_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, ""
+    probe = _as_dict(_as_dict(_as_dict(data).get("data_sources")).get("cache_probe_logs"))
+    probed = probe.get("probed")
+    probed = probed if isinstance(probed, int) else 0
+    returned = probe.get("returned")
+    returned = returned if isinstance(returned, int) else 0
+    if not m:
+        if probed > 0:
+            return (f"{probed} job log(s) were read for the cache hit/miss comparison "
+                    "but the Data sources table has no row for them"), ""
+        return None, ""
+    if probed <= 0:
+        return ("Data sources declares a cache hit/miss log probe, but the run "
+                "recorded none"), ""
+    cell = _strip_render_artifacts(m.group(1)).lower()
+    if returned == probed:
+        claimed = re.search(r"(\d+)\s+job log", cell)
+        if not claimed or int(claimed.group(1)) != returned:
+            return (f"Data sources cache-probe cell {cell!r} does not state the "
+                    f"{returned} log(s) actually read"), ""
+    else:
+        pair = re.search(r"(\d+)\s+of\s+(\d+)", cell)
+        if not pair or (int(pair.group(1)), int(pair.group(2))) != (returned, probed):
+            return (f"Data sources cache-probe cell {cell!r} does not state that "
+                    f"{returned} of {probed} probed log(s) returned content"), ""
+    return None, f"; cache-probe count honest ({returned}/{probed} read)"
+
+
 def _gh_errors_disclosure_violation(report: str, findings_path: Path | None) -> tuple[str | None, str]:
     """Require rendered disclosure when collection recorded failed GitHub calls."""
     if not findings_path:
@@ -746,6 +796,9 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
     logs_violation, logs_note = _job_logs_count_violation(report, findings_path)
     if logs_violation:
         return Check(name, False, logs_violation)
+    probe_violation, probe_note = _cache_probe_count_violation(report, findings_path)
+    if probe_violation:
+        return Check(name, False, probe_violation)
     gh_violation, gh_note = _gh_errors_disclosure_violation(report, findings_path)
     if gh_violation:
         return Check(name, False, gh_violation)
@@ -757,8 +810,9 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
         if "**" not in banner:
             return Check(name, False, "Incomplete-coverage banner names no file")
         return Check(name, True, "coverage gap disclosed and files named"
-                     + logs_note + gh_note + skip_note)
-    return Check(name, True, "data basis disclosed" + logs_note + gh_note + skip_note)
+                     + logs_note + probe_note + gh_note + skip_note)
+    return Check(name, True,
+                 "data basis disclosed" + logs_note + probe_note + gh_note + skip_note)
 
 
 # The two `data_sources` lists naming workflows that left the MEASURED sample: the

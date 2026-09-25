@@ -8669,3 +8669,60 @@ def test_opt77_neutrality_refuses_the_generic_below_floor_margin(tmp_path: Path)
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
     assert not chk.ok and "below-floor margin" in chk.detail, chk
+
+
+def _cache_probe_doc(tmp_path, probed, returned, budget=24):
+    import json as _json
+    p = tmp_path / "findings.json"
+    p.write_text(_json.dumps({"data_sources": {
+        "cache_probe_logs": {"probed": probed, "returned": returned,
+                             "budget": budget}}}), encoding="utf-8")
+    return p
+
+
+def test_cache_probe_row_must_state_the_logs_actually_read(tmp_path):
+    """The cache-cost comparison reads job logs during collection, so the
+    pole-drill `job logs` row can honestly say "not run" in a report that quotes
+    them. Its own row therefore has to be re-derived, or the report can claim a
+    number of reads the run never made."""
+    vr = _load_verify_report()
+    row = "| cache hit/miss log probe | {} | Splitting a cached job's runs |"
+    honest = row.format("8 job log(s) read (capped at 24 for the repository)")
+    bad, note = vr._cache_probe_count_violation(
+        honest, _cache_probe_doc(tmp_path, 8, 8))
+    assert bad is None, bad
+    assert "8/8" in note
+
+    # claims eight reads when only three came back
+    bad, _ = vr._cache_probe_count_violation(
+        honest, _cache_probe_doc(tmp_path, 8, 3))
+    assert bad and "3 of 8" in bad
+
+    # states the shortfall honestly
+    partial = row.format("3 of 8 job log(s) returned content")
+    bad, _ = vr._cache_probe_count_violation(
+        partial, _cache_probe_doc(tmp_path, 8, 3))
+    assert bad is None, bad
+
+
+def test_cache_probe_row_is_absent_exactly_when_nothing_was_probed(tmp_path):
+    """Both silences are failures. A report that read eight logs and shows no row
+    is the bug this row was added for — the provenance table denying a read it
+    made. A report that shows the row having probed nothing bills the reader for
+    a cost they never paid."""
+    vr = _load_verify_report()
+    row = "| cache hit/miss log probe | 8 job log(s) read | Splitting runs |"
+    bad, _ = vr._cache_probe_count_violation(
+        "## Data sources\n| job logs | not run |\n",
+        _cache_probe_doc(tmp_path, 8, 8))
+    assert bad and "no row" in bad
+
+    bad, _ = vr._cache_probe_count_violation(
+        row, _cache_probe_doc(tmp_path, 0, 0))
+    assert bad and "recorded none" in bad
+
+    # nothing probed and no row: correct, and silent
+    bad, note = vr._cache_probe_count_violation(
+        "## Data sources\n| job logs | not run |\n",
+        _cache_probe_doc(tmp_path, 0, 0))
+    assert bad is None and note == ""

@@ -7612,3 +7612,47 @@ def test_distinct_opt77_consolidations_render_as_separate_rows():
     # …and two identical consolidations still fold, exactly as OPT73 does.
     assert len([ms for pat, ms in bp._group_by_pattern_ranked([node, dict(node, id="f3")])
                 if pat == "OPT77"]) == 1
+
+
+def test_data_sources_footer_declares_the_cache_comparison_log_probe():
+    """The cache-cost comparison reads job logs during collection, outside the
+    pole drill and regardless of `--with-logs`. Until this row existed the
+    provenance table could print "job logs | not run" in the very report whose
+    evidence quotes eight fetched log lines — the table that exists to say what
+    was read from the user's repository, denying it read anything.
+
+    It is its OWN row on purpose: `logs_fetched` counts the pole-drill logs the
+    data bundle persists, and the report's self-check re-derives that cell from
+    that bundle, so folding a second kind of fetch into it would trade a false
+    statement for a broken invariant."""
+    doc = _doc_one_pole()
+    doc["data_sources"] = {**doc["data_sources"], "tiers_run": ["gh-timing"],
+                           "cache_probe_logs": {"probed": 8, "returned": 8,
+                                                "budget": 24}}
+    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    assert "| cache hit/miss log probe |" in foot
+    assert "8 job log(s) read" in foot
+    # the pole-drill row keeps its own, separate truth
+    assert "job logs | not run" in foot
+
+    # Probed but nothing came back (expired logs) must not read as 8 read.
+    doc2 = _doc_one_pole()
+    doc2["data_sources"] = {**doc2["data_sources"], "tiers_run": ["gh-timing"],
+                            "cache_probe_logs": {"probed": 8, "returned": 0,
+                                                 "budget": 24}}
+    foot2 = "\n".join(bp._data_sources_footer(doc2, "o/r"))
+    assert "| cache hit/miss log probe |" in foot2
+    assert "0 of 8" in foot2
+
+    # No probe planned -> no row at all. A repo with no cache-then-install job
+    # pays nothing and must not be told about a probe that never ran.
+    doc3 = _doc_one_pole()
+    doc3["data_sources"] = {**doc3["data_sources"], "tiers_run": ["gh-timing"],
+                            "cache_probe_logs": {"probed": 0, "returned": 0,
+                                                 "budget": 24}}
+    assert "cache hit/miss log probe" not in "\n".join(
+        bp._data_sources_footer(doc3, "o/r"))
+    doc4 = _doc_one_pole()
+    doc4["data_sources"] = {**doc4["data_sources"], "tiers_run": ["gh-timing"]}
+    assert "cache hit/miss log probe" not in "\n".join(
+        bp._data_sources_footer(doc4, "o/r"))
