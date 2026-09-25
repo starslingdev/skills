@@ -40,7 +40,7 @@ unversioned and updates by reinstall from `main`.
   runs of one job and two jobs per workflow, spent on the most expensive candidate
   first. A repo that acts on this finding will still be marked down by ci-score's
   dependency-caching check, which reads configuration only; reconciling the two is
-  an open decision, not a behaviour either skill implements today. (#PENDING)
+  an open decision, not a behaviour either skill implements today. (#106)
 
 - **2026-09-24** — **The "slow test suite re-loading the app" diagnosis is now a
   catalogued, guarded lever (OPT78), and it no longer tells a repo to apply a
