@@ -1076,15 +1076,26 @@ measure 0s and a timing-based search would drop that run and inflate the p50.
 A tail is `p95 >= max(3 x p50, p50 + 30s)` with at least two runs at or above the
 threshold; only THEN are logs fetched, for the tail runs only, newest-first,
 bounded by `_OPT80_LOG_PROBE_MAX` — a job with no tail costs no gh call. The
-finding exists only if at least two of those logs show an intra-fetch gap of
->= 20s between consecutive git progress lines, with the two bracketing lines
-quoted verbatim.
+finding exists only if at least two of those logs show the transfer standing
+still — a gap of >= 20s between two consecutive `Receiving objects: N%` lines at
+the SAME N, with both bracketing lines quoted verbatim, and only inside the
+checkout step's own time window.
+
+A stall is progress that STOPPED, not progress that had not started. The quiet
+before the first `remote:` line, the quiet across pack enumeration, and two
+receiving lines whose percentage advanced are all a LARGE REPOSITORY (OPT28's
+lever) and are withheld under `tail_pause_was_advancing_or_pre_transfer` — they
+would also be aborted by the low-speed timeout this pattern recommends, so
+reporting them would hand the reader a fix that reds their CI.
 
 That log gate is the whole reason the pattern is admissible where OPT49 was cut:
 OPT49 read a CAUSE ("uncached") out of a DURATION. OPT80 rejects in both
 directions — a tail whose logs show a smooth fetch is withheld
 (`tail_without_log_gap`), and no log is fetched for a job with no tail, so a gap
-alone can never produce a finding. Log text is untrusted: only the closed
+alone can never produce a finding. The four "no proof" cases are counted apart,
+because progress switched off (`log_carries_no_progress_vocabulary`) and a log
+lost to retention (`tail_run_log_unavailable`) say nothing about the repository
+while a smooth fetch does. Log text is untrusted: only the closed
 progress vocabulary is read, and a quoted line carrying a credential shape drops
 that run's proof rather than being masked — withholding the finding outright if
 that leaves fewer than the two proofs the gate requires.

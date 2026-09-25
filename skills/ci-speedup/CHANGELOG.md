@@ -18,12 +18,19 @@ unversioned and updates by reinstall from `main`.
   caps it.** Some repositories check out in seconds on most runs and in minutes
   on a few; until now the audit could only see that spread as variance and had
   nothing to offer. New catalog pattern OPT80 reports it, but only when the slow
-  runs' own checkout logs show the transfer standing still — a pause of at least
-  twenty seconds between two consecutive git progress lines, both quoted
-  verbatim in the evidence. A heavy tail whose logs show a smooth fetch is
-  deliberately **not** reported: a long fetch with no pause in it is a large
-  repository, which is a different lever, and inferring a cause from a duration
-  is precisely why the older "slow setup step" pattern was cut. The recommended
+  runs' own checkout logs show the transfer standing still — at least twenty
+  seconds during which the percentage transferred did not change, with the lines
+  on both sides of the pause quoted verbatim in the evidence. The bar is
+  deliberately narrow: a stall is progress that stopped, not progress that had
+  not started. A fetch that was merely slow, one that paused before any byte
+  moved, and one that paused while the server built the pack are all reported as
+  what they are — a large repository, which is a different lever — and never as
+  a stall. That matters twice over, because the fix recommended here would abort
+  a healthy fetch in each of those cases. Inferring a cause from a duration is
+  precisely why the older "slow setup step" pattern was cut.
+  The finding is also allowed on the workflow's slowest job, where it says in
+  plain words that the effect on the merge wait is measured but not credited in
+  this version, rather than being suppressed. The recommended
   fix is ordered and honest — the low-speed abort and the retry with backoff
   ship as one change, then a narrower checkout only where the job is known not
   to read history — and it says plainly both that retry and abort cap the damage

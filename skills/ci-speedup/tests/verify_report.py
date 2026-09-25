@@ -5474,7 +5474,19 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
         if wc not in (0, 0.0, None):
             bad.append(f"{fid}: wall_clock_p50_s={wc!r}")
         jobs = {_cmp_name(str(j)) for j in _as_list(f.get("affected_jobs")) if str(j)}
-        if rendered_poles and jobs & rendered_poles:
+        # The pole rule is a PROXY: for every other Tier-2 proof, "this job is not
+        # the long pole" is how the report argues the credited work cannot be on
+        # the merge gate. `checkout_tail_excess` does not need the proxy, because
+        # it carries the thing the proxy stands in for. Its credited quantity is
+        # mean - p50 of one step, and a quantity defined as the distance of the
+        # MEAN above the MEDIAN cannot by construction move the median; the arm
+        # below re-derives p50, the mean and that subtraction from the stamped
+        # per-run inputs, and the `wall_clock_p50_s == 0` check above is applied
+        # to it like any other row. So a stalling checkout on the workflow's
+        # slowest job is reported, and reported uncredited — suppressing it would
+        # hide the pattern's most valuable case to satisfy an inference that has
+        # been replaced by a measurement.
+        if rendered_poles and jobs & rendered_poles and proof != "checkout_tail_excess":
             bad.append(f"{fid}: affected job is also rendered as a Long pole")
         if proof == "below_cluster_floor":
             got = _num(cert.get("margin_s"))

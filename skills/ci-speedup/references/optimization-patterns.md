@@ -1452,9 +1452,11 @@ after:   git fetch  ->  [stall]  -> abort at 30s -> retry -> done ( ~40s)
 **Why this is not OPT49 revived**: [OPT49](#opt49--slow-setup-step) was cut for
 reading a cause out of a duration — "checkout took 61s, therefore the
 dependencies are uncached". OPT80 never infers. It proves the stall from the
-tail runs' own logs, and a heavy tail whose logs show a smooth fetch is
-**withheld**, because a long fetch with no pause in it is a large repository
-(that is [OPT28](#opt28--full-git-history-checkout)'s lever and
+tail runs' own logs, and the proof is narrow: the percentage transferred must be
+the SAME on both sides of the pause. A heavy tail whose logs show a smooth fetch
+is **withheld** — and so is one whose fetch was merely slow, or that paused
+before any byte moved — because a long fetch with no stop in it is a large
+repository (that is [OPT28](#opt28--full-git-history-checkout)'s lever and
 [OPT76](#opt76--submodule--git-lfs-checkout-payload)'s), not a stalled one.
 
 **Detection heuristic** (every gate required; all fail closed):
@@ -1480,16 +1482,39 @@ tail runs' own logs, and a heavy tail whose logs show a smooth fetch is
    retry-wrapper action or local composite that sets either. If one is present
    the fix is already applied and the finding is **withheld**. A retry
    configuration that cannot be read is withheld too.
-5. For at least **2** of the tail runs, the captured checkout log shows an
-   intra-fetch gap of **≥ 20s** between two consecutive git progress lines
-   (`Fetching the repository`, `remote: Enumerating/Counting/Compressing
-   objects`, `Receiving objects: N%`) — including the case of a `Receiving
-   objects` line that does not advance, which the evidence reports as a stall at
-   that percentage. The two lines bracketing the longest gap are quoted
-   **verbatim**. Logs are fetched for **tail runs only**, newest-first, bounded
-   by a named probe cap (4) — never for the whole sample, and never at all for a
-   job with no tail. A job whose gates all pass but whose logs prove no gap is
-   withheld and the reason is counted.
+5. For at least **2** of the tail runs, the captured checkout log shows the
+   transfer **standing still**: a gap of **≥ 20s** between two consecutive
+   `Receiving objects: N%` lines reporting the **same N**. A stall is progress
+   that STOPPED, not progress that had not started, so none of these qualifies:
+
+   - the quiet between `Fetching the repository` and the first `remote:` line
+     (DNS, auth, negotiation);
+   - the quiet across `remote: Enumerating / Counting / Compressing objects`
+     (the server building the pack, during which the client legitimately
+     receives nothing);
+   - two `Receiving objects` lines whose percentage **advanced** (a transfer
+     that is slow, not one that stopped).
+
+   All three are a large repository — OPT28's lever, not this one — and each
+   would be aborted by the low-speed timeout this pattern recommends, so
+   reporting them would hand the reader a fix that reds their CI. They are
+   withheld under `tail_pause_was_advancing_or_pre_transfer`, so a big-repo tail
+   is visible as that rather than as "the logs showed a smooth fetch". The
+   non-transfer lines stay in the vocabulary only as window anchors; they never
+   bracket a proven pause.
+
+   The two lines bracketing the longest qualifying gap are quoted **verbatim**,
+   and only lines inside the checkout step's own time window are read, so a
+   later `git submodule` or `git lfs` step cannot supply the proof. Logs are
+   fetched for **tail runs only**, newest-first, bounded by a named probe cap
+   (4) — never for the whole sample, and never at all for a job with no tail.
+   The four ways a probe can fail to prove a stall are counted separately —
+   a smooth fetch (`tail_without_log_gap`), a big-repo pause
+   (`tail_pause_was_advancing_or_pre_transfer`), progress switched off with
+   `show-progress: false` (`log_carries_no_progress_vocabulary`), and a log that
+   is gone or carries no timestamps (`tail_run_log_unavailable`,
+   `log_carries_no_parseable_timestamps`) — because only the first is evidence
+   about the repository.
 
 Every one of those exits increments a stamped per-gate counter
 (`opt80_withheld_by_gate` on the findings document) and logs at DEBUG, so a
@@ -1606,6 +1631,17 @@ instead of being silently trusted:
 | `tail_excess_s` / `runner_min_saving` | **re-derived** — the credited quantity and the minutes it becomes |
 | `tail_run_longest_pause_s` / `on_critical_path` | the uncredited upper bound on the stalled runs' own improvement, and whether it lands on the gate |
 | `monthly_volume` / `effective_monthly_volume` / `sampled_successful_run_count` / `occurrences` | **re-derived** — the scaling; `occurrences` can never exceed the sampled run count |
+
+**The slowest job is not excluded.** Every other Tier-2 proof argues its credited
+work is off the merge gate by showing the job is not the long pole; the report
+verifier enforces that as a blanket rule. `checkout_tail_excess` is exempt from
+it, because it carries the thing that rule stands in for: the credited quantity
+is `mean - p50` of one step, and a quantity defined as the distance of the mean
+above the median cannot by construction move the median — which the verifier
+re-derives from the stamped per-run inputs rather than infers. So a stalling
+checkout on the workflow's slowest job **is** reported, and the finding says in
+plain words that the effect on the merge wait is measured and not credited in
+this version. The `wall_clock_p50_s == 0` check still applies to it unchanged.
 
 It never claims a speedup on the typical run. It credits the tail excess in full,
 which assumes the stall is fully capped — the residual the abort and re-fetch

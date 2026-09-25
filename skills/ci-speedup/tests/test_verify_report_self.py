@@ -8865,3 +8865,45 @@ def test_opt80_certificate_token_is_dispatched_to_its_own_arm():
     assert 'proof == "checkout_tail_excess"' in renderer, (
         "the renderer must describe OPT80's certificate token, or the report "
         "prints a bare token to the reader")
+
+
+def _opt80_pole_doc():
+    """A report whose rendered long pole IS the job the checkout stall is on."""
+    doc = _tier2_doc_for_verify()
+    f = _opt80_verifier_finding(
+        id="f-promoted",
+        severity="MEDIUM",
+        title="Checkout Stalls on the Tail",
+        line=12,
+        evidence="checkout p50 10s, p95 120s; 2 tail runs with a 40s proven pause",
+        realization="none",
+        runner_min_range_s=[30.0, 45.0],
+    )
+    doc["findings"] = [f]
+    return doc
+
+
+def test_tier2_accepts_a_checkout_stall_on_the_rendered_long_pole(tmp_path: Path):
+    """The pole rule is a PROXY for "the credited work is not on the merge gate".
+    `checkout_tail_excess` carries the thing the proxy stands in for: mean - p50
+    of one step cannot move the median, and the arm re-derives that subtraction
+    from the stamped per-run inputs. Suppressing the finding would hide the
+    pattern's most valuable case to satisfy an inference a measurement replaced."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "Long pole" in report and "build" in report, report[:400]
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert chk.ok and not chk.skipped, chk
+
+
+def test_tier2_still_rejects_a_non_zero_wall_clock_on_that_same_finding(tmp_path: Path):
+    """The exemption is narrow. It drops ONE inference; it does not drop the
+    direct check the inference stood in for."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    doc["findings"][0]["wall_clock_p50_s"] = 12.0
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok, chk
+    assert "wall_clock_p50_s" in str(chk.detail), chk

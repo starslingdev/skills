@@ -9226,8 +9226,8 @@ def _opt80_retry_already_configured(wf_doc: dict[str, Any], job_spec: dict[str, 
 
 
 def _opt80_stall_in_log(log: str, window: "tuple[_dt.datetime, _dt.datetime] | None" = None,
-                        ) -> "dict[str, Any] | None":
-    """The largest intra-fetch stall this checkout log proves, or None.
+                        ) -> "tuple[dict[str, Any] | None, str | None]":
+    """The largest intra-fetch stall this checkout log proves, and why not if none.
 
     `window` is the checkout STEP's own (start, end) from the jobs API. A job
     log is the whole job, and a later `git submodule update` or `git lfs pull`
@@ -9236,48 +9236,82 @@ def _opt80_stall_in_log(log: str, window: "tuple[_dt.datetime, _dt.datetime] | N
     lines inside the step's own window are ever considered. The window is
     required: a run whose step timestamps do not parse proves nothing here.
 
-    A stall is a gap of at least `_OPT80_MIN_GAP_S` between two CONSECUTIVE
-    checkout progress lines — including the case the spec calls out separately, a
-    `Receiving objects: N%` line that does not advance: two consecutive receiving
-    lines at the same percentage separated by the gap are the same observation,
-    and are reported with `stalled_at_pct` set so the evidence can say which.
+    A stall is progress that STOPPED, not progress that had not started. It is a
+    gap of at least `_OPT80_MIN_GAP_S` between two CONSECUTIVE `Receiving
+    objects: N%` lines reporting the SAME N — the transfer phase, standing still.
+    Nothing else qualifies:
 
-    Only lines from the closed progress vocabulary are ever considered, and the
-    two returned lines are the VERBATIM text of the pair that brackets the gap.
-    The gap seconds are DERIVED from their timestamps — the evidence heading says
-    so, because a reader must not take a derived number for quoted text."""
+    * the quiet between `Fetching the repository` and the first `remote:` line is
+      DNS, auth and negotiation;
+    * the quiet across `remote: Enumerating / Counting / Compressing objects` is
+      the server building the pack, during which the client legitimately receives
+      nothing;
+    * two `Receiving objects` lines whose percentage ADVANCED are a transfer that
+      is slow, not one that stopped.
+
+    All three are a large repository, which is a different lever — and each would
+    be aborted by the low-speed timeout this pattern recommends, so reporting
+    them would hand the reader a fix that reds their CI. Those shapes are
+    reported back as `tail_pause_was_advancing_or_pre_transfer` so a big-repo tail
+    is visible as that rather than as "the logs showed a smooth fetch". The
+    non-transfer lines stay in the vocabulary only as window anchors; they never
+    bracket a proven pause.
+
+    Returns `(stall, reason)`: exactly one is set. The two returned lines are the
+    VERBATIM text of the pair that brackets the gap; the gap seconds are DERIVED
+    from their timestamps — the evidence heading says so, because a reader must
+    not take a derived number for quoted text."""
+    lo = hi = None
+    if window is not None:
+        lo, hi = _opt80_aware(window[0]), _opt80_aware(window[1])
+        if lo is None or hi is None:
+            # A window that is not two comparable instants proves nothing; the
+            # log is refused rather than scanned unclamped.
+            return None, "tail_run_step_window_unreadable"
     events: list[tuple[_dt.datetime, str]] = []
+    saw_timestamp = False
     for raw in log.splitlines():
         parsed = _opt80_log_line(raw)
         if parsed is None:
             continue
+        saw_timestamp = True
         ts, text = parsed
-        if window is not None:
-            lo, hi = _opt80_aware(window[0]), _opt80_aware(window[1])
-            # A window that is not two comparable instants proves nothing, so the
-            # whole log is refused rather than scanned unclamped.
-            if lo is None or hi is None or not (lo <= ts <= hi):
-                continue
+        if lo is not None and not (lo <= ts <= hi):
+            continue
         if _OPT80_PROGRESS_RE.search(text):
             events.append((ts, text))
+    if not saw_timestamp:
+        # An older capture format, or a stripped fixture. The gap is not
+        # derivable, and "not derivable" is never "not there".
+        return None, "log_carries_no_parseable_timestamps"
+    if not events:
+        # `show-progress: false` silences the whole vocabulary. Having no
+        # evidence is not evidence of a smooth fetch.
+        return None, "log_carries_no_progress_vocabulary"
     best: dict[str, Any] | None = None
+    saw_unqualified_gap = False
     for (t0, a), (t1, b) in zip(events, events[1:]):
         gap = (t1 - t0).total_seconds()
         if gap < _OPT80_MIN_GAP_S:
             continue
-        if best is not None and gap <= float(best["gap_s"]):
-            continue
         pct_a = _OPT80_RECEIVING_RE.search(a)
         pct_b = _OPT80_RECEIVING_RE.search(b)
-        stalled_at = (pct_a.group(1) if pct_a and pct_b
-                      and pct_a.group(1) == pct_b.group(1) else None)
+        if not (pct_a and pct_b and pct_a.group(1) == pct_b.group(1)):
+            saw_unqualified_gap = True
+            continue
+        if best is not None and gap <= float(best["gap_s"]):
+            continue
         best = {
             "gap_s": round(gap, 1),
             "before": {"ts": t0.isoformat().replace("+00:00", "Z"), "line": a},
             "after": {"ts": t1.isoformat().replace("+00:00", "Z"), "line": b},
-            "stalled_at_pct": stalled_at,
+            "stalled_at_pct": pct_a.group(1),
         }
-    return best
+    if best is not None:
+        return best, None
+    if saw_unqualified_gap:
+        return None, "tail_pause_was_advancing_or_pre_transfer"
+    return None, "tail_without_log_gap"
 
 
 def _detect_opt80_checkout_tail_stall(
@@ -9473,16 +9507,24 @@ def _detect_opt80_checkout_tail_stall(
             reverse=True)[:_OPT80_LOG_PROBE_MAX]
         proven: list[dict[str, Any]] = []
         credential_shaped = False
+        # Why each probed tail run failed to prove a stall. These are NOT
+        # interchangeable: "the fetch was smooth", "the fetch was slow but
+        # advancing", "progress was switched off" and "the log is gone" mean
+        # different things to a maintainer asking why this stopped firing, and
+        # only the first is evidence about the repository.
+        reasons: list[str] = []
         for r in probe:
             log = _fetch_job_log(client, repo, by_id[r["job_id"]])
             if not log:
+                reasons.append("tail_run_log_unavailable")
                 continue
             win = step_window.get(r["job_id"])
             if not win or win[0] is None or win[1] is None:
-                # No parseable step window — the log cannot be attributed to the
-                # checkout step, so it proves nothing.
+                reasons.append("tail_run_step_window_unreadable")
                 continue
-            stall = _opt80_stall_in_log(log, window=win)
+            stall, why = _opt80_stall_in_log(log, window=win)
+            if why:
+                reasons.append(why)
             if stall is None:
                 continue
             if any(_OPT80_CREDENTIAL_RE.search(str(stall[side]["line"]))
@@ -9496,8 +9538,12 @@ def _detect_opt80_checkout_tail_stall(
         if len(proven) < _OPT80_MIN_PROVEN_TAIL_RUNS:
             # THE OPT49 TRAP, closed. A heavy tail whose logs show no stall is a
             # duration with no cause attached, and this pattern does not report
-            # one.
-            _no("tail_without_log_gap", job=job_name, tail_runs=len(tail_runs),
+            # one. The gate NAMES which of the four "no proof" cases it was, most
+            # common first, so a big-repo tail and a dead capture format are
+            # distinguishable from a genuinely smooth fetch.
+            gate = max(sorted(set(reasons)), key=reasons.count) if reasons \
+                else "tail_without_log_gap"
+            _no(gate, job=job_name, tail_runs=len(tail_runs),
                 logs_probed=len(probe), proven=len(proven),
                 required=_OPT80_MIN_PROVEN_TAIL_RUNS)
             continue
@@ -9537,9 +9583,10 @@ def _detect_opt80_checkout_tail_stall(
             f"No wall-clock is credited — the MEDIAN run never stalled, so capping the "
             f"tail cannot move the p50 merge gate. What does improve is the stalled runs "
             f"themselves, by at most the {float(worst['gap_s']):.0f}s pause quoted below "
-            f"(less, once the 30s abort and the re-fetch are paid)"
-            + (f", and `{job_name}` IS this workflow's long pole, so that uncredited "
-               f"improvement lands on the critical path." if on_pole else "."))
+            f"(less, once the 30s abort and the re-fetch are paid). "
+            + (f"`{job_name}` is this workflow's slowest job; the stall's effect on "
+               f"the merge wait is measured (longest pause {float(worst['gap_s']):.0f}s) "
+               f"but not credited in this version." if on_pole else ""))
         me = _measured_evidence(
             ["Tail run", "Checkout", "Pause", "Last progress line before the pause",
              "First progress line after it"],

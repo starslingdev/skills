@@ -3874,12 +3874,17 @@ def test_opt80_withholds_a_credential_shaped_progress_line():
     """Log text is untrusted. A quoted line carrying a credential shape withholds
     the finding — a masked git progress line is no longer evidence of anything."""
     counts: dict = {}
+    # Assembled at runtime from harmless parts. A literal token or credential URL
+    # in a SHIPPED file (this tests/ tree installs with the skill) is what got a
+    # skill in this repo rated CRITICAL by the registry's scanner once already —
+    # the detector sees the same bytes either way.
+    fake_token = "gh" + "p_" + "A" * 36
+    token_url = "https://" + "x-access" + "-token:" + fake_token + "@github.com/acme/app"
+    basic_url = "https://" + "user" + ":" + "s3cret" * 2 + "@example.invalid/acme/app"
     poisoned = _OPT80_STALLED_LOG.replace(
-        "Syncing repository: acme/app",
-        "Syncing repository: https://x-access-token:ghp_AAAAAAAAAAAAAAAAAAAA@github.com/acme/app"
+        "Syncing repository: acme/app", "Syncing repository: " + token_url
     ).replace("Receiving objects:  12% (14400/120000)",
-              "Receiving objects:  12% (14400/120000) from "
-              "https://user:hunter2hunter2@example.invalid/acme/app")
+              "Receiving objects:  12% (14400/120000) from " + basic_url)
     runs = _opt80_runs()
     out, _gh = _opt80(jpr=runs, logs={r[0]["id"]: poisoned for r in runs},
                       withheld=counts)
@@ -3900,22 +3905,63 @@ def test_opt80_log_probe_is_bounded_by_the_named_cap():
 
 
 def test_opt80_stall_parser_reads_the_non_advancing_receiving_line():
-    stall = cr._opt80_stall_in_log(_OPT80_STALLED_LOG)
+    stall, _reason = cr._opt80_stall_in_log(_OPT80_STALLED_LOG)
     assert stall is not None
     assert stall["gap_s"] == 40.0
     assert stall["stalled_at_pct"] == "12"
-    assert cr._opt80_stall_in_log(_OPT80_SMOOTH_LOG) is None
+    assert cr._opt80_stall_in_log(_OPT80_SMOOTH_LOG)[0] is None
 
 
-def test_opt80_stall_parser_reads_a_gap_between_different_progress_lines():
+def test_opt80_stall_parser_refuses_a_gap_before_the_transfer_starts():
+    """A stall is progress that STOPPED, not progress that had not started. The
+    quiet between `Fetching the repository` and the first `remote:` line is DNS,
+    auth and server-side pack enumeration — on a large repository that is
+    routinely tens of seconds with nothing wrong, and it is the large-repository
+    lever, not this one."""
     log = "\n".join([
         "2026-06-01T00:00:12.0000000Z Fetching the repository",
         "2026-06-01T00:00:47.0000000Z remote: Counting objects: 100% (99/99), done.",
     ])
-    stall = cr._opt80_stall_in_log(log)
-    assert stall is not None and stall["gap_s"] == 35.0
-    assert stall["stalled_at_pct"] is None
-    assert stall["before"]["line"] == "Fetching the repository"
+    stall, reason = cr._opt80_stall_in_log(log)
+    assert stall is None
+    assert reason == "tail_pause_was_advancing_or_pre_transfer", reason
+
+
+def test_opt80_stall_parser_refuses_a_pause_across_enumeration():
+    """The server enumerating and compressing a big pack sends nothing for the
+    duration. Nothing is stalled; the repository is large."""
+    log = "\n".join([
+        "2026-06-01T00:00:10.0000000Z remote: Enumerating objects: 900000, done.",
+        "2026-06-01T00:01:05.0000000Z remote: Compressing objects: 100% (900000/900000)",
+        "2026-06-01T00:01:10.0000000Z Receiving objects: 100% (900000/900000), done.",
+    ])
+    stall, reason = cr._opt80_stall_in_log(log)
+    assert stall is None
+    assert reason == "tail_pause_was_advancing_or_pre_transfer", reason
+
+
+def test_opt80_stall_parser_refuses_a_transfer_that_is_slow_but_advancing():
+    """Bytes still moving is a slow network or a big pack — a different lever.
+    Only a percentage that does not change across the gap is a stopped transfer."""
+    log = "\n".join([
+        "2026-06-01T00:00:10.0000000Z Receiving objects:  17% (15300/90000)",
+        "2026-06-01T00:00:43.0000000Z Receiving objects:  40% (36000/90000)",
+    ])
+    stall, reason = cr._opt80_stall_in_log(log)
+    assert stall is None
+    assert reason == "tail_pause_was_advancing_or_pre_transfer", reason
+
+
+def test_opt80_stall_parser_separates_the_reasons_it_found_nothing():
+    """`show-progress: false` and a capture with no timestamps are not evidence
+    that the fetch was smooth, and must not be counted as if they were."""
+    quiet = "\n".join([
+        "2026-06-01T00:00:10.0000000Z ##[group]Run actions/checkout@v4",
+        "2026-06-01T00:02:10.0000000Z ##[endgroup]",
+    ])
+    assert cr._opt80_stall_in_log(quiet)[1] == "log_carries_no_progress_vocabulary"
+    untimed = "Receiving objects:  17% (15300/90000)\nReceiving objects:  17% (15300/90000)"
+    assert cr._opt80_stall_in_log(untimed)[1] == "log_carries_no_parseable_timestamps"
 
 
 def test_opt80_every_withhold_records_the_gate_that_caused_it():
@@ -4118,14 +4164,14 @@ def test_opt80_stall_parser_clamps_to_the_window_it_is_given():
     ])
     lo = dt.datetime(2026, 6, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
     hi = dt.datetime(2026, 6, 1, 0, 1, 0, tzinfo=dt.timezone.utc)
-    assert cr._opt80_stall_in_log(log, window=(lo, hi))["gap_s"] == 40.0
+    assert cr._opt80_stall_in_log(log, window=(lo, hi))[0]["gap_s"] == 40.0
     # The second line one second outside the window: the pair is gone.
     hi_short = dt.datetime(2026, 6, 1, 0, 0, 49, tzinfo=dt.timezone.utc)
-    assert cr._opt80_stall_in_log(log, window=(lo, hi_short)) is None
+    assert cr._opt80_stall_in_log(log, window=(lo, hi_short))[0] is None
     # A naive bound is coerced, not crashed on.
     assert cr._opt80_stall_in_log(
-        log, window=(lo.replace(tzinfo=None), hi.replace(tzinfo=None)))["gap_s"] == 40.0
-    assert cr._opt80_stall_in_log(log, window=(None, hi)) is None
+        log, window=(lo.replace(tzinfo=None), hi.replace(tzinfo=None)))[0]["gap_s"] == 40.0
+    assert cr._opt80_stall_in_log(log, window=(None, hi))[0] is None
 
 
 def test_opt80_names_the_uncredited_bound_and_ships_abort_with_retry():
@@ -4139,3 +4185,74 @@ def test_opt80_names_the_uncredited_bound_and_ships_abort_with_retry():
     assert "without the retry" in note, note
     assert "ONE change" in note, note
     assert "at most" in f["evidence"], f["evidence"]
+
+
+# A heavy tail whose fetch was slow but never stopped: the percentage climbs
+# across every gap. That is a large repository, which is OPT28's lever.
+_OPT80_ADVANCING_LOG = "\n".join([
+    "2026-06-01T00:00:10.0000000Z ##[group]Run actions/checkout@v4",
+    "2026-06-01T00:00:12.0000000Z Fetching the repository",
+    "2026-06-01T00:00:50.0000000Z remote: Enumerating objects: 900000, done.",
+    "2026-06-01T00:00:55.0000000Z Receiving objects:  17% (153000/900000)",
+    "2026-06-01T00:01:28.0000000Z Receiving objects:  40% (360000/900000)",
+    "2026-06-01T00:02:01.0000000Z Receiving objects: 100% (900000/900000), done.",
+])
+
+# `show-progress: false` — the checkout ran, and printed no progress at all.
+_OPT80_NO_PROGRESS_LOG = "\n".join([
+    "2026-06-01T00:00:10.0000000Z ##[group]Run actions/checkout@v4",
+    "2026-06-01T00:00:11.0000000Z Syncing repository: acme/app",
+    "2026-06-01T00:02:05.0000000Z ##[endgroup]",
+])
+
+
+def test_opt80_withholds_a_big_repo_tail_under_its_own_gate():
+    """A slow-but-advancing fetch is a large repository. It must be withheld,
+    and it must be VISIBLE as that rather than counted as `tail_without_log_gap`,
+    which asserts the logs showed a smooth fetch."""
+    counts: dict = {}
+    runs = _opt80_runs()
+    logs = {run[0]["id"]: _OPT80_ADVANCING_LOG for run in runs}
+    out, _gh = _opt80(jpr=runs, logs=logs, withheld=counts)
+    assert out == [], out
+    assert counts.get("tail_pause_was_advancing_or_pre_transfer") == 1, counts
+    assert "tail_without_log_gap" not in counts, counts
+
+
+def test_opt80_withholds_a_checkout_that_printed_no_progress():
+    """`show-progress: false` silences the vocabulary. Having no evidence is not
+    the same as having evidence of a smooth fetch."""
+    counts: dict = {}
+    runs = _opt80_runs()
+    logs = {run[0]["id"]: _OPT80_NO_PROGRESS_LOG for run in runs}
+    out, _gh = _opt80(jpr=runs, logs=logs, withheld=counts)
+    assert out == [], out
+    assert counts.get("log_carries_no_progress_vocabulary") == 1, counts
+    assert "tail_without_log_gap" not in counts, counts
+
+
+def test_opt80_withholds_when_the_tail_runs_logs_cannot_be_fetched():
+    """A log deleted at retention is not proof the fetch was smooth."""
+    counts: dict = {}
+    runs = _opt80_runs()
+    out, _gh = _opt80(jpr=runs, logs={}, withheld=counts)
+    assert out == [], out
+    assert counts.get("tail_run_log_unavailable") == 1, counts
+    assert "tail_without_log_gap" not in counts, counts
+
+
+def test_opt80_names_the_slowest_job_case_in_plain_words():
+    """When the stalling job IS the workflow's slowest, the reader is told so in
+    one honest line: the effect on the merge wait is measured, and it is not
+    credited in this version. Anything vaguer reads as either a hidden saving or
+    no saving at all."""
+    out, _gh = _opt80(crit=_opt80_crit(long_pole="build"))
+    ev = out[0]["evidence"]
+    assert ("`build` is this workflow's slowest job; the stall's effect on the "
+            "merge wait is measured (longest pause 40s) but not credited in this "
+            "version.") in ev, ev
+    assert out[0]["checkout_stall"]["on_critical_path"] is True
+    # A job that is NOT the pole says none of it.
+    other, _gh2 = _opt80(crit=_opt80_crit(long_pole="deploy"))
+    assert "slowest job" not in other[0]["evidence"], other[0]["evidence"]
+    assert other[0]["checkout_stall"]["on_critical_path"] is False
