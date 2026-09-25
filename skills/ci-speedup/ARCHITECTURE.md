@@ -1088,9 +1088,12 @@ withhold rather than guess.
 
 Its gh cost is the one new one in this wave: a capped log probe
 (`_OPT79_LOG_PROBE_MAX = 8` occurrences per candidate job,
-`_OPT79_MAX_CANDIDATE_JOBS = 2` jobs per workflow, candidates ranked by job p50),
-planned across every workflow up front by `_opt79_log_plan` and fanned out in one
-`_prefetch_text` wave before the detector loop. `_opt79_candidates` is the ONE
+`_OPT79_MAX_CANDIDATE_JOBS = 2` jobs per workflow, candidates ranked by job p50,
+and `_OPT79_REPO_LOG_BUDGET = 24` across the whole repo — the first two are per
+workflow, so without the third a thirty-workflow monorepo would multiply them
+into hundreds of fetches), planned across every workflow up front by
+`_opt79_log_plan` and fanned out in one `_prefetch_text` wave before the detector
+loop. `_opt79_candidates` is the ONE
 selector shared by the plan and the detector, so the two can never disagree about
 which jobs were measured. `verify_report.py`'s
 `_opt79_net_negative_cache_rederived` arm recomputes every per-run block from its

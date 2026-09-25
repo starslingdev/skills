@@ -37,8 +37,8 @@ unversioned and updates by reinstall from `main`.
   caches) is excluded, never guessed. It credits no wall-clock time: on the job
   that sets the merge gate the pattern withholds rather than size a speedup it
   cannot yet prove. Reading the logs is the one new cost, and it is capped at eight
-  runs of one job and two jobs per workflow, spent on the most expensive candidate
-  first. A repo that acts on this finding will still be marked down by ci-score's
+  runs of one job, two jobs per workflow and twenty-four fetches across the whole
+  repository, spent on the most expensive candidate first. A repo that acts on this finding will still be marked down by ci-score's
   dependency-caching check, which reads configuration only; reconciling the two is
   an open decision, not a behaviour either skill implements today. (#106)
 

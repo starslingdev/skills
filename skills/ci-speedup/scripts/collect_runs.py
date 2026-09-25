@@ -14169,6 +14169,13 @@ _OPT79_LOG_PROBE_MAX = 8
 # measured job p50 (the most expensive cache first), so the cap spends the
 # budget where a net-negative cache costs most.
 _OPT79_MAX_CANDIDATE_JOBS = 2
+# …and a REPO-WIDE ceiling on top of both, because the two caps above are
+# per-workflow and a monorepo with thirty workflows would multiply them into
+# hundreds of log fetches. 24 is three full per-job probes: enough to reach the
+# two or three most expensive candidate caches in a large repo, and a hard
+# answer to "how much can this lever cost me" that does not depend on how many
+# workflow files happen to exist.
+_OPT79_REPO_LOG_BUDGET = 24
 
 # A cache-RESTORE step, from the YAML `uses:`. `actions/cache` restores on entry
 # and saves in its post phase; `actions/cache/restore` only restores.
@@ -17115,6 +17122,15 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             continue
         _opt79_probe_jobs.extend(_opt79_log_plan(
             _wf_path, _jpr, crit_by_wf[_wf_path], _wf_docs.get(_wf_path, {})))
+    # The two caps inside the plan are PER WORKFLOW; this is the repo-wide
+    # ceiling on top of them, so a monorepo with thirty workflow files cannot
+    # multiply them into hundreds of fetches. A job dropped here simply gets no
+    # logs, so its detector pass withholds on the hit/miss population — the same
+    # fail-closed path as a job whose logs could not be fetched.
+    if len(_opt79_probe_jobs) > _OPT79_REPO_LOG_BUDGET:
+        logger.debug("OPT79: log probe plan of %d job(s) trimmed to the repo-wide "
+                     "budget of %d", len(_opt79_probe_jobs), _OPT79_REPO_LOG_BUDGET)
+        _opt79_probe_jobs = _opt79_probe_jobs[:_OPT79_REPO_LOG_BUDGET]
     _prefetch_text(client, [_job_log_endpoint(repo, j["id"])
                             for j in _opt79_probe_jobs])
     opt79_logs: dict[Any, str] = {}

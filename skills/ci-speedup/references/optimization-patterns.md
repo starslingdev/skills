@@ -433,11 +433,14 @@ named here are the detector's constants, not restatements of them.
 7. The job's measured p50 must sit **strictly below the workflow's cluster
    floor**. See *Why this credits no wall-clock time* below.
 
-Job logs are the expensive call in this engine, so the probe is capped twice: at
-most **8** sampled occurrences of one job, and at most **2** candidate jobs per
-workflow, ranked by measured job p50 so the budget is spent where a net-negative
-cache costs most. Every other gate is answered from data already in hand, so no
-log is fetched for a job that could not produce a finding.
+Job logs are the expensive call in this engine, so the probe is capped three
+times: at most **8** sampled occurrences of one job, at most **2** candidate jobs
+per workflow, and at most **24** log fetches across the whole repository — the
+first two are per workflow, and without the third a monorepo with thirty workflow
+files would multiply them into hundreds of calls. Candidates are ranked by
+measured job p50, so the budget is spent where a net-negative cache costs most,
+and every other gate is answered from data already in hand, so no log is fetched
+for a job that could not produce a finding.
 
 **Sizing (measured)**:
 

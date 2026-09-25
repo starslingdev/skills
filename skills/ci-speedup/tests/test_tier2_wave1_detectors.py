@@ -3944,6 +3944,19 @@ def test_opt79_log_plan_is_capped_and_matches_the_detector_selector():
         "ci.yml", jpr, _opt79_crit(job_p50=600.0), _opt79_wf()) == []
 
 
+def test_opt79_log_probe_has_a_repo_wide_ceiling():
+    """The per-job and per-workflow caps are both PER WORKFLOW. Without a
+    repo-wide ceiling a monorepo with thirty workflow files would multiply them
+    into hundreds of log fetches — the exact cost this engine is frugal about."""
+    assert cr._OPT79_REPO_LOG_BUDGET >= cr._OPT79_LOG_PROBE_MAX
+    assert (cr._OPT79_REPO_LOG_BUDGET
+            < 10 * cr._OPT79_LOG_PROBE_MAX * cr._OPT79_MAX_CANDIDATE_JOBS)
+    src = (Path(cr.__file__).read_text(encoding="utf-8"))
+    body = src.split("def collect(", 1)[1]
+    assert "_OPT79_REPO_LOG_BUDGET" in body, (
+        "collect() no longer trims the OPT79 log plan to the repo-wide budget")
+
+
 def test_opt79_log_plan_does_not_count_withholds():
     """The plan pass runs the same gates to decide what to fetch. If it shared
     the detector's counter every gate would be tallied twice and the per-gate
