@@ -33,24 +33,39 @@ unversioned and updates by reinstall from `main`.
   three miss runs are classified from their logs, every credited run is on the same
   runner label, the hit path is slower by at least 5 seconds or 20%, the cache hits
   on at least a quarter of classified runs, and the job sits below the workflow's
-  slowest-but-one job. A run whose log shows both a hit and a miss (a job with two
-  caches) is excluded, never guessed. It credits no wall-clock time. A cache on
-  the job that sets the merge gate is the case where this waste costs people
-  waiting time rather than money, and sizing that saving needs machinery this
-  version does not have — so it is measured on exactly the same evidence and
-  reported with no number attached: one line saying the cache was measured to cost
-  more than it saves, how much per cache hit, how many runs that came from, and
-  that the saving is not credited here. It adds nothing to any total. Reading the
-  logs is the one new cost, and it is capped at eight
-  runs of one job, two jobs per workflow and twenty-four fetches across the whole
-  repository; within a workflow the most expensive candidate goes first. The
-  install step is recognised by the command it runs rather than by the name the
-  author gave it, so the near-universal "Install dependencies" spelling is not
-  missed, and a cache miss is read in the `setup-` actions' own wording as well as
-  the cache action's, so a job that caches through `setup-node` or `setup-python`
-  can report. A sampled run whose log was never fetched is counted as unread
-  rather than as a run with nothing to say, so a thin result never gets blamed on
-  the repository. A repo that acts on this finding will still be marked down by
+  slowest-but-one job. The cache line is read only inside the restore step's own
+  section of the log, so a monorepo's build tool printing "cache miss" while it
+  runs the tests can never be mistaken for this cache; a run whose log shows both
+  a hit and a miss elsewhere in that section is a job with two caches and is
+  excluded, never guessed, while a miss immediately followed by a hit is the
+  ordinary fallback-key spelling and counts as the hit it is. It credits no
+  wall-clock time. A cache on a job the audit cannot prove is safe to shrink is
+  measured on exactly the same evidence and reported with no number attached: one
+  line saying the cache was measured to cost more than it saves, how much per
+  cache hit, how many runs that came from, and why it is not credited — and that
+  line says the saving is on the merge wait only for the job that actually sets
+  it, on a workflow that can gate a pull request at all. It adds nothing to any
+  total, and the report's own self-check re-derives it from the same per-run
+  measurements it re-derives the credited findings from. Reading the logs is the
+  one new cost, and it is capped at eight runs of one job, two jobs per workflow
+  and twenty-four fetches across the whole repository, spent on the
+  longest-running cached jobs in the repository first; the report states both how
+  many log reads were planned and how many were made. The install step is
+  recognised by the command it runs rather than by the name the author gave it, so
+  the near-universal "Install dependencies" spelling is not missed while a step
+  merely *named* after an install is not priced as one, and a step that installs
+  and then does something else is left alone rather than charging the something
+  else to the cache. A cache miss is read in the `setup-` actions' own wording and
+  in `setup-uv`'s as well as the cache action's, so a job that caches through
+  `setup-node`, `setup-python` or `uv` can report. The cache's post-save step is
+  never assumed to have taken no time: a save that did not finish, or whose step
+  the audit cannot find in the run at all, withholds instead of quietly inflating
+  the number, and a restore-only cache — which has no save — says so. A sampled
+  run whose log was never fetched is counted as unread rather than as a run with
+  nothing to say, so a thin result never gets blamed on the repository, and a
+  probe wave that mostly failed says that instead of "this cache rarely misses".
+  If no log came back at all the report names the detector as unevaluated rather
+  than letting an absent finding read as a clean one. A repo that acts on this finding will still be marked down by
   ci-score's dependency-caching check, which reads configuration only; reconciling
   the two is an open decision, not a behaviour either skill implements today.
   (#106)

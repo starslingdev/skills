@@ -7679,13 +7679,16 @@ def test_uncredited_pole_cache_is_reported_even_though_it_is_not_sized():
         "waste_s": 19.0, "hits": 5, "misses": 4,
         "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
         "job_p50_s": 600.0, "floor_p50_s": 300.0,
+        "long_pole_job": "build", "long_pole_p50_s": 600.0,
+        "on_critical_path": True,
     }]
     lines = bp._opt79_uncredited_block(doc)
     md = "\n".join(lines)
     assert "build" in md
     assert "19s" in md                      # the measured excess, per hit
     assert "5 hit" in md and "4 miss" in md  # the sample it came from
-    assert "slowest job" in md
+    assert "this workflow's slowest job" in md
+    assert "merge wait" in md
     assert "not credited" in md
     # It must NOT read as a sized saving: no runner-minutes, no wall-clock claim.
     assert "min/mo" not in md
@@ -7712,7 +7715,44 @@ def test_uncredited_pole_cache_reaches_the_rendered_report():
         "waste_s": 19.0, "hits": 5, "misses": 4,
         "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
         "job_p50_s": 600.0, "floor_p50_s": 300.0,
+        "long_pole_job": "build", "long_pole_p50_s": 600.0,
+        "on_critical_path": True,
     }]
     md = bp.render(doc, "o/r")
     assert "not credited" in md
     assert "`build`" in md
+
+
+def test_uncredited_pole_cache_survives_a_report_with_nothing_else_in_it():
+    """A schedule-only repository with no measured poles and no other findings
+    renders through the degenerate arms, where every other input is empty. The
+    uncredited line was dropped with them and the whole report collapsed to the
+    50-byte "no measured critical path" note — the exact silence this block
+    exists to break, in the one repository where it is the only thing to say."""
+    doc = {
+        "repo": "o/r",
+        "findings": [],
+        "pr_critical_path": {"poles": []},
+        "data_sources": {},
+        "opt79_uncredited_pole_caches": [{
+            "kind": "opt79_uncredited_pole_cache",
+            "workflow_file": ".github/workflows/nightly.yml",
+            "job": "build",
+            "runner_label": "ubuntu-latest",
+            "restore_step": "Run actions/cache@v4",
+            "install_step": "Run npm ci",
+            "waste_s": 19.0, "hits": 5, "misses": 4,
+            "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
+            "job_p50_s": 600.0, "floor_p50_s": 300.0,
+            "long_pole_job": "build", "long_pole_p50_s": 600.0,
+            "on_critical_path": False,
+        }],
+    }
+    static = bp._render_static_only(doc)
+    assert static, "the static-only body must not be empty with a measured cache"
+    assert "not credited" in static and "`build`" in static
+    md = bp.render(doc, "o/r")
+    assert "No measured critical path" not in md, md
+    assert "not credited" in md and "`build`" in md
+    # …and a schedule-only workflow is never told its saving is on a merge wait.
+    assert "merge wait" not in md, md

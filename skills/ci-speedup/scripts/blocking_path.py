@@ -5209,6 +5209,12 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
         # never as a comparison that had eight logs to work from.
         cov = (f"{_pn} job log(s) read" if _rn == _pn
                else f"{_rn} of {_pn} job log(s) returned content")
+        # The budget did not just cap the cost, it removed candidates. Saying
+        # only what was read hides that the comparison saw less of the repository
+        # than the selector asked for.
+        _pl = _probe.get("planned")
+        if isinstance(_pl, int) and _pl > _pn:
+            cov += f" ({_pn} of {_pl} planned)"
         _bud = _probe.get("budget")
         if isinstance(_bud, int) and _bud > 0:
             cov += f" (capped at {_bud} for the repository)"
@@ -5447,30 +5453,44 @@ def _pr_floor_fallback_banner(doc: dict[str, Any], cp: dict[str, Any]) -> list[s
             "the figures as the PR-floor accordingly.", ""]
 
 
+# The findings-doc key the collector writes uncredited OPT79 rows under. A
+# STRING CONTRACT between two files: renaming it in the collector used to stop
+# this block rendering with nothing going red, so both sides name the constant
+# and a coupling test pins them equal.
+_OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
+
+
 def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
     """Caches MEASURED to cost more than they save on a job that is not below its
     workflow's cluster floor — stated, with no number attached.
 
     These are not findings and never enter a total: no runner-minutes, no
     wall-clock claim, no neutrality certificate, no Tier-2 row. The measurement
-    is as real as a credited one; what is missing is the sizing, because the
-    waste sits on the merge wait and pricing that needs the wall-clock bound
-    cascade (a follow-up). Saying nothing was the worse answer — a repository
-    whose only net-negative cache is on its slowest job would read exactly like
-    one with no such cache, and that is the case worth the most.
+    is as real as a credited one; what is missing is the sizing.
+
+    WHY it is missing differs by job, and saying the same thing about both was a
+    false claim. `not below the cluster floor` spans everything from the
+    SECOND-ranked job upwards. Only the workflow's long pole, on a workflow that
+    can gate a PR, actually carries the merge wait; for every other job at or
+    above the floor the saving is pure runner-minutes, and the reason it is not
+    credited is that this version cannot prove shrinking it leaves the gate
+    unchanged. The row stamps which case it is (`on_critical_path`), and this
+    block says only what that stamp supports — never a merge wait on a
+    schedule-only workflow, and never "this workflow's slowest job" about a job
+    that is not.
 
     Rendered beside `_dropped_unprovable_banner`, its nearest precedent: a
     measured fact deliberately kept out of the numbers and shown anyway. [] when
     there is nothing to say."""
-    rows = (doc or {}).get("opt79_uncredited_pole_caches") or []
+    rows = (doc or {}).get(_OPT79_UNCREDITED_DOC_KEY) or []
     rows = [r for r in rows if isinstance(r, dict) and r.get("job")]
     if not rows:
         return []
     lines = ["> [!NOTE]",
              f"> **{len(rows)} cache(s) measured net-negative on a job this audit "
              "cannot price.** Measured the same way as the credited ones, and "
-             "listed with no number because the time is on the merge wait rather "
-             "than the bill:", ">"]
+             "listed with no number because this version cannot size what "
+             "shrinking them is worth:", ">"]
     for r in rows:
         job = str(r.get("job") or "")
         wf = str(r.get("workflow_file") or "")
@@ -5478,11 +5498,20 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
         hits, misses = r.get("hits"), r.get("misses")
         waste_txt = f"{float(waste):.0f}s" if isinstance(waste, (int, float)) else "?"
         where = f" in `{wf}`" if wf else ""
+        if r.get("on_critical_path"):
+            why = (f"`{job}` is this workflow's slowest job, so the saving is on "
+                   "the merge wait and is **not credited** in this version.")
+        else:
+            floor = r.get("floor_p50_s")
+            floor_txt = (f" ({float(floor):.0f}s)"
+                         if isinstance(floor, (int, float)) else "")
+            why = (f"`{job}` is at or above this workflow's second-slowest job"
+                   f"{floor_txt}, so this audit cannot prove that shrinking it "
+                   "leaves the merge gate unchanged; **not credited** in this "
+                   "version.")
         lines.append(
             f"> - a cache on `{job}`{where} measured net-negative by {waste_txt} "
-            f"per cache hit ({hits} hit / {misses} miss run(s) sampled); `{job}` is "
-            "this workflow's slowest job, so the saving is on the merge wait and "
-            "is **not credited** in this version.")
+            f"per cache hit ({hits} hit / {misses} miss run(s) sampled); {why}")
     lines += [">", "> Re-keying or narrowing such a cache is the same fix as the "
               "credited ones; only the size of the win is unstated here.", ""]
     return lines
@@ -7736,8 +7765,14 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # findings JSON._" — no banner, no coverage note, no data-sources footer: the
     # loudest failure in the collector, rendered as a shrug.
     broken = _measurement_is_broken(ds)
+    # A measured net-negative cache is a fact worth a report on its own. On a
+    # schedule-only repo with no poles and no other findings, every other input
+    # here is empty and the uncredited line was dropped with them — the whole
+    # report collapsed to the one-line no-critical-path note, which is exactly
+    # the silence this block exists to break.
+    uncredited_lines = _opt79_uncredited_block(doc)
     if (not tier2_lines and not also_lines and not queue_lines
-            and not incomplete and not broken):
+            and not incomplete and not broken and not uncredited_lines):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")
@@ -7901,7 +7936,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # Measured net-negative caches that could not be PRICED (their job is not
     # below the cluster floor). Beside the dropped-unprovable banner, its nearest
     # precedent: a measured fact kept out of the numbers and shown anyway.
-    out += _opt79_uncredited_block(doc)
+    out += uncredited_lines
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
                                       or doc.get("dropped_unprovable"))
     # Issue #12: a static-only report (no measured pole to crown) can still carry a stamped
@@ -7975,14 +8010,20 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # a straddle is never silently dropped just because a shorter render path won the
         # short-circuit — else a post_only sample looks full / a disclosed_pre sample looks current.
         _deg_era_lines = _config_era_disclosure_lines(cp, captured_at)
-        if _deg_fileless_lines or _deg_era_lines:
+        # …and the same for a measured net-negative cache. `_render_static_only`
+        # above already returns a full report when there is one, so reaching here
+        # with uncredited rows means there was nothing else at all to say — which
+        # is precisely when dropping the line loses the only measurement the run
+        # made.
+        _deg_uncredited = _opt79_uncredited_block(doc)
+        if _deg_fileless_lines or _deg_era_lines or _deg_uncredited:
             # `_strip_emdashes` at this early-return boundary mirrors the main render exit:
             # this path bypasses that terminal scrub, so without it the typographic dashes in the
             # shared disclosure prose would survive and trip verify_report's ASCII-hyphens-only
             # invariant on a real all-fileless degenerate repo.
             return _strip_emdashes("\n".join([
                 f"# {doc.get('repo', 'repo')} — why is the merge slow?", "",
-                *_deg_era_lines, *_deg_fileless_lines]))
+                *_deg_era_lines, *_deg_fileless_lines, *_deg_uncredited]))
         return "_No measured critical path in this findings JSON._"
     repo = doc.get("repo", "repo")
     catalog_url = _build_catalog_url(doc.get("skill_commit_sha"))

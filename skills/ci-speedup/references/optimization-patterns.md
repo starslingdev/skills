@@ -393,15 +393,24 @@ result, never as this skill's sizing: no OPT79 finding ever renders a number tha
 did not come from the audited repository's own runs.
 
 **Detection heuristic**: measured, and every gate fails closed. The constants
-named here are the detector's constants, not restatements of them.
+named here are the detector's own, not restatements of them — with one
+inheritance called out where it appears: the 0.25 hit-share floor in step 6 is
+the shared cache tail floor (`_CACHE_TAIL_MIN_FRAC`), which the whole cache
+family reads, so retuning it there moves this gate too.
 
 1. From the **workflow file** (never from the observed step list), the job must
    declare exactly **one** cache-restore step — `actions/cache`,
    `actions/cache/restore`, or an `owner/setup-*` action with a `cache:` input
-   set to anything other than `false` / `no` / `off` — followed by an **install**
+   set to anything other than `false` / `no` / `off`; `cache: ${{ … }}` is an
+   unevaluated expression whose value the static parse cannot know and withholds
+   rather than reading as a yes — followed by an **install**
    step. An install step is recognised by **what it runs**, not by what it was
    called, so `name: Install dependencies` over `run: npm ci` is found like any
-   other. The install verbs are the install alternatives of the shared setup
+   other — and a step *named* `npm ci` that *runs* `npm run build` is not one. A
+   multi-line `run:` block must be installs **all the way down**: `pip install
+   -e .` followed by `pytest -q` withholds, because pricing it would charge the
+   whole test suite to both sides of the comparison. The install verbs are the
+   install alternatives of the shared setup
    classifier and nothing else: `npm|pnpm|yarn|bun ci|install|i`,
    `pip|pip3|pipenv|poetry|uv install|sync`, `uv pip install`,
    `python -m pip install`, `bundle install`, `composer install`,
@@ -417,20 +426,47 @@ named here are the detector's constants, not restatements of them.
    **MISS** by the **verbatim cache line** — the matchers the rest of the cache
    family reads, plus the `setup-*` family's own miss wording (those actions
    print `<package manager> cache is not found`, which the cache action's
-   phrasing does not match) — never by a duration. An occurrence whose log was
-   never fetched is **counted as unread**, not folded into the populations. A
-   log showing **both** lines is
-   a job with more than one cache: it is **excluded and counted**, never guessed.
-   At least **3 hits and 3 misses** are required; a comparison with one side
-   unmeasured is the shape-assumption the evidence guards forbid.
+   phrasing does not match) and `astral-sh/setup-uv`'s pair (`uv cache restored
+   from GitHub Actions cache with key` / `No GitHub Actions cache found for
+   key`) — never by a duration.
+
+   That scan is **scoped to the restore step's own log group**
+   (`##[group]Run <step>` … the next group marker). It has to be: Turborepo
+   prints `cache miss, executing <task>`, Gradle prints `Build cache miss for
+   task …`, and both land in the *test* step. Read unscoped, every genuine cache
+   hit in a JavaScript monorepo looked like a two-cache job. Each row stamps the
+   group its line came from, and a log with no such group withholds the
+   occurrence rather than guessing.
+
+   Inside that group, a log showing **both** lines is a job with more than one
+   cache: it is **excluded and counted**, never guessed — *except* a miss line
+   **followed by** a hit line, which is `restore-keys` reporting that the exact
+   key missed and a prefix fallback was restored. The restore ran and was paid
+   for, so that is a hit.
+
+   An occurrence whose log was never fetched is **counted as unread**, not folded
+   into the populations; when unread occurrences leave either population short,
+   the withhold says so rather than reporting a thin sample. At least **3 hits
+   and 3 misses** are required; a comparison with one side unmeasured is the
+   shape-assumption the evidence guards forbid.
 4. Every credited occurrence must have run on the **same runner label**. A hit on
    a slow runner against a miss on a fast one is not a cache comparison.
 5. Both paths measure the **same three steps** — restore + install + the post
-   save — identified in step 1 and summed per run. A step the run did not time
-   counts as **0s**: GitHub stamps step timestamps at one-second granularity and
-   drops a sub-second step from the timing data entirely, so reading the step set
-   from what happened to be timed would let that noise change *which* steps are
-   being compared. The block's p50 over the hit runs must exceed its p50 over the
+   save — identified in step 1 and summed per run. A step the run **rendered**
+   but did not time counts as **0s**: GitHub stamps step timestamps at one-second
+   granularity and drops a sub-second step from the timing data entirely, so
+   reading the step set from what happened to be timed would let that noise
+   change *which* steps are being compared.
+
+   A step that was **never rendered at all** is a different fact, and it fails
+   open on the term that matters most: on `actions/cache` the save runs on a
+   MISS, so silently zeroing it removes the biggest miss-side term and
+   manufactures the excess. A post step that started and never completed
+   withholds the occurrence; a post label that matched **no** occurrence
+   withholds the job; and `actions/cache/restore`, which has no post phase at
+   all, records that there is no save rather than inventing a step name.
+
+   The block's p50 over the hit runs must exceed its p50 over the
    miss runs by at least **max(5s, 20% of the miss path)** — a named floor, so a
    one-second "loss" never renders as a finding.
 6. The **hit share** across the classified runs must be at least **0.25**. A
@@ -443,12 +479,20 @@ Job logs are the expensive call in this engine, so the probe is capped three
 times: at most **8** sampled occurrences of one job, at most **2** candidate jobs
 per workflow, and at most **24** log fetches across the whole repository — the
 first two are per workflow, and without the third a monorepo with thirty workflow
-files would multiply them into hundreds of calls. Within a workflow, candidates
-are ranked by measured job p50, so the two that are probed are the two whose
-cache costs most; the repo-wide ceiling is then applied in workflow order, so on
-a repo large enough to hit it some workflows go unprobed. Every gate except the
-run-frequency one is answered from data already in hand, so a job that could not
-produce a finding for any other reason costs no log fetch.
+files would multiply them into hundreds of calls. Candidates are ranked by
+measured job p50, which is a **proxy** for what a cache can cost and not a
+measurement of it: the longest-running cached jobs are probed first, and what the
+cache actually costs is only known once its logs are read. The repo-wide ceiling
+is applied to the whole plan **after** that ranking, so the budget reaches the
+costliest candidates in the repository rather than whichever workflow file was
+walked first, and every occurrence it cuts is counted. The report's Data sources
+row states both what was planned and what was read.
+
+Every gate about a job's SHAPE — no cache, two caches, no install after the cache
+— is answered from data already in hand, so those jobs cost no log fetch. That is
+not the same as "no log is fetched for a job that could not produce a finding":
+the workflow's slowest job is probed too, and what it produces is the uncredited
+line below.
 
 **Sizing (measured)**:
 
@@ -471,28 +515,45 @@ candidate gate requires the job to sit strictly below the workflow's cluster
 floor — which is exactly what makes that zero true and re-derivable, and is the
 finding's `below_cluster_floor` neutrality certificate.
 
-**The long-pole case: measured, reported, not priced.** A net-negative cache on
-the workflow's **long pole** is the one place this waste sits on the merge wait
-rather than only on the bill, so it is worth the most — and it is exactly the
-case that cannot carry the neutrality certificate a credited runner-minute row
-needs. It is measured anyway, on the same evidence as every credited finding, and
-**reported with no number**:
+**The case above the floor: measured, reported, not priced.** A job that is not
+strictly below the cluster floor cannot carry the neutrality certificate a
+credited runner-minute row needs. It is measured anyway, on the same evidence and
+by the same code as every credited finding, and **reported with no number**.
+
+Which job it is decides what the line may say, because the floor is the
+*second-ranked* job's p50 — so "not below the floor" covers everything from
+second place upwards, and only the workflow's **long pole**, on a workflow that
+can gate a PR, actually carries the merge wait:
 
 > a cache on `build` measured net-negative by 19s per cache hit (5 hit / 4 miss
 > run(s) sampled); `build` is this workflow's slowest job, so the saving is on the
 > merge wait and is **not credited** in this version.
 
+> a cache on `unit` measured net-negative by 19s per cache hit (4 hit / 4 miss
+> run(s) sampled); `unit` is at or above this workflow's second-slowest job
+> (600s), so this audit cannot prove that shrinking it leaves the merge gate
+> unchanged; **not credited** in this version.
+
+The second job's saving is pure runner-minutes; it is uncredited only because
+this version has not sized the neutrality argument for it. A workflow that cannot
+gate a PR is never told it has a merge wait.
+
 No runner-minutes, no wall-clock claim, no certificate, no Tier-2 row, and no
 contribution to any total — the measurement is complete, only the sizing is
-deferred. The fix is the same one the credited findings hand over; only the size
-of the win is unstated. Rendered next to the dropped-unprovable note, its nearest
-precedent: a measured fact deliberately kept out of the numbers and shown anyway.
+deferred. The row carries the same stamped block as a credited finding, including
+its per-run measurements, so the report's self-check re-derives it exactly as it
+re-derives the credited ones. The fix is the same one the credited findings hand
+over; only the size of the win is unstated. Rendered next to the
+dropped-unprovable note, its nearest precedent: a measured fact deliberately kept
+out of the numbers and shown anyway.
 
 Sizing it is the follow-up: route the measured excess through the wall-clock
 bound cascade, where CAP 1 already caps an on-pole saving at
-`long_pole_p50 − floor_p50`. Until then the honest report is a line without a
-number, not silence — and silence is what this used to be, because the floor test
-ran in the candidate selector and the job's logs were never fetched at all.
+`long_pole_p50 − floor_p50`; crediting the at-or-above-the-floor-but-below-the-pole
+job, where neutrality does hold, is the easier half of the same follow-up. Until
+then the honest report is a line without a number, not silence — and silence is
+what this used to be, because the floor test ran in the candidate selector and
+the job's logs were never fetched at all.
 
 **Fix**: in this order, and never "just delete it".
 
@@ -538,24 +599,37 @@ one number as an answer. Every key below is hard-required by that re-derivation:
 
 | key | what it carries |
 |---|---|
-| `kind` | `opt79_net_negative_cache` — the block's type tag, which is what routes the finding to this re-derivation instead of the generic one |
+| `kind` | `opt79_net_negative_cache` for a credited finding, `opt79_uncredited_pole_cache` for an uncredited row — the tag that routes the block to this re-derivation instead of the generic one |
 | `job` | the credited job; must be the finding's only `affected_jobs` entry |
-| `runner_label` | the one runner class every credited run ran on |
-| `restore_step` / `install_step` / `post_step` | the three steps, as named in the YAML, that both paths measure |
-| `per_run[]` | one row per credited run: its `status`, the **verbatim** `log_line` that verdict came from, its `runner_label`, and `restore_s` / `install_s` / `post_s` / `block_s` |
-| `hits` / `misses` / `classified_runs` / `ambiguous_runs` | the populations, and the multi-cache runs excluded from them |
+| `runner_label` / `cache_ref` | the one runner class every credited run ran on, and the cache action the block was built around |
+| `restore_step` / `install_step` / `post_step` | the three steps, as named in the YAML, that both paths measure; `post_step` is null for `actions/cache/restore`, which has no post phase |
+| `per_run[]` | one row per credited run: its `status`, the **verbatim** `log_line` that verdict came from, the `log_line_group` it was read in (which must be the restore step), its `runner_label`, and `restore_s` / `install_s` / `post_s` / `block_s` |
+| `hits` / `misses` / `classified_runs` / `ambiguous_runs` / `occurrences_on_other_runner` | the populations, the multi-cache runs excluded from them, and the occurrences dropped for running on another runner label |
 | `hit_path_p50_s` / `miss_path_p50_s` / `waste_s` / `waste_floor_s` | the two medians, their difference, and the floor it had to clear |
 | `hit_share` | `hits / classified_runs` |
 | `job_runs` / `sampled_successful_run_count` / `monthly_volume` / `effective_monthly_volume` | the scaling; `classified_runs` can never exceed `job_runs`, which can never exceed the sampled run count |
-| `runner_min_saving` | restated inside the block and checked against the finding's own |
+| `runner_min_saving` | restated inside the block and checked against the finding's own; **null** on an uncredited row, where a number would be a failure |
+
+An uncredited row carries every key above plus `workflow_file`, `job_p50_s`,
+`floor_p50_s`, `long_pole_job`, `long_pole_p50_s` and `on_critical_path` — the
+last being what decides whether the rendered line may speak of a merge wait.
 
 The re-derivation recomputes each row's `block_s` from its three parts, re-reads
 every row's quoted line against the hit and miss matchers (a row labelled `hit`
 whose line says the cache was not found is a failure, and so is a row quoting
 both), recomputes both medians, the waste, the floor, the hit share, the
 effective volume and the credited minutes, and re-derives the margin from
-`per_workflow_timing`. A tampered number anywhere in that chain reddens the
+`per_workflow_timing`. Uncredited rows go through the same re-derivation with the
+credited-minutes and neutrality branches skipped, and one extra check: they must
+carry no sizing at all. A tampered number anywhere in that chain reddens the
 report.
+
+The verifier restates the engine in two different ways, and the tests say which
+is which: the stamped key list, the population minimums, the two waste-floor
+constants and the shared cache tail fraction are asserted **identical** to the
+engine's; the hit and miss matchers are deliberately **independent** re-readings
+— a verifier sharing the engine's matcher could not catch a mislabelled row — so
+they are only spot-checked, line by line.
 
 ---
 

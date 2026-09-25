@@ -431,8 +431,13 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
                for r in cn["per_run"]), cn
     assert any("Cache not found for" in str(r.get("log_line"))
                for r in cn["per_run"]), cn
-    # …and the probe stayed inside its budget.
-    assert data.get("opt79_logs_fetched") == 8, data.get("opt79_logs_fetched")
+    # …every verdict names the log group it was read in, so a build tool's own
+    # `cache miss` line in the test step can never be mistaken for this cache's.
+    assert all(r.get("log_line_group") == "Run actions/cache@v4"
+               for r in cn["per_run"]), cn
+    # …and the probe stayed inside its budget. Counted ONCE, in the provenance
+    # row the report renders and `verify_report` re-derives — a second copy on
+    # the findings doc was a number nothing checked and nothing rendered.
     assert isinstance(data.get("opt79_withheld_by_gate"), dict), (
         "the per-gate withhold tally must be stamped on every collected run")
     # …and the run DECLARES those reads in its provenance, as its own row. The
@@ -443,6 +448,10 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     _probe = (data.get("data_sources") or {}).get("cache_probe_logs")
     assert isinstance(_probe, dict), data.get("data_sources")
     assert _probe.get("probed") == 8 and _probe.get("returned") == 8, _probe
+    # PLANNED is stamped beside them: when the repo-wide budget cuts the plan the
+    # comparison saw less of the repository than its selector asked for, and the
+    # row has to say so. Here nothing was cut, so the two agree.
+    assert _probe.get("planned") == 8, _probe
 
     # The static-scan findings come from scan.py parsing the YAML — they exist
     # regardless of gh replay, so they do NOT prove the replay wired up. Assert

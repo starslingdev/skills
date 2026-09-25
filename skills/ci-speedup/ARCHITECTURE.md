@@ -1072,21 +1072,46 @@ For a job whose workflow file declares exactly one cache-restore step
 (`actions/cache`, `actions/cache/restore`, or an `owner/setup-*` action with
 `cache:` set) followed by an install step, it classifies the sampled occurrences
 HIT or MISS from the verbatim cache line — the `_CACHE_HIT_RE` / `_CACHE_MISS_RE`
-the rest of the cache family reads, plus `_OPT79_EXTRA_MISS_RE` for the `setup-*`
-family's own miss wording (`<package manager> cache is not found`, which the
-cache action's "cache not found for" cannot match; kept OPT79-local so the eight
-other cache patterns reading the shared matcher are unaffected) — and compares
-the p50 of the SAME three steps (restore + install + post save) across the two
-populations. A log showing both lines is a multi-cache job and is excluded, never
-guessed; an occurrence whose log was never fetched is counted as unread rather
-than folded into a population. The install step is recognised from what it RUNS
-rather than from its display name, so the near-universal `name: Install
-dependencies` spelling is found; the display name is still what the step's
-duration is looked up by.
+the rest of the cache family reads, plus `_OPT79_EXTRA_MISS_RE` /
+`_OPT79_EXTRA_HIT_RE` for the wordings those two cannot match: the `setup-*`
+family's own miss line (`<package manager> cache is not found`) and
+`astral-sh/setup-uv`'s pair. Both extras are kept OPT79-local so the eight other
+cache patterns reading the shared matcher are unaffected.
 
-Two things keep it honest. The step set comes from the YAML and a step the run
-did not time counts as 0s, so GitHub's one-second granularity cannot change which
-steps are being compared between runs. And the candidate gate requires the job's
+That scan is SCOPED to the restore step's own `##[group]Run <step>` … block. It
+has to be: Turborepo prints `cache miss, executing <task>`, Gradle prints
+`Build cache miss for task …` and buildx prints its own, all matched by
+`_CACHE_MISS_RE` and all in the TEST step's output. Read unscoped, every genuine
+cache HIT in a JavaScript monorepo classified as a two-cache job and was
+discarded — the lever was deadest exactly where `node_modules` is largest. Each
+per-run row stamps `log_line_group`, and the verifier refuses a row whose group
+is not the restore step. A log with no such group withholds the occurrence.
+
+Inside that group, a log showing both lines is a multi-cache job and is excluded,
+never guessed — EXCEPT a miss line FOLLOWED by a hit line, which is `restore-keys`
+reporting that the exact key missed and a prefix fallback was restored. The
+restore ran and was paid for, so that is a hit. An occurrence whose log was never
+fetched is counted as unread rather than folded into a population, and when
+unread occurrences leave either population short the withhold says
+`population_truncated_by_unread_logs` rather than blaming a thin sample.
+
+The install step is recognised from what it RUNS, never from its display name —
+so the near-universal `name: Install dependencies` spelling is found, and a step
+NAMED `npm ci` that runs `npm run build` is not priced as the install. A `run:`
+block whose every line is not an install (`pip install -e .` then `pytest -q`)
+withholds rather than charging the test suite to both sides. The display name is
+still what the step's duration is looked up by.
+
+Three things keep it honest. The step set comes from the YAML and a step the run
+RENDERED but did not time counts as 0s, so GitHub's one-second granularity cannot
+change which steps are being compared between runs. "Rendered sub-second" and
+"not there at all" are kept apart, because conflating them fails OPEN on the term
+that matters most: on `actions/cache` the save runs on a MISS, so a post step
+that never completed, or a constructed `Post <name>` that matched nothing GitHub
+rendered, would drop the biggest miss-side term and MANUFACTURE the excess. The
+first withholds the occurrence, the second withholds the job, and
+`actions/cache/restore` — which has no post phase — stamps `post_step: null`
+rather than inventing a label. And the candidate gate requires the job's
 p50 to sit strictly BELOW the workflow's cluster floor, which is what makes
 `wall_clock_p50_s=0` literally true here — unlike OPT77, the
 `below_cluster_floor` token is not historical for OPT79, it is the proof. A
@@ -1099,35 +1124,73 @@ an absent one, and one no reader could distinguish from a repository with no suc
 cache. The test therefore records `below_cluster_floor` on the candidate instead
 of dropping it. The detector measures both populations as usual and then splits:
 below the floor → the credited finding described above; at or above it → a row on
-`findings_doc["opt79_uncredited_pole_caches"]`, which `blocking_path`'s
+`findings_doc[_OPT79_UNCREDITED_DOC_KEY]`, which `blocking_path`'s
 `_opt79_uncredited_block` renders as one numberless line beside
-`_dropped_unprovable_banner`. Uncredited rows are not findings — no
-`runner_min_saving`, no `wall_clock_p50_s`, no certificate, no Tier-2 row, no
-contribution to any total — so no verifier arm applies to them. Pricing them is
-the follow-up: pass the measured excess into `size_wall_clock` instead of
-hard-coding `wall_clock_p50_s=0` and let CAP 1 (§5) cap it at `long_pole_p50 -
-floor_p50`, the way it caps every other on-pole finding.
+`_dropped_unprovable_banner`.
+
+WHICH job is at or above the floor decides what that line may say. The floor is
+the SECOND-ranked job's p50, so "not strictly below it" spans everything from
+second place upwards, and only the workflow's long pole — on a workflow that can
+gate a PR — actually carries the merge wait. The row therefore stamps
+`long_pole_job`, `long_pole_p50_s`, `job_p50_s`, `floor_p50_s` and
+`on_critical_path`, and the renderer says "this workflow's slowest job, so the
+saving is on the merge wait" ONLY when `on_critical_path` is true. For every
+other uncredited job it says the job is at or above the workflow's second-slowest
+job, so this audit cannot prove that shrinking it leaves the merge gate
+unchanged. A schedule-only workflow is never told it has a merge wait at all.
+
+Uncredited rows are not findings — no `runner_min_saving`, no
+`wall_clock_p50_s`, no certificate, no Tier-2 row, no contribution to any total.
+They are built by the SAME `_opt79_stamp` builder as the credited block (one
+measurement, two outputs, one contract), so they carry `per_run` and every
+multiplier, and `verify_report.py`'s `check_opt79_uncredited_rows_rederived`
+re-derives them row by row with only the credited-minutes and neutrality branches
+skipped. That check is top-level rather than part of the Tier-2 pass, because a
+repository whose only OPT79 result is an uncredited row has no Tier-2 stamps for
+that pass to run on.
+
+Pricing them is the follow-up: pass the measured excess into `size_wall_clock`
+instead of hard-coding `wall_clock_p50_s=0` and let CAP 1 (§5) cap it at
+`long_pole_p50 - floor_p50`, the way it caps every other on-pole finding. The
+at-or-above-the-floor-but-below-the-pole case is part of that follow-up and is
+the easier half: neutrality does hold there, so it is a crediting question, not a
+wall-clock one.
 
 Its gh cost is the one new one in this wave: a capped log probe
 (`_OPT79_LOG_PROBE_MAX = 8` occurrences per candidate job,
-`_OPT79_MAX_CANDIDATE_JOBS = 2` jobs per workflow, candidates ranked by job p50,
-and `_OPT79_REPO_LOG_BUDGET = 24` across the whole repo — the first two are per
+`_OPT79_MAX_CANDIDATE_JOBS = 2` jobs per workflow, candidates ranked by job p50 —
+a PROXY for what a cache can cost, not a measurement of it — and
+`_OPT79_REPO_LOG_BUDGET = 24` across the whole repo; the first two are per
 workflow, so without the third a thirty-workflow monorepo would multiply them
 into hundreds of fetches), planned across every workflow up front by
 `_opt79_log_plan` and fanned out in one `_prefetch_text` wave before the detector
-loop. The p50 ranking is per workflow; the repo-wide ceiling is a prefix cut in
-workflow order, so on a repo that exceeds it the later workflows go unprobed —
-their occurrences then count under `occurrence_has_no_captured_log` rather than
-looking like a thin hit/miss population. `_opt79_candidates` is the ONE selector
-shared by the plan and the detector, so the two can never disagree about which
-jobs are ELIGIBLE (which of those actually got logs is the budget's business, and
-is counted). `verify_report.py`'s
-`_opt79_net_negative_cache_rederived` arm recomputes every per-run block from its
-three parts, re-reads each row's quoted line against its stamped verdict, and
-re-derives both medians, the waste, the floor, the hit share, the effective
-volume, the credited minutes and the margin. Every gate that withheld is counted
-into `findings_doc["opt79_withheld_by_gate"]` and logged at DEBUG, and the number
-of logs the probe actually retrieved is stamped as `opt79_logs_fetched`.
+loop. `_opt79_trim_repo_probe_plan` applies the repo-wide ceiling by SORTING the
+whole plan on candidate job p50 before slicing, so the budget is spent on the
+costliest candidates in the repository rather than on whichever workflow file was
+walked first; every occurrence it cuts is counted under
+`beyond_the_repo_wide_log_budget`, and the cut jobs' remaining occurrences count
+under `occurrence_has_no_captured_log` rather than looking like a thin hit/miss
+population. `_opt79_candidates` is the ONE selector shared by the plan and the
+detector, so the two can never disagree about which jobs are ELIGIBLE (which of
+those actually got logs is the budget's business, and is counted).
+
+`verify_report.py`'s `_opt79_net_negative_cache_rederived` arm recomputes every
+per-run block from its three parts, re-reads each row's quoted line against its
+stamped verdict AND against the log group it was read in, and re-derives both
+medians, the waste, the floor, the hit share, the effective volume, the credited
+minutes and the margin. Its restatements of the engine are of two kinds, and the
+tests say which: the stamp-key tuple, the four numeric thresholds and the shared
+cache tail fraction are asserted IDENTICAL to the engine's; the hit/miss regexes
+are independent re-readings and are only spot-checked line by line.
+
+Every gate that withheld is counted into `findings_doc["opt79_withheld_by_gate"]`
+and logged at DEBUG. The probe's own cost is stamped ONCE, in
+`data_sources.cache_probe_logs` as `{planned, probed, returned, budget}` — the
+row the report renders and the verifier re-derives; when `planned` exceeds
+`probed` the rendered cell says so. And when probes were planned but NOTHING came
+back, OPT79 is recorded in `data_sources.detectors_skipped` for the affected
+workflows, so an unevaluated detector is named rather than reading as a detector
+that found nothing.
 
 
 OPT57 now has a measured timeout-default-burn upgrade. A missing
