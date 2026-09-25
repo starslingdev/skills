@@ -33,7 +33,7 @@ unversioned and updates by reinstall from `main`.
   wall-clock saving is claimed at all, because the typical run was never stalled.
   Logs are downloaded only for the slow runs, and only after every cheaper check
   has passed, so a repository with no such tail pays nothing for the new check.
-  (#N)
+  (#105)
 
 - **2026-09-24** — **The "slow test suite re-loading the app" diagnosis is now a
   catalogued, guarded lever (OPT78), and it no longer tells a repo to apply a
