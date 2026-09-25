@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 76-pattern
-catalog — 69 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76 and OPT77) plus 7 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against a 77-pattern
+catalog — 70 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77 and OPT79) plus 7 **structural /
 critical-path** patterns (OPT70–OPT75 and OPT78, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -1066,6 +1066,40 @@ the eligible set the tallest-remaining job was chosen from. Like OPT65 it claims
 no speedup (`wall_clock_p50_s=0`, `realization=none`), and it shares
 `_billed_job_runner` and `_tier2_scope_event` with it.
 
+OPT79 (a cache that costs more than it saves) is the third measured Tier-2 bill
+lever, and the first one to read job LOGS in `collect()` rather than in the drill.
+For a job whose workflow file declares exactly one cache-restore step
+(`actions/cache`, `actions/cache/restore`, or an `owner/setup-*` action with
+`cache:` set) followed by an install step, it classifies the sampled occurrences
+HIT or MISS from the verbatim cache line — the same `_CACHE_HIT_RE` /
+`_CACHE_MISS_RE` the rest of the cache family reads — and compares the p50 of the
+SAME three steps (restore + install + post save) across the two populations. A
+log showing both lines is a multi-cache job and is excluded, never guessed.
+
+Two things keep it honest. The step set comes from the YAML and a step the run
+did not time counts as 0s, so GitHub's one-second granularity cannot change which
+steps are being compared between runs. And the candidate gate requires the job's
+p50 to sit strictly BELOW the workflow's cluster floor, which is what makes
+`wall_clock_p50_s=0` literally true here — unlike OPT77, the
+`below_cluster_floor` token is not historical for OPT79, it is the proof. A
+net-negative cache on the long pole is a real wall-clock lever but needs the
+floor cascade the spine owns, so the pattern withholds there and counts the
+withhold rather than guess.
+
+Its gh cost is the one new one in this wave: a capped log probe
+(`_OPT79_LOG_PROBE_MAX = 8` occurrences per candidate job,
+`_OPT79_MAX_CANDIDATE_JOBS = 2` jobs per workflow, candidates ranked by job p50),
+planned across every workflow up front by `_opt79_log_plan` and fanned out in one
+`_prefetch_text` wave before the detector loop. `_opt79_candidates` is the ONE
+selector shared by the plan and the detector, so the two can never disagree about
+which jobs were measured. `verify_report.py`'s
+`_opt79_net_negative_cache_rederived` arm recomputes every per-run block from its
+three parts, re-reads each row's quoted line against its stamped verdict, and
+re-derives both medians, the waste, the floor, the hit share, the effective
+volume, the credited minutes and the margin. Every gate that withheld is counted
+into `findings_doc["opt79_withheld_by_gate"]` and logged at DEBUG, and the number
+of logs the probe actually retrieved is stamped as `opt79_logs_fetched`.
+
 
 OPT57 now has a measured timeout-default-burn upgrade. A missing
 `timeout-minutes` key is only the structural gate: `collect_runs.py` emits a
@@ -1419,7 +1453,7 @@ family):
 |---|---|---|---|
 | **derive** | OPT45 | `hit_rate × Σ(measured billable)` | `measured_spine_billable` |
 | **clamp** | OPT73 | `min(modeled, Σ(measured billable))` | `measured_spine_clamped` (or `measured_spine_billable` when already within) |
-| **not_spine_derivable** (the EXPLICIT whitelist) | the measured run-elimination detectors (OPT46/47/64/65 — basis is the eliminated-runs slice, not per-job billable); the measured setup-prefix detector (OPT77 — basis is the per-job leading setup prefix); the modeled-static patterns (`direct` / `runner-min-only`, disclosed as modeled in the report's sized-of-total ratio); the other structural step-decomposition levers (OPT70/71/72/74/75, per-job step basis) | retained, with the reason recorded in `runner_min_door_note` | `not_spine_derivable` |
+| **not_spine_derivable** (the EXPLICIT whitelist) | the measured run-elimination detectors (OPT46/47/64/65 — basis is the eliminated-runs slice, not per-job billable); the measured setup-prefix detector (OPT77 — basis is the per-job leading setup prefix); the measured cache-block detector (OPT79 — basis is one job's restore + install + post-save timings split by the run log's own cache hit/miss line); the modeled-static patterns (`direct` / `runner-min-only`, disclosed as modeled in the report's sized-of-total ratio); the other structural step-decomposition levers (OPT70/71/72/74/75, per-job step basis) | retained, with the reason recorded in `runner_min_door_note` | `not_spine_derivable` |
 
 The whitelist is **visible, not a silent bypass**: a reasoned entry per family,
 and tightening the modeled/structural families from whitelist → clamp is tracked
@@ -1967,7 +2001,7 @@ wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -2021,7 +2055,7 @@ reported by `scan.py` as having no critical-path router.
   (dominant step/category, redundancy ratio, required-status, shared substep)
   annotate the pole they came from; the catalog OPT70–OPT75 findings are
   therefore **excluded** from the off-path "Also noticed" appendix
-  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76/OPT77 only) since the pole already
+  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76/OPT77/OPT79 only) since the pole already
   represents them. Like every pole, a structural lever carries an agent prompt
   rather than a prescribed fix; for a HIGH-risk lever (e.g. OPT70 scope-to-
   changed) the prompt's failure-mode/guard section tells the agent to state the
@@ -2909,7 +2943,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 76-pattern catalog (METADATA + body per pattern); the source of truth for
+  the 77-pattern catalog (METADATA + body per pattern); the source of truth for
   detection and the report's TL;DR / pattern background.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.

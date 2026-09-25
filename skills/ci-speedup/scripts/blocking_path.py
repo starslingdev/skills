@@ -5494,8 +5494,8 @@ def _group_by_pattern_ranked(
     (12), which holds today — is never the row suppressed by the cap. The rest are ranked by
     cloud-bill saving desc (then severity, then pattern id). Used by the off-path appendix.
 
-    Grouping is by pattern id EXCEPT for OPT73 and OPT77, each of which is keyed by its
-    own identity (pattern + workflow + jobs).
+    Grouping is by pattern id EXCEPT for OPT73, OPT77 and OPT79, each of which is keyed
+    by its own identity (pattern + workflow + jobs).
 
     OPT73 (the cross-cluster shared-substep floor lever): each finding is a DISTINCT
     lever — its own shared step, its own cluster of jobs in its own workflow, its own
@@ -5512,6 +5512,11 @@ def _group_by_pattern_ranked(
     combined saving advertised beside a partial job list, which is exactly the failure
     the OPT73 case was added for.
 
+    OPT79 (a cache that costs more than it saves) is per JOB: one workflow can carry two
+    net-negative caches, each with its own measured hit/miss comparison, its own runner
+    class and its own re-key-or-remove edit. Folded by pattern, one job's evidence would
+    be advertised beside both jobs' minutes.
+
     Distinct levers therefore render as their own rows; identical ones (same workflow +
     same jobs) still fold. The displayed `pat` stays the bare pattern id."""
     groups: dict[Any, list[dict[str, Any]]] = {}
@@ -5519,10 +5524,10 @@ def _group_by_pattern_ranked(
     order: list[Any] = []
     for f in findings:
         pat = str(f.get("pattern", "") or "?")
-        # OPT73 and OPT77 levers are distinct per cluster / per consolidated group,
-        # not fungible occurrences of one recipe — see docstring.
+        # OPT73, OPT77 and OPT79 levers are distinct per cluster / per consolidated
+        # group / per job, not fungible occurrences of one recipe — see docstring.
         key: Any = pat
-        if pat in ("OPT73", "OPT77"):
+        if pat in ("OPT73", "OPT77", "OPT79"):
             key = (pat, str(f.get("workflow_file", "")),
                    tuple(f.get("affected_jobs") or ()))
         if key not in groups:
@@ -5652,9 +5657,10 @@ def _tier2_cert_summary(f: dict[str, Any]) -> str:
     if proof == "below_cluster_floor" and margin is not None:
         # HISTORICAL TOKEN for OPT77: its margin is measured against the tallest
         # job that REMAINS after the consolidation, not the workflow's cluster
-        # floor. The token is shared with OPT65, whose cluster-floor comparison is
-        # genuine, so it stays as the dispatch key; the certificate's own `ref`
-        # (appended below) names what each one was actually compared against.
+        # floor. The token is shared with OPT65 and OPT79, whose cluster-floor
+        # comparisons are genuine, so it stays as the dispatch key; the
+        # certificate's own `ref` (appended below) names what each one was
+        # actually compared against.
         msg = f"`below_cluster_floor` with {_clock(margin)} margin"
     elif proof == "post_completion_waste":
         msg = "`post_completion_waste` - compute burned after the run signal is already decided"

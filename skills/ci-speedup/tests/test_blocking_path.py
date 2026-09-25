@@ -4969,6 +4969,27 @@ def test_also_noticed_distinct_opt73_levers_render_as_separate_rows():
     assert body.count("<summary>") == 2
 
 
+
+def test_also_noticed_distinct_opt79_caches_render_as_separate_rows():
+    # OPT79 is per JOB: one workflow can carry two net-negative caches, each with its
+    # own measured hit/miss comparison, its own runner class and its own re-key-or-remove
+    # edit. Folded by pattern id (the default), one job's evidence would be advertised
+    # beside BOTH jobs' minutes and the prompt would name only the first job — the same
+    # failure the OPT73 and OPT77 cases above exist for.
+    def _f(fid, job, waste, rm):
+        return {"pattern": "OPT79", "title": "A Cache That Costs More Than It Saves",
+                "id": fid, "workflow_file": ".github/workflows/ci.yml", "line": 0,
+                "affected_jobs": [job], "wall_clock_p50_s": 0.0,
+                "runner_min_saving": rm, "severity": "MEDIUM",
+                "evidence": f"on `{job}` the cache block is {waste}s slower on hit runs"}
+
+    lines, n, _ = bp._also_noticed_block([_f("f1", "deps", 19, 400.0),
+                                          _f("f2", "docs", 7, 90.0)], "http://cat")
+    body = "\n".join(lines)
+    assert n == 2
+    assert body.count("<summary>") == 2
+    assert "`deps`" in body and "`docs`" in body
+
 def test_also_noticed_bill_only_group_evidence_covers_all_listed_jobs():
     # Regression (OPT12-style bill-only aggregate): a bill-only "Also noticed" group folds
     # multiple FUNGIBLE occurrences of one fix recipe into ONE row whose displayed magnitude

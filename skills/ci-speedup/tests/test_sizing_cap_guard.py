@@ -314,15 +314,17 @@ def test_opt19_cap_respects_physical_bound():
 # class-wide guard can't go blind to a detector added later.
 _RUNTIME_MEASURED_COVERED = {"OPT19", "OPT24", "OPT25", "OPT49", "OPT50", "OPT51"}
 # OPT46/OPT47/OPT64 are run-elimination bill levers, OPT65 is exact billing
-# rounding waste below the cluster floor, and OPT77 credits removed setup
+# rounding waste below the cluster floor, OPT77 credits removed setup
 # payments for a consolidation that must project below the tallest job that
 # REMAINS after it (not the cluster floor, which the group's own members help
-# define): wall_clock is always 0/None, so there is no positive wall-clock
-# bound to cap.
+# define), and OPT79 credits the measured excess of a cache block on hit runs
+# over the same block on miss runs, for a job its own candidate gate already
+# required to sit below the cluster floor: wall_clock is always 0/None, so
+# there is no positive wall-clock bound to cap.
 # Their runner-minute/bill-minute sizing is covered by
 # test_tier2_wave1_detectors.py.
 _MEASURED_EXEMPT = {
-    "OPT43", "OPT48", "OPT46", "OPT47", "OPT64", "OPT65", "OPT77",
+    "OPT43", "OPT48", "OPT46", "OPT47", "OPT64", "OPT65", "OPT77", "OPT79",
 }  # queue/advisory/bill-only
 
 

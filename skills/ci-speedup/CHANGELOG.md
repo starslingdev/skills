@@ -13,6 +13,35 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-09-25** — **The audit can now say a cache is costing you time, not just
+  that one is missing.** Every caching pattern in the catalog until now said "add a
+  cache"; none could see the case where restoring a cache takes longer than the
+  install it was meant to shorten, so a repo paying for a slow restore on every hit
+  got told its caching was fine. New catalog pattern OPT79 measures both sides from
+  the repo's own runs: for a job whose workflow file declares a cache-restore step
+  followed by a dependency install, the sampled runs are split into cache HITs and
+  cache MISSes by the verbatim cache line in each run's log, and the same three
+  steps — restore, install, and the cache's post save — are timed on both. When the
+  hit path is measurably slower, the finding says so, quotes the log line behind
+  every run's verdict, names the runner class the comparison was made on, and
+  credits the excess in runner-minutes. The fix it hands over is re-key or narrow
+  the cache first and re-measure; removing the cache is the second option, and the
+  prompt states plainly that removing it makes the miss-path numbers what every run
+  pays. It never says "just delete it", and it never buys the saving by installing
+  less. It withholds — visibly, with a per-gate tally on every run — unless the job
+  declares exactly one cache followed by an install, at least three hit runs and
+  three miss runs are classified from their logs, every credited run is on the same
+  runner label, the hit path is slower by at least 5 seconds or 20%, the cache hits
+  on at least a quarter of classified runs, and the job sits below the workflow's
+  slowest-but-one job. A run whose log shows both a hit and a miss (a job with two
+  caches) is excluded, never guessed. It credits no wall-clock time: on the job
+  that sets the merge gate the pattern withholds rather than size a speedup it
+  cannot yet prove. Reading the logs is the one new cost, and it is capped at eight
+  runs of one job and two jobs per workflow, spent on the most expensive candidate
+  first. A repo that acts on this finding will still be marked down by ci-score's
+  dependency-caching check, which reads configuration only; reconciling the two is
+  an open decision, not a behaviour either skill implements today. (#PENDING)
+
 - **2026-09-24** — **The "slow test suite re-loading the app" diagnosis is now a
   catalogued, guarded lever (OPT78), and it no longer tells a repo to apply a
   change it has already applied.** The audit already noticed a vitest long pole

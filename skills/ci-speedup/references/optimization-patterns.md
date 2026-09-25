@@ -34,7 +34,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 12. Build Caching (Language-Agnostic) · 13. Hidden Failures and Dead Config ·
 14. Structural / Critical-Path Levers
 
-- **Category 1 — Caching** (`OPT1`–): tool installs, build/test caches, dynamic cache keys.
+- **Category 1 — Caching** (`OPT1`–): tool installs, build/test caches, dynamic cache keys, and the one pattern pointed the other way — a cache measured to cost more than it saves (`OPT79`).
 - **Category 2 — Redundancy**: duplicate env, repeated setup sequences, redundant build steps, repeated fixed setup across independent small jobs (`OPT77`).
 - **Category 3 — Docker**: sleep-based readiness, over-broad `compose up`.
 - **Category 4 — Parallelization**: needless `needs:` serialization, unsharded long jobs.
@@ -357,6 +357,178 @@ title_template: "Tool-Specific Cache Flag Not Enabled"
 ---
 
 ---
+
+### OPT79 — A Cache That Costs More Than It Saves
+
+<!-- METADATA
+pattern: OPT79
+impact: MEDIUM
+class: data-driven
+detector: actions-job-net-negative-cache
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: cache-costs-more-than-it-saves
+title_template: "A Cache That Costs More Than It Saves"
+-->
+
+**Anti-pattern**: A job restores a dependency cache and then installs
+dependencies, and restoring the cache takes longer than the install it was meant
+to shorten. The archive is large, it comes off a network store, it has to be
+decompressed onto the runner's disk, and the install it replaces would have
+resolved most of its work from a warm local store anyway. Every other caching
+entry in this catalog says *add a cache*; this is the one that says the cache you
+already have is costing you time, and it only ever says so from measurement.
+
+```
+before (cache hit):   restore 28s  →  install 3s   →  post-save 0s   = 31s
+before (cache miss):  restore  1s  →  install 7s   →  post-save 4s   = 12s
+after  (no cache):                    install 7s                     =  7s
+```
+
+*(Illustrative shape only. The rendered finding always quotes this repo's own
+measured numbers.)* The one public write-up this pattern was drawn from reports a
+`node_modules` cache hit restoring in about 28 seconds against about 7.5 seconds
+for a filtered install, and the cache being removed as a result —
+<https://linear.app/now/ci-bottleneck-reworked>. That is cited as somebody else's
+result, never as this skill's sizing: no OPT79 finding ever renders a number that
+did not come from the audited repository's own runs.
+
+**Detection heuristic**: measured, and every gate fails closed. The constants
+named here are the detector's constants, not restatements of them.
+
+1. From the **workflow file** (never from the observed step list), the job must
+   declare exactly **one** cache-restore step — `actions/cache`,
+   `actions/cache/restore`, or an `owner/setup-*` action with a `cache:` input
+   set to anything other than `false` / `no` / `off` — followed by an **install**
+   step. The install verbs are the install alternatives of the shared setup
+   classifier and nothing else: `npm|pnpm|yarn|bun ci|install|i`,
+   `pip|pip3|pipenv|poetry|uv install|sync`, `uv pip install`,
+   `python -m pip install`, `bundle install`, `composer install`,
+   `mix deps.get`, `go mod download`, `cargo fetch`, `mvn dependency:`. Checkout,
+   configure and the cache step itself are setup but are not installs, and
+   pairing a cache with one of them would price an unrelated block. Two cache
+   steps in the job withholds: the log's hit line could belong to either.
+2. The job must resolve to exactly **one** job in the workflow YAML by name (an
+   interpolated matrix leg resolves to none; a name carried by more than one job
+   in a single run is not one job), and to one known per-minute-billed runner
+   label.
+3. Across the sampled runs, each occurrence's log is classified **HIT** or
+   **MISS** by the **verbatim cache line** — the same two matchers the rest of
+   the cache family reads — never by a duration. A log showing **both** lines is
+   a job with more than one cache: it is **excluded and counted**, never guessed.
+   At least **3 hits and 3 misses** are required; a comparison with one side
+   unmeasured is the shape-assumption the evidence guards forbid.
+4. Every credited occurrence must have run on the **same runner label**. A hit on
+   a slow runner against a miss on a fast one is not a cache comparison.
+5. Both paths measure the **same three steps** — restore + install + the post
+   save — identified in step 1 and summed per run. A step the run did not time
+   counts as **0s**: GitHub stamps step timestamps at one-second granularity and
+   drops a sub-second step from the timing data entirely, so reading the step set
+   from what happened to be timed would let that noise change *which* steps are
+   being compared. The block's p50 over the hit runs must exceed its p50 over the
+   miss runs by at least **max(5s, 20% of the miss path)** — a named floor, so a
+   one-second "loss" never renders as a finding.
+6. The **hit share** across the classified runs must be at least **0.25**. A
+   cache that almost never hits has a key-entropy problem, which OPT6 and OPT8
+   own; route there rather than report the same cache twice.
+7. The job's measured p50 must sit **strictly below the workflow's cluster
+   floor**. See *Why this credits no wall-clock time* below.
+
+Job logs are the expensive call in this engine, so the probe is capped twice: at
+most **8** sampled occurrences of one job, and at most **2** candidate jobs per
+workflow, ranked by measured job p50 so the budget is spent where a net-negative
+cache costs most. Every other gate is answered from data already in hand, so no
+log is fetched for a job that could not produce a finding.
+
+**Sizing (measured)**:
+
+```
+waste_s     = p50(cache block | HIT runs) − p50(cache block | MISS runs)
+hit_share   = hits / (hits + misses)                       [classified runs only]
+runner_min  = waste_s × hit_share × effective_monthly / 60
+```
+
+`effective_monthly` is the workflow's 30-day volume for the sampled event scope,
+scaled by how often this job actually ran in the sample, so a conditional job is
+not billed at the whole workflow's frequency. `sizing_basis = "measured"`.
+
+The credited figure is a **lower bound** on what removing the cache would save:
+the miss path it is measured against still pays the restore step and the post
+save today, and both disappear with the cache.
+
+**Why this credits no wall-clock time.** `wall_clock_p50_s` is always 0, and the
+candidate gate requires the job to sit strictly below the workflow's cluster
+floor — which is exactly what makes that zero true and re-derivable, and is the
+finding's `below_cluster_floor` neutrality certificate. A net-negative cache on
+the workflow's **long pole** is a genuine wall-clock lever, but sizing it needs
+the floor cascade the measurement spine owns, so the pattern **withholds** there
+for now rather than guess. That withhold is counted like every other, so the
+coverage hole is visible in each run's `opt79_withheld_by_gate` tally instead of
+looking like "nothing to report".
+
+**Fix**: in this order, and never "just delete it".
+
+1. **Re-key or narrow, then re-measure.** A restore is usually slow because the
+   archive is big. Cache the package manager's **store** (`~/.pnpm-store`,
+   `~/.npm`, `~/.cache/uv`, the Go or Cargo module cache) instead of an expanded
+   `node_modules` tree for a whole workspace, or scope the cache — and the
+   install — to the package this job actually needs (pairs with OPT54's filtered
+   install and OPT8's key granularity). Re-run the audit; the comparison above is
+   the acceptance test.
+2. **Remove the cache step and its post save** — only once a narrowed install is
+   already faster than any restore. State plainly what this does: the miss path
+   becomes the **only** path, so the miss-path numbers in the evidence are what
+   every run will pay from then on. That is the trade the measurement says is
+   worth making, and it is worth re-measuring after any change to the dependency
+   graph.
+
+**Runner-class caveat**: the comparison is valid for the runner class it was
+measured on, and the finding names that label. A runner with slower disk or
+faster network can flip the result, so do not carry the conclusion to another job
+or another runner without re-measuring there.
+
+**No-weakening caveat**: the saving must never be bought by narrowing what the
+install installs, by dropping the step the cache feeds, or by skipping the
+install on some runs. Those reduce what CI verifies; this pattern is about paying
+less for the same work.
+
+**ci-score interaction**: ci-score's *Dependency caching* check reads
+configuration only and has no run history, so a repo that measured its cache,
+found it net-negative and removed it will still be docked that point — the
+measurement lives here, in the ci-speedup report, and reconciling the two is an
+open owner decision rather than an engine behaviour either skill implements
+today.
+
+**Tier-2 render note**: OPT79 promotes only with measured evidence and a
+neutrality certificate whose `proof` token is `below_cluster_floor` — which for
+this pattern is **literal**: the credited job's own p50 is below the workflow's
+cluster floor, and the margin is that difference. The finding must stamp
+`wall_clock_p50_s=0`, `sizing_basis=measured`, the two-path model in
+`measured_signal`, and a structured `cache_net_negative` block that lets
+`verify_report.py` re-derive the credited minutes and the margin without reading
+one number as an answer. Every key below is hard-required by that re-derivation:
+
+| key | what it carries |
+|---|---|
+| `job` | the credited job; must be the finding's only `affected_jobs` entry |
+| `runner_label` | the one runner class every credited run ran on |
+| `restore_step` / `install_step` / `post_step` | the three steps, as named in the YAML, that both paths measure |
+| `per_run[]` | one row per credited run: its `status`, the **verbatim** `log_line` that verdict came from, its `runner_label`, and `restore_s` / `install_s` / `post_s` / `block_s` |
+| `hits` / `misses` / `classified_runs` / `ambiguous_runs` | the populations, and the multi-cache runs excluded from them |
+| `hit_path_p50_s` / `miss_path_p50_s` / `waste_s` / `waste_floor_s` | the two medians, their difference, and the floor it had to clear |
+| `hit_share` | `hits / classified_runs` |
+| `job_runs` / `sampled_successful_run_count` / `monthly_volume` / `effective_monthly_volume` | the scaling; `classified_runs` can never exceed `job_runs`, which can never exceed the sampled run count |
+| `runner_min_saving` | restated inside the block and checked against the finding's own |
+
+The re-derivation recomputes each row's `block_s` from its three parts, re-reads
+every row's quoted line against the hit and miss matchers (a row labelled `hit`
+whose line says the cache was not found is a failure, and so is a row quoting
+both), recomputes both medians, the waste, the floor, the hit share, the
+effective volume and the credited minutes, and re-derives the margin from
+`per_workflow_timing`. A tampered number anywhere in that chain reddens the
+report.
+
+---
+
 
 ### OPT11 — Redundant Environment Variables
 
@@ -3121,7 +3293,7 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76 and OPT77 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77 and OPT79 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. On real repos almost every hygiene hit moves **~0 developer
