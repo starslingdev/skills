@@ -810,17 +810,17 @@ def test_opt65_monthly_volume_matches_critical_path_event_scope():
             return {"total_count": 7}
 
     client = Client()
-    out = cr._opt65_monthly_volume_for_scope(
+    out = cr._tier2_monthly_volume_for_scope(
         client, "owner/repo", 123, {"event_scope": "pull_request"}, 99,
         observed_events={"pull_request", "schedule"})
     assert out == 7
     assert "event=pull_request" in client.endpoint
     client.endpoint = ""
-    assert cr._opt65_monthly_volume_for_scope(
+    assert cr._tier2_monthly_volume_for_scope(
         client, "owner/repo", 123, {"event_scope": "pull_request"}, 99,
         observed_events={"pull_request"}) == 99
     assert client.endpoint == ""
-    assert cr._opt65_monthly_volume_for_scope(
+    assert cr._tier2_monthly_volume_for_scope(
         client, "owner/repo", 123, {"event_scope": "all-events"}, 99) == 99
 
 
@@ -2500,7 +2500,1045 @@ def test_opt65_custom_runner_label_is_never_credited():
     # self-hosted label must resolve None (base skipped), never credit "measured"
     # waste that may not exist on that runner's (unknown) billing.
     crit = {"job_runner": {"t (1)": "my-custom-box"}, "job_p50": {"t (1)": 5.0}}
-    assert cr._rounding_job_runner("t (1)", crit) is None
+    assert cr._billed_job_runner("t (1)", crit) is None
     for lbl in ("ubuntu-latest", "windows-2022", "macos-14", "starsling-ubuntu-24.04-8"):
         crit = {"job_runner": {"t (1)": lbl}, "job_p50": {"t (1)": 5.0}}
-        assert cr._rounding_job_runner("t (1)", crit) == lbl
+        assert cr._billed_job_runner("t (1)", crit) == lbl
+
+
+# ============ OPT77 repeated fixed setup across independent small jobs ============
+#
+# The motivating shape: N independent checks in one workflow, each starting a
+# runner, checking out and installing before a few seconds of real work.
+# Consolidating them into ONE job removes (N-1) payments of that setup prefix.
+# Nothing here claims a speedup — every case pins `wall_clock_p50_s == 0.0`.
+
+def _setup_job(name, setup_s, work_s, runner="ubuntu-latest"):
+    """A job whose step timeline is a leading setup prefix then one work step."""
+    t = 0.0
+
+    def _stamp(offset):
+        m, s = divmod(int(offset), 60)
+        return f"2026-06-01T00:{m:02d}:{s:02d}Z"
+
+    steps = []
+    half = setup_s / 2.0
+    for step_name, dur in (("Set up job", half),
+                           ("Run actions/checkout@v4", setup_s - half),
+                           ("Run tests", work_s)):
+        steps.append({"name": step_name, "number": len(steps) + 1,
+                      "started_at": _stamp(t), "completed_at": _stamp(t + dur)})
+        t += dur
+    return {
+        "name": name,
+        "started_at": _stamp(0),
+        "completed_at": _stamp(setup_s + work_s),
+        "labels": [runner],
+        "steps": steps,
+    }
+
+
+_OPT77_NAMES = ("lint", "typecheck", "audit")
+
+
+def _opt77_run(setup_s=80.0, work_s=10.0, runner="ubuntu-latest", names=_OPT77_NAMES):
+    return [_setup_job(n, setup_s, work_s, runner) for n in names]
+
+
+def _opt77_crit(*, floor=600.0, setup_s=80.0, work_s=10.0, runner="ubuntu-latest",
+                names=_OPT77_NAMES):
+    job_p50 = {n: setup_s + work_s for n in names}
+    # A real workflow has something besides the candidate checks, and the
+    # consolidated job is measured against the tallest job that REMAINS after the
+    # consolidation — so the fixture carries one. At `floor` it plays the part the
+    # old cluster-floor comparison played, keeping these cases' margins unchanged.
+    job_p50["test"] = floor
+    return {
+        "floor_p50": floor,
+        "long_pole_p50": floor + 60.0,
+        "job_p50": job_p50,
+        "job_runner": dict({n: runner for n in names}, test=runner),
+        "runner_scope": runner,
+    }
+
+
+def _opt77_wf(names=_OPT77_NAMES, needs=None):
+    jobs = {n: {"runs-on": "ubuntu-latest"} for n in names}
+    for key, parents in (needs or {}).items():
+        jobs[key]["needs"] = parents
+    return {"on": {"pull_request": {}}, "jobs": jobs}
+
+
+def _opt77(jpr=None, crit=None, wf=None, monthly=100):
+    return cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", jpr if jpr is not None else [_opt77_run(), _opt77_run()],
+        crit or _opt77_crit(), wf if wf is not None else _opt77_wf(), monthly, 0)
+
+
+def test_opt77_promotes_measured_setup_consolidation():
+    out = _opt77()
+    assert len(out) == 1
+    f = out[0]
+    assert f["pattern"] == "OPT77"
+    assert f["affected_jobs"] == ["audit", "lint", "typecheck"]
+    assert f["wall_clock_p50_s"] == 0.0
+    assert f["sizing_basis"] == "measured"
+    assert f["realization"] == "none"
+    # 2 sampled runs x (3-1) removed setups x 80s = 320s = 5.333 min sampled,
+    # scaled by 100/2 = 50  ->  266.7 runner-min/mo.
+    assert f["runner_min_saving"] == 266.7
+    sc = f["setup_consolidation"]
+    assert sc["kind"] == "opt77_repeated_setup"
+    assert sc["credited_jobs"] == ["audit", "lint", "typecheck"]
+    assert sc["removed_setup_payments"] == 2
+    assert sc["setup_p50_s"] == 80.0
+    assert sc["projected_consolidated_p50_s"] == 90.0
+    assert sc["occurrences"] == 2
+    assert f["tier2_neutrality"]["proof"] == "below_cluster_floor"
+    assert f["tier2_neutrality"]["margin_s"] == 510.0
+    # The recipe's concurrency precondition must be stated in the size note, with
+    # the sequential cost named — a serial consolidation costs setup + SUM(work).
+    assert "concurrently" in f["size_note"].lower()
+    assert "sequential" in f["size_note"].lower()
+    assert "required status check" in f["guardrail"]
+
+
+def test_opt77_needs_at_least_three_independent_jobs():
+    two = ("lint", "typecheck")
+    assert _opt77(
+        jpr=[_opt77_run(names=two), _opt77_run(names=two)],
+        crit=_opt77_crit(names=two), wf=_opt77_wf(names=two)) == []
+
+
+def test_opt77_requires_one_known_billed_runner_across_the_group():
+    run = _opt77_run()
+    run[2]["labels"] = ["windows-latest"]
+    crit = _opt77_crit()
+    crit["job_runner"]["audit"] = "windows-latest"
+    assert _opt77(jpr=[run, run]) == []          # observed label disagrees with crit
+    assert _opt77(crit=crit) == []               # declared labels disagree
+    assert _opt77(jpr=[_opt77_run(runner="self-hosted"), _opt77_run(runner="self-hosted")],
+                  crit=_opt77_crit(runner="self-hosted")) == []
+
+
+def test_opt77_withholds_when_a_needs_edge_links_the_group():
+    wf = _opt77_wf(needs={"audit": ["lint"]})
+    assert _opt77(wf=wf) == []
+    # Indirect edges count too: audit -> typecheck -> lint is still not a
+    # consolidatable set of independent jobs.
+    wf = _opt77_wf(needs={"typecheck": "lint", "audit": ["typecheck"]})
+    assert _opt77(wf=wf) == []
+
+
+def test_opt77_requires_setup_to_dominate_useful_work():
+    # 20s setup against 200s of useful work: consolidating saves almost nothing
+    # relative to what these jobs actually do, so the pattern must not fire.
+    jpr = [_opt77_run(setup_s=20.0, work_s=200.0),
+           _opt77_run(setup_s=20.0, work_s=200.0)]
+    assert _opt77(jpr=jpr, crit=_opt77_crit(setup_s=20.0, work_s=200.0)) == []
+
+
+def test_opt77_withholds_when_the_consolidated_job_reaches_the_tallest_remaining_job():
+    # setup 80s + max useful 10s = 90s projected. The fixture's `test` job — the
+    # tallest job that REMAINS once the group is consolidated — is also 90s, so
+    # the merge gate would not stay strictly longer than the consolidated job.
+    assert _opt77(crit=_opt77_crit(floor=90.0)) == []
+
+
+def test_opt77_requires_jobs_resolvable_to_independent_yaml_jobs():
+    # No workflow YAML -> the independence gate cannot be evaluated -> withhold.
+    assert _opt77(wf={}) == []
+    # A matrix leg's display name resolves to no YAML job of that name.
+    legs = ("check (a)", "check (b)", "check (c)")
+    assert _opt77(jpr=[_opt77_run(names=legs), _opt77_run(names=legs)],
+                  crit=_opt77_crit(names=legs),
+                  wf={"jobs": {"check": {"runs-on": "ubuntu-latest"}}}) == []
+
+
+def test_opt77_requires_monthly_volume():
+    assert _opt77(monthly=0) == []
+    assert _opt77(monthly=None) == []
+
+
+def test_opt77_is_wired_into_collect():
+    import inspect
+    assert "_detect_opt77_repeated_setup_across_small_jobs(" in inspect.getsource(cr.collect)
+
+
+def _setup_job_named(name, setup_steps, work_s, runner="ubuntu-latest"):
+    """A job whose leading setup prefix is the GIVEN named steps, then one work step."""
+    t = 0.0
+
+    def _stamp(offset):
+        m, s = divmod(int(offset), 60)
+        return f"2026-06-01T00:{m:02d}:{s:02d}Z"
+
+    steps = []
+    for step_name, dur in list(setup_steps) + [("Run tests", work_s)]:
+        steps.append({"name": step_name, "number": len(steps) + 1,
+                      "started_at": _stamp(t), "completed_at": _stamp(t + dur)})
+        t += dur
+    return {"name": name, "started_at": _stamp(0), "completed_at": _stamp(t),
+            "labels": [runner], "steps": steps}
+
+
+_OPT77_DISTINCT_SETUPS = {
+    # Same runner, same setup DURATION, same useful work — but three different
+    # toolchains. A consolidation still has to install all three, so only the
+    # shared `Set up job` + checkout is actually removable.
+    "lint": [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+             ("Run actions/setup-node@v4", 15.0), ("Install npm dependencies", 50.0)],
+    "typecheck": [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+                  ("Run actions/setup-python@v5", 15.0), ("Install pip requirements", 50.0)],
+    "audit": [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+              ("Run actions/setup-go@v5", 15.0), ("Install go modules", 50.0)],
+}
+
+
+def _opt77_distinct_run(work_s=10.0, runner="ubuntu-latest"):
+    return [_setup_job_named(n, s, work_s, runner)
+            for n, s in _OPT77_DISTINCT_SETUPS.items()]
+
+
+def test_opt77_withholds_when_the_setup_prefixes_are_not_the_same_work():
+    """Jobs are grouped by runner label, so three checks with entirely DIFFERENT
+    dependency installs (node / python / go) can land in one group. Consolidating
+    them removes nothing but the one shared checkout — every distinct install must
+    still run. Crediting `(N-1) x setup_p50` there overstates the removable
+    runner-minutes, and projecting `max(setup) + max(useful)` understates the
+    consolidated job, so the neutrality guard can pass when the real consolidated
+    job would overrun the tallest job that remains. The finding must be
+    WITHHELD."""
+    names = tuple(_OPT77_DISTINCT_SETUPS)
+    jpr = [_opt77_distinct_run(), _opt77_distinct_run()]
+    crit = _opt77_crit(setup_s=80.0, work_s=10.0, names=names)
+    assert _opt77(jpr=jpr, crit=crit, wf=_opt77_wf(names=names)) == []
+
+
+def test_opt77_still_fires_when_every_job_shares_one_setup_prefix():
+    """The complement of the gate above: an identical prefix across the group is
+    exactly the shape the saving model is valid for, and must still be credited."""
+    shared = [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+              ("Run actions/setup-node@v4", 15.0), ("Install npm dependencies", 50.0)]
+    names = ("lint", "typecheck", "audit")
+    jpr = [[_setup_job_named(n, shared, 10.0) for n in names] for _ in range(2)]
+    out = _opt77(jpr=jpr, crit=_opt77_crit(setup_s=80.0, work_s=10.0, names=names),
+                 wf=_opt77_wf(names=names))
+    assert len(out) == 1
+    assert out[0]["pattern"] == "OPT77"
+    assert out[0]["wall_clock_p50_s"] == 0.0
+
+
+def test_opt77_door_note_describes_its_own_basis():
+    """Every OPT77 finding stamps `runner_min_door_note`. The generic `measured`
+    branch describes a RUN-ELIMINATION detector whose basis is an eliminated-runs /
+    prior-attempt slice — which OPT77 is not, and does not use. Shipping that string
+    on an OPT77 finding is provenance text that misdescribes the number beside it."""
+    policy, reason = cr._rm_door_policy("OPT77")
+    assert policy == cr._RM_DOOR_NOT_DERIVABLE
+    low = reason.lower()
+    assert "run-elimination" not in low
+    assert "eliminated runs" not in low
+    assert "prior-attempt" not in low
+    assert "setup" in low
+
+
+def test_opt77_guardrail_reaches_the_copy_paste_agent_prompt():
+    """The rendered agent prompt is the artifact that performs the fix, and it is
+    built to be self-contained: `_tier2_guardrail_sentence` lifts the note's text
+    from the literal token GUARDRAIL to the end. Without that token OPT77's prompt
+    ships with no failure mode at all — not the intra-job concurrency requirement
+    (run sequentially the consolidated job costs setup + the SUM of the tasks), not
+    the required-status-check rename, not the lost failure isolation — and it never
+    names which jobs to merge."""
+    import importlib.util as _ilu
+    import pathlib as _pl
+    _bp_path = _pl.Path(cr.__file__).with_name("blocking_path.py")
+    _spec = _ilu.spec_from_file_location("_bp_for_opt77", _bp_path)
+    bp = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(bp)
+
+    out = _opt77()
+    assert len(out) == 1
+    sentence = bp._tier2_guardrail_sentence(out[0])
+    assert sentence, "OPT77's note carries no GUARDRAIL token, so the prompt has none"
+    low = sentence.lower()
+    assert "concurrent" in low            # the requirement
+    assert "sum" in low                   # and WHY it is load-bearing
+    assert "required status check" in low  # branch protection must be updated
+    assert "re-run" in low                # the failure-isolation trade
+    for name in _OPT77_NAMES:             # the group the fix must actually merge
+        assert name in sentence
+
+
+def test_opt77_withholds_a_job_name_that_is_not_one_job():
+    """`_consolidation_yaml_key` resolves an observed job name against the YAML.
+    A MATRIX job that declares a static `name:` (no ${{ matrix.* }} in it) renders
+    every leg under that one name, so it resolves to exactly one YAML job and slips
+    past the matrix exclusion — while `split[name]` keeps only the last leg seen, so
+    the credited medians describe one arbitrary leg of a matrix, not an independent
+    job. A name carried by more than one job in a single run is not one job."""
+    names = ("lint", "typecheck", "audit")
+    run = _opt77_run(names=names)
+    # `audit` is a 2-leg matrix with a static name: both legs render as "audit".
+    collided = run + [_setup_job("audit", 80.0, 10.0)]
+    assert _opt77(jpr=[collided, list(collided)],
+                  crit=_opt77_crit(names=names), wf=_opt77_wf(names=names)) == []
+
+
+def test_setup_classifier_counts_an_unnamed_dependency_install():
+    """GitHub names an unnamed `run:` step after its command, so the single largest
+    part of a real setup prefix arrives as `Run npm ci` / `Run pip install -r ...`.
+    Those have to classify as setup: `_leading_setup_prefix` stops at the first
+    non-setup step, so if the install is not setup it is both missing from the
+    measured prefix AND counted as "useful work", which withholds the finding on
+    exactly the shape the pattern exists to report."""
+    for name in ("Run npm ci", "Run pnpm install --frozen-lockfile",
+                 "Run yarn install", "Run pip install -r requirements.txt",
+                 "Run bundle install", "Run poetry install",
+                 "Run go mod download", "Run cargo fetch", "Run composer install"):
+        assert cr._classify_step(name) == "setup", name
+    # …and the widening must not swallow steps that are not setup.
+    for name in ("Run actions/upload-artifact@v4", "Run ./my-composite-action",
+                 "Run npm test", "Run eslint .", "Run docker/build-push-action@v5"):
+        assert cr._classify_step(name) != "setup", name
+
+
+def test_opt77_withholds_when_only_the_projection_reaches_the_tallest_remaining_job():
+    """The projection comparison is this pattern's ENTIRE wall-clock-safety claim,
+    and the homogeneous fixture cannot prove it: there every job p50 equals the
+    projection, so any per-job comparison catches the case too and the projection
+    check could be deleted with the suite still green. This group is heterogeneous
+    — every job p50 (90/102/100) is below the 110s `test` job that remains, yet the
+    CONSOLIDATED job projects to max(setup) + max(useful) = 100 + 40 = 140s, which
+    is not. Nothing but the projection comparison can withhold it: the per-job
+    medians are all comfortably clear. (Two lines enforce it — the strict check and
+    the float-precision margin guard behind it — so deleting either one alone still
+    withholds. This pins the property, not the line.)"""
+    names = ("lint", "typecheck", "audit")
+    spec = {"lint": (80.0, 10.0), "typecheck": (100.0, 2.0), "audit": (60.0, 40.0)}
+    run = [_setup_job(n, s, w) for n, (s, w) in spec.items()]
+    # `test` at 110s is the tallest job that REMAINS after the consolidation, so
+    # it is what the projection is measured against.
+    crit = dict(_opt77_crit(names=names), floor_p50=110.0,
+                job_p50=dict({n: s + w for n, (s, w) in spec.items()}, test=110.0))
+    assert _opt77(jpr=[run, list(run)], crit=crit, wf=_opt77_wf(names=names)) == []
+
+
+def test_opt77_credits_the_smallest_setup_in_a_heterogeneous_group():
+    """The saving is deliberately `(N-1) x the SMALLEST` setup p50 — the conservative
+    floor on what each removed payment was worth. Every other fixture gives the jobs
+    an identical setup, so min == max and flipping one for the other changes nothing.
+    Here the setups differ (80/40/120), so `max` would stamp 120s and roughly triple
+    the credited runner-minutes."""
+    names = ("lint", "typecheck", "audit")
+    spec = {"lint": (80.0, 10.0), "typecheck": (40.0, 10.0), "audit": (120.0, 10.0)}
+    run = [_setup_job(n, s, w) for n, (s, w) in spec.items()]
+    crit = dict(_opt77_crit(names=names), floor_p50=600.0,
+                job_p50=dict({n: s + w for n, (s, w) in spec.items()}, test=600.0))
+    out = _opt77(jpr=[run, list(run)], crit=crit, wf=_opt77_wf(names=names))
+    assert len(out) == 1
+    sc = out[0]["setup_consolidation"]
+    assert sc["setup_p50_s"] == 40.0
+    assert sc["runner_min_saving"] == 133.3
+    assert sc["projected_consolidated_p50_s"] == 130.0
+
+
+def test_opt77_withholds_on_a_needs_chain_through_a_non_credited_job():
+    """Transitive independence, for real. The existing chain fixture links two
+    CREDITED jobs directly, so it never exercises the ancestor walk. Here the chain
+    runs `audit -> build -> lint` through `build`, which is far too big to be a
+    candidate and so never appears in the group — the only thing that can catch it
+    is the transitive walk."""
+    names = ("lint", "typecheck", "audit")
+    wf = _opt77_wf(names=names)
+    wf["jobs"]["build"] = {"runs-on": "ubuntu-latest", "needs": ["lint"]}
+    wf["jobs"]["audit"]["needs"] = ["build"]
+    assert _opt77(wf=wf) == []
+
+
+def test_opt77_credits_only_runs_where_every_job_in_the_group_appeared():
+    """`occurrences` counts runs in which ALL credited jobs ran, because a run where
+    one of them was skipped paid no setup for it and so had no duplicate payment to
+    remove. Counting runs where ANY of them appeared would over-credit."""
+    names = ("lint", "typecheck", "audit")
+    full = _opt77_run(names=names)
+    partial = _opt77_run(names=("lint", "typecheck"))     # `audit` did not run
+    out = _opt77(jpr=[full, partial], crit=_opt77_crit(names=names),
+                 wf=_opt77_wf(names=names))
+    assert len(out) == 1
+    sc = out[0]["setup_consolidation"]
+    assert sc["occurrences"] == 1
+    assert sc["runner_min_saving"] == 133.3
+
+
+def test_setup_classifier_never_reads_a_build_or_test_command_as_setup():
+    """`_classify_step` is the ONE shared definition of a setup step, and OPT49
+    ("Slow Setup Step") and OPT51 (install ratio) consume it too — so a build or
+    test command misread as setup does not just inflate a consolidation, it invents
+    a sized "cache this setup" finding about a step that is neither.
+
+    `mvn install` COMPILES and tests; it is a build, not a dependency install. And
+    an install keyword must be the tool's own subcommand, never a word occurring
+    somewhere later on the line — a test filter naming a `Get*` class, or a spec
+    file called `get_spec.rb`, is not setup."""
+    for name in ("Run mvn install", "Run mvn -B install -DskipTests",
+                 "Run mvn verify", "Run mvn -B test -Dtest=GetUserIT",
+                 "Run gradle test --tests '*.GetSpec'",
+                 "Run gradle build", "Run bundle exec rspec spec/get_spec.rb",
+                 "Run poetry run pytest tests/get_user_test.py",
+                 "Run poetry run python scripts/get_data.py",
+                 "Run npm run download-fixtures"):
+        assert cr._classify_step(name) != "setup", name
+
+
+def test_setup_classifier_recognises_the_remaining_install_idioms():
+    """Complements the negative list above: the tool's own install subcommand still
+    has to classify as setup, including the ones the first pass missed entirely
+    (`mix deps.get` could never match, and `uv sync` is the modern uv idiom)."""
+    for name in ("Run mix deps.get", "Run uv sync", "Run uv pip install -r req.txt",
+                 "Run pipenv install --deploy", "Run npm i --prefer-offline",
+                 "Run python3 -m pip install -r requirements.txt",
+                 "Run mvn dependency:go-offline"):
+        assert cr._classify_step(name) == "setup", name
+
+
+def test_opt77_reports_one_long_job_beside_a_flat_row_of_small_checks():
+    """The motivating shape, which used to be the one shape that could not fire.
+
+    The gate asks "does the merge gate get longer if these jobs are collapsed?",
+    and the gate afterwards is set by the jobs that were NOT touched. Measuring
+    against a floor the group's own members define measures against something the
+    fix removes. Here five equally-sized checks sit beside one 9-minute test job:
+    the second-tallest job in the workflow is itself a group member, so the old
+    comparison rejected every candidate and reported nothing. The consolidated job
+    projects to 90s against the 540s test job that remains."""
+    names = ("lint", "typecheck", "audit", "format-check", "spellcheck")
+    run = [_setup_job(n, 80.0, 10.0) for n in names]
+    job_p50 = {n: 90.0 for n in names}
+    job_p50["test"] = 540.0
+    crit = {"floor_p50": 90.0, "long_pole_p50": 540.0, "job_p50": job_p50,
+            "job_runner": dict({n: "ubuntu-latest" for n in names}, test="ubuntu-latest"),
+            "runner_scope": "ubuntu-latest"}
+    wf = _opt77_wf(names=names)
+    wf["jobs"]["test"] = {"runs-on": "ubuntu-latest"}
+    out = _opt77(jpr=[run, list(run)], crit=crit, wf=wf)
+    assert len(out) == 1, out
+    sc = out[0]["setup_consolidation"]
+    assert sorted(sc["credited_jobs"]) == sorted(names)
+    assert sc["remaining_tallest_job"] == "test"
+    assert sc["remaining_tallest_p50_s"] == 540.0
+    assert sc["projected_consolidated_p50_s"] == 90.0
+    assert out[0]["tier2_neutrality"]["margin_s"] == 450.0
+    assert out[0]["wall_clock_p50_s"] == 0.0
+
+
+def test_opt77_withholds_when_no_job_outside_the_group_is_taller():
+    """The complement: if nothing outside the group is taller than the consolidated
+    job, collapsing the group can only make the consolidated job the new gate.
+    A workflow that is nothing but the candidate checks has no remaining job to
+    measure against at all, and must report nothing rather than guess."""
+    names = ("lint", "typecheck", "audit")
+    run = [_setup_job(n, 80.0, 10.0) for n in names]
+    crit = {"floor_p50": 90.0, "long_pole_p50": 90.0,
+            "job_p50": {n: 90.0 for n in names},
+            "job_runner": {n: "ubuntu-latest" for n in names},
+            "runner_scope": "ubuntu-latest"}
+    assert _opt77(jpr=[run, list(run)], crit=crit, wf=_opt77_wf(names=names)) == []
+    # And a remaining job that is SHORTER than the projection is no protection.
+    crit2 = dict(crit, job_p50=dict({n: 90.0 for n in names}, docs=45.0))
+    wf2 = _opt77_wf(names=names)
+    wf2["jobs"]["docs"] = {"runs-on": "ubuntu-latest"}
+    assert _opt77(jpr=[run, list(run)], crit=crit2, wf=wf2) == []
+
+
+# ==== OPT77 supersedes OPT65 when both describe the same jobs ====
+#
+# The two were described as disjoint because matrix legs never resolve to a
+# single YAML job by name. But OPT65 never required a declared matrix: it groups
+# on a trailing parenthetical in the OBSERVED job name. Three ordinary jobs that
+# happen to be named `lint (eslint)`, `lint (biome)`, `lint (stylelint)` resolve
+# to one YAML job each AND form an OPT65 "matrix base", so both fire on the same
+# three jobs and one edit is reported as two levers.
+
+_OPT65_OVERLAP_NAMES = ("lint (biome)", "lint (eslint)", "lint (stylelint)")
+
+
+def _overlap_run():
+    """Three tiny same-runner checks sharing one setup prefix, beside two taller
+    jobs so there is something for the consolidation to be measured against."""
+    return [_setup_job(n, 14.0, 6.0) for n in _OPT65_OVERLAP_NAMES]
+
+
+def _overlap_crit():
+    p50 = {n: 20.0 for n in _OPT65_OVERLAP_NAMES}
+    p50["build"] = 300.0
+    p50["test"] = 540.0
+    return {"floor_p50": 300.0, "long_pole_p50": 540.0, "job_p50": p50,
+            "job_runner": {n: "ubuntu-latest" for n in p50},
+            "runner_scope": "ubuntu-latest"}
+
+
+def _overlap_wf():
+    jobs = {n.replace(" ", "-").replace("(", "").replace(")", ""): {
+        "runs-on": "ubuntu-latest", "name": n} for n in _OPT65_OVERLAP_NAMES}
+    jobs["build"] = {"runs-on": "ubuntu-latest"}
+    jobs["test"] = {"runs-on": "ubuntu-latest"}
+    return {"on": {"pull_request": {}}, "jobs": jobs}
+
+
+def test_both_levers_really_do_fire_on_the_same_three_plain_jobs():
+    """The premise of the supersede rule, pinned so it cannot quietly stop being
+    true: these are plain jobs, not a matrix, and both detectors claim them."""
+    runs = [_overlap_run(), _overlap_run()]
+    crit, wf = _overlap_crit(), _overlap_wf()
+    o65 = cr._detect_opt65_billing_rounding_waste("ci.yml", runs, crit, 100, 0)
+    o77 = cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", runs, crit, wf, 100, 0)
+    assert len(o65) == 1, o65
+    assert len(o77) == 1, o77
+    assert sorted(o65[0]["affected_jobs"]) == sorted(_OPT65_OVERLAP_NAMES)
+    assert sorted(o77[0]["affected_jobs"]) == sorted(_OPT65_OVERLAP_NAMES)
+
+
+def test_opt77_supersedes_opt65_so_one_edit_is_one_lever():
+    """One edit — merge those three checks into one job — must render as ONE
+    lever. OPT65's round-up minutes are real and go unreported in the overlap,
+    which slightly understates the total; that is accepted deliberately, because
+    OPT77's saving model is raw removed compute and folding a billable-round-up
+    quantity into it would break its measured basis."""
+    runs = [_overlap_run(), _overlap_run()]
+    crit, wf = _overlap_crit(), _overlap_wf()
+    findings = (cr._detect_opt65_billing_rounding_waste("ci.yml", runs, crit, 100, 0)
+                + cr._detect_opt77_repeated_setup_across_small_jobs(
+                    "ci.yml", runs, crit, wf, 100, 1))
+    kept = cr._supersede_opt65_with_opt77(findings)
+    assert [f["pattern"] for f in kept] == ["OPT77"], [f["pattern"] for f in kept]
+
+
+def test_opt65_survives_when_it_describes_different_jobs():
+    """The supersede is scoped to the overlapping job set, not to the pattern:
+    an OPT65 finding about a genuine matrix elsewhere in the workflow is
+    untouched."""
+    o65 = {"id": "f1", "pattern": "OPT65", "workflow_file": "ci.yml",
+           "affected_jobs": ["unit (3.9)", "unit (3.11)", "unit (3.12)"]}
+    o77 = {"id": "f2", "pattern": "OPT77", "workflow_file": "ci.yml",
+           "affected_jobs": list(_OPT65_OVERLAP_NAMES)}
+    kept = cr._supersede_opt65_with_opt77([o65, o77])
+    assert [f["id"] for f in kept] == ["f1", "f2"]
+    # …and a same-named job set in a DIFFERENT workflow is also untouched.
+    other = {"id": "f3", "pattern": "OPT65", "workflow_file": "release.yml",
+             "affected_jobs": list(_OPT65_OVERLAP_NAMES)}
+    kept = cr._supersede_opt65_with_opt77([other, o77])
+    assert [f["id"] for f in kept] == ["f3", "f2"]
+
+
+# ==== what "the same setup prefix" tolerates, and what it must not ====
+#
+# Comparing the prefix as written makes the gate correct but unusably strict:
+# one job pinning `setup-node@v3` while the others are on `@v4`, or one passing
+# `--prefer-offline`, is the SAME setup work and must still group. A different
+# toolchain is not, and must still split. Without a stated contract the lever
+# quietly never fires on a real repo, which is indistinguishable from it working.
+
+def _prefix_variant_fires(first_job_steps):
+    names = ("lint", "typecheck", "audit")
+    base = [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+            ("Run actions/setup-node@v4", 15.0), ("Run npm ci", 50.0)]
+    jobs = [_setup_job_named(names[0], first_job_steps, 10.0)] + [
+        _setup_job_named(n, base, 10.0) for n in names[1:]]
+    crit = _opt77_crit(names=names)
+    return bool(_opt77(jpr=[jobs, list(jobs)], crit=crit, wf=_opt77_wf(names=names)))
+
+
+def test_opt77_tolerates_version_and_flag_churn_within_one_setup_prefix():
+    """A pinned-action bump and an extra command flag are not different setup."""
+    assert _prefix_variant_fires(
+        [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+         ("Run actions/setup-node@v4", 15.0), ("Run npm ci", 50.0)]), "control"
+    assert _prefix_variant_fires(
+        [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+         ("Run actions/setup-node@v3", 15.0), ("Run npm ci", 50.0)]), "action version bump"
+    assert _prefix_variant_fires(
+        [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+         ("Run actions/setup-node@v4", 15.0),
+         ("Run npm ci --prefer-offline --no-audit", 50.0)]), "extra command flags"
+
+
+def test_opt77_still_splits_on_genuinely_different_setup_work():
+    """The complement, and the reason the gate exists at all: a different
+    toolchain, a different thing being installed, or an extra step are different
+    setup work, and must not be merged into one credited group."""
+    assert not _prefix_variant_fires(
+        [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+         ("Run actions/setup-python@v5", 15.0),
+         ("Run pip install -r requirements.txt", 50.0)]), "different toolchain"
+    assert not _prefix_variant_fires(
+        [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+         ("Run actions/setup-node@v4", 15.0),
+         ("Run npm ci frontend/package.json", 50.0)]), "different install target"
+    assert not _prefix_variant_fires(
+        [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+         ("Run actions/cache@v4", 3.0), ("Run actions/setup-node@v4", 15.0),
+         ("Run npm ci", 47.0)]), "an extra step is a different prefix"
+
+
+# ==== the prefix is a SHAPE, and a zero-second step must not change it ====
+#
+# GitHub stamps step timestamps at ONE-SECOND granularity, so a step that takes
+# under half a second is stamped start == end and measures 0s. `Set up job`, a
+# warm `setup-node`, and a cache restore all do this — in some runs and not
+# others, on byte-identical YAML. Reading the prefix off the TIMED steps only
+# therefore made the prefix's SHAPE depend on jitter: the step vanished, the
+# signature changed length, the "one stable prefix" gate saw two signatures and
+# dropped the job, and the group died. Worse, a job whose `Set up job` is
+# stably 1s while its siblings' are stably 0s was split from them forever.
+#
+# The complement fails the other way: a 0-second NON-setup step between two
+# setup steps also vanished, so the prefix walk never broke on it and reported
+# `checkout → npm ci` as contiguous when a `Run lint` sat between them.
+
+def _jitter_job(name, steps, runner="ubuntu-latest"):
+    """A job built from explicit (step name, duration) pairs — durations may be 0."""
+    t = 0.0
+
+    def _stamp(offset):
+        m, s = divmod(int(offset), 60)
+        return f"2026-06-01T00:{m:02d}:{s:02d}Z"
+
+    out = []
+    for step_name, dur in steps:
+        out.append({"name": step_name, "number": len(out) + 1,
+                    "started_at": _stamp(t), "completed_at": _stamp(t + dur)})
+        t += dur
+    return {"name": name, "started_at": _stamp(0), "completed_at": _stamp(t),
+            "labels": [runner], "steps": out}
+
+
+_JITTER_NAMES = ("lint", "typecheck", "audit")
+
+
+def _jitter_case(per_job_setup_seconds):
+    """Two sampled runs of three jobs; `per_job_setup_seconds[name]` is that job's
+    `Set up job` duration in run 1 and run 2 respectively."""
+    runs = []
+    for run_i in range(2):
+        jobs = []
+        for n in _JITTER_NAMES:
+            boot = per_job_setup_seconds[n][run_i]
+            jobs.append(_jitter_job(n, [
+                ("Set up job", boot),
+                ("Run actions/checkout@v4", 10.0),
+                ("Run actions/setup-node@v4", 15.0),
+                ("Run npm ci", 55.0),
+                ("Run tests", 10.0)]))
+        runs.append(jobs)
+    crit = _opt77_crit(names=_JITTER_NAMES, setup_s=80.0, work_s=10.0)
+    return _opt77(jpr=runs, crit=crit, wf=_opt77_wf(names=_JITTER_NAMES))
+
+
+def test_opt77_survives_one_second_of_step_timestamp_jitter():
+    """Three cases that differ only in sub-second noise must all behave the same."""
+    stable = {n: (1.0, 1.0) for n in _JITTER_NAMES}
+    assert len(_jitter_case(stable)) == 1, "stable 1s boot"
+    jitter = {n: (0.0, 1.0) for n in _JITTER_NAMES}
+    assert len(_jitter_case(jitter)) == 1, "0s/1s boot jitter across runs"
+    split = {"lint": (1.0, 1.0), "typecheck": (0.0, 0.0), "audit": (0.0, 0.0)}
+    assert len(_jitter_case(split)) == 1, "one job stably 1s, siblings stably 0s"
+
+
+def test_opt77_prefix_breaks_on_a_zero_second_non_setup_step():
+    """A 0-second `Run lint` between checkout and `npm ci` ends the prefix. The
+    catalog promises the credited prefix is CONTIGUOUS and leading; reporting
+    `checkout → npm ci` across a work step in the middle breaks that promise."""
+    job = _jitter_job("lint", [
+        ("Set up job", 2.0), ("Run actions/checkout@v4", 3.0),
+        ("Run lint", 0.0), ("Run npm ci", 60.0), ("Run tests", 5.0)])
+    sig, shown, total = cr._leading_setup_prefix(job)
+    assert list(sig) == ["set up job", "actions/checkout"], sig
+    assert total == 5.0, total
+
+
+def test_leading_setup_prefix_counts_only_the_leading_run():
+    """Directly on the helper, and again through the detector: a setup-looking
+    step AFTER the work has started is not part of the fixed prefix a
+    consolidation pays once, so it must not be summed into it."""
+    job = _jitter_job("lint", [
+        ("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+        ("Run tests", 10.0), ("Run actions/cache@v4", 60.0)])
+    sig, _shown, total = cr._leading_setup_prefix(job)
+    assert total == 15.0, total
+    assert list(sig) == ["set up job", "actions/checkout"], sig
+
+
+def test_opt77_prefix_of_purely_human_authored_names_is_not_evidence():
+    """A prefix with no recognizable action and no install command is not
+    evidence that two jobs do the same setup work — and a group formed on the
+    implicit `Set up job` alone shares nothing but runner boot."""
+    runs = [[_jitter_job(n, [("Set up job", 60.0), ("Run tests", 10.0)])
+             for n in _JITTER_NAMES] for _ in range(2)]
+    crit = _opt77_crit(names=_JITTER_NAMES, setup_s=60.0, work_s=10.0)
+    assert _opt77(jpr=runs, crit=crit, wf=_opt77_wf(names=_JITTER_NAMES)) == []
+
+
+def test_opt77_withholds_a_setup_prefix_too_small_to_be_worth_consolidating():
+    """Below an absolute floor the removed payments are noise against the cost of
+    coupling N independently-re-runnable checks into one."""
+    runs = [[_jitter_job(n, [("Set up job", 1.0), ("Run actions/checkout@v4", 2.0),
+                             ("Run tests", 2.0)])
+             for n in _JITTER_NAMES] for _ in range(2)]
+    crit = _opt77_crit(names=_JITTER_NAMES, setup_s=3.0, work_s=2.0)
+    assert _opt77(jpr=runs, crit=crit, wf=_opt77_wf(names=_JITTER_NAMES)) == []
+
+
+def test_opt77_withholds_when_a_prefix_step_is_genuinely_absent_in_one_run():
+    """The complement of the jitter fix: tolerating a 0-second step must not
+    tolerate a step that is not there at all. A cache hit that skipped `npm ci`
+    in run 2 means these jobs have no ONE prefix a consolidation would pay once."""
+    full = [("Set up job", 2.0), ("Run actions/checkout@v4", 10.0),
+            ("Run actions/setup-node@v4", 15.0), ("Run npm ci", 55.0),
+            ("Run tests", 10.0)]
+    hit = [("Set up job", 2.0), ("Run actions/checkout@v4", 10.0),
+           ("Run actions/setup-node@v4", 15.0), ("Run tests", 10.0)]
+    runs = [[_jitter_job(n, full) for n in _JITTER_NAMES],
+            [_jitter_job(n, hit) for n in _JITTER_NAMES]]
+    crit = _opt77_crit(names=_JITTER_NAMES, setup_s=82.0, work_s=10.0)
+    assert _opt77(jpr=runs, crit=crit, wf=_opt77_wf(names=_JITTER_NAMES)) == []
+
+
+def test_opt77_still_fires_when_the_group_shares_a_needs_parent_outside_it():
+    """The independence gate must not be read as "any `needs:` disqualifies".
+    `lint`, `typecheck` and `audit` all waiting on one `build` is the single most
+    common real layout for exactly this shape: none of them is an ancestor of
+    another, so consolidating them changes nothing about what runs when."""
+    names = ("lint", "typecheck", "audit")
+    wf = _opt77_wf(names=names)
+    wf["jobs"]["build"] = {"runs-on": "ubuntu-latest"}
+    for n in names:
+        wf["jobs"][n]["needs"] = ["build"]
+    out = _opt77(wf=wf)
+    assert len(out) == 1, out
+    assert sorted(out[0]["affected_jobs"]) == sorted(names)
+
+
+def test_opt77_withholds_when_a_job_outside_the_group_waits_on_a_member():
+    """A downstream dependent makes the consolidation wall-clock NEGATIVE, and the
+    finding ships `wall_clock_p50_s = 0` with a neutrality certificate. The
+    projection is always at least as tall as the tallest member, so every job that
+    waits on a member starts later; the bare-duration comparison is only valid when
+    nothing downstream is watching."""
+    names = ("lint", "typecheck", "audit")
+    wf = _opt77_wf(names=names)
+    wf["jobs"]["deploy"] = {"runs-on": "ubuntu-latest", "needs": list(names)}
+    assert _opt77(wf=wf) == []
+    # …and transitively, through a job that is not a member either.
+    wf2 = _opt77_wf(names=names)
+    wf2["jobs"]["package"] = {"runs-on": "ubuntu-latest", "needs": ["lint"]}
+    wf2["jobs"]["deploy"] = {"runs-on": "ubuntu-latest", "needs": ["package"]}
+    assert _opt77(wf=wf2) == []
+
+
+def test_opt77_withholds_on_a_dangling_needs_reference():
+    """A `needs:` naming a job the workflow does not declare is dropped by the
+    parent walk, which STRENGTHENS the independence claim on YAML nobody can
+    reason about. Withhold instead."""
+    names = ("lint", "typecheck", "audit")
+    wf = _opt77_wf(names=names)
+    wf["jobs"]["audit"]["needs"] = ["prepare"]      # no `prepare` job exists
+    assert _opt77(wf=wf) == []
+
+
+def test_opt77_withholds_when_the_yaml_setup_steps_diverge():
+    """Two jobs can render the same step NAMES while doing different work: a
+    named `Install dependencies` step with a different `working-directory`, a
+    different `run:` body, or an unnamed `setup-python@v5` with a different
+    `python-version:`. Consolidating removes NEITHER install, so the credit is
+    wrong and the guardrail's "consolidate exactly these jobs" cannot be done."""
+    names = ("lint", "typecheck", "audit")
+    steps = [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+             ("Run actions/setup-python@v5", 15.0), ("Run pip install -r r.txt", 50.0)]
+    runs = [[_setup_job_named(n, steps, 10.0) for n in names] for _ in range(2)]
+    crit = _opt77_crit(names=names, setup_s=80.0, work_s=10.0)
+
+    def _wf_with(steps_by_job):
+        wf = _opt77_wf(names=names)
+        for k, v in steps_by_job.items():
+            wf["jobs"][k]["steps"] = v
+        return wf
+
+    same = [{"uses": "actions/checkout@v4"},
+            {"uses": "actions/setup-python@v5", "with": {"python-version": "3.12"}},
+            {"run": "pip install -r r.txt"}]
+    assert len(_opt77(jpr=runs, crit=crit,
+                      wf=_wf_with({n: list(same) for n in names}))) == 1, "control"
+
+    diverged_input = {n: list(same) for n in names}
+    diverged_input["audit"] = [
+        {"uses": "actions/checkout@v4"},
+        {"uses": "actions/setup-python@v5", "with": {"python-version": "3.9"}},
+        {"run": "pip install -r r.txt"}]
+    assert _opt77(jpr=runs, crit=crit, wf=_wf_with(diverged_input)) == [], "action input"
+
+    diverged_wd = {n: list(same) for n in names}
+    diverged_wd["audit"] = [
+        {"uses": "actions/checkout@v4"},
+        {"uses": "actions/setup-python@v5", "with": {"python-version": "3.12"}},
+        {"run": "pip install -r r.txt", "working-directory": "backend"}]
+    assert _opt77(jpr=runs, crit=crit, wf=_wf_with(diverged_wd)) == [], "working-directory"
+
+    diverged_run = {n: list(same) for n in names}
+    diverged_run["audit"] = [
+        {"uses": "actions/checkout@v4"},
+        {"uses": "actions/setup-python@v5", "with": {"python-version": "3.12"}},
+        {"run": "pip install -r requirements-dev.txt"}]
+    assert _opt77(jpr=runs, crit=crit, wf=_wf_with(diverged_run)) == [], "run body"
+
+
+def test_opt77_keeps_an_install_target_and_drops_only_bare_flags():
+    """`npm ci -w frontend` and `npm ci -w backend` are different installs, not
+    churn; `--prefer-offline` is churn. Flag stripping that ate the value token
+    merged installs that remove nothing when consolidated."""
+    ident = cr._setup_step_identity
+    assert ident("Run npm ci --prefer-offline") == ident("Run npm ci")
+    assert ident("Run npm ci --frozen-lockfile") == ident("Run npm ci")
+    assert ident("Run pnpm install --filter a") != ident("Run pnpm install --filter b")
+    assert ident("Run pnpm install --filter=a") != ident("Run pnpm install --filter=b")
+    assert ident("Run npm ci -w frontend") != ident("Run npm ci -w backend")
+    assert ident("Run pip install --target build") != ident("Run pip install --target dist")
+    assert ident("Run actions/setup-node@v4") == ident("Run actions/setup-node@v3")
+
+
+def test_setup_step_identity_never_strips_a_container_digest():
+    """`@` plus `/` is not enough to call something an action ref: a pinned image
+    digest has both, and cutting at the `@` erases exactly the part that says
+    WHICH image."""
+    ident = cr._setup_step_identity
+    a = ident("Run docker pull ghcr.io/org/img@sha256:" + "a" * 64)
+    b = ident("Run docker pull ghcr.io/org/img@sha256:" + "b" * 64)
+    assert a != b
+    assert "sha256" in a
+
+
+def test_opt77_withholds_when_the_tallest_remaining_job_barely_ever_runs():
+    """The whole neutrality proof rests on one job outside the group being taller.
+    A conditional job that ran in a minority of the sampled runs cannot carry it:
+    on the other runs the group's own members are the tallest thing left."""
+    names = ("lint", "typecheck", "audit")
+    tall = _jitter_job("release-notes", [("Set up job", 5.0), ("Run tests", 535.0)])
+    small = [_setup_job(n, 80.0, 10.0) for n in names]
+    job_p50 = dict({n: 90.0 for n in names}, **{"release-notes": 540.0})
+    crit = {"floor_p50": 90.0, "long_pole_p50": 540.0, "job_p50": job_p50,
+            "job_runner": dict({n: "ubuntu-latest" for n in names},
+                               **{"release-notes": "ubuntu-latest"}),
+            "runner_scope": "ubuntu-latest"}
+    wf = _opt77_wf(names=names)
+    wf["jobs"]["release-notes"] = {"runs-on": "ubuntu-latest"}
+    # Present in 1 of 4 sampled runs: a minority.
+    runs = [list(small) + [tall]] + [list(small) for _ in range(3)]
+    assert _opt77(jpr=runs, crit=crit, wf=wf) == []
+    # Present throughout, the same group is credited.
+    assert len(_opt77(jpr=[list(small) + [tall] for _ in range(4)],
+                      crit=crit, wf=wf)) == 1
+
+
+# ==== a silent detector and a dead one look identical ====
+#
+# OPT77 has around thirty withhold points, and every "withholds" test asserts
+# `== []` — exactly what a detector broken into never firing also returns. Two
+# such bugs have already shipped on this lever. The gate that stopped a group is
+# counted and logged, so a zero firing rate is visible in the artifact instead of
+# being inferred from an absence.
+
+def test_opt77_names_the_gate_that_withheld_each_group():
+    names = ("lint", "typecheck", "audit")
+    counts = {}
+    wf = _opt77_wf(names=names)
+    wf["jobs"]["deploy"] = {"runs-on": "ubuntu-latest", "needs": list(names)}
+    assert cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", [_opt77_run(), _opt77_run()], _opt77_crit(), wf, 100, 0,
+        withheld=counts) == []
+    assert counts.get("downstream_job_needs_a_member") == 1, counts
+
+    counts = {}
+    two = ("lint", "typecheck")
+    assert cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", [_opt77_run(names=two), _opt77_run(names=two)],
+        _opt77_crit(names=two), _opt77_wf(names=two), 100, 0,
+        withheld=counts) == []
+    assert counts.get("fewer_than_min_jobs_share_the_prefix") == 1, counts
+
+    counts = {}
+    assert cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", [_opt77_run(), _opt77_run()], _opt77_crit(), {}, 100, 0,
+        withheld=counts) == []
+    assert counts.get("workflow_yaml_unparsed") == 1, counts
+
+    # A group that fires records nothing.
+    counts = {}
+    assert len(cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", [_opt77_run(), _opt77_run()], _opt77_crit(), _opt77_wf(),
+        100, 0, withheld=counts)) == 1
+    assert counts == {}, counts
+
+
+def test_opt77_withhold_counts_reach_the_findings_document():
+    """The counter is only useful if it is stamped where a reader can see it."""
+    import inspect
+    src = inspect.getsource(cr.collect)
+    assert "opt77_withheld_by_gate" in src
+
+
+# ==== the detector and its verifier arm, coupled ====
+#
+# The verifier re-derives OPT77's saving and margin from the stamped block. A
+# hand-written block proves only that the verifier reads what the test wrote; the
+# coupling that matters is that what the DETECTOR stamps survives it.
+
+def _opt77_findings_doc(out, crit, wf_path="ci.yml"):
+    return {"findings": out,
+            "per_workflow_timing": {wf_path: {"job_p50": dict(crit["job_p50"])}}}
+
+
+def test_opt77_detector_output_passes_its_own_verifier_arm():
+    import verify_report as vr
+    names = ("lint", "typecheck", "audit")
+    crit = _opt77_crit(names=names)
+    out = _opt77(crit=crit, wf=_opt77_wf(names=names))
+    assert len(out) == 1
+    margin, problems = vr._opt77_consolidation_rederived(
+        out[0], _opt77_findings_doc(out, crit))
+    assert problems == [], problems
+    assert margin == out[0]["tier2_neutrality"]["margin_s"]
+
+
+def test_opt77_verifier_catches_a_credited_job_with_a_different_prefix():
+    """The grouping is the whole saving model, and until each job stamped its OWN
+    measured prefix the verifier could only check that the group's list was
+    non-empty — it had to take on faith that all N jobs re-pay it."""
+    import verify_report as vr
+    names = ("lint", "typecheck", "audit")
+    crit = _opt77_crit(names=names)
+    out = _opt77(crit=crit, wf=_opt77_wf(names=names))
+    f = out[0]
+    f["setup_consolidation"]["per_job"]["audit"]["setup_steps"] = [
+        "set up job", "actions/setup-python"]
+    _margin, problems = vr._opt77_consolidation_rederived(
+        f, _opt77_findings_doc(out, crit))
+    assert any("is not the credited shared prefix" in p for p in problems), problems
+
+
+def test_opt77_verifier_bounds_occurrences_by_the_sampled_run_count():
+    """`occurrences` multiplies the entire saving and nothing else bounds it."""
+    import verify_report as vr
+    names = ("lint", "typecheck", "audit")
+    crit = _opt77_crit(names=names)
+    out = _opt77(crit=crit, wf=_opt77_wf(names=names))
+    f = out[0]
+    f["setup_consolidation"]["occurrences"] = 40
+    _margin, problems = vr._opt77_consolidation_rederived(
+        f, _opt77_findings_doc(out, crit))
+    assert any("exceeds the" in p and "sampled run" in p for p in problems), problems
+
+
+def test_opt77_verifier_rejects_a_tallest_remaining_job_from_outside_the_stated_set():
+    """The tallest-remaining job must come from the set the detector said it chose
+    from, and every job outside the group must be either in that set or excluded
+    with a reason."""
+    import verify_report as vr
+    names = ("lint", "typecheck", "audit")
+    crit = _opt77_crit(names=names)
+    out = _opt77(crit=crit, wf=_opt77_wf(names=names))
+    f = out[0]
+    f["setup_consolidation"]["remaining_eligible_jobs"] = []
+    _margin, problems = vr._opt77_consolidation_rederived(
+        f, _opt77_findings_doc(out, crit))
+    assert any("remaining_eligible_jobs missing" in p for p in problems), problems
+
+    f = _opt77(crit=crit, wf=_opt77_wf(names=names))[0]
+    f["setup_consolidation"]["remaining_eligible_jobs"] = ["lint"]
+    _margin, problems = vr._opt77_consolidation_rederived(
+        f, _opt77_findings_doc([f], crit))
+    assert any("credited group members" in p for p in problems), problems
+
+
+def test_opt77_verifier_checks_the_restated_saving_numbers():
+    """The block restates the saving, its sampled basis and its scale factor.
+    Numbers nobody reads drift."""
+    import verify_report as vr
+    names = ("lint", "typecheck", "audit")
+    crit = _opt77_crit(names=names)
+    for field, bogus, needle in (("runner_min_saving", 9999.0, "runner_min_saving"),
+                                 ("sampled_saved_s", 1.0, "sampled_saved_s"),
+                                 ("scale", 999.0, "scale")):
+        f = _opt77(crit=crit, wf=_opt77_wf(names=names))[0]
+        f["setup_consolidation"][field] = bogus
+        _margin, problems = vr._opt77_consolidation_rederived(
+            f, _opt77_findings_doc([f], crit))
+        assert any(needle in p for p in problems), (field, problems)
+
+
+# ==== a dropped lever has to be visible somewhere ====
+#
+# Superseding OPT65 deliberately loses real minutes: its billing round-up for the
+# overlapping jobs goes unreported so one edit renders as one lever. Nothing said
+# so anywhere a reader could look, and the overlap is tested on INTERSECTION, so
+# a four-leg OPT65 can be dropped for a three-job OPT77 with the fourth leg's
+# round-up disappearing without a word.
+
+def test_supersede_discloses_every_dropped_lever_and_what_it_gave_up():
+    o65 = {"id": "f1", "pattern": "OPT65", "workflow_file": "ci.yml",
+           "affected_jobs": ["lint (a)", "lint (b)", "lint (c)", "lint (d)"]}
+    o77 = {"id": "f2", "pattern": "OPT77", "workflow_file": "ci.yml",
+           "affected_jobs": ["lint (a)", "lint (b)", "lint (c)"]}
+    disclosure = []
+    kept = cr._supersede_opt65_with_opt77([o65, o77], disclosure=disclosure)
+    assert [f["id"] for f in kept] == ["f2"]
+    assert len(disclosure) == 1, disclosure
+    d = disclosure[0]
+    assert d["id"] == "f1"
+    assert d["pattern"] == "OPT65"
+    assert d["workflow_file"] == "ci.yml"
+    assert d["superseded_by"] == ["f2"]
+    # The leg the consolidation does NOT cover is named: its round-up minutes are
+    # real and go unreported.
+    assert d["unreported_jobs"] == ["lint (d)"]
+    assert "one lever" in d["reason"]
+
+
+def test_supersede_discloses_nothing_when_it_drops_nothing():
+    o65 = {"id": "f1", "pattern": "OPT65", "workflow_file": "release.yml",
+           "affected_jobs": ["unit (3.9)", "unit (3.12)"]}
+    o77 = {"id": "f2", "pattern": "OPT77", "workflow_file": "ci.yml",
+           "affected_jobs": ["lint", "typecheck", "audit"]}
+    disclosure = []
+    assert len(cr._supersede_opt65_with_opt77([o65, o77], disclosure=disclosure)) == 2
+    assert disclosure == []
+
+
+def test_supersede_disclosure_reaches_the_findings_document():
+    import inspect
+    assert "superseded_findings" in inspect.getsource(cr.collect)
+
+
+def test_verifier_rejects_a_suppression_with_no_surviving_consolidation():
+    """The trade — lose OPT65's minutes so one edit renders once — is only
+    defensible while the lever that replaced it is actually in the report."""
+    import verify_report as vr
+    data = {"findings": [{"id": "f2", "pattern": "OPT77", "workflow_file": "ci.yml"}],
+            "superseded_findings": [
+                {"id": "f1", "pattern": "OPT65", "workflow_file": "ci.yml",
+                 "superseded_by": ["f2"], "unreported_jobs": []}]}
+    assert vr._opt65_suppressions_are_accounted_for(data) == []
+
+    orphan = {"findings": [],
+              "superseded_findings": [
+                  {"id": "f1", "pattern": "OPT65", "workflow_file": "ci.yml",
+                   "superseded_by": ["f2"], "unreported_jobs": []}]}
+    problems = vr._opt65_suppressions_are_accounted_for(orphan)
+    assert any("no such OPT77 consolidation survives" in p for p in problems), problems
+
+    unnamed = {"findings": [],
+               "superseded_findings": [
+                   {"id": "f1", "pattern": "OPT65", "workflow_file": "ci.yml"}]}
+    problems = vr._opt65_suppressions_are_accounted_for(unnamed)
+    assert any("without naming what superseded it" in p for p in problems), problems

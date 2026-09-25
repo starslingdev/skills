@@ -1,160 +1,301 @@
 {
-  "total_count": 5,
-  "jobs": [
+ "total_count": 8,
+ "jobs": [
+  {
+   "id": 60100,
+   "run_id": 6010,
+   "name": "build",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-24T10:00:05Z",
+   "completed_at": "2026-06-24T10:01:35Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/6010/job/60100",
+   "steps": [
     {
-      "id": 60100,
-      "run_id": 6010,
-      "name": "build",
-      "status": "completed",
-      "conclusion": "success",
-      "started_at": "2026-06-24T10:00:05Z",
-      "completed_at": "2026-06-24T10:01:35Z",
-      "labels": [
-        "ubuntu-latest"
-      ],
-      "html_url": "https://github.com/synthetic/repo/actions/runs/6010/job/60100",
-      "steps": [
-        {
-          "name": "Set up job",
-          "number": 1,
-          "started_at": "2026-06-24T10:00:05Z",
-          "completed_at": "2026-06-24T10:00:05Z",
-          "status": "completed",
-          "conclusion": "success"
-        },
-        {
-          "name": "Build",
-          "number": 2,
-          "started_at": "2026-06-24T10:00:05Z",
-          "completed_at": "2026-06-24T10:01:35Z",
-          "status": "completed",
-          "conclusion": "success"
-        }
-      ]
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-24T10:00:05Z",
+     "completed_at": "2026-06-24T10:00:05Z",
+     "status": "completed",
+     "conclusion": "success"
     },
     {
-      "id": 60101,
-      "run_id": 6010,
-      "name": "unit (a)",
-      "status": "completed",
-      "conclusion": "success",
-      "started_at": "2026-06-24T10:00:10Z",
-      "completed_at": "2026-06-24T10:00:30Z",
-      "labels": [
-        "ubuntu-latest"
-      ],
-      "html_url": "https://github.com/synthetic/repo/actions/runs/6010/job/60101",
-      "steps": [
-        {
-          "name": "Set up job",
-          "number": 1,
-          "started_at": "2026-06-24T10:00:10Z",
-          "completed_at": "2026-06-24T10:00:10Z",
-          "status": "completed",
-          "conclusion": "success"
-        },
-        {
-          "name": "Run unit slice",
-          "number": 2,
-          "started_at": "2026-06-24T10:00:10Z",
-          "completed_at": "2026-06-24T10:00:30Z",
-          "status": "completed",
-          "conclusion": "success"
-        }
-      ]
-    },
-    {
-      "id": 60102,
-      "run_id": 6010,
-      "name": "unit (b)",
-      "status": "completed",
-      "conclusion": "success",
-      "started_at": "2026-06-24T10:00:11Z",
-      "completed_at": "2026-06-24T10:00:32Z",
-      "labels": [
-        "ubuntu-latest"
-      ],
-      "html_url": "https://github.com/synthetic/repo/actions/runs/6010/job/60102",
-      "steps": [
-        {
-          "name": "Set up job",
-          "number": 1,
-          "started_at": "2026-06-24T10:00:11Z",
-          "completed_at": "2026-06-24T10:00:11Z",
-          "status": "completed",
-          "conclusion": "success"
-        },
-        {
-          "name": "Run unit slice",
-          "number": 2,
-          "started_at": "2026-06-24T10:00:11Z",
-          "completed_at": "2026-06-24T10:00:32Z",
-          "status": "completed",
-          "conclusion": "success"
-        }
-      ]
-    },
-    {
-      "id": 60103,
-      "run_id": 6010,
-      "name": "unit (c)",
-      "status": "completed",
-      "conclusion": "success",
-      "started_at": "2026-06-24T10:00:12Z",
-      "completed_at": "2026-06-24T10:00:34Z",
-      "labels": [
-        "ubuntu-latest"
-      ],
-      "html_url": "https://github.com/synthetic/repo/actions/runs/6010/job/60103",
-      "steps": [
-        {
-          "name": "Set up job",
-          "number": 1,
-          "started_at": "2026-06-24T10:00:12Z",
-          "completed_at": "2026-06-24T10:00:12Z",
-          "status": "completed",
-          "conclusion": "success"
-        },
-        {
-          "name": "Run unit slice",
-          "number": 2,
-          "started_at": "2026-06-24T10:00:12Z",
-          "completed_at": "2026-06-24T10:00:34Z",
-          "status": "completed",
-          "conclusion": "success"
-        }
-      ]
-    },
-    {
-      "id": 60104,
-      "run_id": 6010,
-      "name": "integration",
-      "status": "completed",
-      "conclusion": "success",
-      "started_at": "2026-06-24T10:00:15Z",
-      "completed_at": "2026-06-24T10:03:15Z",
-      "labels": [
-        "ubuntu-latest"
-      ],
-      "html_url": "https://github.com/synthetic/repo/actions/runs/6010/job/60104",
-      "steps": [
-        {
-          "name": "Set up job",
-          "number": 1,
-          "started_at": "2026-06-24T10:00:15Z",
-          "completed_at": "2026-06-24T10:00:15Z",
-          "status": "completed",
-          "conclusion": "success"
-        },
-        {
-          "name": "Integration suite",
-          "number": 2,
-          "started_at": "2026-06-24T10:00:15Z",
-          "completed_at": "2026-06-24T10:03:15Z",
-          "status": "completed",
-          "conclusion": "success"
-        }
-      ]
+     "name": "Build",
+     "number": 2,
+     "started_at": "2026-06-24T10:00:05Z",
+     "completed_at": "2026-06-24T10:01:35Z",
+     "status": "completed",
+     "conclusion": "success"
     }
-  ]
+   ]
+  },
+  {
+   "id": 60101,
+   "run_id": 6010,
+   "name": "unit (a)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-24T10:00:10Z",
+   "completed_at": "2026-06-24T10:00:30Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/6010/job/60101",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-24T10:00:10Z",
+     "completed_at": "2026-06-24T10:00:10Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run unit slice",
+     "number": 2,
+     "started_at": "2026-06-24T10:00:10Z",
+     "completed_at": "2026-06-24T10:00:30Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 60102,
+   "run_id": 6010,
+   "name": "unit (b)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-24T10:00:11Z",
+   "completed_at": "2026-06-24T10:00:32Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/6010/job/60102",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-24T10:00:11Z",
+     "completed_at": "2026-06-24T10:00:11Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run unit slice",
+     "number": 2,
+     "started_at": "2026-06-24T10:00:11Z",
+     "completed_at": "2026-06-24T10:00:32Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 60103,
+   "run_id": 6010,
+   "name": "unit (c)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-24T10:00:12Z",
+   "completed_at": "2026-06-24T10:00:34Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/6010/job/60103",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-24T10:00:12Z",
+     "completed_at": "2026-06-24T10:00:12Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run unit slice",
+     "number": 2,
+     "started_at": "2026-06-24T10:00:12Z",
+     "completed_at": "2026-06-24T10:00:34Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 60104,
+   "run_id": 6010,
+   "name": "integration",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-24T10:00:15Z",
+   "completed_at": "2026-06-24T10:03:15Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/6010/job/60104",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-24T10:00:15Z",
+     "completed_at": "2026-06-24T10:00:15Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Integration suite",
+     "number": 2,
+     "started_at": "2026-06-24T10:00:15Z",
+     "completed_at": "2026-06-24T10:03:15Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 60105,
+   "run_id": 6010,
+   "name": "lint (eslint)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-24T10:00:05Z",
+   "completed_at": "2026-06-24T10:00:25Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/6010/job/60105",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-24T10:00:05Z",
+     "completed_at": "2026-06-24T10:00:07Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-24T10:00:07Z",
+     "completed_at": "2026-06-24T10:00:11Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm ci",
+     "number": 3,
+     "started_at": "2026-06-24T10:00:11Z",
+     "completed_at": "2026-06-24T10:00:19Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm run lint:eslint",
+     "number": 4,
+     "started_at": "2026-06-24T10:00:19Z",
+     "completed_at": "2026-06-24T10:00:25Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 60106,
+   "run_id": 6010,
+   "name": "lint (biome)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-24T10:00:05Z",
+   "completed_at": "2026-06-24T10:00:25Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/6010/job/60106",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-24T10:00:05Z",
+     "completed_at": "2026-06-24T10:00:07Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-24T10:00:07Z",
+     "completed_at": "2026-06-24T10:00:11Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm ci",
+     "number": 3,
+     "started_at": "2026-06-24T10:00:11Z",
+     "completed_at": "2026-06-24T10:00:19Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm run lint:biome",
+     "number": 4,
+     "started_at": "2026-06-24T10:00:19Z",
+     "completed_at": "2026-06-24T10:00:25Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 60107,
+   "run_id": 6010,
+   "name": "lint (stylelint)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-24T10:00:05Z",
+   "completed_at": "2026-06-24T10:00:25Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/6010/job/60107",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-24T10:00:05Z",
+     "completed_at": "2026-06-24T10:00:07Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-24T10:00:07Z",
+     "completed_at": "2026-06-24T10:00:11Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm ci",
+     "number": 3,
+     "started_at": "2026-06-24T10:00:11Z",
+     "completed_at": "2026-06-24T10:00:19Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm run lint:stylelint",
+     "number": 4,
+     "started_at": "2026-06-24T10:00:19Z",
+     "completed_at": "2026-06-24T10:00:25Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  }
+ ]
 }

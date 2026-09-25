@@ -64,10 +64,12 @@ def test_split_into_new_jobs_fix_meta_carries_the_caveat():
 
 def test_catalog_sharding_patterns_carry_the_caveat():
     # OPT24 (Long Test Job Without Sharding), OPT25 (Shard Imbalance — split a leg into new
-    # jobs), OPT22 (consolidate workflows — renames the check) each hand out a fix that
-    # changes/adds check names, so each must carry the caveat.
+    # jobs), OPT22 (consolidate workflows — renames the check) and OPT77 (consolidate N
+    # small jobs into one — renames the checks) each hand out a fix that changes/adds
+    # check names, so each must carry the caveat.
     for anchor in ("Long Test Job Without Sharding", "Shard Imbalance",
-                   "Sequential Workflows via `workflow_run`"):
+                   "Sequential Workflows via `workflow_run`",
+                   "Repeated Fixed Setup Across Independent Small Jobs"):
         assert anchor in _CATALOG, (
             f"catalog anchor {anchor!r} not found — was the pattern title renamed?"
         )

@@ -8420,3 +8420,252 @@ def test_gap_fill_grounding_rejects_text_spliced_across_adjacent_log_lines(tmp_p
     genuine = _with_gapfill_block("request failed")
     assert _tag_for(genuine, _GROUND, tmp_path,
                     findings=_gapfill_findings(str(tmp_path))) == "PASS"
+
+
+# ── OPT77: the verifier re-derives the consolidation saving, never trusts it ──
+# The Tier-2 certificate arm for OPT77 must recompute BOTH numbers from the
+# stamped per-job setup/useful-work p50s: the credited runner-minutes and the
+# below-floor margin (floor - the PROJECTED consolidated duration). These pin
+# that it fails on tampered numbers, so the arm can't decay into a rubber stamp.
+
+def _opt77_finding(**over):
+    f = {
+        "id": "f1",
+        "pattern": "OPT77",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": ["audit", "lint", "typecheck"],
+        "runner_min_saving": 266.7,
+        "wall_clock_p50_s": 0.0,
+        "sizing_basis": "measured",
+        "setup_consolidation": {
+            "kind": "opt77_repeated_setup",
+            "credited_jobs": ["audit", "lint", "typecheck"],
+            "runner_label": "ubuntu-latest",
+            "removed_setup_payments": 2,
+            "setup_p50_s": 80.0,
+            "per_job": {n: {"setup_p50_s": 80.0, "useful_work_p50_s": 10.0,
+                            "setup_steps": ["set up job", "actions/checkout"]}
+                        for n in ("audit", "lint", "typecheck")},
+            "shared_setup_steps": ["set up job", "actions/checkout"],
+            "projected_consolidated_p50_s": 90.0,
+            "remaining_tallest_job": "test",
+            "remaining_tallest_p50_s": 600.0,
+            "remaining_eligible_jobs": ["test"],
+            "remaining_excluded_jobs": {},
+            "occurrences": 2,
+            "sampled_saved_s": 320.0,
+            "sampled_successful_run_count": 2,
+            "monthly_volume": 100,
+            "scale": 50.0,
+            "runner_min_saving": 266.7,
+        },
+    }
+    tall = over.pop("remaining_tallest", None)
+    if tall:
+        f["setup_consolidation"].update(tall)
+    f.update(over)
+    return f
+
+
+# `job_p50` is what the arm re-derives the remaining-tallest job from: the
+# credited group (audit/lint/typecheck) minus out, `test` at 600s is what the
+# consolidated job must stay below.
+_OPT77_DATA = {"per_workflow_timing": {".github/workflows/ci.yml": {
+    "floor_p50": 600.0,
+    "job_p50": {"audit": 90.0, "lint": 90.0, "typecheck": 90.0, "test": 600.0},
+}}}
+
+
+def test_opt77_certificate_rederives_margin_and_saving():
+    vr = _load_verify_report()
+    margin, problems = vr._opt77_consolidation_rederived(_opt77_finding(), _OPT77_DATA)
+    assert problems == []
+    assert margin == 510.0
+
+
+def test_opt77_certificate_fails_on_tampered_numbers():
+    vr = _load_verify_report()
+    # An inflated credited saving is caught by the re-derivation.
+    _m, problems = vr._opt77_consolidation_rederived(
+        _opt77_finding(runner_min_saving=9999.0), _OPT77_DATA)
+    assert any("runner_min_saving" in p for p in problems)
+    # A projection that understates the consolidated duration is caught too.
+    f = _opt77_finding()
+    f["setup_consolidation"]["projected_consolidated_p50_s"] = 12.0
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_DATA)
+    assert any("projected_consolidated_p50_s" in p for p in problems)
+    # And a group whose consolidated job would reach the cluster floor is refused
+    # outright — no margin at all, rather than a small positive one.
+    margin, problems = vr._opt77_consolidation_rederived(
+        _opt77_finding(remaining_tallest={"remaining_tallest_job": "test",
+                                          "remaining_tallest_p50_s": 90.0}),
+        {"per_workflow_timing": {".github/workflows/ci.yml": {
+            "floor_p50": 90.0,
+            "job_p50": {"audit": 90.0, "lint": 90.0, "typecheck": 90.0,
+                        "test": 90.0}}}})
+    assert margin is None
+    assert any("not below the tallest remaining job" in p for p in problems)
+
+
+def test_opt77_certificate_requires_setup_to_dominate():
+    vr = _load_verify_report()
+    f = _opt77_finding()
+    f["setup_consolidation"]["per_job"]["lint"] = {
+        "setup_p50_s": 80.0, "useful_work_p50_s": 400.0}
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_DATA)
+    assert any("does not dominate" in p for p in problems)
+
+
+def test_opt77_certificate_is_not_a_rubber_stamp_on_the_stamped_evidence():
+    """The arm has to re-derive the saving from the per-job medians, not re-read the
+    number the detector wrote beside them. Tampering only the TOP-LEVEL
+    `runner_min_saving` cannot tell the two apart: an arm that simply echoed
+    `setup_consolidation.runner_min_saving` would still catch that. This tampers the
+    EVIDENCE instead — one job's stamped setup median — and leaves every stamped
+    total untouched. A re-deriving arm reddens; an echoing one agrees with itself."""
+    vr = _load_verify_report()
+    f = _opt77_finding()
+    f["setup_consolidation"]["per_job"]["lint"]["setup_p50_s"] = 40.0
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_DATA)
+    assert any("setup_p50_s" in p for p in problems), problems
+    assert any("runner_min_saving" in p for p in problems), problems
+
+
+def test_opt77_certificate_rederives_the_remaining_tallest_job_itself():
+    """The comparison the certificate rests on is "the tallest job that REMAINS
+    after the consolidation". The arm must work that out itself from the workflow's
+    own per-job medians minus the credited group — not read back whichever job the
+    detector nominated. Naming a different job, or overstating its median, has to
+    redden even though every other stamped number is untouched."""
+    vr = _load_verify_report()
+    f = _opt77_finding(remaining_tallest={"remaining_tallest_job": "lint"})
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_DATA)
+    assert any("remaining_tallest_job" in p for p in problems), problems
+
+    f = _opt77_finding(remaining_tallest={"remaining_tallest_p50_s": 9999.0})
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_DATA)
+    assert any("remaining_tallest_p50_s" in p for p in problems), problems
+
+
+def test_opt77_certificate_refuses_a_group_with_nothing_left_to_measure_against():
+    """A workflow that is nothing but the credited checks has no remaining job, so
+    there is no evidence the consolidated job stays off the gate. Refuse outright
+    rather than fall back to a floor the group itself defines."""
+    vr = _load_verify_report()
+    data = {"per_workflow_timing": {".github/workflows/ci.yml": {
+        "floor_p50": 90.0,
+        "job_p50": {"audit": 90.0, "lint": 90.0, "typecheck": 90.0}}}}
+    margin, problems = vr._opt77_consolidation_rederived(_opt77_finding(), data)
+    assert margin is None
+    assert any("no job outside the credited group" in p for p in problems), problems
+
+
+def test_opt77_certificate_requires_the_shared_setup_prefix_to_be_stamped():
+    """The grouping fix — credit a group only when its jobs re-pay the SAME setup
+    prefix — had no verifier-side invariant at all. A detector regressed back to
+    grouping on the runner label alone would emit a finding the certificate
+    happily stamped, which is exactly the failure the certificate exists to catch.
+    The arm now requires the shared prefix the group was formed on to be present."""
+    vr = _load_verify_report()
+    f = _opt77_finding()
+    f["setup_consolidation"].pop("shared_setup_steps", None)
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_DATA)
+    assert any("shared_setup_steps" in p for p in problems), problems
+
+    f = _opt77_finding()
+    f["setup_consolidation"]["shared_setup_steps"] = []
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_DATA)
+    assert any("shared_setup_steps" in p for p in problems), problems
+
+
+# ── OPT77 neutrality routing, pinned at EXECUTION level ──
+# The arm is only useful if `check_tier2_neutrality_derived` actually reaches it.
+# A source-level assertion catches the branch being deleted but not the branch
+# being present and never reached. These drive the real entry point instead, on
+# a group where the two arms DISAGREE: setups 80/100/60 and useful 10/2/40 give
+# job p50s of 90/102/100, so the OPT77 arm's margin is 600 - (100 + 40) = 460
+# while the generic below-floor arm would compute 600 - 102 = 498.
+
+def _opt77_promoted_finding(fid: str = "f-opt77") -> dict:
+    f = copy.deepcopy(_tier2_doc_for_verify()["findings"][0])
+    f["id"] = fid
+    f["pattern"] = "OPT77"
+    f["title"] = "Repeated Fixed Setup Across Independent Small Jobs"
+    f["affected_jobs"] = ["audit", "lint", "typecheck"]
+    f["fix_key"] = f"OPT77:{fid}"
+    f["fix_recipe_anchor"] = "opt77--repeated-fixed-setup-across-independent-small-jobs"
+    f["runner_min_saving"] = 200.0
+    f["usd_saving_per_month"] = 1.2
+    f["evidence"] = ("3 independent same-runner jobs each re-pay the same measured "
+                     "setup prefix")
+    f["measured_signal"] = "leading setup prefix p50 per job from the jobs API steps[]"
+    f["tier2_neutrality"] = {
+        "proof": "below_cluster_floor",
+        "margin_s": 460.0,
+        "ref": "tallest remaining job 600s - projected consolidated 140s",
+    }
+    f["setup_consolidation"] = {
+        "kind": "opt77_repeated_setup",
+        "credited_jobs": ["audit", "lint", "typecheck"],
+        "runner_label": "ubuntu-latest",
+        "shared_setup_steps": ["set up job", "actions/checkout"],
+        "removed_setup_payments": 2,
+        "setup_p50_s": 60.0,
+        "per_job": {
+            "lint": {"setup_p50_s": 80.0, "useful_work_p50_s": 10.0,
+                     "setup_steps": ["set up job", "actions/checkout"]},
+            "typecheck": {"setup_p50_s": 100.0, "useful_work_p50_s": 2.0,
+                          "setup_steps": ["set up job", "actions/checkout"]},
+            "audit": {"setup_p50_s": 60.0, "useful_work_p50_s": 40.0,
+                      "setup_steps": ["set up job", "actions/checkout"]},
+        },
+        "projected_consolidated_p50_s": 140.0,
+        "remaining_tallest_job": "build",
+        "remaining_tallest_p50_s": 600.0,
+        "remaining_eligible_jobs": ["build"],
+        "remaining_excluded_jobs": {},
+        "occurrences": 2,
+        "sampled_saved_s": 240.0,
+        "sampled_successful_run_count": 2,
+        "monthly_volume": 100,
+        "scale": 50.0,
+        "runner_min_saving": 200.0,
+    }
+    f["measured_evidence"] = {
+        "summary": "measured leading setup prefix per job",
+        "table": {"headers": ["Job", "setup p50", "useful p50", "job p50"],
+                  "rows": [["`lint`", "80s", "10s", "90s"],
+                           ["`typecheck`", "100s", "2s", "102s"],
+                           ["`audit`", "60s", "40s", "100s"]]},
+    }
+    return f
+
+
+def _opt77_tier2_doc() -> dict:
+    doc = _tier2_doc_for_verify()
+    wf = ".github/workflows/ci.yml"
+    doc["per_workflow_timing"] = {wf: {"floor_p50": 600.0, "job_p50": {
+        "build": 600.0, "lint": 90.0, "typecheck": 102.0, "audit": 100.0}}}
+    doc["findings"] = [_opt77_promoted_finding()]
+    return doc
+
+
+def test_opt77_neutrality_is_routed_to_its_own_arm(tmp_path: Path):
+    """Drives the real entry point. The stamped margin is the projection-based
+    460, which only the OPT77 arm re-derives — routing this to the generic arm
+    yields 498 and reddens."""
+    vr = _load_verify_report()
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, _opt77_tier2_doc())
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert chk.ok and not chk.skipped, chk
+
+
+def test_opt77_neutrality_refuses_the_generic_below_floor_margin(tmp_path: Path):
+    """And the arm must reject the margin the generic computation would give, so
+    a finding sized by the wrong model cannot ride through."""
+    vr = _load_verify_report()
+    doc = _opt77_tier2_doc()
+    doc["findings"][0]["tier2_neutrality"]["margin_s"] = 498.0
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "below-floor margin" in chk.detail, chk

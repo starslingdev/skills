@@ -35,7 +35,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 14. Structural / Critical-Path Levers
 
 - **Category 1 — Caching** (`OPT1`–): tool installs, build/test caches, dynamic cache keys.
-- **Category 2 — Redundancy**: duplicate env, repeated setup sequences, redundant build steps.
+- **Category 2 — Redundancy**: duplicate env, repeated setup sequences, redundant build steps, repeated fixed setup across independent small jobs (`OPT77`).
 - **Category 3 — Docker**: sleep-based readiness, over-broad `compose up`.
 - **Category 4 — Parallelization**: needless `needs:` serialization, unsharded long jobs.
 - **Category 5 — Actions and Checkout**: stale action pins, repeated setup, full-history checkout, submodule / Git LFS checkout payload.
@@ -669,6 +669,246 @@ done
 ```
 
 **Fix**: Remove the duplicate invocation. If the rebuild is a workaround for stale artifacts, fix the root cause (e.g., cache key, build system incremental support) instead.
+
+---
+
+### OPT77 — Repeated Fixed Setup Across Independent Small Jobs
+
+<!-- METADATA
+pattern: OPT77
+impact: MEDIUM
+class: data-driven
+detector: actions-job-setup-consolidation
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: repeated-fixed-setup-across-independent-small-jobs
+title_template: "Repeated Fixed Setup Across Independent Small Jobs"
+-->
+
+**Anti-pattern**: A workflow declares several small, independent checks — lint,
+typecheck, a licence audit, a formatting check, a spellcheck — and every one of
+them starts a runner, checks out the repository and installs dependencies before
+doing work that takes no longer than the setup did. The same fixed setup prefix is
+paid N times for one commit. The jobs are not tiny in billed terms (each is
+comfortably over a minute once checkout and install are paid), so nothing about
+per-job billing round-up describes this; what is wasted is repeated setup
+*runtime*. (The gate is "setup is at least as large as the useful work", not
+"the work takes seconds" — the finding's evidence quotes the measured maximum.)
+
+Consolidating N such jobs into one, and running their tasks concurrently inside
+it, pays the setup once instead of N times.
+
+```
+before:  N jobs  →  N x (start runner + checkout + install)  +  N x seconds of work
+after:   1 job   →  1 x (start runner + checkout + install)  +  the same work, concurrent
+saved:   (N - 1) x setup, every run
+```
+
+**Detection heuristic**:
+
+1. For every sampled job, split its measured step timeline (jobs API `steps[]`
+   timestamps) into the **leading run of setup steps** — the implicit `Set up
+   job`, `actions/checkout`, `setup-*` actions, dependency installs — and the
+   remaining **useful work**. Take the p50 of each across the sampled runs, and
+   record the prefix's **signature**: the ordered identities of those setup
+   steps. An identity is the step's name, whitespace-collapsed and casefolded,
+   with the `Run ` prefix GitHub renders in front of an unnamed step dropped
+   (that last one is load-bearing: it is what makes `Run npm ci` and a step
+   *named* `npm ci` the same identity), and two kinds of churn removed — an
+   **action's** version ref (`actions/setup-node@v4` and `@v3` are one identity)
+   and **bare boolean** flag tokens (`npm ci` and `npm ci --prefer-offline` are
+   one identity).
+
+   Everything else is kept, so a different toolchain (`pip install` vs `npm ci`),
+   a different thing installed (`npm ci frontend/package.json`) and an extra step
+   all remain different setup. In particular an install *target* is not churn:
+   `--filter=api` / `--filter api`, `-w frontend` and `--target build` all name
+   what is being installed and keep their groups apart, and an `@` that is not an
+   `owner/repo` action reference (a pinned image digest) is left intact.
+   Comparing the names exactly would be correct but unusable: one pinned-version
+   bump anywhere in the group would silence the finding, and a lever that never
+   fires on a real repo cannot be told apart from a broken one.
+
+   The signature's **shape** comes from every step the job declares; only its
+   duration comes from the steps that measured above zero. GitHub stamps step
+   timestamps at one-second granularity, so a sub-second step is 0s in one run and
+   1s in the next on identical YAML; reading the shape from the timed steps alone
+   made that noise change the signature's length and silently drop the job.
+2. Keep a job as a candidate only if it resolves to exactly **one** job in the
+   workflow YAML by name (an interpolated matrix leg resolves to none and is
+   excluded; a name carried by more than one job in a single run is not one job
+   and is excluded too, which covers a matrix declaring a static `name:`), runs
+   on a single known
+   per-minute-billed runner label, shows the **same setup signature in every
+   sampled occurrence**, and its setup p50 is **at least as large as its
+   useful-work p50**.
+3. Group the candidates by resolved runner label **and by setup signature** —
+   never by runner label alone. The saving model removes `(N-1)` payments of
+   *one* prefix and projects the consolidated job at `max(setup_p50)` rather than
+   the sum of the setups, and both steps are only valid for jobs re-paying the
+   **same setup work**. Three checks that each spend 80s installing *different*
+   toolchains (a Node one, a Python one, a Go one) share a runner and a duration
+   but not a prefix: consolidating them removes only the one shared checkout,
+   while every distinct install still has to run. Grouping on the signature keeps
+   them in separate groups, each sized on its own. Emit only when:
+
+   * the group has at least **three** jobs;
+   * **no `needs:` edge**, direct or transitive, links any two of them — a chain
+     is not a consolidatable set;
+   * **no job outside the group** waits on a member, directly or transitively.
+     The projected consolidated job is always at least as tall as the tallest
+     member, so anything downstream of a member starts later and the change is
+     wall-clock *negative* — which a bill-only finding must never be. (A `needs:`
+     parent the group *shares*, such as `lint`/`typecheck`/`audit` all waiting on
+     one `build`, is fine and is the commonest real layout for this shape.) A
+     dangling `needs:` naming a job the workflow does not declare withholds too:
+     dropping an unresolvable parent would strengthen the independence claim
+     rather than question it;
+   * the shared prefix contains at least one **recognizable** piece of shared
+     work — a real `owner/repo` action or a dependency install. A prefix of
+     purely human-authored names is a naming coincidence, and `Set up job` alone
+     is only the runner booting;
+   * the credited setup prefix clears an absolute floor (10s), below which the
+     removed payments are noise against the cost of coupling the checks;
+   * the **workflow file** agrees, for the members it can be read for. Two jobs
+     can render the same step name while doing different work: a different
+     `working-directory`, a different `run:` body, or the same unnamed action
+     with different `with:` inputs (`python-version: 3.9` vs `3.12`).
+     Consolidating those removes neither install, so any such disagreement splits
+     the group.
+4. Project the consolidated job at `max(setup_p50) + max(useful_work_p50)` (the
+   collapsed tasks run concurrently inside it) and compare it against **the
+   tallest job that REMAINS after the consolidation** — the tallest job in the
+   workflow that is not a member of the credited group. If the projection reaches
+   that job, **withhold the finding**; if nothing outside the group is taller,
+   withhold it too. Consolidation must never lengthen the merge gate.
+
+   That job has to be a job that actually runs. Only jobs present in a **majority
+   of the sampled runs in which the whole group ran** are eligible to carry the
+   proof — a conditional job seen once in ten samples cannot show the gate is
+   unchanged, because on the other nine the group's own members are the tallest
+   thing left. The eligible set, and every job left out of it with its reason, are
+   stamped so the check can re-derive the same maximum.
+
+   The comparison is deliberately *not* against the workflow's cluster floor. The
+   question the gate answers is "does the merge gate get longer if these jobs are
+   collapsed?", and the gate afterwards is set by the jobs that were not touched.
+   A floor the group's own members help define measures the fix against something
+   the fix removes — which is a modelling error, not conservatism, and it silenced
+   the pattern on its own motivating shape (one long test job beside a flat row of
+   equally-sized small checks, where the second-tallest job is itself a member).
+5. Credit `occurrences x (N - 1) x setup_p50` runner-seconds across the sample,
+   where `setup_p50` is the **smallest** measured setup p50 in the group and
+   `occurrences` is the number of sampled runs in which **every** credited job
+   produced a clean measurement (it ran, its duration and its setup prefix both
+   measured) — a run where one of them was skipped paid no duplicate setup for
+   it and so has none to remove. Scale that to a month by the monthly volume for
+   the sampled event scope divided by sampled successful runs. This credits
+   removed setup runtime only — no wall-clock speedup is ever claimed.
+
+**What counts as the setup prefix.** Only the *leading* run of setup-classified
+steps, and only steps the classifier recognises. In full, a step name opening
+with (optionally after the `Run ` prefix GitHub renders for an unnamed step):
+
+* `set up` / `setup`, `checkout`, `install`, `cache`, `restore`, `fetch`,
+  `configure`, `init `, `bootstrap`;
+* `docker login`, `docker pull`, `docker compose up`;
+* `actions/checkout`, `actions/setup-*`, `actions/cache`, `pnpm/action-setup`,
+  and the bare `setup-node` / `setup-python` / `setup-go` / `setup-pnpm` forms;
+* the unnamed install commands themselves — `npm|pnpm|yarn|bun ci|install|i`,
+  `pip|pip3|pipenv|poetry|uv install|sync`, `uv pip install`,
+  `python -m pip install`, `bundle install`, `composer install`, `mix deps.get`,
+  `go mod download`, `cargo fetch`, `mvn dependency:`.
+
+Each install alternative pins the verb as the tool's *own subcommand*, so
+`mvn install` (which compiles and tests) and `bundle exec rspec spec/get_spec.rb`
+are builds and tests, not setup. A setup step the classifier does not recognise
+ends the prefix, so its time lands in "useful work" and the group is sized
+conservatively or withheld — never inflated.
+
+**Relationship to OPT65 (supersede, not disjoint).** These two were described as
+disjoint because a matrix leg never resolves to a single YAML job by name. That
+reasoning does not hold: OPT65 never required a *declared* matrix — it groups on a
+trailing parenthetical in the **observed** job name, so three ordinary jobs named
+`lint (eslint)`, `lint (biome)`, `lint (stylelint)` resolve to one YAML job each
+*and* form an OPT65 base. Both then describe the same consolidation. **OPT77
+supersedes OPT65 on any job set both claim**: one edit renders as one lever.
+
+The accepted cost: OPT65's billing round-up minutes are genuine, and they go
+unreported whenever it is superseded, so the report slightly **understates** that
+group's total. They are deliberately not folded into OPT77's credited number —
+OPT77 credits raw removed compute, and mixing a billable-round-up quantity into it
+would break its measured basis. Under-reporting a real saving is the safe
+direction; inventing a basis is not. Because that cost is real, every superseded
+finding is disclosed in the results (`superseded_findings`) with what displaced
+it and which of its jobs the surviving finding does *not* cover.
+
+**Fix**: Merge the group into one job that checks out and installs once, then
+runs the collapsed tasks **concurrently** inside that job (background processes
+joined at the end, or a task runner's own parallel mode). The concurrency is not
+a nicety: run sequentially, the consolidated job costs `setup + the SUM of the
+tasks` instead of `setup + the slowest task`, which can push it past the merge
+gate and make the change wall-clock-negative. Do not consolidate any job that can
+sit on the merge gate, and do not drop or narrow any check in the process — the
+consolidated job must still run everything the separate jobs ran, and still fail
+the build when any of them fails.
+
+**Failure-isolation cost (a real cost, not a footnote)**: N separate checks give
+N independently-red checks and N independently re-runnable units. One
+consolidated job gives one red check and re-runs everything, and a reviewer
+reading the checks list loses the at-a-glance "which one broke". Surface each
+task's own result inside the job (per-task step, or an explicit summary) so the
+diagnosis is not lost, and weigh the lost re-run granularity against the saved
+minutes before consolidating.
+
+**Required-checks caveat**: consolidating jobs renames the checks (the old job
+names disappear). If any of the consolidated jobs was a required status check,
+add the new consolidated job's check name to branch protection as a required
+check (or the ruleset equivalent), or the consolidated work silently stops gating
+merges until that admin-only step is done. If the consolidation routes the old
+checks' work behind a `needs:` edge and an aggregator, see OPT75's
+[dependency-failure skip caveat](#opt75--long-pole-optimize-or-relocate-the-dominant-step)
+— a dependent skipped by a failed dependency reports skipped, not failed, so the
+aggregator must run with `always()` (or `!cancelled()`) and propagate every
+`needs.<job>.result`, and keeping the required check name on that aggregator
+re-gates the merge without an admin.
+
+**Tier-2 render note**: OPT77 can promote only with measured setup evidence and a
+neutrality certificate whose `proof` token is `below_cluster_floor`. **That token
+is historical** for this pattern: the comparison is against the tallest job that
+*remains* after the consolidation, not against the workflow's cluster floor. The
+token is shared with OPT65 (whose cluster-floor comparison *is* genuine) and kept
+as the dispatch key; the meaning is restated wherever it is read — the detector,
+`verify_report.py`'s neutrality arm, `blocking_path.py`'s certificate summary and
+this note.
+
+The finding must stamp `wall_clock_p50_s=0`, `sizing_basis=measured`, the
+`(N-1) x setup_p50` model in `measured_signal`, and a structured
+`setup_consolidation` block that lets `verify_report.py` re-derive both the
+credited minutes and the margin. Every one of these keys is hard-required by that
+re-derivation:
+
+| key | what it carries |
+|---|---|
+| `credited_jobs` | the jobs the saving is claimed for; must equal `affected_jobs` |
+| `removed_setup_payments` | `N - 1` |
+| `setup_p50_s` | the smallest per-job setup p50 in the group |
+| `shared_setup_steps` | the prefix identities the group was formed on |
+| `per_job[job].setup_p50_s` / `.useful_work_p50_s` / `.setup_steps` | each job's own measured split and its own prefix, which is what proves the grouping |
+| `projected_consolidated_p50_s` | `max(setup) + max(useful)` |
+| `remaining_tallest_job` / `remaining_tallest_p50_s` | the job the projection is measured against |
+| `remaining_eligible_jobs` / `remaining_excluded_jobs` | the set that job was chosen from, and every job left out with its reason |
+| `occurrences`, `sampled_successful_run_count`, `monthly_volume`, `scale` | the scaling; `occurrences` can never exceed the sampled run count |
+
+It never claims a speedup; it credits only removed setup runtime.
+
+**Worked shape**: seven independent checks each start a runner, check out the
+repository and install dependencies before doing only seconds of useful work.
+Collapsing them into a single job, with the seven tasks running concurrently
+inside it, drops the number of times that setup prefix is paid from seven to one
+— `(7 - 1) x setup_p50` of removed setup runtime on every run of the workflow.
+Split across two consolidated jobs instead (say, because two of the checks need a
+different toolchain), the same arithmetic applies per group: each group of `n`
+pays its prefix once instead of `n` times.
 
 ---
 
@@ -2881,7 +3121,8 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69 are *hygiene*: each is a named, locally-checkable defect with
+patterns OPT1–OPT69, OPT76 and OPT77 are *hygiene*: each is a named,
+locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. On real repos almost every hygiene hit moves **~0 developer
 wall-clock** — the true bottleneck is usually a check that is *working as

@@ -143,6 +143,27 @@ jobs:
       - uses: actions/checkout@v4
       - name: Integration suite
         run: npm run integration
+  lint-eslint:
+    name: lint (eslint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run lint:eslint
+  lint-biome:
+    name: lint (biome)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run lint:biome
+  lint-stylelint:
+    name: lint (stylelint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run lint:stylelint
 """
 
 
@@ -332,6 +353,39 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
         f"{sorted(f for f in consumed if '_status_success' in f)}")
 
     data = json.loads(findings_path.read_text(encoding="utf-8"))
+
+    # OPT77 end to end. `matrix.yml` carries three plain same-runner lint checks
+    # that each re-pay one 14s setup prefix before 6s of work, beside a 180s
+    # `integration` job that survives the consolidation. Both the detector's
+    # DISPATCH and the supersede step that follows it were pinned only by reading
+    # collect()'s source: `new = [] if True else _detect_opt77(...)` and deleting
+    # the supersede line each left the whole suite green. This executes them.
+    o77 = [f for f in data["findings"] if f.get("pattern") == "OPT77"]
+    assert len(o77) == 1, (
+        "the three plain same-runner lint checks in matrix.yml must promote one "
+        f"OPT77 consolidation (got {[f.get('affected_jobs') for f in o77]!r})")
+    sc = o77[0].get("setup_consolidation") or {}
+    assert sc.get("kind") == "opt77_repeated_setup", sc
+    assert sorted(sc.get("credited_jobs") or []) == [
+        "lint (biome)", "lint (eslint)", "lint (stylelint)"], sc.get("credited_jobs")
+    assert o77[0].get("wall_clock_p50_s") in (0, 0.0)
+    assert float(sc.get("setup_p50_s") or 0.0) > 0.0
+    assert sc.get("remaining_tallest_job") == "integration", sc
+    # ...and the round-up lever must not ALSO claim those three jobs: they are named
+    # like matrix legs, so OPT65 groups them too, and one edit rendering as two
+    # levers is exactly what the supersede step exists to stop.
+    o65_over_lints = [f for f in data["findings"]
+                      if f.get("pattern") == "OPT65"
+                      and {str(j) for j in (f.get("affected_jobs") or [])}
+                      & set(sc["credited_jobs"])]
+    assert not o65_over_lints, (
+        "an OPT65 finding survived over the same jobs as the OPT77 consolidation: "
+        f"{[f.get('affected_jobs') for f in o65_over_lints]!r}")
+    # Every gate that withheld a consolidation is counted, so a zero firing rate
+    # would be visible rather than silent.
+    assert isinstance(data.get("opt77_withheld_by_gate"), dict), (
+        "the per-gate withhold tally must be stamped on every collected run")
+
     # The static-scan findings come from scan.py parsing the YAML — they exist
     # regardless of gh replay, so they do NOT prove the replay wired up. Assert
     # them, but they are not the backstop.

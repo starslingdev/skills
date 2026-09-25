@@ -2212,7 +2212,7 @@ def test_door_policy_is_total_and_flags_unclassified():
         assert pol == "not_spine_derivable", f"{pat} must stay whitelisted"
         assert why, f"{pat} whitelist reason recorded"
     # And the measured run-elimination detectors resolve via their _SIZING model.
-    for pat in ("OPT46", "OPT47", "OPT64", "OPT65"):
+    for pat in ("OPT46", "OPT47", "OPT64", "OPT65", "OPT77"):
         assert _rm_door_policy(pat)[0] == "not_spine_derivable"
     f = {"pattern": "OPT99_new", "workflow_file": _OPT73_WF,
          "affected_jobs": ["e2e (1)"], "runner_min_saving": 42.0}

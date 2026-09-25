@@ -5164,7 +5164,7 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
     rows: list[tuple[str, str, str]] = [
         (f"ci-speedup static scan{skill_part}",
          f"All `.github/workflows/*.yml` under the analyzed tree ({short_sha})",
-         "Static pattern detection (OPT1–OPT69 catalog)")]
+         "Static pattern detection (full OPT catalog)")]
     if "gh-timing" in tiers:
         runs, jobs = ds.get("runs_sampled"), ds.get("jobs_sampled")
         cov = (f"{_count_noun(runs, 'run') if isinstance(runs, int) else '? runs'} / "
@@ -5494,22 +5494,35 @@ def _group_by_pattern_ranked(
     (12), which holds today — is never the row suppressed by the cap. The rest are ranked by
     cloud-bill saving desc (then severity, then pattern id). Used by the off-path appendix.
 
-    Grouping is by pattern id EXCEPT for OPT73 (the cross-cluster shared-substep floor
-    lever): each OPT73 finding is a DISTINCT lever — its own shared step, its own cluster
-    of jobs in its own workflow, its own evidence and magnitude — not a fungible occurrence
-    of one fix recipe applied at N spots. Folding them by pattern would render one row whose
-    evidence is only the first leg's and whose size is the MAX leg's wall-clock, hiding the
-    smaller legs' evidence and over-sizing them. So OPT73 is keyed by its cluster identity
-    (workflow + jobs), so distinct levers render as their own rows; identical clusters (same
-    workflow + same jobs) still fold. The displayed `pat` stays the bare pattern id."""
+    Grouping is by pattern id EXCEPT for OPT73 and OPT77, each of which is keyed by its
+    own identity (pattern + workflow + jobs).
+
+    OPT73 (the cross-cluster shared-substep floor lever): each finding is a DISTINCT
+    lever — its own shared step, its own cluster of jobs in its own workflow, its own
+    evidence and magnitude — not a fungible occurrence of one fix recipe applied at N
+    spots. Folding them by pattern would render one row whose evidence is only the first
+    leg's and whose size is the MAX leg's wall-clock, hiding the smaller legs' evidence
+    and over-sizing them.
+
+    OPT77 (repeated fixed setup) is the same shape for the same reason: the detector
+    groups by runner label AND setup prefix, so ONE workflow can carry two
+    consolidations — a row of Node checks and a row of Python checks are two separate
+    edits. Folded by pattern they rendered one row whose runner-minutes SUM both groups
+    while the embedded copy-paste agent prompt names only the first group's jobs: the
+    combined saving advertised beside a partial job list, which is exactly the failure
+    the OPT73 case was added for.
+
+    Distinct levers therefore render as their own rows; identical ones (same workflow +
+    same jobs) still fold. The displayed `pat` stays the bare pattern id."""
     groups: dict[Any, list[dict[str, Any]]] = {}
     display: dict[Any, str] = {}
     order: list[Any] = []
     for f in findings:
         pat = str(f.get("pattern", "") or "?")
-        # OPT73 levers are distinct per cluster, not fungible occurrences — see docstring.
+        # OPT73 and OPT77 levers are distinct per cluster / per consolidated group,
+        # not fungible occurrences of one recipe — see docstring.
         key: Any = pat
-        if pat == "OPT73":
+        if pat in ("OPT73", "OPT77"):
             key = (pat, str(f.get("workflow_file", "")),
                    tuple(f.get("affected_jobs") or ()))
         if key not in groups:
@@ -5637,6 +5650,11 @@ def _tier2_cert_summary(f: dict[str, Any]) -> str:
     ref = str(cert.get("ref") or "").strip()
     margin = _num(cert.get("margin_s"))
     if proof == "below_cluster_floor" and margin is not None:
+        # HISTORICAL TOKEN for OPT77: its margin is measured against the tallest
+        # job that REMAINS after the consolidation, not the workflow's cluster
+        # floor. The token is shared with OPT65, whose cluster-floor comparison is
+        # genuine, so it stays as the dispatch key; the certificate's own `ref`
+        # (appended below) names what each one was actually compared against.
         msg = f"`below_cluster_floor` with {_clock(margin)} margin"
     elif proof == "post_completion_waste":
         msg = "`post_completion_waste` - compute burned after the run signal is already decided"

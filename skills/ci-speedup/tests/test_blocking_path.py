@@ -7562,3 +7562,32 @@ def test_advisory_long_pole_tells_the_coding_agent_the_job_is_advisory():
         bp.render(_advisory_pole_doc(False), {}, {}, {}, "2026-09-02T00:00:00Z", {}), "e2e")
     assert "continue-on-error: true" not in plain.split(
         "#### 🤖 Prompt for your coding agent", 1)[1]
+
+
+def test_distinct_opt77_consolidations_render_as_separate_rows():
+    # A workflow can carry more than one consolidation: the detector groups by
+    # runner label AND by setup prefix, so a row of Node checks and a row of Python
+    # checks in one workflow are two separate edits (the catalog's own "Worked
+    # shape" shows exactly that). Folded by pattern they became ONE row that SUMMED
+    # both savings while the embedded agent prompt named only the first group's
+    # jobs — the combined minutes advertised next to a partial job list, verbatim
+    # the failure the OPT73 special case exists for.
+    def _opt77(fid, jobs, rm):
+        return {"pattern": "OPT77", "id": fid,
+                "title": "Repeated Fixed Setup Across Independent Small Jobs",
+                "workflow_file": ".github/workflows/ci.yml", "line": 0,
+                "affected_jobs": list(jobs), "wall_clock_p50_s": 0.0,
+                "runner_min_saving": rm, "severity": "MEDIUM",
+                "evidence": f"3 independent same-runner jobs ({', '.join(jobs)})",
+                "tier2_neutrality": {"proof": "below_remaining_tallest_job",
+                                     "margin_s": 450.0, "ref": "x"}}
+
+    node = _opt77("f1", ["lint", "typecheck", "format"], 400.0)
+    py = _opt77("f2", ["mypy", "ruff", "bandit"], 150.0)
+    groups = bp._group_by_pattern_ranked([node, py])
+    opt77_groups = [ms for pat, ms in groups if pat == "OPT77"]
+    assert len(opt77_groups) == 2, opt77_groups
+    assert [bp._rmin_of(ms) for ms in opt77_groups] == [400.0, 150.0]
+    # …and two identical consolidations still fold, exactly as OPT73 does.
+    assert len([ms for pat, ms in bp._group_by_pattern_ranked([node, dict(node, id="f3")])
+                if pat == "OPT77"]) == 1

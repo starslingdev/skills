@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 75-pattern
-catalog — 68 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76) plus 7 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against a 76-pattern
+catalog — 69 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76 and OPT77) plus 7 **structural /
 critical-path** patterns (OPT70–OPT75 and OPT78, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -736,7 +736,7 @@ multiset invariant:
 
 The plans and the call sites share their endpoint builders (`_volume_endpoint`,
 `_run_list_endpoint`, `_status_count_endpoint`, `_run_jobs_endpoint`,
-`_job_log_endpoint`) and their guard predicates (`_opt65_scope_event`,
+`_job_log_endpoint`) and their guard predicates (`_tier2_scope_event`,
 `_opt57_timeout_job_specs`, `_on_has_event`, `_recovers`) precisely so the two cannot
 disagree about which URL, or whether a call happens at all. A predicate re-stated inline
 next to the plan that computed it is a drift bug waiting to happen; there is exactly one
@@ -1032,6 +1032,40 @@ stamp bare run IDs for de-overlap: the credited unit is per-job billing round-up
 not whole-run elimination. The guardrail text must keep consolidation off the
 merge gate; lowering matrix parallelism or adding a serial `needs:` stage for an
 on-spine matrix is wall-clock-negative.
+OPT65 is also **superseded by OPT77** on any job set both claim, in
+`collect()` right after both have run for a workflow (`_supersede_opt65_with_opt77`).
+The two are not disjoint: OPT65 groups on a trailing parenthetical in the OBSERVED
+job name, so three ordinary jobs named `lint (eslint)` / `(biome)` / `(stylelint)`
+form an OPT65 base AND resolve to one YAML job each. One edit must render as one
+lever, so the consolidation wins; OPT65's round-up minutes for the overlap go
+unreported (a deliberate under-statement, since folding a billable-round-up
+quantity into OPT77's raw-compute basis would break it) and every drop is
+disclosed in `findings_doc["superseded_findings"]`.
+
+OPT77 (repeated fixed setup across independent small jobs) is the other measured
+Tier-2 consolidation lever. It splits each sampled job's step timeline into a
+LEADING setup prefix and useful work, using the same `_SETUP_STEP_RE` classifier
+the CUT hygiene detectors OPT49/OPT51 were defined against — widened in this wave
+to recognise GitHub's `Run <owner>/<action>@<ref>` rendering of an unnamed action
+step and the bare install commands (`npm ci`, `pip install`, …), without which
+the largest component of a real setup prefix was invisible. The prefix's SHAPE is
+read from every declared step and only its duration from the steps that measured
+above zero, because GitHub's one-second step granularity otherwise turns
+sub-second jitter into a change of signature.
+
+Its neutrality model is deliberately NOT the cluster floor: the projected
+consolidated job (`max(setup_p50) + max(useful_p50)`, tasks run concurrently
+inside it) is compared against the tallest job that REMAINS after the
+consolidation — a floor the group's own members help define would measure the fix
+against something the fix removes, and silenced the pattern on its own motivating
+shape. The certificate's `proof` token stays `below_cluster_floor` (shared with
+OPT65 as the dispatch key) and is historical for OPT77; `verify_report.py`'s
+`_opt77_consolidation_rederived` arm re-derives the saving, the margin, the
+grouping (each job's own stamped prefix must equal the credited shared one) and
+the eligible set the tallest-remaining job was chosen from. Like OPT65 it claims
+no speedup (`wall_clock_p50_s=0`, `realization=none`), and it shares
+`_billed_job_runner` and `_tier2_scope_event` with it.
+
 
 OPT57 now has a measured timeout-default-burn upgrade. A missing
 `timeout-minutes` key is only the structural gate: `collect_runs.py` emits a
@@ -1385,7 +1419,7 @@ family):
 |---|---|---|---|
 | **derive** | OPT45 | `hit_rate × Σ(measured billable)` | `measured_spine_billable` |
 | **clamp** | OPT73 | `min(modeled, Σ(measured billable))` | `measured_spine_clamped` (or `measured_spine_billable` when already within) |
-| **not_spine_derivable** (the EXPLICIT whitelist) | the measured run-elimination detectors (OPT46/47/64/65 — basis is the eliminated-runs slice, not per-job billable); the modeled-static patterns (`direct` / `runner-min-only`, disclosed as modeled in the report's sized-of-total ratio); the other structural step-decomposition levers (OPT70/71/72/74/75, per-job step basis) | retained, with the reason recorded in `runner_min_door_note` | `not_spine_derivable` |
+| **not_spine_derivable** (the EXPLICIT whitelist) | the measured run-elimination detectors (OPT46/47/64/65 — basis is the eliminated-runs slice, not per-job billable); the measured setup-prefix detector (OPT77 — basis is the per-job leading setup prefix); the modeled-static patterns (`direct` / `runner-min-only`, disclosed as modeled in the report's sized-of-total ratio); the other structural step-decomposition levers (OPT70/71/72/74/75, per-job step basis) | retained, with the reason recorded in `runner_min_door_note` | `not_spine_derivable` |
 
 The whitelist is **visible, not a silent bypass**: a reasoned entry per family,
 and tightening the modeled/structural families from whitelist → clamp is tracked
@@ -1933,7 +1967,7 @@ wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -1987,7 +2021,7 @@ reported by `scan.py` as having no critical-path router.
   (dominant step/category, redundancy ratio, required-status, shared substep)
   annotate the pole they came from; the catalog OPT70–OPT75 findings are
   therefore **excluded** from the off-path "Also noticed" appendix
-  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76 only) since the pole already
+  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76/OPT77 only) since the pole already
   represents them. Like every pole, a structural lever carries an agent prompt
   rather than a prescribed fix; for a HIGH-risk lever (e.g. OPT70 scope-to-
   changed) the prompt's failure-mode/guard section tells the agent to state the
@@ -2875,7 +2909,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 75-pattern catalog (METADATA + body per pattern); the source of truth for
+  the 76-pattern catalog (METADATA + body per pattern); the source of truth for
   detection and the report's TL;DR / pattern background.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.

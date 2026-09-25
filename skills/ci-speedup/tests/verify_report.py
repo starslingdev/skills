@@ -5006,6 +5006,211 @@ def _opt65_rounding_rederived(f: dict, data: dict) -> tuple[float | None, list[s
     return round(floor - max_combined, 1), problems
 
 
+def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, list[str]]:
+    """Independently re-derive OPT77's saving and its neutrality margin from the
+    stamped `setup_consolidation` block — never from the finding's own prose.
+
+    The certificate's `proof` token is `below_cluster_floor`, which for OPT77 is
+    HISTORICAL: the comparison is against the tallest job that remains after the
+    consolidation. The token is shared with OPT65 (a genuine cluster-floor
+    comparison) and kept as the dispatch key.
+
+    Saving model: consolidating N independent same-runner jobs that each re-pay the
+    same measured setup prefix removes (N-1) payments of it per run, so
+    `runner_min = occurrences x (N-1) x setup_p50_s / 60 x monthly / sampled_runs`.
+    Neutrality: the consolidated job is projected at `max(setup_p50) +
+    max(useful_work_p50)` (the collapsed tasks run CONCURRENTLY inside it) and must
+    stay strictly below the TALLEST JOB THAT REMAINS after the consolidation — not
+    below a floor the credited group's own members help define, which would compare
+    the fix against something the fix removes.
+
+    The per-job setup and useful-work values are stamped ROUNDED to 0.1s, so the
+    re-derivation below runs on rounded inputs and compares at a 0.11 tolerance.
+    That is sound only because the underlying measurements come from
+    second-granular step timestamps, where 0.1s is already finer than the source
+    data; it is not a licence to widen either number."""
+    sc = _as_dict(f.get("setup_consolidation"))
+    problems: list[str] = []
+    if sc.get("kind") != "opt77_repeated_setup":
+        return None, ["missing opt77_repeated_setup evidence"]
+    per_job = _as_dict(sc.get("per_job"))
+    jobs = [str(j) for j in _as_list(sc.get("credited_jobs")) if str(j)]
+    monthly = _num(sc.get("monthly_volume"))
+    denom = _num(sc.get("sampled_successful_run_count"))
+    occurrences = _num(sc.get("occurrences"))
+    if len(jobs) < 3:
+        problems.append(f"only {len(jobs)} credited job(s); at least 3 required")
+    if sorted(jobs) != sorted(str(j) for j in _as_list(f.get("affected_jobs")) if str(j)):
+        problems.append("affected_jobs do not match credited consolidation jobs")
+    if monthly is None or monthly <= 0:
+        problems.append(f"monthly_volume={sc.get('monthly_volume')!r}")
+    if denom is None or denom <= 0:
+        problems.append(f"sampled_successful_run_count={sc.get('sampled_successful_run_count')!r}")
+    if occurrences is None or occurrences <= 0:
+        problems.append(f"occurrences={sc.get('occurrences')!r}")
+    # `occurrences` multiplies the whole saving and nothing else bounds it: it
+    # counts sampled runs in which every credited job produced a clean
+    # measurement, so it can never exceed the number of runs sampled.
+    if (occurrences is not None and denom is not None
+            and occurrences > denom):
+        problems.append(
+            f"occurrences {occurrences} exceeds the {denom} sampled run(s) it counts")
+    setups: list[float] = []
+    usefuls: list[float] = []
+    # The group is only creditable because its jobs re-pay the SAME setup prefix;
+    # without that, `(N-1) x one setup` is not a saving anyone can collect.
+    shared = [str(x) for x in _as_list(sc.get("shared_setup_steps")) if str(x).strip()]
+    if not shared:
+        problems.append(
+            "shared_setup_steps missing or empty - cannot show the credited jobs "
+            "re-pay the same setup prefix rather than merely sharing a runner")
+    for job in jobs:
+        entry = _as_dict(per_job.get(job))
+        s = _num(entry.get("setup_p50_s"))
+        u = _num(entry.get("useful_work_p50_s"))
+        if s is None or s <= 0 or u is None or u < 0:
+            problems.append(f"{job}: missing setup/useful-work p50")
+            continue
+        if s + 0.011 < 0.5 * (s + u):
+            problems.append(f"{job}: setup {s} does not dominate useful work {u}")
+        # …and the prefix claimed for the GROUP has to be the prefix this job was
+        # actually measured with. Checking only that `shared_setup_steps` is
+        # non-empty takes the grouping on faith: it cannot tell a group of three
+        # jobs that genuinely re-pay one prefix from three jobs sharing a runner
+        # label and a plausible-looking list.
+        own = [str(x) for x in _as_list(entry.get("setup_steps"))]
+        if not own:
+            problems.append(f"{job}: no per-job setup_steps to check the grouping against")
+        elif own != shared:
+            problems.append(
+                f"{job}: measured setup prefix {own!r} is not the credited "
+                f"shared prefix {shared!r}")
+        setups.append(float(s))
+        usefuls.append(float(u))
+    if not setups or len(setups) != len(jobs):
+        return None, problems
+    removed = len(jobs) - 1
+    if _num(sc.get("removed_setup_payments")) != removed:
+        problems.append(f"removed_setup_payments {sc.get('removed_setup_payments')!r} != {removed}")
+    setup_p50 = min(setups)
+    if abs((_num(sc.get("setup_p50_s")) or -1.0) - round(setup_p50, 1)) > 0.11:
+        problems.append(f"setup_p50_s {sc.get('setup_p50_s')!r} != {round(setup_p50, 1)}")
+    projected = round(max(setups) + max(usefuls), 1)
+    claimed_projected = _num(sc.get("projected_consolidated_p50_s"))
+    if claimed_projected is None or abs(claimed_projected - projected) > 0.11:
+        problems.append(
+            f"projected_consolidated_p50_s {claimed_projected!r} != {projected}")
+    if monthly is not None and denom is not None and denom > 0 and occurrences:
+        expected_rm = round(
+            float(occurrences) * removed * setup_p50 / 60.0 * monthly / denom, 1)
+        rm = _num(f.get("runner_min_saving"))
+        if rm is None or abs(rm - expected_rm) > 0.11:
+            problems.append(f"runner_min_saving {rm!r} != re-derived {expected_rm}")
+        # The block restates the saving, its sampled basis and its scale factor.
+        # Duplicated numbers nobody reads drift; these are checked against the
+        # same re-derivation so a drift is a failure rather than a curiosity.
+        inner_rm = _num(sc.get("runner_min_saving"))
+        if inner_rm is None or abs(inner_rm - (rm if rm is not None else expected_rm)) > 0.11:
+            problems.append(
+                f"setup_consolidation.runner_min_saving {sc.get('runner_min_saving')!r} "
+                f"!= the finding's {rm!r}")
+        expected_sampled = round(float(occurrences) * removed * setup_p50, 3)
+        sampled = _num(sc.get("sampled_saved_s"))
+        if sampled is None or abs(sampled - expected_sampled) > 0.11:
+            problems.append(
+                f"sampled_saved_s {sc.get('sampled_saved_s')!r} != {expected_sampled}")
+        expected_scale = round(float(monthly) / float(denom), 6)
+        scale = _num(sc.get("scale"))
+        if scale is None or abs(scale - expected_scale) > 0.001:
+            problems.append(f"scale {sc.get('scale')!r} != {expected_scale}")
+    wf = str(f.get("workflow_file") or "")
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    # The consolidated job is measured against the tallest job that REMAINS after
+    # the consolidation, never against a floor the credited group helps define.
+    # Re-derived here from `per_workflow_timing[wf].job_p50` minus the credited
+    # jobs, so the detector's own stamped `remaining_tallest_*` is checked against
+    # an independent computation rather than taken at its word.
+    all_p50 = _as_dict(crit.get("job_p50"))
+    if not all_p50:
+        problems.append("missing job_p50")
+        return None, problems
+    member = {str(j) for j in jobs}
+    # The detector does not max over every remaining job: a job that ran in a
+    # minority of the sampled runs cannot carry the neutrality proof, because on
+    # the other runs the group's own members are the tallest thing left. It
+    # stamps the set it DID max over, plus every job it left out and why — so the
+    # partition is total and visible here rather than implied.
+    eligible_names = [str(x) for x in _as_list(sc.get("remaining_eligible_jobs"))]
+    excluded_names = set(_as_dict(sc.get("remaining_excluded_jobs")))
+    outside = {str(k) for k in all_p50 if str(k) not in member}
+    if not eligible_names:
+        problems.append("remaining_eligible_jobs missing - the tallest-remaining "
+                        "job was not shown to be chosen from a stated set")
+        return None, problems
+    stray = [n for n in eligible_names if n in member or n not in all_p50]
+    if stray:
+        problems.append(
+            f"remaining_eligible_jobs names {sorted(stray)!r}, which are credited "
+            "group members or absent from job_p50")
+    unaccounted = outside - set(eligible_names) - excluded_names
+    if unaccounted:
+        problems.append(
+            f"jobs outside the credited group neither credited as eligible nor "
+            f"excluded with a reason: {sorted(unaccounted)!r}")
+    remaining = [(float(_num(all_p50.get(n)) or 0.0), n) for n in eligible_names
+                 if (_num(all_p50.get(n)) or 0.0) > 0]
+    if not remaining:
+        problems.append("no job outside the credited group to measure against")
+        return None, problems
+    tallest_p50, tallest_job = max(remaining)
+    claimed_job = str(sc.get("remaining_tallest_job") or "")
+    if claimed_job != tallest_job:
+        problems.append(
+            f"remaining_tallest_job {claimed_job!r} != re-derived {tallest_job!r}")
+    claimed_tall = _num(sc.get("remaining_tallest_p50_s"))
+    if claimed_tall is None or abs(claimed_tall - round(tallest_p50, 1)) > 0.11:
+        problems.append(
+            f"remaining_tallest_p50_s {claimed_tall!r} != {round(tallest_p50, 1)}")
+    if projected >= tallest_p50:
+        problems.append(
+            f"projected consolidated job {projected} is not below the tallest "
+            f"remaining job {tallest_job!r} at {tallest_p50}")
+        return None, problems
+    return round(tallest_p50 - projected, 1), problems
+
+
+def _opt65_suppressions_are_accounted_for(data: dict) -> list[str]:
+    """Every OPT65 finding dropped for overlapping an OPT77 consolidation must be
+    disclosed, and the consolidation that displaced it must actually be in the
+    report.
+
+    The drop deliberately loses real minutes — OPT65's billing round-up for the
+    overlapping jobs goes unreported so that one edit renders as one lever. That
+    trade is only defensible while the surviving lever is there to describe the
+    edit. A suppression naming an OPT77 that is not in the same workflow's
+    findings has removed a lever and replaced it with nothing."""
+    out: list[str] = []
+    dropped = [d for d in _as_list(data.get("superseded_findings"))
+               if isinstance(d, dict)]
+    if not dropped:
+        return out
+    surviving: dict[str, set[str]] = {}
+    for f in _as_list(data.get("findings")):
+        if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT77":
+            surviving.setdefault(str(f.get("workflow_file") or ""), set()).add(
+                str(f.get("id") or ""))
+    for d in dropped:
+        wf = str(d.get("workflow_file") or "")
+        by = {str(x) for x in _as_list(d.get("superseded_by")) if str(x)}
+        if not by:
+            out.append(f"{d.get('id')!r}: suppressed without naming what superseded it")
+        elif not (by & surviving.get(wf, set())):
+            out.append(
+                f"{d.get('id')!r}: suppressed by {sorted(by)!r} in {wf!r}, but no "
+                "such OPT77 consolidation survives in that workflow")
+    return out
+
+
 def _tier2_skip_or_data(findings_path: Path | None, name: str,
                         report: str | None = None) -> tuple[Check | None, dict]:
     data, err = _load_findings_doc(findings_path)
@@ -5072,6 +5277,12 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
             if str(f.get("pattern") or "") == "OPT65":
                 want, opt65_bad = _opt65_rounding_rederived(f, data)
                 bad.extend(f"{fid}: {msg}" for msg in opt65_bad)
+            elif str(f.get("pattern") or "") == "OPT77":
+                # OPT77's margin is floor - PROJECTED consolidated duration, not
+                # floor - max(job p50): the generic re-derivation would silently
+                # pass a group whose consolidated job overruns the floor.
+                want, opt77_bad = _opt77_consolidation_rederived(f, data)
+                bad.extend(f"{fid}: {msg}" for msg in opt77_bad)
             else:
                 want = _below_floor_margin(f, data)
             if got is None or want is None or abs(got - want) > 0.11:
@@ -5113,6 +5324,7 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                 bad.append(f"{fid}: missing tier2_neutrality_line claim")
             elif str(claim.get("rendered") or "") not in body:
                 bad.append(f"{fid}: neutrality claim not bound to its R-row")
+    bad.extend(_opt65_suppressions_are_accounted_for(data))
     return Check(name, not bad, f"{len(ranked)} Tier-2 certificate(s) re-derived "
                  f"({len(expected)} visible R-row(s))" if not bad
                  else "; ".join(bad[:6]))

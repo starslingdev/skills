@@ -50,6 +50,103 @@ unversioned and updates by reinstall from `main`.
   match. The saving is deliberately not credited: the audit reports the measured
   import share and says a benchmark is required. (#103)
 
+- **2026-09-24** — **A workflow that pays the same setup over and over, once per
+  small check, is now reported as the runner-minute lever it is.** Several small,
+  independent checks — lint, typecheck, a licence audit — each start a runner,
+  check out the repository and install dependencies before doing work no longer
+  than the setup took, so one commit pays that fixed setup once per check. The
+  audit previously had no way to see this: the closest existing pattern credits
+  per-job billing round-up for sub-minute legs of one matrix, and these jobs are
+  neither sub-minute nor matrix legs, so the waste was invisible no matter how
+  large it got.
+
+  The audit now measures each job's setup prefix from its real step timings, and
+  where at least three independent jobs on the same runner spend at least half
+  their time in **the same** prefix, it credits the setup payments a
+  consolidation would remove — a runner-minute saving only, never a speedup.
+  Sameness is measured, not assumed: checks that each spend the same amount of
+  time installing *different* toolchains, or that run the same-named step in a
+  different directory or against a different toolchain version, are grouped
+  separately and sized separately, because merging those would still have to run
+  every install and so removes far less than it appears to.
+
+  Whether the change could lengthen the wait for a pull request is decided
+  against the longest job that would still be there **afterwards** — the job that
+  actually sets the wait once the group is collapsed — and that job must itself
+  be one that runs in most of the sampled runs. The finding is withheld when
+  nothing outside the group is longer, and withheld when any job outside the
+  group waits on a member, since collapsing them would then delay everything
+  downstream. The fix it hands back says plainly that the collapsed tasks must
+  run concurrently inside the new job (run one after another they would cost the
+  sum, not the slowest), that consolidating renames the checks so branch
+  protection must be updated or the work silently stops gating merges, that
+  collapsing several checks into one trades away independently-red,
+  independently-re-runnable checks, and that the grouping should be confirmed
+  against the jobs' real toolchains before merging them.
+
+- **2026-09-21** — **One edit is reported as one saving.** A group of checks could
+  be claimed by both this lever and the older billing round-up lever and shown
+  twice, because the older one recognises a group by how its jobs are named rather
+  than by whether they are really a build matrix — so three ordinary checks named
+  like matrix legs tripped both. The repeated-setup lever now takes precedence for
+  any group both describe. The round-up minutes the other lever would have
+  reported are real and are not added in, so the total for that group is slightly
+  conservative; that is deliberate, since the two are measured in different units
+  and combining them would make neither trustworthy.
+
+- **2026-09-21** — **Two checks that set up the same way are still recognised as
+  the same when one of them has drifted.** Deciding whether a group of checks
+  re-pays the same setup compared the setup steps exactly as written, so one check
+  pinning an older version of a setup action, or passing one extra flag to its
+  install, split the group and silenced the finding. Real repositories drift like
+  that constantly, which made the lever close to unreportable in practice. Action
+  versions and command flags are no longer treated as differences; a different
+  toolchain, a different thing being installed, or an extra step still are.
+
+- **2026-09-21** — **The audit now recognises an unnamed dependency install as
+  setup.** The single shared definition of "this step is setup" keyed off the
+  step's name, and a step nobody named is shown by GitHub as the command it ran —
+  so `npm ci`, `pip install`, `bundle install` and their equivalents were read as
+  useful work rather than as the install they are. That made the largest part of a
+  typical setup prefix invisible to any measurement of it, on exactly the repos
+  least likely to have named their steps. The definition now also recognises
+  GitHub's rendering of an unnamed action step and the common install commands
+  themselves.
+
+- **2026-09-24** — **A second of timing noise no longer hides the repeated-setup
+  finding.** GitHub records how long each step took to the nearest second, so a
+  step that takes a fraction of a second is recorded as zero in one run and one
+  second in the next, on a workflow file that has not changed. The setup prefix
+  was read only from steps with a measurable duration, so that noise changed the
+  shape of the prefix, made a check look as though it set up differently from one
+  run to the next, and dropped it — taking the whole group with it. Two checks
+  whose boot time happened to land on different sides of a second were split from
+  each other permanently. The prefix's shape now comes from every step a job
+  declares and only its duration from the steps long enough to measure. On a
+  four-case sample of ordinary jitter the finding went from being reported in two
+  cases to all four. The same omission also hid a zero-second step that is *not*
+  setup, so a prefix with real work in the middle of it was reported as one
+  unbroken run of setup; that now ends the prefix as it should.
+
+- **2026-09-24** — **A run that reports no consolidations now says why.** The
+  check declines in around thirty places and returned the same empty answer every
+  time. Each decision is now recorded with the workflow, the jobs, the reason and
+  the numbers compared, and the results carry a count per reason, so a lever that
+  has stopped working is visible rather than mistaken for a clean repository.
+
+- **2026-09-24** — **A saving dropped so another could be reported once is now
+  disclosed.** When a consolidation and a billing round-up describe the same edit,
+  only the consolidation is reported. The round-up minutes that drop out are real
+  and nothing said they had gone. Each dropped finding is now recorded alongside
+  the results with what displaced it and which of its jobs the surviving finding
+  does not cover.
+
+- **2026-09-24** — **Two consolidations in one workflow no longer render as one
+  row.** A workflow can carry more than one group — a row of Node checks and a row
+  of Python checks are two separate edits — and they were folded into a single
+  entry that added both savings together while the copy-paste fix named only the
+  first group's jobs.
+
 - **2026-09-08** — **A fix that moves the slowest step out of a merge gate now
   says how to keep the gate.** The long-pole lever can hand back a fix that
   relocates the dominant step into another job, and until now nothing in the
