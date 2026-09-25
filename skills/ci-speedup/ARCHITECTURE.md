@@ -1070,30 +1070,35 @@ OPT80 (checkout stalls on the tail) is the third measured Tier-2 lever, and the
 first whose admission rests on a LOG rather than on a timing alone. It measures
 one step's distribution across the sample — the checkout step, identified from
 the workflow YAML (directly `uses: actions/checkout@*`, or a local composite
-whose body does, read with the same transitive local-action walk OPT76 uses) and
-never from its timing, because one-second step granularity makes a warm checkout
+whose body does, read with a transitive local-action walk mirroring OPT76's; an
+unreadable or self-referential action fails closed) and never from its timing, because one-second step granularity makes a warm checkout
 measure 0s and a timing-based search would drop that run and inflate the p50.
 A tail is `p95 >= max(3 x p50, p50 + 30s)` with at least two runs at or above the
 threshold; only THEN are logs fetched, for the tail runs only, newest-first,
 bounded by `_OPT80_LOG_PROBE_MAX` — a job with no tail costs no gh call. The
 finding exists only if at least two of those logs show the transfer standing
 still — a gap of >= 20s between two consecutive `Receiving objects: N%` lines at
-the SAME N, with both bracketing lines quoted verbatim, and only inside the
-checkout step's own time window.
+the SAME N below 100, with both bracketing lines quoted verbatim, and only inside
+the checkout step's own time window. A log is split on newlines only, and each
+record split again on the carriage returns git writes its progress animation
+with, so an advancing transfer cannot masquerade as a stalled one.
 
 A stall is progress that STOPPED, not progress that had not started. The quiet
 before the first `remote:` line, the quiet across pack enumeration, and two
 receiving lines whose percentage advanced are all a LARGE REPOSITORY (OPT28's
-lever) and are withheld under `tail_pause_was_advancing_or_pre_transfer` — they
-would also be aborted by the low-speed timeout this pattern recommends, so
-reporting them would hand the reader a fix that reds their CI.
+lever) and are withheld under `tail_pause_was_advancing_or_pre_transfer`; a pause
+at 100% is the runner writing the pack to disk and is withheld under
+`tail_pause_was_after_the_transfer_completed`. The large-repository shapes would
+also be aborted by the low-speed timeout this pattern recommends, so reporting
+them would hand the reader a fix that reds their CI.
 
 That log gate is the whole reason the pattern is admissible where OPT49 was cut:
 OPT49 read a CAUSE ("uncached") out of a DURATION. OPT80 rejects in both
 directions — a tail whose logs show a smooth fetch is withheld
 (`tail_without_log_gap`), and no log is fetched for a job with no tail, so a gap
-alone can never produce a finding. The four "no proof" cases are counted apart,
-because progress switched off (`log_carries_no_progress_vocabulary`) and a log
+alone can never produce a finding. Every "no proof" case is counted apart, and
+every DISTINCT one across the probed runs is counted rather than only the most
+common, because progress switched off (`log_carries_no_progress_vocabulary`) and a log
 lost to retention (`tail_run_log_unavailable`) say nothing about the repository
 while a smooth fetch does. Log text is untrusted: only the closed
 progress vocabulary is read, and a quoted line carrying a credential shape drops
