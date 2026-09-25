@@ -3561,8 +3561,14 @@ def _opt80_stamp(offset):
 
 
 def _opt80_job(job_id, checkout_s, runner="ubuntu-latest", name="build",
-               checkout_step="Run actions/checkout@v4", work_s=60.0):
-    """One sampled occurrence: `Set up job` → the checkout step → work."""
+               checkout_step="Run actions/checkout@v4", work_s=60.0,
+               started_at=None):
+    """One sampled occurrence: `Set up job` → the checkout step → work.
+
+    `started_at` is the job's own clock time (an ISO stamp). It defaults to the
+    same instant for every job, which is what most cases want; the probe-order
+    case passes distinct values, because ordering is only observable when the
+    jobs do not all start together."""
     t = 0.0
     steps = []
     for step_name, dur in (("Set up job", 1.0),
@@ -3577,7 +3583,7 @@ def _opt80_job(job_id, checkout_s, runner="ubuntu-latest", name="build",
         "name": name,
         "status": "completed",
         "conclusion": "success",
-        "started_at": _opt80_stamp(0),
+        "started_at": started_at or _opt80_stamp(0),
         "completed_at": _opt80_stamp(t),
         "labels": [runner],
         "html_url": f"https://github.com/acme/app/actions/runs/{job_id}/job/{job_id}",
@@ -4021,3 +4027,115 @@ def test_opt80_needs_two_separately_proven_tail_runs():
     assert out == [], out
     assert counts.get("tail_without_log_gap") == 1, counts
     assert cr._OPT80_MIN_PROVEN_TAIL_RUNS == 2
+
+
+def test_opt80_probes_the_newest_tail_runs_first():
+    """Job logs are deleted at retention, so a bounded probe that starts at the
+    OLDEST tail run spends its budget on the runs whose logs are most likely to
+    be gone — and a real stall then reads as `tail_without_log_gap`. The probe
+    takes the newest tail runs, newest first, whatever order the sample is in."""
+    # Six tail runs with distinct, deliberately shuffled start days.
+    order = [3, 0, 5, 1, 4, 2]
+    runs = [[_opt80_job(8100 + i, 10.0)] for i in range(12)]         # the p50 side
+    runs += [[_opt80_job(8200 + d, 120.0,
+                         started_at=f"2026-06-{10 + d:02d}T00:00:00Z")]
+             for d in order]
+    logs = {r[0]["id"]: _OPT80_STALLED_LOG for r in runs}
+    out, gh = _opt80(jpr=runs, logs=logs)
+    assert len(out) == 1, out
+    newest_first = [8200 + d for d in sorted(order, reverse=True)][:cr._OPT80_LOG_PROBE_MAX]
+    probed = [int(c.split("/jobs/")[1].split("/")[0]) for c in gh.calls]
+    assert probed == newest_first, (probed, newest_first)
+
+
+def test_opt80_drops_only_the_doubled_name_not_the_whole_sample():
+    """Failing closed on a static-name matrix must cost that ONE name. A sibling
+    job in the same runs still earns its finding."""
+    counts: dict = {}
+    runs = _opt80_runs()
+    # `lint` carries the same stalling shape as `build`, so it would fire alone.
+    for i, run in enumerate(runs):
+        run.append(_opt80_job(8300 + i, 10.0 if i < 8 else 120.0, name="lint"))
+    runs[0].append(_opt80_job(8901, 500.0, name="build"))     # doubles `build` only
+    crit = {"job_p50": {"build": 121.0, "lint": 121.0},
+            "job_runner": {"build": "ubuntu-latest", "lint": "ubuntu-latest"},
+            "long_pole_job": "build", "long_pole_p50": 121.0,
+            "floor_p50": 121.0, "runner_scope": "ubuntu-latest"}
+    steps = [{"uses": "actions/checkout@v4"}, {"run": "npm test"}]
+    wf = {"on": {"pull_request": {}},
+          "jobs": {"build": {"runs-on": "ubuntu-latest", "steps": steps},
+                   "lint": {"runs-on": "ubuntu-latest", "steps": steps}}}
+    logs = {j["id"]: _OPT80_STALLED_LOG for run in runs for j in run}
+    out, _gh = _opt80(jpr=runs, crit=crit, wf=wf, logs=logs, withheld=counts)
+    assert counts.get("job_name_is_carried_twice_in_one_run") == 1, counts
+    assert [f["checkout_stall"]["job"] for f in out] == ["lint"], out
+
+
+def test_opt80_reads_the_abort_from_inside_a_local_composite(tmp_path):
+    """The git-config form and a lone `_TIME` must be recognised inside a local
+    composite action's body too, not only in the job's own steps."""
+    for body in ("runs:\n  using: composite\n  steps:\n"
+                 "    - run: git config http.lowSpeedTime 30\n"
+                 "      shell: bash\n",
+                 "runs:\n  using: composite\n  steps:\n"
+                 "    - uses: actions/checkout@v4\n"
+                 "      env:\n        GIT_HTTP_LOW_SPEED_TIME: '30'\n"):
+        d = tmp_path / ".github" / "actions" / "co"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "action.yml").write_text(
+            "runs:\n  using: composite\n  steps:\n"
+            "    - uses: actions/checkout@v4\n      \n")
+        (tmp_path / ".github" / "actions" / "co" / "action.yml").write_text(body)
+        counts: dict = {}
+        wf = _opt80_wf(steps=[{"uses": "./.github/actions/co"},
+                              {"run": "npm test"}])
+        out, _gh = _opt80(wf=wf, root=tmp_path, withheld=counts)
+        assert out == [], body
+        assert counts, (body, counts)
+
+
+def test_opt80_git_config_that_removes_the_abort_is_not_a_fix():
+    """`--unset` is the repo this pattern exists for. Neither it, nor a mention
+    in an echo or a grep, may read as 'already applied'."""
+    for cmd in ("git config --unset http.lowSpeedLimit",
+                "git config --global --unset-all http.lowSpeedTime",
+                "echo 'we do not set http.lowSpeedLimit'",
+                "grep -q http.lowSpeedLimit ~/.gitconfig"):
+        wf = _opt80_wf(steps=[{"run": cmd},
+                              {"uses": "actions/checkout@v4"},
+                              {"run": "npm test"}])
+        out, _gh = _opt80(wf=wf)
+        assert len(out) == 1, (cmd, out)
+
+
+def test_opt80_stall_parser_clamps_to_the_window_it_is_given():
+    """The parser's window is a hard bound at both ends, and a window that is not
+    two comparable instants yields no proof rather than an unclamped scan."""
+    import datetime as dt
+    log = "\n".join([
+        "2026-06-01T00:00:10.0000000Z Receiving objects:  12% (1/9)",
+        "2026-06-01T00:00:50.0000000Z Receiving objects:  12% (1/9)",
+    ])
+    lo = dt.datetime(2026, 6, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
+    hi = dt.datetime(2026, 6, 1, 0, 1, 0, tzinfo=dt.timezone.utc)
+    assert cr._opt80_stall_in_log(log, window=(lo, hi))["gap_s"] == 40.0
+    # The second line one second outside the window: the pair is gone.
+    hi_short = dt.datetime(2026, 6, 1, 0, 0, 49, tzinfo=dt.timezone.utc)
+    assert cr._opt80_stall_in_log(log, window=(lo, hi_short)) is None
+    # A naive bound is coerced, not crashed on.
+    assert cr._opt80_stall_in_log(
+        log, window=(lo.replace(tzinfo=None), hi.replace(tzinfo=None)))["gap_s"] == 40.0
+    assert cr._opt80_stall_in_log(log, window=(None, hi)) is None
+
+
+def test_opt80_names_the_uncredited_bound_and_ships_abort_with_retry():
+    """Two honesty claims the report makes in prose, pinned: the stalled runs'
+    own improvement is named as an upper bound, and the recipe never offers the
+    abort as a step you can take on its own."""
+    out, _gh = _opt80()
+    f = out[0]
+    assert f["checkout_stall"]["tail_run_longest_pause_s"] == 40.0, f["checkout_stall"]
+    note = f["measured_evidence"]["note"]
+    assert "without the retry" in note, note
+    assert "ONE change" in note, note
+    assert "at most" in f["evidence"], f["evidence"]

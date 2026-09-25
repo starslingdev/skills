@@ -8717,7 +8717,7 @@ def _opt80_verifier_finding(**over):
             "min_gap_s": 20.0, "min_proven_tail_runs": 2,
             "proven_tail_runs": proven,
             "logs_fetched": 2, "log_probe_max": 4,
-            "tail_excess_s": 22.0, "tail_run_wall_clock_s": 40.0,
+            "tail_excess_s": 22.0, "tail_run_longest_pause_s": 40.0,
             "on_critical_path": True,
             "monthly_volume": 100, "effective_monthly_volume": 100.0,
             "runner_min_saving": 36.7,

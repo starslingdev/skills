@@ -325,7 +325,7 @@ _RUNTIME_MEASURED_COVERED = {"OPT19", "OPT24", "OPT25", "OPT49", "OPT50", "OPT51
 # stamps wall_clock_p50_s = 0 by construction: the median run has no stall, so
 # capping the tail cannot move the p50 merge gate. With no positive wall-clock
 # claim there is no physical bound to cap — the tail runs' own improvement is
-# stamped (`tail_run_wall_clock_s`) and deliberately left uncredited. Its
+# stamped (`tail_run_longest_pause_s`) and deliberately left uncredited. Its
 # runner-minute sizing is covered by test_tier2_wave1_detectors.py and
 # independently re-derived by verify_report's OPT80 certificate arm.
 _MEASURED_EXEMPT = {

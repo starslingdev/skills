@@ -9061,9 +9061,27 @@ _OPT80_RETRY_WRAPPER_RE = _re.compile(
     r"(nick-fields/retry|Wandalen/wretry|retry[-_]?action"
     r"|GIT_HTTP_LOW_SPEED_(LIMIT|TIME)|http\.lowspeed(limit|time))",
     _re.I)
-_OPT80_GIT_CONFIG_RE = _re.compile(r"http\.lowspeed(limit|time)", _re.I)
+# `git config http.lowSpeedLimit 1000` — git's own equivalent of the env vars.
+# Anchored on a `git config` invocation that SETS it: `--unset`, `--get` and
+# `--list`, and a bare mention in an echo or a grep, must not read as "already
+# applied", because a repo that just removed the abort is the repo this pattern
+# exists for.
+_OPT80_GIT_CONFIG_RE = _re.compile(
+    r"git\s+config\b(?![^\n]*--(unset|unset-all|get|get-all|list))"
+    r"[^\n]*http\.lowspeed(limit|time)", _re.I)
 _OPT80_LOCAL_USES_RE = _re.compile(r"uses:\s*['\"]?(\./[^\s'\"#]+)")
 _OPT80_CHECKOUT_USES_RE = _re.compile(r"^actions/checkout(@|$)", _re.I)
+
+
+def _opt80_aware(value: "_dt.datetime | None") -> "_dt.datetime | None":
+    """A datetime coerced to UTC-aware, or None. Log timestamps are always aware;
+    a step timestamp that arrived without an offset would otherwise raise on
+    comparison and abort the whole pass instead of failing this one claim."""
+    if not isinstance(value, _dt.datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=_dt.timezone.utc)
+    return value
 
 
 def _opt80_log_line(line: str) -> "tuple[_dt.datetime, str] | None":
@@ -9168,11 +9186,12 @@ def _opt80_retry_already_configured(wf_doc: dict[str, Any], job_spec: dict[str, 
     """True when the checkout already retries or aborts a stalled fetch, False when
     it demonstrably does not, None when that cannot be read (fail closed).
 
-    Three places carry the fix: `GIT_HTTP_LOW_SPEED_LIMIT` / `_TIME` in the
-    workflow-, job- or step-level `env:`; a retry-wrapper action around the
-    checkout; or a local composite action whose body does either. An unreadable
-    local composite returns None — a fix we cannot see is not a fix we may
-    assume absent."""
+    Four places carry the fix: `GIT_HTTP_LOW_SPEED_LIMIT` / `_TIME` in the
+    workflow-, job- or step-level `env:`; a `git config http.lowSpeedLimit` /
+    `http.lowSpeedTime` in a `run:` step; a retry-wrapper action around the
+    checkout; or a local composite action whose body does any of those. An
+    unreadable local composite returns None — a fix that cannot be seen is not a
+    fix that may be assumed absent."""
     for env_block in (wf_doc.get("env"), job_spec.get("env")):
         if isinstance(env_block, dict) and any(
                 str(k).upper() in _OPT80_RETRY_ENV_KEYS for k in env_block):
@@ -9188,8 +9207,10 @@ def _opt80_retry_already_configured(wf_doc: dict[str, Any], job_spec: dict[str, 
                 str(k).upper() in _OPT80_RETRY_ENV_KEYS for k in env_block):
             return True
         # `git config http.lowSpeedLimit` is git's own documented equivalent of
-        # the env vars, and setting it in a `run:` step before the checkout is a
-        # common way to apply this fix. A repo that did that has applied it.
+        # the env vars, and a `run:` step that sets it is a common way to apply
+        # this fix. Any step in the job counts: ordering is not checked, because
+        # the setting is usually made in a setup step and reading it as "not
+        # applied" would tell the repo to apply what it already has.
         if _OPT80_GIT_CONFIG_RE.search(str(step.get("run") or "")):
             return True
         uses = str(step.get("uses") or "").strip()
@@ -9231,8 +9252,12 @@ def _opt80_stall_in_log(log: str, window: "tuple[_dt.datetime, _dt.datetime] | N
         if parsed is None:
             continue
         ts, text = parsed
-        if window is not None and not (window[0] <= ts <= window[1]):
-            continue
+        if window is not None:
+            lo, hi = _opt80_aware(window[0]), _opt80_aware(window[1])
+            # A window that is not two comparable instants proves nothing, so the
+            # whole log is refused rather than scanned unclamped.
+            if lo is None or hi is None or not (lo <= ts <= hi):
+                continue
         if _OPT80_PROGRESS_RE.search(text):
             events.append((ts, text))
     best: dict[str, Any] | None = None
@@ -9293,8 +9318,8 @@ def _detect_opt80_checkout_tail_stall(
     Every exit is COUNTED into `withheld` (a `{gate: count}` accumulator the
     caller stamps onto the findings doc) and logged at DEBUG. An empty return is
     what a DEAD detector also produces; a visible per-gate tally is the only
-    thing that tells the two apart, and this detector withholds at nineteen
-    named gates."""
+    thing that tells the two apart, and every one of this detector's exits is a
+    named gate."""
     def _no(gate: str, **ctx: Any) -> None:
         if withheld is not None:
             withheld[gate] = withheld.get(gate, 0) + 1
@@ -9443,7 +9468,7 @@ def _detect_opt80_checkout_tail_stall(
         probe = sorted(
             (r for r in tail_runs if by_id.get(r["job_id"])
              and _job_has_log(by_id[r["job_id"]])),
-            key=lambda r: (_parse_dt(by_id[r["job_id"]].get("started_at"))
+            key=lambda r: (_opt80_aware(_parse_dt(by_id[r["job_id"]].get("started_at")))
                            or _dt.datetime.min.replace(tzinfo=_dt.timezone.utc)),
             reverse=True)[:_OPT80_LOG_PROBE_MAX]
         proven: list[dict[str, Any]] = []
@@ -17196,7 +17221,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # job logs per firing job, fetched for TAIL RUNS ONLY and only after
         # every cheap gate has already passed — a job with no tail costs nothing.
         # Like OPT77, every gate that stopped a finding is counted onto the
-        # findings doc: this detector withholds at nineteen named gates and
+        # findings doc: this detector withholds at many named gates and
         # returns the same empty list whether it declined on the evidence or is
         # broken.
         new = _detect_opt80_checkout_tail_stall(
