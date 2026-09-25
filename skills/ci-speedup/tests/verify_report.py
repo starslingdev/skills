@@ -5179,6 +5179,210 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
     return round(tallest_p50 - projected, 1), problems
 
 
+# Verbatim copies of the OPT80 constants in `collect_runs.py` — verify_report is
+# standalone by design (no skill imports), so the bounds it re-derives the tail
+# test on are duplicated here and kept honest by a coupling test in
+# test_verify_report_self.py, exactly like the other engine constants.
+_VR_OPT80_TAIL_P95_MULTIPLE = 3.0
+_VR_OPT80_TAIL_P95_ABS_S = 30.0
+_VR_OPT80_MIN_TAIL_RUNS = 2
+_VR_OPT80_MIN_PROVEN_TAIL_RUNS = 2
+_VR_OPT80_MIN_GAP_S = 20.0
+
+
+def _vr_percentile(values: list[float], pct: float) -> float:
+    """Linear-interpolated percentile — the copy of `collect_runs._percentile`
+    this file re-derives OPT80's distribution with."""
+    if not values:
+        return 0.0
+    v = sorted(values)
+    k = (len(v) - 1) * pct / 100.0
+    lo, hi = int(k), min(int(k) + 1, len(v) - 1)
+    return v[lo] + (v[hi] - v[lo]) * (k - lo)
+
+
+def _vr_opt80_ts(value: object) -> "float | None":
+    """A stamped log-line timestamp as epoch seconds, or None. Accepts the
+    six-digit-fraction ISO form the detector stamps."""
+    s = str(value or "").strip().replace("Z", "+00:00")
+    if not s:
+        return None
+    try:
+        import datetime as _d
+        return _d.datetime.fromisoformat(s).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt80_checkout_stall_rederived(f: dict) -> list[str]:
+    """Re-derive OPT80's whole claim from the stamped `checkout_stall` block —
+    the distribution, the tail test, every proven pause, and the credited
+    minutes. Nothing here reads the finding's prose, and nothing takes a stamped
+    summary number at its word: p50, p95, mean, the tail threshold, which runs
+    were tail runs, each pause's seconds and the runner-minutes are all
+    recomputed from the per-run inputs.
+
+    The pattern is only admissible because it PROVES the stall rather than
+    inferring it from a duration (the reason OPT49 was cut), so the two halves
+    are checked against each other in both directions: a claim with a tail and
+    no log-proven pause fails here, and a claim whose "tail runs" are not
+    actually at or above the re-derived threshold fails here too.
+
+    Per-run durations are stamped rounded to 0.1s, so the comparisons run on
+    rounded inputs at a 0.11 tolerance — sound only because the source is
+    second-granular step timestamps, and not a licence to widen either number."""
+    cs = _as_dict(f.get("checkout_stall"))
+    problems: list[str] = []
+    if cs.get("kind") != "opt80_checkout_tail_stall":
+        return ["missing opt80_checkout_tail_stall evidence"]
+
+    per_run = [r for r in _as_list(cs.get("per_run_checkout_s")) if isinstance(r, dict)]
+    durs = [_num(r.get("checkout_s")) for r in per_run]
+    if not per_run or any(d is None or d < 0 for d in durs):
+        return ["per_run_checkout_s missing or carries a non-numeric duration"]
+    vals = [float(d) for d in durs if d is not None]
+
+    sampled = _num(cs.get("sampled_successful_run_count"))
+    occurrences = _num(cs.get("occurrences"))
+    if occurrences is None or int(occurrences) != len(per_run):
+        problems.append(
+            f"occurrences {cs.get('occurrences')!r} != the {len(per_run)} stamped "
+            "per-run measurement(s)")
+    if sampled is None or sampled <= 0:
+        problems.append(
+            f"sampled_successful_run_count={cs.get('sampled_successful_run_count')!r}")
+    elif len(per_run) > sampled:
+        problems.append(
+            f"{len(per_run)} per-run measurement(s) exceed the {sampled} sampled run(s)")
+
+    job = str(cs.get("job") or "")
+    affected = [str(j) for j in _as_list(f.get("affected_jobs")) if str(j)]
+    if affected != [job] or not job:
+        problems.append(
+            f"affected_jobs {affected!r} do not match the credited job {job!r}")
+    if not str(cs.get("checkout_step") or "").strip():
+        problems.append("checkout_step missing - the measured step is unidentified")
+    if not str(cs.get("checkout_step_source") or "").strip():
+        problems.append("checkout_step_source missing - cannot tell an "
+                        "`actions/checkout` step from a local composite that wraps one")
+    if not str(cs.get("runner_label") or "").strip():
+        problems.append("runner_label missing - a tail across runner classes is not a stall")
+
+    p50 = round(_vr_percentile(vals, 50), 1)
+    p95 = round(_vr_percentile(vals, 95), 1)
+    mean = round(sum(vals) / len(vals), 1)
+    for key, want in (("p50_s", p50), ("p95_s", p95), ("mean_s", mean),
+                      ("max_s", round(max(vals), 1))):
+        got = _num(cs.get(key))
+        if got is None or abs(got - want) > 0.11:
+            problems.append(f"{key} {cs.get(key)!r} != re-derived {want}")
+
+    threshold = round(max(_VR_OPT80_TAIL_P95_MULTIPLE * p50,
+                          p50 + _VR_OPT80_TAIL_P95_ABS_S), 1)
+    got_thr = _num(cs.get("tail_threshold_s"))
+    if got_thr is None or abs(got_thr - threshold) > 0.11:
+        problems.append(
+            f"tail_threshold_s {cs.get('tail_threshold_s')!r} != re-derived {threshold}")
+    if p95 + 0.11 < threshold:
+        problems.append(
+            f"p95 {p95} does not clear the tail threshold {threshold} - this is a "
+            "duration, not a tail")
+    tail_ids = {r.get("job_id") for r in per_run
+                if float(_num(r.get("checkout_s")) or 0.0) >= threshold - 0.11}
+    claimed_tail = {j for j in _as_list(cs.get("tail_run_job_ids"))}
+    if claimed_tail != tail_ids:
+        problems.append(
+            f"tail_run_job_ids {sorted(map(str, claimed_tail))!r} != re-derived "
+            f"{sorted(map(str, tail_ids))!r}")
+    if len(tail_ids) < _VR_OPT80_MIN_TAIL_RUNS:
+        problems.append(
+            f"{len(tail_ids)} tail run(s) is below the {_VR_OPT80_MIN_TAIL_RUNS} required")
+    if len(tail_ids) > len(per_run):
+        problems.append("more tail runs than sampled occurrences")
+
+    proven = [p for p in _as_list(cs.get("proven_tail_runs")) if isinstance(p, dict)]
+    if len(proven) < _VR_OPT80_MIN_PROVEN_TAIL_RUNS:
+        problems.append(
+            f"{len(proven)} log-proven pause(s) is below the "
+            f"{_VR_OPT80_MIN_PROVEN_TAIL_RUNS} required - a tail with no proven "
+            "stall is a duration with no cause attached")
+    if len(proven) > len(tail_ids):
+        problems.append("more log-proven runs than tail runs")
+    for p in proven:
+        pid = p.get("job_id")
+        if pid not in tail_ids:
+            problems.append(f"log-proven run {pid!r} is not one of the tail runs")
+        before, after = _as_dict(p.get("before")), _as_dict(p.get("after"))
+        t0, t1 = _vr_opt80_ts(before.get("ts")), _vr_opt80_ts(after.get("ts"))
+        if t0 is None or t1 is None:
+            problems.append(
+                f"{pid}: pause is not bracketed by two parseable log timestamps")
+            continue
+        if not str(before.get("line") or "").strip() or not str(after.get("line") or "").strip():
+            problems.append(f"{pid}: pause is not bracketed by two quoted log lines")
+        gap = round(t1 - t0, 1)
+        got_gap = _num(p.get("gap_s"))
+        if got_gap is None or abs(got_gap - gap) > 0.11:
+            problems.append(
+                f"{pid}: gap_s {p.get('gap_s')!r} != {gap} re-derived from the "
+                "quoted lines' own timestamps")
+        elif gap + 0.11 < _VR_OPT80_MIN_GAP_S:
+            problems.append(
+                f"{pid}: {gap}s pause is below the {_VR_OPT80_MIN_GAP_S}s a stall requires")
+
+    tail_excess = round(mean - p50, 1)
+    got_excess = _num(cs.get("tail_excess_s"))
+    if got_excess is None or abs(got_excess - tail_excess) > 0.11:
+        problems.append(
+            f"tail_excess_s {cs.get('tail_excess_s')!r} != re-derived {tail_excess}")
+    if tail_excess <= 0:
+        problems.append("tail excess is not positive - nothing is credited")
+    if tail_excess > p95 - p50 + 0.11:
+        problems.append(
+            f"tail excess {tail_excess} exceeds p95-p50 {round(p95 - p50, 1)} - the "
+            "credited quantity must be the mean's inflation, never the full p95")
+
+    monthly = _num(cs.get("monthly_volume"))
+    eff = _num(cs.get("effective_monthly_volume"))
+    if monthly is None or monthly <= 0:
+        problems.append(f"monthly_volume={cs.get('monthly_volume')!r}")
+    elif sampled and sampled > 0:
+        # The effective volume is the workflow's volume scaled by how often THIS
+        # job actually ran in the sample — a job behind an `if:` gate must not be
+        # credited at the workflow's full frequency.
+        want_eff = round(float(monthly) * min(len(per_run) / float(sampled), 1.0), 3)
+        if eff is None or abs(eff - want_eff) > 0.011:
+            problems.append(
+                f"effective_monthly_volume {cs.get('effective_monthly_volume')!r} "
+                f"!= {want_eff}")
+    if eff is not None:
+        expected_rm = round(tail_excess * float(eff) / 60.0, 1)
+        rm = _num(f.get("runner_min_saving"))
+        if rm is None or abs(rm - expected_rm) > 0.11:
+            problems.append(f"runner_min_saving {rm!r} != re-derived {expected_rm}")
+        inner_rm = _num(cs.get("runner_min_saving"))
+        if inner_rm is None or abs(inner_rm - (rm if rm is not None else expected_rm)) > 0.11:
+            problems.append(
+                f"checkout_stall.runner_min_saving {cs.get('runner_min_saving')!r} "
+                f"!= the finding's {rm!r}")
+
+    logs_fetched = _num(cs.get("logs_fetched"))
+    cap = _num(cs.get("log_probe_max"))
+    if logs_fetched is None or cap is None or logs_fetched > cap:
+        problems.append(
+            f"logs_fetched {cs.get('logs_fetched')!r} is unstated or exceeds the "
+            f"probe cap {cs.get('log_probe_max')!r} - the log fetch must stay bounded")
+    elif logs_fetched > len(tail_ids):
+        problems.append("more logs fetched than there were tail runs to fetch them for")
+
+    cert = _as_dict(f.get("tier2_neutrality"))
+    margin = _num(cert.get("margin_s"))
+    if margin is None or abs(margin - tail_excess) > 0.11:
+        problems.append(
+            f"certificate margin_s {cert.get('margin_s')!r} != the tail excess {tail_excess}")
+    return problems
+
+
 def _opt65_suppressions_are_accounted_for(data: dict) -> list[str]:
     """Every OPT65 finding dropped for overlapping an OPT77 consolidation must be
     disclosed, and the consolidation that displaced it must actually be in the
@@ -5301,6 +5505,18 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                     bad.append(f"{fid}: post_completion_waste lacks stamped post-completion evidence")
             elif not _post_completion_waste_corroborated(f):
                 bad.append(f"{fid}: post_completion_waste lacks stamped post-completion evidence")
+        elif proof == "checkout_tail_excess":
+            # OPT80's own token. Everything the claim rests on — the
+            # distribution, the tail test, each quoted pause and the credited
+            # minutes — is recomputed from the stamped per-run inputs, so a
+            # tampered summary number or a "tail" with no log-proven stall fails
+            # here rather than rendering.
+            if str(f.get("pattern") or "") != "OPT80":
+                bad.append(f"{fid}: checkout_tail_excess is OPT80's certificate, "
+                           f"claimed by {str(f.get('pattern') or '')!r}")
+            else:
+                bad.extend(f"{fid}: {msg}"
+                           for msg in _opt80_checkout_stall_rederived(f))
         elif proof == "non_pr_event":
             if not _non_pr_event_corroborated(f, data):
                 bad.append(f"{fid}: non_pr_event lacks stamped event-subset evidence")

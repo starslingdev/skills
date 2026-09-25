@@ -1,5 +1,5 @@
 {
- "total_count": 8,
+ "total_count": 9,
  "jobs": [
   {
    "id": 60080,
@@ -292,6 +292,45 @@
      "number": 4,
      "started_at": "2026-06-24T08:00:19Z",
      "completed_at": "2026-06-24T08:00:25Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 60088,
+   "run_id": 6008,
+   "name": "smoke",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-24T08:00:05Z",
+   "completed_at": "2026-06-24T08:02:10Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/6008/job/60088",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-24T08:00:05Z",
+     "completed_at": "2026-06-24T08:00:05Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-24T08:00:05Z",
+     "completed_at": "2026-06-24T08:02:05Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run smoke",
+     "number": 3,
+     "started_at": "2026-06-24T08:02:05Z",
+     "completed_at": "2026-06-24T08:02:10Z",
      "status": "completed",
      "conclusion": "success"
     }

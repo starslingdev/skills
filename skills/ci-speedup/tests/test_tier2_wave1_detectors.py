@@ -3542,3 +3542,405 @@ def test_verifier_rejects_a_suppression_with_no_surviving_consolidation():
                    {"id": "f1", "pattern": "OPT65", "workflow_file": "ci.yml"}]}
     problems = vr._opt65_suppressions_are_accounted_for(unnamed)
     assert any("without naming what superseded it" in p for p in problems), problems
+
+# ============ OPT80 checkout stalls on the tail ============
+#
+# The motivating shape: `actions/checkout` is a handful of seconds on a typical
+# run and minutes on a few, and the tail runs' own logs show the git fetch
+# standing still. The bar this pattern had to clear is OPT49's cut — a cause may
+# never be inferred from a duration — so every case below pins BOTH halves: the
+# measured tail AND the log-proven pause. A tail with no gap, and a gap with no
+# tail, are each withheld.
+
+_OPT80_WF_PATH = "ci.yml"
+
+
+def _opt80_stamp(offset):
+    m, s = divmod(int(offset), 60)
+    return f"2026-06-01T00:{m:02d}:{s:02d}Z"
+
+
+def _opt80_job(job_id, checkout_s, runner="ubuntu-latest", name="build",
+               checkout_step="Run actions/checkout@v4", work_s=60.0):
+    """One sampled occurrence: `Set up job` → the checkout step → work."""
+    t = 0.0
+    steps = []
+    for step_name, dur in (("Set up job", 1.0),
+                           (checkout_step, float(checkout_s)),
+                           ("Run tests", float(work_s))):
+        steps.append({"name": step_name, "number": len(steps) + 1,
+                      "started_at": _opt80_stamp(t),
+                      "completed_at": _opt80_stamp(t + dur)})
+        t += dur
+    return {
+        "id": job_id,
+        "name": name,
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": _opt80_stamp(0),
+        "completed_at": _opt80_stamp(t),
+        "labels": [runner],
+        "html_url": f"https://github.com/acme/app/actions/runs/{job_id}/job/{job_id}",
+        "steps": steps,
+    }
+
+
+def _opt80_runs(durations=None, runner="ubuntu-latest", **kw):
+    """One sampled run per duration, job ids 8001…"""
+    durs = durations if durations is not None else ([10.0] * 8 + [120.0, 120.0])
+    return [[_opt80_job(8001 + i, d, runner=runner, **kw)]
+            for i, d in enumerate(durs)]
+
+
+def _opt80_crit(runner="ubuntu-latest", long_pole="build"):
+    return {"job_p50": {"build": 121.0}, "job_runner": {"build": runner},
+            "long_pole_job": long_pole, "long_pole_p50": 121.0,
+            "floor_p50": 121.0, "runner_scope": runner}
+
+
+def _opt80_wf(steps=None, job_env=None, wf_env=None):
+    job = {"runs-on": "ubuntu-latest",
+           "steps": steps if steps is not None else [
+               {"uses": "actions/checkout@v4"}, {"run": "npm test"}]}
+    if job_env:
+        job["env"] = job_env
+    doc = {"on": {"pull_request": {}}, "jobs": {"build": job}}
+    if wf_env:
+        doc["env"] = wf_env
+    return doc
+
+
+# A checkout log whose fetch sits still for 40s at 12%, then finishes. The
+# LARGEST gap is the 12%→12% pause, which is what the detector must quote.
+_OPT80_STALLED_LOG = "\n".join([
+    "2026-06-01T00:00:10.0000000Z ##[group]Run actions/checkout@v4",
+    "2026-06-01T00:00:11.0000000Z Syncing repository: acme/app",
+    "2026-06-01T00:00:12.0000000Z Fetching the repository",
+    "2026-06-01T00:00:13.0000000Z remote: Enumerating objects: 120000, done.",
+    "2026-06-01T00:00:14.0000000Z Receiving objects:  12% (14400/120000)",
+    "2026-06-01T00:00:54.0000000Z Receiving objects:  12% (14400/120000)",
+    "2026-06-01T00:01:20.0000000Z Receiving objects: 100% (120000/120000), done.",
+    "2026-06-01T00:01:21.0000000Z ##[endgroup]",
+])
+
+# The same shape with NO pause: a fetch that was merely large. This is the
+# OPT49 trap — a heavy tail whose cause the log does not establish.
+_OPT80_SMOOTH_LOG = "\n".join([
+    "2026-06-01T00:00:10.0000000Z ##[group]Run actions/checkout@v4",
+    "2026-06-01T00:00:12.0000000Z Fetching the repository",
+    "2026-06-01T00:00:13.0000000Z remote: Enumerating objects: 120000, done.",
+    "2026-06-01T00:00:18.0000000Z Receiving objects:  40% (48000/120000)",
+    "2026-06-01T00:00:26.0000000Z Receiving objects:  80% (96000/120000)",
+    "2026-06-01T00:00:33.0000000Z Receiving objects: 100% (120000/120000), done.",
+])
+
+
+class _Opt80Gh:
+    """The narrowest stand-in for `GhClient` the detector's log probe uses."""
+
+    def __init__(self, logs):
+        self._logs = dict(logs)
+        self.calls: list[str] = []
+
+    def text(self, path, allow_missing=False):
+        self.calls.append(path)
+        jid = int(str(path).split("/jobs/")[1].split("/")[0])
+        return self._logs.get(jid)
+
+
+def _opt80(jpr=None, crit=None, wf=None, monthly=100, logs=None, root=None,
+           withheld=None, client=None):
+    runs = jpr if jpr is not None else _opt80_runs()
+    if logs is None:
+        logs = {run[0]["id"]: _OPT80_STALLED_LOG for run in runs}
+    gh = client if client is not None else _Opt80Gh(logs)
+    out = cr._detect_opt80_checkout_tail_stall(
+        gh, "acme/app", _OPT80_WF_PATH, runs, crit or _opt80_crit(),
+        wf if wf is not None else _opt80_wf(), root, monthly, 0,
+        withheld=withheld)
+    return out, gh
+
+
+def test_opt80_promotes_a_log_proven_checkout_stall():
+    out, gh = _opt80()
+    assert len(out) == 1, out
+    f = out[0]
+    assert f["pattern"] == "OPT80"
+    assert f["affected_jobs"] == ["build"]
+    # Never a wall-clock claim: the MEDIAN run has no stall, so capping the tail
+    # cannot move the p50 merge gate.
+    assert f["wall_clock_p50_s"] == 0.0
+    assert f["sizing_basis"] == "measured"
+    assert f["realization"] == "none"
+    cs = f["checkout_stall"]
+    assert cs["kind"] == "opt80_checkout_tail_stall"
+    assert cs["checkout_step_source"] == "actions/checkout"
+    assert cs["p50_s"] == 10.0 and cs["p95_s"] == 120.0 and cs["mean_s"] == 32.0
+    assert cs["tail_threshold_s"] == 40.0          # max(3 x 10, 10 + 30)
+    assert len(cs["tail_run_job_ids"]) == 2
+    assert cs["tail_excess_s"] == 22.0             # mean 32 - p50 10
+    # 22s x (100/mo x 10/10 sampled) / 60 = 36.7 runner-min/mo.
+    assert f["runner_min_saving"] == 36.7
+    assert cs["runner_min_saving"] == 36.7
+    assert cs["on_critical_path"] is True
+    # The proof: two tail runs, each with the two VERBATIM lines bracketing the
+    # pause and the DERIVED gap between their timestamps.
+    proven = cs["proven_tail_runs"]
+    assert len(proven) == 2, proven
+    for p in proven:
+        assert p["gap_s"] == 40.0
+        assert p["stalled_at_pct"] == "12"
+        assert p["before"]["line"] == "Receiving objects:  12% (14400/120000)"
+        assert p["after"]["line"] == "Receiving objects:  12% (14400/120000)"
+    # Logs are fetched for TAIL RUNS ONLY — never for the whole sample.
+    assert len(gh.calls) == 2, gh.calls
+    assert cs["logs_fetched"] == 2 and cs["logs_fetched"] <= cs["log_probe_max"]
+    assert f["tier2_neutrality"]["proof"] == "checkout_tail_excess"
+    assert f["tier2_neutrality"]["margin_s"] == 22.0
+    # The evidence must say which text is quoted and which number is derived.
+    note = f["measured_evidence"]["note"]
+    assert "VERBATIM" in note and "DERIVED" in note
+    # …and the recipe must not promise a fix for the network.
+    assert "CAP THE DAMAGE" in note
+    assert "GIT_HTTP_LOW_SPEED_LIMIT" in note and "GIT_HTTP_LOW_SPEED_TIME" in note
+    assert "RUNNER-SIDE" in note and "not something this change installs" in note
+
+
+def test_opt80_withholds_a_tail_with_no_log_gap():
+    """THE OPT49 TRAP. A heavy tail whose logs show a smooth fetch is a duration
+    with no cause attached, which is exactly what OPT49 was cut for."""
+    counts: dict = {}
+    runs = _opt80_runs()
+    logs = {run[0]["id"]: _OPT80_SMOOTH_LOG for run in runs}
+    out, gh = _opt80(jpr=runs, logs=logs, withheld=counts)
+    assert out == []
+    assert counts.get("tail_without_log_gap") == 1, counts
+    # The logs WERE fetched — the tail is real; it is the cause that is missing.
+    assert len(gh.calls) == 2
+
+
+def test_opt80_withholds_when_there_is_no_tail_and_fetches_no_log():
+    """The other direction: a log gap can never produce a finding on its own,
+    because no log is fetched for a job whose durations are flat."""
+    counts: dict = {}
+    out, gh = _opt80(jpr=_opt80_runs([12.0] * 10), withheld=counts)
+    assert out == []
+    assert counts.get("checkout_duration_has_no_tail") == 1, counts
+    assert gh.calls == [], "a job with no tail must cost no gh call"
+
+
+def test_opt80_withholds_when_only_one_run_is_a_tail():
+    counts: dict = {}
+    # p50 10, p95 (k=8.55) interpolates 10 -> 10 + 0.55*(120-10) = 70.5, which
+    # clears the 40s threshold, but only ONE run is at or above it.
+    out, _gh = _opt80(jpr=_opt80_runs([10.0] * 9 + [120.0]), withheld=counts)
+    assert out == []
+    assert counts.get("fewer_than_the_minimum_tail_runs") == 1, counts
+
+
+def test_opt80_withholds_below_the_minimum_sample():
+    counts: dict = {}
+    out, _gh = _opt80(jpr=_opt80_runs([10.0, 10.0, 120.0]), withheld=counts)
+    assert out == []
+    assert counts.get("fewer_sampled_occurrences_than_the_minimum") == 1, counts
+
+
+def test_opt80_withholds_a_uniformly_slow_checkout():
+    """A checkout that is slow on EVERY run is a large fetch (OPT28's lever),
+    not a stalled one: the multiple bound is what keeps the two apart."""
+    counts: dict = {}
+    out, _gh = _opt80(jpr=_opt80_runs([100.0] * 8 + [130.0, 130.0]),
+                      withheld=counts)
+    assert out == []
+    assert counts.get("checkout_duration_has_no_tail") == 1, counts
+
+
+def test_opt80_withholds_on_mixed_runner_labels():
+    counts: dict = {}
+    runs = _opt80_runs()
+    runs[0][0]["labels"] = ["ubuntu-latest-8-cores"]
+    out, _gh = _opt80(jpr=runs, withheld=counts)
+    assert out == []
+    assert counts.get("runner_label_not_one_known_billed_label") == 1, counts
+
+
+def test_opt80_does_not_match_a_git_clone_run_step():
+    """A hand-rolled `git clone` is a different fix (flags on the user's own
+    command), so it is not this pattern's step."""
+    counts: dict = {}
+    wf = _opt80_wf(steps=[{"run": "git clone --depth 1 https://example.invalid/x"},
+                          {"run": "npm test"}])
+    out, gh = _opt80(wf=wf, withheld=counts)
+    assert out == []
+    assert counts.get("job_declares_no_actions_checkout_step") == 1, counts
+    assert gh.calls == []
+
+
+def test_opt80_withholds_when_the_abort_env_is_already_set():
+    for where in ("step", "job", "workflow"):
+        counts: dict = {}
+        env = {"GIT_HTTP_LOW_SPEED_LIMIT": "1000", "GIT_HTTP_LOW_SPEED_TIME": "30"}
+        if where == "step":
+            wf = _opt80_wf(steps=[{"uses": "actions/checkout@v4", "env": env},
+                                  {"run": "npm test"}])
+        elif where == "job":
+            wf = _opt80_wf(job_env=env)
+        else:
+            wf = _opt80_wf(wf_env=env)
+        out, _gh = _opt80(wf=wf, withheld=counts)
+        assert out == [], where
+        assert counts.get("retry_or_abort_already_configured") == 1, (where, counts)
+
+
+def test_opt80_withholds_when_a_retry_wrapper_is_already_present():
+    counts: dict = {}
+    wf = _opt80_wf(steps=[{"uses": "nick-fields/retry@v3"},
+                          {"uses": "actions/checkout@v4"},
+                          {"run": "npm test"}])
+    out, _gh = _opt80(wf=wf, withheld=counts)
+    assert out == []
+    assert counts.get("retry_or_abort_already_configured") == 1, counts
+
+
+def test_opt80_withholds_more_than_one_checkout_step():
+    counts: dict = {}
+    wf = _opt80_wf(steps=[{"uses": "actions/checkout@v4"},
+                          {"uses": "actions/checkout@v4", "with": {"path": "other"}},
+                          {"run": "npm test"}])
+    out, _gh = _opt80(wf=wf, withheld=counts)
+    assert out == []
+    assert counts.get("job_declares_more_than_one_checkout_step") == 1, counts
+
+
+def test_opt80_withholds_an_unreadable_local_composite(tmp_path):
+    """OPT76's stance: a local action that cannot be read fails CLOSED."""
+    counts: dict = {}
+    wf = _opt80_wf(steps=[{"uses": "./.github/actions/checkout-wrapper"},
+                          {"run": "npm test"}])
+    out, _gh = _opt80(wf=wf, root=tmp_path, withheld=counts)
+    assert out == []
+    assert counts.get("local_composite_action_unreadable") == 1, counts
+
+
+def test_opt80_matches_a_checkout_behind_a_local_composite(tmp_path):
+    """A composite whose body checks out is the same step and the same fix."""
+    act = tmp_path / ".github" / "actions" / "co"
+    act.mkdir(parents=True)
+    (act / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - uses: actions/checkout@v4\n",
+        encoding="utf-8")
+    wf = _opt80_wf(steps=[{"uses": "./.github/actions/co"}, {"run": "npm test"}])
+    runs = _opt80_runs(checkout_step="Run ./.github/actions/co")
+    out, _gh = _opt80(jpr=runs, wf=wf, root=tmp_path)
+    assert len(out) == 1, out
+    assert out[0]["checkout_stall"]["checkout_step_source"] == (
+        "local composite ./.github/actions/co")
+
+
+def test_opt80_withholds_when_the_composite_already_retries(tmp_path):
+    counts: dict = {}
+    act = tmp_path / ".github" / "actions" / "co"
+    act.mkdir(parents=True)
+    (act / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - uses: actions/checkout@v4\n"
+        "      env:\n        GIT_HTTP_LOW_SPEED_LIMIT: 1000\n", encoding="utf-8")
+    wf = _opt80_wf(steps=[{"uses": "./.github/actions/co"}, {"run": "npm test"}])
+    runs = _opt80_runs(checkout_step="Run ./.github/actions/co")
+    out, _gh = _opt80(jpr=runs, wf=wf, root=tmp_path, withheld=counts)
+    assert out == []
+    assert counts.get("retry_or_abort_already_configured") == 1, counts
+
+
+def test_opt80_identifies_the_checkout_step_by_yaml_identity_not_by_timing():
+    """Step timings are one-second granular, so a warm checkout measures 0s. The
+    step is found in the YAML, so a 0s occurrence stays IN the distribution
+    instead of silently shrinking the sample (and inflating the p50)."""
+    runs = _opt80_runs([0.0] + [10.0] * 7 + [120.0, 120.0])
+    out, _gh = _opt80(jpr=runs)
+    assert len(out) == 1
+    cs = out[0]["checkout_stall"]
+    assert cs["occurrences"] == 10, "the 0-second occurrence must not be dropped"
+    assert cs["mean_s"] == 31.0 and cs["p50_s"] == 10.0
+    assert cs["tail_excess_s"] == 21.0
+
+
+def test_opt80_withholds_a_credential_shaped_progress_line():
+    """Log text is untrusted. A quoted line carrying a credential shape withholds
+    the finding — a masked git progress line is no longer evidence of anything."""
+    counts: dict = {}
+    poisoned = _OPT80_STALLED_LOG.replace(
+        "Syncing repository: acme/app",
+        "Syncing repository: https://x-access-token:ghp_AAAAAAAAAAAAAAAAAAAA@github.com/acme/app"
+    ).replace("Receiving objects:  12% (14400/120000)",
+              "Receiving objects:  12% (14400/120000) from "
+              "https://user:hunter2hunter2@example.invalid/acme/app")
+    runs = _opt80_runs()
+    out, _gh = _opt80(jpr=runs, logs={r[0]["id"]: poisoned for r in runs},
+                      withheld=counts)
+    assert out == []
+    assert counts.get("quoted_progress_line_is_credential_shaped") == 1, counts
+    assert counts.get("tail_without_log_gap") == 1, counts
+
+
+def test_opt80_log_probe_is_bounded_by_the_named_cap():
+    """Logs are fetched for tail runs only, and never more than the cap — even
+    when the tail is long."""
+    durs = [10.0] * 10 + [120.0] * 5
+    runs = _opt80_runs(durs)
+    out, gh = _opt80(jpr=runs, logs={r[0]["id"]: _OPT80_STALLED_LOG for r in runs})
+    assert len(out) == 1
+    assert len(gh.calls) == cr._OPT80_LOG_PROBE_MAX
+    assert out[0]["checkout_stall"]["logs_fetched"] == cr._OPT80_LOG_PROBE_MAX
+
+
+def test_opt80_stall_parser_reads_the_non_advancing_receiving_line():
+    stall = cr._opt80_stall_in_log(_OPT80_STALLED_LOG)
+    assert stall is not None
+    assert stall["gap_s"] == 40.0
+    assert stall["stalled_at_pct"] == "12"
+    assert cr._opt80_stall_in_log(_OPT80_SMOOTH_LOG) is None
+
+
+def test_opt80_stall_parser_reads_a_gap_between_different_progress_lines():
+    log = "\n".join([
+        "2026-06-01T00:00:12.0000000Z Fetching the repository",
+        "2026-06-01T00:00:47.0000000Z remote: Counting objects: 100% (99/99), done.",
+    ])
+    stall = cr._opt80_stall_in_log(log)
+    assert stall is not None and stall["gap_s"] == 35.0
+    assert stall["stalled_at_pct"] is None
+    assert stall["before"]["line"] == "Fetching the repository"
+
+
+def test_opt80_every_withhold_records_the_gate_that_caused_it():
+    """`== []` is what a DEAD detector returns too. Every exit must be counted,
+    and a firing group must count nothing."""
+    counts: dict = {}
+    assert cr._detect_opt80_checkout_tail_stall(
+        _Opt80Gh({}), "acme/app", _OPT80_WF_PATH, _opt80_runs(), _opt80_crit(),
+        _opt80_wf(), None, 0, 0, withheld=counts) == []
+    assert counts.get("no_monthly_volume_or_no_sampled_runs") == 1, counts
+
+    counts = {}
+    assert cr._detect_opt80_checkout_tail_stall(
+        _Opt80Gh({}), "acme/app", _OPT80_WF_PATH, _opt80_runs(), _opt80_crit(),
+        {}, None, 100, 0, withheld=counts) == []
+    assert counts.get("workflow_yaml_unparsed") == 1, counts
+
+    counts = {}
+    out, _gh = _opt80(withheld=counts)
+    assert len(out) == 1 and counts == {}, counts
+
+
+def test_opt80_withhold_counts_reach_the_findings_document():
+    """The counter is only useful if it is stamped where a reader can see it."""
+    import inspect
+    src = inspect.getsource(cr.collect)
+    assert "opt80_withheld_by_gate" in src
+    assert "_detect_opt80_checkout_tail_stall(" in src
+
+
+def test_opt80_sizing_model_is_registered_as_measured():
+    assert cr._SIZING["OPT80"] == {"model": "measured"}
+    assert cr._rm_door_policy("OPT80")[0] == cr._RM_DOOR_NOT_DERIVABLE
+    assert cr._rm_door_policy("OPT80")[1]

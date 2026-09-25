@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 76-pattern
-catalog — 69 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76 and OPT77) plus 7 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against a 77-pattern
+catalog — 70 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77 and OPT80) plus 7 **structural /
 critical-path** patterns (OPT70–OPT75 and OPT78, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -1066,6 +1066,43 @@ the eligible set the tallest-remaining job was chosen from. Like OPT65 it claims
 no speedup (`wall_clock_p50_s=0`, `realization=none`), and it shares
 `_billed_job_runner` and `_tier2_scope_event` with it.
 
+OPT80 (checkout stalls on the tail) is the third measured Tier-2 lever, and the
+first whose admission rests on a LOG rather than on a timing alone. It measures
+one step's distribution across the sample — the checkout step, identified from
+the workflow YAML (directly `uses: actions/checkout@*`, or a local composite
+whose body does, read with the same transitive local-action walk OPT76 uses) and
+never from its timing, because one-second step granularity makes a warm checkout
+measure 0s and a timing-based search would drop that run and inflate the p50.
+A tail is `p95 >= max(3 x p50, p50 + 30s)` with at least two runs at or above the
+threshold; only THEN are logs fetched, for the tail runs only, newest-first,
+bounded by `_OPT80_LOG_PROBE_MAX` — a job with no tail costs no gh call. The
+finding exists only if at least two of those logs show an intra-fetch gap of
+>= 20s between consecutive git progress lines, with the two bracketing lines
+quoted verbatim.
+
+That log gate is the whole reason the pattern is admissible where OPT49 was cut:
+OPT49 read a CAUSE ("uncached") out of a DURATION. OPT80 rejects in both
+directions — a tail whose logs show a smooth fetch is withheld
+(`tail_without_log_gap`), and no log is fetched for a job with no tail, so a gap
+alone can never produce a finding. Log text is untrusted: only the closed
+progress vocabulary is read, and a quoted line carrying a credential shape
+withholds the finding rather than being masked.
+
+Sizing is the tail-excess model — `mean - p50` of the checkout step, scaled by
+the job's own observed run frequency (`_effective_volume`) — never the full p95
+and never the whole step. `wall_clock_p50_s` is 0 by construction: the median
+run has no stall, so capping the tail cannot move the p50 merge gate; the tail
+runs' own improvement is stamped (`tail_run_wall_clock_s`, with
+`on_critical_path`) and deliberately left uncredited rather than rendered as a
+p50 saving. Its certificate carries its own `proof` token,
+`checkout_tail_excess`, and `verify_report.py`'s
+`_opt80_checkout_stall_rederived` arm recomputes the distribution, the tail
+threshold, which runs were tail runs, each pause's seconds from the quoted
+lines' own timestamps, and the credited minutes — bounding every count against
+the sampled occurrences. Every withhold increments
+`findings_doc["opt80_withheld_by_gate"]`, the same visible-zero discipline OPT77
+carries.
+
 
 OPT57 now has a measured timeout-default-burn upgrade. A missing
 `timeout-minutes` key is only the structural gate: `collect_runs.py` emits a
@@ -1419,7 +1456,7 @@ family):
 |---|---|---|---|
 | **derive** | OPT45 | `hit_rate × Σ(measured billable)` | `measured_spine_billable` |
 | **clamp** | OPT73 | `min(modeled, Σ(measured billable))` | `measured_spine_clamped` (or `measured_spine_billable` when already within) |
-| **not_spine_derivable** (the EXPLICIT whitelist) | the measured run-elimination detectors (OPT46/47/64/65 — basis is the eliminated-runs slice, not per-job billable); the measured setup-prefix detector (OPT77 — basis is the per-job leading setup prefix); the modeled-static patterns (`direct` / `runner-min-only`, disclosed as modeled in the report's sized-of-total ratio); the other structural step-decomposition levers (OPT70/71/72/74/75, per-job step basis) | retained, with the reason recorded in `runner_min_door_note` | `not_spine_derivable` |
+| **not_spine_derivable** (the EXPLICIT whitelist) | the measured run-elimination detectors (OPT46/47/64/65 — basis is the eliminated-runs slice, not per-job billable); the measured setup-prefix detector (OPT77 — basis is the per-job leading setup prefix); the measured checkout tail-excess detector (OPT80 — basis is one step's mean-minus-p50 across the sample); the modeled-static patterns (`direct` / `runner-min-only`, disclosed as modeled in the report's sized-of-total ratio); the other structural step-decomposition levers (OPT70/71/72/74/75, per-job step basis) | retained, with the reason recorded in `runner_min_door_note` | `not_spine_derivable` |
 
 The whitelist is **visible, not a silent bypass**: a reasoned entry per family,
 and tightening the modeled/structural families from whitelist → clamp is tracked
@@ -1967,7 +2004,7 @@ wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT80) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -2021,7 +2058,7 @@ reported by `scan.py` as having no critical-path router.
   (dominant step/category, redundancy ratio, required-status, shared substep)
   annotate the pole they came from; the catalog OPT70–OPT75 findings are
   therefore **excluded** from the off-path "Also noticed" appendix
-  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76/OPT77 only) since the pole already
+  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76/OPT77/OPT80 only) since the pole already
   represents them. Like every pole, a structural lever carries an agent prompt
   rather than a prescribed fix; for a HIGH-risk lever (e.g. OPT70 scope-to-
   changed) the prompt's failure-mode/guard section tells the agent to state the
@@ -2909,7 +2946,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 76-pattern catalog (METADATA + body per pattern); the source of truth for
+  the 77-pattern catalog (METADATA + body per pattern); the source of truth for
   detection and the report's TL;DR / pattern background.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.

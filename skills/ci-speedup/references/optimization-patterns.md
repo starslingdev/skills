@@ -38,7 +38,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 2 — Redundancy**: duplicate env, repeated setup sequences, redundant build steps, repeated fixed setup across independent small jobs (`OPT77`).
 - **Category 3 — Docker**: sleep-based readiness, over-broad `compose up`.
 - **Category 4 — Parallelization**: needless `needs:` serialization, unsharded long jobs.
-- **Category 5 — Actions and Checkout**: stale action pins, repeated setup, full-history checkout, submodule / Git LFS checkout payload.
+- **Category 5 — Actions and Checkout**: stale action pins, repeated setup, full-history checkout, submodule / Git LFS checkout payload, checkout stalls on the tail (`OPT80`).
 - **Category 6 — Conditional Execution**: merge_group step-vs-job conditions, draft-PR gating.
 - **Category 7 — Trigger and Scope**: missing path filters, no `--filter` on PR turbo, cron frequency.
 - **Category 8 — Release Workflow**: release-path caching + redundancy.
@@ -1418,6 +1418,185 @@ absence of a declaration is not evidence of unread payload.
 **Rollout**: Change one job, re-run the workflow once, and compare that job's
 checkout step duration before and after. Revert by restoring the single `with:`
 key.
+
+---
+
+### OPT80 — Checkout Stalls on the Tail
+
+<!-- METADATA
+pattern: OPT80
+impact: MEDIUM
+class: data-driven
+detector: actions-checkout-tail-stall
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: checkout-stalls-on-the-tail
+title_template: "Checkout Stalls on the Tail"
+-->
+
+**TL;DR**: The checkout step is a few seconds on a typical run and minutes on a
+handful, and the slow runs' own logs show the git fetch standing still. That is
+a stalled transfer, not a large one — and a low-speed abort plus a retry caps it.
+
+**Anti-pattern**: A job's `actions/checkout` has a heavy right tail. Most runs
+fetch in seconds; every so often one sits at the same `Receiving objects: N%`
+for a minute or more and then completes. Nothing in the repository changed
+between those runs — the transfer stalled, and `git` has no timeout configured,
+so it waits. The cost is paid by whoever happens to catch it, and it is
+invisible in a p50: the median run looks fine, and only the average moves.
+
+```
+before:  git fetch  ->  [stall, no timeout]  ->  ...  ->  done   (120s)
+after:   git fetch  ->  [stall]  -> abort at 30s -> retry -> done ( ~40s)
+```
+
+**Why this is not OPT49 revived**: [OPT49](#opt49--slow-setup-step) was cut for
+reading a cause out of a duration — "checkout took 61s, therefore the
+dependencies are uncached". OPT80 never infers. It proves the stall from the
+tail runs' own logs, and a heavy tail whose logs show a smooth fetch is
+**withheld**, because a long fetch with no pause in it is a large repository
+(that is [OPT28](#opt28--full-git-history-checkout)'s lever and
+[OPT76](#opt76--submodule--git-lfs-checkout-payload)'s), not a stalled one.
+
+**Detection heuristic** (every gate required; all fail closed):
+
+1. The step is `uses: actions/checkout@*`, or a **local composite action** whose
+   body checks out (the same transitive local-action indexing OPT76 uses; an
+   unreadable local action fails closed and the job is skipped). A hand-rolled
+   `git clone` in a `run:` block is **not** matched — its fix is flags on the
+   user's own command. A job declaring more than one checkout step is skipped:
+   which one the timing belongs to is ambiguous.
+   The step is located in the **YAML**, never by its timing. GitHub stamps step
+   timestamps at one-second granularity, so a warm checkout measures 0s; a
+   timing-based search would drop that run from the sample and inflate the p50.
+2. At least **6** sampled occurrences of the job, all on **one** known
+   per-minute-billed runner label. A "tail" that is really some runs on a
+   different runner class is a runner comparison, not a stall.
+3. The checkout step's duration has a real tail:
+   `p95 ≥ max(3 × p50, p50 + 30s)`, with at least **2** runs at or above that
+   threshold. Both parts of the bound are named constants: the multiple keeps a
+   uniformly slow checkout out, the absolute floor keeps sub-minute jitter out.
+4. No retry or abort is configured already — no `GIT_HTTP_LOW_SPEED_LIMIT` /
+   `GIT_HTTP_LOW_SPEED_TIME` in the workflow-, job- or step-level `env:`, and no
+   retry-wrapper action or local composite that sets either. If one is present
+   the fix is already applied and the finding is **withheld**. A retry
+   configuration that cannot be read is withheld too.
+5. For at least **2** of the tail runs, the captured checkout log shows an
+   intra-fetch gap of **≥ 20s** between two consecutive git progress lines
+   (`Fetching the repository`, `remote: Enumerating/Counting/Compressing
+   objects`, `Receiving objects: N%`) — including the case of a `Receiving
+   objects` line that does not advance, which the evidence reports as a stall at
+   that percentage. The two lines bracketing the longest gap are quoted
+   **verbatim**. Logs are fetched for **tail runs only**, newest-first, bounded
+   by a named probe cap (4) — never for the whole sample, and never at all for a
+   job with no tail. A job whose gates all pass but whose logs prove no gap is
+   withheld and the reason is counted.
+
+Every one of those exits increments a stamped per-gate counter
+(`opt80_withheld_by_gate` on the findings document) and logs at DEBUG, so a
+detector that has quietly stopped firing is distinguishable from a repository
+with nothing to report.
+
+**Log text is untrusted third-party data.** Only lines from the closed progress
+vocabulary above are ever read, the two quoted lines are quoted and never acted
+on, and a quoted line carrying a credential shape withholds the finding outright
+rather than being masked — a masked git progress line is no longer evidence of
+anything.
+
+**Sizing (measured — the tail-excess model)**:
+
+```
+tail_excess_s = mean(checkout_s) - p50(checkout_s)        over the sample
+runner_min    = tail_excess_s x effective_monthly_volume / 60
+wall_clock_p50_s = 0
+```
+
+Never the full p95, never the whole step. `effective_monthly_volume` is the
+workflow's monthly volume scaled by how often *this job* actually ran in the
+sample, so a job behind an `if:` gate is not credited at the workflow's
+frequency. The evidence renders p50 / p95 / max so the reader sees the spread.
+
+`wall_clock_p50_s` is **0 by construction**, and this is deliberate: the median
+run has no stall, so capping the tail cannot move the p50 merge gate. What does
+improve is the tail runs' own wall-clock, which is measured and stamped
+(`tail_run_wall_clock_s`) and named in the finding — including whether the job
+sits on the critical path — but is **not credited**, because a mean-minus-median
+quantity is not a p50 saving and must not be rendered as one.
+
+**Fix recipe**, in this order, with the caveat that **retry and abort cap the
+damage; they do not fix the network**:
+
+1. Set `GIT_HTTP_LOW_SPEED_LIMIT: 1000` and `GIT_HTTP_LOW_SPEED_TIME: 30` in the
+   checkout step's `env:`. Git then aborts a transfer that stays under 1 KB/s
+   for 30 seconds instead of waiting indefinitely. Cheapest, no wrapper.
+2. Wrap the checkout in a retry with backoff (a retry action, or a local
+   composite). The abort from (1) is what makes the retry fast — **never add a
+   retry without it**, or the retry inherits the same hang and doubles the worst
+   case.
+3. Where the job allows it, a shallow / blobless / sparse checkout shrinks what
+   can stall at all. This pairs with [OPT28](#opt28--full-git-history-checkout),
+   which already knows which jobs read history — check it before narrowing the
+   checkout, because a job that needs history fails only later, inside the step
+   that reads it.
+4. A persistent git mirror on the runner removes the fetch entirely. That is a
+   **runner-side capability your runner provider may or may not offer** — it is
+   not something this change installs, and this skill does not recommend a
+   vendor for it.
+
+Expect the tail to shorten, not to disappear, and re-measure the same step after
+the change.
+
+**Risk**: **LOW**. No check is renamed, so branch protection is untouched, and
+steps 1 and 2 change only how a failing transfer is handled. Step 3 is the one
+that can break a job (a narrowed checkout the job silently depended on), which
+is why it is third and gated on OPT28.
+
+**Guardrail**: never present this as a fix for a checkout that is merely large;
+never add a retry without the abort; never narrow the checkout without
+confirming the job reads no history and no excluded path; never describe the
+runner-side mirror as part of the change.
+
+**Published example**: Linear's CI writeup
+(<https://linear.app/now/ci-bottleneck-reworked>) replaced `actions/checkout`
+with a composite that retries with backoff and sets the same two low-speed
+variables so a stalled fetch aborts after about 30 seconds. That is cited as a
+real-world instance of the shape; it is **not** this skill's sizing, and no
+number from it is ever credited to a user's repository.
+
+**Tier-2 render note**: OPT80 can promote only with measured tail evidence and a
+neutrality certificate whose `proof` token is `checkout_tail_excess` — its own
+token, because the credited quantity is one step's tail excess rather than a job
+duration, so neither the cluster-floor comparison nor the post-completion
+argument describes it. The meaning is restated wherever it is read: the
+detector, `verify_report.py`'s neutrality arm, `blocking_path.py`'s certificate
+summary and this note.
+
+The finding must stamp `wall_clock_p50_s=0`, `sizing_basis=measured`, the
+tail-excess model in `measured_signal`, and a structured `checkout_stall` block
+that lets `verify_report.py` re-derive the whole claim. Every one of these keys
+is hard-required by that re-derivation:
+
+| key | what it carries |
+|---|---|
+| `job` | the credited job; must equal `affected_jobs` |
+| `checkout_step` / `checkout_step_identity` / `checkout_step_source` | which step was measured, and whether it is `actions/checkout` directly or a local composite that wraps one |
+| `runner_label` | the one billed label every credited occurrence ran on |
+| `per_run_checkout_s` | each sampled occurrence's job id, run URL and checkout seconds — the inputs p50 / p95 / mean / max are recomputed from |
+| `p50_s` / `p95_s` / `mean_s` / `max_s` | the distribution, each re-derived |
+| `tail_p95_multiple` / `tail_p95_abs_s` / `tail_threshold_s` / `min_tail_runs` | the tail test's constants and the threshold they produce |
+| `tail_run_job_ids` | which runs were tail runs; re-derived against the threshold, and bounded by the sampled occurrences |
+| `min_gap_s` / `min_proven_tail_runs` / `proven_tail_runs` | the stall bar, and per proven run the two quoted lines, their log timestamps and the derived gap — the gap is recomputed from the timestamps |
+| `logs_fetched` / `log_probe_max` | the bounded probe; can never exceed the cap or the number of tail runs |
+| `tail_excess_s` / `tail_run_wall_clock_s` / `on_critical_path` | the credited quantity, the uncredited tail-run improvement, and whether it lands on the gate |
+| `monthly_volume` / `effective_monthly_volume` / `sampled_successful_run_count` / `occurrences` | the scaling; `occurrences` can never exceed the sampled run count |
+
+It never claims a speedup on the typical run; it credits only the tail the fix
+removes from the average.
+
+**Worked shape**: a `smoke` job checks out in eight seconds on ten of twelve
+sampled runs and in two minutes on the other two. Both slow runs' logs sit at
+`Receiving objects: 17%` for eighty-five seconds before finishing. The credited
+saving is the average's inflation — mean minus p50 — times how often the job
+runs, and nothing at all is credited to the ten runs that were already fine.
 
 ---
 
@@ -3121,7 +3300,7 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76 and OPT77 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77 and OPT80 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. On real repos almost every hygiene hit moves **~0 developer

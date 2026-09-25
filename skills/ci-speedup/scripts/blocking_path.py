@@ -5658,6 +5658,15 @@ def _tier2_cert_summary(f: dict[str, Any]) -> str:
         msg = f"`below_cluster_floor` with {_clock(margin)} margin"
     elif proof == "post_completion_waste":
         msg = "`post_completion_waste` - compute burned after the run signal is already decided"
+    elif proof == "checkout_tail_excess" and margin is not None:
+        # OPT80's own token. The credited quantity is a TAIL EXCESS (mean minus
+        # p50 of one step), not a job duration, so neither the cluster-floor
+        # comparison nor the post-completion argument describes it. Nothing the
+        # fix does changes what a job runs or what a check is called, which is
+        # what makes it merge-safe; the margin IS the tail excess.
+        msg = (f"`checkout_tail_excess` - {_clock(margin)} of stalled-fetch tail "
+               "removed from the average run; no job runtime on the merge gate "
+               "changes and no check is renamed")
     elif proof == "non_pr_event":
         events = f.get("tier2_run_subset_events")
         ev = ", ".join(str(e) for e in events) if isinstance(events, list) else "non-PR"

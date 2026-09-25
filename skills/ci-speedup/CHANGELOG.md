@@ -13,6 +13,28 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-09-25** — **A checkout that occasionally hangs is now reported as a
+  stalled fetch, with the two log lines that prove it — and with the retry that
+  caps it.** Some repositories check out in seconds on most runs and in minutes
+  on a few; until now the audit could only see that spread as variance and had
+  nothing to offer. New catalog pattern OPT80 reports it, but only when the slow
+  runs' own checkout logs show the transfer standing still — a pause of at least
+  twenty seconds between two consecutive git progress lines, both quoted
+  verbatim in the evidence. A heavy tail whose logs show a smooth fetch is
+  deliberately **not** reported: a long fetch with no pause in it is a large
+  repository, which is a different lever, and inferring a cause from a duration
+  is precisely why the older "slow setup step" pattern was cut. The recommended
+  fix is ordered and honest — a low-speed abort first, then a retry with
+  backoff, then a narrower checkout only where the job is known not to read
+  history — and it says plainly that retry and abort cap the damage rather than
+  fix the network. A repository that already configures the abort or a retry
+  wrapper is told nothing. The credited saving is only the amount the stall adds
+  to the average run, never the worst run and never the whole step, and no
+  wall-clock saving is claimed at all, because the typical run was never stalled.
+  Logs are downloaded only for the slow runs, and only after every cheaper check
+  has passed, so a repository with no such tail pays nothing for the new check.
+  (#N)
+
 - **2026-09-24** — **The "slow test suite re-loading the app" diagnosis is now a
   catalogued, guarded lever (OPT78), and it no longer tells a repo to apply a
   change it has already applied.** The audit already noticed a vitest long pole
