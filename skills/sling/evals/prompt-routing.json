@@ -110,6 +110,11 @@
       "why": "changes state; no first-class gh subcommand"
     },
     {
+      "prompt": "get my PR green and deal with the bot comments",
+      "route": "ci-land",
+      "why": "changes state across a whole PR; sling answers one run, ci-land lands the PR"
+    },
+    {
       "prompt": "grade my CI",
       "route": "ci-score",
       "why": "repo-wide ask about workflow configuration, not one run"

@@ -254,7 +254,7 @@ def test_routing_evals_agree_with_the_surface_and_the_split():
     for r in _ROUTING["routings"]:
         route, prompt = r["route"], r["prompt"]
         assert route in {"sling", "gh", "ci-score", "ci-speedup",
-                         "ci-secure", "file-edit", "none"}, prompt
+                         "ci-secure", "ci-land", "file-edit", "none"}, prompt
         if route == "sling":
             cmd = r["command"].removeprefix("sling ")
             assert cmd in _COMMANDS, f"{prompt!r} routes to unknown `sling {cmd}`"

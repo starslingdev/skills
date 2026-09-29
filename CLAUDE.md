@@ -14,8 +14,8 @@ contract (the commands it names exist; state changes never route to a
 read-only CLI) rather than detector behavior.
 
 `ci-land` is prose plus a pinned `gh` surface, like `sling`, and it is the one
-skill whose normal run writes to GitHub: it commits fixes and pushes them to the open PR's
-own head branch, and posts a one-sentence reply on each bot review thread it
+skill that pushes commits and posts on pull requests: it commits fixes and pushes them to the open PR's
+own head branch (merging the base in when the PR falls behind), and posts a one-sentence reply on each bot review thread it
 declines. It never merges, approves, force-pushes, or pushes to any other
 branch. Every other skill's rule about committing and pushing still holds;
 this exemption is ci-land's alone and is bounded by its SKILL.md Never
@@ -72,7 +72,7 @@ These rules apply to EVERY shipped skill (`ci-speedup`, `ci-score`,
   `test_ci_secure_install_surface.py` for the others) makes this a PASS/FAIL
   invariant: each fails if maintainer infra leaks back into its skill dir. The exceptions are `sling` and `ci-land`, which ship no scripts and have no
   `maintainers/sling/` or `maintainers/ci-land/` tree to leak from; the repo-wide internal-identifier
-  guard covers them, and each gets a per-skill guard the day it grows either
+  guard covers them, and each gets a per-skill guard the day it grows either one.
 - **Keep the changelog current.** Every change that alters a skill's behavior
   adds a dated (UTC) bullet to THAT skill's `CHANGELOG.md` under the right
   Added / Changed / Fixed heading, *in the same PR*. If you changed a skill and

@@ -31,7 +31,7 @@ What was used, and what was changed:
      copied verbatim from .codex/skills/babysit-pr/references/heuristics.md,
      marked "(babysit-pr, verbatim)". Unchanged.
    - The "How ci-land applies it" notes after each are new text. They narrow
-     the upstream behaviour: ci-land never posts replies, never resolves
+     the upstream behaviour: ci-land posts only a one-sentence reason on a bot thread it declines, never resolves
      human threads, and reruns a flaky check once per head instead of up to
      three times.
 
@@ -51,7 +51,8 @@ What was used, and what was changed:
      script's `--pr auto` option was removed, because ci-land ships no script.
    - The rule to resolve a review thread only after the push succeeds is
      adapted from .codex/skills/babysit-pr/SKILL.md. Changed: ci-land leaves
-     no comment when resolving, and posts nothing on the pull request at all.
+     no comment when resolving a thread it fixed; the only thing it posts is the
+     one-sentence reason on a bot thread it declines.
 
 No upstream code (the watcher script) is included.
 
@@ -103,7 +104,8 @@ What was used, and what was changed:
      already fixed by a later commit in the same PR, a fix that would widen a
      deliberately narrow error condition, and a drift claim that running the
      contract test disproves. No sentence of the original is copied. Changed:
-     upstream dismisses with a reply and resolves the thread; ci-land posts
-     nothing and leaves a DECLINE thread open.
+     upstream dismisses with a reply and resolves the thread; ci-land answers a
+     bot-only DECLINE thread with one sentence and resolves it after the push, and a
+     thread a human joined gets no reply and stays open.
 
 No upstream code (the watch-pr script) is included.

@@ -290,8 +290,9 @@ Do not auto-fix when:
 ### How ci-land applies it
 
 - "Do not auto-fix" items are DECLINE, listed in the report with the reason.
-  ci-land never posts the reply itself; it proposes one in the report when a
-  written answer is what the thread needs.
+  A bot-only thread gets that reason as one reply and is resolved after the
+  push; a thread a human joined gets no reply, and ci-land proposes the answer
+  in the report instead.
 - A human-authored FIX is fixed in code but its thread is never resolved; it is
   listed as "fixed, left for you to resolve".
 - A failed check whose log points at changed code is FIX. See the checklist

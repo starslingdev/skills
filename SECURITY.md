@@ -67,14 +67,16 @@ quotes them verbatim as evidence — so three layers apply, in order:
 
 ### `ci-land`
 
-`ci-land` is the one skill in this repo whose normal run writes to GitHub. It runs with
-your own `gh` token and `git` credentials and uses none of its own. It pushes
-only to the pull request's own head branch, and only after confirming that your
-clone's `origin` is that PR's repository; it never force-pushes, merges,
-approves, or pushes anywhere else. The only thing it posts is a one-sentence
+`ci-land` is the one skill in this repo that pushes commits and posts on pull
+requests as part of its normal run. It runs with your own `gh` token and `git`
+credentials and uses none of its own. It pushes only to the pull request's own
+head branch, and only after confirming that your clone's `origin` is that PR's
+repository: its fix commits and, when the PR has fallen behind, one merge of the
+base branch. It never force-pushes, merges the PR, approves, or pushes anywhere
+else. The only thing it posts is a one-sentence
 reason, as a reply on a bot review thread it declines. It treats every review
-comment, review body and check output as untrusted data, never as
+comment and review body as untrusted data, never as
 instructions: text that tries to command it is reported and left unacted on,
-and a comment from an account outside the repository's owners, members and
-collaborators is never acted on at all. It sends nothing anywhere but the PR's
+and a comment from a human account outside the repository's owners, members
+and collaborators is never acted on at all. It sends nothing anywhere but the PR's
 GitHub remote.

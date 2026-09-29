@@ -36,11 +36,11 @@
       "name": "bot-comments-batched-not-one-at-a-time",
       "should_trigger": true,
       "prompt": "deal with the bugbot comments and get this green",
-      "expected_output": "Waits for the bot to finish reviewing the current head before touching anything, reads each finding against the cited code, labels it FIX or DECLINE, fixes every FIX together in one commit, and lists each DECLINE with a one-sentence reason in the report. Finds no bugs of its own.",
+      "expected_output": "Waits for the bot to finish reviewing the current head before touching anything, reads each finding against the cited code, labels it FIX or DECLINE, fixes every FIX together in one commit, answers each DECLINE with a one-sentence reason on the thread and resolves it after the push, and lists it in the report. Finds no bugs of its own.",
       "assertions": [
         "Every thread was labelled FIX, DECLINE or FLAKE before the commit",
         "All FIX items landed in a single commit",
-        "Declined threads were left open and listed in the report with a reason",
+        "Declined bot threads were answered with a one-sentence reason, resolved after the push, and listed in the report",
         "Did not add findings that no reviewer raised"
       ],
       "files": []
@@ -161,7 +161,7 @@
       "id": 13,
       "name": "repeated-bugbot-fixes-batched-in-one-pass",
       "should_trigger": true,
-      "prompt": "bugbot keeps finding stuff on #58 every time i push one fix. do them all at once and get the checks passing",
+      "prompt": "bugbot keeps finding stuff on #42 every time i push one fix. do them all at once and get the checks passing",
       "expected_output": "Waits for the bot to finish on the current head, fixes every outstanding finding together in one commit, pushes once, and resolves only the threads it fixed, instead of reacting to each bot comment with a separate push.",
       "assertions": [
         "Waited for the bot to finish on the head before fixing anything",

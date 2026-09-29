@@ -279,10 +279,10 @@ Then invoke it by name (**`/ci-land`**, or `$ci-land` in Codex), or just ask
 *"get this PR green"*.
 
 One command, run when the code is done. It waits until every review bot
-(Bugbot, CodeRabbit, Greptile, Cubic, Copilot review, or a human reviewer) has
-finished on the current commit, fixes each finding it verifies against the
+(Bugbot, CodeRabbit, Greptile, Cubic, Copilot review) has finished on the
+current commit, fixes each finding it verifies against the
 code as the findings arrive, and pushes once per round to the PR's own
-branch. It resolves the threads it fixed, answers the ones it declines with a
+branch. It resolves the threads it fixed, answers each bot thread it declines with a
 one-sentence reason, and stops when checks are green and every thread is
 handled. The coding session hands the PR to a background driver, so its own
 context stays free, and on Claude Code a scheduled check re-runs it when the

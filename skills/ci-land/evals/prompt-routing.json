@@ -62,7 +62,7 @@
       "why": "merging is the human's call; ci-land never merges"
     },
     {
-      "prompt": "bugbot keeps finding stuff on #58 every time i push one fix. do them all at once and get the checks passing",
+      "prompt": "bugbot keeps finding stuff on #42 every time i push one fix. do them all at once and get the checks passing",
       "route": "ci-land",
       "why": "repeated bot findings on one PR, wants them batched into one pass"
     },

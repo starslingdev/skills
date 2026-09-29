@@ -17,8 +17,9 @@ All notable changes to the `ci-land` skill. Unversioned; dated (UTC). Format:
 - 2026-09-28: `/ci-land` with no number refused to use the PR the session had just pushed to, reading the
   Never bullet on guessing against the Invocation rule; the bullet now names that PR as not a guess.
 - 2026-09-28: a LANDED report left five declined bot threads to be discovered on GitHub, and the next run
-  called them the owner's decision. Declined threads now head every report under Waiting on you, in both
-  forms, and a DECLINE stays ci-land's call, pending the owner, across runs.
+  called them the owner's decision. Declined threads a human joined now head every report under Waiting on you,
+  in both forms, and a DECLINE stays ci-land's call, pending the owner, across runs; bot-only declines
+  are listed under Declined, answered and resolved (next bullet).
 - 2026-09-28: a declined bot thread is now answered (one reply with the reason, via
   `addPullRequestReviewThreadReply`) and resolved after the push, so LANDED means no bot thread is left for
   the owner to close. Three runs on one PR had each left the same five declines open. Threads a human

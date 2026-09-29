@@ -7,8 +7,9 @@ description: >-
   runner minutes or CI cost, asks to re-run or cancel a run, or pastes a
   GitHub Actions URL — `sling` returns server-classified failure causes and
   cost attribution that log-grepping misses; state changes route to `gh`. Not
-  for repo-wide audits of workflow files (ci-score, ci-speedup, ci-secure),
-  writing workflow YAML, or non-GitHub-Actions CI.
+  for landing a whole PR (ci-land), repo-wide audits of workflow files
+  (ci-score, ci-speedup, ci-secure), writing workflow YAML, or
+  non-GitHub-Actions CI.
 license: MIT
 ---
 
@@ -230,7 +231,9 @@ reading before the first parse.
 *change* CI state — re-run a job, cancel a run, trigger a workflow, flip a
 workflow on or off, pull down an artifact — `sling` cannot do it in this
 release. Use `gh` directly; do not attempt a `sling` subcommand for these
-under any name.
+under any name. The one exception is landing a whole PR (getting it green,
+handling its review threads): that is neither `sling` nor `gh`, hand off to
+`ci-land` (see the table).
 
 **2. If it only reads: is it about one run, one job, or aggregate
 cost/usage — or about the repo's CI *configuration* as a whole?** One run,

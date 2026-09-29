@@ -54,7 +54,7 @@ A `gh` error while resolving is the gh gate's (Phase 0), never "no PR".
 **Leave the session.** With background subagents, spawn ONE background driver with the explicit PR number and URL
 (per Invocation), the repo path, and "You are the ci-land driver: follow the ci-land skill from the gh gate onward;
 end only on a terminal= line". The spawn call passes no model parameter, so the driver inherits the session's. The
-main thread then names the PR ("Running ci-land on #430, `<title>`") in one or two lines, says it runs in the
+main thread then names the PR ("Running ci-land on #123, `<title>`") in one or two lines, says it runs in the
 background and will report, never re-explaining the loop, then says nothing further until the driver's report
 arrives; a notification that the driver is still running is not something to relay. No subagents: give the user
 `/ci-land <number>` to run in a fresh session.
