@@ -589,6 +589,16 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-09-29** — **The stalled-checkout pattern (OPT80) no longer misses a
+  stall, or invents one, in three cases.** A low-speed setting on some other
+  step, or a `git config` applied after the checkout had already run, no longer
+  counts as "the fix is already here" — neither can reach the checkout's fetch.
+  A checkout step whose name carries a matrix value (`Checkout ${{ matrix.os }}`)
+  is now matched by its rendered name, so its runs are measured instead of all
+  being dropped. And two progress lines at the same percentage whose object
+  count moved are read as a transfer that advanced, not one that stopped; the
+  report verifier checks the same. (#105)
+
 - **2026-09-24** — **A vitest drill-down no longer quotes another project's test
   count.** When the run the finding sized printed a summary with a failure in it
   (`Test Files  1 failed | 148 passed`) — which is exactly what a red or flaky

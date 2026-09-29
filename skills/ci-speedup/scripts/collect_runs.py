@@ -9039,7 +9039,10 @@ _OPT80_PROGRESS_RE = _re.compile(
     r"|remote:\s*(Enumerating|Counting|Compressing)\s+objects"
     r"|Receiving objects:\s*\d+%)",
     _re.I)
-_OPT80_RECEIVING_RE = _re.compile(r"Receiving objects:\s*(\d+)%", _re.I)
+# Group 2 is the `(received/total)` object count: a pair at the same whole
+# percentage whose count moved is a transfer that advanced, not one that stopped.
+_OPT80_RECEIVING_RE = _re.compile(
+    r"Receiving objects:\s*(\d+)%(?:\s*\((\d+/\d+)\))?", _re.I)
 # A GitHub job-log line is `<RFC3339 timestamp> <text>`; the fractional part can
 # carry seven digits, which `datetime.fromisoformat` rejects, so it is truncated
 # to six here rather than dropped (the gap arithmetic needs the timestamp). The
@@ -9262,8 +9265,9 @@ def _opt80_checkout_step(job_spec: dict[str, Any],
         # A step NAME carrying a `${{ … }}` expression (or a matrix value) is
         # rendered by GitHub before the jobs API reports it, so the YAML spelling
         # matches no observed step on any run and the job's whole sample vanishes
-        # under "fewer sampled occurrences than the minimum". The `uses:` identity
-        # is the one spelling the template cannot move.
+        # under "fewer sampled occurrences than the minimum". The detector matches
+        # the rendered name against the template (`_opt80_template_name_re`); the
+        # `uses:` identity is kept as the exact-match fallback.
         identity_source = f"Run {uses}" if "${{" in display else display
         found.append((_setup_step_identity(identity_source), display, provenance,
                       step))
@@ -9274,6 +9278,19 @@ def _opt80_checkout_step(job_spec: dict[str, Any],
     return found[0]
 
 
+def _opt80_template_name_re(display: str) -> "_re.Pattern[str] | None":
+    """A matcher for the RENDERED form of a templated step name, or None when the
+    name carries no `${{ … }}` or no literal text to anchor on (a name that is all
+    expression would match every step in the job). Each expression becomes `.+?`;
+    whitespace is collapsed on both sides before the full match."""
+    if "${{" not in display:
+        return None
+    parts = _re.split(r"\$\{\{.*?\}\}", " ".join(display.split()))
+    if not "".join(parts).strip():
+        return None
+    return _re.compile(".+?".join(_re.escape(part) for part in parts), _re.I)
+
+
 def _opt80_retry_already_configured(wf_doc: dict[str, Any], job_spec: dict[str, Any],
                                     root: "Path | None",
                                     checkout_step: "dict[str, Any] | None" = None,
@@ -9281,14 +9298,16 @@ def _opt80_retry_already_configured(wf_doc: dict[str, Any], job_spec: dict[str, 
     """True when the checkout already retries or aborts a stalled fetch, False when
     it demonstrably does not, None when that cannot be read (fail closed).
 
-    Four places carry the fix. Two of them are read from ANYWHERE in the job,
-    because the checkout inherits them wherever they are set:
+    Four places carry the fix, each read only where the checkout inherits it:
 
-      * `GIT_HTTP_LOW_SPEED_LIMIT` / `_TIME` in the workflow-, job- or step-level
-        `env:`, or in a local composite action's body;
+      * `GIT_HTTP_LOW_SPEED_LIMIT` / `_TIME` in the workflow- or job-level `env:`,
+        or in the checkout step's own `env:` or the body of the local composite
+        that IS the checkout — a step-level `env:` on any other step does not
+        reach the checkout;
       * `git config http.lowSpeedLimit` / `http.lowSpeedTime` in a `run:` step or
-        in a local composite's body — git's own documented equivalent, and
-        usually set in a setup step, so step ORDER is deliberately not checked.
+        in a local composite's body — git's own documented equivalent — at or
+        BEFORE the checkout step: a setting applied after the fetch cannot have
+        protected it.
 
     The other two are read ONLY from the checkout step itself (`checkout_step`,
     the step `_opt80_checkout_step` identified):
@@ -9314,8 +9333,10 @@ def _opt80_retry_already_configured(wf_doc: dict[str, Any], job_spec: dict[str, 
         if not isinstance(step, dict):
             continue
         is_checkout = checkout_step is not None and step is checkout_step
+        # Step-level env is scoped to its own step: only the checkout's counts.
+        env_reaches_checkout = is_checkout or checkout_step is None
         env_block = step.get("env")
-        if isinstance(env_block, dict) and any(
+        if env_reaches_checkout and isinstance(env_block, dict) and any(
                 str(k).upper() in _OPT80_RETRY_ENV_KEYS for k in env_block):
             return True
         if _OPT80_GIT_CONFIG_RE.search(str(step.get("run") or "")):
@@ -9330,15 +9351,19 @@ def _opt80_retry_already_configured(wf_doc: dict[str, Any], job_spec: dict[str, 
                 return None
             if body is None:
                 return None
-            # The env and git-config forms are inherited wherever they are set;
-            # the retry WRAPPER only counts inside the composite that is the
-            # checkout. `_OPT80_GIT_CONFIG_RE` rather than a loose word match, so
-            # a composite that `--unset`s the abort does not read as applying it.
-            if (_OPT80_LOW_SPEED_ENV_RE.search(body)
+            # The git-config form is inherited from any composite at or before
+            # the checkout; the env form and the retry WRAPPER only count inside
+            # the composite that is the checkout. `_OPT80_GIT_CONFIG_RE` rather
+            # than a loose word match, so a composite that `--unset`s the abort
+            # does not read as applying it.
+            if ((env_reaches_checkout and _OPT80_LOW_SPEED_ENV_RE.search(body))
                     or _OPT80_GIT_CONFIG_RE.search(body)):
                 return True
             if is_checkout and _OPT80_RETRY_WRAPPER_RE.search(body):
                 return True
+        if is_checkout:
+            # Steps after the checkout run after its fetch.
+            break
     return False
 
 
@@ -9435,7 +9460,8 @@ def _opt80_stall_in_log(log: str,
             continue
         pct_a = _OPT80_RECEIVING_RE.search(a)
         pct_b = _OPT80_RECEIVING_RE.search(b)
-        if not (pct_a and pct_b and pct_a.group(1) == pct_b.group(1)):
+        if not (pct_a and pct_b and pct_a.group(1) == pct_b.group(1)
+                and pct_a.group(2) == pct_b.group(2)):
             saw_unqualified_gap = True
             continue
         if int(pct_a.group(1)) >= 100:
@@ -9575,6 +9601,7 @@ def _detect_opt80_checkout_tail_stall(
             _no(step_or_gate, job=job_name)
             continue
         want_identity, checkout_display, provenance, checkout_spec = step_or_gate
+        want_template = _opt80_template_name_re(checkout_display)
 
         # Per-occurrence checkout duration, matched on the YAML step's IDENTITY.
         # A 0-second checkout is a real measurement (a warm one-second-granular
@@ -9593,8 +9620,11 @@ def _detect_opt80_checkout_tail_stall(
             for step in job.get("steps") or []:
                 if not isinstance(step, dict):
                     continue
-                observed_names.add(str(step.get("name", "") or ""))
-                if _setup_step_identity(str(step.get("name", "") or "")) == want_identity:
+                observed = str(step.get("name", "") or "")
+                observed_names.add(observed)
+                if (_setup_step_identity(observed) == want_identity
+                        or (want_template is not None
+                            and want_template.fullmatch(" ".join(observed.split())))):
                     match = step
                     break
             if match is None:

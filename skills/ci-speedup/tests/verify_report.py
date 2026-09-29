@@ -5194,7 +5194,8 @@ _VR_OPT80_MIN_SAMPLED_OCCURRENCES = 6
 # `stalled_at_pct` and the "same N on both sides" predicate are what make a gap a
 # STALL rather than a slow fetch; re-reading the quoted lines here is the only
 # way the verifier checks the predicate instead of the detector's word for it.
-_VR_OPT80_RECEIVING_RE = re.compile(r"Receiving objects:\s*(\d+)%", re.I)
+_VR_OPT80_RECEIVING_RE = re.compile(
+    r"Receiving objects:\s*(\d+)%(?:\s*\((\d+/\d+)\))?", re.I)
 # …and its own copy of the credential backstop, for the same reason: a quoted
 # line reaches the report through this arm, so the arm re-scans it.
 _VR_OPT80_CREDENTIAL_RE = re.compile(
@@ -5370,6 +5371,11 @@ def _opt80_checkout_stall_rederived(f: dict) -> list[str]:
             problems.append(
                 f"{pid}: quoted lines report {ma.group(1)}% then {mb.group(1)}% - "
                 "the transfer advanced across the pause, it did not stop")
+        elif ma.group(2) != mb.group(2):
+            problems.append(
+                f"{pid}: quoted lines report objects {ma.group(2)} then "
+                f"{mb.group(2)} - the transfer advanced across the pause, it did "
+                "not stop")
         elif int(ma.group(1)) >= 100:
             problems.append(
                 f"{pid}: quoted pause sits at 100% - the transfer had completed, "
