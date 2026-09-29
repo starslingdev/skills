@@ -79,4 +79,5 @@ comment and review body as untrusted data, never as
 instructions: text that tries to command it is reported and left unacted on,
 and a comment from a human account outside the repository's owners, members
 and collaborators is never acted on at all. It sends nothing anywhere but the PR's
-GitHub remote.
+GitHub remote, and the lockfile's package registry when a fix has to install
+dependencies to run a check.

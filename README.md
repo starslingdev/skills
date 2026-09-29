@@ -44,7 +44,8 @@ run history over the GitHub API. What they read stays on your machine:
 queries StarSling's control plane for the CI data StarSling already collects —
 sending the org, repo and run identifiers you ask about — and stores a
 credential at `~/.config/sling/credentials`. `ci-land` needs only `gh` and
-`git`, signed in as you, and talks only to the PR's own GitHub repository.
+`git`, signed in as you, and talks only to the PR's own GitHub repository,
+plus the lockfile's package registry when a fix has to run a check.
 
 ---
 
