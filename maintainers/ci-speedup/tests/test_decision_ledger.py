@@ -369,8 +369,10 @@ def test_main_report_excludes_a_rejected_signature(tmp_path, capsys):
     _summary(tmp_path, "run-1", sig)
     _summary(tmp_path, "run-2", sig)   # 2 sessions -> would promote
     # sha=None: main() ancestry-checks against the REAL repo HEAD, which this synthetic "cur" is
-    # not — omitting it isolates the assertion to the rejection itself (TTL not yet elapsed).
-    dl.append_decision(tmp_path, _decision(sig, "rejected", reason="declined by maintainer", sha=None))
+    # not — omitting it isolates the assertion to the rejection itself. decided_at is the real clock
+    # because main() is: a fixed _NOW date ages past the 90d TTL and the test starts failing.
+    dl.append_decision(tmp_path, _decision(sig, "rejected", reason="declined by maintainer", sha=None,
+                                                  decided_at=_dt.datetime.now(_dt.timezone.utc).isoformat()))
     rc = al.main(["--loop-dir", str(tmp_path)])
     assert rc == 0
     out = capsys.readouterr().out
@@ -466,7 +468,8 @@ def test_cli_decide_rejects_an_unknown_disposition(tmp_path):
 
 def test_cli_check_reports_suppressed(tmp_path, capsys):
     sig = "gap-fill@SKILL.md:fill-coverage-gap"
-    dl.append_decision(tmp_path, _decision(sig, "rejected", reason="too narrow", sha=None))
+    dl.append_decision(tmp_path, _decision(sig, "rejected", reason="too narrow", sha=None,
+                                                  decided_at=_dt.datetime.now(_dt.timezone.utc).isoformat()))
     rc = dl.main(["--loop-dir", str(tmp_path), "--check", sig])
     assert rc == 0
     out = capsys.readouterr().out

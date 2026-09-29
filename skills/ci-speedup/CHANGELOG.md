@@ -74,6 +74,52 @@ unversioned and updates by reinstall from `main`.
   cache hit or miss line printed after the cache step's input block closes (the
   real `actions/cache` log layout) is now read as that step's verdict. (#106)
 
+- **2026-09-25** — **A checkout that occasionally hangs is now reported as a
+  stalled fetch, with the two log lines that prove it — and with the retry that
+  caps it.** Some repositories check out in seconds on most runs and in minutes
+  on a few; until now the audit could only see that spread as variance and had
+  nothing to offer. New catalog pattern OPT80 reports it, but only when the slow
+  runs' own checkout logs show the transfer standing still — at least twenty
+  seconds during which the percentage transferred did not change, with the lines
+  on both sides of the pause quoted verbatim in the evidence. The bar is
+  deliberately narrow: a stall is progress that stopped, not progress that had
+  not started. A fetch that was merely slow, one that paused before any byte
+  moved, and one that paused while the server built the pack are all reported as
+  what they are — a large repository, which is a different lever — and never as
+  a stall. That matters twice over, because the fix recommended here would abort
+  a healthy fetch in each of those cases. Inferring a cause from a duration is
+  precisely why the older "slow setup step" pattern was cut.
+  The finding is also allowed on the workflow's slowest job, where it says in
+  plain words that the effect on the merge wait is measured but not credited in
+  this version, rather than being suppressed. The recommended
+  fix is ordered and honest — the low-speed abort and the retry with backoff
+  ship as one change, then a narrower checkout only where the job is known not
+  to read history — and it says plainly both that retry and abort cap the damage
+  rather than fix the network, and that the abort on its own would turn today's
+  slow-but-green runs red. A repository that already configures the abort, a
+  retry wrapper, or the equivalent `git config http.lowSpeedLimit` is told
+  nothing. The proof is read only from inside the checkout step's own time
+  window, so a later `git submodule` or `git lfs` step that prints the same
+  progress lines can never be quoted as a stalled checkout. Git writes its
+  progress as one long line that overwrites itself, and every update inside it is
+  read, so a fetch that kept moving is seen to have kept moving instead of
+  looking as though it stopped. A pause after the transfer already reached 100%
+  is the runner writing the download to disk, which no network timeout can help,
+  so it is never reported as a stall either. "The fix is already here" is read
+  narrowly and correctly: a retry wrapper counts only when it is wrapping the
+  checkout, not when it sits on some other step in the same job, and a setting
+  the repository has just *removed* never reads as one it applied. Where the
+  workflow's own files cannot be followed to the end — a shared action that is
+  missing, or one that refers back to itself — nothing is reported rather than
+  something guessed. Every reason a finding was held back is counted and named
+  separately, so "we looked and the fetch was fine" can never stand in for "we
+  never managed to look". The credited saving is only the amount the stall adds
+  to the average run, never the worst run and never the whole step, and no
+  wall-clock saving is claimed at all, because the typical run was never stalled.
+  Logs are downloaded only for the slow runs, and only after every cheaper check
+  has passed, so a repository with no such tail pays nothing for the new check.
+  (#105)
+
 - **2026-09-24** — **The "slow test suite re-loading the app" diagnosis is now a
   catalogued, guarded lever (OPT78), and it no longer tells a repo to apply a
   change it has already applied.** The audit already noticed a vitest long pole
@@ -603,6 +649,16 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-09-29** — **The stalled-checkout pattern (OPT80) no longer misses a
+  stall, or invents one, in three cases.** A low-speed setting on some other
+  step, or a `git config` applied after the checkout had already run, no longer
+  counts as "the fix is already here" — neither can reach the checkout's fetch.
+  A checkout step whose name carries a matrix value (`Checkout ${{ matrix.os }}`)
+  is now matched by its rendered name, so its runs are measured instead of all
+  being dropped. And two progress lines at the same percentage whose object
+  count moved are read as a transfer that advanced, not one that stopped; the
+  report verifier checks the same. (#105)
 
 - **2026-09-24** — **A vitest drill-down no longer quotes another project's test
   count.** When the run the finding sized printed a summary with a failure in it
