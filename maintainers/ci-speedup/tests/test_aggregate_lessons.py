@@ -367,11 +367,19 @@ def test_main_commit_writes_only_held_to_pending(tmp_path):
     assert sig_held in sigs and sig_promote not in sigs  # promoted cleared, held kept
 
 
-def test_main_without_commit_does_not_mutate_pending(tmp_path):
+def test_main_without_commit_does_not_mutate_pending(tmp_path, capsys):
     _summary(tmp_path, "run-1", "render@SKILL.md:second-pole")
-    seed = [al._record_to_pending(_lesson("sizing@SKILL.md:floor-cap", "old"))]
+    # main() judges the seed against the REAL clock (90-day pending TTL) and the REAL repo HEAD
+    # (sha ancestry), so a fixed _NOW stamp ages into EXPIRED and a synthetic sha is never an
+    # ancestor. Stamp it relative to now and omit the sha, so it is a live row when main() runs.
+    recent = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=10)).isoformat()
+    seed = [al._record_to_pending(
+        _lesson("sizing@SKILL.md:floor-cap", "old", sha=None, recorded_at=recent))]
     al.write_pending(tmp_path, seed)
     before = (tmp_path / "pending.jsonl").read_text(encoding="utf-8")
     rc = al.main(["--loop-dir", str(tmp_path)])  # no --commit
     assert rc == 0
+    # The seed must still be a live pending row when main() runs, or this test is exercising the
+    # expire path instead of the survive path it is named for.
+    assert "EXPIRED" not in capsys.readouterr().out
     assert (tmp_path / "pending.jsonl").read_text(encoding="utf-8") == before  # untouched

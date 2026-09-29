@@ -9,6 +9,12 @@
 # section there silences a detector as effectively as editing the code.
 /skills/ci-secure/ @yonasb
 
+# The one skill whose normal run pushes commits and posts on pull requests. Its
+# Never list (no merge, no force-push, no push off the PR's own branch) lives in
+# SKILL.md and is pinned verbatim by its own tests/, so a pull request can loosen
+# the rule and its pin together; route that diff to an owner.
+/skills/ci-land/ @yonasb
+
 # The tests are the only thing pinning the gate's rules -- the verdict logic, the
 # fork/self-hosted split, the escaping, the @claude hardening. Deleting an
 # assertion weakens the gate as much as editing the code it guards.

@@ -2,9 +2,10 @@
 
 Fixture-replay per spec §3 item #3: a fixture `decisions.jsonl` + a pending/promoted set ->
 a REJECTED signature is skipped, an ancestry-stale one re-surfaces, a TTL-expired one re-surfaces,
-and the two git-ignore DoD oracles hold. No git checkout / wall clock needed — `is_suppressed` and
+and the two git-ignore DoD oracles hold. No git checkout needed: `is_suppressed` and
 `apply_decision_ledger` both take injected `now` / `current_skill_sha` / `is_ancestor`, mirroring
-`aggregate_lessons.aggregate`'s own discipline.
+`aggregate_lessons.aggregate`'s own discipline. The `main()` tests are the exception: `main()` reads
+the real wall clock, so their decision fixtures are stamped relative to it, never to `_NOW`.
 
 Run from the repo root:
 
