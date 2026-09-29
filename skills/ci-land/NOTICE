@@ -1,0 +1,109 @@
+ci-land
+Copyright (c) 2026 StarSling
+
+This skill is licensed under the MIT License (see LICENSE), except for the
+portions listed below, which are derived from third-party work and remain
+under their original license.
+
+--------------------------------------------------------------------------
+
+Portions derived from babysit-pr, part of OpenAI Codex
+
+  OpenAI Codex
+  Copyright 2025 OpenAI
+
+  Source:   https://github.com/openai/codex
+  Path:     .codex/skills/babysit-pr/
+  Revision: 84aa75204ad604bcf498df180d128181c89b2f0b
+  License:  Apache License, Version 2.0
+            https://www.apache.org/licenses/LICENSE-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use these portions except in compliance with the License. Unless required by
+applicable law or agreed to in writing, software distributed under the
+License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS
+OF ANY KIND, either express or implied.
+
+What was used, and what was changed:
+
+1. references/review-triage.md
+   - "Review comment agreement criteria" and "CI classification checklist":
+     copied verbatim from .codex/skills/babysit-pr/references/heuristics.md,
+     marked "(babysit-pr, verbatim)". Unchanged.
+   - The "How ci-land applies it" notes after each are new text. They narrow
+     the upstream behaviour: ci-land never posts replies, never resolves
+     human threads, and reruns a flaky check once per head instead of up to
+     three times.
+
+2. SKILL.md and references/gh-commands.md
+   - The rule on PENDING reviews originated as a paraphrase of
+     .codex/skills/babysit-pr/SKILL.md's "Only act on published feedback.
+     Ignore review submissions in GitHub's `PENDING` state and inline
+     comments attached to those pending reviews." SKILL.md's Phase 1 has
+     since been rewritten again to state only what the pinned round query
+     can determine: it returns submitted reviews only, so nothing pending
+     is visible or acted on.
+   - The explanation of why the job logs endpoint is preferred over
+     `gh run view --log-failed` is quoted verbatim from
+     .codex/skills/babysit-pr/SKILL.md, marked as such.
+   - The accepted PR inputs (no argument, PR number, PR URL) are adapted from
+     .codex/skills/babysit-pr/SKILL.md: the reference to the upstream watcher
+     script's `--pr auto` option was removed, because ci-land ships no script.
+   - The rule to resolve a review thread only after the push succeeds is
+     adapted from .codex/skills/babysit-pr/SKILL.md. Changed: ci-land leaves
+     no comment when resolving, and posts nothing on the pull request at all.
+
+No upstream code (the watcher script) is included.
+
+--------------------------------------------------------------------------
+
+Portions derived from poteto-mode, part of Cursor's plugins
+
+  pstack / poteto-mode
+  Copyright (c) 2026 Lauren Tan
+
+  Source:   https://github.com/cursor/plugins
+  Path:     pstack/skills/poteto-mode/
+  Revision: adf3218ca2f5b9971eedc07a76bef22df7701539
+  License:  MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+What was used, and what was changed:
+
+1. references/gh-commands.md ("Two reviewers behind the `cursor` login")
+   and references/review-triage.md ("Bugbot pass keys")
+   - The body tokens `cursor_automation_id` and `agentic security review`,
+     and the pass-key prefixes `RUN_ID:` and `CURSOR_AUTOMATION_ID:`, are
+     taken verbatim from scripts/watch-pr/github.ts, which treats every such
+     `cursor` post as one Bugbot family. The surrounding rules are new text:
+     ci-land splits the `cursor` login into one reviewer per check name for
+     its push gate (the tokens do not tell them apart), and uses the pass key
+     only as a dedupe aid, never as a reason to skip a thread.
+
+2. references/review-triage.md (DECLINE)
+   - Three DECLINE signals are restated in new words from
+     references/bugbot-triage.md's candidate patterns: a security finding
+     already fixed by a later commit in the same PR, a fix that would widen a
+     deliberately narrow error condition, and a drift claim that running the
+     contract test disproves. No sentence of the original is copied. Changed:
+     upstream dismisses with a reply and resolves the thread; ci-land posts
+     nothing and leaves a DECLINE thread open.
+
+No upstream code (the watch-pr script) is included.

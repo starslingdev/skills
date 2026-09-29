@@ -263,6 +263,7 @@ reading YAML yourself.
 | **Delete a run** | `gh` | `gh run delete <run-id>` |
 | Approve or reject a pending deployment | `gh` | `gh api` — see [references/gh-fallback.md](references/gh-fallback.md) |
 | The checks on a specific PR | `gh` | `gh pr checks <pr>` — then take the failing run/job id back into `sling why` / `sling time` |
+| Landing an open PR: getting it green, handling its bot review threads, fixing its red checks | neither | Hand off to `ci-land`, see [Handoff](#handoff-to-the-audit-skills) |
 | Secrets or repo/environment variables | `gh` | `gh secret`, `gh variable` |
 | The contents of a workflow file | neither | Read the `.yml` directly — this is a file question, not a CLI action |
 | A repo-wide grade, speed sweep, or security scan | neither | Hand off — see [Handoff](#handoff-to-the-audit-skills) |
@@ -437,6 +438,11 @@ right skill** rather than looping `sling` over every run:
 
 Each reads a local checkout and runs its own catalog. Name the skill and let
 the user run it; do not approximate one of these from run data.
+
+Landing a whole PR ("get this PR green", "deal with the bot comments", "CI is
+red on my PR") belongs to `ci-land`, which fixes the threads and checks and
+pushes to the PR's branch. Name it the same way. One failed run on that PR is
+still `sling why`.
 
 **Suggest, do not auto-chain.** After `sling usage` or `sling top` shows a
 clear cost outlier, or `sling time` shows one phase dominating repeatedly,

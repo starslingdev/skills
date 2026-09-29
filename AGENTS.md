@@ -9,11 +9,16 @@ source files below win.
 
 ## What this repo is
 
-Public Claude Code skills from StarSling. Today it ships **one** skill,
-`ci-speedup`, self-contained under `skills/ci-speedup/`. `ci-speedup` audits a
-repository's GitHub Actions workflows for CI optimization opportunities and
-produces a prioritized report with measured wall-clock and runner-minute
-savings.
+Public Claude Code skills from StarSling. It ships five skills, each
+self-contained under `skills/<name>/`: `ci-speedup`, `ci-score`, `ci-secure`,
+`sling` and `ci-land`. The rest of this file uses `ci-speedup` as its worked
+example. `ci-speedup` audits a repository's GitHub Actions workflows for CI
+optimization opportunities and produces a prioritized report with measured
+wall-clock and runner-minute savings.
+
+`ci-land` is the one skill that pushes as part of its normal run: it pushes
+fixes to the open PR's own head branch and posts a one-sentence reply on each
+bot review thread it declines, and it never merges.
 
 **Read [`skills/ci-speedup/SKILL.md`](skills/ci-speedup/SKILL.md) before editing
 anything under the skill** — it is the authoritative spec.

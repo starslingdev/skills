@@ -1,0 +1,194 @@
+{
+  "_comment": "Every gh subcommand, flag, --json field, REST endpoint, GraphQL field and mutation that ci-land's SKILL.md and references/ name. Captured against gh v2.100.0 (`gh <cmd> --help`, `gh <cmd> --json` with no value) and GitHub's GraphQL schema (introspection via `gh api graphql`). A test fails on any name used in the skill that is not listed here. Update this file and the changelog together.",
+  "gh_version": "2.100.0",
+  "captured_utc": "2026-09-28",
+  "gh": {
+    "auth status": {
+      "flags": [],
+      "json_fields": []
+    },
+    "auth login": {
+      "flags": [],
+      "json_fields": [],
+      "_note": "The user runs it to sign in; the skill only names it."
+    },
+    "help exit-codes": {
+      "flags": [],
+      "json_fields": [],
+      "_note": "Source of the gh exit-code table."
+    },
+    "pr view": {
+      "flags": [
+        "--json",
+        "--jq",
+        "-R"
+      ],
+      "json_fields": [
+        "number",
+        "url",
+        "title",
+        "state",
+        "isDraft",
+        "headRefName",
+        "baseRefName",
+        "isCrossRepository",
+        "headRepository",
+        "headRepositoryOwner"
+      ]
+    },
+    "pr checks": {
+      "flags": [
+        "--watch",
+        "--fail-fast",
+        "-R"
+      ],
+      "json_fields": []
+    },
+    "repo view": {
+      "flags": [
+        "--json",
+        "--jq"
+      ],
+      "json_fields": [
+        "defaultBranchRef"
+      ]
+    },
+    "run list": {
+      "flags": [
+        "--commit",
+        "--json",
+        "-R"
+      ],
+      "json_fields": [
+        "databaseId",
+        "name",
+        "status",
+        "conclusion",
+        "attempt"
+      ]
+    },
+    "run rerun": {
+      "flags": [
+        "--failed",
+        "-R"
+      ],
+      "json_fields": []
+    },
+    "run view": {
+      "flags": [
+        "--log-failed"
+      ],
+      "json_fields": [],
+      "_note": "Named only in a quoted explanation of why the skill does NOT use it; never called."
+    },
+    "api": {
+      "flags": [
+        "-f",
+        "-F",
+        "--jq",
+        "--allow-escape-sequences"
+      ],
+      "json_fields": [],
+      "endpoints": [
+        "graphql",
+        "repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
+        "repos/{owner}/{repo}/branches/{branch}",
+        "repos/{owner}/{repo}/rules/branches/{branch}",
+        "user"
+      ]
+    }
+  },
+  "exit_codes": {
+    "gh": {
+      "0": "success",
+      "1": "failure",
+      "2": "cancelled",
+      "4": "authentication required"
+    },
+    "gh pr checks": {
+      "8": "checks pending"
+    },
+    "timeout": {
+      "124": "slice expired"
+    }
+  },
+  "graphql": {
+    "types": [
+      "CheckRun",
+      "StatusContext",
+      "PullRequestReviewThread"
+    ],
+    "fields": [
+      "repository",
+      "pullRequest",
+      "number",
+      "title",
+      "url",
+      "state",
+      "isDraft",
+      "headRefName",
+      "headRefOid",
+      "baseRefName",
+      "mergeStateStatus",
+      "commits",
+      "nodes",
+      "commit",
+      "oid",
+      "statusCheckRollup",
+      "contexts",
+      "pageInfo",
+      "hasNextPage",
+      "endCursor",
+      "__typename",
+      "name",
+      "status",
+      "conclusion",
+      "detailsUrl",
+      "completedAt",
+      "databaseId",
+      "isRequired",
+      "checkSuite",
+      "workflowRun",
+      "context",
+      "targetUrl",
+      "createdAt",
+      "reviews",
+      "author",
+      "login",
+      "authorAssociation",
+      "body",
+      "submittedAt",
+      "reviewThreads",
+      "id",
+      "isResolved",
+      "isOutdated",
+      "path",
+      "line",
+      "comments",
+      "node",
+      "thread",
+      "totalCount",
+      "summary",
+      "description",
+      "comment"
+    ],
+    "arguments": [
+      "number",
+      "owner",
+      "name",
+      "first",
+      "last",
+      "after",
+      "pullRequestNumber",
+      "id",
+      "input",
+      "threadId",
+      "pullRequestReviewThreadId",
+      "body"
+    ],
+    "mutations": [
+      "resolveReviewThread",
+      "addPullRequestReviewThreadReply"
+    ]
+  }
+}

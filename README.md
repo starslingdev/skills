@@ -24,12 +24,16 @@ gives the one-line command for that skill on its own.
 | 📋 [**ci-score**](#ci-score) | Is my CI config following best practices? | [`skills/ci-score/`](skills/ci-score/) |
 | 🔒 [**ci-secure**](#ci-secure) | Can someone attack me through my CI? | [`skills/ci-secure/`](skills/ci-secure/) |
 | 🛰️ [**sling**](#sling) | Why did *this* run fail, and what did it cost? | [`skills/sling/`](skills/sling/) |
+| 🛬 [**ci-land**](#ci-land) | How do I get this PR green, with the bot comments handled? | [`skills/ci-land/`](skills/ci-land/) |
 
 The first three audit a checkout and end the same way: your agent offers to
 fix the findings you pick, or to just save the full report as markdown.
 `sling` is the odd one out — it answers questions about live runs instead
 of auditing files. Fixes land in your working tree for
 you to review, and nothing is ever committed, pushed, or opened as a PR.
+`ci-land` is the one skill that pushes as part of its normal run: it commits its fixes to the open
+PR's own branch and posts a one-sentence reply on each bot thread it
+declines, and it never merges.
 
 The three audit skills — `ci-speedup`, `ci-score`, `ci-secure` — run from a
 local checkout and need **`python3` 3.9+** and **PyYAML** (`pip install
@@ -39,7 +43,8 @@ run history over the GitHub API. What they read stays on your machine:
 ([data handling](SECURITY.md)). **`sling` is the exception by design**: it
 queries StarSling's control plane for the CI data StarSling already collects —
 sending the org, repo and run identifiers you ask about — and stores a
-credential at `~/.config/sling/credentials`.
+credential at `~/.config/sling/credentials`. `ci-land` needs only `gh` and
+`git`, signed in as you, and talks only to the PR's own GitHub repository.
 
 ---
 
@@ -221,7 +226,7 @@ update the sling skill.
 Then invoke it by name (**`/sling`**, or `$sling` in Codex), or just
 ask *"why did this job fail?"*
 
-The skill is named after the CLI it drives. The other three skills read your
+The skill is named after the CLI it drives. The three audit skills read your
 workflow files; this one reads your **live CI**, through
 [`sling`](https://docs.starsling.dev/sling-cli), StarSling's read-only CLI: why a job failed (classified server-side, no LLM in the loop),
 where a run's wall-clock actually went, only the log lines that matter, and
@@ -251,6 +256,48 @@ you ask for a state change and it tells you before making it.
 [gh-fallback.md](skills/sling/references/gh-fallback.md) — what `gh` does that `sling` cannot ·
 [command-surface.json](skills/sling/references/command-surface.json) — the complete command list, machine-readable
 **Everything else:** [`skills/sling/`](skills/sling/) · Learn more: [docs.starsling.dev/sling-cli](https://docs.starsling.dev/sling-cli)
+
+---
+
+## ci-land
+
+🛬 **Takes an open PR from "the code is done" to green checks, with every bot
+review thread handled.**
+
+```bash
+npx skills add starslingdev/skills --skill ci-land
+```
+
+Or paste this into your agent:
+
+```text
+Run `npx skills add starslingdev/skills --skill ci-land` to install or
+update the ci-land skill.
+```
+
+Then invoke it by name (**`/ci-land`**, or `$ci-land` in Codex), or just ask
+*"get this PR green"*.
+
+One command, run when the code is done. It waits until every review bot
+(Bugbot, CodeRabbit, Greptile, Cubic, Copilot review, or a human reviewer) has
+finished on the current commit, fixes each finding it verifies against the
+code as the findings arrive, and pushes once per round to the PR's own
+branch. It resolves the threads it fixed, answers the ones it declines with a
+one-sentence reason, and stops when checks are green and every thread is
+handled. The coding session hands the PR to a background driver, so its own
+context stays free, and on Claude Code a scheduled check re-runs it when the
+PR changes.
+
+It needs `gh` and `git` signed in as you, and no StarSling account. It works
+in its own worktree, never merges or approves, and every fix maps to a thread
+the person merging can read.
+
+**Read the skill:** [SKILL.md](skills/ci-land/SKILL.md): the phases, the push gate, the stop rules ·
+[CHANGELOG.md](skills/ci-land/CHANGELOG.md)
+**The details:** [review-triage.md](skills/ci-land/references/review-triage.md): how each finding is judged FIX, DECLINE or FLAKE ·
+[gh-commands.md](skills/ci-land/references/gh-commands.md): every `gh` call it makes, with verified syntax ·
+[report-template.md](skills/ci-land/references/report-template.md): what the final report looks like
+**Everything else:** [`skills/ci-land/`](skills/ci-land/)
 
 ---
 

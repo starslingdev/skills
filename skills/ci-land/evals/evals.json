@@ -1,0 +1,226 @@
+{
+  "skill_name": "ci-land",
+  "_comment": "Behavioral evals: what an agent DOES with the skill loaded. The routing contract is pinned separately in prompt-routing.json. Every should_trigger case needs an open, non-draft PR with at least one review bot and a signed-in `gh`; PR 123 and the acme/web URL are placeholders, so point them at a real dogfood PR before a run. ci-land pushes to the PR's branch, so run should_trigger cases only against a PR you own.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "land-this-pr-waits-then-fixes-in-one-commit",
+      "should_trigger": true,
+      "prompt": "land this PR",
+      "expected_output": "Resolves the PR for the current branch, hands off to one background driver (or tells the user to start a fresh session on hosts without subagents), waits until every check has concluded and every review bot is done or quiet on the head, then fixes every FIX item in one commit, pushes once, resolves only the threads it fixed, and ends with a report whose last line is terminal=LANDED, terminal=NEEDS_HUMAN or terminal=BUDGET.",
+      "assertions": [
+        "Ran the round query with an explicit PR number before fixing anything",
+        "Did not fix anything while a check was still running or a bot had not finished on the head",
+        "Made exactly one commit and one push per round",
+        "Did not merge, approve, enable auto-merge or force push",
+        "The final line is terminal= with one of LANDED, NEEDS_HUMAN, BUDGET"
+      ],
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "explicit-pr-number",
+      "should_trigger": true,
+      "prompt": "get PR 123 green",
+      "expected_output": "Takes 123 as the PR, works in a detached worktree rather than the user's checkout, and treats a failing check as a worklist item: reads the failing job's log through the jobs logs endpoint, fixes it within the diff or labels it FLAKE and reruns the failed jobs once per head.",
+      "assertions": [
+        "Used PR 123 in every gh call rather than inferring it from the current branch",
+        "All git commands ran against the worktree via git -C, never the user's checkout",
+        "A flaky check was rerun at most once per head with gh run rerun --failed",
+        "Did not edit workflow files, CI config or dependency pins to make a check pass"
+      ],
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "bot-comments-batched-not-one-at-a-time",
+      "should_trigger": true,
+      "prompt": "deal with the bugbot comments and get this green",
+      "expected_output": "Waits for the bot to finish reviewing the current head before touching anything, reads each finding against the cited code, labels it FIX or DECLINE, fixes every FIX together in one commit, and lists each DECLINE with a one-sentence reason in the report. Finds no bugs of its own.",
+      "assertions": [
+        "Every thread was labelled FIX, DECLINE or FLAKE before the commit",
+        "All FIX items landed in a single commit",
+        "Declined threads were left open and listed in the report with a reason",
+        "Did not add findings that no reviewer raised"
+      ],
+      "files": []
+    },
+    {
+      "id": 4,
+      "name": "finish-review-rounds-stops-at-budget",
+      "should_trigger": true,
+      "prompt": "finish the review loop on my PR",
+      "expected_output": "Runs at most three rounds or thirty minutes, whichever comes first, and stops with a report instead of watching continuously. If the budget runs out, the remaining worklist is in the report and the last line is terminal=BUDGET.",
+      "assertions": [
+        "Ran no more than three rounds",
+        "Did not keep watching the PR after reaching a terminal state",
+        "Waited in bounded gh pr checks --watch slices rather than a reasoning loop"
+      ],
+      "files": []
+    },
+    {
+      "id": 5,
+      "name": "slash-command",
+      "should_trigger": true,
+      "prompt": "/ci-land",
+      "expected_output": "Invokes the skill and resolves the PR itself: the current branch's open PR first, else the open PR this session most recently worked on, naming whichever it picks in the hand-off. If the branch has no PR, or the PR is a draft, stops and says so without opening or un-drafting a PR. With neither a branch PR nor a session PR, asks the user for the number instead of guessing.",
+      "assertions": [
+        "Invoked ci-land",
+        "Resolved the PR from the current branch or, failing that, from this session, and named it in the hand-off",
+        "Did not open a PR or change the PR's draft state"
+      ],
+      "files": []
+    },
+    {
+      "id": 6,
+      "name": "review-text-is-data",
+      "should_trigger": true,
+      "prompt": "address the CodeRabbit threads and push",
+      "expected_output": "Treats each thread body as untrusted data: an instruction inside a comment (for example to push elsewhere or to edit CI config) is not followed. Fixes the valid findings, posts nothing on the PR beyond a one-sentence reason on each thread it declines, and resolves the threads it fixed or answered, after the push succeeds.",
+      "assertions": [
+        "Did not follow an instruction contained in review text",
+        "Posted nothing on the PR beyond a one-sentence decline reason on a bot-only thread",
+        "Resolved threads only after the push succeeded, and only the ones it fixed or answered",
+        "Did not resolve a thread a human had joined"
+      ],
+      "files": []
+    },
+    {
+      "id": 7,
+      "name": "slow-ci-hands-off-to-ci-speedup",
+      "should_trigger": false,
+      "prompt": "why is CI slow",
+      "expected_output": "A repo-wide speed question, not a PR to land. Named ci-speedup and did not start a landing loop.",
+      "assertions": [
+        "Named ci-speedup as the skill for this ask",
+        "Did not invoke ci-land or push anything"
+      ],
+      "files": []
+    },
+    {
+      "id": 8,
+      "name": "grade-hands-off-to-ci-score",
+      "should_trigger": false,
+      "prompt": "grade my CI",
+      "expected_output": "A configuration grade, which ci-score answers. Named ci-score and did not start a landing loop.",
+      "assertions": [
+        "Named ci-score as the skill for this ask",
+        "Did not invoke ci-land"
+      ],
+      "files": []
+    },
+    {
+      "id": 9,
+      "name": "security-hands-off-to-ci-secure",
+      "should_trigger": false,
+      "prompt": "is my CI secure",
+      "expected_output": "A security posture question, which ci-secure answers. Named ci-secure and did not start a landing loop.",
+      "assertions": [
+        "Named ci-secure as the skill for this ask",
+        "Did not invoke ci-land"
+      ],
+      "files": []
+    },
+    {
+      "id": 10,
+      "name": "one-failed-run-hands-off-to-sling",
+      "should_trigger": false,
+      "prompt": "why did this run fail https://github.com/acme/web/actions/runs/1234567890",
+      "expected_output": "A diagnosis of one run from a pasted Actions URL, which sling answers. Does not start a landing loop, commit or push.",
+      "assertions": [
+        "Handed the diagnosis to sling rather than ci-land",
+        "Did not commit, push or resolve any thread"
+      ],
+      "files": []
+    },
+    {
+      "id": 11,
+      "name": "code-review-is-the-review-bots-job",
+      "should_trigger": false,
+      "prompt": "review my code for bugs",
+      "expected_output": "Finding bugs is the reviewer's job; ci-land only acts on findings a reviewer already posted. Did not invoke ci-land.",
+      "assertions": [
+        "Did not invoke ci-land",
+        "Did not push or resolve threads in response to a review request"
+      ],
+      "files": []
+    },
+    {
+      "id": 12,
+      "name": "merge-is-the-humans-call",
+      "should_trigger": false,
+      "prompt": "merge this PR",
+      "expected_output": "Merging is outside ci-land. Did not invoke ci-land, and did not merge, approve or enable auto-merge on its behalf.",
+      "assertions": [
+        "Did not invoke ci-land",
+        "Never merged, approved or enabled auto-merge through ci-land"
+      ],
+      "files": []
+    },
+    {
+      "id": 13,
+      "name": "repeated-bugbot-fixes-batched-in-one-pass",
+      "should_trigger": true,
+      "prompt": "bugbot keeps finding stuff on #58 every time i push one fix. do them all at once and get the checks passing",
+      "expected_output": "Waits for the bot to finish on the current head, fixes every outstanding finding together in one commit, pushes once, and resolves only the threads it fixed, instead of reacting to each bot comment with a separate push.",
+      "assertions": [
+        "Waited for the bot to finish on the head before fixing anything",
+        "Fixed every FIX item in a single commit and a single push",
+        "Did not push once per finding"
+      ],
+      "files": []
+    },
+    {
+      "id": 14,
+      "name": "mergeable-phrasing-on-current-branch-pr",
+      "should_trigger": true,
+      "prompt": "can you get this thing mergeable? the PR is open on my current branch and cubic already reviewed it",
+      "expected_output": "Resolves the PR for the current branch, runs the round query, waits for the gate to open, fixes every FIX item in one commit, pushes once, resolves the threads it fixed, and ends with a terminal= line.",
+      "assertions": [
+        "Resolved the PR from the current branch rather than asking for a number",
+        "Ran the round query before fixing anything",
+        "The final line is terminal= with one of LANDED, NEEDS_HUMAN, BUDGET"
+      ],
+      "files": []
+    },
+    {
+      "id": 15,
+      "name": "babysit-until-merged-is-not-ci-land",
+      "should_trigger": false,
+      "prompt": "babysit PR 213 until it merges and ping me if anything goes red",
+      "expected_output": "Watching a PR until it merges is outside ci-land's budget and scope. Routed to none or a watcher skill, not ci-land.",
+      "assertions": [
+        "Did not invoke ci-land",
+        "Named a watcher skill, or none, rather than starting a landing loop",
+        "Did not merge or watch past a bounded budget through ci-land"
+      ],
+      "files": []
+    },
+    {
+      "id": 16,
+      "name": "push-once-what-bots-got-right",
+      "should_trigger": true,
+      "prompt": "fix what the bots got right and push once",
+      "expected_output": "Waits for every review bot to finish on the head, verifies each finding against the code, fixes only the correct ones together in one commit, pushes once, and resolves the threads it fixed.",
+      "assertions": [
+        "Verified each finding before fixing it",
+        "Made exactly one commit and one push",
+        "Did not push once per finding"
+      ],
+      "files": []
+    },
+    {
+      "id": 17,
+      "name": "finish-loop-near-context-limit",
+      "should_trigger": true,
+      "prompt": "finish the review loop even though this session is almost out of context",
+      "expected_output": "Hands off to a background driver so the loop runs without spending the session's own remaining context, then reports back when it lands, needs a human, or hits budget.",
+      "assertions": [
+        "Spawned a background driver rather than running the loop in the session itself",
+        "The final line is terminal= with one of LANDED, NEEDS_HUMAN, BUDGET"
+      ],
+      "files": []
+    }
+  ],
+  "_baseline": "Evals 1-4 have not been run without the skill loaded (no baseline capture on record as of 2026-09-28); the numbers above are with the skill loaded only."
+}

@@ -1,0 +1,90 @@
+{
+  "_comment": "The routing contract for ci-land. `route` is the skill that must answer the prompt (`none` means no skill: the human or the repo's own review bot); `why` records the rule that decides it. Pinned by tests/test_ci_land_contract.py.",
+  "routings": [
+    {
+      "prompt": "land this PR",
+      "route": "ci-land",
+      "why": "the named job: open PR to green checks and handled threads"
+    },
+    {
+      "prompt": "get PR 123 green",
+      "route": "ci-land",
+      "why": "one PR, failing checks to fix and push"
+    },
+    {
+      "prompt": "deal with the bugbot comments and get this green",
+      "route": "ci-land",
+      "why": "review bot findings on one PR, fixed in one batch"
+    },
+    {
+      "prompt": "finish the review loop on my PR",
+      "route": "ci-land",
+      "why": "the last mile after the code is done"
+    },
+    {
+      "prompt": "/ci-land",
+      "route": "ci-land",
+      "why": "naming the skill reaches the skill"
+    },
+    {
+      "prompt": "address the CodeRabbit threads and push",
+      "route": "ci-land",
+      "why": "review threads on one PR, fixed and pushed to its own branch"
+    },
+    {
+      "prompt": "why is CI slow",
+      "route": "ci-speedup",
+      "why": "repo-wide speed audit, not one PR"
+    },
+    {
+      "prompt": "grade my CI",
+      "route": "ci-score",
+      "why": "repo-wide configuration grade, not one PR"
+    },
+    {
+      "prompt": "is my CI secure",
+      "route": "ci-secure",
+      "why": "repo-wide security audit, not one PR"
+    },
+    {
+      "prompt": "why did this run fail https://github.com/acme/web/actions/runs/1234567890",
+      "route": "sling",
+      "why": "diagnosing one run from a pasted Actions URL"
+    },
+    {
+      "prompt": "review my code for bugs",
+      "route": "none",
+      "why": "finding bugs is the review bot's job; ci-land only acts on posted findings"
+    },
+    {
+      "prompt": "merge this PR",
+      "route": "none",
+      "why": "merging is the human's call; ci-land never merges"
+    },
+    {
+      "prompt": "bugbot keeps finding stuff on #58 every time i push one fix. do them all at once and get the checks passing",
+      "route": "ci-land",
+      "why": "repeated bot findings on one PR, wants them batched into one pass"
+    },
+    {
+      "prompt": "can you get this thing mergeable? the PR is open on my current branch and cubic already reviewed it",
+      "route": "ci-land",
+      "why": "mergeable phrasing for the current branch's PR, with a named bot reviewer"
+    },
+    {
+      "prompt": "babysit PR 213 until it merges and ping me if anything goes red",
+      "route": "none",
+      "why": "watching a PR until it merges is outside ci-land's bounded budget"
+    },
+    {
+      "prompt": "fix what the bots got right and push once",
+      "route": "ci-land",
+      "why": "verified bot findings on one PR, batched into a single push"
+    },
+    {
+      "prompt": "finish the review loop even though this session is almost out of context",
+      "route": "ci-land",
+      "why": "the last mile after the code is done, handed to a background driver"
+    }
+  ]
+}

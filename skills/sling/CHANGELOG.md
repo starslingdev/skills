@@ -6,6 +6,11 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 ### Added
 
+- **2026-09-28**: **Landing a PR hands off to `ci-land`.** The routing table
+  gains a row for getting an open PR green (its bot review threads and red
+  checks), and the handoff section names `ci-land` for it; one failed run on
+  that PR still routes to `sling why`.
+
 - **2026-08-26** — **The launch-announcement prompts are pinned in the routing
   eval.** "why did CI fail on my last push", "what's breaking the nightly
   build", and "is this test actually broken or just flaky" are published as

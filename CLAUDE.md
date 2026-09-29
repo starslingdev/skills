@@ -1,16 +1,25 @@
 # starslingdev/skills
 
-Public Claude Code skills from StarSling. The repo ships four skills, each in
+Public Claude Code skills from StarSling. The repo ships five skills, each in
 its own self-contained directory under `skills/`: `ci-speedup` (measured
 speed / runner-minute waste), `ci-score` (configuration best practices),
-`ci-secure` (the ten critical CI/CD attack vectors), and `sling` (live
-single-run questions, routed between the `sling` and `gh` CLIs).
+`ci-secure` (the ten critical CI/CD attack vectors), `sling` (live
+single-run questions, routed between the `sling` and `gh` CLIs), and
+`ci-land` (takes an open PR to green checks with its review threads handled).
 
 The first three audit a local checkout offline and ship deterministic Python
 engines. `sling` is deliberately different: it is prose plus a routing
 contract over a live CLI, with no engine of its own, so its tests pin the
 contract (the commands it names exist; state changes never route to a
 read-only CLI) rather than detector behavior.
+
+`ci-land` is prose plus a pinned `gh` surface, like `sling`, and it is the one
+skill whose normal run writes to GitHub: it commits fixes and pushes them to the open PR's
+own head branch, and posts a one-sentence reply on each bot review thread it
+declines. It never merges, approves, force-pushes, or pushes to any other
+branch. Every other skill's rule about committing and pushing still holds;
+this exemption is ci-land's alone and is bounded by its SKILL.md Never
+list, which `skills/ci-land/tests/` pins verbatim.
 
 ## Repository layout
 
@@ -28,6 +37,8 @@ skills/
     tests/                          # oracle tests + verify_report.py invariants
   sling/                            # skill: live run/job questions (prose only:
                                     #   SKILL.md, references/, evals/, tests/)
+  ci-land/                          # skill: land an open PR (prose only, same shape;
+                                    #   the one skill that pushes, to the PR's branch)
 docs/methodology.md                 # public front-door methodology (links into the skill)
 examples/                           # sanitized sample report(s)
 maintainers/                        # maintainer-only loop infra, OUTSIDE the installable tree
@@ -46,8 +57,8 @@ pyproject.toml                      # pytest config; testpaths span the skill + 
 
 ## Working in this repo
 
-These rules apply to EVERY shipped skill — `ci-speedup`, `ci-score`,
-`ci-secure`, `sling` — not just the one they were first written for.
+These rules apply to EVERY shipped skill (`ci-speedup`, `ci-score`,
+`ci-secure`, `sling`, `ci-land`), not just the one they were first written for.
 
 - **`skills/<skill>/SKILL.md` is that skill's authoritative spec.** Read it
   before editing anything else under the skill.
@@ -59,9 +70,9 @@ These rules apply to EVERY shipped skill — `ci-speedup`, `ci-score`,
   `skills/<skill>/`. One install-surface guard per skill under `tests/`
   (`test_skill_install_surface.py` for ci-speedup, `test_ci_score_…` and
   `test_ci_secure_install_surface.py` for the others) makes this a PASS/FAIL
-  invariant — each fails if maintainer infra leaks back into its skill dir. — except `sling`, which ships no scripts and has no
-  `maintainers/sling/` tree to leak from; the repo-wide internal-identifier
-  guard covers it, and it gets a per-skill guard the day it grows either
+  invariant: each fails if maintainer infra leaks back into its skill dir. The exceptions are `sling` and `ci-land`, which ship no scripts and have no
+  `maintainers/sling/` or `maintainers/ci-land/` tree to leak from; the repo-wide internal-identifier
+  guard covers them, and each gets a per-skill guard the day it grows either
 - **Keep the changelog current.** Every change that alters a skill's behavior
   adds a dated (UTC) bullet to THAT skill's `CHANGELOG.md` under the right
   Added / Changed / Fixed heading, *in the same PR*. If you changed a skill and
