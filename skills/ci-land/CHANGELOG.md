@@ -165,7 +165,7 @@ All notable changes to the `ci-land` skill. Unversioned; dated (UTC). Format:
   and the report gains a main-thread `Watch: armed until` / `Watch: lapsed`
   line.
 
-- **2026-09-28** (#300): **Initial skill.** One command takes an open
+- **2026-09-28**: **Initial skill.** One command takes an open
   pull request to green checks and no unhandled review threads. It hands off
   to a fresh driver so the coding session's context is never spent, waits
   until every review bot is done on the current head or has gone quiet, fixes
