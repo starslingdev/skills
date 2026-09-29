@@ -4417,6 +4417,47 @@ def test_opt79_stamps_no_post_step_for_a_restore_only_cache():
     data = {"per_workflow_timing": {"ci.yml": _opt79_crit()}, "findings": [out[0]]}
     assert vr._opt79_net_negative_cache_rederived(out[0], data)[1] == []
 
+def test_opt79_withholds_a_restore_only_cache_saved_by_a_separate_step():
+    """`actions/cache/restore` + a later `actions/cache/save` step: the save runs
+    on the miss path but is not the restore's post phase, so the block has no
+    label for it. Measuring without it shortens the miss path and can
+    manufacture the excess this pattern reports, so the shape is withheld."""
+    wf = _opt79_wf(steps=[
+        {"uses": "actions/cache/restore@v4", "with": {"path": "n", "key": "k"}},
+        {"run": "npm ci"}, {"run": "npm test"},
+        {"uses": "actions/cache/save@v4", "with": {"path": "n", "key": "k"}}])
+    jpr, logs = _opt79_sample(hit=(28.0, 3.0, 0.0), miss=(1.0, 7.0, 0.0),
+                              group="Run actions/cache/restore@v4")
+    for run_jobs in jpr:
+        for st in run_jobs[0]["steps"]:
+            st["name"] = st["name"].replace("Run actions/cache@v4",
+                                            "Run actions/cache/restore@v4")
+    out, w = _opt79_withheld(jpr=jpr, logs=logs, wf=wf)
+    assert out == []
+    assert w.get("cache_is_saved_by_a_separate_step") == 1, w
+
+
+def test_opt79_reads_a_cache_verdict_printed_after_the_input_group_closes():
+    """A real `actions/cache` log closes its `Run actions/cache` group after
+    echoing the inputs and prints the hit/miss line AFTER `##[endgroup]`. That
+    line still belongs to the restore step (until the next step's header)."""
+    jpr, logs = _opt79_sample()
+    for jid in sorted(logs):
+        line = _OPT79_HIT_LINE if jid in sorted(logs)[:4] else _OPT79_MISS_LINE
+        logs[jid] = "\n".join([
+            "2026-06-01T00:00:01.0Z ##[group]Run actions/cache@v4",
+            "2026-06-01T00:00:01.1Z with:",
+            "2026-06-01T00:00:01.2Z   path: node_modules",
+            "2026-06-01T00:00:01.3Z ##[endgroup]",
+            f"2026-06-01T00:00:01.5Z {line}",
+            "2026-06-01T00:00:02.0Z ##[group]Run npm ci",
+            "2026-06-01T00:00:02.5Z added 812 packages in 7s",
+        ]) + "\n"
+    out = _opt79(jpr, logs)
+    assert len(out) == 1
+    cn = out[0]["cache_net_negative"]
+    assert cn["hits"] == 4 and cn["misses"] == 4
+
 
 # ---- reading the cache line, and only the cache line ----
 

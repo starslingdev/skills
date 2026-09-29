@@ -69,6 +69,10 @@ unversioned and updates by reinstall from `main`.
   ci-score's dependency-caching check, which reads configuration only; reconciling
   the two is an open decision, not a behaviour either skill implements today.
   (#106)
+  **2026-09-29:** a job that saves its cache in a separate `actions/cache/save`
+  step is now withheld, since that save cannot be timed on the miss side, and a
+  cache hit or miss line printed after the cache step's input block closes (the
+  real `actions/cache` log layout) is now read as that step's verdict. (#106)
 
 - **2026-09-24** — **The "slow test suite re-loading the app" diagnosis is now a
   catalogued, guarded lever (OPT78), and it no longer tells a repo to apply a

@@ -14189,6 +14189,9 @@ _OPT79_CACHE_USES_RE = _re.compile(r"^actions/cache(/restore)?(@|$)", _re.I)
 # step that measures 0s in every occurrence silently removes the save from both
 # sides of the comparison. Such a block stamps `post_step: None` instead.
 _OPT79_RESTORE_ONLY_USES_RE = _re.compile(r"^actions/cache/restore(@|$)", _re.I)
+# A separate `actions/cache/save` step pays the save outside the restore's post
+# phase, where the block has no label for it; such a job is withheld.
+_OPT79_SAVE_ONLY_USES_RE = _re.compile(r"^actions/cache/save(@|$)", _re.I)
 # A `setup-*` action, whose `cache:` input turns it into a cache-restore step
 # with a built-in post-save (`actions/setup-node`, `actions/setup-python`,
 # `astral-sh/setup-uv`, …). The `setup-` must follow the slash, so
@@ -14345,9 +14348,11 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any]
     detector thinks is the restore — and a comparison whose step set moves
     between runs is not a comparison.
 
-    Fail-closed in six places, each its own gate so a zero firing rate is
+    Fail-closed in seven places, each its own gate so a zero firing rate is
     attributable:
 
+      * a SEPARATE `actions/cache/save` step. Its save runs on the miss path but
+        is not the restore's post phase, so the block cannot measure it.
       * MORE THAN ONE cache-restore step in the job. A job restoring two caches
         cannot be priced from one hit/miss verdict — the log's hit line may
         belong to either. Never guessed.
@@ -14378,6 +14383,8 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any]
         uses = str(step.get("uses") or "").strip()
         if not uses:
             continue
+        if _OPT79_SAVE_ONLY_USES_RE.match(uses):
+            return None, "cache_is_saved_by_a_separate_step"
         if _OPT79_CACHE_USES_RE.match(uses):
             cache_idx.append(i)
             cache_ref = uses
@@ -14520,16 +14527,22 @@ def _opt79_restore_step_group(log: str, block: dict[str, Any]
     inside = False
     for raw_line in (log or "").splitlines():
         if "##[group]" in raw_line:
-            if inside:
-                break
             name = " ".join(raw_line.split("##[group]", 1)[1].split())
+            if inside:
+                # Only the NEXT step's header ends the step; the action's own
+                # inner groups do not.
+                if name.startswith(("Run ", "Post ")):
+                    break
+                continue
             if name in wanted:
                 inside, header = True, name
             continue
         if not inside:
             continue
+        # `actions/cache` closes its group after echoing the inputs and prints
+        # the hit/miss line after `##[endgroup]`, still inside its own step.
         if "##[endgroup]" in raw_line:
-            break
+            continue
         picked.append(raw_line)
     return (picked, header) if inside else ([], "")
 
