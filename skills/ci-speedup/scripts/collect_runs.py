@@ -15361,6 +15361,44 @@ _OPT79_GATE_NOT_SLOWER = "hit_path_not_slower_than_the_miss_path_by_the_floor"
 _OPT79_GATE_HIT_SHARE_BELOW_TAIL = "hit_share_below_the_tail_floor"
 _OPT79_VERDICT_GATES = frozenset({_OPT79_GATE_NOT_SLOWER,
                                   _OPT79_GATE_HIT_SHARE_BELOW_TAIL})
+# Gates whose exit is NOT a held-back candidate: the job declares no cache at all
+# (most jobs in a workflow), so there is no candidate to hold back.
+_OPT79_NOT_A_CANDIDATE_GATES = frozenset({"job_has_no_yaml_steps",
+                                          "job_declares_no_cache_restore_step"})
+# Candidates held back BEFORE any log is read: the job's YAML shows a cache, and
+# the job then falls out on its shape, runner, or the per-workflow probe budget.
+_OPT79_EARLY_HELD_BACK_GATES = frozenset({
+    "cache_is_saved_by_a_separate_step",
+    "setup_cache_input_is_an_unevaluated_expression",
+    "job_declares_more_than_one_cache_restore_step",
+    "setup_action_cache_default_depends_on_repository_files",
+    "cache_action_is_not_one_this_pattern_measures",
+    "cache_step_has_no_renderable_name",
+    "install_step_also_runs_non_install_commands",
+    "no_install_step_after_the_cache_step",
+    "first_step_after_cache_is_not_a_recognised_install",
+    "cache_path_names_no_known_package_store",
+    "install_package_manager_does_not_match_cache",
+    "step_display_name_is_ambiguous_within_the_job",
+    "runner_label_not_one_known_billed_label",
+    "beyond_the_per_workflow_candidate_log_budget",
+})
+# Held back AFTER the logs were read, without a verdict (the verdict gates above
+# are measured-and-judged-fine and are never recorded).
+_OPT79_LATE_HELD_BACK_GATES = frozenset({
+    "restore_step_never_measured_in_any_occurrence",
+    "post_step_never_measured_in_any_occurrence",
+    "population_truncated_by_unread_logs",
+    "population_truncated_by_excluded_runs",
+    "fewer_than_min_hit_runs_classified",
+    "fewer_than_min_miss_runs_classified",
+    "no_monthly_volume",
+    "credited_runner_minutes_round_to_zero",
+    "neutrality_margin_not_positive",
+})
+# Every gate that can land in `opt79_withheld_candidates`. The report maps each
+# to a plain-English phrase (blocking_path / verify_report); a test enumerates it.
+_OPT79_HELD_BACK_GATES = _OPT79_EARLY_HELD_BACK_GATES | _OPT79_LATE_HELD_BACK_GATES
 
 
 def _opt79_yaml_step_display(step: dict[str, Any]) -> str | None:
@@ -15926,6 +15964,7 @@ def _opt79_candidates(
     wf_doc: dict[str, Any] | None,
     withheld: dict[str, int] | None = None,
     package_json: Any = None,
+    withheld_candidates: list[dict[str, Any]] | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     """The jobs worth spending a log probe on, most expensive first — the ONE
     selector shared by the log plan and the detector, so the two can never
@@ -15952,6 +15991,13 @@ def _opt79_candidates(
             withheld[gate] = withheld.get(gate, 0) + 1
         logger.debug("OPT79 %s: withheld by %s%s", wf_path, gate,
                      (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items())) if ctx else "")
+        # A job whose YAML showed a cache and which fell out before any log was
+        # read is still a candidate that was held back: recorded on the same list
+        # the post-probe exits use, so the report can say so.
+        if (withheld_candidates is not None and gate in _OPT79_EARLY_HELD_BACK_GATES
+                and ctx.get("job")):
+            withheld_candidates.append(
+                {"workflow_file": wf_path, "job": str(ctx["job"]), "gate": gate})
 
     if not jobs_per_run:
         _no("no_sampled_runs")
@@ -16389,7 +16435,7 @@ def _detect_opt79_net_negative_cache(
     logs = logs_by_job_id or {}
     candidates = _opt79_candidates(
         wf_path, jobs_per_run, crit, wf_doc, withheld=withheld,
-        package_json=package_json)
+        package_json=package_json, withheld_candidates=withheld_candidates)
     if not candidates:
         return []
 

@@ -6935,3 +6935,63 @@ def test_opt80_evidence_names_the_percentage_the_transfer_stuck_at():
     what makes it a stall rather than a slow link."""
     out, _gh = _opt80()
     assert "stuck at 12%" in out[0]["evidence"], out[0]["evidence"]
+
+
+# --- the held-back line: every recordable gate has a plain-English phrase ------
+
+def _opt79_source_gates():
+    """Every gate literal the collector can record, read off the source so a new
+    gate added later cannot dodge the completeness check."""
+    import inspect
+    import re as _re
+    block_src = inspect.getsource(cr._opt79_cache_block)
+    early = set(_re.findall(r'return None, "([a-z0-9_]+)"', block_src))
+    detector_src = inspect.getsource(cr._detect_opt79_net_negative_cache)
+    late = set(_re.findall(r'_drop\(\s*name,\s*"([a-z0-9_]+)"', detector_src))
+    return early, late
+
+
+def test_opt79_every_recordable_gate_has_a_plain_english_phrase():
+    early, late = _opt79_source_gates()
+    not_candidates = set(cr._OPT79_NOT_A_CANDIDATE_GATES)
+    recordable = (early - not_candidates) | late | {
+        "runner_label_not_one_known_billed_label",
+        "beyond_the_per_workflow_candidate_log_budget"}
+    assert recordable == set(cr._OPT79_HELD_BACK_GATES), (
+        recordable ^ set(cr._OPT79_HELD_BACK_GATES))
+    # the two verdict exits are measured-and-judged-fine: never held back
+    assert not (set(cr._OPT79_VERDICT_GATES) & set(cr._OPT79_HELD_BACK_GATES))
+    vr = _load_verify_report_for_opt79()
+    for phrases in (bp._OPT79_HELD_BACK_REASONS, vr._VR_OPT79_HELD_BACK_REASONS):
+        missing = sorted(g for g in recordable if not phrases.get(g))
+        assert not missing, f"gates with no plain-English phrase: {missing}"
+        for g, ph in phrases.items():
+            assert "_" not in ph and ph == ph.strip() and not ph.endswith("."), (g, ph)
+            assert "$" not in ph, (g, ph)
+    assert dict(bp._OPT79_HELD_BACK_REASONS) == dict(vr._VR_OPT79_HELD_BACK_REASONS)
+
+
+def test_opt79_records_a_job_held_back_before_any_log_is_read():
+    """A two-cache job never reaches the log probe. It used to show only in the
+    findings file's tally; it is now a candidate on the same list the renderer
+    reads, with its workflow, job and gate."""
+    wf = _opt79_wf(steps=[{"uses": "actions/cache@v4", "with": {"path": "a", "key": "k1"}},
+                          {"uses": "actions/cache@v4", "with": {"path": "b", "key": "k2"}},
+                          {"run": "npm ci"}])
+    jpr, logs = _opt79_sample()
+    wc: list = []
+    cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), wf, 100, 0, logs_by_job_id=logs,
+        withheld={}, withheld_candidates=wc)
+    assert wc == [{"workflow_file": "ci.yml", "job": _OPT79_JOB,
+                   "gate": "job_declares_more_than_one_cache_restore_step"}], wc
+
+
+def test_opt79_a_job_with_no_cache_is_not_a_held_back_candidate():
+    wf = _opt79_wf(steps=[{"run": "npm ci"}, {"run": "npm test"}])
+    jpr, logs = _opt79_sample()
+    wc: list = []
+    cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), wf, 100, 0, logs_by_job_id=logs,
+        withheld={}, withheld_candidates=wc)
+    assert wc == [], wc

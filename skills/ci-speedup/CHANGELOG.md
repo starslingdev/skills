@@ -13,6 +13,23 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-09-30** — **The report now says, in plain English, which caches it held
+  back and why.** When the cache check (OPT79) could not reach a verdict on a
+  candidate cache, the Data sources table used to print an internal gate name as
+  the reason and did not name the jobs, and caches held back before any log was
+  read (a job that restores more than one cache, an unreadable `package.json`, a
+  cache that does not serve the install, a first step after the cache that is not a
+  recognised install, a separate save step) appeared only in the findings file's
+  tally. The `cache hit/miss verdicts` row now reads `N candidate cache(s) held
+  back (<job>, <job>, ...): <reason>.` and counts every candidate held back, before
+  or after its logs were read, naming the jobs (workflow-qualified where two
+  workflows share a job name, at most five and then "and K more", with anything a
+  repository controls escaped for the table). Every reason is a short phrase a
+  non-engineer can follow; a cache measured and judged fine is not listed. The
+  report's own self-check re-derives the count, the job list and the reason, and
+  fails if a held-back cache has no plain-English phrase rather than printing a
+  code.
+
 - **2026-09-25** — **The audit can now say a cache is costing you time, not just
   that one is missing.** Every caching pattern in the catalog until now said "add a
   cache"; none could see the case where restoring a cache takes longer than the

@@ -8840,19 +8840,28 @@ def test_withheld_cache_candidates_must_be_disclosed(tmp_path):
     path = _withheld_doc(tmp_path, rows)
     silent = "## 🗄️ Data sources\n\n| Source | Coverage | Feeds |\n"
     chk = vr.check_coverage_disclosed(silent, path)
-    assert not chk.ok and "withheld" in chk.detail, chk
+    assert not chk.ok and "held back" in chk.detail, chk
     row = ("| cache hit/miss verdicts | {} | Why a probed cache produced "
            "no finding |\n")
     honest = silent + row.format(
-        "3 candidate cache(s) probed but withheld; top reason: "
-        "`fewer_than_min_miss_runs_classified`")
+        "3 candidate cache(s) held back (build, e2e, unit): too few sampled "
+        "runs missed the cache to compare a miss against a hit.")
     chk = vr.check_coverage_disclosed(honest, path)
     assert chk.ok, chk
-    # a wrong count, or a reason that is not the commonest one, is not a disclosure
-    for cell in ("2 candidate cache(s) probed but withheld; top reason: "
-                 "`fewer_than_min_miss_runs_classified`",
-                 "3 candidate cache(s) probed but withheld; top reason: "
-                 "`population_truncated_by_unread_logs`"):
+    # wrong count, wrong reason, wrong job list, a leaked gate name: none is a disclosure
+    wrong = (
+        "2 candidate cache(s) held back (build, e2e): too few "
+        "sampled runs missed the cache to compare a miss against a hit.",
+        "3 candidate cache(s) held back (build, e2e, unit): too "
+        "many of the sampled runs' logs could not be read to tell how often the "
+        "cache hits.",
+        "3 candidate cache(s) held back (build, e2e, other): too "
+        "few sampled runs missed the cache to compare a miss against a hit.",
+        "3 candidate cache(s) held back (build, e2e, unit): "
+        "`fewer_than_min_miss_runs_classified`.",
+        "3 candidate cache(s) probed but withheld; top reason: "
+        "`fewer_than_min_miss_runs_classified`")
+    for cell in wrong:
         chk = vr.check_coverage_disclosed(silent + row.format(cell), path)
         assert not chk.ok, (cell, chk)
     # …and a row with nothing behind it is a claim the run never made.
@@ -9275,3 +9284,50 @@ def test_tier2_still_rejects_a_non_zero_wall_clock_on_that_same_finding(tmp_path
     chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
     assert not chk.ok, chk
     assert "wall_clock_p50_s" in str(chk.detail), chk
+
+
+def test_held_back_verifier_fails_closed_on_an_unmapped_gate(tmp_path):
+    vr = _load_verify_report()
+    rows = [{"workflow_file": "ci.yml", "job": "unit", "gate": "a_gate_nobody_mapped"}]
+    path = _withheld_doc(tmp_path, rows)
+    report = ("## 🗄️ Data sources\n\n| Source | Coverage | Feeds |\n"
+              "| cache hit/miss verdicts | 1 candidate cache(s) held back (unit): "
+              "a reason the report has no plain-English wording for. | x |\n")
+    chk = vr.check_coverage_disclosed(report, path)
+    assert not chk.ok and "plain-English" in chk.detail, chk
+
+
+def test_held_back_verifier_rederives_escaped_job_names(tmp_path):
+    vr = _load_verify_report()
+    rows = [{"workflow_file": "ci.yml", "job": "a|b `x`\nc", "gate": "no_monthly_volume"}]
+    path = _withheld_doc(tmp_path, rows)
+    cell = ("1 candidate cache(s) held back (a\\|b 'x' c): the job's monthly run "
+            "count was unknown, so its saving could not be sized.")
+    report = ("## 🗄️ Data sources\n\n| Source | Coverage | Feeds |\n"
+              f"| cache hit/miss verdicts | {cell} | x |\n")
+    chk = vr.check_coverage_disclosed(report, path)
+    assert chk.ok, chk
+
+
+def test_held_back_verifier_rederives_the_five_job_cap_and_shared_names(tmp_path):
+    vr = _load_verify_report()
+    rows = [{"workflow_file": f".github/workflows/{w}", "job": j,
+             "gate": "no_monthly_volume"}
+            for w, j in [("ci.yml", "build"), ("nightly.yml", "build"),
+                         ("ci.yml", "a"), ("ci.yml", "b"), ("ci.yml", "c"),
+                         ("ci.yml", "d"), ("ci.yml", "e")]]
+    path = _withheld_doc(tmp_path, rows)
+    tail = ("the job's monthly run count was unknown, so its saving could not "
+            "be sized.")
+    head = "## 🗄️ Data sources\n\n| Source | Coverage | Feeds |\n"
+
+    def cell(jobs):
+        return (head + f"| cache hit/miss verdicts | 7 candidate cache(s) held "
+                f"back ({jobs}): {tail} | x |\n")
+    honest = "a, b, c, ci.yml / build, d, and 2 more"
+    assert vr.check_coverage_disclosed(cell(honest), path).ok
+    for wrong in ("a, b, c, ci.yml / build, and 3 more",
+                  "a, b, c, ci.yml / build, d, and 1 more",
+                  "a, b, c, build, d, and 2 more",
+                  "a, b, c, ci.yml / build, d, e, nightly.yml / build"):
+        assert not vr.check_coverage_disclosed(cell(wrong), path).ok, wrong

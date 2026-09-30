@@ -578,12 +578,16 @@ walked first, and every occurrence it cuts is counted. The report's Data sources
 row states both what was planned and what was read. This probe runs during
 collection and does **not** need `--with-logs`.
 
-**Withheld candidates are disclosed.** A candidate whose logs were probed and
-which a gate then withheld does not vanish: each one is recorded as
-`{workflow_file, job, gate}` in `opt79_withheld_candidates`, and the report's
-Data sources table carries a **`cache hit/miss verdicts`** row — "N candidate
-cache(s) probed but withheld; top reason: `<gate>`" (ties go to the
-alphabetically first gate) — which `verify_report.py` re-derives from that list.
+**Held-back candidates are disclosed.** A candidate that a gate held back does
+not vanish, whether that happened after its logs were probed or before any log was
+read (two caches, an unreadable `package.json`, a cache that does not serve the
+install, a first step that is not a recognised install, a separate save step): each
+one is recorded as `{workflow_file, job, gate}` in `opt79_withheld_candidates`, and
+the report's Data sources table carries a **`cache hit/miss verdicts`** row — "N
+candidate cache(s) held back (<job>, <job>, ...): <plain-English reason for the
+most common gate>." (ties go to the alphabetically first gate; at most five jobs
+then "and K more", workflow-qualified where two workflows share a job name) —
+which `verify_report.py` re-derives from that list.
 So a repository with a withheld cache reads differently from one with no cache
 at all. A cache measured healthy, or one hitting too rarely to judge (step 6), is
 a verdict, not a withhold, and is not listed. The full per-gate tally, including

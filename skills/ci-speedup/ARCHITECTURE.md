@@ -1309,11 +1309,19 @@ and logged at DEBUG (a credit-eligible job on a workflow with no measured volume
 is `no_monthly_volume`, counted after it is measured). A candidate whose logs were
 probed and which then exits on anything but a verdict (`_OPT79_VERDICT_GATES`:
 measured healthy, or hitting too rarely) is also appended to
-`findings_doc["opt79_withheld_candidates"]` as `{workflow_file, job, gate}`;
-`blocking_path` renders it as the `cache hit/miss verdicts` Data sources row
-("N candidate cache(s) probed but withheld; top reason: `<gate>`") and
-`verify_report.py` re-derives the count and the top gate, so a withheld cache is
-not indistinguishable from no cache. The probe's own cost is stamped ONCE, in
+`findings_doc["opt79_withheld_candidates"]` as `{workflow_file, job, gate}`, and
+so is a job whose YAML showed a cache and which fell out BEFORE any log was read
+(`_OPT79_EARLY_HELD_BACK_GATES`: two caches, unreadable `package.json`, a cache
+that does not serve the install, an unrecognised first step, a separate save step,
+an unpriceable runner, the per-workflow probe budget). A job with no cache at all
+is not a candidate. `blocking_path` renders the list as the `cache hit/miss
+verdicts` Data sources row ("N candidate cache(s) held back (<jobs>): <reason>.").
+The reason is a module-level dict, gate to plain-English phrase
+(`_OPT79_HELD_BACK_REASONS`, a standalone copy in `verify_report.py`), covering
+`_OPT79_HELD_BACK_GATES`; a test enumerates the gates from the source so a new one
+cannot ship without a phrase. `verify_report.py` re-derives the whole sentence
+(count, job list, reason) and FAILS on a gate with no phrase, so a held-back cache
+is not indistinguishable from no cache and a code is never printed. The probe's own cost is stamped ONCE, in
 `data_sources.cache_probe_logs` as `{planned, probed, returned, budget}` — the
 row the report renders and the verifier re-derives; when `planned` exceeds
 `probed` the rendered cell says so. And when probes were planned but NOTHING came

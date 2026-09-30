@@ -7788,7 +7788,7 @@ def test_static_only_keeps_the_withheld_cache_disclosure():
     static = bp._render_static_only(doc)
     assert static, "the static-only body must not be empty with a withheld cache"
     md = bp.render(doc, "o/r")
-    assert "probed but withheld" in md, md
+    assert "held back" in md, md
 
 
 def _uncredited_row(**kw):
@@ -7858,9 +7858,68 @@ def test_withheld_cache_candidates_reach_the_data_sources_table():
          "gate": "fewer_than_min_miss_runs_classified"}]
     foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
     assert "| cache hit/miss verdicts |" in foot, foot
-    assert ("3 candidate cache(s) probed but withheld; top reason: "
-            "`fewer_than_min_miss_runs_classified`") in foot, foot
+    assert ("3 candidate cache(s) held back (e2e, unit, x): too few sampled runs missed the cache to compare "
+            "a miss against a hit.") in foot, foot
+    assert "fewer_than_min" not in foot and "_runs_classified" not in foot, foot
     # nothing withheld -> no row
     doc["opt79_withheld_candidates"] = []
     assert "cache hit/miss verdicts" not in "\n".join(
         bp._data_sources_footer(doc, "o/r"))
+
+
+def _held_back_cell(rows):
+    doc = _doc_one_pole()
+    doc["data_sources"] = {**doc["data_sources"], "tiers_run": ["gh-timing"]}
+    doc["opt79_withheld_candidates"] = rows
+    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    line = next((l for l in foot.splitlines()
+                 if l.startswith("| cache hit/miss verdicts |")), "")
+    return line
+
+
+def test_held_back_line_is_plain_english_and_names_the_jobs():
+    line = _held_back_cell([
+        {"workflow_file": ".github/workflows/ci.yml", "job": "unit",
+         "gate": "job_declares_more_than_one_cache_restore_step"},
+        {"workflow_file": ".github/workflows/ci.yml", "job": "lint",
+         "gate": "job_declares_more_than_one_cache_restore_step"}])
+    assert ("2 candidate cache(s) held back (lint, unit): the job restores "
+            "more than one cache, so one hit/miss verdict can't price it."
+            ) in line, line
+    assert "job_declares" not in line and "probed" not in line and "$" not in line
+
+
+def test_held_back_line_qualifies_a_job_name_two_workflows_share():
+    line = _held_back_cell([
+        {"workflow_file": ".github/workflows/ci.yml", "job": "build",
+         "gate": "no_install_step_after_the_cache_step"},
+        {"workflow_file": ".github/workflows/nightly.yml", "job": "build",
+         "gate": "no_install_step_after_the_cache_step"},
+        {"workflow_file": ".github/workflows/ci.yml", "job": "unit",
+         "gate": "no_install_step_after_the_cache_step"}])
+    assert "(ci.yml / build, nightly.yml / build, unit)" in line, line
+
+
+def test_held_back_line_shows_five_jobs_then_and_k_more():
+    rows = [{"workflow_file": "ci.yml", "job": f"j{i}",
+             "gate": "no_monthly_volume"} for i in range(8)]
+    line = _held_back_cell(rows)
+    assert "8 candidate cache(s) held back (j0, j1, j2, j3, j4, and 3 more):" in line, line
+
+
+def test_held_back_line_escapes_repo_controlled_job_names():
+    line = _held_back_cell([{"workflow_file": "ci.yml",
+                             "job": "a|b `x`\nc", "gate": "no_monthly_volume"}])
+    cells = [c for c in line.replace("\\|", "").split("|") if c.strip()]
+    assert len(cells) == 3, line            # source, coverage, feeds: the pipe did not split
+    assert "`x`" not in line and "\n" not in line, line
+    assert "a\\|b 'x' c" in line, line
+
+
+def test_held_back_line_merges_early_and_late_gates_and_keeps_the_tie_rule():
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "a", "gate": "no_monthly_volume"},
+        {"workflow_file": "ci.yml", "job": "b",
+         "gate": "job_declares_more_than_one_cache_restore_step"}])
+    # tie: alphabetically first gate wins, exactly as before
+    assert "restores more than one cache" in line, line

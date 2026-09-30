@@ -1655,8 +1655,10 @@ def test_a_cache_probe_whose_logs_all_fail_is_named_and_disclosed(tmp_path):
 
     report = _render(_SCRIPTS, findings_path, report_path, env)
     assert "OPT79" in report and "matrix.yml" in report
-    assert ("| cache hit/miss verdicts | 2 candidate cache(s) probed but withheld; "
-            "top reason: `population_truncated_by_unread_logs`") in report, report
+    assert ("| cache hit/miss verdicts | 2 candidate cache(s) held back "
+            "(deps, integration): too many of the sampled runs' logs could not "
+            "be read to tell how often the cache hits.") in report, report
+    assert "population_truncated" not in report.split("cache hit/miss verdicts")[1].split("\n")[0]
     ok = _verify(report_path, findings_path, env)
     assert ok.returncode == 0, f"verify rejected an honest report:\n{ok.stdout}"
     silent = "\n".join(line for line in report.splitlines()
@@ -1664,7 +1666,7 @@ def test_a_cache_probe_whose_logs_all_fail_is_named_and_disclosed(tmp_path):
     silent_path = tmp_path / "silent.md"
     silent_path.write_text(silent, encoding="utf-8")
     bad = _verify(silent_path, findings_path, env)
-    assert bad.returncode != 0 and "withheld" in bad.stdout, bad.stdout
+    assert bad.returncode != 0 and "held back" in bad.stdout, bad.stdout
 
 
 def test_a_feature_branch_checkout_discloses_the_yaml_branch_skew(tmp_path):

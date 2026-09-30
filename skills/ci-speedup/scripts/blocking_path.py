@@ -5227,9 +5227,8 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
     _wn, _wtop = _opt79_withheld_summary(doc)
     if _wn:
         rows.append(("cache hit/miss verdicts",
-                     f"{_wn} candidate cache(s) probed but withheld; top reason: "
-                     f"`{_wtop}`",
-                     "Why a probed cache produced no finding and no uncredited line"))
+                     _opt79_held_back_cell(doc),
+                     "Why a candidate cache produced no finding and no uncredited line"))
     # WHICH workflow YAML fed the detectors. `collect_runs` stamps this, and until now
     # nothing rendered it — so the reader could not tell whether the `on:`/matrix/timeout
     # signals came off the audited checkout or off the default branch's HEAD (the two
@@ -5499,6 +5498,126 @@ def _opt79_withheld_summary(doc: dict[str, Any] | None) -> tuple[int, str]:
         counts[g] = counts.get(g, 0) + 1
     top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
     return len(rows), top
+
+
+# One plain-English phrase per gate that can land in `opt79_withheld_candidates`
+# (`collect_runs._OPT79_HELD_BACK_GATES`). The reader is a person who has never
+# seen a gate name, so each phrase says what was not established and why that
+# stops a verdict. `verify_report` carries an identical copy (it is a standalone
+# checker) and a test pins the two equal and complete. An unmapped gate renders
+# the fallback below and FAILS `verify_report`: a code is never printed.
+_OPT79_HELD_BACK_REASONS: dict[str, str] = {
+    # held back before any log was read
+    "cache_is_saved_by_a_separate_step":
+        "the cache is saved by its own separate step, so one restore-and-save "
+        "measurement can't cover it",
+    "setup_cache_input_is_an_unevaluated_expression":
+        "whether a setup step turns its cache on depends on a value that is "
+        "only known while the job runs",
+    "job_declares_more_than_one_cache_restore_step":
+        "the job restores more than one cache, so one hit/miss verdict can't "
+        "price it",
+    "setup_action_cache_default_depends_on_repository_files":
+        "whether a setup step's built-in cache is on depends on package.json, "
+        "which could not be read reliably",
+    "cache_action_is_not_one_this_pattern_measures":
+        "the job's only cache belongs to a tool that manages its own cache, "
+        "which this check does not measure",
+    "cache_step_has_no_renderable_name":
+        "the cache step has no name to look its time up by",
+    "install_step_also_runs_non_install_commands":
+        "the install step also runs other commands, so its time is not just "
+        "the install",
+    "no_install_step_after_the_cache_step":
+        "no dependency install follows the cache, so the cache is not shown to "
+        "speed anything up",
+    "first_step_after_cache_is_not_a_recognised_install":
+        "the first step after the cache is not a recognised dependency install, "
+        "so the cache may be feeding a different step",
+    "cache_path_names_no_known_package_store":
+        "the cache does not clearly hold a package manager's downloads, so it "
+        "is not shown to serve the install",
+    "install_package_manager_does_not_match_cache":
+        "the install uses a different package manager than the one the cache "
+        "holds, so the cache does not serve it",
+    "step_display_name_is_ambiguous_within_the_job":
+        "two steps in the job share the cache or install step's name, so their "
+        "times can't be told apart",
+    "runner_label_not_one_known_billed_label":
+        "the job's machine type is not one this report can price",
+    "beyond_the_per_workflow_candidate_log_budget":
+        "the workflow has more candidate caches than the per-workflow log "
+        "budget covers, and this one was not reached",
+    # held back after the logs were read
+    "restore_step_never_measured_in_any_occurrence":
+        "the cache's restore step never showed a time in any sampled run, so "
+        "its cost could not be measured",
+    "post_step_never_measured_in_any_occurrence":
+        "the cache's save step never showed a time in any sampled run, so the "
+        "cost of saving could not be measured",
+    "population_truncated_by_unread_logs":
+        "too many of the sampled runs' logs could not be read to tell how often "
+        "the cache hits",
+    "population_truncated_by_excluded_runs":
+        "too many of the sampled runs had logs that could not tell a cache hit "
+        "from a miss",
+    "fewer_than_min_hit_runs_classified":
+        "too few sampled runs hit the cache to compare a hit against a miss",
+    "fewer_than_min_miss_runs_classified":
+        "too few sampled runs missed the cache to compare a miss against a hit",
+    "no_monthly_volume":
+        "the job's monthly run count was unknown, so its saving could not be "
+        "sized",
+    "credited_runner_minutes_round_to_zero":
+        "the measured saving rounds down to zero runner-minutes a month",
+    "neutrality_margin_not_positive":
+        "the job is about as slow as its workflow's slowest jobs, so removing "
+        "the cache could not be shown to leave the pull-request wait unchanged",
+}
+_OPT79_HELD_BACK_UNMAPPED = "a reason this report has no plain-English wording for"
+_OPT79_HELD_BACK_MAX_JOBS = 5
+
+
+def _opt79_held_back_job_cell(text: object) -> str:
+    """A repo-controlled job or workflow name made safe for one table cell: no
+    newline, no unescaped pipe, no backtick or emphasis marker that a markdown
+    renderer (or the verifier's decoration strip) would treat as syntax."""
+    t = re.sub(r"\s+", " ", str(text)).strip()
+    t = t.replace("`", "'").replace("*", "'")
+    return t.replace("|", "\\|")
+
+
+def _opt79_held_back_labels(rows: list[dict[str, Any]]) -> list[str]:
+    """Distinct, sorted job labels. A job name that two workflows share is
+    qualified with its workflow file's base name, so the two stay tellable."""
+    def wf_of(r: dict[str, Any]) -> str:
+        return str(r.get("workflow_file") or "").rsplit("/", 1)[-1]
+    by_name: dict[str, set[str]] = {}
+    for r in rows:
+        by_name.setdefault(str(r.get("job") or "").strip(), set()).add(wf_of(r))
+    labels: set[str] = set()
+    for r in rows:
+        name = str(r.get("job") or "").strip() or "(unnamed job)"
+        shared = len(by_name.get(str(r.get("job") or "").strip(), ())) > 1
+        labels.add(f"{wf_of(r)} / {name}" if shared and wf_of(r) else name)
+    return sorted(labels)
+
+
+def _opt79_held_back_cell(doc: dict[str, Any] | None) -> str:
+    """`N candidate cache(s) held back (<jobs>): <plain-English reason>.` for the
+    Data sources row. The count and the most common gate (ties to the
+    alphabetically first) are `_opt79_withheld_summary`'s; `verify_report`
+    re-derives the whole sentence from the findings file."""
+    n, top = _opt79_withheld_summary(doc)
+    rows = [r for r in ((doc or {}).get(_OPT79_WITHHELD_DOC_KEY) or [])
+            if isinstance(r, dict)]
+    labels = [_opt79_held_back_job_cell(x) for x in _opt79_held_back_labels(rows)]
+    shown = labels[:_OPT79_HELD_BACK_MAX_JOBS]
+    jobs = ", ".join(shown)
+    if len(labels) > len(shown):
+        jobs += f", and {len(labels) - len(shown)} more"
+    reason = _OPT79_HELD_BACK_REASONS.get(top, _OPT79_HELD_BACK_UNMAPPED)
+    return f"{n} candidate cache(s) held back ({jobs}): {reason}."
 
 
 def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:

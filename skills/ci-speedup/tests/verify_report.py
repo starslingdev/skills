@@ -749,17 +749,131 @@ def _cache_probe_count_violation(report: str, findings_path: Path | None
     return None, f"; cache-probe count honest ({returned}/{probed} read)"
 
 
+# The cell may carry `\|` (an escaped pipe inside a job name), so the cell is
+# "escaped pair or any non-pipe character", not a bare lazy match.
 _DS_CACHE_VERDICTS_ROW_RE = re.compile(
-    r"^\|\s*cache hit/miss verdicts\s*\|\s*(.+?)\s*\|", re.MULTILINE)
+    r"^\|\s*cache hit/miss verdicts\s*\|\s*((?:\\.|[^|\\])+?)\s*\|", re.MULTILINE)
 _VR_OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
+_VR_OPT79_HELD_BACK_MAX_JOBS = 5
+# The plain-English phrase for every gate that can be recorded. This is a
+# standalone copy of `blocking_path._OPT79_HELD_BACK_REASONS` (this checker
+# imports nothing from the renderer); a test pins the two equal and complete.
+# A recorded gate with no phrase FAILS the check: the report may never print a
+# raw gate name, and a fallback here would let it.
+_VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
+    "cache_is_saved_by_a_separate_step":
+        "the cache is saved by its own separate step, so one restore-and-save "
+        "measurement can't cover it",
+    "setup_cache_input_is_an_unevaluated_expression":
+        "whether a setup step turns its cache on depends on a value that is "
+        "only known while the job runs",
+    "job_declares_more_than_one_cache_restore_step":
+        "the job restores more than one cache, so one hit/miss verdict can't "
+        "price it",
+    "setup_action_cache_default_depends_on_repository_files":
+        "whether a setup step's built-in cache is on depends on package.json, "
+        "which could not be read reliably",
+    "cache_action_is_not_one_this_pattern_measures":
+        "the job's only cache belongs to a tool that manages its own cache, "
+        "which this check does not measure",
+    "cache_step_has_no_renderable_name":
+        "the cache step has no name to look its time up by",
+    "install_step_also_runs_non_install_commands":
+        "the install step also runs other commands, so its time is not just "
+        "the install",
+    "no_install_step_after_the_cache_step":
+        "no dependency install follows the cache, so the cache is not shown to "
+        "speed anything up",
+    "first_step_after_cache_is_not_a_recognised_install":
+        "the first step after the cache is not a recognised dependency install, "
+        "so the cache may be feeding a different step",
+    "cache_path_names_no_known_package_store":
+        "the cache does not clearly hold a package manager's downloads, so it "
+        "is not shown to serve the install",
+    "install_package_manager_does_not_match_cache":
+        "the install uses a different package manager than the one the cache "
+        "holds, so the cache does not serve it",
+    "step_display_name_is_ambiguous_within_the_job":
+        "two steps in the job share the cache or install step's name, so their "
+        "times can't be told apart",
+    "runner_label_not_one_known_billed_label":
+        "the job's machine type is not one this report can price",
+    "beyond_the_per_workflow_candidate_log_budget":
+        "the workflow has more candidate caches than the per-workflow log "
+        "budget covers, and this one was not reached",
+    "restore_step_never_measured_in_any_occurrence":
+        "the cache's restore step never showed a time in any sampled run, so "
+        "its cost could not be measured",
+    "post_step_never_measured_in_any_occurrence":
+        "the cache's save step never showed a time in any sampled run, so the "
+        "cost of saving could not be measured",
+    "population_truncated_by_unread_logs":
+        "too many of the sampled runs' logs could not be read to tell how often "
+        "the cache hits",
+    "population_truncated_by_excluded_runs":
+        "too many of the sampled runs had logs that could not tell a cache hit "
+        "from a miss",
+    "fewer_than_min_hit_runs_classified":
+        "too few sampled runs hit the cache to compare a hit against a miss",
+    "fewer_than_min_miss_runs_classified":
+        "too few sampled runs missed the cache to compare a miss against a hit",
+    "no_monthly_volume":
+        "the job's monthly run count was unknown, so its saving could not be "
+        "sized",
+    "credited_runner_minutes_round_to_zero":
+        "the measured saving rounds down to zero runner-minutes a month",
+    "neutrality_margin_not_positive":
+        "the job is about as slow as its workflow's slowest jobs, so removing "
+        "the cache could not be shown to leave the pull-request wait unchanged",
+}
+
+
+def _opt79_held_back_expected_cell(rows: list[dict]) -> tuple[str | None, str]:
+    """`(sentence, "")` the Data sources cell must be, re-derived from the
+    recorded rows, or `(None, problem)` when a gate has no plain-English phrase.
+    Count = rows; reason = the commonest gate (ties to the alphabetically
+    first); jobs = distinct labels, sorted, workflow-qualified only where two
+    workflows share a job name, at most five then `and K more`."""
+    counts: dict[str, int] = {}
+    for r in rows:
+        g = str(r.get("gate") or "unknown")
+        counts[g] = counts.get(g, 0) + 1
+    unmapped = sorted(g for g in counts if g not in _VR_OPT79_HELD_BACK_REASONS)
+    if unmapped:
+        return None, (f"recorded gate(s) {unmapped} have no plain-English phrase, "
+                      "so the held-back line cannot be stated without printing a code")
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+    def wf_of(r: dict) -> str:
+        return str(r.get("workflow_file") or "").rsplit("/", 1)[-1]
+    shared: dict[str, set[str]] = {}
+    for r in rows:
+        shared.setdefault(str(r.get("job") or "").strip(), set()).add(wf_of(r))
+    labels: set[str] = set()
+    for r in rows:
+        raw = str(r.get("job") or "").strip()
+        name = raw or "(unnamed job)"
+        labels.add(f"{wf_of(r)} / {name}" if len(shared[raw]) > 1 and wf_of(r) else name)
+
+    def safe(t: str) -> str:
+        t = re.sub(r"\s+", " ", t).strip().replace("`", "'").replace("*", "'")
+        return t.replace("|", "\\|")
+    cells = [safe(x) for x in sorted(labels)]
+    jobs = ", ".join(cells[:_VR_OPT79_HELD_BACK_MAX_JOBS])
+    if len(cells) > _VR_OPT79_HELD_BACK_MAX_JOBS:
+        jobs += f", and {len(cells) - _VR_OPT79_HELD_BACK_MAX_JOBS} more"
+    return (f"{len(rows)} candidate cache(s) held back ({jobs}): "
+            f"{_VR_OPT79_HELD_BACK_REASONS[top]}."), ""
 
 
 def _opt79_withheld_disclosure_violation(report: str, findings_path: Path | None
                                          ) -> tuple[str | None, str]:
     """The cache hit/miss probe can read a candidate's logs and still withhold
     it. `opt79_withheld_candidates` records each one, and the report must say so
-    in its `cache hit/miss verdicts` Data sources row — the count and the
-    commonest gate (ties to the alphabetically first), both re-derived here.
+    in its `cache hit/miss verdicts` Data sources row as
+    `N candidate cache(s) held back (<jobs>): <plain-English reason>.` — the
+    count, the job list and the reason for the commonest gate (ties to the
+    alphabetically first), all re-derived here. A gate with no phrase fails.
     Without the row a probed-but-undecided cache reads as "measured, nothing
     found"; a row with nothing behind it is a claim the run never made."""
     if not findings_path:
@@ -774,24 +888,21 @@ def _opt79_withheld_disclosure_violation(report: str, findings_path: Path | None
     m = _DS_CACHE_VERDICTS_ROW_RE.search(report)
     if not rows:
         if m:
-            return ("Data sources declares cache candidates probed but withheld, "
+            return ("Data sources declares cache candidates held back, "
                     "but the run recorded none"), ""
         return None, ""
-    counts: dict[str, int] = {}
-    for r in rows:
-        g = str(r.get("gate") or "unknown")
-        counts[g] = counts.get(g, 0) + 1
-    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    expected, problem = _opt79_held_back_expected_cell(rows)
+    if expected is None:
+        return problem, ""
     if not m:
-        return (f"{len(rows)} cache candidate(s) were probed and then withheld "
-                f"(top reason {top}) but the Data sources table does not say so - "
-                "a probed-but-undecided cache reads as measured and clean"), ""
+        return (f"{len(rows)} cache candidate(s) were held back "
+                f"but the Data sources table does not say so - "
+                "a held-back cache reads as measured and clean"), ""
     cell = _strip_render_artifacts(m.group(1))
-    got = re.search(r"(\d+) candidate cache\(s\) probed but withheld; top reason: "
-                    r"([a-z0-9_]+)", cell)
-    if not got or int(got.group(1)) != len(rows) or got.group(2) != top:
-        return (f"Data sources withheld-cache cell {cell!r} does not state the "
-                f"{len(rows)} withheld candidate(s) and top reason {top!r}"), ""
+    if cell != _strip_render_artifacts(expected):
+        return (f"Data sources held-back-cache cell {cell!r} does not match the "
+                f"one re-derived from the findings (count, job list and reason): "
+                f"{expected!r}"), ""
     return None, f"; {len(rows)} withheld cache candidate(s) disclosed"
 
 
