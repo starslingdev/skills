@@ -6995,3 +6995,140 @@ def test_opt79_a_job_with_no_cache_is_not_a_held_back_candidate():
         "ci.yml", jpr, _opt79_crit(), wf, 100, 0, logs_by_job_id=logs,
         withheld={}, withheld_candidates=wc)
     assert wc == [], wc
+
+
+# ==== withheld candidates: "could not tell" must never read as "nothing found" ====
+#
+# OPT77 and OPT80 tally every gate into `opt77_withheld_by_gate` /
+# `opt80_withheld_by_gate`, but nothing rendered or verified those tallies, so a
+# report could read "measured, nothing found" where the audit had measured a
+# candidate and then been unable to decide it. Each detector now also appends
+# every candidate it could NOT RESOLVE to an explicit list — a candidate measured
+# and judged fine (a verdict) is not on it — which the report states as one Data
+# sources row and `verify_report` re-derives (the OPT79 design, #106).
+
+
+def _opt77_withheld(jpr=None, crit=None, wf=None, monthly=100):
+    rows: list = []
+    out = cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", jpr if jpr is not None else [_opt77_run(), _opt77_run()],
+        crit or _opt77_crit(), wf if wf is not None else _opt77_wf(), monthly, 0,
+        withheld={}, withheld_candidates=rows)
+    return out, rows
+
+
+def test_opt77_lists_the_groups_it_measured_but_could_not_resolve():
+    names = ("lint", "typecheck", "audit")
+    run = [_setup_job(n, 80.0, 10.0) for n in names]
+    # Nothing outside the group to measure the consolidated job against: the
+    # audit cannot tell whether the merge gate stays unchanged -> WITHHELD.
+    crit = {"floor_p50": 90.0, "long_pole_p50": 90.0,
+            "job_p50": {n: 90.0 for n in names},
+            "job_runner": {n: "ubuntu-latest" for n in names},
+            "runner_scope": "ubuntu-latest"}
+    out, rows = _opt77_withheld(jpr=[run, list(run)], crit=crit,
+                                wf=_opt77_wf(names=names))
+    assert out == []
+    assert rows == [{
+        "workflow_file": "ci.yml",
+        "group": "ubuntu-latest/audit+lint+typecheck",
+        "jobs": ["audit", "lint", "typecheck"],
+        "gate": "no_job_outside_the_group_runs_often_enough_to_measure_against",
+    }], rows
+    # A `needs:` graph the audit cannot reason about is also "could not tell".
+    out, rows = _opt77_withheld(wf=_opt77_wf(needs={"audit": ["ghost"]}))
+    assert out == [] and [r["gate"] for r in rows] == ["needs_graph_undecidable"], rows
+
+
+def test_opt77_does_not_list_groups_it_measured_and_judged():
+    # A verdict is not a withhold: a group whose members depend on each other,
+    # or whose consolidated job would reach the tallest remaining job, was
+    # measured and decided.
+    for kw in ({"wf": _opt77_wf(needs={"audit": ["lint"]})},
+               {"crit": _opt77_crit(floor=90.0)}):
+        out, rows = _opt77_withheld(**kw)
+        assert out == [] and rows == [], (kw, rows)
+    # Two jobs never formed a candidate group at all.
+    two = ("lint", "typecheck")
+    out, rows = _opt77_withheld(jpr=[_opt77_run(names=two), _opt77_run(names=two)],
+                                crit=_opt77_crit(names=two), wf=_opt77_wf(names=two))
+    assert out == [] and rows == [], rows
+    # …and a group that fires is not withheld.
+    out, rows = _opt77_withheld()
+    assert len(out) == 1 and rows == [], rows
+
+
+def test_opt77_withheld_candidates_reach_the_findings_document():
+    import inspect
+    assert cr._OPT77_WITHHELD_DOC_KEY == "opt77_withheld_candidates"
+    src = inspect.getsource(cr.collect)
+    assert "withheld_candidates=findings_doc.setdefault(_OPT77_WITHHELD_DOC_KEY" in src
+
+
+def _opt80_withheld(jpr=None, logs=None, wf=None):
+    runs = jpr if jpr is not None else _opt80_runs()
+    if logs is None:
+        logs = {run[0]["id"]: _OPT80_STALLED_LOG for run in runs}
+    rows: list = []
+    out = cr._detect_opt80_checkout_tail_stall(
+        _Opt80Gh(logs), "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(),
+        wf if wf is not None else _opt80_wf(), None, 100, 0,
+        withheld={}, withheld_candidates=rows)
+    return out, rows
+
+
+def test_opt80_lists_the_checkouts_it_measured_but_could_not_resolve():
+    runs = _opt80_runs()
+    # Tail runs whose logs are gone: the tail is measured, the cause unknown.
+    out, rows = _opt80_withheld(jpr=runs, logs={})
+    assert out == []
+    assert rows == [{"workflow_file": "ci.yml", "job": "build",
+                     "gate": "tail_run_log_unavailable"}], rows
+    # A checkout that printed no progress: no evidence either way.
+    out, rows = _opt80_withheld(
+        jpr=runs, logs={r[0]["id"]: _OPT80_NO_PROGRESS_LOG for r in runs})
+    assert out == [] and [r["gate"] for r in rows] == [
+        "log_carries_no_progress_vocabulary"], rows
+    # One proven stall and one unreadable log: the second could have been the
+    # proof the finding needed, so this is unresolved, named by the unread one.
+    tail_ids = [r[0]["id"] for r in runs][-2:]
+    out, rows = _opt80_withheld(jpr=runs, logs={tail_ids[0]: _OPT80_STALLED_LOG})
+    assert out == [] and [r["gate"] for r in rows] == ["tail_run_log_unavailable"], rows
+
+
+def test_opt80_does_not_list_checkouts_it_measured_and_judged():
+    runs = _opt80_runs()
+    # Smooth logs: the tail was read and it is not a stall -> a verdict.
+    out, rows = _opt80_withheld(
+        jpr=runs, logs={r[0]["id"]: _OPT80_SMOOTH_LOG for r in runs})
+    assert out == [] and rows == [], rows
+    # Four tail runs, three smooth and one unreadable: even a stall in the unread
+    # one could not reach the two-proven minimum, so the audit did decide.
+    runs4 = _opt80_runs([10.0] * 8 + [120.0] * 4)
+    logs = {r[0]["id"]: _OPT80_SMOOTH_LOG for r in runs4[-4:-1]}
+    out, rows = _opt80_withheld(jpr=runs4, logs=logs)
+    assert out == [] and rows == [], rows
+    # No tail at all is no candidate.
+    out, rows = _opt80_withheld(jpr=_opt80_runs([12.0] * 10))
+    assert out == [] and rows == [], rows
+    # …and a finding that fires is not withheld.
+    out, rows = _opt80_withheld()
+    assert len(out) == 1 and rows == [], rows
+
+
+def test_opt80_withheld_candidates_reach_the_findings_document():
+    import inspect
+    assert cr._OPT80_WITHHELD_DOC_KEY == "opt80_withheld_candidates"
+    src = inspect.getsource(cr.collect)
+    assert "withheld_candidates=findings_doc.setdefault(_OPT80_WITHHELD_DOC_KEY" in src
+
+
+def test_withheld_candidate_keys_are_one_string_contract_across_files():
+    """Renaming a key in the collector would stop its row rendering with nothing
+    going red, so the renderer and the verifier name the same constants."""
+    import blocking_path as bp
+    import verify_report as vr
+    assert bp._OPT77_WITHHELD_DOC_KEY == cr._OPT77_WITHHELD_DOC_KEY
+    assert vr._VR_OPT77_WITHHELD_DOC_KEY == cr._OPT77_WITHHELD_DOC_KEY
+    assert bp._OPT80_WITHHELD_DOC_KEY == cr._OPT80_WITHHELD_DOC_KEY
+    assert vr._VR_OPT80_WITHHELD_DOC_KEY == cr._OPT80_WITHHELD_DOC_KEY

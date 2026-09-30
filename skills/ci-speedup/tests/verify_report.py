@@ -966,6 +966,63 @@ def _detectors_skipped_violation(report: str,
     return None, f"; {len(skipped)} skipped-detector workflow(s) named"
 
 
+# The findings-doc keys OPT77 and OPT80 list their WITHHELD candidates under —
+# the same strings as the collector's and the renderer's constants (a coupling
+# test pins all three equal).
+_VR_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
+_VR_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
+# (doc key, Data sources row label, counted noun) — as blocking_path renders them.
+_VR_WITHHELD_77_80_ROWS = (
+    (_VR_OPT77_WITHHELD_DOC_KEY, "repeated-setup verdicts", "candidate job group(s)"),
+    (_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall verdicts", "candidate checkout(s)"),
+)
+
+
+def _withheld_77_80_disclosure_violation(report: str, findings_path: Path | None
+                                         ) -> tuple[str | None, str]:
+    """OPT77 (repeated setup) and OPT80 (checkout stalls) can measure a candidate
+    and still be unable to decide it. Each such candidate is listed on the
+    findings doc, and the report must say so in that detector's Data sources row
+    — the count and the commonest gate (ties to the alphabetically first), both
+    re-derived here. Without the row a measured-but-undecided candidate reads as
+    "measured, nothing found"; a row with nothing behind it is a claim the run
+    never made."""
+    if not findings_path:
+        return None, ""
+    try:
+        data = json.loads(Path(findings_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return (f"the withheld-candidate rows could not be re-derived: findings JSON "
+                f"at {findings_path} is unreadable ({type(exc).__name__})"), ""
+    note = ""
+    for key, label, noun in _VR_WITHHELD_77_80_ROWS:
+        rows = [r for r in _as_list(_as_dict(data).get(key)) if isinstance(r, dict)]
+        m = re.search(rf"^\|\s*{re.escape(label)}\s*\|\s*(.+?)\s*\|", report,
+                      re.MULTILINE)
+        if not rows:
+            if m:
+                return (f"Data sources row '{label}' declares candidates measured but "
+                        f"withheld, but the run recorded none under {key}"), ""
+            continue
+        counts: dict[str, int] = {}
+        for r in rows:
+            g = str(r.get("gate") or "unknown")
+            counts[g] = counts.get(g, 0) + 1
+        top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        if not m:
+            return (f"{len(rows)} {noun} were measured and then withheld (top reason "
+                    f"{top}, {key}) but the Data sources table has no '{label}' row - "
+                    "a measured-but-undecided candidate reads as measured and clean"), ""
+        cell = _strip_render_artifacts(m.group(1))
+        got = re.search(rf"(\d+) {re.escape(noun)} measured but withheld; "
+                        r"top reason: ([a-z0-9_]+)", cell)
+        if not got or int(got.group(1)) != len(rows) or got.group(2) != top:
+            return (f"Data sources '{label}' cell {cell!r} does not state the "
+                    f"{len(rows)} withheld {noun} and top reason {top!r}"), ""
+        note += f"; {len(rows)} withheld {noun} disclosed"
+    return None, note
+
+
 def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> Check:
     """The report must disclose its data basis (a provenance block or the Data
     sources footer), any incomplete-coverage banner must name the unscanned file(s)
@@ -996,6 +1053,11 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
     skip_violation, skip_note = _detectors_skipped_violation(report, findings_path)
     if skip_violation:
         return Check(name, False, skip_violation)
+    withheld_violation, withheld_note = _withheld_77_80_disclosure_violation(
+        report, findings_path)
+    if withheld_violation:
+        return Check(name, False, withheld_violation)
+    skip_note += withheld_note
     if "Incomplete coverage" in report:
         banner = _section_quote(report, "Incomplete coverage")
         if "**" not in banner:

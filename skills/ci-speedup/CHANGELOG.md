@@ -703,6 +703,21 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-09-30** — **The repeated-setup (OPT77) and stalled-checkout (OPT80)
+  patterns now say when they measured something and could not decide it.** Both
+  kept a private tally of why they held candidates back, but nothing showed it,
+  so a report could read "checked, nothing found" when a group of small jobs or
+  a slow checkout had actually been measured and set aside — because no job was
+  left to compare the consolidation against, say, or because the slow runs' logs
+  were gone. The Data sources table now carries one row per pattern when that
+  happens: "N candidate job group(s) measured but withheld; top reason: `gate`"
+  and "N candidate checkout(s) measured but withheld; top reason: `gate`". Only
+  undecided candidates count; a candidate measured and judged fine (the jobs
+  depend on each other, the logs show a smooth fetch) does not. The report's
+  self-check re-derives both rows from the findings and fails a report that
+  omits one, misstates its count or reason, or carries one with nothing behind
+  it. It mirrors the row the cache pattern (OPT79) adds for the same gap.
+
 - **2026-09-29** — **The stalled-checkout pattern (OPT80) no longer misses a
   stall, or invents one, in three cases.** A low-speed setting on some other
   step, or a `git config` applied after the checkout had already run, no longer

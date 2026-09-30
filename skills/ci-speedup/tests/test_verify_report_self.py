@@ -9331,3 +9331,81 @@ def test_held_back_verifier_rederives_the_five_job_cap_and_shared_names(tmp_path
                   "a, b, c, build, d, and 2 more",
                   "a, b, c, ci.yml / build, d, e, nightly.yml / build"):
         assert not vr.check_coverage_disclosed(cell(wrong), path).ok, wrong
+
+
+# ── OPT77 / OPT80: withheld candidates must reach the page ──
+# Both detectors can measure a candidate and still be unable to decide it. The
+# collector lists each one (`opt77_withheld_candidates` /
+# `opt80_withheld_candidates`); the report states the count and the commonest
+# gate in one Data sources row, and the self-check re-derives both. Without it
+# "measured, could not tell" reads exactly like "measured, nothing found".
+
+def _withheld_77_80_doc(tmp_path, key, rows):
+    import json as _json
+    p = tmp_path / f"findings-{key}.json"
+    p.write_text(_json.dumps({"data_sources": {}, key: rows}), encoding="utf-8")
+    return p
+
+
+_WITHHELD_77_80_CASES = (
+    ("opt77_withheld_candidates", "repeated-setup verdicts",
+     "candidate job group(s)",
+     [{"workflow_file": "ci.yml", "group": "ubuntu-latest/a+b+c",
+       "jobs": ["a", "b", "c"], "gate": "needs_graph_undecidable"},
+      {"workflow_file": "ci.yml", "group": "ubuntu-latest/d+e+f",
+       "jobs": ["d", "e", "f"], "gate": "needs_graph_undecidable"},
+      {"workflow_file": "b.yml", "group": "ubuntu-latest/x+y+z",
+       "jobs": ["x", "y", "z"],
+       "gate": "no_job_outside_the_group_runs_often_enough_to_measure_against"}],
+     "needs_graph_undecidable",
+     "no_job_outside_the_group_runs_often_enough_to_measure_against"),
+    ("opt80_withheld_candidates", "checkout stall verdicts",
+     "candidate checkout(s)",
+     [{"workflow_file": "ci.yml", "job": "build", "gate": "tail_run_log_unavailable"},
+      {"workflow_file": "ci.yml", "job": "e2e", "gate": "tail_run_log_unavailable"},
+      {"workflow_file": "b.yml", "job": "x",
+       "gate": "log_carries_no_progress_vocabulary"}],
+     "tail_run_log_unavailable", "log_carries_no_progress_vocabulary"),
+)
+
+
+def test_withheld_setup_and_checkout_candidates_must_be_disclosed(tmp_path):
+    vr = _load_verify_report()
+    silent = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    for key, label, noun, rows, top, other in _WITHHELD_77_80_CASES:
+        path = _withheld_77_80_doc(tmp_path, key, rows)
+        chk = vr.check_coverage_disclosed(silent, path)
+        assert not chk.ok and "withheld" in chk.detail, (key, chk)
+        row = f"| {label} | {{}} | Why a measured candidate produced no finding |\n"
+        honest = silent + row.format(
+            f"3 {noun} measured but withheld; top reason: `{top}`")
+        chk = vr.check_coverage_disclosed(honest, path)
+        assert chk.ok, (key, chk)
+        # a wrong count, or a reason that is not the commonest one, is not a disclosure
+        for cell in (f"2 {noun} measured but withheld; top reason: `{top}`",
+                     f"3 {noun} measured but withheld; top reason: `{other}`"):
+            chk = vr.check_coverage_disclosed(silent + row.format(cell), path)
+            assert not chk.ok, (key, cell, chk)
+        # …and a row with nothing behind it is a claim the run never made.
+        chk = vr.check_coverage_disclosed(
+            honest, _withheld_77_80_doc(tmp_path, key, []))
+        assert not chk.ok, (key, chk)
+
+
+def test_withheld_setup_and_checkout_rows_the_renderer_writes_pass_the_verifier(tmp_path):
+    """The coupling that matters: the renderer's own row, not a hand-written one,
+    satisfies the self-check — and removing it reddens the check."""
+    import json as _json
+    import blocking_path as bp
+    vr = _load_verify_report()
+    doc = {"data_sources": {},
+           "opt77_withheld_candidates": _WITHHELD_77_80_CASES[0][3],
+           "opt80_withheld_candidates": _WITHHELD_77_80_CASES[1][3]}
+    p = tmp_path / "findings.json"
+    p.write_text(_json.dumps(doc), encoding="utf-8")
+    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    chk = vr.check_coverage_disclosed(foot, p)
+    assert chk.ok, (chk, foot)
+    for label in ("repeated-setup verdicts", "checkout stall verdicts"):
+        stripped = "\n".join(ln for ln in foot.splitlines() if label not in ln)
+        assert not vr.check_coverage_disclosed(stripped, p).ok, label

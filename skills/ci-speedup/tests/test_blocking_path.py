@@ -2837,6 +2837,42 @@ def test_data_sources_footer_reports_logs_when_the_job_logs_tier_ran():
     assert "job logs | not run" in "\n".join(bp._data_sources_footer(doc3, "o/r"))
 
 
+def test_withheld_setup_and_checkout_candidates_reach_the_data_sources_table():
+    """OPT77 (repeated setup) and OPT80 (checkout stalls) can measure a candidate
+    and still be unable to decide it (no job to measure the consolidation
+    against, a tail run's log gone). Without a line saying so the report reads
+    "measured, nothing found" for "measured, could not tell"."""
+    doc = _doc_one_pole()
+    doc["data_sources"] = {**doc["data_sources"], "tiers_run": ["gh-timing"]}
+    doc["opt77_withheld_candidates"] = [
+        {"workflow_file": "ci.yml", "group": "ubuntu-latest/a+b+c",
+         "jobs": ["a", "b", "c"], "gate": "needs_graph_undecidable"},
+        {"workflow_file": "ci.yml", "group": "ubuntu-latest/d+e+f",
+         "jobs": ["d", "e", "f"],
+         "gate": "no_job_outside_the_group_runs_often_enough_to_measure_against"},
+        {"workflow_file": "b.yml", "group": "ubuntu-latest/x+y+z",
+         "jobs": ["x", "y", "z"], "gate": "needs_graph_undecidable"}]
+    doc["opt80_withheld_candidates"] = [
+        {"workflow_file": "ci.yml", "job": "build",
+         "gate": "tail_run_log_unavailable"},
+        {"workflow_file": "ci.yml", "job": "e2e",
+         "gate": "log_carries_no_progress_vocabulary"}]
+    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    assert "| repeated-setup verdicts |" in foot, foot
+    assert ("3 candidate job group(s) measured but withheld; top reason: "
+            "`needs_graph_undecidable`") in foot, foot
+    assert "| checkout stall verdicts |" in foot, foot
+    # A tie goes to the alphabetically first gate — the verifier's rule too.
+    assert ("2 candidate checkout(s) measured but withheld; top reason: "
+            "`log_carries_no_progress_vocabulary`") in foot, foot
+    # nothing withheld -> no row
+    doc["opt77_withheld_candidates"] = []
+    doc.pop("opt80_withheld_candidates")
+    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    assert "repeated-setup verdicts" not in foot
+    assert "checkout stall verdicts" not in foot
+
+
 def test_second_pole_role_names_the_real_slowest_concurrent_check_above_it():
     # Regression (two-pole): pole 2's "becomes the gate once X drops" must name the
     # ACTUAL slowest concurrent check above it - which may be an intervening check that

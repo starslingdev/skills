@@ -1067,6 +1067,20 @@ the eligible set the tallest-remaining job was chosen from. Like OPT65 it claims
 no speedup (`wall_clock_p50_s=0`, `realization=none`), and it shares
 `_billed_job_runner` and `_tier2_scope_event` with it.
 
+OPT77 and OPT80 each also keep an explicit list of the candidates they measured
+but could NOT decide — `opt77_withheld_candidates` (a formed group that exited on
+anything outside `_OPT77_VERDICT_GATES`) and `opt80_withheld_candidates` (a
+checkout with a measured tail that exited unresolved, outside
+`_OPT80_VERDICT_GATES`). The per-gate tallies above are for maintainers; these
+lists reach the reader. `blocking_path._data_sources_footer` renders one Data
+sources row per non-empty list (`repeated-setup verdicts` /
+`checkout stall verdicts`: "N candidate … measured but withheld; top reason:
+`gate`", the commonest gate, ties alphabetical), and `verify_report.py`'s
+`check_coverage_disclosed` re-derives the count and the reason from the findings
+document — failing a report that omits the row, misstates it, or carries one
+with nothing behind it. The three files name the keys as constants a coupling
+test pins equal.
+
 OPT80 (checkout stalls on the tail) is the third measured Tier-2 lever, and the
 first whose admission rests on a LOG rather than on a timing alone. It measures
 one step's distribution across the sample — the checkout step, identified from

@@ -5128,6 +5128,38 @@ def _coverage_note(ds: dict[str, Any]) -> str:
     return f" **Note:** {reason}.{named_part}"
 
 
+# The findings-doc keys the collector writes OPT77's and OPT80's WITHHELD
+# candidates under. STRING CONTRACTS between files: renaming one in the
+# collector would stop its row rendering with nothing going red, so every side
+# names the constant and a coupling test pins them equal.
+_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
+_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
+# (doc key, Data sources row label, counted noun, "Used for" cell). The row
+# label and the noun are what `verify_report` matches on.
+_WITHHELD_77_80_ROWS: tuple[tuple[str, str, str, str], ...] = (
+    (_OPT77_WITHHELD_DOC_KEY, "repeated-setup verdicts", "candidate job group(s)",
+     "Why a measured group of small jobs sharing one setup produced no finding"),
+    (_OPT80_WITHHELD_DOC_KEY, "checkout stall verdicts", "candidate checkout(s)",
+     "Why a checkout with a measured slow tail produced no finding"),
+)
+
+
+def _withheld_candidates_summary(doc: dict[str, Any] | None,
+                                 key: str) -> tuple[int, str]:
+    """`(candidates withheld, the commonest gate)` from one of the collector's
+    withheld-candidate lists; ties go to the alphabetically first gate. `(0, "")`
+    when nothing was withheld. `verify_report` re-derives the same pair."""
+    rows = [r for r in ((doc or {}).get(key) or []) if isinstance(r, dict)]
+    if not rows:
+        return 0, ""
+    counts: dict[str, int] = {}
+    for r in rows:
+        g = str(r.get("gate") or "unknown")
+        counts[g] = counts.get(g, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    return len(rows), top
+
+
 def _data_sources_footer(doc: dict[str, Any], repo: str,
                          lead: "list[str] | None" = None) -> list[str]:
     """A structured Data Sources table at the foot of the report - which tiers ran,
@@ -5245,6 +5277,16 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
             _parts.append(f"{_api} from the gh contents API (default branch HEAD)")
         rows.append(("workflow YAML", " / ".join(_parts),
                      "`on:` triggers, matrix/shard axes, job timeouts (detector inputs)"))
+    # Candidates OPT77 (repeated setup) and OPT80 (checkout stalls) measured and
+    # then WITHHELD because the audit could not decide them. Without these rows
+    # the report reads "measured, nothing found" where the audit could not tell.
+    # `verify_report` re-derives both numbers from the collector's lists.
+    for _key, _label, _noun, _feeds in _WITHHELD_77_80_ROWS:
+        _wn, _wtop = _withheld_candidates_summary(doc, _key)
+        if _wn:
+            rows.append((_label,
+                         f"{_wn} {_noun} measured but withheld; top reason: `{_wtop}`",
+                         _feeds))
     out = ["## 🗄️ Data sources", ""]
     if lead:
         out += lead

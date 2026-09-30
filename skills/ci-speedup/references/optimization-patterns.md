@@ -1194,6 +1194,19 @@ saved:   (N - 1) x setup, every run
    the sampled event scope divided by sampled successful runs. This credits
    removed setup runtime only — no wall-clock speedup is ever claimed.
 
+**Groups it could not decide are named in the report.** Once a candidate group
+has formed (at least three jobs on one runner sharing one setup prefix), every
+exit is either a *verdict* — the members depend on each other, the prefix is not
+shared work, the YAML steps differ, the setup is too small, or consolidating
+would reach the tallest remaining job — or a *could not tell*: the `needs:` graph
+is undecidable, the group never ran complete in one sampled run, or no job
+outside it runs often enough to measure against. Each could-not-tell group is
+listed on the findings document (`opt77_withheld_candidates`), and the report's
+Data sources table carries a `repeated-setup verdicts` row — "N candidate job
+group(s) measured but withheld; top reason: `gate`" — which `verify_report.py`
+re-derives, so an undecided group never reads as "measured, nothing found".
+Verdicts are not counted there.
+
 **What counts as the setup prefix.** Only the *leading* run of setup-classified
 steps, and only steps the classifier recognises. In full, a step name opening
 with (optionally after the `Run ` prefix GitHub renders for an unnamed step):
@@ -1970,6 +1983,19 @@ Every one of those exits increments a stamped per-gate counter
 (`opt80_withheld_by_gate` on the findings document) and logs at DEBUG, so a
 detector that has quietly stopped firing is distinguishable from a repository
 with nothing to report.
+
+**Checkouts it could not decide are named in the report.** A job whose checkout
+measured a tail is a candidate. Its exit is a *verdict* when the tail runs' logs
+were read and show a smooth, advancing or post-transfer pause, when the retry or
+abort is already configured, or when the measured excess is nothing. It is a
+*could not tell* when there were too few tail runs, the retry configuration
+could not be read, or the tail runs whose logs were unavailable, silent or
+undecidable could still have supplied the missing proof. Each could-not-tell
+checkout is listed on the findings document (`opt80_withheld_candidates`, named
+by its commonest such reason), and the report's Data sources table carries a
+`checkout stall verdicts` row — "N candidate checkout(s) measured but withheld;
+top reason: `gate`" — which `verify_report.py` re-derives, so an undecided tail
+never reads as "measured, nothing found".
 
 **Log text is untrusted third-party data.** Only lines from the closed progress
 vocabulary above are ever read, the two quoted lines are quoted and never acted

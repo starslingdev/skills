@@ -432,6 +432,10 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # would be visible rather than silent.
     assert isinstance(data.get("opt77_withheld_by_gate"), dict), (
         "the per-gate withhold tally must be stamped on every collected run")
+    # …and so is the list of candidate groups it measured but could not decide,
+    # which the report states as a Data sources row and the self-check re-derives.
+    assert isinstance(data.get("opt77_withheld_candidates"), list), (
+        "the withheld-candidate list must be stamped on every collected run")
 
     # OPT79 end to end, including the LOG fetch nothing else in the plain path
     # makes. `matrix.yml`'s `deps` job restores a cache and then installs; the
@@ -542,6 +546,8 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert o80[0].get("tier2_neutrality", {}).get("proof") == "checkout_tail_excess"
     assert isinstance(data.get("opt80_withheld_by_gate"), dict), (
         "the per-gate withhold tally must be stamped on every collected run")
+    assert isinstance(data.get("opt80_withheld_candidates"), list), (
+        "the withheld-candidate list must be stamped on every collected run")
 
     # The static-scan findings come from scan.py parsing the YAML — they exist
     # regardless of gh replay, so they do NOT prove the replay wired up. Assert

@@ -8584,6 +8584,29 @@ def _supersede_opt65_with_opt77(
     return kept
 
 
+# The findings-doc key the collector writes OPT77's WITHHELD candidate groups
+# under (`[{workflow_file, group, jobs, gate}]`) — rendered as one Data sources
+# row and re-derived by `verify_report`, so "measured, could not tell" never
+# reads as "measured, nothing found". A STRING CONTRACT across the collector,
+# the renderer and the verifier: a coupling test pins the three constants equal.
+_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
+# The group-level exits that are a VERDICT on a measured candidate group, not a
+# withhold: the members depend on each other, the prefix is not shared work,
+# the YAML steps differ, the setup is too small to matter, or consolidating
+# would reach the tallest remaining job. Every OTHER exit once a group has
+# formed means the audit could not tell, and is listed under the key above.
+_OPT77_VERDICT_GATES = frozenset({
+    "prefix_has_no_recognizable_shared_work",
+    "member_needs_member",
+    "downstream_job_needs_a_member",
+    "yaml_setup_steps_differ_across_the_group",
+    "setup_prefix_below_absolute_floor",
+    "projected_consolidated_job_is_not_below_the_tallest_remaining_job",
+    "neutrality_margin_not_positive",
+    "credited_runner_minutes_round_to_zero",
+})
+
+
 def _detect_opt77_repeated_setup_across_small_jobs(
     wf_path: str,
     jobs_per_run: list[list[dict[str, Any]]],
@@ -8592,6 +8615,7 @@ def _detect_opt77_repeated_setup_across_small_jobs(
     monthly_volume: int | None,
     start_idx: int,
     withheld: dict[str, int] | None = None,
+    withheld_candidates: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Repeated fixed setup across independent small jobs (catalog OPT77) — measured.
 
@@ -8613,12 +8637,25 @@ def _detect_opt77_repeated_setup_across_small_jobs(
     dead one: twice already a gate too strict to ever fire shipped, and the tests
     that pin "withholds" assert exactly what a broken detector returns. A visible
     zero firing rate is the only thing that tells those two apart.
+
+    A candidate GROUP (at least `_CONSOLIDATION_MIN_JOBS` jobs sharing one runner
+    and one setup prefix) that then exits on anything but a verdict
+    (`_OPT77_VERDICT_GATES`) is also appended to `withheld_candidates` as
+    `{workflow_file, group, jobs, gate}`, which the report renders as its own
+    Data sources row: the audit measured it and could not decide it.
     """
     def _no(gate: str, **ctx: Any) -> None:
         if withheld is not None:
             withheld[gate] = withheld.get(gate, 0) + 1
         logger.debug("OPT77 %s: withheld by %s%s", wf_path, gate,
                      (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items())) if ctx else "")
+
+    def _drop_group(group_id: str, names: list[str], gate: str, **ctx: Any) -> None:
+        """A group-level exit for a candidate group that formed."""
+        _no(gate, group=group_id, **ctx)
+        if withheld_candidates is not None and gate not in _OPT77_VERDICT_GATES:
+            withheld_candidates.append({"workflow_file": wf_path, "group": group_id,
+                                        "jobs": list(names), "gate": gate})
 
     if not monthly_volume or monthly_volume <= 0 or not jobs_per_run:
         _no("no_monthly_volume_or_no_sampled_runs", monthly_volume=monthly_volume,
@@ -8765,13 +8802,13 @@ def _detect_opt77_repeated_setup_across_small_jobs(
         # a real action or a dependency install somewhere in it. `set up job`
         # alone is the runner booting, which every job on the label shares.
         if not any(_CONSOLIDATION_SUBSTANTIVE_STEP_RE.match(i) for i in setup_sig):
-            _no("prefix_has_no_recognizable_shared_work", group=group_id,
-                prefix=list(setup_sig))
+            _drop_group(group_id, names, "prefix_has_no_recognizable_shared_work",
+                        prefix=list(setup_sig))
             continue
         gate = _consolidation_group_is_independent(
             [str(candidates[n]["key"]) for n in names], doc)
         if gate is not None:
-            _no(gate, group=group_id)
+            _drop_group(group_id, names, gate)
             continue
         # Same step NAMES can be different work. Compare what the YAML actually
         # says for the leading setup steps — working directory, `run:` body,
@@ -8780,7 +8817,7 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             str(candidates[n]["key"]), doc) for n in names}
         resolved = {n: fp for n, fp in fingerprints.items() if fp is not None}
         if len({fp for fp in resolved.values()}) > 1:
-            _no("yaml_setup_steps_differ_across_the_group", group=group_id)
+            _drop_group(group_id, names, "yaml_setup_steps_differ_across_the_group")
             continue
         if len(resolved) < n_jobs:
             logger.debug("OPT77 %s: group %s has %d/%d members whose YAML steps "
@@ -8788,9 +8825,9 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                          wf_path, group_id, len(resolved), n_jobs)
         setup_p50 = min(float(candidates[n]["setup_p50"]) for n in names)
         if setup_p50 < _CONSOLIDATION_MIN_SETUP_P50_S:
-            _no("setup_prefix_below_absolute_floor", group=group_id,
-                setup_p50=round(setup_p50, 1),
-                floor=_CONSOLIDATION_MIN_SETUP_P50_S)
+            _drop_group(group_id, names, "setup_prefix_below_absolute_floor",
+                        setup_p50=round(setup_p50, 1),
+                        floor=_CONSOLIDATION_MIN_SETUP_P50_S)
             continue
         projected = round(max(float(candidates[n]["setup_p50"]) for n in names)
                           + max(float(candidates[n]["useful_p50"]) for n in names), 1)
@@ -8808,7 +8845,7 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                       if all(name in split for name in names)]
         occurrences = len(group_runs)
         if occurrences <= 0:
-            _no("group_never_ran_complete_in_one_sampled_run", group=group_id)
+            _drop_group(group_id, names, "group_never_ran_complete_in_one_sampled_run")
             continue
         # …and the job that carries the proof has to be a job that actually runs.
         # A conditional job present in a minority of the sampled runs cannot show
@@ -8837,24 +8874,26 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                     continue
             eligible.append((p50v, nm))
         if not eligible:
-            _no("no_job_outside_the_group_runs_often_enough_to_measure_against",
-                group=group_id, excluded=excluded)
+            _drop_group(group_id, names,
+                        "no_job_outside_the_group_runs_often_enough_to_measure_against",
+                        excluded=excluded)
             continue
         tallest_p50, tallest_job = max(eligible)
         if projected <= 0 or projected >= tallest_p50:
-            _no("projected_consolidated_job_is_not_below_the_tallest_remaining_job",
-                group=group_id, projected=projected,
-                tallest=tallest_job, tallest_p50=round(tallest_p50, 1))
+            _drop_group(group_id, names,
+                        "projected_consolidated_job_is_not_below_the_tallest_remaining_job",
+                        projected=projected,
+                        tallest=tallest_job, tallest_p50=round(tallest_p50, 1))
             continue
         margin = round(tallest_p50 - projected, 1)
         if margin <= 0:
-            _no("neutrality_margin_not_positive", group=group_id)
+            _drop_group(group_id, names, "neutrality_margin_not_positive")
             continue
         removed = n_jobs - 1
         sampled_saved_s = occurrences * removed * setup_p50
         credited = round(sampled_saved_s / 60.0 * scale, 1)
         if credited <= 0:
-            _no("credited_runner_minutes_round_to_zero", group=group_id)
+            _drop_group(group_id, names, "credited_runner_minutes_round_to_zero")
             continue
         rows = [[name,
                  f"{candidates[name]['setup_p50']:.0f}s",
@@ -9501,6 +9540,26 @@ def _opt80_stall_in_log(log: str,
     return None, "tail_without_log_gap"
 
 
+# The findings-doc key the collector writes OPT80's WITHHELD candidates under
+# (`[{workflow_file, job, gate}]`) — rendered as one Data sources row and
+# re-derived by `verify_report`. A STRING CONTRACT across the collector, the
+# renderer and the verifier: a coupling test pins the three constants equal.
+_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
+# The exits, once a job's checkout has measured a tail, that are a VERDICT
+# rather than a withhold: the tail runs' logs were read and show a smooth, an
+# advancing or a post-transfer pause (not a stall), the fix is already in
+# place, or the measured excess is nothing. Every other exit after the tail is
+# measured means the audit could not tell.
+_OPT80_VERDICT_GATES = frozenset({
+    "tail_without_log_gap",
+    "tail_pause_was_advancing_or_pre_transfer",
+    "tail_pause_was_after_the_transfer_completed",
+    "retry_or_abort_already_configured",
+    "tail_excess_not_positive",
+    "credited_runner_minutes_round_to_zero",
+})
+
+
 def _detect_opt80_checkout_tail_stall(
     client: "GhClient",
     repo: str,
@@ -9513,6 +9572,7 @@ def _detect_opt80_checkout_tail_stall(
     start_idx: int,
     withheld: dict[str, int] | None = None,
     notes: dict[str, int] | None = None,
+    withheld_candidates: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Checkout stalls on the tail (catalog OPT80) — measured, and log-proven.
 
@@ -9544,12 +9604,26 @@ def _detect_opt80_checkout_tail_stall(
     named gate. A count in `withheld` therefore means exactly one thing: A
     FINDING WAS SUPPRESSED. Anything worth surfacing about a finding that DID
     fire goes to `notes` (`opt80_notes` on the findings doc) instead, so the two
-    tallies can never be read for each other."""
+    tallies can never be read for each other.
+
+    A CANDIDATE is a job whose checkout measured a tail. One that then exits
+    unresolved — anything but a verdict (`_OPT80_VERDICT_GATES`) — is also
+    appended to `withheld_candidates` as `{workflow_file, job, gate}`, which the
+    report renders as its own Data sources row. After the log probe that means
+    the unread or undecidable tail runs could still have supplied the missing
+    proof; the gate named is the commonest such reason."""
     def _no(gate: str, **ctx: Any) -> None:
         if withheld is not None:
             withheld[gate] = withheld.get(gate, 0) + 1
         logger.debug("OPT80 %s: withheld by %s%s", wf_path, gate,
                      (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items())) if ctx else "")
+
+    def _unresolved(name: str, gate: str) -> None:
+        """Record a candidate (a job with a measured tail) the audit could not
+        decide. Verdicts never reach here."""
+        if withheld_candidates is not None and gate not in _OPT80_VERDICT_GATES:
+            withheld_candidates.append(
+                {"workflow_file": wf_path, "job": name, "gate": gate})
 
     if not monthly_volume or monthly_volume <= 0 or not jobs_per_run:
         _no("no_monthly_volume_or_no_sampled_runs", monthly_volume=monthly_volume,
@@ -9706,11 +9780,13 @@ def _detect_opt80_checkout_tail_stall(
         if len(tail_runs) < _OPT80_MIN_TAIL_RUNS:
             _no("fewer_than_the_minimum_tail_runs", job=job_name,
                 tail_runs=len(tail_runs), minimum=_OPT80_MIN_TAIL_RUNS)
+            _unresolved(job_name, "fewer_than_the_minimum_tail_runs")
             continue
 
         retry = _opt80_retry_already_configured(doc, job_spec, root, checkout_spec)
         if retry is None:
             _no("retry_configuration_could_not_be_read", job=job_name)
+            _unresolved(job_name, "retry_configuration_could_not_be_read")
             continue
         if retry:
             # The fix is already in place. Reporting it would ask the user to
@@ -9787,6 +9863,18 @@ def _detect_opt80_checkout_tail_stall(
                 _no(gate, job=job_name, tail_runs=len(tail_runs),
                     logs_probed=len(probe), proven=len(proven),
                     required=_OPT80_MIN_PROVEN_TAIL_RUNS)
+            # Unresolved only when the tail runs the audit could NOT read or
+            # decide could still have supplied the missing proof. Runs whose
+            # logs were read and showed no stall are a verdict, and when those
+            # alone keep the job below the minimum the audit did decide.
+            open_reasons = [g for g in (reasons or ["no_tail_run_log_was_probed"])
+                            if g not in _OPT80_VERDICT_GATES]
+            if len(proven) + len(open_reasons) >= _OPT80_MIN_PROVEN_TAIL_RUNS:
+                tally: dict[str, int] = {}
+                for g in open_reasons:
+                    tally[g] = tally.get(g, 0) + 1
+                _unresolved(job_name,
+                            sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))[0][0])
             continue
         if credential_shaped and notes is not None:
             # The finding FIRED. A dropped poisoned line is still worth surfacing
@@ -19200,6 +19288,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         new = _detect_opt77_repeated_setup_across_small_jobs(
             wf_path, jobs_per_run, crit, _wf_docs.get(wf_path, {}),
             opt65_monthly, next_id,
+            # Candidate groups measured and then NOT resolved: rendered as one
+            # Data sources row so "could not tell" never reads as clean.
+            withheld_candidates=findings_doc.setdefault(_OPT77_WITHHELD_DOC_KEY, []),
             withheld=findings_doc.setdefault("opt77_withheld_by_gate", {}))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
@@ -19248,6 +19339,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             client, repo, wf_path, jobs_per_run, crit, _wf_docs.get(wf_path, {}),
             root, opt65_monthly, next_id,
             withheld=findings_doc.setdefault("opt80_withheld_by_gate", {}),
+            # Checkouts with a measured tail that the audit could NOT resolve:
+            # rendered as one Data sources row so "could not tell" never reads
+            # as clean.
+            withheld_candidates=findings_doc.setdefault(_OPT80_WITHHELD_DOC_KEY, []),
             notes=findings_doc.setdefault("opt80_notes", {}))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
