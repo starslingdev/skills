@@ -11,7 +11,7 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
-- **2026-09-30** — **Changed**: the Dependency caching check's "Why it matters" text (engine, methodology, example report) now states its exception: a cache that measurably costs more than it saves should be removed, this check reads configuration only and cannot see that measurement (ci-speedup's cache measurement can), and a repo that removed such a cache still loses the point. Documentation only; no scoring change, no `spec_version` bump.
+- **2026-09-30** — **Changed**: the Dependency caching check's "Why it matters" text (engine, methodology, example report) now states its exception: a cache that measurably costs more than it saves should be removed, this check reads configuration only and cannot see that measurement, and a repo that removed such a cache still loses the point. Documentation only; no scoring change, no `spec_version` bump.
 - **2026-09-02** — **Changed**: the CI Score registry is bumped to
   `ci-score-v0.1.4` (OD-CS22). The two shallow-clone exemptions below move a
   gate — one frozen calibration control goes from 9/11 to 10/11 on identical
