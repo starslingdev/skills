@@ -9409,3 +9409,20 @@ def test_withheld_setup_and_checkout_rows_the_renderer_writes_pass_the_verifier(
     for label in ("repeated-setup verdicts", "checkout stall verdicts"):
         stripped = "\n".join(ln for ln in foot.splitlines() if label not in ln)
         assert not vr.check_coverage_disclosed(stripped, p).ok, label
+
+
+def test_withheld_setup_and_checkout_lists_that_are_malformed_fail(tmp_path):
+    """The self-check exists to catch collector bugs. A list the renderer would
+    quietly shrink or relabel — not a list, an entry that is not an object, an
+    entry with no gate — must fail rather than read as "nothing withheld" or as
+    a reason called `unknown`."""
+    vr = _load_verify_report()
+    silent = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    for key, _label, _noun, rows, _top, _other in _WITHHELD_77_80_CASES:
+        for bad in ({"gate": "x"}, "tail_run_log_unavailable",
+                    rows + ["not-an-object"],
+                    rows[:1] + [{"workflow_file": "ci.yml", "job": "z"}],
+                    rows[:1] + [{"workflow_file": "ci.yml", "job": "z", "gate": ""}]):
+            chk = vr.check_coverage_disclosed(
+                silent, _withheld_77_80_doc(tmp_path, key, bad))
+            assert not chk.ok and key in chk.detail, (key, bad, chk)

@@ -996,7 +996,17 @@ def _withheld_77_80_disclosure_violation(report: str, findings_path: Path | None
                 f"at {findings_path} is unreadable ({type(exc).__name__})"), ""
     note = ""
     for key, label, noun in _VR_WITHHELD_77_80_ROWS:
-        rows = [r for r in _as_list(_as_dict(data).get(key)) if isinstance(r, dict)]
+        raw = _as_dict(data).get(key)
+        # The renderer quietly drops non-objects and names a gate-less entry
+        # `unknown`; here either is a collector bug, not "nothing withheld".
+        if raw is not None and not isinstance(raw, list):
+            return (f"{key} on the findings document is a {type(raw).__name__}, "
+                    "not a list of withheld candidates"), ""
+        if any(not isinstance(r, dict) or not isinstance(r.get("gate"), str)
+               or not r.get("gate") for r in (raw or [])):
+            return (f"{key} carries an entry that is not an object with a named "
+                    "gate - the withheld row cannot be re-derived"), ""
+        rows = list(raw or [])
         m = re.search(rf"^\|\s*{re.escape(label)}\s*\|\s*(.+?)\s*\|", report,
                       re.MULTILINE)
         if not rows:
