@@ -1063,7 +1063,13 @@ shape. The certificate's `proof` token stays `below_cluster_floor` (shared with
 OPT65 as the dispatch key) and is historical for OPT77; `verify_report.py`'s
 `_opt77_consolidation_rederived` arm re-derives the saving, the margin, the
 grouping (each job's own stamped prefix must equal the credited shared one) and
-the eligible set the tallest-remaining job was chosen from. Like OPT65 it claims
+the eligible set the tallest-remaining job was chosen from. When the group is
+every job the workflow DECLARES there is no remaining job, and the comparison is
+against the gate the group sets today (`max_i(setup_i + useful_i)`, its members
+running in parallel): at or below it the merge wait is unchanged and the
+runner-minute saving is credited, above it the group is held back and disclosed.
+"Whole workflow" is decided from the declared jobs, never from the sample.
+Like OPT65 it claims
 no speedup (`wall_clock_p50_s=0`, `realization=none`), and it shares
 `_billed_job_runner` and `_tier2_scope_event` with it.
 
@@ -1106,8 +1112,11 @@ its own copy of the tables (pinned equal by a coupling test) and re-derives the
 whole line — count, jobs, reason — from the findings document, failing a report
 that omits the row, misstates any part of it, prints a gate name instead of a
 phrase, or carries a row with nothing behind it; a recorded gate with no phrase
-fails closed. A group that is the whole workflow (`group_is_the_whole_workflow`,
-no job outside it) is a verdict, not a withhold, and is never listed. The three
+fails closed. A group that is every job the workflow declares is no longer a
+silent verdict: it fires when collapsing it leaves the merge gate alone, and is
+listed as held back
+(`collapsing_the_whole_workflow_would_lengthen_the_merge_gate`) when it would
+not. The three
 files name the keys as constants a coupling test pins equal.
 
 OPT80 (checkout stalls on the tail) is the third measured Tier-2 lever, and the

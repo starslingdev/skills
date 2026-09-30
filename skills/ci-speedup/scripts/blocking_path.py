@@ -5168,6 +5168,9 @@ _OPT77_WITHHOLD_PHRASES: dict[str, str] = {
     "group_never_ran_complete_in_one_sampled_run":
         "the sampled runs never had every job in the group run together, so the "
         "saving could not be measured",
+    "collapsing_the_whole_workflow_would_lengthen_the_merge_gate":
+        "these are every job the workflow declares, so they set the wait "
+        "themselves, and collapsing them into one would make that wait longer",
     "no_job_outside_the_group_runs_often_enough_to_measure_against":
         "other jobs exist, but none ran often enough in the sampled runs to show "
         "that merging these would not make the pipeline slower",

@@ -8592,10 +8592,19 @@ def _supersede_opt65_with_opt77(
 _OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 # The group-level exits that are a VERDICT on a measured candidate group, not a
 # withhold: the members depend on each other, the prefix is not shared work,
-# the YAML steps differ, the setup is too small to matter, the group is the whole
-# workflow (no job outside it, so merging can only keep or lengthen the wait),
+# the YAML steps differ, the setup is too small to matter,
 # consolidating would reach the tallest remaining job, or the credited saving
-# rounds to zero. Every
+# rounds to zero.
+#
+# A group that is every job the workflow DECLARES is no longer among them. It
+# used to be dropped as a verdict ("no job outside it, so merging can only keep
+# or lengthen the wait") on two wrong axes: the test read the SAMPLE, so a
+# declared job that never ran in the sampled window made a workflow look like
+# it had nothing outside the group; and the rationale was wall-clock reasoning
+# applied to a runner-minute lever, so a real bill saving became silence. Such
+# a group is now measured against the gate it sets today (its tallest member)
+# and either fires or is held back under the gate below — disclosed either way.
+# Every
 # OTHER exit routed through `_drop_group` once a group has formed means the
 # audit could not tell, and is listed under the key above — a new group-level
 # exit must go through `_drop_group` to be disclosed.
@@ -8605,7 +8614,6 @@ _OPT77_VERDICT_GATES = frozenset({
     "downstream_job_needs_a_member",
     "yaml_setup_steps_differ_across_the_group",
     "setup_prefix_below_absolute_floor",
-    "group_is_the_whole_workflow",
     "projected_consolidated_job_is_not_below_the_tallest_remaining_job",
     "neutrality_margin_not_positive",
     "credited_runner_minutes_round_to_zero",
@@ -8879,29 +8887,75 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                     continue
             eligible.append((p50v, nm))
         if not eligible:
-            if not excluded and not (observed_any - member_names):
-                # No job outside the group exists at all: the group IS the
-                # workflow. Those jobs run in parallel today, so merging them can
-                # only keep or lengthen the wait. A verdict, not an unknown.
-                _drop_group(group_id, names, "group_is_the_whole_workflow")
+            # Is the group the WHOLE workflow? Decided from the workflow's
+            # DECLARED jobs, never from the sample alone. A workflow that
+            # declares a fourth job which simply never appeared in the sampled
+            # runs (a main-gated `release`, a job behind an `if:`) is not a
+            # workflow with nothing outside the group — and reading that off
+            # `observed_any` classified it as one and dropped it in silence,
+            # with the comment "No job outside the group exists at all" false
+            # on exactly those repositories. The sampled axis is kept as a
+            # second condition: a job observed running but absent from the YAML
+            # (a reusable-workflow call, a matrix leg under another name) is
+            # also a job outside the group.
+            declared_keys = {str(k) for k in (doc.get("jobs") or {})}
+            member_keys = {str(candidates[n]["key"]) for n in names}
+            whole_workflow = bool(declared_keys) and declared_keys <= member_keys
+            if whole_workflow and not excluded and not (observed_any - member_names):
+                # The group IS the workflow, so there is no job outside it to
+                # measure the consolidated job against — but there is still a
+                # gate: today it is the tallest member, because the members run
+                # in parallel. Owner decision A applies unchanged ("withhold
+                # only when consolidating would LENGTHEN the merge gate"), so
+                # the comparison is the consolidated job against the gate the
+                # group sets today.
+                gate_today = round(max(float(candidates[n]["setup_p50"])
+                                       + float(candidates[n]["useful_p50"])
+                                       for n in names), 1)
+                if projected > gate_today:
+                    # Consolidating really would make the merge slower. Held
+                    # back rather than dropped in silence: the reader is told a
+                    # bill saving exists and what it would cost.
+                    _drop_group(
+                        group_id, names,
+                        "collapsing_the_whole_workflow_would_lengthen_the_merge_gate",
+                        projected=projected, gate_today=gate_today)
+                    continue
+                # Gate unchanged (or shorter): the runner-minute saving is free.
+                # Treating this as a verdict applied a wall-clock rationale to a
+                # runner-minute lever and turned a real bill saving into silence
+                # that was not even disclosed.
+                tallest_job, tallest_p50 = None, gate_today
+                margin = round(gate_today - projected, 1)
+            elif whole_workflow:
+                # Every declared job is a member, but the sample also carried a
+                # job the YAML does not declare (or one with no strict p50).
+                # Neither "the whole workflow" nor a usable comparison: unknown.
+                _drop_group(group_id, names,
+                            "no_job_outside_the_group_runs_often_enough_to_measure_against",
+                            excluded=excluded)
                 continue
-            # Jobs outside the group exist but none ran often enough (or has a
-            # strict p50) to carry the proof: genuinely unknown, so HELD BACK.
-            _drop_group(group_id, names,
-                        "no_job_outside_the_group_runs_often_enough_to_measure_against",
-                        excluded=excluded)
-            continue
-        tallest_p50, tallest_job = max(eligible)
-        if projected <= 0 or projected >= tallest_p50:
-            _drop_group(group_id, names,
-                        "projected_consolidated_job_is_not_below_the_tallest_remaining_job",
-                        projected=projected,
-                        tallest=tallest_job, tallest_p50=round(tallest_p50, 1))
-            continue
-        margin = round(tallest_p50 - projected, 1)
-        if margin <= 0:
-            _drop_group(group_id, names, "neutrality_margin_not_positive")
-            continue
+            else:
+                # Jobs outside the group exist but none ran often enough (or has
+                # a strict p50) to carry the proof: genuinely unknown, HELD BACK.
+                _drop_group(group_id, names,
+                            "no_job_outside_the_group_runs_often_enough_to_measure_against",
+                            excluded=excluded, declared_outside=sorted(
+                                declared_keys - member_keys))
+                continue
+        else:
+            tallest_p50, tallest_job = max(eligible)
+            if projected <= 0 or projected >= tallest_p50:
+                _drop_group(group_id, names,
+                            "projected_consolidated_job_is_not_below_the_tallest_remaining_job",
+                            projected=projected,
+                            tallest=tallest_job, tallest_p50=round(tallest_p50, 1))
+                continue
+            margin = round(tallest_p50 - projected, 1)
+            if margin <= 0:
+                _drop_group(group_id, names, "neutrality_margin_not_positive")
+                continue
+        whole_workflow_group = tallest_job is None
         removed = n_jobs - 1
         sampled_saved_s = occurrences * removed * setup_p50
         credited = round(sampled_saved_s / 60.0 * scale, 1)
@@ -8929,8 +8983,15 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             f"{sampled_saved_s / 60.0:.1f} runner-min across {occurrences} sampled "
             f"run(s), ~{credited:.0f} runner-min/mo ({basis}). The consolidated job "
             f"projects to {projected:.0f}s (setup + the slowest task, run "
-            f"concurrently), {margin:.0f}s below the {tallest_p50:.0f}s `{tallest_job}` "
-            f"job, which becomes this workflow's longest job afterwards.")
+            + (f"concurrently), against the {tallest_p50:.0f}s this workflow's "
+               f"slowest job takes today — these jobs are every job the workflow "
+               f"declares, so they set the wait themselves and consolidating them "
+               f"leaves it "
+               + ("unchanged" if margin == 0 else f"{margin:.0f}s shorter") + "."
+               if whole_workflow_group else
+               f"concurrently), {margin:.0f}s below the {tallest_p50:.0f}s "
+               f"`{tallest_job}` job, which becomes this workflow's longest job "
+               f"afterwards."))
         me = _measured_evidence(
             ["Job", "Setup p50", "Useful work p50", "Job p50"],
             rows[:8],
@@ -9002,8 +9063,18 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                             "setup_steps": list(candidates[n]["setup_sig"])}
                         for n in names},
             "projected_consolidated_p50_s": projected,
+            # A group that is every job the workflow DECLARES has no remaining
+            # job to be measured against; the gate it is measured against is the
+            # one the group itself sets today (its tallest member), and the
+            # declared job keys are stamped so the verifier can check the claim
+            # rather than take "no job outside" off the sample.
+            "group_is_the_whole_workflow": whole_workflow_group,
+            "workflow_declared_job_keys": sorted(
+                str(k) for k in (doc.get("jobs") or {})),
+            "gate_today_p50_s": round(tallest_p50, 1) if whole_workflow_group else None,
             "remaining_tallest_job": tallest_job,
-            "remaining_tallest_p50_s": round(tallest_p50, 1),
+            "remaining_tallest_p50_s": (None if whole_workflow_group
+                                        else round(tallest_p50, 1)),
             # The set the tallest-remaining job was chosen from, and every job
             # left out of it with the reason — so the verifier re-derives the max
             # over the same set rather than over all of `job_p50`.
@@ -9026,10 +9097,17 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             # certificate summary, and the catalog's Tier-2 render note.
             "proof": "below_cluster_floor",
             "margin_s": margin,
-            "ref": (f"per_workflow_timing[wf]: projected consolidated job "
-                    f"{projected:.1f}s, {margin:.1f}s below the tallest "
-                    f"NON-credited job `{tallest_job}` at {tallest_p50:.1f}s "
-                    f"(job_p50 minus the credited group)"),
+            "ref": (
+                (f"per_workflow_timing[wf]: projected consolidated job "
+                 f"{projected:.1f}s against the {tallest_p50:.1f}s gate the group "
+                 f"sets today (its tallest member); the group is every job the "
+                 f"workflow declares, so no non-credited job exists to compare "
+                 f"against and the merge gate moves by {margin:.1f}s")
+                if whole_workflow_group else
+                (f"per_workflow_timing[wf]: projected consolidated job "
+                 f"{projected:.1f}s, {margin:.1f}s below the tallest "
+                 f"NON-credited job `{tallest_job}` at {tallest_p50:.1f}s "
+                 f"(job_p50 minus the credited group)")),
         }
         f["guardrail"] = (
             "Consolidating checks RENAMES them. If any of these jobs is a required "

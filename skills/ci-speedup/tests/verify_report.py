@@ -916,6 +916,9 @@ _VR_OPT77_WITHHOLD_PHRASES = {
     "group_never_ran_complete_in_one_sampled_run":
         "the sampled runs never had every job in the group run together, so the "
         "saving could not be measured",
+    "collapsing_the_whole_workflow_would_lengthen_the_merge_gate":
+        "these are every job the workflow declares, so they set the wait "
+        "themselves, and collapsing them into one would make that wait longer",
     "no_job_outside_the_group_runs_often_enough_to_measure_against":
         "other jobs exist, but none ran often enough in the sampled runs to show "
         "that merging these would not make the pipeline slower",
@@ -5499,6 +5502,53 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
         problems.append("missing job_p50")
         return None, problems
     member = {str(j) for j in jobs}
+    # A group that is every job the workflow DECLARES has no remaining job to be
+    # measured against. Its gate today is its own tallest member (the members
+    # run in parallel), so the margin is that gate minus the projected
+    # consolidated duration — and the claim "there is nothing outside this
+    # group" is checked on BOTH axes the detector used: the declared job keys it
+    # stamped must all be credited members, and the sampled `job_p50` must carry
+    # no job outside the group either. One axis alone is what the detector got
+    # wrong: the sample can be missing a declared job that simply never ran.
+    if sc.get("group_is_the_whole_workflow"):
+        declared = [str(k) for k in _as_list(sc.get("workflow_declared_job_keys"))]
+        credited_keys = {str(k) for k in _as_list(sc.get("credited_job_keys"))}
+        if not declared:
+            problems.append("group_is_the_whole_workflow with no declared job keys "
+                            "stamped - the claim cannot be re-derived")
+            return None, problems
+        outside_declared = sorted(set(declared) - credited_keys)
+        if outside_declared:
+            problems.append(
+                f"group_is_the_whole_workflow but the workflow also declares "
+                f"{outside_declared!r}, which are not credited members")
+        outside_sampled = sorted(k for k in all_p50 if str(k) not in member)
+        if outside_sampled:
+            problems.append(
+                f"group_is_the_whole_workflow but the sampled runs also carried "
+                f"{outside_sampled!r}")
+        per_job = _as_dict(sc.get("per_job"))
+        gates = [(_num(_as_dict(v).get("setup_p50_s")) or 0.0)
+                 + (_num(_as_dict(v).get("useful_work_p50_s")) or 0.0)
+                 for v in per_job.values()]
+        if len(per_job) != len(member) or not gates:
+            problems.append("group_is_the_whole_workflow but per_job does not cover "
+                            "every credited member - the gate cannot be re-derived")
+            return None, problems
+        gate_today = round(max(gates), 1)
+        claimed_gate = _num(sc.get("gate_today_p50_s"))
+        if claimed_gate is None or abs(claimed_gate - gate_today) > 0.11:
+            problems.append(
+                f"gate_today_p50_s {sc.get('gate_today_p50_s')!r} != {gate_today}")
+        if sc.get("remaining_tallest_job") is not None:
+            problems.append("group_is_the_whole_workflow but a remaining tallest job "
+                            "is named - there is no job outside the group")
+        if projected > gate_today:
+            problems.append(
+                f"projected consolidated job {projected} is ABOVE the {gate_today} "
+                "gate the group sets today - consolidating would lengthen the merge")
+            return None, problems
+        return round(gate_today - projected, 1), problems
     # The detector does not max over every remaining job: a job that ran in a
     # minority of the sampled runs cannot carry the neutrality proof, because on
     # the other runs the group's own members are the tallest thing left. It

@@ -1171,6 +1171,19 @@ saved:   (N - 1) x setup, every run
    that job, **withhold the finding**; if nothing outside the group is taller,
    withhold it too. Consolidation must never lengthen the merge gate.
 
+   **When the group is every job the workflow DECLARES** there is no remaining
+   job to compare against — but the group still sets a gate today, because its
+   members run in parallel: `max_i(setup_i + useful_i)`. The same rule applies
+   to that gate. Fire when `max(setup) + max(useful)` is at or below it (the
+   merge wait is unchanged, so the runner-minute saving is free); hold the group
+   back when the projection is above it, and say so
+   (`collapsing_the_whole_workflow_would_lengthen_the_merge_gate`). "Whole
+   workflow" is read off the workflow's **declared** jobs, never off the sampled
+   runs: a declared job that simply never ran in the sampled window — a
+   main-gated `release`, a job behind an `if:` — is still a job outside the
+   group, and reading the sample instead classified such workflows as having
+   nothing outside the group and dropped them silently.
+
    That job has to be a job that actually runs. Only jobs present in a **majority
    of the sampled runs in which the whole group ran** are eligible to carry the
    proof — a conditional job seen once in ten samples cannot show the gate is
@@ -1198,12 +1211,13 @@ saved:   (N - 1) x setup, every run
 has formed (at least three jobs on one runner sharing one setup prefix), every
 exit is either a *verdict* — the members depend on each other, the prefix is not
 shared work, the YAML steps differ, the setup is too small, consolidating
-would reach the tallest remaining job, the credited saving rounds to zero, or
-the group *is* the whole workflow (no job outside it, so the jobs run in parallel
-today and merging them can only keep or lengthen the wait) —
-or a *could not tell*: the `needs:` graph
-is undecidable, the group never ran complete in one sampled run, or jobs outside
-it exist but none runs often enough to measure against. Each could-not-tell group
+would reach the tallest remaining job, or the credited saving rounds to zero —
+or a *could not tell*: the workflow file could not be read (`no_yaml_jobs`), the
+`needs:` graph
+is undecidable, the group never ran complete in one sampled run, jobs outside
+it exist but none runs often enough to measure against, or the group is every
+job the workflow declares and collapsing it would lengthen the merge gate.
+Each could-not-tell group
 is listed on the findings document (`opt77_withheld_candidates`), and the
 report's Data sources table carries a `repeated-setup: held back` row — "N
 candidate job group(s) held back (lint + test + typecheck in ci.yml): the
