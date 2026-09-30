@@ -12,15 +12,15 @@
 >
 > **41m 12s until all checks finish** - the slowest check a typical PR waits on is `Windows (firefox)` (~72m 57s), but it ran on only 4/20 sampled PRs, so a typical PR finishes in 41m 12s; `ubuntu-22.04 (webkit - Node.js 20)` is the check most PRs gate on (drilled below). (`Test chrome on macos-latest` is slower (~59m 33s) but it ran on only 5/20 sampled PRs - it looks opt-in / conditional (e.g. label-gated), so a typical PR doesn't wait on it and its time is throughput/cost, not merge-wait; unless it's a *required* status check it isn't the gate here. See its long pole below.) 
 >
-> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~44 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
+> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~79 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
 >
-> **`.github/workflows/fix-flakes.yml` changed ~34 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/fix-flakes.yml` changed ~69 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/publish_release.yml` changed ~36 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/publish_release.yml` changed ~71 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_bidi.yml` changed ~40 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_bidi.yml` changed ~76 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_secondary.yml` changed ~48 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_secondary.yml` changed ~83 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **After the gate.** 73,441 min/mo of wall-clock-neutral runner minutes is recoverable (10 neutral findings; none can slow a merge).
 
@@ -1765,7 +1765,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `d9c4cb6`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (OPT1-OPT69 catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `fc0b219`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

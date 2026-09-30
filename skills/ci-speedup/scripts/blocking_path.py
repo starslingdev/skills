@@ -1619,8 +1619,124 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
     return None
 
 
-def _parse_log(text: str) -> dict[str, Any] | None:
-    """Detect the leaf root cause in a captured job log. Returns a leaf dict:
+# --- OPT78: the isolation lever needs a CONFIG fact, not just a log ----------
+# The `vitest-isolate-pool` leaf claims the pole is still PAYING for per-file
+# isolation (vitest's default). A log cannot say that — a repo that already
+# runs an opt-in shared-registry project prints the same import/tests split.
+# So that leaf is gated on `scan.py`'s `test_runner_isolation` block, and FAILS
+# CLOSED on every gap in it: no block at all, no config read, a config that
+# could not be read, a config import the read could not follow, a config walk
+# that could not cover the repo, an already-configured opt-out (config or
+# package script), a vm pool (where isolation cannot be turned off), or either
+# spelling of the CLI opt-out in the run's own log.
+#
+# Withholding the LEVER is not withholding the MEASUREMENT. The import-bound
+# split is still real, measured log fact, so a withheld pole gets the guarded
+# `vitest-import-bound` leaf instead: it names the split, says OPT78 was
+# withheld and why, and forbids flipping isolation from this finding. That
+# keeps the pole a catalog match — never a "no detector" coverage gap, which
+# would route it to an unguarded LLM gap-fill (SKILL.md 4a) and to the
+# maintainer loop's draft-a-new-detector step (4c) for a pattern the catalog
+# already has.
+# vitest documents BOTH spellings of the CLI opt-out (`--no-isolate` and
+# `--isolate=false`); matching only the first told a repo that had already
+# applied this exact lever from the command line to apply it again. `--isolate`
+# takes no value, so `--isolate false` (a space) is not an opt-out.
+_NO_ISOLATE_FLAG_RE = re.compile(r"--no-isolate\b|--isolate=false\b")
+
+
+def _isolation_lever_available(
+    iso: dict[str, Any] | None, joined: str,
+) -> "tuple[bool, str]":
+    """`(True, evidence_line)` only when the scanned vitest config(s) were
+    actually READ, completely, and none opts out of per-file isolation — the
+    evidence line names the file(s) that fact came from, so the finding quotes
+    what it read instead of asserting it. Otherwise `(False, reason)`: a short
+    plain-English reason the lever was withheld, which the withheld leaf
+    carries into the report so the silence is never unexplained."""
+    if not isinstance(iso, dict):
+        return False, ("no vitest config was found to confirm per-file isolation "
+                       "is still on (the scan supplied no config fact) — re-run "
+                       "the scan to restore it")
+    if iso.get("error"):
+        # A CRASHED reader, not a fact about the repo. Without its own reason it
+        # rendered identically to a big monorepo's truncated walk, so a broken
+        # scanner would retire this pattern silently.
+        return False, (f"the config reader failed ({iso.get('error')}), so "
+                       "isolation could not be checked")
+    if iso.get("isolation_opt_out"):
+        ev = [str(e) for e in (iso.get("opt_out_evidence") or [])]
+        where = ev[0].split(": ", 1)[0].replace("`", "'") if ev else ""
+        return False, ("the repo already opts out of per-file isolation"
+                       + (f" (first at `{where}`)" if where else ""))
+    if _NO_ISOLATE_FLAG_RE.search(joined):
+        return False, ("the repo already opts out of per-file isolation (this run "
+                       "passes the opt-out flag)")
+    if iso.get("vm_pool"):
+        return False, ("the suite runs on a vm pool, where vitest cannot turn "
+                       "per-file isolation off")
+    if iso.get("unreadable"):
+        return False, ("a vitest config could not be read, so an existing opt-out "
+                       "cannot be ruled out")
+    if iso.get("unresolved_imports"):
+        return False, ("a vitest config pulls settings from a module this read "
+                       "could not follow, so an existing opt-out cannot be ruled out")
+    if iso.get("isolate_unresolved"):
+        uv = [str(e) for e in (iso.get("isolate_unresolved") or [])]
+        where = uv[0].split(": ", 1)[0].replace("`", "'") if uv else ""
+        return False, ("a vitest config sets `isolate` to a value this read could "
+                       "not resolve" + (f" (first at `{where}`)" if where else "")
+                       + ", so an existing opt-out cannot be ruled out")
+    # A walk that left ground unvisited (file cap, depth bound, a pruned symlink
+    # or package, an unreadable directory) cannot establish "no opt-out
+    # ANYWHERE" — the opt-out may sit in a config it never reached, and the repo
+    # that already adopted this lever is precisely the one that must not be told
+    # to adopt it. Default True: a bundle from a scan that predates this key was
+    # produced by a root-only read, so its silence is not a complete search.
+    if iso.get("truncated", True):
+        return False, ("the config search could not cover the whole repo, so an "
+                       "existing opt-out cannot be ruled out")
+    cfgs = [str(c) for c in (iso.get("configs") or [])]
+    if not iso.get("readable") or not cfgs:
+        return False, ("no vitest config was found to confirm per-file isolation "
+                       "is still on")
+    # The producer's ONE collapsed reading of the block, checked last so a fact
+    # whose per-field reasons all look clean but whose verdict is not
+    # `isolation_on` still fails closed — a renamed or dropped producer key
+    # reaches here as `unknown` (the default) and withholds, instead of every
+    # `.get()` above defaulting to False and letting the lever fire.
+    if str(iso.get("verdict", "unknown")) != "isolation_on":
+        return False, ("the scan's config fact does not confirm per-file "
+                       f"isolation is still on (verdict: "
+                       f"{iso.get('verdict', 'unknown')})")
+    # NOT a log line. This half is a statement composed from the repo's config
+    # about the ABSENCE of an opt-out, which by construction has no line to
+    # quote — so it is carried as the leaf's `config_fact`, rendered OUTSIDE the
+    # untrusted-log block and under its own label, and it says so inline too.
+    n = len(cfgs)
+    # Both branches must state the ABSENCE — this finding fires only when no
+    # opt-out was found, so a sentence reading "<config> sets `isolate: false`"
+    # would assert the opposite of the fact that let it fire, in the prompt that
+    # then tells the agent to go and change `isolate`.
+    if n > 1:
+        listed = ", ".join(cfgs[:4]) + (f", … ({n} in total)" if n > 4 else "")
+        scope = f"none of the {n} vitest config files read set `isolate: false`"
+        tail = f"; read: {listed}"
+    else:
+        scope = f"`{cfgs[0]}` does not set `isolate: false`"
+        tail = ""
+    return True, ("(read from the repo's vitest config, not this log) "
+                  f"{scope} — per-file isolation is vitest's default, so it is "
+                  "still in effect" + tail)
+
+
+def _parse_log(text: str,
+               iso: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Detect the leaf root cause in a captured job log. `iso` is `scan.py`'s
+    `test_runner_isolation` block — the config corroboration the OPT78
+    (`vitest-isolate-pool`) leaf needs; omitted ⇒ an import-bound vitest run
+    gets the guarded `vitest-import-bound` leaf (OPT78 withheld) instead.
+    Returns a leaf dict:
         {fix_key, unit_label, deeper: [ {rows, blocker_note, header?}, … ]}
     `deeper` is the list of drill-down levels below the dominant step (the first
     one's header is built by the renderer from `unit_label`; later ones carry
@@ -1756,25 +1872,69 @@ def _parse_log(text: str) -> dict[str, Any] | None:
 
     # --- B2: vitest where IMPORT/transform dominates the tests (no coverage) ---
     # The dominant vitest invocation spends more on loading the module graph per
-    # test file than on assertions - per-file isolation re-pays the import cost.
+    # test file than on assertions. Sized from the SLOWEST run in the log (the
+    # one you wait for), and each tuple carries its source line index so the
+    # evidence quotes THAT run - never the first `Duration` line in log order,
+    # which on a multi-project log is a different, often test-bound, run.
+    # The full gate is `(import + transform) > tests AND import > 30s AND tests > 0`
+    # — the 30s floor keeps a fast suite whose ratio happens to tip from becoming a
+    # finding, and `tests > 0` keeps a run that reported no assertions out of it.
+    # On the ratio itself: vitest may already count part
+    # of the transform wait inside `import`, so the gate is looser than it reads.
+    # It only decides whether to name the split, never a credited saving.
     vd = sorted(
-        ((float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)))
-         for l in lines
+        ((float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)), i)
+         for i, l in enumerate(lines)
          if (m := re.search(r"Duration +([\d.]+)s \(transform ([\d.]+)s, setup "
                             r"[\d.]+m?s, import ([\d.]+)s, tests ([\d.]+)s", l))),
         key=lambda x: -x[0])
     if vd and not istanbul:
-        wall, tr, im, te = vd[0]
+        wall, tr, im, te, d_idx = vd[0]
         if (im + tr) > te and im > 30 and te > 0:
             total = tr + im + te
-            ev = [l.strip() for l in lines if re.search(r"Test Files +[0-9]+ passed", l)][:1]
-            ev += [l.strip() for l in lines
-                   if re.search(r"Duration .*transform .*import .*tests", l)][:2]
+            _iso_ok, _iso_line = _isolation_lever_available(iso, joined)
+            # Only MEASURED log lines go in `evidence` - it renders inside the
+            # untrusted-log fence, under a heading that calls it verbatim run
+            # output. The CONFIG half is skill-composed text about the repo's
+            # config, so it travels separately as `config_fact` and renders
+            # outside that fence under its own label. Both halves of the claim
+            # ("imports dominate" AND "isolation is still on", or "the lever was
+            # withheld, and why") still reach the reader and the agent.
+            ev = [lines[d_idx].strip()]
+            config_fact = (_iso_line if _iso_ok else
+                           "OPT78 withheld: " + _iso_line)
+            # The `Test Files` summary of the SAME run: searched only back to the
+            # start of this run's own block (the previous run's Duration line, or
+            # its ` RUN ` banner), so a run whose own summary is missing borrows
+            # nobody else's. Failures count too - a red or flaky drill prints
+            # `Test Files  1 failed | 148 passed (149)`, and skipping that line
+            # walked the search into the PREVIOUS project and paired a 149-file
+            # run with another project's `12 passed`.
+            prev_d = max((j for _w, _t, _i, _e, j in vd if j < d_idx), default=-1)
+            own_run = max((j for j in range(d_idx - 1, -1, -1)
+                           if re.search(r"(?:^|\s)RUN\s+v?\d", lines[j])), default=-1)
+            floor = max(prev_d, own_run)
+            tf = next((lines[j].strip() for j in range(d_idx - 1, floor, -1)
+                       if re.search(r"Test Files +\d+ (?:passed|failed|skipped)\b",
+                                    lines[j])), None)
+            if tf:
+                ev.append(tf)
+            if _iso_ok:
+                fix_key = "vitest-isolate-pool"
+                note = ("BIGGEST LEVER (OPT78, HIGH RISK) - caused by per-file "
+                        "isolation re-importing the app for each test file")
+            else:
+                fix_key = "vitest-import-bound"
+                note = ("BIGGEST SHARE - loading the module graph; the isolation "
+                        f"lever (OPT78) was withheld: {_iso_line}")
             return {
-                "fix_key": "vitest-isolate-pool",
+                "fix_key": fix_key,
                 "unit_label": f"the slowest vitest project ({_clock(wall)} wall) - "
                               "where that wall goes (import vs tests vs transform)",
                 "evidence": ev,
+                # Read from the repo's config, NOT from this log - rendered
+                # outside the untrusted-log fence, under its own label.
+                "config_fact": config_fact,
                 "search": ["Test Files ", "(transform "],
                 "magnitude": {"label": "import share of the vitest run",
                               "value": round(100 * im / total, 2) if total else 0.0,
@@ -1785,8 +1945,7 @@ def _parse_log(text: str) -> dict[str, Any] | None:
                     {"rows": [("import (load module graph per file)", im, None),
                               ("tests (run assertions)", te, None),
                               ("transform (compile)", tr, None)],
-                     "blocker_note": "BIGGEST LEVER - caused by per-file isolation "
-                                     "re-importing the app for each test file",
+                     "blocker_note": note,
                      "pct_of": "sum", "scale_to_secs": wall},
                 ],
             }
@@ -2391,20 +2550,110 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "provider fits; apply the change to the vitest config / scripts, "
                    "verify the coverage consumer still works, and re-measure the step.",
     },
+    # OPT78 - see references/optimization-patterns.md. HIGH risk: this lever buys
+    # speed by letting test files SHARE a module registry, which can leak state
+    # between them. The guardrail/rollout below are not advice, they are the
+    # condition on which the lever is sane at all, so they ride in the prompt.
+    # Keys target vitest 4 (top-level `isolate`, `projects`); `poolOptions` and
+    # `vitest.workspace.*` are 3.x spellings vitest 4 removed.
     "vitest-isolate-pool": {
-        "cause": "The gating vitest run spends as much time in `import` (re-loading "
-                 "the module graph per test file under per-file isolation) as in the "
-                 "tests themselves.",
-        "look": "the vitest config - `test.isolate`, `pool`, `poolOptions`, and "
-                "whether tests rely on per-file isolation (global/DB state set up per "
-                "file).",
-        "constraints": "State the failure mode (cross-file state leakage) and how you "
-                       "verified it's safe. Disabling isolation or sharing a pool only "
-                       "works if tests clean up their own global/DB state.",
+        "cause": "The gating vitest run spends more time in `import` (rebuilding the "
+                 "module graph for every test file, which per-file isolation - "
+                 "vitest's default - makes it re-pay) than in the tests themselves. "
+                 "The repo's vitest config does not opt out of that isolation. The "
+                 "evidence below carries both halves: the measured split, verbatim "
+                 "from the log, and - labelled as such, because an absence has no "
+                 "line to quote - the config file that second fact was read from.",
+        "look": "the vitest config the evidence names - the top-level `isolate` and "
+                "`pool` options and its `projects` list (a 3.x config may still spell "
+                "these `poolOptions` / `vitest.workspace.*`, which vitest 4 removed) - "
+                "and what the expensive imports actually are (an ORM entity graph, a "
+                "GraphQL schema, decorator registration). Then find which test files "
+                "touch module-level mutable state, fake timers, or a shared client.",
+        "constraints": "RISK: HIGH - correctness exposure, not a cache tweak. Sharing "
+                       "a module registry between test files can make a test pass "
+                       "only because an earlier file left state behind (or fail only "
+                       "because of it): an order-dependent green, which is worse than "
+                       "a red because CI stays green while the suite stops meaning "
+                       "anything.\n"
+                       "- INTENT: before changing the config, read its history "
+                       "(`git log -p` on the vitest config) for why isolation is set "
+                       "the way it is; if that history contradicts this change, stop "
+                       "and ask the owner.\n"
+                       "- GUARDRAIL (MANDATORY): opt IN per file, never a global flip. "
+                       "Add a SEPARATE vitest project (in `projects`) with "
+                       "`isolate: false` that only named, reviewed files join (vitest "
+                       "selects a project's files by `include` globs, so use an "
+                       "explicit per-file list or a dedicated filename suffix), keep "
+                       "the existing isolated project as the default, and write "
+                       "explicit teardown for every piece of shared state those files "
+                       "touch. Files using fake timers, or shared state you cannot "
+                       "untangle safely, STAY in the isolated project. Sharing a "
+                       "registry must not silently skip setup a test depends on.\n"
+                       "- ROLLOUT: start in SHADOW mode - the candidate files run in "
+                       "BOTH projects, the shared one non-required - and compare "
+                       "results over real PR traffic; only then exclude a file from "
+                       "the isolated project's `include` (or it runs twice). Move "
+                       "files in small batches; run the shared project in a randomized "
+                       "file order (`sequence.shuffle`) to smoke out order "
+                       "dependence; revert a file to the isolated project at the "
+                       "first unexplained failure.\n"
+                       "- SIZING: any addressable ceiling this report gives for "
+                       "the pole is that POLE's measured wall, not this lever's "
+                       "saving, and the import "
+                       "share is an upper bound on what repeated imports could "
+                       "touch - part of that import cost is paid once per worker "
+                       "whatever you do. ci-speedup credits NO saving for this "
+                       "lever; the only honest number comes from the benchmark "
+                       "below.",
         "docs": ["Vitest performance guide (isolation and pools): "
+                 "https://vitest.dev/guide/improving-performance",
+                 "Vitest config reference (`isolate`, `pool`, `projects`): "
+                 "https://vitest.dev/config/"],
+        "deliver": "A benchmark first: the skill measured the import share, NOT the "
+                   "saving. Then ship the opt-in project in SHADOW mode (candidate "
+                   "files still also run in the isolated project; the shared project "
+                   "is non-required) with its teardown, the benchmark of the shared "
+                   "run's wall time and results against the isolated one, and the "
+                   "list of which files are candidates and which deliberately are "
+                   "not. Moving files out of the isolated project is a follow-up "
+                   "once the shadow comparison has held over real PR traffic.",
+    },
+    # The same import-bound split, when the OPT78 lever was WITHHELD (the config
+    # scan could not establish that the repo is still paying for per-file
+    # isolation, or found it already opts out). The measurement is still real;
+    # the lever is not offered. The withheld reason reaches the agent as the
+    # second evidence line.
+    "vitest-import-bound": {
+        "cause": "The gating vitest run spends more time in `import` (loading the "
+                 "module graph) than in the tests themselves. The per-file-isolation "
+                 "lever (OPT78) was NOT raised for this pole, and the config fact "
+                 "below says why (the repo already opts out, its config could not be "
+                 "fully read, or the read itself failed). The measured split is "
+                 "verbatim from the log; the withheld reason is read from the repo's "
+                 "config, and is shown separately from the log for that reason.",
+        "look": "what the expensive imports actually are - run the suite with "
+                "vitest's import-duration reporting where available, and read the "
+                "setup files and the heaviest shared modules (an ORM entity graph, a "
+                "GraphQL schema build, decorator registration, barrel files that pull "
+                "in the whole app).",
+        "constraints": "Do NOT turn per-file isolation off (`isolate: false`, "
+                       "`--no-isolate`) as the fix from this finding: the isolation "
+                       "lever was withheld for the reason in the evidence, and it "
+                       "carries HIGH correctness risk (an order-dependent green). If "
+                       "the repo already runs an opt-in shared-registry project, "
+                       "moving more files into it follows that project's own "
+                       "guardrail (per-file opt-in, teardown, fake-timer files stay "
+                       "isolated, shadow comparison first). Prefer cutting the "
+                       "import cost itself - lazier imports, a cheaper schema or "
+                       "entity build, narrower imports instead of barrels - which "
+                       "carries no correctness risk. The import share is an upper "
+                       "bound on what import work could touch, not a saving.",
+        "docs": ["Vitest performance guide: "
                  "https://vitest.dev/guide/improving-performance"],
-        "deliver": "Tune isolation/pool in the vitest config if the tests can safely "
-                   "share context; prove no cross-file leakage and re-measure the run.",
+        "deliver": "Name the heaviest imports with their measured cost, cut them, and "
+                   "re-measure the suite's import and total wall time against the "
+                   "drilled run.",
     },
     "turbo-remote-cache": {
         "cause": "`turbo build` rebuilds every package from scratch each run - the "
@@ -3065,6 +3314,14 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
         safe = [_fence_safe(e) for e in ev]
         out += ["  Verbatim from the run:"] + [f"    {line}"
                                                 for line in uw.wrap_untrusted_block(safe)]
+    # A fact this skill READ FROM THE REPO'S CONFIG, never from the log: it must
+    # sit OUTSIDE the untrusted-log block (skill-authored text inside that
+    # boundary reads as run output the agent could go and find) and outside the
+    # "verbatim from the run" heading.
+    cf = str(leaf.get("config_fact") or "").strip()
+    if cf:
+        out += ["  One fact read from the repo's config (not from the log):",
+                f"    {_fence_safe(cf)}"]
     out += [""]
 
     addr = _addressable_plain(pole, candidates)
@@ -4352,6 +4609,7 @@ _LEAF_STEP_CATEGORY: dict[str, str] = {
     "prisma-migrate-once": "test",
     "vitest-v8-coverage": "test",
     "vitest-isolate-pool": "test",
+    "vitest-import-bound": "test",
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
     "cargo-test-shard": "test",
@@ -4369,6 +4627,11 @@ _LEAF_STEP_CATEGORY: dict[str, str] = {
 # token — else it is demoted. This separates eslint (lint) from a type-check step (both
 # bin `scan`), catching the sveltejs/svelte instance where scan is dominant but the
 # dominant step is the type-check, not the lint.
+# Leaves whose fix carries HIGH correctness risk: a demotion must say so rather
+# than framing them as a small cleanup.
+_HIGH_RISK_LEAVES: dict[str, str] = {
+    "vitest-isolate-pool": "a HIGH-risk change (OPT78, per-file test isolation)",
+}
 _LEAF_DOMINANT_STEP_TOKEN: dict[str, "re.Pattern[str]"] = {
     "eslint-no-cache": re.compile(r"lint", re.IGNORECASE),
 }
@@ -4418,6 +4681,7 @@ def _demote_offcategory_leaf(
 
 def _derive_pole_leaf(
     pole: dict[str, Any], owner_key: str | None, logs: dict[str, str],
+    iso: dict[str, Any] | None = None,
 ) -> "tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]":
     """The ONE leaf-derivation pipeline a pole's log runs through — captured here so the
     Long pole map (which drills the descent pole = pole 1 up top) and the per-pole loop
@@ -4426,7 +4690,7 @@ def _derive_pole_leaf(
     pole owns none → no log), parse, reconcile the cache-hit distribution, then split off an
     off-category leaf. Pure over its inputs, so calling it twice on the same pole is exact."""
     log_text = logs.get(owner_key) if owner_key is not None else None
-    leaf = _parse_log(log_text) if log_text else None
+    leaf = _parse_log(log_text, iso) if log_text else None
     leaf = _apply_cache_dist(leaf, pole.get("cache_dist"))
     leaf, offcat_leaf = _demote_offcategory_leaf(leaf, pole)
     return log_text, leaf, offcat_leaf
@@ -4448,9 +4712,19 @@ def _offcategory_note_block(leaf: dict[str, Any], pole: dict[str, Any]) -> list[
            "is not crowned as the cause and is not credited the pole's wall-clock ceiling. "
            "Address the dominant step above first, then treat this as a smaller, separate "
            "cleanup."]
+    if fk in _HIGH_RISK_LEAVES:
+        # A demoted HIGH-risk lever must not read as a low-stakes cleanup: the
+        # sentence above would present it as exactly the quick win the catalog forbids.
+        out[-1] = out[-1].replace(
+            "then treat this as a smaller, separate cleanup.",
+            f"and do not treat this as a quick cleanup: it is {_HIGH_RISK_LEAVES[fk]}, "
+            "and applying it needs that pattern's guardrail and rollout (see the catalog).")
     ev = leaf.get("evidence") or []
     if ev:
         out += ["", *_evidence_fence(ev)]
+    cf = str(leaf.get("config_fact") or "").strip()
+    if cf:
+        out += ["", f"One fact read from the repo's config (not from the log): {cf}"]
     out.append("")
     return out
 
@@ -4890,7 +5164,7 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
     rows: list[tuple[str, str, str]] = [
         (f"ci-speedup static scan{skill_part}",
          f"All `.github/workflows/*.yml` under the analyzed tree ({short_sha})",
-         "Static pattern detection (OPT1–OPT69 catalog)")]
+         "Static pattern detection (full OPT catalog)")]
     if "gh-timing" in tiers:
         runs, jobs = ds.get("runs_sampled"), ds.get("jobs_sampled")
         cov = (f"{_count_noun(runs, 'run') if isinstance(runs, int) else '? runs'} / "
@@ -4917,6 +5191,44 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
     else:
         rows.append(("job logs", "not run",
                      "Sampled only for a slow pole worth log-level inspection"))
+    # The cache-cost comparison (OPT79) reads job logs during COLLECTION, not in
+    # the pole drill and not behind `--with-logs`, so the row above can honestly
+    # say "not run" while that comparison quotes real log lines. A separate row,
+    # deliberately: `logs_fetched` counts the pole logs the data bundle persists
+    # and `verify_report` re-derives that cell from the bundle, so folding a
+    # second kind of fetch into it would swap a false statement for a broken
+    # invariant. No probe planned → no row; a probe the reader never paid for is
+    # not a disclosure, it is noise.
+    _probe = ds.get("cache_probe_logs")
+    if isinstance(_probe, dict) and isinstance(_probe.get("probed"), int) \
+            and _probe["probed"] > 0:
+        _pn = _probe["probed"]
+        _rn = _probe.get("returned")
+        _rn = _rn if isinstance(_rn, int) else 0
+        # Probed-but-empty is its own fact: expired retention reads as "0 of 8",
+        # never as a comparison that had eight logs to work from.
+        cov = (f"{_pn} job log(s) read" if _rn == _pn
+               else f"{_rn} of {_pn} job log(s) returned content")
+        # The budget did not just cap the cost, it removed candidates. Saying
+        # only what was read hides that the comparison saw less of the repository
+        # than the selector asked for.
+        _pl = _probe.get("planned")
+        if isinstance(_pl, int) and _pl > _pn:
+            cov += f" ({_pn} of {_pl} planned)"
+        _bud = _probe.get("budget")
+        if isinstance(_bud, int) and _bud > 0:
+            cov += f" (capped at {_bud} for the repository)"
+        rows.append(("cache hit/miss log probe", cov,
+                     "Splitting a cached job's runs into cache hits and misses"))
+    # Candidates the probe read and then WITHHELD (too few misses, logs that
+    # never came back, a runner change…). Without this row the report reads
+    # "measured, nothing found" where the audit could not tell. `verify_report`
+    # re-derives both numbers from `opt79_withheld_candidates`.
+    _wn, _wtop = _opt79_withheld_summary(doc)
+    if _wn:
+        rows.append(("cache hit/miss verdicts",
+                     _opt79_held_back_cell(doc),
+                     "Why a candidate cache produced no finding and no uncredited line"))
     # WHICH workflow YAML fed the detectors. `collect_runs` stamps this, and until now
     # nothing rendered it — so the reader could not tell whether the `on:`/matrix/timeout
     # signals came off the audited checkout or off the default branch's HEAD (the two
@@ -5150,6 +5462,229 @@ def _pr_floor_fallback_banner(doc: dict[str, Any], cp: dict[str, Any]) -> list[s
             "the figures as the PR-floor accordingly.", ""]
 
 
+# The findings-doc keys the collector writes OPT79's uncredited rows and its
+# withheld candidates under. STRING CONTRACTS between files: renaming one in the
+# collector would stop its line rendering with nothing going red, so every side
+# names the constant and a coupling test pins them equal.
+_OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
+_OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
+
+
+def _opt79_uncredited_row_is_renderable(r: Any) -> bool:
+    """A row the uncredited block can state: a job name, a numeric excess and
+    integer hit/miss populations. Anything else would render as "by ?s" or
+    "None hit" — a measurement line with no measurement in it — so it is not
+    rendered, and `verify_report` fails on the count it no longer matches."""
+    if not isinstance(r, dict) or not str(r.get("job") or "").strip():
+        return False
+    waste = r.get("waste_s")
+    if isinstance(waste, bool) or not isinstance(waste, (int, float)):
+        return False
+    return all(isinstance(r.get(k), int) and not isinstance(r.get(k), bool)
+               for k in ("hits", "misses"))
+
+
+def _opt79_withheld_summary(doc: dict[str, Any] | None) -> tuple[int, str]:
+    """`(candidates withheld, the commonest gate)` from the collector's
+    withheld-candidate list; ties go to the alphabetically first gate. `(0, "")`
+    when nothing was withheld. `verify_report` re-derives the same pair."""
+    rows = [r for r in ((doc or {}).get(_OPT79_WITHHELD_DOC_KEY) or [])
+            if isinstance(r, dict)]
+    if not rows:
+        return 0, ""
+    counts: dict[str, int] = {}
+    for r in rows:
+        g = str(r.get("gate") or "unknown")
+        counts[g] = counts.get(g, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    return len(rows), top
+
+
+# One plain-English phrase per gate that can land in `opt79_withheld_candidates`
+# (`collect_runs._OPT79_HELD_BACK_GATES`). The reader is a person who has never
+# seen a gate name, so each phrase says what was not established and why that
+# stops a verdict. `verify_report` carries an identical copy (it is a standalone
+# checker) and a test pins the two equal and complete. An unmapped gate renders
+# the fallback below and FAILS `verify_report`: a code is never printed.
+_OPT79_HELD_BACK_REASONS: dict[str, str] = {
+    # held back before any log was read
+    "cache_is_saved_by_a_separate_step":
+        "the cache is saved by its own separate step, so one restore-and-save "
+        "measurement can't cover it",
+    "setup_cache_input_is_an_unevaluated_expression":
+        "whether a setup step turns its cache on depends on a value that is "
+        "only known while the job runs",
+    "job_declares_more_than_one_cache_restore_step":
+        "the job restores more than one cache, so one hit/miss verdict can't "
+        "price it",
+    "setup_action_cache_default_depends_on_repository_files":
+        "whether a setup step's built-in cache is on depends on package.json, "
+        "which could not be read reliably",
+    "cache_action_is_not_one_this_pattern_measures":
+        "the job's only cache belongs to a tool that manages its own cache, "
+        "which this check does not measure",
+    "cache_step_has_no_renderable_name":
+        "the cache step has no name to look its time up by",
+    "install_step_also_runs_non_install_commands":
+        "the install step also runs other commands, so its time is not just "
+        "the install",
+    "no_install_step_after_the_cache_step":
+        "no dependency install follows the cache, so the cache is not shown to "
+        "speed anything up",
+    "first_step_after_cache_is_not_a_recognised_install":
+        "the first step after the cache is not a recognised dependency install, "
+        "so the cache may be feeding a different step",
+    "cache_path_names_no_known_package_store":
+        "the cache does not clearly hold a package manager's downloads, so it "
+        "is not shown to serve the install",
+    "install_package_manager_does_not_match_cache":
+        "the install uses a different package manager than the one the cache "
+        "holds, so the cache does not serve it",
+    "step_display_name_is_ambiguous_within_the_job":
+        "two steps in the job share the cache or install step's name, so their "
+        "times can't be told apart",
+    "runner_label_not_one_known_billed_label":
+        "the job's machine type is not one this report can price",
+    "beyond_the_per_workflow_candidate_log_budget":
+        "the workflow has more candidate caches than the per-workflow log "
+        "budget covers, and this one was not reached",
+    # held back after the logs were read
+    "restore_step_never_measured_in_any_occurrence":
+        "the cache's restore step never showed a time in any sampled run, so "
+        "its cost could not be measured",
+    "post_step_never_measured_in_any_occurrence":
+        "the cache's save step never showed a time in any sampled run, so the "
+        "cost of saving could not be measured",
+    "population_truncated_by_unread_logs":
+        "too many of the sampled runs' logs could not be read to tell how often "
+        "the cache hits",
+    "population_truncated_by_excluded_runs":
+        "too many of the sampled runs had logs that could not tell a cache hit "
+        "from a miss",
+    "fewer_than_min_hit_runs_classified":
+        "too few sampled runs hit the cache to compare a hit against a miss",
+    "fewer_than_min_miss_runs_classified":
+        "too few sampled runs missed the cache to compare a miss against a hit",
+    "no_monthly_volume":
+        "the job's monthly run count was unknown, so its saving could not be "
+        "sized",
+    "credited_runner_minutes_round_to_zero":
+        "the measured saving rounds down to zero runner-minutes a month",
+    "neutrality_margin_not_positive":
+        "the job is about as slow as its workflow's slowest jobs, so removing "
+        "the cache could not be shown to leave the pull-request wait unchanged",
+}
+_OPT79_HELD_BACK_UNMAPPED = "a reason this report has no plain-English wording for"
+_OPT79_HELD_BACK_MAX_JOBS = 5
+
+
+def _opt79_held_back_job_cell(text: object) -> str:
+    """A repo-controlled job or workflow name made safe for one table cell: no
+    newline, no unescaped pipe, no backtick or emphasis marker that a markdown
+    renderer (or the verifier's decoration strip) would treat as syntax."""
+    t = re.sub(r"\s+", " ", str(text)).strip()
+    t = t.replace("`", "'").replace("*", "'")
+    return t.replace("|", "\\|")
+
+
+def _opt79_held_back_labels(rows: list[dict[str, Any]]) -> list[str]:
+    """Distinct, sorted job labels. A job name that two workflows share is
+    qualified with its workflow file's base name, so the two stay tellable."""
+    def wf_of(r: dict[str, Any]) -> str:
+        return str(r.get("workflow_file") or "").rsplit("/", 1)[-1]
+    by_name: dict[str, set[str]] = {}
+    for r in rows:
+        by_name.setdefault(str(r.get("job") or "").strip(), set()).add(wf_of(r))
+    labels: set[str] = set()
+    for r in rows:
+        name = str(r.get("job") or "").strip() or "(unnamed job)"
+        shared = len(by_name.get(str(r.get("job") or "").strip(), ())) > 1
+        labels.add(f"{wf_of(r)} / {name}" if shared and wf_of(r) else name)
+    return sorted(labels)
+
+
+def _opt79_held_back_cell(doc: dict[str, Any] | None) -> str:
+    """`N candidate cache(s) held back (<jobs>): <plain-English reason>.` for the
+    Data sources row. The count and the most common gate (ties to the
+    alphabetically first) are `_opt79_withheld_summary`'s; `verify_report`
+    re-derives the whole sentence from the findings file."""
+    n, top = _opt79_withheld_summary(doc)
+    rows = [r for r in ((doc or {}).get(_OPT79_WITHHELD_DOC_KEY) or [])
+            if isinstance(r, dict)]
+    labels = [_opt79_held_back_job_cell(x) for x in _opt79_held_back_labels(rows)]
+    shown = labels[:_OPT79_HELD_BACK_MAX_JOBS]
+    jobs = ", ".join(shown)
+    if len(labels) > len(shown):
+        jobs += f", and {len(labels) - len(shown)} more"
+    reason = _OPT79_HELD_BACK_REASONS.get(top, _OPT79_HELD_BACK_UNMAPPED)
+    return f"{n} candidate cache(s) held back ({jobs}): {reason}."
+
+
+def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
+    """Caches MEASURED to cost more than they save on a job that is not below its
+    workflow's cluster floor — stated, with no number attached.
+
+    These are not findings and never enter a total: no runner-minutes, no
+    wall-clock claim, no neutrality certificate, no Tier-2 row. The measurement
+    is as real as a credited one; what is missing is the sizing.
+
+    WHY it is missing differs by job. `not below the cluster floor` spans
+    everything from the SECOND-ranked job upwards. Only the workflow's long
+    pole, on a workflow that can gate a PR, actually carries the merge wait
+    (`on_critical_path`). On a workflow no pull request runs
+    (`workflow_gates_pull_requests` false) there is no merge gate at all and the
+    saving is pure runner-minutes. For every other job at or above the floor the
+    saving is runner-minutes too, uncredited because this version cannot prove
+    shrinking it leaves the gate unchanged. The block says only what those
+    stamps support — never a merge wait or a merge gate on a workflow that has
+    none, and never "this workflow's slowest job" about a job that is not.
+
+    Rendered beside `_dropped_unprovable_banner`, its nearest precedent: a
+    measured fact deliberately kept out of the numbers and shown anyway. [] when
+    there is nothing to say."""
+    # A row with no job, no numeric excess or no integer populations cannot be
+    # stated. It is left out HERE and caught by `verify_report`, which fails when
+    # the rendered count differs from the rows the run measured — a malformed
+    # row reddens the report instead of vanishing from it.
+    rows = [r for r in ((doc or {}).get(_OPT79_UNCREDITED_DOC_KEY) or [])
+            if _opt79_uncredited_row_is_renderable(r)]
+    if not rows:
+        return []
+    lines = ["> [!NOTE]",
+             f"> **{len(rows)} cache(s) measured net-negative on a job this audit "
+             "cannot price.** Measured the same way as the credited ones, and "
+             "listed with no number because this version cannot size what "
+             "shrinking them is worth:", ">"]
+    for r in rows:
+        job = str(r.get("job") or "")
+        wf = str(r.get("workflow_file") or "")
+        waste = r.get("waste_s")
+        hits, misses = r.get("hits"), r.get("misses")
+        waste_txt = f"{float(waste):.0f}s"
+        where = f" in `{wf}`" if wf else ""
+        if r.get("on_critical_path"):
+            why = (f"`{job}` is this workflow's slowest job, so the saving is on "
+                   "the merge wait and is **not credited** in this version.")
+        elif r.get("workflow_gates_pull_requests") is False:
+            why = (f"`{job}` runs in a workflow that does not run on pull "
+                   "requests, so no pull request waits on it; the saving is "
+                   "runner-minutes only and is **not credited** in this version.")
+        else:
+            floor = r.get("floor_p50_s")
+            floor_txt = (f" ({float(floor):.0f}s)"
+                         if isinstance(floor, (int, float)) else "")
+            why = (f"`{job}` is at or above this workflow's second-slowest job"
+                   f"{floor_txt}, so this audit cannot prove that shrinking it "
+                   "leaves the merge gate unchanged; **not credited** in this "
+                   "version.")
+        lines.append(
+            f"> - a cache on `{job}`{where} measured net-negative by {waste_txt} "
+            f"per cache hit ({hits} hit / {misses} miss run(s) sampled); {why}")
+    lines += [">", "> Re-keying or narrowing such a cache is the same fix as the "
+              "credited ones; only the size of the win is unstated here.", ""]
+    return lines
+
+
 def _dropped_unprovable_banner(dropped: list[dict[str, Any]] | None) -> list[str]:
     """A note naming cache findings the `--with-logs` admission gate removed (the
     logs couldn't prove the cacheable work runs). Kept VISIBLE so the drop is
@@ -5220,22 +5755,40 @@ def _group_by_pattern_ranked(
     (12), which holds today — is never the row suppressed by the cap. The rest are ranked by
     cloud-bill saving desc (then severity, then pattern id). Used by the off-path appendix.
 
-    Grouping is by pattern id EXCEPT for OPT73 (the cross-cluster shared-substep floor
-    lever): each OPT73 finding is a DISTINCT lever — its own shared step, its own cluster
-    of jobs in its own workflow, its own evidence and magnitude — not a fungible occurrence
-    of one fix recipe applied at N spots. Folding them by pattern would render one row whose
-    evidence is only the first leg's and whose size is the MAX leg's wall-clock, hiding the
-    smaller legs' evidence and over-sizing them. So OPT73 is keyed by its cluster identity
-    (workflow + jobs), so distinct levers render as their own rows; identical clusters (same
-    workflow + same jobs) still fold. The displayed `pat` stays the bare pattern id."""
+    Grouping is by pattern id EXCEPT for OPT73, OPT77 and OPT79, each of which is keyed
+    by its own identity (pattern + workflow + jobs).
+
+    OPT73 (the cross-cluster shared-substep floor lever): each finding is a DISTINCT
+    lever — its own shared step, its own cluster of jobs in its own workflow, its own
+    evidence and magnitude — not a fungible occurrence of one fix recipe applied at N
+    spots. Folding them by pattern would render one row whose evidence is only the first
+    leg's and whose size is the MAX leg's wall-clock, hiding the smaller legs' evidence
+    and over-sizing them.
+
+    OPT77 (repeated fixed setup) is the same shape for the same reason: the detector
+    groups by runner label AND setup prefix, so ONE workflow can carry two
+    consolidations — a row of Node checks and a row of Python checks are two separate
+    edits. Folded by pattern they rendered one row whose runner-minutes SUM both groups
+    while the embedded copy-paste agent prompt names only the first group's jobs: the
+    combined saving advertised beside a partial job list, which is exactly the failure
+    the OPT73 case was added for.
+
+    OPT79 (a cache that costs more than it saves) is per JOB: one workflow can carry two
+    net-negative caches, each with its own measured hit/miss comparison, its own runner
+    class and its own re-key-or-remove edit. Folded by pattern, one job's evidence would
+    be advertised beside both jobs' minutes.
+
+    Distinct levers therefore render as their own rows; identical ones (same workflow +
+    same jobs) still fold. The displayed `pat` stays the bare pattern id."""
     groups: dict[Any, list[dict[str, Any]]] = {}
     display: dict[Any, str] = {}
     order: list[Any] = []
     for f in findings:
         pat = str(f.get("pattern", "") or "?")
-        # OPT73 levers are distinct per cluster, not fungible occurrences — see docstring.
+        # OPT73, OPT77 and OPT79 levers are distinct per cluster / per consolidated
+        # group / per job, not fungible occurrences of one recipe — see docstring.
         key: Any = pat
-        if pat == "OPT73":
+        if pat in ("OPT73", "OPT77", "OPT79"):
             key = (pat, str(f.get("workflow_file", "")),
                    tuple(f.get("affected_jobs") or ()))
         if key not in groups:
@@ -5363,9 +5916,30 @@ def _tier2_cert_summary(f: dict[str, Any]) -> str:
     ref = str(cert.get("ref") or "").strip()
     margin = _num(cert.get("margin_s"))
     if proof == "below_cluster_floor" and margin is not None:
+        # HISTORICAL TOKEN for OPT77: its margin is measured against the tallest
+        # job that REMAINS after the consolidation, not the workflow's cluster
+        # floor. The token is shared with OPT65 and OPT79, whose cluster-floor
+        # comparisons are genuine, so it stays as the dispatch key; the
+        # certificate's own `ref` (appended below) names what each one was
+        # actually compared against.
         msg = f"`below_cluster_floor` with {_clock(margin)} margin"
     elif proof == "post_completion_waste":
         msg = "`post_completion_waste` - compute burned after the run signal is already decided"
+    elif proof == "checkout_tail_excess" and margin is not None:
+        # OPT80's own token. The credited quantity is a TAIL EXCESS (mean minus
+        # p50 of one step), not a job duration, so neither the cluster-floor
+        # comparison nor the post-completion argument describes it. Nothing the
+        # fix does changes what a job runs or what a check is called, which is
+        # what makes it merge-safe; the margin IS the tail excess.
+        #
+        # `margin is not None` never falls through in practice: `verify_report`'s
+        # arm fails any `checkout_tail_excess` row whose `margin_s` is not the
+        # re-derived tail excess, so a row reaching here without one would already
+        # have reddened the report. The guard is kept so a renderer run over an
+        # UNVERIFIED doc degrades to the bare token below rather than raising.
+        msg = (f"`checkout_tail_excess` - {_clock(margin)} of stalled-fetch tail "
+               "removed from the average run; no job runtime on the merge gate "
+               "changes and no check is renamed")
     elif proof == "non_pr_event":
         events = f.get("tier2_run_subset_events")
         ev = ", ".join(str(e) for e in events) if isinstance(events, list) else "non-PR"
@@ -7374,8 +7948,19 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # findings JSON._" — no banner, no coverage note, no data-sources footer: the
     # loudest failure in the collector, rendered as a shrug.
     broken = _measurement_is_broken(ds)
+    # A measured net-negative cache is a fact worth a report on its own. On a
+    # schedule-only repo with no poles and no other findings, every other input
+    # here is empty and the uncredited line was dropped with them — the whole
+    # report collapsed to the one-line no-critical-path note, which is exactly
+    # the silence this block exists to break.
+    uncredited_lines = _opt79_uncredited_block(doc)
+    # A cache that was probed and then withheld is disclosed in the Data sources
+    # footer; collapsing to the one-line note would drop the footer with it and
+    # let "probed, could not tell" read as "nothing found".
+    withheld_n, _top = _opt79_withheld_summary(doc)
     if (not tier2_lines and not also_lines and not queue_lines
-            and not incomplete and not broken):
+            and not incomplete and not broken and not uncredited_lines
+            and not withheld_n):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")
@@ -7536,6 +8121,10 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *tier2_lines]
     if also_lines:
         out += ["---", "", *also_lines]
+    # Measured net-negative caches that could not be PRICED (their job is not
+    # below the cluster floor). Beside the dropped-unprovable banner, its nearest
+    # precedent: a measured fact kept out of the numbers and shown anyway.
+    out += uncredited_lines
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
                                       or doc.get("dropped_unprovable"))
     # Issue #12: a static-only report (no measured pole to crown) can still carry a stamped
@@ -7609,6 +8198,9 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # a straddle is never silently dropped just because a shorter render path won the
         # short-circuit — else a post_only sample looks full / a disclosed_pre sample looks current.
         _deg_era_lines = _config_era_disclosure_lines(cp, captured_at)
+        # A measured net-negative cache never reaches this arm:
+        # `_render_static_only` above returns a full report whenever
+        # `_opt79_uncredited_block(doc)` has anything to say.
         if _deg_fileless_lines or _deg_era_lines:
             # `_strip_emdashes` at this early-return boundary mirrors the main render exit:
             # this path bypasses that terminal scrub, so without it the typographic dashes in the
@@ -8480,7 +9072,9 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # descent pole's entry; the loop reads its own pole's — the SAME object, so the map's
     # Level 3 and the pole's Level 3 can never disagree.
     _pole_leaves: dict[int, tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]] = {
-        id(p): _derive_pole_leaf(p, pole_owner_keys.get(id(p)), logs) for p in pole_wfs}
+        id(p): _derive_pole_leaf(p, pole_owner_keys.get(id(p)), logs,
+                                  doc.get("test_runner_isolation"))
+        for p in pole_wfs}
 
     # ── Long pole map (owner UX edit 2026-07-19) ─────────────────────────────────────────
     # The FULL blocker cascade, RESTORED up top (PR #73 flattened it to level 1; the trimmed
@@ -9228,10 +9822,17 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out += _cache_health_block(p.get("cache_dist"))
         if leaf is not None:
             ev = leaf.get("evidence") or []
+            cf = str(leaf.get("config_fact") or "").strip()
             if ev:
                 lead = ("Verbatim from one of those runs' log:" if sample
                         else "**🔬 Evidence** — verbatim from the captured job log:")
                 out += [lead, "", *_evidence_fence(ev), ""]
+            # Not log text: a fact read from the repo's config, so it renders
+            # outside the quoted-log fence and under its own heading rather than
+            # under one that calls it verbatim run output.
+            if cf:
+                out += ["**📄 One fact read from the repo's config** (not from "
+                        f"the log): {cf}", ""]
         elif analysis:
             # LLM gap-fill: no catalog match, so the agent's grounded reading of the
             # captured log stands in for the measured cause (clearly labelled).
@@ -9330,6 +9931,10 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # (§5.5/G15; `check_cost_spine_shallow_disclosed` re-derives it from
         # `data_sources`, so dropping this line is a verify FAIL, not a style choice).
         out += ["---", "", f"> ⚠️ _{shallow_note}_", ""]
+    # Measured net-negative caches that could not be PRICED (their job is not
+    # below the cluster floor). Beside the dropped-unprovable banner, its nearest
+    # precedent: a measured fact kept out of the numbers and shown anyway.
+    out += _opt79_uncredited_block(doc)
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
                                       or doc.get("dropped_unprovable"))
     # The prose provenance block leads the Data sources section (owner UX edit
@@ -9614,6 +10219,16 @@ def _gap_poles(doc: dict[str, Any],
     # telling a maintainer to "draft a NEW detector" (phase 4c) is the bug this guards
     # against — the render path suppresses the gap for these poles, so the capture must too.
     findings = _dedupe_findings(list(doc.get("findings") or []))
+    # The SAME config fact the render path parses with. An import-bound vitest
+    # pole is never a gap on either path: the fact only picks WHICH leaf it gets
+    # (the OPT78 lever, or the guarded `vitest-import-bound` leaf when OPT78 is
+    # withheld), so the maintainer loop is never sent to draft a duplicate detector.
+    # For OPT78 as it stands today this argument makes `_iso` INERT here — both
+    # branches return a leaf, so the gap verdict is the same with or without it.
+    # It is passed anyway: the invariant this function must hold is "parse exactly
+    # as the renderer does", and a future config-gated leaf that can return None
+    # would silently over-report gaps the day it lands.
+    _iso = doc.get("test_runner_isolation")
 
     def _catalog_covers(pole: dict[str, Any]) -> bool:
         return bool(_structural_for_pole(pole, findings)
@@ -9639,7 +10254,7 @@ def _gap_poles(doc: dict[str, Any],
                 if "=" in key:
                     continue  # an un-bindable key (summary flags it) — never borrow
                 log_text = logs.get(key)
-                if not log_text or _parse_log(log_text) is not None:
+                if not log_text or _parse_log(log_text, _iso) is not None:
                     continue
                 base = _pole_for_entry(poles, entry) or dict(entry)
                 if _catalog_covers(base):
@@ -9655,7 +10270,7 @@ def _gap_poles(doc: dict[str, Any],
     named = [p for p in poles if p.get("check")]
     for key, log_text in logs.items():
         pole = _sole_owner_pole(key, named)
-        if pole is None or not log_text or _parse_log(log_text) is not None:
+        if pole is None or not log_text or _parse_log(log_text, _iso) is not None:
             continue
         if _catalog_covers(pole):
             continue  # a catalog detector already covers it — not a gap

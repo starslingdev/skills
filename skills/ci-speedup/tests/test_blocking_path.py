@@ -983,7 +983,13 @@ def test_parse_log_detects_vitest_import_bound_without_coverage():
         " Test Files  149 passed (149)",
         " Duration  96.12s (transform 8.97s, setup 1.01s, import 245.03s, tests 214.54s, environment 8ms)",
     ])
-    leaf = bp._parse_log(log)
+    # OPT78: the leaf also needs the scanned config fact that the repo has NOT
+    # already opted out of per-file isolation — a log alone cannot establish that,
+    # so without it the leaf fails closed (tests/test_vitest_isolation_lever.py).
+    iso = {"runner": "vitest", "readable": True, "isolation_opt_out": False,
+           "truncated": False, "verdict": "isolation_on",
+           "configs": ["vitest.config.ts"], "opt_out_evidence": []}
+    leaf = bp._parse_log(log, iso)
     assert leaf is not None and leaf["fix_key"] == "vitest-isolate-pool"
     rows = leaf["deeper"][-1]["rows"]
     assert rows[0][0].startswith("import")  # import is the blocker (first) row
@@ -2273,6 +2279,12 @@ def _doc_one_pole() -> dict:
         "repo": "o/r", "scanned_at": "2026-06-08T00:00:00Z",
         "data_sources": {"runs_sampled": 100, "jobs_sampled": 300,
                          "workflows_analyzed": 5},
+        # The scanned config fact the OPT78 (`vitest-isolate-pool`) leaf is gated
+        # on — this fixture's drill log is an import-bound vitest run.
+        "test_runner_isolation": {
+            "runner": "vitest", "readable": True, "isolation_opt_out": False,
+            "truncated": False, "verdict": "isolation_on",
+            "configs": ["vitest.config.ts"], "opt_out_evidence": []},
         "pr_critical_path": {
             "sampled_pr_count": 20, "sample_target": 20, "sample_complete": True,
             "poles": [{
@@ -2284,6 +2296,10 @@ def _doc_one_pole() -> dict:
             }]},
     }
 
+
+_ISOLATION_ON = {"runner": "vitest", "readable": True, "isolation_opt_out": False,
+                 "truncated": False, "verdict": "isolation_on",
+                 "configs": ["vitest.config.ts"], "opt_out_evidence": []}
 
 _IMPORT_BOUND_LOG = "\n".join([
     " RUN  v4.1.4 /repo/web",
@@ -4252,7 +4268,7 @@ def test_leaf_detectors_carry_a_load_bearing_magnitude():
         " Duration  12.18s (transform 12.24s, setup 0ms, import 19.07s, tests 4.13s)",
     ])
     assert bp._parse_log(coverage)["magnitude"]["unit"] == "%"
-    assert bp._parse_log(_IMPORT_BOUND_LOG)["magnitude"]["value"] > 0
+    assert bp._parse_log(_IMPORT_BOUND_LOG, _ISOLATION_ON)["magnitude"]["value"] > 0
     pw = bp._parse_log("$ pnpm exec playwright test a.spec.ts\n"
                        "$ pnpm exec playwright test b.spec.ts")
     assert pw["magnitude"] is None
@@ -4952,6 +4968,27 @@ def test_also_noticed_distinct_opt73_levers_render_as_separate_rows():
     assert n == 2
     assert body.count("<summary>") == 2
 
+
+
+def test_also_noticed_distinct_opt79_caches_render_as_separate_rows():
+    # OPT79 is per JOB: one workflow can carry two net-negative caches, each with its
+    # own measured hit/miss comparison, its own runner class and its own re-key-or-remove
+    # edit. Folded by pattern id (the default), one job's evidence would be advertised
+    # beside BOTH jobs' minutes and the prompt would name only the first job — the same
+    # failure the OPT73 and OPT77 cases above exist for.
+    def _f(fid, job, waste, rm):
+        return {"pattern": "OPT79", "title": "A Cache That Costs More Than It Saves",
+                "id": fid, "workflow_file": ".github/workflows/ci.yml", "line": 0,
+                "affected_jobs": [job], "wall_clock_p50_s": 0.0,
+                "runner_min_saving": rm, "severity": "MEDIUM",
+                "evidence": f"on `{job}` the cache block is {waste}s slower on hit runs"}
+
+    lines, n, _ = bp._also_noticed_block([_f("f1", "deps", 19, 400.0),
+                                          _f("f2", "docs", 7, 90.0)], "http://cat")
+    body = "\n".join(lines)
+    assert n == 2
+    assert body.count("<summary>") == 2
+    assert "`deps`" in body and "`docs`" in body
 
 def test_also_noticed_bill_only_group_evidence_covers_all_listed_jobs():
     # Regression (OPT12-style bill-only aggregate): a bill-only "Also noticed" group folds
@@ -7546,3 +7583,343 @@ def test_advisory_long_pole_tells_the_coding_agent_the_job_is_advisory():
         bp.render(_advisory_pole_doc(False), {}, {}, {}, "2026-09-02T00:00:00Z", {}), "e2e")
     assert "continue-on-error: true" not in plain.split(
         "#### 🤖 Prompt for your coding agent", 1)[1]
+
+
+def test_distinct_opt77_consolidations_render_as_separate_rows():
+    # A workflow can carry more than one consolidation: the detector groups by
+    # runner label AND by setup prefix, so a row of Node checks and a row of Python
+    # checks in one workflow are two separate edits (the catalog's own "Worked
+    # shape" shows exactly that). Folded by pattern they became ONE row that SUMMED
+    # both savings while the embedded agent prompt named only the first group's
+    # jobs — the combined minutes advertised next to a partial job list, verbatim
+    # the failure the OPT73 special case exists for.
+    def _opt77(fid, jobs, rm):
+        return {"pattern": "OPT77", "id": fid,
+                "title": "Repeated Fixed Setup Across Independent Small Jobs",
+                "workflow_file": ".github/workflows/ci.yml", "line": 0,
+                "affected_jobs": list(jobs), "wall_clock_p50_s": 0.0,
+                "runner_min_saving": rm, "severity": "MEDIUM",
+                "evidence": f"3 independent same-runner jobs ({', '.join(jobs)})",
+                "tier2_neutrality": {"proof": "below_remaining_tallest_job",
+                                     "margin_s": 450.0, "ref": "x"}}
+
+    node = _opt77("f1", ["lint", "typecheck", "format"], 400.0)
+    py = _opt77("f2", ["mypy", "ruff", "bandit"], 150.0)
+    groups = bp._group_by_pattern_ranked([node, py])
+    opt77_groups = [ms for pat, ms in groups if pat == "OPT77"]
+    assert len(opt77_groups) == 2, opt77_groups
+    assert [bp._rmin_of(ms) for ms in opt77_groups] == [400.0, 150.0]
+    # …and two identical consolidations still fold, exactly as OPT73 does.
+    assert len([ms for pat, ms in bp._group_by_pattern_ranked([node, dict(node, id="f3")])
+                if pat == "OPT77"]) == 1
+
+
+def test_data_sources_footer_declares_the_cache_comparison_log_probe():
+    """The cache-cost comparison reads job logs during collection, outside the
+    pole drill and regardless of `--with-logs`. Until this row existed the
+    provenance table could print "job logs | not run" in the very report whose
+    evidence quotes eight fetched log lines — the table that exists to say what
+    was read from the user's repository, denying it read anything.
+
+    It is its OWN row on purpose: `logs_fetched` counts the pole-drill logs the
+    data bundle persists, and the report's self-check re-derives that cell from
+    that bundle, so folding a second kind of fetch into it would trade a false
+    statement for a broken invariant."""
+    doc = _doc_one_pole()
+    doc["data_sources"] = {**doc["data_sources"], "tiers_run": ["gh-timing"],
+                           "cache_probe_logs": {"probed": 8, "returned": 8,
+                                                "budget": 24}}
+    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    assert "| cache hit/miss log probe |" in foot
+    assert "8 job log(s) read" in foot
+    # the pole-drill row keeps its own, separate truth
+    assert "job logs | not run" in foot
+
+    # Probed but nothing came back (expired logs) must not read as 8 read.
+    doc2 = _doc_one_pole()
+    doc2["data_sources"] = {**doc2["data_sources"], "tiers_run": ["gh-timing"],
+                            "cache_probe_logs": {"probed": 8, "returned": 0,
+                                                 "budget": 24}}
+    foot2 = "\n".join(bp._data_sources_footer(doc2, "o/r"))
+    assert "| cache hit/miss log probe |" in foot2
+    assert "0 of 8" in foot2
+
+    # No probe planned -> no row at all. A repo with no cache-then-install job
+    # pays nothing and must not be told about a probe that never ran.
+    doc3 = _doc_one_pole()
+    doc3["data_sources"] = {**doc3["data_sources"], "tiers_run": ["gh-timing"],
+                            "cache_probe_logs": {"probed": 0, "returned": 0,
+                                                 "budget": 24}}
+    assert "cache hit/miss log probe" not in "\n".join(
+        bp._data_sources_footer(doc3, "o/r"))
+    doc4 = _doc_one_pole()
+    doc4["data_sources"] = {**doc4["data_sources"], "tiers_run": ["gh-timing"]}
+    assert "cache hit/miss log probe" not in "\n".join(
+        bp._data_sources_footer(doc4, "o/r"))
+
+
+def test_data_sources_cache_probe_row_states_what_the_budget_cut():
+    """When the repo-wide budget cut the plan, the row says how many reads were
+    planned beside how many were made — the comparison saw less of the
+    repository than its own selector asked for."""
+    doc = _doc_one_pole()
+    doc["data_sources"] = {**doc["data_sources"], "tiers_run": ["gh-timing"],
+                           "cache_probe_logs": {"probed": 24, "returned": 24,
+                                                "planned": 32, "budget": 24}}
+    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    assert "24 job log(s) read (24 of 32 planned)" in foot, foot
+    assert "(capped at 24 for the repository)" in foot, foot
+
+
+def test_uncredited_pole_cache_is_reported_even_though_it_is_not_sized():
+    """The most valuable instance of a net-negative cache is the one on the
+    workflow's SLOWEST job, because there the waste is on the merge wait rather
+    than only on the bill. This version cannot size that saving, and the old
+    behaviour was to skip the job in the candidate selector — so its logs were
+    never fetched, its cache was never classified, and the report was
+    byte-identical to one for a repository with no such cache.
+
+    It is measured like any other now and stated with NO number: the reader
+    learns the cache exists and that the saving is not credited here."""
+    doc = _doc_one_pole()
+    doc["opt79_uncredited_pole_caches"] = [{
+        "kind": "opt79_uncredited_pole_cache",
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "build",
+        "runner_label": "ubuntu-latest",
+        "restore_step": "Run actions/cache@v4",
+        "install_step": "Run npm ci",
+        "waste_s": 19.0, "hits": 5, "misses": 4,
+        "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
+        "job_p50_s": 600.0, "floor_p50_s": 300.0,
+        "long_pole_job": "build", "long_pole_p50_s": 600.0,
+        "on_critical_path": True,
+    }]
+    lines = bp._opt79_uncredited_block(doc)
+    md = "\n".join(lines)
+    assert "build" in md
+    assert "19s" in md                      # the measured excess, per hit
+    assert "5 hit" in md and "4 miss" in md  # the sample it came from
+    assert "this workflow's slowest job" in md
+    assert "merge wait" in md
+    assert "not credited" in md
+    # It must NOT read as a sized saving: no runner-minutes, no wall-clock claim.
+    assert "min/mo" not in md
+    assert "runner-min" not in md
+
+    # Nothing measured -> nothing said.
+    assert bp._opt79_uncredited_block(_doc_one_pole()) == []
+    empty = _doc_one_pole()
+    empty["opt79_uncredited_pole_caches"] = []
+    assert bp._opt79_uncredited_block(empty) == []
+
+
+def test_uncredited_pole_cache_reaches_the_rendered_report():
+    """A helper nothing calls is not a disclosure. Pin that the block is actually
+    emitted into the report body."""
+    doc = _doc_one_pole()
+    doc["opt79_uncredited_pole_caches"] = [{
+        "kind": "opt79_uncredited_pole_cache",
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "build",
+        "runner_label": "ubuntu-latest",
+        "restore_step": "Run actions/cache@v4",
+        "install_step": "Run npm ci",
+        "waste_s": 19.0, "hits": 5, "misses": 4,
+        "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
+        "job_p50_s": 600.0, "floor_p50_s": 300.0,
+        "long_pole_job": "build", "long_pole_p50_s": 600.0,
+        "on_critical_path": True,
+    }]
+    md = bp.render(doc, "o/r")
+    assert "not credited" in md
+    assert "`build`" in md
+
+
+def test_uncredited_pole_cache_survives_a_report_with_nothing_else_in_it():
+    """A schedule-only repository with no measured poles and no other findings
+    renders through the degenerate arms, where every other input is empty. The
+    uncredited line was dropped with them and the whole report collapsed to the
+    50-byte "no measured critical path" note — the exact silence this block
+    exists to break, in the one repository where it is the only thing to say."""
+    doc = {
+        "repo": "o/r",
+        "findings": [],
+        "pr_critical_path": {"poles": []},
+        "data_sources": {},
+        "opt79_uncredited_pole_caches": [{
+            "kind": "opt79_uncredited_pole_cache",
+            "workflow_file": ".github/workflows/nightly.yml",
+            "job": "build",
+            "runner_label": "ubuntu-latest",
+            "restore_step": "Run actions/cache@v4",
+            "install_step": "Run npm ci",
+            "waste_s": 19.0, "hits": 5, "misses": 4,
+            "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
+            "job_p50_s": 600.0, "floor_p50_s": 300.0,
+            "long_pole_job": "build", "long_pole_p50_s": 600.0,
+            "on_critical_path": False,
+        }],
+    }
+    static = bp._render_static_only(doc)
+    assert static, "the static-only body must not be empty with a measured cache"
+    assert "not credited" in static and "`build`" in static
+    md = bp.render(doc, "o/r")
+    assert "No measured critical path" not in md, md
+    assert "not credited" in md and "`build`" in md
+    # …and a schedule-only workflow is never told its saving is on a merge wait.
+    assert "merge wait" not in md, md
+
+
+def test_static_only_keeps_the_withheld_cache_disclosure():
+    """A repository with no measured poles and no other findings whose cache
+    was probed and then withheld: the static-only body treated that as nothing
+    to say, collapsed to the one-line no-critical-path note, and the Data
+    sources row that says "probed, could not tell" was never rendered."""
+    doc = {
+        "repo": "o/r",
+        "findings": [],
+        "pr_critical_path": {"poles": []},
+        "data_sources": {},
+        "opt79_withheld_candidates": [
+            {"workflow_file": ".github/workflows/nightly.yml", "job": "build",
+             "gate": "population_truncated_by_unread_logs"}],
+    }
+    static = bp._render_static_only(doc)
+    assert static, "the static-only body must not be empty with a withheld cache"
+    md = bp.render(doc, "o/r")
+    assert "held back" in md, md
+
+
+def _uncredited_row(**kw):
+    row = {
+        "kind": "opt79_uncredited_pole_cache",
+        "workflow_file": ".github/workflows/nightly.yml",
+        "job": "build",
+        "runner_label": "ubuntu-latest",
+        "restore_step": "Run actions/cache@v4",
+        "install_step": "Run npm ci",
+        "waste_s": 19.0, "hits": 5, "misses": 4,
+        "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
+        "job_p50_s": 600.0, "floor_p50_s": 300.0,
+        "long_pole_job": "build", "long_pole_p50_s": 600.0,
+        "on_critical_path": False,
+    }
+    row.update(kw)
+    return row
+
+
+def test_uncredited_cache_on_a_workflow_that_gates_no_pr_says_so():
+    """A workflow no pull request runs has no merge gate to leave unchanged. The
+    row was told "this audit cannot prove that shrinking it leaves the merge gate
+    unchanged" — a sentence about a gate that does not exist, which reads as a
+    reason to hesitate over a saving that is pure runner-minutes."""
+    md = "\n".join(bp._opt79_uncredited_block({
+        "opt79_uncredited_pole_caches": [
+            _uncredited_row(workflow_gates_pull_requests=False)]}))
+    assert "merge gate" not in md, md
+    assert "merge wait" not in md, md
+    assert "does not run on pull requests" in md, md
+    assert "not credited" in md
+
+
+def test_uncredited_cache_rows_without_their_numbers_are_not_rendered():
+    """A row missing its measured excess or its populations rendered as
+    "by ?s … (None hit / None miss run(s) sampled)" — a measurement line with no
+    measurement in it. Such a row is not rendered (and the report's self-check
+    fails on the resulting count mismatch)."""
+    rows = [_uncredited_row(job="good"),
+            _uncredited_row(job="nowaste", waste_s=None),
+            _uncredited_row(job="nohits", hits=None),
+            _uncredited_row(job="nomisses", misses="4")]
+    md = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": rows}))
+    assert "`good`" in md
+    for job in ("nowaste", "nohits", "nomisses"):
+        assert f"`{job}`" not in md, md
+    assert "?s" not in md and "None hit" not in md, md
+    assert "**1 cache(s) measured net-negative" in md, md
+
+
+def test_withheld_cache_candidates_reach_the_data_sources_table():
+    """The cache hit/miss probe can read a candidate's logs and still withhold it
+    (too few misses, unread logs, a runner change). Without a line saying so the
+    report reads "measured, nothing found" for "measured, could not tell"."""
+    doc = _doc_one_pole()
+    doc["data_sources"] = {**doc["data_sources"], "tiers_run": ["gh-timing"],
+                           "cache_probe_logs": {"probed": 8, "returned": 8,
+                                                "budget": 24}}
+    doc["opt79_withheld_candidates"] = [
+        {"workflow_file": "ci.yml", "job": "unit",
+         "gate": "population_truncated_by_unread_logs"},
+        {"workflow_file": "ci.yml", "job": "e2e",
+         "gate": "fewer_than_min_miss_runs_classified"},
+        {"workflow_file": "b.yml", "job": "x",
+         "gate": "fewer_than_min_miss_runs_classified"}]
+    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    assert "| cache hit/miss verdicts |" in foot, foot
+    assert ("3 candidate cache(s) held back (e2e, unit, x): too few sampled runs missed the cache to compare "
+            "a miss against a hit.") in foot, foot
+    assert "fewer_than_min" not in foot and "_runs_classified" not in foot, foot
+    # nothing withheld -> no row
+    doc["opt79_withheld_candidates"] = []
+    assert "cache hit/miss verdicts" not in "\n".join(
+        bp._data_sources_footer(doc, "o/r"))
+
+
+def _held_back_cell(rows):
+    doc = _doc_one_pole()
+    doc["data_sources"] = {**doc["data_sources"], "tiers_run": ["gh-timing"]}
+    doc["opt79_withheld_candidates"] = rows
+    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    line = next((l for l in foot.splitlines()
+                 if l.startswith("| cache hit/miss verdicts |")), "")
+    return line
+
+
+def test_held_back_line_is_plain_english_and_names_the_jobs():
+    line = _held_back_cell([
+        {"workflow_file": ".github/workflows/ci.yml", "job": "unit",
+         "gate": "job_declares_more_than_one_cache_restore_step"},
+        {"workflow_file": ".github/workflows/ci.yml", "job": "lint",
+         "gate": "job_declares_more_than_one_cache_restore_step"}])
+    assert ("2 candidate cache(s) held back (lint, unit): the job restores "
+            "more than one cache, so one hit/miss verdict can't price it."
+            ) in line, line
+    assert "job_declares" not in line and "probed" not in line and "$" not in line
+
+
+def test_held_back_line_qualifies_a_job_name_two_workflows_share():
+    line = _held_back_cell([
+        {"workflow_file": ".github/workflows/ci.yml", "job": "build",
+         "gate": "no_install_step_after_the_cache_step"},
+        {"workflow_file": ".github/workflows/nightly.yml", "job": "build",
+         "gate": "no_install_step_after_the_cache_step"},
+        {"workflow_file": ".github/workflows/ci.yml", "job": "unit",
+         "gate": "no_install_step_after_the_cache_step"}])
+    assert "(ci.yml / build, nightly.yml / build, unit)" in line, line
+
+
+def test_held_back_line_shows_five_jobs_then_and_k_more():
+    rows = [{"workflow_file": "ci.yml", "job": f"j{i}",
+             "gate": "no_monthly_volume"} for i in range(8)]
+    line = _held_back_cell(rows)
+    assert "8 candidate cache(s) held back (j0, j1, j2, j3, j4, and 3 more):" in line, line
+
+
+def test_held_back_line_escapes_repo_controlled_job_names():
+    line = _held_back_cell([{"workflow_file": "ci.yml",
+                             "job": "a|b `x`\nc", "gate": "no_monthly_volume"}])
+    cells = [c for c in line.replace("\\|", "").split("|") if c.strip()]
+    assert len(cells) == 3, line            # source, coverage, feeds: the pipe did not split
+    assert "`x`" not in line and "\n" not in line, line
+    assert "a\\|b 'x' c" in line, line
+
+
+def test_held_back_line_merges_early_and_late_gates_and_keeps_the_tie_rule():
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "a", "gate": "no_monthly_volume"},
+        {"workflow_file": "ci.yml", "job": "b",
+         "gate": "job_declares_more_than_one_cache_restore_step"}])
+    # tie: alphabetically first gate wins, exactly as before
+    assert "restores more than one cache" in line, line

@@ -94,7 +94,17 @@ class Capture:
         return data if isinstance(data, dict) else {}
 
     def fires(self) -> dict[str, Any] | None:
-        """The live detector verdict on this capture's raw job log."""
+        """The live detector verdict on this capture's raw job log.
+
+        NOTE: the one config-gated leaf (OPT78 / `vitest-isolate-pool`) needs
+        scan's `test_runner_isolation` fact, which a capture dir does not carry
+        (it holds the drilled job's log and the loop's own metadata, never scan
+        output). Without it, an
+        import-bound vitest log still yields a leaf here - the guarded
+        `vitest-import-bound` one (OPT78 withheld) - so such a capture reads as
+        catalog-covered, never "pending", and the loop is never asked to draft a
+        duplicate detector for it. Which of the two leaves it is does not matter
+        to this verdict."""
         try:
             text = self.log_path.read_text(encoding="utf-8", errors="replace")
         except OSError:

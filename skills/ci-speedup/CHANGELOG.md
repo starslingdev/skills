@@ -13,6 +13,287 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-09-30** — **The report now says, in plain English, which caches it held
+  back and why.** When the cache check (OPT79) could not reach a verdict on a
+  candidate cache, the Data sources table used to print an internal gate name as
+  the reason and did not name the jobs, and caches held back before any log was
+  read (a job that restores more than one cache, an unreadable `package.json`, a
+  cache that does not serve the install, a first step after the cache that is not a
+  recognised install, a separate save step) appeared only in the findings file's
+  tally. The `cache hit/miss verdicts` row now reads `N candidate cache(s) held
+  back (<job>, <job>, ...): <reason>.` and counts every candidate held back, before
+  or after its logs were read, naming the jobs (workflow-qualified where two
+  workflows share a job name, at most five and then "and K more", with anything a
+  repository controls escaped for the table). Every reason is a short phrase a
+  non-engineer can follow; a cache measured and judged fine is not listed. The
+  report's own self-check re-derives the count, the job list and the reason, and
+  fails if a held-back cache has no plain-English phrase rather than printing a
+  code.
+
+- **2026-09-25** — **The audit can now say a cache is costing you time, not just
+  that one is missing.** Every caching pattern in the catalog until now said "add a
+  cache"; none could see the case where restoring a cache takes longer than the
+  install it was meant to shorten, so a repo paying for a slow restore on every hit
+  got told its caching was fine. New catalog pattern OPT79 measures both sides from
+  the repo's own runs: for a job whose workflow file declares a cache-restore step
+  followed by a dependency install, the sampled runs are split into cache HITs and
+  cache MISSes by the verbatim cache line in each run's log, and the same three
+  steps — restore, install, and the cache's post save — are timed on both. When the
+  hit path is measurably slower, the finding says so, quotes the log line behind
+  every run's verdict, names the runner class the comparison was made on, and
+  credits the excess in runner-minutes. The fix it hands over is re-key or narrow
+  the cache first and re-measure; removing the cache is the second option, and the
+  prompt states plainly that removing it makes the miss-path numbers what every run
+  pays. It never says "just delete it", and it never buys the saving by installing
+  less. It withholds — visibly, with a per-gate tally on every run — unless the job
+  declares exactly one cache followed by an install, at least three hit runs and
+  three miss runs are classified from their logs, every credited run is on the same
+  runner label, the hit path is slower by at least the larger of 5 seconds and
+  20% of the miss path, the cache hits
+  on at least a quarter of classified runs, and the job sits below the workflow's
+  slowest-but-one job. The cache line is read only inside the restore step's own
+  section of the log, so a monorepo's build tool printing "cache miss" while it
+  runs the tests can never be mistaken for this cache; a run whose log shows both
+  a hit and a miss in that section, in either order, is excluded, never
+  guessed. It credits no
+  wall-clock time. A cache on a job the audit cannot prove is safe to shrink is
+  measured on exactly the same evidence and reported with no number attached: one
+  line saying the cache was measured to cost more than it saves, how much per
+  cache hit, how many runs that came from, and why it is not credited — and that
+  line says the saving is on the merge wait only for the job that actually sets
+  it, on a workflow that can gate a pull request at all. It adds nothing to any
+  total, and the report's own self-check re-derives it from the same per-run
+  measurements it re-derives the credited findings from. Reading the logs is the
+  main new cost, and it is capped at eight runs of one job, two jobs per workflow
+  and twenty-four fetches across the whole repository, spent on the
+  longest-running cached jobs in the repository first; the report states both how
+  many log reads were planned and how many were made. The install step is
+  recognised by the command it runs rather than by the name the author gave it, so
+  the near-universal "Install dependencies" spelling is not missed while a step
+  merely *named* after an install is not priced as one, and a step that installs
+  and then does something else is left alone rather than charging the something
+  else to the cache. A cache miss is read in the `setup-` actions' own wording and
+  in `setup-uv`'s as well as the cache action's, so a job that caches through
+  `setup-node`, `setup-python` or `uv` can report. The cache's post-save step is
+  never assumed to have taken no time: a save that did not finish, or whose step
+  the audit cannot find in the run at all, withholds instead of quietly inflating
+  the number, and a restore-only cache — which has no save — says so. A sampled
+  run whose log was never fetched is counted as unread rather than as a run with
+  nothing to say, so a thin result never gets blamed on the repository, and a
+  probe wave that mostly failed says that instead of "this cache rarely misses".
+  A workflow none of whose probed logs came back is named as unevaluated rather
+  than letting an absent finding read as a clean one. A repo that acts on this finding will still be marked down by
+  ci-score's dependency-caching check, which reads configuration only; reconciling
+  the two is an open decision, not a behaviour either skill implements today.
+  (#106)
+  **What it holds back on, and how it counts caches** (2026-09-30): a job is held
+  back, and counted under its reason, when its input is ambiguous. That covers a
+  cache saved in a separate `actions/cache/save` step; a `${{ … }}` cache input;
+  an unrecognised command (`cd web && npm ci`) between the cache and the install;
+  an install of a different package manager than the cache; a cache whose path
+  names no known package store (a browser or build-output cache pays off in a
+  later step, outside what is measured); a second cache anywhere in the job,
+  including the ones `setup-go` (v4+) and `setup-uv` (v5+) turn on by default and
+  caching actions such as `Swatinem/rust-cache` and `setup-gradle`; a step whose
+  times cannot be read; and a run that did not succeed. `setup-node` v5+ turns on
+  a package-manager cache by itself when `package.json` names the package
+  manager, so the audit reads `package.json` the way each `setup-node` version
+  does (v5: `packageManager` naming npm, yarn or pnpm; v6+: `devEngines` or
+  `packageManager` naming npm; off when `package-manager-cache` is not `true`; an
+  empty `cache:` input behaves like no input) and counts that cache only when it
+  is on. `package.json` is read once per repository, and only when a job needs it
+  — the one gh call the pattern adds besides the logs. An action pinned to a
+  commit SHA is treated as an unknown version, never as a version number read
+  from the SHA's leading digits. A restore from a fallback key (`Cache hit for
+  restore-key:`, a restored key that differs from the step's own, or a new cache
+  saved after the restore) is neither path of the comparison: it is excluded from
+  both, but still counts in the hit share, so the minutes are priced on the share
+  of runs that took the exact-hit path. When runs the audit read had to be set
+  aside and too few were left to compare, the reason given is the set-aside runs,
+  not a thin sample. When the audit read a cache's logs and still could not
+  decide, the data-sources table says how many caches that happened to and the
+  most common reason, even on a report with nothing else to show. (#106)
+
+- **2026-09-25** — **A checkout that occasionally hangs is now reported as a
+  stalled fetch, with the two log lines that prove it — and with the retry that
+  caps it.** Some repositories check out in seconds on most runs and in minutes
+  on a few; until now the audit could only see that spread as variance and had
+  nothing to offer. New catalog pattern OPT80 reports it, but only when the slow
+  runs' own checkout logs show the transfer standing still — at least twenty
+  seconds during which the percentage transferred did not change, with the lines
+  on both sides of the pause quoted verbatim in the evidence. The bar is
+  deliberately narrow: a stall is progress that stopped, not progress that had
+  not started. A fetch that was merely slow, one that paused before any byte
+  moved, and one that paused while the server built the pack are all reported as
+  what they are — a large repository, which is a different lever — and never as
+  a stall. That matters twice over, because the fix recommended here would abort
+  a healthy fetch in each of those cases. Inferring a cause from a duration is
+  precisely why the older "slow setup step" pattern was cut.
+  The finding is also allowed on the workflow's slowest job, where it says in
+  plain words that the effect on the merge wait is measured but not credited in
+  this version, rather than being suppressed. The recommended
+  fix is ordered and honest — the low-speed abort and the retry with backoff
+  ship as one change, then a narrower checkout only where the job is known not
+  to read history — and it says plainly both that retry and abort cap the damage
+  rather than fix the network, and that the abort on its own would turn today's
+  slow-but-green runs red. A repository that already configures the abort, a
+  retry wrapper, or the equivalent `git config http.lowSpeedLimit` is told
+  nothing. The proof is read only from inside the checkout step's own time
+  window, so a later `git submodule` or `git lfs` step that prints the same
+  progress lines can never be quoted as a stalled checkout. Git writes its
+  progress as one long line that overwrites itself, and every update inside it is
+  read, so a fetch that kept moving is seen to have kept moving instead of
+  looking as though it stopped. A pause after the transfer already reached 100%
+  is the runner writing the download to disk, which no network timeout can help,
+  so it is never reported as a stall either. "The fix is already here" is read
+  narrowly and correctly: a retry wrapper counts only when it is wrapping the
+  checkout, not when it sits on some other step in the same job, and a setting
+  the repository has just *removed* never reads as one it applied. Where the
+  workflow's own files cannot be followed to the end — a shared action that is
+  missing, or one that refers back to itself — nothing is reported rather than
+  something guessed. Every reason a finding was held back is counted and named
+  separately, so "we looked and the fetch was fine" can never stand in for "we
+  never managed to look". The credited saving is only the amount the stall adds
+  to the average run, never the worst run and never the whole step, and no
+  wall-clock saving is claimed at all, because the typical run was never stalled.
+  Logs are downloaded only for the slow runs, and only after every cheaper check
+  has passed, so a repository with no such tail pays nothing for the new check.
+  (#105)
+
+- **2026-09-24** — **The "slow test suite re-loading the app" diagnosis is now a
+  catalogued, guarded lever (OPT78), and it no longer tells a repo to apply a
+  change it has already applied.** The audit already noticed a vitest long pole
+  that spends more time importing the module graph than running tests, and told
+  the coding agent to tune isolation, with no warning attached. That change can
+  break correctness silently (a test passing only because an earlier file left
+  state behind), and the audit said it even to repos that had already made it.
+  Now it is catalog pattern OPT78 with HIGH risk stamped on the pole's
+  drill-down. Its prompt carries an intent check, a mandatory guardrail (files
+  opt in to a separate shared project one reviewed list at a time, with explicit
+  teardown, and fake-timer files stay isolated) and a rollout that runs the
+  candidate files in both projects, shadow-style, before any file moves. The
+  lever is offered only when the repo's own vitest configuration is read in full
+  and shows no opt-out: every vitest config file (not only the default names,
+  and including one kept under `.config/`), the modules those configs merge in,
+  and the package scripts beside them. When that cannot be established the lever
+  is **withheld**, and the pole still names the measured import-bound split,
+  states why OPT78 was withheld, and tells the agent not to turn isolation off —
+  it is never left as a gap for an unguarded analysis. Withholding happens when
+  the repo already opts out, a config cannot be read (including a config whose
+  bytes are not UTF-8 text, which used to read as an empty, clean config), a
+  config takes its settings from a package the read cannot follow whatever that
+  package is called, the `isolate` value itself cannot be resolved, the search
+  could not cover the repo, the config reader failed, or the suite runs on a vm
+  pool. A config that merely *uses* a package — a plugin, a test environment, a
+  side-effect import — does not withhold it, so ordinary Cloudflare Workers,
+  Nuxt and Storybook setups still get the lever. An `isolate` value the read
+  cannot resolve now says exactly that instead of being reported as an opt-out
+  the repo does not have, and a reader that fails outright says so on stderr
+  rather than passing for a repo too large to search. The evidence quotes the
+  slowest run, the one the finding sizes, and the one fact read from the repo's
+  config is shown separately from the quoted log, never inside it. The detector
+  reads the summary line vitest 4.0.14 and later print; earlier releases (which
+  label the phase `collect`) and vitest 5 (which prints percentages) do not
+  match. The saving is deliberately not credited: the audit reports the measured
+  import share and says a benchmark is required. (#103)
+
+- **2026-09-24** — **A workflow that pays the same setup over and over, once per
+  small check, is now reported as the runner-minute lever it is.** Several small,
+  independent checks — lint, typecheck, a licence audit — each start a runner,
+  check out the repository and install dependencies before doing work no longer
+  than the setup took, so one commit pays that fixed setup once per check. The
+  audit previously had no way to see this: the closest existing pattern credits
+  per-job billing round-up for sub-minute legs of one matrix, and these jobs are
+  neither sub-minute nor matrix legs, so the waste was invisible no matter how
+  large it got.
+
+  The audit now measures each job's setup prefix from its real step timings, and
+  where at least three independent jobs on the same runner spend at least half
+  their time in **the same** prefix, it credits the setup payments a
+  consolidation would remove — a runner-minute saving only, never a speedup.
+  Sameness is measured, not assumed: checks that each spend the same amount of
+  time installing *different* toolchains, or that run the same-named step in a
+  different directory or against a different toolchain version, are grouped
+  separately and sized separately, because merging those would still have to run
+  every install and so removes far less than it appears to.
+
+  Whether the change could lengthen the wait for a pull request is decided
+  against the longest job that would still be there **afterwards** — the job that
+  actually sets the wait once the group is collapsed — and that job must itself
+  be one that runs in most of the sampled runs. The finding is withheld when
+  nothing outside the group is longer, and withheld when any job outside the
+  group waits on a member, since collapsing them would then delay everything
+  downstream. The fix it hands back says plainly that the collapsed tasks must
+  run concurrently inside the new job (run one after another they would cost the
+  sum, not the slowest), that consolidating renames the checks so branch
+  protection must be updated or the work silently stops gating merges, that
+  collapsing several checks into one trades away independently-red,
+  independently-re-runnable checks, and that the grouping should be confirmed
+  against the jobs' real toolchains before merging them.
+
+- **2026-09-21** — **One edit is reported as one saving.** A group of checks could
+  be claimed by both this lever and the older billing round-up lever and shown
+  twice, because the older one recognises a group by how its jobs are named rather
+  than by whether they are really a build matrix — so three ordinary checks named
+  like matrix legs tripped both. The repeated-setup lever now takes precedence for
+  any group both describe. The round-up minutes the other lever would have
+  reported are real and are not added in, so the total for that group is slightly
+  conservative; that is deliberate, since the two are measured in different units
+  and combining them would make neither trustworthy.
+
+- **2026-09-21** — **Two checks that set up the same way are still recognised as
+  the same when one of them has drifted.** Deciding whether a group of checks
+  re-pays the same setup compared the setup steps exactly as written, so one check
+  pinning an older version of a setup action, or passing one extra flag to its
+  install, split the group and silenced the finding. Real repositories drift like
+  that constantly, which made the lever close to unreportable in practice. Action
+  versions and command flags are no longer treated as differences; a different
+  toolchain, a different thing being installed, or an extra step still are.
+
+- **2026-09-21** — **The audit now recognises an unnamed dependency install as
+  setup.** The single shared definition of "this step is setup" keyed off the
+  step's name, and a step nobody named is shown by GitHub as the command it ran —
+  so `npm ci`, `pip install`, `bundle install` and their equivalents were read as
+  useful work rather than as the install they are. That made the largest part of a
+  typical setup prefix invisible to any measurement of it, on exactly the repos
+  least likely to have named their steps. The definition now also recognises
+  GitHub's rendering of an unnamed action step and the common install commands
+  themselves.
+
+- **2026-09-24** — **A second of timing noise no longer hides the repeated-setup
+  finding.** GitHub records how long each step took to the nearest second, so a
+  step that takes a fraction of a second is recorded as zero in one run and one
+  second in the next, on a workflow file that has not changed. The setup prefix
+  was read only from steps with a measurable duration, so that noise changed the
+  shape of the prefix, made a check look as though it set up differently from one
+  run to the next, and dropped it — taking the whole group with it. Two checks
+  whose boot time happened to land on different sides of a second were split from
+  each other permanently. The prefix's shape now comes from every step a job
+  declares and only its duration from the steps long enough to measure. On a
+  four-case sample of ordinary jitter the finding went from being reported in two
+  cases to all four. The same omission also hid a zero-second step that is *not*
+  setup, so a prefix with real work in the middle of it was reported as one
+  unbroken run of setup; that now ends the prefix as it should.
+
+- **2026-09-24** — **A run that reports no consolidations now says why.** The
+  check declines in around thirty places and returned the same empty answer every
+  time. Each decision is now recorded with the workflow, the jobs, the reason and
+  the numbers compared, and the results carry a count per reason, so a lever that
+  has stopped working is visible rather than mistaken for a clean repository.
+
+- **2026-09-24** — **A saving dropped so another could be reported once is now
+  disclosed.** When a consolidation and a billing round-up describe the same edit,
+  only the consolidation is reported. The round-up minutes that drop out are real
+  and nothing said they had gone. Each dropped finding is now recorded alongside
+  the results with what displaced it and which of its jobs the surviving finding
+  does not cover.
+
+- **2026-09-24** — **Two consolidations in one workflow no longer render as one
+  row.** A workflow can carry more than one group — a row of Node checks and a row
+  of Python checks are two separate edits — and they were folded into a single
+  entry that added both savings together while the copy-paste fix named only the
+  first group's jobs.
+
 - **2026-09-08** — **A fix that moves the slowest step out of a merge gate now
   says how to keep the gate.** The long-pole lever can hand back a fix that
   relocates the dominant step into another job, and until now nothing in the
@@ -328,6 +609,19 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-09-30** — **Five fix moves the catalog only half-covered are now in the
+  advice.** OPT28 gains "delete the checkout step if no step reads a file" and
+  the sparse / blobless checkout option (`filter: blob:none`, `sparse-checkout:`)
+  between a full clone and depth 1; OPT77 points at OPT73's base-image approach
+  for jobs that must stay separate; OPT25's sharded case notes that a file-granular
+  runner's imbalance is file size (split the largest files before adding shards; not for Playwright `fullyParallel`);
+  OPT14's swap table gains `tsc --noEmit` -> TypeScript 7 (native port, stable,
+  command still `tsc`; only the vendor's own speedup figure, with the
+  no-compiler-API and changed-defaults caveats), kept distinct from the
+  esbuild/swc anti-row. OPT28's delete-the-checkout advice lists the indirect
+  repo dependencies to rule out first. Catalog text only; no
+  detector or rendered-output change.
+
 - **2026-09-09** — **The planned before/after check can no longer claim a
   speedup it did not measure.** The approved (still unimplemented) post-fix
   verification methodology told the future implementation to stamp one universal
@@ -409,6 +703,25 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-09-29** — **The stalled-checkout pattern (OPT80) no longer misses a
+  stall, or invents one, in three cases.** A low-speed setting on some other
+  step, or a `git config` applied after the checkout had already run, no longer
+  counts as "the fix is already here" — neither can reach the checkout's fetch.
+  A checkout step whose name carries a matrix value (`Checkout ${{ matrix.os }}`)
+  is now matched by its rendered name, so its runs are measured instead of all
+  being dropped. And two progress lines at the same percentage whose object
+  count moved are read as a transfer that advanced, not one that stopped; the
+  report verifier checks the same. (#105)
+
+- **2026-09-24** — **A vitest drill-down no longer quotes another project's test
+  count.** When the run the finding sized printed a summary with a failure in it
+  (`Test Files  1 failed | 148 passed`) — which is exactly what a red or flaky
+  drill prints, and bimodal poles are deliberately drilled in their slow mode —
+  the report skipped that line and walked back into the *previous* project's
+  block, pairing a 149-file run with some other run's `12 passed`. The search is
+  now bounded to the sized run's own block and reads summaries with failures in
+  them; a run with no summary of its own quotes none at all. (#103)
+
 - **2026-09-16** — **`gh api` refuses to print a coloured response, and every
   CI job log is coloured.** Since `gh` learned to defend the terminal from
   hostile output it exits 1 on a response body containing terminal escape
@@ -435,6 +748,28 @@ unversioned and updates by reinstall from `main`.
   worker meets the rejection in the same instant, so an unmetered re-issue
   would have been a burst of up to pool-width calls that neither the pacing
   nor the accounting ever saw. (#99)
+- **2026-09-15** — **Recording a fixture now refuses a colliding name under the
+  lock, and writes the file atomically.** This only touches the maintainer-only,
+  opt-in record mode (`CI_SPEEDUP_GH_RECORD`); a normal audit never records and
+  replay behaviour is unchanged. Two defects. First, the fixture filename mapping
+  is lossy, so two different endpoints can target one file; the guard for that
+  promised to raise, but it read "is this file claimed?" under the client lock,
+  wrote the file outside it, and only then claimed the name — so two pooled
+  fetch workers colliding in the same wave both saw "unclaimed", both wrote, the
+  last writer won and nothing raised, leaving a corpus that replays one
+  endpoint's body under the other's name (valid-but-wrong JSON). The check and
+  the claim are now one critical section, the claim is taken before the write,
+  and the loser raises exactly as documented; re-recording the same endpoint
+  remains an idempotent overwrite. Second, the write truncated the file in
+  place, so an interrupted write (Ctrl-C, a timeout, a crash mid-body) left a
+  prefix that replays as valid-but-short JSON. The response is now written to a
+  temp file in the record directory and renamed into place, so a fixture is
+  either complete or absent, and the temp file is removed on every exit path the
+  interpreter runs (only a hard kill mid-write can leave one; it is dot-prefixed
+  and replay never reads it).
+  Red-first: the new two-thread collision test fails on the previous code with
+  both writers succeeding and nothing raised. (#100)
+
 - **2026-09-02** — **`continue-on-error: yes` is no longer reported as an
   advisory job.** GitHub Actions reads only `true` and `false` as booleans; the
   YAML library this scan uses also reads `yes`, `on` and `y` that way. A workflow
