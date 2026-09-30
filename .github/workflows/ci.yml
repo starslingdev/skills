@@ -67,7 +67,7 @@ jobs:
       # Node is required for the dogfood-loop JS test: tests/test_dogfood_retry_node.py runs
       # dogfood-retry.test.mjs under `node` and hard-fails in CI if node is missing.
       - name: Set up Node
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
 
@@ -105,7 +105,7 @@ jobs:
           python-version: "3.12"
 
       - name: Set up Node
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
 
