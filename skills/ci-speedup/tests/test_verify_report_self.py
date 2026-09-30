@@ -8780,6 +8780,18 @@ def test_cache_probe_check_says_so_when_it_cannot_read_the_findings(tmp_path):
     assert bad and "unreadable" in bad, (bad, note)
 
 
+def test_cache_probe_row_must_state_the_right_count_when_all_returned(tmp_path):
+    """Every probed log returned, but the cell names another number."""
+    vr = _load_verify_report()
+    row = "| cache hit/miss log probe | {} | Splitting a cached job's runs |"
+    bad, _ = vr._cache_probe_count_violation(
+        row.format("7 job log(s) read"), _cache_probe_doc(tmp_path, 8, 8))
+    assert bad and "8 log(s) actually read" in bad, bad
+    bad, _ = vr._cache_probe_count_violation(
+        row.format("8 job log(s) read"), _cache_probe_doc(tmp_path, 8, 8))
+    assert bad is None, bad
+
+
 def test_cache_probe_check_fails_closed_on_malformed_counts(tmp_path):
     """A probe count that is not an integer is not zero. Reading `"8"` (or a
     missing `returned`) as 0 let a report with no probe row pass a run that

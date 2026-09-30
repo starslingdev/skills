@@ -7658,6 +7658,19 @@ def test_data_sources_footer_declares_the_cache_comparison_log_probe():
         bp._data_sources_footer(doc4, "o/r"))
 
 
+def test_data_sources_cache_probe_row_states_what_the_budget_cut():
+    """When the repo-wide budget cut the plan, the row says how many reads were
+    planned beside how many were made — the comparison saw less of the
+    repository than its own selector asked for."""
+    doc = _doc_one_pole()
+    doc["data_sources"] = {**doc["data_sources"], "tiers_run": ["gh-timing"],
+                           "cache_probe_logs": {"probed": 24, "returned": 24,
+                                                "planned": 32, "budget": 24}}
+    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    assert "24 job log(s) read (24 of 32 planned)" in foot, foot
+    assert "(capped at 24 for the repository)" in foot, foot
+
+
 def test_uncredited_pole_cache_is_reported_even_though_it_is_not_sized():
     """The most valuable instance of a net-negative cache is the one on the
     workflow's SLOWEST job, because there the waste is on the merge wait rather

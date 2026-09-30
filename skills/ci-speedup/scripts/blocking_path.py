@@ -8074,20 +8074,17 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # a straddle is never silently dropped just because a shorter render path won the
         # short-circuit — else a post_only sample looks full / a disclosed_pre sample looks current.
         _deg_era_lines = _config_era_disclosure_lines(cp, captured_at)
-        # …and the same for a measured net-negative cache. `_render_static_only`
-        # above already returns a full report when there is one, so reaching here
-        # with uncredited rows means there was nothing else at all to say — which
-        # is precisely when dropping the line loses the only measurement the run
-        # made.
-        _deg_uncredited = _opt79_uncredited_block(doc)
-        if _deg_fileless_lines or _deg_era_lines or _deg_uncredited:
+        # A measured net-negative cache never reaches this arm:
+        # `_render_static_only` above returns a full report whenever
+        # `_opt79_uncredited_block(doc)` has anything to say.
+        if _deg_fileless_lines or _deg_era_lines:
             # `_strip_emdashes` at this early-return boundary mirrors the main render exit:
             # this path bypasses that terminal scrub, so without it the typographic dashes in the
             # shared disclosure prose would survive and trip verify_report's ASCII-hyphens-only
             # invariant on a real all-fileless degenerate repo.
             return _strip_emdashes("\n".join([
                 f"# {doc.get('repo', 'repo')} — why is the merge slow?", "",
-                *_deg_era_lines, *_deg_fileless_lines, *_deg_uncredited]))
+                *_deg_era_lines, *_deg_fileless_lines]))
         return "_No measured critical path in this findings JSON._"
     repo = doc.get("repo", "repo")
     catalog_url = _build_catalog_url(doc.get("skill_commit_sha"))

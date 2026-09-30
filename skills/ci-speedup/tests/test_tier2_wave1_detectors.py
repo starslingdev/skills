@@ -5155,6 +5155,121 @@ def test_opt79_uncredited_check_runs_in_the_report_self_check(tmp_path):
     assert "check_opt79_uncredited_rows_rederived(" in body
 
 
+# ---- one pinning test per detector gate nothing else reached ----
+
+def test_opt79_withholds_when_a_block_step_name_is_carried_twice():
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        _OPT79_NODE_CACHE, {"run": "npm ci"}, {"run": "npm ci"}))
+    assert block is None and gate == "step_display_name_is_ambiguous_within_the_job"
+
+
+def test_opt79_withholds_an_occurrence_that_times_one_step_twice():
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr[:2]:
+        steps = run_jobs[0]["steps"]
+        steps.append(dict(next(s for s in steps if s["name"] == "Run npm ci")))
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("step_measured_more_than_once_in_one_occurrence") == 2, w
+
+
+def test_opt79_withholds_when_the_restore_step_matched_no_occurrence():
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr:
+        for st in run_jobs[0]["steps"]:
+            if st["name"] == "Run actions/cache@v4":
+                st["name"] = "Restore node modules"
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert out == []
+    assert w.get("restore_step_never_measured_in_any_occurrence") == 1, w
+
+
+def test_opt79_re_checks_the_neutrality_margin_after_rounding():
+    """599.96s is strictly below a 600s floor, but the stamped p50 rounds to
+    600.0 and the certificate's margin to 0 — no certificate to ship."""
+    out, w = _opt79_withheld(crit=_opt79_crit(job_p50=599.96))
+    assert out == []
+    assert w.get("neutrality_margin_not_positive") == 1, w
+
+
+def test_opt79_withholds_minutes_that_round_to_zero():
+    jpr, logs = _opt79_sample()
+    jpr = jpr + [[_span_job("integration", 600.0)] for _ in range(92)]
+    out, w = _opt79_withheld(jpr=jpr, logs=logs, monthly=1)
+    assert out == []
+    assert w.get("credited_runner_minutes_round_to_zero") == 1, w
+
+
+def test_opt79_withholds_a_workflow_with_no_cluster_floor():
+    out, w = _opt79_withheld(crit=_opt79_crit(floor=0.0))
+    assert out == [] and w.get("workflow_has_no_cluster_floor") == 1, w
+
+
+def test_opt79_withholds_a_job_with_an_empty_step_list():
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_wf(steps=[]))
+    assert block is None and gate == "job_has_no_yaml_steps"
+
+
+def test_opt79_withholds_a_job_name_two_yaml_jobs_render_as():
+    wf = {"on": {"pull_request": {}},
+          "jobs": {"a": {"name": _OPT79_JOB, "steps": _opt79_wf()["jobs"][
+                        _OPT79_JOB]["steps"]},
+                   "b": {"name": _OPT79_JOB, "steps": [{"run": "npm test"}]}}}
+    jpr, logs = _opt79_sample()
+    out, w = _opt79_withheld(jpr=jpr, logs=logs, wf=wf)
+    assert out == []
+    # `unit` (two YAML jobs render as it) and `integration` (none does)
+    assert w.get("job_name_resolves_to_no_single_yaml_job") == 2, w
+
+
+def test_opt79_caps_the_candidates_per_workflow_and_counts_the_rest():
+    names = ["c1", "c2", "c3"]
+    wf = {"on": {"pull_request": {}},
+          "jobs": {n: {"runs-on": "ubuntu-latest",
+                       "steps": _opt79_wf()["jobs"][_OPT79_JOB]["steps"]}
+                   for n in names}}
+    crit = _opt79_crit()
+    crit["job_p50"] = {"c1": 40.0, "c2": 30.0, "c3": 20.0, "integration": 600.0,
+                       "e2e": 660.0}
+    crit["job_runner"] = {n: "ubuntu-latest" for n in crit["job_p50"]}
+    jpr = [[dict(_opt79_job(900 + 10 * i + k, restore=1, install=7, post=4),
+                 name=n) for k, n in enumerate(names)] for i in range(3)]
+    w: dict = {}
+    got = cr._opt79_candidates("ci.yml", jpr, crit, wf, withheld=w)
+    assert [n for n, _b in got] == ["c1", "c2"]
+    assert w.get("beyond_the_per_workflow_candidate_log_budget") == 1, w
+
+
+@pytest.mark.parametrize("value", ["no", "off", "false", ""])
+def test_opt79_reads_every_off_spelling_of_a_setup_cache_input(value):
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        {"uses": "actions/setup-node@v4", "with": {"cache": value}},
+        {"run": "npm ci"}))
+    assert gate == "job_declares_no_cache_restore_step", (value, gate)
+
+
+def test_opt79_reads_a_line_matching_both_matchers_as_both():
+    status, _l, _g = cr._opt79_classify_log(
+        _opt79_log("Cache restored from key: k (cache miss on the fallback)"),
+        {"restore": "Run actions/cache@v4", "cache_ref": "actions/cache@v4"})
+    assert status == "both", status
+
+
+def test_opt79_reads_past_an_inner_group_inside_the_restore_step():
+    """An action's own inner `##[group]` (not a `Run `/`Post ` header) is part
+    of the restore step; the verdict printed after it is still this cache's."""
+    log = "\n".join([
+        "2026-06-01T00:00:01.0Z ##[group]Run actions/cache@v4",
+        "2026-06-01T00:00:01.1Z ##[endgroup]",
+        "2026-06-01T00:00:01.2Z ##[group]Downloading cache archive",
+        "2026-06-01T00:00:01.3Z Received 100 of 100 (100.0%)",
+        "2026-06-01T00:00:01.4Z ##[endgroup]",
+        f"2026-06-01T00:00:01.5Z {_OPT79_HIT_LINE}",
+        "2026-06-01T00:00:02.0Z ##[group]Run npm ci"]) + "\n"
+    status, _l, group = cr._opt79_classify_log(
+        log, {"restore": "Run actions/cache@v4", "cache_ref": "actions/cache@v4"})
+    assert (status, group) == ("hit", "Run actions/cache@v4")
+
+
 # ============ OPT80 checkout stalls on the tail ============
 #
 # The motivating shape: `actions/checkout` is a handful of seconds on a typical
