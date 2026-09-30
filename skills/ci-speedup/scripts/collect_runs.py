@@ -15204,12 +15204,25 @@ _OPT79_SETUP_CACHE_INPUTS: dict[str, tuple[str, int | None]] = {
     "astral-sh/setup-uv": ("enable-cache", 5),
     "ruby/setup-ruby": ("bundler-cache", None),
 }
-# `actions/setup-node` from v5 also caches with NO `cache:` input when
-# `package.json` names npm as its package manager (`package-manager-cache`,
-# default `true`). Whether it does depends on a file this parse does not read,
-# so such a step is a POSSIBLE cache: it counts toward the more-than-one-cache
-# gate and is never chosen as the cache being priced.
+# `actions/setup-node` from v5 also caches with NO `cache:` input when the
+# `package.json` at `$GITHUB_WORKSPACE` names the package manager, unless
+# `package-manager-cache` (default `true`) is set to anything but `true` —
+# setup-node reads it as `(input || 'true').toUpperCase() === 'TRUE'`. The field
+# rule differs by major, read from each tag's `src/main.ts`
+# (`getNameFromPackageManagerField`):
+#   * v5.0.0 — top-level `packageManager` only, `^(?:\^)?(npm|yarn|pnpm)@`, so
+#     npm, yarn AND pnpm auto-cache, and a bare `npm` (no `@`) does not.
+#   * v6+    — `devEngines.packageManager` (an object or an array of objects,
+#     by `.name`) first, then top-level `packageManager`, each matched against
+#     `^(\^)?npm(@.*)?$`: npm ONLY.
+# setup-node swallows a missing or invalid file as "no manager" (off). OPT79
+# does not: it reads the default branch's (or the checkout's) copy, not the
+# runs' own, so a file it cannot read or parse is UNKNOWN and fails closed
+# (`setup_action_cache_default_depends_on_repository_files`). Read once per repo
+# by `_opt79_resolve_package_json`, and only when some job needs it.
 _OPT79_SETUP_NODE_AUTO_CACHE_FROM_MAJOR = 5
+_OPT79_SETUP_NODE_V5_PM_RE = _re.compile(r"^(?:\^)?(npm|yarn|pnpm)@")
+_OPT79_SETUP_NODE_NPM_RE = _re.compile(r"(\^)?npm(@.*)?")   # fullmatch = JS ^…$
 _OPT79_OFF_VALUES = ("false", "no", "off")
 # The package-manager ECOSYSTEM of an install command, of a `setup-*` action and
 # of an `actions/cache` path. A cache and the install it is paired with must
@@ -15395,13 +15408,53 @@ def _opt79_run_is_only_installs(step: dict[str, Any]) -> bool | None:
     return all(bool(_OPT79_INSTALL_RE.match(ln)) for ln in lines)
 
 
-def _opt79_setup_cache_state(uses: str, with_in: dict[str, Any]) -> str:
+def _opt79_setup_node_auto_cache(major: int | None, package_json: Any) -> str:
+    """setup-node's AUTOMATIC cache for one `package.json`: `on`, `off`, or
+    `maybe` when `package_json` is not a parsed object (unread, unreadable) or
+    when the ref is not a `vN` tag and the v5 and v6+ rules disagree on it.
+
+    Mirrors `getNameFromPackageManagerField` on each tag (see the constants
+    above); a value of the wrong type is skipped exactly as the JS skips it."""
+    if not isinstance(package_json, dict):
+        return "maybe"
+
+    def _v5() -> bool:
+        pm = package_json.get("packageManager")
+        return isinstance(pm, str) and bool(_OPT79_SETUP_NODE_V5_PM_RE.match(pm))
+
+    def _v6() -> bool:
+        dev = package_json.get("devEngines")
+        dev_pm = dev.get("packageManager") if isinstance(dev, dict) else None
+        items = (dev_pm if isinstance(dev_pm, list) else [dev_pm]) if dev_pm else []
+        for obj in items:
+            nm = obj.get("name") if isinstance(obj, dict) else None
+            if isinstance(nm, str) and _OPT79_SETUP_NODE_NPM_RE.fullmatch(nm):
+                return True
+        pm = package_json.get("packageManager")
+        return isinstance(pm, str) and bool(_OPT79_SETUP_NODE_NPM_RE.fullmatch(pm))
+
+    if major is None:
+        # A SHA or a branch: the tag it points at is unknown. Decided only when
+        # both rules agree, never by picking one.
+        a, b = _v5(), _v6()
+        return ("on" if a else "off") if a == b else "maybe"
+    if major == _OPT79_SETUP_NODE_AUTO_CACHE_FROM_MAJOR:
+        return "on" if _v5() else "off"
+    return "on" if _v6() else "off"
+
+
+def _opt79_setup_cache_state(uses: str, with_in: dict[str, Any],
+                             package_json: Any = None) -> str:
     """Whether a `setup-*` step restores a cache: `on`, `off`, `maybe` (it may,
-    depending on a repository file this parse does not read) or `expr` (its
-    cache input is an unevaluated `${{ … }}` expression).
+    depending on a repository file that was not read or could not be read) or
+    `expr` (its cache input is an unevaluated `${{ … }}` expression).
 
     An input that is SET decides it; an input that is absent falls back to the
-    action's own default (`_OPT79_SETUP_CACHE_INPUTS`), never to "off"."""
+    action's own default (`_OPT79_SETUP_CACHE_INPUTS`), never to "off". For
+    `actions/setup-node` v5+ with no `cache:` input the default depends on
+    `package_json` — the PARSED repo-root file, or None when it is unknown or
+    is not the file this job's setup-node reads (`_opt79_cache_block` decides
+    that)."""
     action, _, ref = uses.partition("@")
     action = action.strip().lower()
     m = _re.match(r"v?(\d+)", ref.strip())
@@ -15422,10 +15475,28 @@ def _opt79_setup_cache_state(uses: str, with_in: dict[str, Any]) -> str:
         pmc_val = "" if pmc is None else str(pmc).strip()
         if "${{" in pmc_val:
             return "expr"
-        if pmc_val.lower() in _OPT79_OFF_VALUES:
+        # `(input || 'true').toUpperCase() === 'TRUE'`: empty is on, `true` is
+        # on, and EVERY other value (`false`, `no`, `0`, …) is off.
+        if pmc_val and pmc_val.upper() != "TRUE":
             return "off"
-        return "maybe"
+        return _opt79_setup_node_auto_cache(major, package_json)
     return "off"
+
+
+def _opt79_checkout_state(state: str, step: dict[str, Any]) -> str:
+    """Where `$GITHUB_WORKSPACE` stands after `step`, as far as setup-node's
+    `package.json` read is concerned: `none` (nothing checked out yet), `root`
+    (this repository checked out at the workspace root) or `moved` (checked out
+    into a sub-path, or another repository — sticky, because the root file is
+    then not the one OPT79 read)."""
+    uses = str(step.get("uses") or "").strip().lower()
+    if not uses.startswith("actions/checkout@") and uses != "actions/checkout":
+        return state
+    with_in = step.get("with") if isinstance(step.get("with"), dict) else {}
+    path = str((with_in or {}).get("path") or "").strip()
+    if (with_in or {}).get("repository") or path not in ("", ".", "./"):
+        return "moved"
+    return "moved" if state == "moved" else "root"
 
 
 def _opt79_cache_ecosystem(step: dict[str, Any]) -> str | None:
@@ -15454,7 +15525,8 @@ def _opt79_install_ecosystem(cmd: str | None) -> str | None:
     return None
 
 
-def _opt79_cache_block(key: str, wf_doc: dict[str, Any]
+def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
+                       package_json: Any = None,
                        ) -> tuple[dict[str, Any] | None, str]:
     """`({restore, install, post, cache_ref}, "")` for a job whose YAML declares
     ONE cache-restore step followed by an install step, else `(None, gate)`.
@@ -15481,7 +15553,11 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any]
         default-on and possible (`maybe`) setup caches. The log's hit line may
         belong to either, so one verdict cannot price the block. Never guessed.
       * `setup_action_cache_default_depends_on_repository_files` — the only
-        cache is a `setup-node` default that `package.json` decides.
+        cache is a `setup-node` default that `package.json` decides, and that
+        file is unknown to OPT79: `package_json` is None (not read, missing,
+        invalid), the job's workspace root is not this repository's root (no
+        checkout before the setup step, a checkout into a `path:`, or of another
+        `repository:`), or a SHA ref whose v5 and v6+ rules disagree.
       * `cache_step_has_no_renderable_name` — nothing to match a duration by.
       * `install_step_also_runs_non_install_commands` — the install step's
         `run:` block runs more than the install.
@@ -15498,6 +15574,12 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any]
       * `step_display_name_is_ambiguous_within_the_job` — the restore or install
         display name is carried by two declared steps, so its duration cannot be
         attributed.
+
+    `package_json` is the parsed repo-root `package.json`
+    (`_opt79_resolve_package_json`), or None when it is unknown. With it,
+    setup-node's automatic cache counts exactly when setup-node would turn it on
+    (a real cache, priced like any other and stamped `setup_node_auto_cache`)
+    and not at all when it would not.
     """
     jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
     spec = jobs.get(key) if isinstance(jobs, dict) else None
@@ -15507,11 +15589,14 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any]
 
     displays: list[str | None] = [_opt79_yaml_step_display(s) for s in steps]
     cache_idx: list[int] = []
+    auto_idx: set[int] = set()
     possible = 0
     cache_ref = ""
+    workspace = "none"
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
             continue
+        workspace = _opt79_checkout_state(workspace, step)
         uses = str(step.get("uses") or "").strip()
         if not uses:
             continue
@@ -15523,12 +15608,19 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any]
             continue
         if _OPT79_SETUP_USES_RE.match(uses):
             with_in = step.get("with") if isinstance(step.get("with"), dict) else {}
-            state = _opt79_setup_cache_state(uses, with_in or {})
+            # setup-node reads `$GITHUB_WORKSPACE/package.json`; the file OPT79
+            # read is that one only when this repository sits at the root.
+            state = _opt79_setup_cache_state(
+                uses, with_in or {},
+                package_json if workspace == "root" else None)
             if state == "expr":
                 return None, "setup_cache_input_is_an_unevaluated_expression"
             if state == "on":
                 cache_idx.append(i)
                 cache_ref = uses
+                if (uses.partition("@")[0].strip().lower() == "actions/setup-node"
+                        and (with_in or {}).get("cache") is None):
+                    auto_idx.add(i)
             elif state == "maybe":
                 possible += 1
     if len(cache_idx) + possible > 1:
@@ -15586,8 +15678,13 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any]
     for label in (restore, install):
         if named.count(label) > 1:
             return None, "step_display_name_is_ambiguous_within_the_job"
-    return ({"restore": restore, "install": install, "post": post,
-             "cache_ref": cache_ref}, "")
+    out: dict[str, Any] = {"restore": restore, "install": install, "post": post,
+                           "cache_ref": cache_ref}
+    if ci in auto_idx:
+        # setup-node's AUTOMATIC cache: there is no `cache:` input to remove, so
+        # the recipe has to name the switch that turns it off.
+        out["setup_node_auto_cache"] = True
+    return out, ""
 
 
 def _opt79_block_durations(job: dict[str, Any], block: dict[str, Any]
@@ -15765,6 +15862,7 @@ def _opt79_candidates(
     crit: dict[str, Any],
     wf_doc: dict[str, Any] | None,
     withheld: dict[str, int] | None = None,
+    package_json: Any = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     """The jobs worth spending a log probe on, most expensive first — the ONE
     selector shared by the log plan and the detector, so the two can never
@@ -15851,7 +15949,7 @@ def _opt79_candidates(
         # against a runner or floor gate would bury the counts that matter under
         # the whole workflow's job list — the tally exists to say why a REAL
         # candidate was withheld.
-        block, gate = _opt79_cache_block(str(key), doc)
+        block, gate = _opt79_cache_block(str(key), doc, package_json)
         if block is None:
             _no(gate, job=name)
             continue
@@ -15901,6 +15999,7 @@ def _opt79_log_plan(
     jobs_per_run: list[list[dict[str, Any]]],
     crit: dict[str, Any],
     wf_doc: dict[str, Any] | None,
+    package_json: Any = None,
 ) -> list[tuple[float, str, dict[str, Any]]]:
     """The job occurrences whose logs OPT79 needs, as
     `(candidate job p50, workflow file, job dict)` so the caller can plan the
@@ -15914,7 +16013,8 @@ def _opt79_log_plan(
     handing runs over oldest-first cannot silently change which occurrences the
     comparison is built from."""
     out: list[tuple[float, str, dict[str, Any]]] = []
-    for name, block in _opt79_candidates(wf_path, jobs_per_run, crit, wf_doc):
+    for name, block in _opt79_candidates(wf_path, jobs_per_run, crit, wf_doc,
+                                         package_json=package_json):
         p50 = float(block.get("job_p50_s") or 0.0)
         picked = 0
         for run_jobs in jobs_per_run:
@@ -15964,6 +16064,81 @@ def _opt79_trim_repo_probe_plan(
     return kept
 
 
+def _opt79_package_json_needed(wf_docs: dict[str, Any]) -> bool:
+    """True when some job's cache count turns on setup-node's automatic cache —
+    a setup-node v5+ step with no `cache:` input and `package-manager-cache` not
+    switched off, in a job whose workspace root is this repository. Every other
+    job's cache count is already decided by its YAML, so reading `package.json`
+    for it would be a gh call that changes nothing."""
+    for doc in (wf_docs or {}).values():
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        for spec in (jobs.values() if isinstance(jobs, dict) else ()):
+            steps = spec.get("steps") if isinstance(spec, dict) else None
+            workspace = "none"
+            for step in (steps if isinstance(steps, list) else ()):
+                if not isinstance(step, dict):
+                    continue
+                workspace = _opt79_checkout_state(workspace, step)
+                uses = str(step.get("uses") or "").strip()
+                if workspace != "root" or not _OPT79_SETUP_USES_RE.match(uses):
+                    continue
+                with_in = step.get("with") if isinstance(step.get("with"), dict) else {}
+                if _opt79_setup_cache_state(uses, with_in or {}) == "maybe":
+                    return True
+    return False
+
+
+def _opt79_resolve_package_json(
+    client: Any, repo: str, wf_docs: dict[str, Any], *, root: "Path | None",
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """`(parsed repo-root package.json | None, provenance stamp)` for setup-node's
+    automatic-cache rule — read ONCE per repo, and only when
+    `_opt79_package_json_needed` says a job's cache count depends on it.
+
+    Read the way workflow YAML is (`_fetch_workflow_docs`): from the verified
+    local checkout when `root` has a usable copy, else ONE `GET /contents/
+    package.json` (the default branch's HEAD). Missing, a 404, a failed fetch,
+    invalid JSON or JSON that is not an object all return None, and every job
+    that needed it then fails closed with
+    `setup_action_cache_default_depends_on_repository_files` — counted in the
+    per-gate tally like any other withhold."""
+    stamp: dict[str, Any] = {"needed": False, "source": None, "readable": False}
+    if not _opt79_package_json_needed(wf_docs):
+        return None, stamp
+    stamp["needed"] = True
+
+    def _parse(text: str | None, source: str) -> dict[str, Any] | None:
+        if text is None:
+            return None
+        try:
+            parsed = json.loads(text)
+        except ValueError as e:
+            logger.debug("OPT79: package.json from the %s is not JSON: %s", source, e)
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    parsed = _parse(_read_local_workflow(root, "package.json"), "checkout")
+    if parsed is not None:
+        stamp.update(source="checkout", readable=True)
+        return parsed, stamp
+    doc = client.json(f"repos/{repo}/contents/package.json", allow_missing=True)
+    content = doc.get("content") if isinstance(doc, dict) else None
+    text = None
+    if content:
+        try:
+            text = base64.b64decode(content).decode("utf-8", "replace")
+        except ValueError as e:
+            logger.debug("OPT79: could not decode package.json: %s", e)
+    parsed = _parse(text, "contents API")
+    stamp["source"] = "contents API"
+    if parsed is None:
+        logger.debug("OPT79: package.json unreadable; setup-node automatic caches "
+                     "stay undecided and fail closed")
+        return None, stamp
+    stamp["readable"] = True
+    return parsed, stamp
+
+
 def _opt79_probe_logs(
     client: Any,
     repo: str,
@@ -15971,6 +16146,7 @@ def _opt79_probe_logs(
     crit_by_wf: dict[str, dict[str, Any]],
     wf_docs: dict[str, dict[str, Any]],
     withheld: dict[str, int],
+    package_json: Any = None,
 ) -> tuple[list[tuple[float, str, dict[str, Any]]], dict[Any, str], dict[str, int]]:
     """Plan, trim and fetch OPT79's cache-probe logs in ONE wave:
     `(kept plan, {job id: log}, the data_sources stamp)`.
@@ -15987,7 +16163,8 @@ def _opt79_probe_logs(
         if not jpr:
             continue
         plan.extend(_opt79_log_plan(
-            wf_path, jpr, crit_by_wf[wf_path], wf_docs.get(wf_path, {})))
+            wf_path, jpr, crit_by_wf[wf_path], wf_docs.get(wf_path, {}),
+            package_json=package_json))
     kept = _opt79_trim_repo_probe_plan(plan, withheld=withheld)
     probe_jobs = [j for _p, _wf, j in kept]
     _prefetch_text(client, [_job_log_endpoint(repo, j["id"]) for j in probe_jobs])
@@ -16093,6 +16270,7 @@ def _detect_opt79_net_negative_cache(
     uncredited: list[dict[str, Any]] | None = None,
     is_pr: bool = False,
     withheld_candidates: list[dict[str, Any]] | None = None,
+    package_json: Any = None,
 ) -> list[dict[str, Any]]:
     """A cache that costs more than it saves (catalog OPT79) — measured.
 
@@ -16147,7 +16325,8 @@ def _detect_opt79_net_negative_cache(
         return []
     logs = logs_by_job_id or {}
     candidates = _opt79_candidates(
-        wf_path, jobs_per_run, crit, wf_doc, withheld=withheld)
+        wf_path, jobs_per_run, crit, wf_doc, withheld=withheld,
+        package_json=package_json)
     if not candidates:
         return []
 
@@ -16370,6 +16549,15 @@ def _detect_opt79_net_negative_cache(
 
         ref = str(block.get("cache_ref") or "the cache step")
         _post_txt = " + its post step" if block.get("post") else ""
+        # setup-node's AUTOMATIC cache has no `cache:` input to delete: it is on
+        # because package.json names the package manager, and the switch that
+        # turns it off is `package-manager-cache: false` on that step.
+        _auto_txt = (
+            f" This cache is `{ref}`'s AUTOMATIC package-manager cache, switched "
+            "on by the `packageManager` / `devEngines.packageManager` field in "
+            "package.json with no `cache:` input; removing it means setting "
+            "`package-manager-cache: false` on that step, not deleting a step."
+            if block.get("setup_node_auto_cache") else "")
         evidence = (
             f"On `{name}` (`{declared}`), the cache block — `{block['restore']}` "
             f"+ `{block['install']}`{_post_txt} — measured a p50 of "
@@ -16412,7 +16600,7 @@ def _detect_opt79_net_negative_cache(
                 "network or disk flips it, so re-measure before applying the same "
                 "conclusion to another job or another runner. Never drop the install "
                 "itself or narrow what it installs to make the number smaller — that "
-                "reduces what CI verifies."))
+                "reduces what CI verifies." + _auto_txt))
         f = _new_finding(
             "OPT79", "MEDIUM", title, wf_path, name, evidence,
             "cache-costs-more-than-it-saves",
@@ -18814,8 +19002,17 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # is planned here and fanned out in ONE prefetch wave rather than one
     # round-trip per job inside the detector loop.
     _opt79_gates = findings_doc.setdefault("opt79_withheld_by_gate", {})
+    # setup-node v5+ caches automatically when package.json names the package
+    # manager, so whether such a job has one cache or two is a fact about that
+    # file. Read ONCE for the repo — and only when a sampled job's cache count
+    # actually depends on it — so the plan and the detector share one answer.
+    _opt79_pkg, _opt79_pkg_stamp = _opt79_resolve_package_json(
+        client, repo,
+        {wf: _wf_docs.get(wf, {}) for wf, jpr in jobs_per_run_by_wf.items() if jpr},
+        root=root)
     _opt79_kept, opt79_logs, _opt79_probe_stamp = _opt79_probe_logs(
-        client, repo, jobs_per_run_by_wf, crit_by_wf, _wf_docs, _opt79_gates)
+        client, repo, jobs_per_run_by_wf, crit_by_wf, _wf_docs, _opt79_gates,
+        package_json=_opt79_pkg)
     # A workflow whose probes ALL came back empty (expired retention, a 404
     # wave, a token without the scope) was not evaluated, and a detector that
     # returned nothing reads exactly like a detector that found nothing. Judged
@@ -18891,7 +19088,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             is_pr=is_pr,
             # Candidates whose logs were probed and then withheld: rendered as
             # one Data sources line so "could not tell" never reads as clean.
-            withheld_candidates=findings_doc.setdefault(_OPT79_WITHHELD_DOC_KEY, []))
+            withheld_candidates=findings_doc.setdefault(_OPT79_WITHHELD_DOC_KEY, []),
+            # The repo-root package.json, read once above: decides whether a
+            # setup-node v5+ job's automatic cache is really on.
+            package_json=_opt79_pkg)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
@@ -19448,6 +19648,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # passed, so without this the provenance table could say no job logs
         # were read in a report that quotes them.
         "cache_probe_logs": _opt79_probe_stamp,
+        # Whether the cache-cost comparison needed the repo-root package.json
+        # (setup-node v5+'s automatic cache), where it came from, and whether it
+        # parsed. `readable: false` means every job that needed it was withheld
+        # under `setup_action_cache_default_depends_on_repository_files`.
+        "setup_node_package_json": _opt79_pkg_stamp,
         # Where each workflow's YAML was PARSED from. The two sources can disagree (the
         # checkout is what the report stamps as audited; `GET /contents/` is the DEFAULT
         # BRANCH's HEAD), so which one fed the detectors is a fact about the report, not

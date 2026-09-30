@@ -4859,6 +4859,201 @@ def test_opt79_counts_caches_that_setup_actions_turn_on_by_default():
     assert gate == "job_declares_more_than_one_cache_restore_step", gate
 
 
+# ---- setup-node's AUTOMATIC package-manager cache, decided by package.json ----
+# actions/setup-node v5+ caches with no `cache:` input when the repo-root
+# `package.json` names the package manager (`package-manager-cache`, default
+# true). v5.0.0 reads the top-level `packageManager` for npm / yarn / pnpm
+# (`^(?:\^)?(npm|yarn|pnpm)@`); v6+ reads `devEngines.packageManager` then
+# `packageManager` for npm ONLY (`^(\^)?npm(@.*)?$`). Both read
+# `$GITHUB_WORKSPACE/package.json`. OPT79 reads the same file the same way and
+# counts that cache only when it is really on.
+
+_OPT79_CHECKOUT = {"uses": "actions/checkout@v4"}
+
+
+def test_opt79_counts_setup_node_s_automatic_cache_when_package_json_turns_it_on():
+    npm = {"packageManager": "npm@10.8.2"}
+    # the only cache: it IS the cache OPT79 prices
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        _OPT79_CHECKOUT, {"uses": "actions/setup-node@v5"}, {"run": "npm ci"}),
+        package_json=npm)
+    assert gate == "" and block["cache_ref"] == "actions/setup-node@v5", (block, gate)
+    assert block["restore"] == "Run actions/setup-node@v5"
+    assert block["post"] == "Post Run actions/setup-node@v5"
+    assert block.get("setup_node_auto_cache") is True, block
+    # beside an explicit cache it is a real SECOND cache: the one-cache rule applies
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        _OPT79_CHECKOUT, {"uses": "actions/setup-node@v5"}, _OPT79_NODE_CACHE,
+        {"run": "npm ci"}), package_json=npm)
+    assert gate == "job_declares_more_than_one_cache_restore_step", gate
+    # v6+: `devEngines.packageManager` (object or array) turns it on too
+    for pj in ({"devEngines": {"packageManager": {"name": "npm"}}},
+               {"devEngines": {"packageManager": [{"name": "npm", "version": "^10"}]}},
+               {"packageManager": "npm"}):
+        block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+            _OPT79_CHECKOUT, {"uses": "actions/setup-node@v6"}, {"run": "npm ci"}),
+            package_json=pj)
+        assert gate == "" and block["cache_ref"] == "actions/setup-node@v6", (pj, gate)
+    # v5.0.0 also auto-caches pnpm and yarn (v6 dropped both)
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        _OPT79_CHECKOUT, {"uses": "actions/setup-node@v5"}, {"run": "pnpm install"}),
+        package_json={"packageManager": "pnpm@9.1.0"})
+    assert gate == "" and block["cache_ref"] == "actions/setup-node@v5", gate
+
+
+def test_opt79_measures_setup_node_s_automatic_cache_from_its_own_log_lines():
+    """End to end through the detector: the automatic cache prints setup-node's
+    own hit / miss wording, is priced like any other cache, and the recipe says
+    how to switch THIS cache off (it has no `cache:` input to remove)."""
+    jpr, logs = _opt79_sample(
+        miss_line="npm cache is not found",
+        hit_line="Cache restored from key: node-cache-Linux-x64-npm-abc123",
+        group="Run actions/setup-node@v5")
+    for run_jobs in jpr:
+        for st in run_jobs[0]["steps"]:
+            st["name"] = st["name"].replace("actions/cache@v4", "actions/setup-node@v5")
+    wf = _opt79_wf(steps=[_OPT79_CHECKOUT, {"uses": "actions/setup-node@v5"},
+                          {"run": "npm ci"}, {"run": "npm test"}])
+    withheld: dict = {}
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), wf, 100, 0, logs_by_job_id=logs,
+        withheld=withheld, package_json={"packageManager": "npm@10.8.2"})
+    assert len(out) == 1, withheld
+    cn = out[0]["cache_net_negative"]
+    assert cn["hits"] == 4 and cn["misses"] == 4
+    assert cn["restore_step"] == "Run actions/setup-node@v5"
+    assert "package-manager-cache: false" in out[0]["measured_evidence"]["note"]
+    # the plan agrees with the detector: the same job's logs are fetched
+    plan = cr._opt79_log_plan("ci.yml", jpr, _opt79_crit(), wf,
+                              package_json={"packageManager": "npm@10.8.2"})
+    assert len(plan) == cr._OPT79_LOG_PROBE_MAX
+
+
+def test_opt79_ignores_setup_node_s_automatic_cache_when_package_json_turns_it_off():
+    """Definitely off → not a cache. A job with setup-node v5 and its OWN
+    `actions/cache` used to be withheld as a possible two-cache job, silencing
+    OPT79 on the commonest Node job shape there is."""
+    steps = (_OPT79_CHECKOUT, {"uses": "actions/setup-node@v5"}, _OPT79_NODE_CACHE,
+             {"run": "npm ci"})
+    for ref, pj in (("v5", {}),                                  # no field at all
+                    ("v5", {"packageManager": "bun@1.1.0"}),     # not a manager it caches
+                    ("v5", {"packageManager": "npm"}),           # v5 needs `@`
+                    ("v6", {"packageManager": "pnpm@9.1.0"}),    # v6+: npm only
+                    ("v6", {"devEngines": {"packageManager": {"name": "yarn"}}}),
+                    ("v6", {"devEngines": {"packageManager": "npm"}})):  # not an object
+        s = list(steps)
+        s[1] = {"uses": f"actions/setup-node@{ref}"}
+        block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(*s),
+                                            package_json=pj)
+        assert gate == "" and block["cache_ref"] == "actions/cache@v4", (ref, pj, gate)
+    # `package-manager-cache` is ON only for 'true' (setup-node:
+    # `(input || 'true').toUpperCase() === 'TRUE'`), so any other value is off
+    for pmc in ("false", False, "0", "disabled"):
+        block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+            _OPT79_CHECKOUT,
+            {"uses": "actions/setup-node@v5", "with": {"package-manager-cache": pmc}},
+            _OPT79_NODE_CACHE, {"run": "npm ci"}))
+        assert gate == "" and block["cache_ref"] == "actions/cache@v4", (pmc, gate)
+    # End to end: the default sample (an `actions/cache` job) is MEASURED when
+    # the job also runs setup-node v5 and package.json turns its cache off.
+    wf = _opt79_wf(steps=[_OPT79_CHECKOUT, {"uses": "actions/setup-node@v5"},
+                          dict(_OPT79_NODE_CACHE), {"run": "npm ci"},
+                          {"run": "npm test"}])
+    jpr, logs = _opt79_sample()
+    withheld: dict = {}
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), wf, 100, 0, logs_by_job_id=logs,
+        withheld=withheld, package_json={"name": "app"})
+    assert len(out) == 1, withheld
+    assert out[0]["cache_net_negative"]["restore_step"] == "Run actions/cache@v4"
+
+
+def test_opt79_withholds_setup_node_s_automatic_cache_when_package_json_is_unreadable():
+    """Unreadable, or not the file setup-node would read → fail closed with the
+    existing gate, and tallied."""
+    only = (_OPT79_CHECKOUT, {"uses": "actions/setup-node@v5"}, {"run": "npm ci"})
+    # not read at all (missing, 404, invalid JSON, fetch failed)
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(*only),
+                                        package_json=None)
+    assert gate == "setup_action_cache_default_depends_on_repository_files", gate
+    npm = {"packageManager": "npm@10.8.2"}
+    # the workspace root is not this repository's root, so the file setup-node
+    # reads is not the one OPT79 read: checked out into a sub-path, another
+    # repository, or no checkout before the setup step at all
+    for checkout in ({"uses": "actions/checkout@v4", "with": {"path": "web"}},
+                     {"uses": "actions/checkout@v4",
+                      "with": {"repository": "other/repo"}},
+                     {"run": "echo no checkout"}):
+        block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+            checkout, {"uses": "actions/setup-node@v5"}, {"run": "npm ci"}),
+            package_json=npm)
+        assert gate == "setup_action_cache_default_depends_on_repository_files", (
+            checkout, gate)
+    # a SHA / branch ref whose v5 and v6+ rules disagree cannot be decided
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        _OPT79_CHECKOUT, {"uses": "actions/setup-node@main"}, {"run": "pnpm install"}),
+        package_json={"packageManager": "pnpm@9.1.0"})
+    assert gate == "setup_action_cache_default_depends_on_repository_files", gate
+    # …and the detector tallies it
+    wf = _opt79_wf(steps=list(only) + [{"run": "npm test"}])
+    out, w = _opt79_withheld(wf=wf)
+    assert out == []
+    assert w.get("setup_action_cache_default_depends_on_repository_files") == 1, w
+
+
+class _Opt79PkgClient:
+    """A gh client that serves `contents/package.json` and counts every call."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls: list = []
+
+    def json(self, endpoint, allow_missing=False, **_kw):
+        self.calls.append(endpoint)
+        return self.payload
+
+
+def _opt79_b64(text):
+    import base64
+    return {"content": base64.b64encode(text.encode()).decode()}
+
+
+def test_opt79_reads_package_json_once_and_only_when_a_job_needs_it(tmp_path):
+    needs = {"ci.yml": _opt79_wf(steps=[_OPT79_CHECKOUT,
+                                        {"uses": "actions/setup-node@v5"},
+                                        {"run": "npm ci"}]),
+             "b.yml": _opt79_wf(steps=[_OPT79_CHECKOUT,
+                                       {"uses": "actions/setup-node@v6"},
+                                       {"run": "npm ci"}])}
+    no_need = {"ci.yml": _opt79_wf(steps=[
+        _OPT79_CHECKOUT, {"uses": "actions/setup-node@v4"}, {"run": "npm ci"}]),
+        "d.yml": _opt79_wf(steps=[
+            _OPT79_CHECKOUT,
+            {"uses": "actions/setup-node@v5", "with": {"cache": "npm"}},
+            {"run": "npm ci"}])}
+    # (a) no job needs it: no read, no gh call
+    c = _Opt79PkgClient(_opt79_b64('{"packageManager": "npm@10"}'))
+    pj, stamp = cr._opt79_resolve_package_json(c, "o/r", no_need, root=None)
+    assert pj is None and c.calls == [] and stamp["needed"] is False, stamp
+    # (b) two workflows need it: ONE contents call for the repo
+    pj, stamp = cr._opt79_resolve_package_json(c, "o/r", needs, root=None)
+    assert pj == {"packageManager": "npm@10"}
+    assert c.calls == ["repos/o/r/contents/package.json"], c.calls
+    assert stamp == {"needed": True, "source": "contents API", "readable": True}
+    # (c) the checkout serves it: no gh call at all
+    (tmp_path / "package.json").write_text('{"packageManager": "pnpm@9"}')
+    c = _Opt79PkgClient(None)
+    pj, stamp = cr._opt79_resolve_package_json(c, "o/r", needs, root=tmp_path)
+    assert pj == {"packageManager": "pnpm@9"} and c.calls == []
+    assert stamp["source"] == "checkout", stamp
+    # (d) unreadable: 404, invalid JSON, not an object → None (fail closed)
+    for payload in (None, {}, _opt79_b64("{not json"), _opt79_b64("[1, 2]")):
+        c = _Opt79PkgClient(payload)
+        pj, stamp = cr._opt79_resolve_package_json(c, "o/r", needs, root=None)
+        assert pj is None and stamp["readable"] is False, (payload, stamp)
+        assert len(c.calls) == 1
+
+
 def test_opt79_withholds_a_restore_keys_fallback_rather_than_calling_it_a_hit():
     """`actions/cache` prints only `Cache restored from key: <key>` on a
     restore-keys fallback — it never prints a miss line first. A miss line

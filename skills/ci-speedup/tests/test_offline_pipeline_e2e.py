@@ -105,6 +105,14 @@ _JOB_ID = 9001
 #            now also restores a cache before its install, so the uncredited path
 #            runs end to end: its second candidate job costs the per-job cap once
 #            more.)
+#   56  still (OPT79 now reads the repo-root `package.json` to decide whether
+#            setup-node v5+'s AUTOMATIC cache is on. At most ONE read per repo, and
+#            only when a sampled job runs setup-node v5+ with no `cache:` input;
+#            it comes off the `--root` checkout first and costs one `contents/
+#            package.json` call only when the checkout cannot serve it. This corpus
+#            pins `setup-node@v4`, so the read never happens here (asserted via
+#            `data_sources.setup_node_package_json.needed`), and on a repo that
+#            needs it the cost is +0 with a checkout, +1 without.)
 _GOLDEN_GH_QUERY_COUNT = 56
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
@@ -494,6 +502,12 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # comparison saw less of the repository than its selector asked for, and the
     # row has to say so. Here nothing was cut, so the two agree.
     assert _probe.get("planned") == 16, _probe
+    # setup-node's automatic cache: no job in this corpus runs setup-node v5+
+    # without a `cache:` input (`ci.yml` pins v4), so no cache count depends on
+    # package.json and it is NOT read — no gh call, no disk read. The stamp says
+    # so, which is also why the golden call count did not move for it.
+    _pkg = (data.get("data_sources") or {}).get("setup_node_package_json")
+    assert _pkg == {"needed": False, "source": None, "readable": False}, _pkg
     # OPT80 end to end. `matrix.yml`'s `smoke` job checks out in 8s on ten of the
     # twelve sampled runs and 120s on two, and each of those two runs ships a
     # recorded checkout log whose git progress stops for 85s. This executes the
