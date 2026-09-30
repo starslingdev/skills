@@ -9456,11 +9456,11 @@ def test_withheld_rows_round_trip_hostile_job_names_and_shared_names(tmp_path):
     p = tmp_path / "findings.json"
     p.write_text(_json.dumps(doc), encoding="utf-8")
     foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
-    assert "build (ci.yml), build (release.yml)" in foot and "more)" in foot, foot
+    assert "ci.yml / build" in foot and "more)" in foot, foot
     chk = vr.check_coverage_disclosed(foot, p)
     assert chk.ok, (chk, foot)
     # dropping a qualifier the verifier derives is a mismatch
-    bad = foot.replace("build (release.yml)", "build")
+    bad = foot.replace("ci.yml / build", "build")
     assert not vr.check_coverage_disclosed(bad, p).ok
 
 
@@ -9493,8 +9493,10 @@ def test_withhold_phrase_tables_match_the_renderer_and_the_collector():
     vr = _load_verify_report()
     assert vr._VR_OPT77_WITHHOLD_PHRASES == bp._OPT77_WITHHOLD_PHRASES
     assert vr._VR_OPT80_WITHHOLD_PHRASES == bp._OPT80_WITHHOLD_PHRASES
-    assert vr._VR_WITHHELD_77_80_ROWS[0][1] == bp._WITHHELD_77_80_ROWS[0][1]
-    assert vr._VR_WITHHELD_77_80_ROWS[1][1] == bp._WITHHELD_77_80_ROWS[1][1]
+    # one registry, all three patterns: same keys, same labels, same nouns
+    assert ([r[:3] for r in vr._VR_WITHHELD_ROWS]
+            == [r[:3] for r in bp._WITHHELD_ROWS])
+    assert set(vr._VR_WITHHELD_PHRASES_BY_KEY) == set(bp._WITHHELD_PHRASES_BY_KEY)
 
 
 def test_withheld_setup_and_checkout_lists_that_are_malformed_fail(tmp_path):
@@ -9559,5 +9561,5 @@ def test_withheld_setup_and_checkout_rows_fail_on_an_unreadable_findings_file(tm
     vr = _load_verify_report()
     p = tmp_path / "findings.json"
     p.write_text("{not json", encoding="utf-8")
-    chk = vr._withheld_77_80_disclosure_violation("## 🗄️ Data sources\n", p)
+    chk = vr._withheld_disclosure_violation("## 🗄️ Data sources\n", p)
     assert chk[0] and "unreadable" in chk[0], chk

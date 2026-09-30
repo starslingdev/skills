@@ -715,7 +715,10 @@ unversioned and updates by reinstall from `main`.
   <reason>." under `checkout stall: held back`. The jobs are named
   (workflow-qualified when two workflows share a job name, at most five, then
   "and K more"), and the reason is a plain-English sentence for the most common
-  cause, never an internal code. Only undecided candidates count; a candidate
+  cause, never an internal code. This is the same held-back disclosure the cache
+  check (OPT79) already gave: all three patterns now share one mechanism — one
+  row builder, one job list, one self-check — so a fourth pattern discloses a
+  held-back candidate by registering its reasons, not by growing a fourth copy. Only undecided candidates count; a candidate
   that was decided (the jobs depend on each other, the logs show a smooth fetch)
   does not. A slow checkout whose logs were not all read, because only the newest
   four are fetched, counts as undecided when the unread runs could still have

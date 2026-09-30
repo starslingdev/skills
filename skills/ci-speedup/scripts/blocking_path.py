@@ -5128,15 +5128,24 @@ def _coverage_note(ds: dict[str, Any]) -> str:
     return f" **Note:** {reason}.{named_part}"
 
 
-# The findings-doc keys the collector writes OPT77's and OPT80's WITHHELD
-# candidates under. STRING CONTRACTS between files: renaming one in the
-# collector would stop its row rendering with nothing going red, so every side
-# names the constant and a coupling test pins them equal.
+# ONE held-back disclosure, shared by every pattern that can measure a candidate
+# and still be unable to decide it (OPT77 repeated setup, OPT79 net-negative
+# cache, OPT80 checkout stall). Each pattern contributes only its doc key, its
+# row label/noun and its gate→phrase table; the sentence, the job list, the
+# escaping and the verifier's re-derivation are the same code for all three.
+#
+# The findings-doc keys the collector writes each pattern's WITHHELD candidates
+# under. STRING CONTRACTS between files: renaming one in the collector would
+# stop its row rendering with nothing going red, so every side names the
+# constant and a coupling test pins them equal.
 _OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
+_OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 _OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
 # (doc key, Data sources row label, counted noun, "Used for" cell). The row
 # label and the noun are what `verify_report` matches on.
-_WITHHELD_77_80_ROWS: tuple[tuple[str, str, str, str], ...] = (
+_WITHHELD_ROWS: tuple[tuple[str, str, str, str], ...] = (
+    (_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts", "candidate cache(s)",
+     "Why a candidate cache produced no finding and no uncredited line"),
     (_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back", "candidate job group(s)",
      "Why a group of small jobs sharing one setup produced no finding"),
     (_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back", "candidate checkout(s)",
@@ -5193,52 +5202,56 @@ _OPT80_WITHHOLD_PHRASES: dict[str, str] = {
         "there were more slow runs than the audit reads logs for, and the rest "
         "were never read",
 }
+# Every pattern's gate→phrase table, by doc key. OPT79's table is defined with
+# the rest of its code further down and registers itself there, so this one dict
+# is the single place the renderer looks a reason up.
 _WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
     _OPT77_WITHHELD_DOC_KEY: _OPT77_WITHHOLD_PHRASES,
     _OPT80_WITHHELD_DOC_KEY: _OPT80_WITHHOLD_PHRASES,
 }
 # What the row says for a gate with no phrase. Never the code; `verify_report`
 # fails on the same gate, so this text cannot reach a verified report.
-_WITHHELD_UNMAPPED_PHRASE = "the reason was not recorded in a form this report can state"
-# Named entries before "and K more".
+_WITHHELD_UNMAPPED_PHRASE = "a reason this report has no plain-English wording for"
+# Named entries before ", and K more".
 _WITHHELD_JOBS_SHOWN = 5
 
 
 def _withheld_cell_text(text: object) -> str:
     """Repo-controlled text (a job or workflow name) made safe for one table
-    cell: whitespace and newlines collapsed, `|` escaped, backticks swapped for
-    an apostrophe so a name cannot open a code span. `verify_report` carries the
-    same transform."""
+    cell: whitespace and newlines collapsed, `|` escaped, backticks and emphasis
+    markers swapped for an apostrophe so a name cannot open a code span or an
+    italic run. `verify_report` carries the same transform."""
     return (re.sub(r"\s+", " ", str(text)).strip()
-            .replace("`", "'").replace("|", "\\|"))
+            .replace("`", "'").replace("*", "'").replace("|", "\\|"))
 
 
 def _withheld_entries(rows: list[dict[str, Any]], key: str) -> list[str]:
-    """The named jobs of one withheld-candidate list, in collector order. An
-    OPT77 entry is a group ("lint + test in ci.yml"); an OPT80 entry is a job,
-    qualified with its workflow only when two workflows share the job name."""
+    """The distinct, sorted entries of one withheld-candidate list. An OPT77
+    entry is a group ("lint + test in ci.yml"); an OPT79 / OPT80 entry is a job,
+    qualified with its workflow file only when two workflows share the job
+    name, so the two stay tellable apart."""
     def _wf(r: dict[str, Any]) -> str:
         return str(r.get("workflow_file") or "").replace("\\", "/").rsplit("/", 1)[-1]
 
-    out: list[str] = []
+    out: set[str] = set()
     if key == _OPT77_WITHHELD_DOC_KEY:
         for r in rows:
             jobs = r.get("jobs")
             names = sorted(_withheld_cell_text(j) for j in jobs) if isinstance(
                 jobs, list) and jobs else [_withheld_cell_text(r.get("group") or "a group")]
             wf = _wf(r)
-            out.append(" + ".join(names) + (f" in {_withheld_cell_text(wf)}" if wf else ""))
-        return out
+            out.add(" + ".join(names) + (f" in {_withheld_cell_text(wf)}" if wf else ""))
+        return sorted(out)
     wfs_of: dict[str, set[str]] = {}
     for r in rows:
-        wfs_of.setdefault(str(r.get("job") or ""), set()).add(_wf(r))
+        wfs_of.setdefault(str(r.get("job") or "").strip(), set()).add(_wf(r))
     for r in rows:
-        name = str(r.get("job") or "")
+        raw = str(r.get("job") or "").strip()
         wf = _wf(r)
-        shown = _withheld_cell_text(name or "a job")
-        out.append(f"{shown} ({_withheld_cell_text(wf)})"
-                   if len(wfs_of[name]) > 1 and wf else shown)
-    return out
+        shown = _withheld_cell_text(raw or "(unnamed job)")
+        out.add(f"{_withheld_cell_text(wf)} / {shown}"
+                if len(wfs_of[raw]) > 1 and wf else shown)
+    return sorted(out)
 
 
 def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
@@ -5247,7 +5260,7 @@ def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
     collector's withheld-candidate lists, or None when nothing was held back.
     N counts every entry; the reason is the commonest gate's phrase (ties go to
     the alphabetically first gate); at most `_WITHHELD_JOBS_SHOWN` entries are
-    named, then "and K more". `verify_report` re-derives the whole line."""
+    named, then ", and K more". `verify_report` re-derives the whole line."""
     rows = [r for r in ((doc or {}).get(key) or []) if isinstance(r, dict)]
     if not rows:
         return None
@@ -5259,7 +5272,7 @@ def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
     entries = _withheld_entries(rows, key)
     jobs = ", ".join(entries[:_WITHHELD_JOBS_SHOWN])
     if len(entries) > _WITHHELD_JOBS_SHOWN:
-        jobs += f" and {len(entries) - _WITHHELD_JOBS_SHOWN} more"
+        jobs += f", and {len(entries) - _WITHHELD_JOBS_SHOWN} more"
     phrase = _WITHHELD_PHRASES_BY_KEY[key].get(top, _WITHHELD_UNMAPPED_PHRASE)
     return f"{len(rows)} {noun} held back ({jobs}): {phrase}."
 
@@ -5356,15 +5369,6 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
             cov += f" (capped at {_bud} for the repository)"
         rows.append(("cache hit/miss log probe", cov,
                      "Splitting a cached job's runs into cache hits and misses"))
-    # Candidates the probe read and then WITHHELD (too few misses, logs that
-    # never came back, a runner change…). Without this row the report reads
-    # "measured, nothing found" where the audit could not tell. `verify_report`
-    # re-derives both numbers from `opt79_withheld_candidates`.
-    _wn, _wtop = _opt79_withheld_summary(doc)
-    if _wn:
-        rows.append(("cache hit/miss verdicts",
-                     _opt79_held_back_cell(doc),
-                     "Why a candidate cache produced no finding and no uncredited line"))
     # WHICH workflow YAML fed the detectors. `collect_runs` stamps this, and until now
     # nothing rendered it — so the reader could not tell whether the `on:`/matrix/timeout
     # signals came off the audited checkout or off the default branch's HEAD (the two
@@ -5381,11 +5385,12 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
             _parts.append(f"{_api} from the gh contents API (default branch HEAD)")
         rows.append(("workflow YAML", " / ".join(_parts),
                      "`on:` triggers, matrix/shard axes, job timeouts (detector inputs)"))
-    # Candidates OPT77 (repeated setup) and OPT80 (checkout stalls) HELD BACK
-    # because the audit could not decide them. Without these rows
-    # the report reads "measured, nothing found" where the audit could not tell.
+    # Candidates a pattern measured and then HELD BACK because it could not
+    # decide them — a candidate cache (OPT79), a group of small jobs sharing one
+    # setup (OPT77), a checkout with a slow tail (OPT80). Without these rows the
+    # report reads "measured, nothing found" where the audit could not tell.
     # `verify_report` re-derives the whole line from the collector's lists.
-    for _key, _label, _noun, _feeds in _WITHHELD_77_80_ROWS:
+    for _key, _label, _noun, _feeds in _WITHHELD_ROWS:
         _wline = _withheld_candidates_line(doc, _key, _noun)
         if _wline:
             rows.append((_label, _wline, _feeds))
@@ -5606,12 +5611,12 @@ def _pr_floor_fallback_banner(doc: dict[str, Any], cp: dict[str, Any]) -> list[s
             "the figures as the PR-floor accordingly.", ""]
 
 
-# The findings-doc keys the collector writes OPT79's uncredited rows and its
-# withheld candidates under. STRING CONTRACTS between files: renaming one in the
-# collector would stop its line rendering with nothing going red, so every side
-# names the constant and a coupling test pins them equal.
+# The findings-doc key the collector writes OPT79's uncredited rows under. A
+# STRING CONTRACT between files: renaming it in the collector would stop the
+# line rendering with nothing going red, so every side names the constant and a
+# coupling test pins them equal. (OPT79's withheld-candidate key lives with the
+# other two, beside the shared held-back disclosure.)
 _OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
-_OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 
 
 def _opt79_uncredited_row_is_renderable(r: Any) -> bool:
@@ -5628,28 +5633,12 @@ def _opt79_uncredited_row_is_renderable(r: Any) -> bool:
                for k in ("hits", "misses"))
 
 
-def _opt79_withheld_summary(doc: dict[str, Any] | None) -> tuple[int, str]:
-    """`(candidates withheld, the commonest gate)` from the collector's
-    withheld-candidate list; ties go to the alphabetically first gate. `(0, "")`
-    when nothing was withheld. `verify_report` re-derives the same pair."""
-    rows = [r for r in ((doc or {}).get(_OPT79_WITHHELD_DOC_KEY) or [])
-            if isinstance(r, dict)]
-    if not rows:
-        return 0, ""
-    counts: dict[str, int] = {}
-    for r in rows:
-        g = str(r.get("gate") or "unknown")
-        counts[g] = counts.get(g, 0) + 1
-    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
-    return len(rows), top
-
-
 # One plain-English phrase per gate that can land in `opt79_withheld_candidates`
 # (`collect_runs._OPT79_HELD_BACK_GATES`). The reader is a person who has never
 # seen a gate name, so each phrase says what was not established and why that
 # stops a verdict. `verify_report` carries an identical copy (it is a standalone
 # checker) and a test pins the two equal and complete. An unmapped gate renders
-# the fallback below and FAILS `verify_report`: a code is never printed.
+# the shared fallback phrase and FAILS `verify_report`: a code is never printed.
 _OPT79_HELD_BACK_REASONS: dict[str, str] = {
     # held back before any log was read
     "cache_is_saved_by_a_separate_step":
@@ -5718,50 +5707,9 @@ _OPT79_HELD_BACK_REASONS: dict[str, str] = {
         "the job is about as slow as its workflow's slowest jobs, so removing "
         "the cache could not be shown to leave the pull-request wait unchanged",
 }
-_OPT79_HELD_BACK_UNMAPPED = "a reason this report has no plain-English wording for"
-_OPT79_HELD_BACK_MAX_JOBS = 5
-
-
-def _opt79_held_back_job_cell(text: object) -> str:
-    """A repo-controlled job or workflow name made safe for one table cell: no
-    newline, no unescaped pipe, no backtick or emphasis marker that a markdown
-    renderer (or the verifier's decoration strip) would treat as syntax."""
-    t = re.sub(r"\s+", " ", str(text)).strip()
-    t = t.replace("`", "'").replace("*", "'")
-    return t.replace("|", "\\|")
-
-
-def _opt79_held_back_labels(rows: list[dict[str, Any]]) -> list[str]:
-    """Distinct, sorted job labels. A job name that two workflows share is
-    qualified with its workflow file's base name, so the two stay tellable."""
-    def wf_of(r: dict[str, Any]) -> str:
-        return str(r.get("workflow_file") or "").rsplit("/", 1)[-1]
-    by_name: dict[str, set[str]] = {}
-    for r in rows:
-        by_name.setdefault(str(r.get("job") or "").strip(), set()).add(wf_of(r))
-    labels: set[str] = set()
-    for r in rows:
-        name = str(r.get("job") or "").strip() or "(unnamed job)"
-        shared = len(by_name.get(str(r.get("job") or "").strip(), ())) > 1
-        labels.add(f"{wf_of(r)} / {name}" if shared and wf_of(r) else name)
-    return sorted(labels)
-
-
-def _opt79_held_back_cell(doc: dict[str, Any] | None) -> str:
-    """`N candidate cache(s) held back (<jobs>): <plain-English reason>.` for the
-    Data sources row. The count and the most common gate (ties to the
-    alphabetically first) are `_opt79_withheld_summary`'s; `verify_report`
-    re-derives the whole sentence from the findings file."""
-    n, top = _opt79_withheld_summary(doc)
-    rows = [r for r in ((doc or {}).get(_OPT79_WITHHELD_DOC_KEY) or [])
-            if isinstance(r, dict)]
-    labels = [_opt79_held_back_job_cell(x) for x in _opt79_held_back_labels(rows)]
-    shown = labels[:_OPT79_HELD_BACK_MAX_JOBS]
-    jobs = ", ".join(shown)
-    if len(labels) > len(shown):
-        jobs += f", and {len(labels) - len(shown)} more"
-    reason = _OPT79_HELD_BACK_REASONS.get(top, _OPT79_HELD_BACK_UNMAPPED)
-    return f"{n} candidate cache(s) held back ({jobs}): {reason}."
+# OPT79's table joins the shared registry: the held-back row, its job list and
+# the verifier's re-derivation are the same code for OPT77, OPT79 and OPT80.
+_WITHHELD_PHRASES_BY_KEY[_OPT79_WITHHELD_DOC_KEY] = _OPT79_HELD_BACK_REASONS
 
 
 def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
@@ -8098,10 +8046,11 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # report collapsed to the one-line no-critical-path note, which is exactly
     # the silence this block exists to break.
     uncredited_lines = _opt79_uncredited_block(doc)
-    # A cache that was probed and then withheld is disclosed in the Data sources
-    # footer; collapsing to the one-line note would drop the footer with it and
-    # let "probed, could not tell" read as "nothing found".
-    withheld_n, _top = _opt79_withheld_summary(doc)
+    # A candidate any pattern held back is disclosed in the Data sources footer;
+    # collapsing to the one-line note would drop the footer with it and let
+    # "measured, could not tell" read as "nothing found".
+    withheld_n = sum(1 for _k, _l, _n, _f in _WITHHELD_ROWS
+                     if _withheld_candidates_line(doc, _k, _n))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
             and not withheld_n):

@@ -749,12 +749,7 @@ def _cache_probe_count_violation(report: str, findings_path: Path | None
     return None, f"; cache-probe count honest ({returned}/{probed} read)"
 
 
-# The cell may carry `\|` (an escaped pipe inside a job name), so the cell is
-# "escaped pair or any non-pipe character", not a bare lazy match.
-_DS_CACHE_VERDICTS_ROW_RE = re.compile(
-    r"^\|\s*cache hit/miss verdicts\s*\|\s*((?:\\.|[^|\\])+?)\s*\|", re.MULTILINE)
 _VR_OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
-_VR_OPT79_HELD_BACK_MAX_JOBS = 5
 # The plain-English phrase for every gate that can be recorded. This is a
 # standalone copy of `blocking_path._OPT79_HELD_BACK_REASONS` (this checker
 # imports nothing from the renderer); a test pins the two equal and complete.
@@ -828,84 +823,6 @@ _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
 }
 
 
-def _opt79_held_back_expected_cell(rows: list[dict]) -> tuple[str | None, str]:
-    """`(sentence, "")` the Data sources cell must be, re-derived from the
-    recorded rows, or `(None, problem)` when a gate has no plain-English phrase.
-    Count = rows; reason = the commonest gate (ties to the alphabetically
-    first); jobs = distinct labels, sorted, workflow-qualified only where two
-    workflows share a job name, at most five then `and K more`."""
-    counts: dict[str, int] = {}
-    for r in rows:
-        g = str(r.get("gate") or "unknown")
-        counts[g] = counts.get(g, 0) + 1
-    unmapped = sorted(g for g in counts if g not in _VR_OPT79_HELD_BACK_REASONS)
-    if unmapped:
-        return None, (f"recorded gate(s) {unmapped} have no plain-English phrase, "
-                      "so the held-back line cannot be stated without printing a code")
-    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
-
-    def wf_of(r: dict) -> str:
-        return str(r.get("workflow_file") or "").rsplit("/", 1)[-1]
-    shared: dict[str, set[str]] = {}
-    for r in rows:
-        shared.setdefault(str(r.get("job") or "").strip(), set()).add(wf_of(r))
-    labels: set[str] = set()
-    for r in rows:
-        raw = str(r.get("job") or "").strip()
-        name = raw or "(unnamed job)"
-        labels.add(f"{wf_of(r)} / {name}" if len(shared[raw]) > 1 and wf_of(r) else name)
-
-    def safe(t: str) -> str:
-        t = re.sub(r"\s+", " ", t).strip().replace("`", "'").replace("*", "'")
-        return t.replace("|", "\\|")
-    cells = [safe(x) for x in sorted(labels)]
-    jobs = ", ".join(cells[:_VR_OPT79_HELD_BACK_MAX_JOBS])
-    if len(cells) > _VR_OPT79_HELD_BACK_MAX_JOBS:
-        jobs += f", and {len(cells) - _VR_OPT79_HELD_BACK_MAX_JOBS} more"
-    return (f"{len(rows)} candidate cache(s) held back ({jobs}): "
-            f"{_VR_OPT79_HELD_BACK_REASONS[top]}."), ""
-
-
-def _opt79_withheld_disclosure_violation(report: str, findings_path: Path | None
-                                         ) -> tuple[str | None, str]:
-    """The cache hit/miss probe can read a candidate's logs and still withhold
-    it. `opt79_withheld_candidates` records each one, and the report must say so
-    in its `cache hit/miss verdicts` Data sources row as
-    `N candidate cache(s) held back (<jobs>): <plain-English reason>.` — the
-    count, the job list and the reason for the commonest gate (ties to the
-    alphabetically first), all re-derived here. A gate with no phrase fails.
-    Without the row a probed-but-undecided cache reads as "measured, nothing
-    found"; a row with nothing behind it is a claim the run never made."""
-    if not findings_path:
-        return None, ""
-    try:
-        data = json.loads(Path(findings_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return (f"the withheld-cache row could not be re-derived: findings JSON at "
-                f"{findings_path} is unreadable ({type(exc).__name__})"), ""
-    rows = [r for r in _as_list(_as_dict(data).get(_VR_OPT79_WITHHELD_DOC_KEY))
-            if isinstance(r, dict)]
-    m = _DS_CACHE_VERDICTS_ROW_RE.search(report)
-    if not rows:
-        if m:
-            return ("Data sources declares cache candidates held back, "
-                    "but the run recorded none"), ""
-        return None, ""
-    expected, problem = _opt79_held_back_expected_cell(rows)
-    if expected is None:
-        return problem, ""
-    if not m:
-        return (f"{len(rows)} cache candidate(s) were held back "
-                f"but the Data sources table does not say so - "
-                "a held-back cache reads as measured and clean"), ""
-    cell = _strip_render_artifacts(m.group(1))
-    if cell != _strip_render_artifacts(expected):
-        return (f"Data sources held-back-cache cell {cell!r} does not match the "
-                f"one re-derived from the findings (count, job list and reason): "
-                f"{expected!r}"), ""
-    return None, f"; {len(rows)} withheld cache candidate(s) disclosed"
-
-
 def _gh_errors_disclosure_violation(report: str, findings_path: Path | None) -> tuple[str | None, str]:
     """Require rendered disclosure when collection recorded failed GitHub calls."""
     if not findings_path:
@@ -966,13 +883,15 @@ def _detectors_skipped_violation(report: str,
     return None, f"; {len(skipped)} skipped-detector workflow(s) named"
 
 
-# The findings-doc keys OPT77 and OPT80 list their WITHHELD candidates under —
-# the same strings as the collector's and the renderer's constants (a coupling
-# test pins all three equal).
+# The findings-doc keys OPT77, OPT79 and OPT80 list their WITHHELD candidates
+# under — the same strings as the collector's and the renderer's constants (a
+# coupling test pins all three equal).
 _VR_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _VR_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
-# (doc key, Data sources row label, counted noun) — as blocking_path renders them.
-_VR_WITHHELD_77_80_ROWS = (
+# (doc key, Data sources row label, counted noun) — as blocking_path renders
+# them. ONE re-derivation serves all three patterns.
+_VR_WITHHELD_ROWS = (
+    (_VR_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts", "candidate cache(s)"),
     (_VR_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back", "candidate job group(s)"),
     (_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back", "candidate checkout(s)"),
 )
@@ -1026,6 +945,7 @@ _VR_OPT80_WITHHOLD_PHRASES = {
 }
 _VR_WITHHELD_PHRASES_BY_KEY = {
     _VR_OPT77_WITHHELD_DOC_KEY: _VR_OPT77_WITHHOLD_PHRASES,
+    _VR_OPT79_WITHHELD_DOC_KEY: _VR_OPT79_HELD_BACK_REASONS,
     _VR_OPT80_WITHHELD_DOC_KEY: _VR_OPT80_WITHHOLD_PHRASES,
 }
 _VR_WITHHELD_JOBS_SHOWN = 5
@@ -1033,31 +953,37 @@ _VR_WITHHELD_JOBS_SHOWN = 5
 
 def _vr_withheld_cell_text(text: object) -> str:
     """The renderer's cell-safe transform of repo-controlled text (whitespace
-    collapsed, `|` escaped, backticks swapped for an apostrophe)."""
+    collapsed, `|` escaped, backticks and emphasis markers swapped for an
+    apostrophe)."""
     return (re.sub(r"\s+", " ", str(text)).strip()
-            .replace("`", "'").replace("|", "\\|"))
+            .replace("`", "'").replace("*", "'").replace("|", "\\|"))
 
 
 def _vr_withheld_entries(rows: list[dict], key: str) -> list[str]:
+    """The distinct, sorted entries the cell must name: a group for OPT77, a
+    job for OPT79 / OPT80, workflow-qualified only where two workflows share
+    the job name."""
     def _wf(r: dict) -> str:
         return str(r.get("workflow_file") or "").replace("\\", "/").rsplit("/", 1)[-1]
 
     if key == _VR_OPT77_WITHHELD_DOC_KEY:
-        return [" + ".join(sorted(_vr_withheld_cell_text(j) for j in r["jobs"]))
-                + (f" in {_vr_withheld_cell_text(_wf(r))}" if _wf(r) else "")
-                for r in rows]
+        return sorted({
+            " + ".join(sorted(_vr_withheld_cell_text(j) for j in r["jobs"]))
+            + (f" in {_vr_withheld_cell_text(_wf(r))}" if _wf(r) else "")
+            for r in rows})
     wfs_of: dict[str, set[str]] = {}
     for r in rows:
-        wfs_of.setdefault(r["job"], set()).add(_wf(r))
-    return [(f"{_vr_withheld_cell_text(r['job'])} ({_vr_withheld_cell_text(_wf(r))})"
-             if len(wfs_of[r["job"]]) > 1 and _wf(r)
-             else _vr_withheld_cell_text(r["job"])) for r in rows]
+        wfs_of.setdefault(r["job"].strip(), set()).add(_wf(r))
+    return sorted({
+        (f"{_vr_withheld_cell_text(_wf(r))} / {_vr_withheld_cell_text(r['job'])}"
+         if len(wfs_of[r["job"].strip()]) > 1 and _wf(r)
+         else _vr_withheld_cell_text(r["job"])) for r in rows})
 
 
-def _withheld_77_80_disclosure_violation(report: str, findings_path: Path | None
-                                         ) -> tuple[str | None, str]:
-    """OPT77 (repeated setup) and OPT80 (checkout stalls) can be unable to decide
-    a candidate. Each such candidate is listed on the findings doc, and the report
+def _withheld_disclosure_violation(report: str, findings_path: Path | None
+                                   ) -> tuple[str | None, str]:
+    """OPT77 (repeated setup), OPT79 (net-negative cache) and OPT80 (checkout
+    stalls) can each be unable to decide a candidate. Each such candidate is listed on the findings doc, and the report
     must say so in that detector's Data sources row. The WHOLE cell is re-derived
     here — the count, the named jobs (workflow-qualified when two workflows share
     a name, at most five then "and K more") and the plain-English reason for the
@@ -1074,7 +1000,7 @@ def _withheld_77_80_disclosure_violation(report: str, findings_path: Path | None
         return (f"the withheld-candidate rows could not be re-derived: findings JSON "
                 f"at {findings_path} is unreadable ({type(exc).__name__})"), ""
     note = ""
-    for key, label, noun in _VR_WITHHELD_77_80_ROWS:
+    for key, label, noun in _VR_WITHHELD_ROWS:
         raw = _as_dict(data).get(key)
         # The renderer quietly drops non-objects and names a gate-less entry
         # `unknown`; here either is a collector bug, not "nothing withheld".
@@ -1116,7 +1042,7 @@ def _withheld_77_80_disclosure_violation(report: str, findings_path: Path | None
         entries = _vr_withheld_entries(rows, key)
         jobs = ", ".join(entries[:_VR_WITHHELD_JOBS_SHOWN])
         if len(entries) > _VR_WITHHELD_JOBS_SHOWN:
-            jobs += f" and {len(entries) - _VR_WITHHELD_JOBS_SHOWN} more"
+            jobs += f", and {len(entries) - _VR_WITHHELD_JOBS_SHOWN} more"
         expected = f"{len(rows)} {noun} held back ({jobs}): {phrases[top]}."
         if not m:
             return (f"{len(rows)} {noun} were held back ({key}) but the Data sources "
@@ -1149,18 +1075,13 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
     probe_violation, probe_note = _cache_probe_count_violation(report, findings_path)
     if probe_violation:
         return Check(name, False, probe_violation)
-    withheld_violation, withheld_note = _opt79_withheld_disclosure_violation(
-        report, findings_path)
-    if withheld_violation:
-        return Check(name, False, withheld_violation)
-    probe_note += withheld_note
     gh_violation, gh_note = _gh_errors_disclosure_violation(report, findings_path)
     if gh_violation:
         return Check(name, False, gh_violation)
     skip_violation, skip_note = _detectors_skipped_violation(report, findings_path)
     if skip_violation:
         return Check(name, False, skip_violation)
-    withheld_violation, withheld_note = _withheld_77_80_disclosure_violation(
+    withheld_violation, withheld_note = _withheld_disclosure_violation(
         report, findings_path)
     if withheld_violation:
         return Check(name, False, withheld_violation)

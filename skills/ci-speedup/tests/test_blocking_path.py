@@ -2898,8 +2898,8 @@ def test_withheld_row_qualifies_shared_job_names_caps_the_list_and_escapes():
          {"workflow_file": ".github/workflows/release.yml", "job": "build", "gate": gate}]
         + [{"workflow_file": "ci.yml", "job": f"j{i}", "gate": gate} for i in range(5)])
     row = _withheld_row(_withheld_foot(doc), "checkout stall: held back")
-    assert ("7 candidate checkout(s) held back (build (ci.yml), build (release.yml), "
-            "j0, j1, j2 and 2 more): ") in row, row
+    assert ("7 candidate checkout(s) held back (ci.yml / build, j0, j1, j2, j3, "
+            "and 2 more): ") in row, row
     # Job names are repo-controlled text: a pipe, backticks and a newline must not
     # break the table row or open a code span.
     doc["opt80_withheld_candidates"] = [
