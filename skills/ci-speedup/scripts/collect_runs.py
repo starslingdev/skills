@@ -15964,6 +15964,46 @@ def _opt79_trim_repo_probe_plan(
     return kept
 
 
+def _opt79_probe_logs(
+    client: Any,
+    repo: str,
+    jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
+    crit_by_wf: dict[str, dict[str, Any]],
+    wf_docs: dict[str, dict[str, Any]],
+    withheld: dict[str, int],
+) -> tuple[list[tuple[float, str, dict[str, Any]]], dict[Any, str], dict[str, int]]:
+    """Plan, trim and fetch OPT79's cache-probe logs in ONE wave:
+    `(kept plan, {job id: log}, the data_sources stamp)`.
+
+    The per-workflow plan (`_opt79_log_plan`) is cut to the repo-wide budget
+    COSTLIEST CANDIDATE FIRST (`_opt79_trim_repo_probe_plan`, which counts
+    everything it cuts into `withheld`), so a monorepo with thirty workflow
+    files cannot multiply the per-workflow caps into hundreds of fetches. The
+    stamp states what the selector PLANNED, what the budget let it PROBE and
+    what RETURNED content — the three numbers the report's `cache hit/miss log
+    probe` row renders and `verify_report` re-derives."""
+    plan: list[tuple[float, str, dict[str, Any]]] = []
+    for wf_path, jpr in jobs_per_run_by_wf.items():
+        if not jpr:
+            continue
+        plan.extend(_opt79_log_plan(
+            wf_path, jpr, crit_by_wf[wf_path], wf_docs.get(wf_path, {})))
+    kept = _opt79_trim_repo_probe_plan(plan, withheld=withheld)
+    probe_jobs = [j for _p, _wf, j in kept]
+    _prefetch_text(client, [_job_log_endpoint(repo, j["id"]) for j in probe_jobs])
+    logs: dict[Any, str] = {}
+    for job in probe_jobs:
+        log = _fetch_job_log(client, repo, job)
+        if log:
+            logs[job.get("id")] = log
+    if probe_jobs:
+        logger.debug("OPT79: probed %d job log(s), %d returned content",
+                     len(probe_jobs), len(logs))
+    stamp = {"planned": len(plan), "probed": len(probe_jobs),
+             "returned": len(logs), "budget": _OPT79_REPO_LOG_BUDGET}
+    return kept, logs, stamp
+
+
 def _opt79_workflows_with_no_returned_log(
     kept: list[tuple[float, str, dict[str, Any]]],
     logs: dict[Any, str],
@@ -18774,31 +18814,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # is planned here and fanned out in ONE prefetch wave rather than one
     # round-trip per job inside the detector loop.
     _opt79_gates = findings_doc.setdefault("opt79_withheld_by_gate", {})
-    _opt79_plan: list[tuple[float, str, dict[str, Any]]] = []
-    for _wf_path, _jpr in jobs_per_run_by_wf.items():
-        if not _jpr:
-            continue
-        _opt79_plan.extend(_opt79_log_plan(
-            _wf_path, _jpr, crit_by_wf[_wf_path], _wf_docs.get(_wf_path, {})))
-    _opt79_planned = len(_opt79_plan)
-    # The two caps inside the plan are PER WORKFLOW; this is the repo-wide
-    # ceiling on top of them, so a monorepo with thirty workflow files cannot
-    # multiply them into hundreds of fetches. It spends the budget COSTLIEST
-    # CANDIDATE FIRST and counts everything it cuts, so a job dropped here
-    # reaches the detector as a job whose logs went unread — a disclosed budget
-    # decision, never a silent one.
-    _opt79_kept = _opt79_trim_repo_probe_plan(_opt79_plan, withheld=_opt79_gates)
-    _opt79_probe_jobs = [_j for _p, _wf, _j in _opt79_kept]
-    _prefetch_text(client, [_job_log_endpoint(repo, j["id"])
-                            for j in _opt79_probe_jobs])
-    opt79_logs: dict[Any, str] = {}
-    for _job in _opt79_probe_jobs:
-        _log = _fetch_job_log(client, repo, _job)
-        if _log:
-            opt79_logs[_job.get("id")] = _log
-    if _opt79_probe_jobs:
-        logger.debug("OPT79: probed %d job log(s), %d returned content",
-                     len(_opt79_probe_jobs), len(opt79_logs))
+    _opt79_kept, opt79_logs, _opt79_probe_stamp = _opt79_probe_logs(
+        client, repo, jobs_per_run_by_wf, crit_by_wf, _wf_docs, _opt79_gates)
     # A workflow whose probes ALL came back empty (expired retention, a 404
     # wave, a token without the scope) was not evaluated, and a detector that
     # returned nothing reads exactly like a detector that found nothing. Judged
@@ -19430,16 +19447,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # These happen during collection whether or not `--with-logs` was
         # passed, so without this the provenance table could say no job logs
         # were read in a report that quotes them.
-        "cache_probe_logs": {
-            # PLANNED is what the selector asked for; PROBED is what the
-            # repo-wide budget allowed. When they differ the comparison saw less
-            # of the repository than it could have, which is a fact about the
-            # report, not an implementation detail.
-            "planned": _opt79_planned,
-            "probed": len(_opt79_probe_jobs),
-            "returned": len(opt79_logs),
-            "budget": _OPT79_REPO_LOG_BUDGET,
-        },
+        "cache_probe_logs": _opt79_probe_stamp,
         # Where each workflow's YAML was PARSED from. The two sources can disagree (the
         # checkout is what the report stamps as audited; `GET /contents/` is the DEFAULT
         # BRANCH's HEAD), so which one fed the detectors is a fact about the report, not

@@ -147,9 +147,41 @@
      "conclusion": "success"
     },
     {
-     "name": "Integration suite",
+     "name": "Run actions/checkout@v4",
      "number": 2,
      "started_at": "2026-06-24T05:00:15Z",
+     "completed_at": "2026-06-24T05:00:17Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/cache@v4",
+     "number": 3,
+     "started_at": "2026-06-24T05:00:17Z",
+     "completed_at": "2026-06-24T05:00:47Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm ci",
+     "number": 4,
+     "started_at": "2026-06-24T05:00:47Z",
+     "completed_at": "2026-06-24T05:00:50Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Integration suite",
+     "number": 5,
+     "started_at": "2026-06-24T05:00:50Z",
+     "completed_at": "2026-06-24T05:03:15Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Post Run actions/cache@v4",
+     "number": 6,
+     "started_at": "2026-06-24T05:03:15Z",
      "completed_at": "2026-06-24T05:03:15Z",
      "status": "completed",
      "conclusion": "success"

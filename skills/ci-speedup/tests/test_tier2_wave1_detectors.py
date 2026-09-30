@@ -3972,17 +3972,38 @@ def test_opt79_log_plan_is_capped_and_matches_the_detector_selector():
         _opt79_wf(steps=[{"run": "npm ci"}, {"run": "npm test"}])) == []
 
 
-def test_opt79_log_probe_has_a_repo_wide_ceiling():
+def test_opt79_log_probe_has_a_repo_wide_ceiling(monkeypatch):
     """The per-job and per-workflow caps are both PER WORKFLOW. Without a
     repo-wide ceiling a monorepo with thirty workflow files would multiply them
-    into hundreds of log fetches — the exact cost this engine is frugal about."""
+    into hundreds of log fetches — the exact cost this engine is frugal about.
+    Driven through the probe the collector runs: four workflows planning 32
+    reads are cut to the 24-read budget, the cut is tallied, and the stamp the
+    report renders states planned and probed separately."""
     assert cr._OPT79_REPO_LOG_BUDGET >= cr._OPT79_LOG_PROBE_MAX
     assert (cr._OPT79_REPO_LOG_BUDGET
             < 10 * cr._OPT79_LOG_PROBE_MAX * cr._OPT79_MAX_CANDIDATE_JOBS)
-    src = (Path(cr.__file__).read_text(encoding="utf-8"))
-    body = src.split("def collect(", 1)[1]
-    assert "_OPT79_REPO_LOG_BUDGET" in body, (
-        "collect() no longer trims the OPT79 log plan to the repo-wide budget")
+    fetched: list = []
+    monkeypatch.setattr(cr, "_prefetch_text", lambda client, eps: None)
+    monkeypatch.setattr(cr, "_fetch_job_log",
+                        lambda client, repo, job: fetched.append(job["id"]) or "log")
+    jpr_by_wf, crit_by_wf, docs = {}, {}, {}
+    for n, p50 in enumerate((10.0, 40.0, 20.0, 30.0)):
+        wf = f"w{n}.yml"
+        jpr, _ = _opt79_sample()
+        for run_jobs in jpr:
+            run_jobs[0]["id"] += 1000 * n
+        jpr_by_wf[wf] = jpr
+        crit_by_wf[wf] = _opt79_crit(job_p50=p50)
+        docs[wf] = _opt79_wf()
+    gates: dict = {}
+    kept, logs, stamp = cr._opt79_probe_logs(
+        None, "o/r", jpr_by_wf, crit_by_wf, docs, gates)
+    assert stamp == {"planned": 32, "probed": 24, "returned": 24,
+                     "budget": cr._OPT79_REPO_LOG_BUDGET}, stamp
+    assert len(fetched) == 24 and len(logs) == 24
+    assert gates.get("beyond_the_repo_wide_log_budget") == 8, gates
+    # the cheapest candidate's workflow is the one cut
+    assert {wf for _p, wf, _j in kept} == {"w1.yml", "w3.yml", "w2.yml"}
 
 
 def test_opt79_log_plan_does_not_count_withholds():

@@ -101,7 +101,11 @@ _JOB_ID = 9001
 #            so it costs exactly the per-job cap once. Every other OPT79 gate is
 #            answered from data already in hand, so no log is fetched for a job that
 #            could not produce a finding.)
-_GOLDEN_GH_QUERY_COUNT = 48
+#   56  now  (+8 OPT79: `matrix.yml`'s `integration` job — that workflow's slowest —
+#            now also restores a cache before its install, so the uncredited path
+#            runs end to end: its second candidate job costs the per-job cap once
+#            more.)
+_GOLDEN_GH_QUERY_COUNT = 56
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).
@@ -155,6 +159,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: integration-deps-${{ hashFiles('**/package-lock.json') }}
+      - run: npm ci
       - name: Integration suite
         run: npm run integration
   lint-eslint:
@@ -450,8 +459,29 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # …and the probe stayed inside its budget. Counted ONCE, in the provenance
     # row the report renders and `verify_report` re-derives — a second copy on
     # the findings doc was a number nothing checked and nothing rendered.
-    assert isinstance(data.get("opt79_withheld_by_gate"), dict), (
+    _o79_gates = data.get("opt79_withheld_by_gate")
+    assert isinstance(_o79_gates, dict), (
         "the per-gate withhold tally must be stamped on every collected run")
+    # …and it is FED: the corpus has jobs with no cache at all, and each is
+    # counted. An empty tally is what a collect() that stopped passing the
+    # accumulator to the detector produces.
+    assert (_o79_gates.get("job_declares_no_cache_restore_step") or 0) > 0, _o79_gates
+    # The uncredited path end to end. `matrix.yml`'s `integration` job is that
+    # workflow's slowest job and also restores a cache before `npm ci`: 33s on
+    # its hit runs against 12s on its miss runs. It cannot be priced (it is not
+    # below the cluster floor), so it is reported with no number — and since the
+    # workflow runs only on push, never as a merge wait.
+    _unc = data.get("opt79_uncredited_pole_caches")
+    assert isinstance(_unc, list) and len(_unc) == 1, _unc
+    assert _unc[0].get("job") == "integration", _unc[0]
+    assert _unc[0].get("waste_s") == 21.0, _unc[0]
+    assert _unc[0].get("hits") == 4 and _unc[0].get("misses") == 4, _unc[0]
+    assert _unc[0].get("runner_min_saving") is None, _unc[0]
+    assert _unc[0].get("on_critical_path") is False, _unc[0]
+    assert _unc[0].get("workflow_gates_pull_requests") is False, _unc[0]
+    # Nothing was probed and withheld on this corpus: both candidates decided.
+    assert data.get("opt79_withheld_candidates") == [], data.get(
+        "opt79_withheld_candidates")
     # …and the run DECLARES those reads in its provenance, as its own row. The
     # pole-drill `logs_fetched` field counts a different thing and the report's
     # self-check re-derives that cell from the persisted bundle, so a report that
@@ -459,11 +489,11 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # were read is the failure this separate row exists to prevent.
     _probe = (data.get("data_sources") or {}).get("cache_probe_logs")
     assert isinstance(_probe, dict), data.get("data_sources")
-    assert _probe.get("probed") == 8 and _probe.get("returned") == 8, _probe
+    assert _probe.get("probed") == 16 and _probe.get("returned") == 16, _probe
     # PLANNED is stamped beside them: when the repo-wide budget cuts the plan the
     # comparison saw less of the repository than its selector asked for, and the
     # row has to say so. Here nothing was cut, so the two agree.
-    assert _probe.get("planned") == 8, _probe
+    assert _probe.get("planned") == 16, _probe
     # OPT80 end to end. `matrix.yml`'s `smoke` job checks out in 8s on ten of the
     # twelve sampled runs and 120s on two, and each of those two runs ships a
     # recorded checkout log whose git progress stops for 85s. This executes the
@@ -658,6 +688,49 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert "checkout_tail_excess" in report, (
         "OPT80's neutrality certificate must be described to the reader")
     assert str(o80_rendered[0]["id"]) in report, o80_rendered[0]["id"]
+
+    # OPT79 reaches the READER too — the credited finding with the numbers it
+    # was measured on, and the uncredited line with its own.
+    o79_rendered = [f for f in data["findings"] if f.get("pattern") == "OPT79"]
+    assert "A Cache That Costs More Than It Saves" in report, (
+        "the OPT79 finding is in the findings document but not in the rendered "
+        "report — the renderer dropped it")
+    assert str(o79_rendered[0]["id"]) in report, o79_rendered[0]["id"]
+    _o79_ev = o79_rendered[0]["evidence"]
+    assert ("measured a p50 of 31s across 4 sampled run(s)" in _o79_ev
+            and "against 12s across 4 run(s)" in _o79_ev
+            and "the hit path is 19s SLOWER" in _o79_ev), _o79_ev
+    assert (f"~{o79_rendered[0]['runner_min_saving']:.0f} runner-min/mo"
+            in _o79_ev), _o79_ev
+    assert "1 cache(s) measured net-negative on a job this audit cannot price" \
+        in report, "the uncredited OPT79 line did not reach the report"
+    assert ("a cache on `integration` in `.github/workflows/matrix.yml` "
+            "measured net-negative by 21s per cache hit (4 hit / 4 miss run(s) "
+            "sampled)") in report
+    assert "does not run on pull requests" in report
+
+    # The self-check RE-DERIVES the OPT79 numbers, it does not read them back.
+    # A findings file with the credited finding's excess tampered must fail
+    # the report's own verification, and so must a tampered uncredited row.
+    for _tamper, _check in (
+            (lambda d: [f for f in d["findings"] if f.get("pattern") == "OPT79"
+                        ][0]["cache_net_negative"].__setitem__("waste_s", 900.0),
+             "Tier-2"),
+            (lambda d: d["opt79_uncredited_pole_caches"][0].__setitem__(
+                "waste_s", 900.0),
+             "uncredited net-negative caches")):
+        _bad = json.loads(findings_path.read_text(encoding="utf-8"))
+        _tamper(_bad)
+        _bad_path = tmp_path / "findings_tampered.json"
+        _bad_path.write_text(json.dumps(_bad), encoding="utf-8")
+        _v = subprocess.run(
+            [sys.executable, str(_SKILL_DIR / "tests" / "verify_report.py"),
+             "--report", str(report_path), "--findings", str(_bad_path)],
+            capture_output=True, text=True, env=env, timeout=60)
+        assert _v.returncode != 0, (
+            f"verify_report accepted a tampered OPT79 waste_s ({_check}):\n"
+            f"{_v.stdout}")
+        assert "waste_s" in _v.stdout, _v.stdout
 
     # ---- PR-H1 (G5): the promoted-path backstop — UNCONDITIONAL. -------------
     # Before this, the replay corpus promoted nothing, so the Tier-2 render
@@ -1531,6 +1604,53 @@ def test_skipped_detectors_are_NAMED_in_the_rendered_report(tmp_path):
         "verify_report passed a report that never disclosed the skipped detectors — "
         "the invariant does not bite")
     assert "not name them" in (bad.stdout + bad.stderr)
+
+
+def test_a_cache_probe_whose_logs_all_fail_is_named_and_disclosed(tmp_path):
+    """Every OPT79 cache-probe log for `matrix.yml` comes back empty (expired
+    retention, a 404 wave). The workflow was not evaluated, and the two candidate
+    caches whose logs were probed were withheld — neither may read as clean.
+    Driven end to end: the workflow is NAMED as not evaluated, the Data sources
+    table states the withheld candidates and why, the honest report verifies,
+    and one with the withheld line stripped does not."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    fixtures = _replay_dir(tmp_path)
+    for i in range(1, 9):
+        for leg in (4, 9):                      # `integration` and `deps`
+            (fixtures / f"repos_synthetic_repo_actions_jobs_600{i}{leg}_logs.txt"
+             ).unlink()
+    env = _replay_env(fixtures)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    r = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "run.py"),
+         "--root", str(root), "--out", str(findings_path), "--repo", _REPO],
+        capture_output=True, text=True, env=env, timeout=120)
+    assert r.returncode == 0, r.stderr
+    data = json.loads(findings_path.read_text(encoding="utf-8"))
+    skipped = data["data_sources"].get("detectors_skipped") or []
+    entry = next((e for e in skipped
+                  if e["workflow"] == ".github/workflows/matrix.yml"), None)
+    assert entry and "OPT79" in entry["detectors"], skipped
+    assert "0 of 16 cache-probe job log(s)" in entry["reason"], entry
+    assert not [f for f in data["findings"] if f.get("pattern") == "OPT79"]
+    withheld = data.get("opt79_withheld_candidates")
+    assert sorted(w["job"] for w in withheld) == ["deps", "integration"], withheld
+    assert {w["gate"] for w in withheld} == {"population_truncated_by_unread_logs"}
+
+    report = _render(_SCRIPTS, findings_path, report_path, env)
+    assert "OPT79" in report and "matrix.yml" in report
+    assert ("| cache hit/miss verdicts | 2 candidate cache(s) probed but withheld; "
+            "top reason: `population_truncated_by_unread_logs`") in report, report
+    ok = _verify(report_path, findings_path, env)
+    assert ok.returncode == 0, f"verify rejected an honest report:\n{ok.stdout}"
+    silent = "\n".join(line for line in report.splitlines()
+                       if "cache hit/miss verdicts" not in line)
+    silent_path = tmp_path / "silent.md"
+    silent_path.write_text(silent, encoding="utf-8")
+    bad = _verify(silent_path, findings_path, env)
+    assert bad.returncode != 0 and "withheld" in bad.stdout, bad.stdout
 
 
 def test_a_feature_branch_checkout_discloses_the_yaml_branch_skew(tmp_path):
