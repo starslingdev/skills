@@ -9381,8 +9381,10 @@ def test_withheld_setup_and_checkout_candidates_must_be_disclosed(tmp_path):
             f"3 {noun} measured but withheld; top reason: `{top}`")
         chk = vr.check_coverage_disclosed(honest, path)
         assert chk.ok, (key, chk)
-        # a wrong count, or a reason that is not the commonest one, is not a disclosure
+        # a wrong count either way, or a reason that is not the commonest one, is
+        # not a disclosure
         for cell in (f"2 {noun} measured but withheld; top reason: `{top}`",
+                     f"4 {noun} measured but withheld; top reason: `{top}`",
                      f"3 {noun} measured but withheld; top reason: `{other}`"):
             chk = vr.check_coverage_disclosed(silent + row.format(cell), path)
             assert not chk.ok, (key, cell, chk)
@@ -9426,3 +9428,28 @@ def test_withheld_setup_and_checkout_lists_that_are_malformed_fail(tmp_path):
             chk = vr.check_coverage_disclosed(
                 silent, _withheld_77_80_doc(tmp_path, key, bad))
             assert not chk.ok and key in chk.detail, (key, bad, chk)
+
+
+def test_withheld_setup_and_checkout_tie_goes_to_the_alphabetically_first_gate(tmp_path):
+    """The renderer and the verifier each carry the tie rule; a 1:1 tie is the
+    only case where a drift between them shows."""
+    vr = _load_verify_report()
+    silent = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    rows = [{"workflow_file": "ci.yml", "job": "a", "gate": "tail_run_log_unavailable"},
+            {"workflow_file": "ci.yml", "job": "b",
+             "gate": "log_carries_no_progress_vocabulary"}]
+    path = _withheld_77_80_doc(tmp_path, "opt80_withheld_candidates", rows)
+    row = "| checkout stall verdicts | 2 candidate checkout(s) measured but withheld; " \
+          "top reason: `{}` | x |\n"
+    assert vr.check_coverage_disclosed(
+        silent + row.format("log_carries_no_progress_vocabulary"), path).ok
+    assert not vr.check_coverage_disclosed(
+        silent + row.format("tail_run_log_unavailable"), path).ok
+
+
+def test_withheld_setup_and_checkout_rows_fail_on_an_unreadable_findings_file(tmp_path):
+    vr = _load_verify_report()
+    p = tmp_path / "findings.json"
+    p.write_text("{not json", encoding="utf-8")
+    chk = vr._withheld_77_80_disclosure_violation("## 🗄️ Data sources\n", p)
+    assert chk[0] and "unreadable" in chk[0], chk
