@@ -65,7 +65,7 @@ def test_classification_counts_match_spec():
     # +1 (MEASURED CAUSE never asserts unrendered timeline steps — the nrwl/nx playwright-parallel fix).
     # +1 (#12: no fileless/managed status check crowns the headline — disclosed as PR-lifetime latency).
     # +1 (#1: aggregation-gate poles tell the upstream story, never an optimize-this prompt).
-    # +1 (#106: uncredited net-negative caches re-derive from their own runs — a numberless
+    # +1 (OPT79 (PR #106): uncredited net-negative caches re-derive from their own runs — a numberless
     #     row carries measurements no total contradicts, so it needs its own re-derivation).
     assert counts[gs.EXCLUDE] == 1
     assert counts[gs.TRIAGE] == 2

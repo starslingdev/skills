@@ -403,8 +403,20 @@ family reads, so retuning it there moves this gate too.
    `actions/cache/restore`, or an `owner/setup-*` action with a `cache:` input
    set to anything other than `false` / `no` / `off`; `cache: ${{ … }}` is an
    unevaluated expression whose value the static parse cannot know and withholds
-   rather than reading as a yes — followed by an **install**
-   step. An install step is recognised by **what it runs**, not by what it was
+   rather than reading as a yes — and **that cache step must be saved by its own
+   post phase**. A separate `actions/cache/save` step withholds
+   (`cache_is_saved_by_a_separate_step`): the save runs on the miss path but is
+   not the restore's post phase, so the three-step block cannot measure it.
+   Caches that are **on by default** count toward "exactly one": `setup-go`
+   caches unless it says `cache: false`, and `astral-sh/setup-uv` caches through
+   `enable-cache`, so a job pairing either with an `actions/cache` step is a
+   multi-cache job and withholds. The cache is followed by an **install**
+   step, and the **first step after the cache must be a recognised install**
+   (`first_step_after_cache_is_not_a_recognised_install` withholds otherwise — a
+   build or test step in between would be priced as part of the cache's cost).
+   That install must also belong to the **same package manager** the cache is
+   for (`install_package_manager_does_not_match_cache` withholds a pnpm store
+   cache followed by `npm ci`, for example). An install step is recognised by **what it runs**, not by what it was
    called, so `name: Install dependencies` over `run: npm ci` is found like any
    other — and a step *named* `npm ci` that *runs* `npm run build` is not one. A
    multi-line `run:` block must be installs **all the way down**: `pip install
@@ -417,7 +429,8 @@ family reads, so retuning it there moves this gate too.
    `mix deps.get`, `go mod download`, `cargo fetch`, `mvn dependency:`. Checkout,
    configure and the cache step itself are setup but are not installs, and
    pairing a cache with one of them would price an unrelated block. Two cache
-   steps in the job withholds: the log's hit line could belong to either.
+   steps in the job withholds (counting the on-by-default caches above): the
+   log's hit line could belong to either.
 2. The job must resolve to exactly **one** job in the workflow YAML by name (an
    interpolated matrix leg resolves to none; a name carried by more than one job
    in a single run is not one job), and to one known per-minute-billed runner
@@ -430,23 +443,31 @@ family reads, so retuning it there moves this gate too.
    from GitHub Actions cache with key` / `No GitHub Actions cache found for
    key`) — never by a duration.
 
-   That scan is **scoped to the restore step's own log group**
-   (`##[group]Run <step>` … the next group marker). It has to be: Turborepo
+   That scan is **scoped to the restore step's own log group**: it starts at
+   the restore step's `##[group]Run <step>` header and ends **only** at the next
+   `##[group]Run ` or `##[group]Post ` header. The action's own inner groups and
+   every `##[endgroup]` are skipped, because `actions/cache` prints its hit/miss
+   line after closing its group but still inside its own step. It has to be: Turborepo
    prints `cache miss, executing <task>`, Gradle prints `Build cache miss for
    task …`, and both land in the *test* step. Read unscoped, every genuine cache
    hit in a JavaScript monorepo looked like a two-cache job. Each row stamps the
    group its line came from, and a log with no such group withholds the
    occurrence rather than guessing.
 
-   Inside that group, a log showing **both** lines is a job with more than one
-   cache: it is **excluded and counted**, never guessed — *except* a miss line
-   **followed by** a hit line, which is `restore-keys` reporting that the exact
-   key missed and a prefix fallback was restored. The restore ran and was paid
-   for, so that is a hit.
+   Inside that group, a log showing **both** a miss and a hit line is
+   **excluded and counted**, never guessed, in either order. A miss followed by a
+   hit is what a `restore-keys` partial match prints, and a partial match is not
+   a clean hit — its restore size and time are not the exact-key restore this
+   comparison prices — so it is withheld rather than counted as one.
+
+   Only **successful** job runs are classified: a failed or cancelled run's
+   step timings are truncated and would poison either population.
 
    An occurrence whose log was never fetched is **counted as unread**, not folded
-   into the populations; when unread occurrences leave either population short,
-   the withhold says so rather than reporting a thin sample. At least **3 hits
+   into the populations; an occurrence past the per-job log cap of 8 is tallied
+   separately as `beyond_the_per_job_log_probe_cap`, not as unread. When unread
+   occurrences leave either population short, the withhold says so rather than
+   reporting a thin sample. At least **3 hits
    and 3 misses** are required; a comparison with one side unmeasured is the
    shape-assumption the evidence guards forbid.
 4. Every credited occurrence must have run on the **same runner label**. A hit on
@@ -464,7 +485,9 @@ family reads, so retuning it there moves this gate too.
    manufactures the excess. A post step that started and never completed
    withholds the occurrence; a post label that matched **no** occurrence
    withholds the job; and `actions/cache/restore`, which has no post phase at
-   all, records that there is no save rather than inventing a step name.
+   all, records that there is no save rather than inventing a step name. That
+   is only true when no *separate* `actions/cache/save` step exists in the job;
+   one that does withholds in step 1, because its save cannot be measured here.
 
    The block's p50 over the hit runs must exceed its p50 over the
    miss runs by at least **max(5s, 20% of the miss path)** — a named floor, so a
@@ -472,8 +495,10 @@ family reads, so retuning it there moves this gate too.
 6. The **hit share** across the classified runs must be at least **0.25**. A
    cache that almost never hits has a key-entropy problem, which OPT6 and OPT8
    own; route there rather than report the same cache twice.
-7. The job's measured p50 must sit **strictly below the workflow's cluster
-   floor**. See *Why this credits no wall-clock time* below.
+7. To be **credited**, the job's measured p50 must sit **strictly below the
+   workflow's cluster floor**. This is a crediting gate, not a candidate gate: a
+   job at or above the floor is still measured by steps 1-6 and is reported
+   uncredited. See *Why this credits no wall-clock time* below.
 
 Job logs are the expensive call in this engine, so the probe is capped three
 times: at most **8** sampled occurrences of one job, at most **2** candidate jobs
@@ -486,10 +511,18 @@ cache actually costs is only known once its logs are read. The repo-wide ceiling
 is applied to the whole plan **after** that ranking, so the budget reaches the
 costliest candidates in the repository rather than whichever workflow file was
 walked first, and every occurrence it cuts is counted. The report's Data sources
-row states both what was planned and what was read.
+row states both what was planned and what was read. This probe runs during
+collection and does **not** need `--with-logs`.
 
-Every gate about a job's SHAPE — no cache, two caches, no install after the cache
-— is answered from data already in hand, so those jobs cost no log fetch. That is
+**Withheld candidates are disclosed.** A job that was measured but withheld by a
+gate does not vanish: the report carries a one-line note of the form "measured
+but withheld: N, top reason", so a repository with a withheld cache reads
+differently from one with no cache at all. The full per-gate tally stays in
+`opt79_withheld_by_gate`.
+
+Every gate about a job's SHAPE — no cache, two caches, a separate save step, no
+recognised install right after the cache, a package-manager mismatch — is
+answered from data already in hand, so those jobs cost no log fetch. That is
 not the same as "no log is fetched for a job that could not produce a finding":
 the workflow's slowest job is probed too, and what it produces is the uncredited
 line below.
@@ -510,10 +543,12 @@ The credited figure is a **lower bound** on what removing the cache would save:
 the miss path it is measured against still pays the restore step and the post
 save today, and both disappear with the cache.
 
-**Why this credits no wall-clock time.** `wall_clock_p50_s` is always 0, and the
-candidate gate requires the job to sit strictly below the workflow's cluster
-floor — which is exactly what makes that zero true and re-derivable, and is the
-finding's `below_cluster_floor` neutrality certificate.
+**Why this credits no wall-clock time.** `wall_clock_p50_s` is always 0, and a
+job must sit strictly below the workflow's cluster floor to be **credited** —
+which is exactly what makes that zero true and re-derivable, and is the
+finding's `below_cluster_floor` neutrality certificate. The floor does not gate
+which jobs are measured: at or above it, the job is measured and reported
+uncredited, as described next.
 
 **The case above the floor: measured, reported, not priced.** A job that is not
 strictly below the cluster floor cannot carry the neutrality certificate a
@@ -534,9 +569,10 @@ can gate a PR, actually carries the merge wait:
 > (600s), so this audit cannot prove that shrinking it leaves the merge gate
 > unchanged; **not credited** in this version.
 
-The second job's saving is pure runner-minutes; it is uncredited only because
-this version has not sized the neutrality argument for it. A workflow that cannot
-gate a PR is never told it has a merge wait.
+For a job that is not the long pole the saving may be pure runner-minutes, but
+this audit cannot prove that shrinking it leaves the merge gate unchanged, so it
+is not credited. A workflow that cannot gate a PR is never told it has a merge
+wait.
 
 No runner-minutes, no wall-clock claim, no certificate, no Tier-2 row, and no
 contribution to any total — the measurement is complete, only the sizing is
@@ -549,8 +585,9 @@ out of the numbers and shown anyway.
 
 Sizing it is the follow-up: route the measured excess through the wall-clock
 bound cascade, where CAP 1 already caps an on-pole saving at
-`long_pole_p50 − floor_p50`; crediting the at-or-above-the-floor-but-below-the-pole
-job, where neutrality does hold, is the easier half of the same follow-up. Until
+`long_pole_p50 − floor_p50`; the at-or-above-the-floor-but-below-the-pole job is
+the easier half of the same follow-up, but only once a neutrality argument for
+the merge gate exists. Until
 then the honest report is a line without a number, not silence — and silence is
 what this used to be, because the floor test ran in the candidate selector and
 the job's logs were never fetched at all.
