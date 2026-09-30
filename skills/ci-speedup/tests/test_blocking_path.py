@@ -2920,11 +2920,24 @@ def test_withheld_row_never_prints_an_unmapped_gate_code():
     assert row and "brand_new_gate_code" not in row, row
 
 
+# The local names OPT80 accumulates its no-proof reasons in. A gate reaches the
+# report through one of these, whichever statement writes it.
+_REASON_ACCUMULATORS = ("reasons", "open_reasons")
+
+
 def _withhold_gates_recordable_in_the_collector():
     """Every gate the collector can write into a withheld-candidates list, read
     from the detectors' own source: the literals handed to `_drop_group` /
-    `_unresolved`, the no-proof reasons OPT80 collects, and the names the
-    independence check returns. A gate added there without a phrase fails here."""
+    `_unresolved`, the no-proof reasons OPT80 collects (by `.append`, `.extend`,
+    `+=` or an assignment's fallback default), and the names the independence
+    check returns. A gate added there without a phrase fails here.
+
+    Nothing in this scan is hardcoded. Two OPT80 gates used to be, because they
+    are recorded by `open_reasons += [...]` and by the `reasons or [<default>]`
+    inside an assignment rather than by `.append` — and a gate the guard lists
+    for itself is a gate the guard cannot notice disappearing, which also left
+    the "the scan is really reading the detectors" canary below passing on two
+    names the scan never read."""
     import ast
     tree = ast.parse((_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8"))
     fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
@@ -2948,12 +2961,26 @@ def _withhold_gates_recordable_in_the_collector():
     d80 = fns["_detect_opt80_checkout_tail_stall"]
     for c in calls(d80, "_unresolved"):
         found80 |= lits(c.args[1]) if len(c.args) > 1 else set()
-    for c in calls(d80, "append"):
-        if isinstance(c.func.value, ast.Name) and c.func.value.id in (
-                "reasons", "open_reasons"):
-            found80 |= lits(c)
-    found80 |= lits(ast.parse("x=['tail_run_past_the_log_probe_budget',"
-                              "'no_tail_run_log_was_probed']"))
+    # Every way the reason accumulators are written to, not just `.append`.
+    # `open_reasons += [...]` (an AugAssign) and the `reasons or [<default>]`
+    # fallback inside `open_reasons = [...]` (a plain Assign) both record gates
+    # the scan could not see, so their two literals were hardcoded here — and a
+    # hardcoded literal is a gate the guard cannot notice going missing.
+    def _writes_a_reason_list(node):
+        if isinstance(node, (ast.Assign, ast.AugAssign)):
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target])
+            return any(isinstance(t, ast.Name) and t.id in _REASON_ACCUMULATORS
+                       for t in targets)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("append", "extend")):
+            return (isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in _REASON_ACCUMULATORS)
+        return False
+
+    for n in ast.walk(d80):
+        if _writes_a_reason_list(n):
+            found80 |= lits(n)
     for n in ast.walk(fns["_opt80_stall_in_log"]):
         if isinstance(n, ast.Return) and isinstance(n.value, ast.Tuple):
             found80 |= lits(n.value)

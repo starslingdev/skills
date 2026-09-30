@@ -1083,14 +1083,25 @@ sources row label, its counted noun and its "Used for" cell, and
 "N candidate … held back (<jobs>): <reason>." — the entries distinct and sorted,
 workflow-qualified as `<workflow.yml> / <job>` when two workflows share a job
 name (an OPT77 entry is the whole group), at most five then ", and K more", every
-repo-controlled name escaped for the table; the reason a plain-English phrase for
-the commonest gate, ties alphabetical. A pattern contributes only its key, its
+repo-controlled name escaped for the table (every markdown-active character
+backslash-escaped, `\` before `|`, so a name can neither split the row nor turn
+itself into a link); the reason a plain-English phrase for the commonest gate,
+ties alphabetical, and prefixed "most commonly," whenever more than one gate
+contributed — the count and the job list cover every candidate while the reason
+covers only some of them. A pattern contributes only its key, its
 row text and its gate→phrase table (registered in `_WITHHELD_PHRASES_BY_KEY`),
 never its own row builder. The phrase tables (`_OPT77_WITHHOLD_PHRASES`,
 `_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`) map EVERY withhold gate
-their collector can record, and
-a test enumerates those gates from the detectors' source so a new gate cannot
-ship without a phrase. `verify_report.py`'s `check_coverage_disclosed` carries
+their collector can record. What a test actually guarantees is narrower than
+"a new gate cannot ship without a phrase": it enumerates the gates it can READ
+from the detectors' source — the literals handed to `_drop_group` /
+`_unresolved`, the names the independence check and `_opt80_stall_in_log`
+return, and the reasons accumulated in `reasons` / `open_reasons` by `.append`,
+`.extend`, `+=` or an assignment's fallback default — and fails when one of
+those has no phrase. A gate recorded in some other shape (through a
+differently-named local, or assembled at runtime) is invisible to the scan; the
+backstop for that one is `verify_report`, which fails the report closed rather
+than printing a code. `verify_report.py`'s `check_coverage_disclosed` carries
 its own copy of the tables (pinned equal by a coupling test) and re-derives the
 whole line — count, jobs, reason — from the findings document, failing a report
 that omits the row, misstates any part of it, prints a gate name instead of a
