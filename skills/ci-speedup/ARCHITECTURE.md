@@ -1065,10 +1065,21 @@ OPT65 as the dispatch key) and is historical for OPT77; `verify_report.py`'s
 grouping (each job's own stamped prefix must equal the credited shared one) and
 the eligible set the tallest-remaining job was chosen from. When the group is
 every job the workflow DECLARES there is no remaining job, and the comparison is
-against the gate the group sets today (`max_i(setup_i + useful_i)`, its members
-running in parallel): at or below it the merge wait is unchanged and the
+against the gate the group sets today, its members running in parallel:
+`max_i(min(setup_i + useful_i, job_p50_i))`. The component sum is CAPPED by the
+member's measured job p50 because `setup_i` and `useful_i` are two medians taken
+separately and their sum is not the median of the job's duration: setups of
+10/100/100s beside tasks of 100/100/10s make a 110s job read as 200s, and an
+overstated gate credits a consolidation as free when the measured wait says it
+would grow. At or below that gate the merge wait is unchanged and the
 runner-minute saving is credited, above it the group is held back and disclosed.
 "Whole workflow" is decided from the declared jobs, never from the sample.
+`margin_s` on this path is always exactly 0: `projected = max_i(setup_i) +
+max_i(useful_i)` is never below `max_i(setup_i + useful_i)`, so the branch
+credits only the exact tie, where one member sets both the longest setup and the
+longest task. `verify_report` re-derives the capped gate from `job_p50` rather
+than replaying the detector's arithmetic, so an overstated gate is caught rather
+than reproduced.
 Like OPT65 it claims
 no speedup (`wall_clock_p50_s=0`, `realization=none`), and it shares
 `_billed_job_runner` and `_tier2_scope_event` with it.
@@ -1089,9 +1100,12 @@ sources row label, its counted noun and its "Used for" cell, and
 "N candidate … held back (<jobs>): <reason>." — the entries distinct and sorted,
 workflow-qualified as `<workflow.yml> / <job>` when two workflows share a job
 name (an OPT77 entry is the whole group), at most five then ", and K more", every
-repo-controlled name escaped for the table (every markdown-active character
-backslash-escaped, `\` before `|`, so a name can neither split the row nor turn
-itself into a link); the reason a plain-English phrase for the commonest gate,
+repo-controlled name escaped for the table (backticks and `*` swapped for an
+apostrophe, then `\` `|` `[` `]` `(` `)` `_` `<` `>` backslash-escaped, `\`
+first, so a name can neither split the row, nor turn itself into a link, nor
+open raw HTML. Out of scope, and unfixable by character escaping: GFM's
+extended autolink turns a BARE `https://...` job name into a live link with no
+punctuation to escape); the reason a plain-English phrase for the commonest gate,
 ties alphabetical, and prefixed "most commonly," whenever more than one gate
 contributed — the count and the job list cover every candidate while the reason
 covers only some of them. A pattern contributes only its key, its
@@ -1104,8 +1118,10 @@ from the detectors' source — the literals handed to `_drop_group` /
 `_unresolved`, the names the independence check and `_opt80_stall_in_log`
 return, and the reasons accumulated in `reasons` / `open_reasons` by `.append`,
 `.extend`, `+=` or an assignment's fallback default — and fails when one of
-those has no phrase. A gate recorded in some other shape (through a
-differently-named local, or assembled at runtime) is invisible to the scan; the
+those has no phrase. A gate recorded in some other shape is invisible to the
+scan: through a differently-named local, assembled at runtime, passed to
+`_drop_group` by keyword instead of positionally, or recorded in a helper other
+than the four functions the scan reads. The
 backstop for that one is `verify_report`, which fails the report closed rather
 than printing a code. `verify_report.py`'s `check_coverage_disclosed` carries
 its own copy of the tables (pinned equal by a coupling test) and re-derives the

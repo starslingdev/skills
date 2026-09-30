@@ -917,8 +917,9 @@ _VR_OPT77_WITHHOLD_PHRASES = {
         "the sampled runs never had every job in the group run together, so the "
         "saving could not be measured",
     "collapsing_the_whole_workflow_would_lengthen_the_merge_gate":
-        "these are every job the workflow declares, so they set the wait "
-        "themselves, and collapsing them into one would make that wait longer",
+        "every job the workflow declares is in the group, so the group sets "
+        "the pull-request wait itself, and collapsing it into one job would "
+        "make that wait longer",
     "no_job_outside_the_group_runs_often_enough_to_measure_against":
         "other jobs exist, but none ran often enough in the sampled runs to show "
         "that merging these would not make the pipeline slower",
@@ -967,9 +968,11 @@ _VR_WITHHELD_MODAL_LEAD = "most commonly, "
 
 # The renderer's escape list, in the renderer's order. `\` MUST stay first:
 # escaping `|` first turns `a\|b` into `a\\|b`, which GFM reads as an escaped
-# backslash plus a LIVE cell separator. A coupling test pins this tuple and the
-# function below byte-identical to `blocking_path`'s.
-_VR_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_")
+# backslash plus a LIVE cell separator. `<` and `>` are in the list because
+# `<https://example.test>` is a GFM autolink and a raw `<details>` is live
+# HTML. A coupling test pins this tuple and the function below
+# byte-identical to `blocking_path`'s.
+_VR_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_", "<", ">")
 
 
 def _vr_withheld_cell_text(text: object) -> str:
@@ -5527,10 +5530,19 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
             problems.append(
                 f"group_is_the_whole_workflow but the sampled runs also carried "
                 f"{outside_sampled!r}")
+        # Today's gate is the slowest member, capped by what that member
+        # MEASURED: the stamped `setup_p50_s` and `useful_work_p50_s` are two
+        # medians taken separately, and their sum can exceed the median of the
+        # job's duration. Re-derived against `job_p50` here rather than by
+        # replaying the detector's own arithmetic, so an overstated gate is
+        # caught instead of reproduced.
         per_job = _as_dict(sc.get("per_job"))
-        gates = [(_num(_as_dict(v).get("setup_p50_s")) or 0.0)
-                 + (_num(_as_dict(v).get("useful_work_p50_s")) or 0.0)
-                 for v in per_job.values()]
+        gates = []
+        for _k, _v in per_job.items():
+            _steps = ((_num(_as_dict(_v).get("setup_p50_s")) or 0.0)
+                      + (_num(_as_dict(_v).get("useful_work_p50_s")) or 0.0))
+            _measured = _num(all_p50.get(str(_k))) or 0.0
+            gates.append(min(_steps, _measured) if _measured > 0 else _steps)
         if len(per_job) != len(member) or not gates:
             problems.append("group_is_the_whole_workflow but per_job does not cover "
                             "every credited member - the gate cannot be re-derived")
@@ -5543,6 +5555,9 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
         if sc.get("remaining_tallest_job") is not None:
             problems.append("group_is_the_whole_workflow but a remaining tallest job "
                             "is named - there is no job outside the group")
+        if sc.get("remaining_tallest_p50_s") is not None:
+            problems.append("group_is_the_whole_workflow but a remaining tallest p50 "
+                            "is stamped - there is no job outside the group")
         if projected > gate_today:
             problems.append(
                 f"projected consolidated job {projected} is ABOVE the {gate_today} "

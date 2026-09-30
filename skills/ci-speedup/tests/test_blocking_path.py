@@ -8134,10 +8134,34 @@ def test_held_back_job_names_cannot_split_the_row_or_become_a_link():
     self-check's own cell regex read only the fragment before the split. And a
     job named `[click](http://example.test)` rendered as a working link inside
     the audit's own Data sources table."""
+    def _gfm_cells(row: str) -> int:
+        """Count the row's cells the way GFM does: a backslash escapes exactly
+        the character after it, so a `|` ends a cell unless an ODD run of
+        backslashes precedes it. Counting with a `(?<!\\)\\|` lookbehind has
+        precisely the blind spot this test exists to catch — it declines to
+        split `a\\\\|b`, which GFM reads as an escaped backslash followed by a
+        LIVE separator, so the broken escaper would score three cells here."""
+        cells, buf, i = [], [], 0
+        while i < len(row):
+            if row[i] == "\\" and i + 1 < len(row):
+                buf.append(row[i:i + 2])
+                i += 2
+            elif row[i] == "|":
+                cells.append("".join(buf))
+                buf = []
+                i += 1
+            else:
+                buf.append(row[i])
+                i += 1
+        cells.append("".join(buf))
+        return len([c for c in cells if c.strip()])
+
     line = _held_back_cell([
         {"workflow_file": "ci.yml", "job": "a\\|b", "gate": "no_monthly_volume"}])
     # exactly three cells: the row did not grow a column
-    assert len([c for c in re.split(r"(?<!\\)\|", line) if c.strip()]) == 3, line
+    assert _gfm_cells(line) == 3, line
+    # `\` escaped first, THEN `|`: `a\|b` -> `a\\\|b`, never `a\\|b`
+    assert "a\\\\\\|b" in line, line
 
     line = _held_back_cell([
         {"workflow_file": "ci.yml", "job": "[click](http://example.test)",
@@ -8151,6 +8175,20 @@ def test_held_back_job_names_cannot_split_the_row_or_become_a_link():
         {"workflow_file": "ci.yml", "job": "snake_case_job_name",
          "gate": "no_monthly_volume"}])
     assert "snake\\_case\\_job\\_name" in line, line
+
+    # `<https://example.test>` is a GFM autolink and renders as a working link
+    # exactly like the `[click](...)` form above; a raw `<img …>` / `<details>`
+    # is live HTML inside the cell. Angle brackets are the same harm, so they
+    # are neutralised the same way.
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "<https://example.test>",
+         "gate": "no_monthly_volume"}])
+    assert "<https://example.test>" not in line, line
+    assert "\\<https://example.test\\>" in line, line
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "<details open>build</details>",
+         "gate": "no_monthly_volume"}])
+    assert "<details open>" not in line, line
 
 
 def test_no_collector_path_can_record_a_held_back_entry_with_no_job():

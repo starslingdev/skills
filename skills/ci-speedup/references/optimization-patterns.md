@@ -1173,10 +1173,14 @@ saved:   (N - 1) x setup, every run
 
    **When the group is every job the workflow DECLARES** there is no remaining
    job to compare against — but the group still sets a gate today, because its
-   members run in parallel: `max_i(setup_i + useful_i)`. The same rule applies
-   to that gate. Fire when `max(setup) + max(useful)` is at or below it (the
-   merge wait is unchanged, so the runner-minute saving is free); hold the group
-   back when the projection is above it, and say so
+   members run in parallel: `max_i(min(setup_i + useful_i, job_p50_i))`. The
+   component sum is capped by the member's own measured job p50, because a
+   median setup added to a median task is not the median of the job's duration
+   and can exceed it — and an overstated gate credits a consolidation as free
+   when what was measured says the merge would get slower. The same rule then
+   applies to that gate. Fire when `max(setup) + max(useful)` is at or below it
+   (the merge wait is unchanged, so the runner-minute saving is free); hold the
+   group back when the projection is above it, and say so
    (`collapsing_the_whole_workflow_would_lengthen_the_merge_gate`). "Whole
    workflow" is read off the workflow's **declared** jobs, never off the sampled
    runs: a declared job that simply never ran in the sampled window — a
@@ -1321,7 +1325,11 @@ re-derivation:
 | `shared_setup_steps` | the prefix identities the group was formed on |
 | `per_job[job].setup_p50_s` / `.useful_work_p50_s` / `.setup_steps` | each job's own measured split and its own prefix, which is what proves the grouping |
 | `projected_consolidated_p50_s` | `max(setup) + max(useful)` |
-| `remaining_tallest_job` / `remaining_tallest_p50_s` | the job the projection is measured against |
+| `remaining_tallest_job` / `remaining_tallest_p50_s` | the job the projection is measured against; both `null` when the group is every declared job, because there is none |
+| `group_is_the_whole_workflow` | true when the group is every job the workflow declares, which is what selects the gate below |
+| `workflow_declared_job_keys` | the workflow's declared job keys; every one must be a credited member, or the claim is refused |
+| `gate_today_p50_s` | the gate the group sets today, `max_i(min(setup_i + useful_i, job_p50_i))`; `null` unless the group is the whole workflow |
+| `credited_job_keys` | the credited members' YAML job keys, which is what `workflow_declared_job_keys` is compared against |
 | `remaining_eligible_jobs` / `remaining_excluded_jobs` | the set that job was chosen from, and every job left out with its reason |
 | `occurrences`, `sampled_successful_run_count`, `monthly_volume`, `scale` | the scaling; `occurrences` can never exceed the sampled run count |
 

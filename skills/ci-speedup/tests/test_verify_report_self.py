@@ -8483,6 +8483,133 @@ def test_opt77_certificate_rederives_margin_and_saving():
     assert margin == 510.0
 
 
+def _opt77_whole_workflow_finding(**over):
+    """The same finding, stamped as a group that is every declared job."""
+    f = _opt77_finding(**over)
+    sc = f["setup_consolidation"]
+    sc["group_is_the_whole_workflow"] = True
+    sc["workflow_declared_job_keys"] = ["audit", "lint", "typecheck"]
+    sc["credited_job_keys"] = ["audit", "lint", "typecheck"]
+    sc["gate_today_p50_s"] = 90.0
+    sc["remaining_tallest_job"] = None
+    sc["remaining_tallest_p50_s"] = None
+    sc["remaining_eligible_jobs"] = []
+    return f
+
+
+# No job outside the group, and each member measured at exactly its setup +
+# useful work, so today's gate is 90s and the 90s projection is free.
+_OPT77_WHOLE_DATA = {"per_workflow_timing": {".github/workflows/ci.yml": {
+    "floor_p50": 90.0,
+    "job_p50": {"audit": 90.0, "lint": 90.0, "typecheck": 90.0},
+}}}
+
+
+def test_opt77_whole_workflow_certificate_is_rederived_never_trusted():
+    """The whole-workflow arm decides whether a real audit goes red, and it is
+    the only OPT77 path that credits a finding with no wall-clock headroom at
+    all. Every claim it rests on is re-derived here, and each one tampered with
+    in turn, so the arm cannot decay into a rubber stamp."""
+    vr = _load_verify_report()
+    margin, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), _OPT77_WHOLE_DATA)
+    assert problems == [], problems
+    assert margin == 0.0
+
+    # A job the workflow declares that is not a credited member: the group is
+    # not the whole workflow, whatever the finding stamped.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["workflow_declared_job_keys"] = [
+        "audit", "lint", "release", "typecheck"]
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("release" in p for p in problems), problems
+
+    # …and the sampled axis is checked too, not just the declared one.
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"]["test"] = 600.0
+    _m, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert any("test" in p for p in problems), problems
+
+    # Without the declared keys the claim cannot be re-derived at all, so it is
+    # refused rather than taken on trust.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["workflow_declared_job_keys"] = []
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("no declared job keys" in p for p in problems), problems
+
+    # A stamped gate that is not the one the data yields.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["gate_today_p50_s"] = 400.0
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("gate_today_p50_s" in p for p in problems), problems
+
+    # A remaining tallest job named in a group that has nothing outside it.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["remaining_tallest_job"] = "test"
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("remaining tallest job" in p for p in problems), problems
+
+    # …and its p50, which was checked on the name alone.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["remaining_tallest_p50_s"] = 600.0
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("remaining tallest p50" in p for p in problems), problems
+
+    # A finding stamped as FIRED whose projection is above today's gate: the
+    # longest setup and the longest task sit on different members, so
+    # consolidating would lengthen the merge and nothing may be credited.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["per_job"] = {
+        "lint": {"setup_p50_s": 100.0, "useful_work_p50_s": 10.0,
+                 "setup_steps": ["set up job", "actions/checkout"]},
+        "typecheck": {"setup_p50_s": 100.0, "useful_work_p50_s": 10.0,
+                      "setup_steps": ["set up job", "actions/checkout"]},
+        "audit": {"setup_p50_s": 60.0, "useful_work_p50_s": 50.0,
+                  "setup_steps": ["set up job", "actions/checkout"]},
+    }
+    f["setup_consolidation"]["projected_consolidated_p50_s"] = 150.0
+    f["setup_consolidation"]["gate_today_p50_s"] = 110.0
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 110.0, "lint": 110.0, "typecheck": 110.0}
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert margin is None, margin
+    assert any("ABOVE" in p for p in problems), problems
+
+
+def test_opt77_whole_workflow_gate_is_capped_by_what_the_members_measured():
+    """`setup_p50_s` and `useful_work_p50_s` are two medians taken separately,
+    so their sum can exceed the median of the job's duration. Re-deriving the
+    gate by repeating the detector's own arithmetic would reproduce an
+    overstated gate instead of catching it, and an overstated gate is what
+    turns "consolidating is free" into a merge that gets slower."""
+    vr = _load_verify_report()
+    # Components sum to 90s a member, but each member's job measured 70s, so
+    # today's gate is 70s and a 90s projection is NOT free.
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 70.0, "lint": 70.0, "typecheck": 70.0}
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["gate_today_p50_s"] = 70.0
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert margin is None, margin
+    assert any("ABOVE" in p for p in problems), problems
+    # …and a finding that stamps the uncapped 90s gate is rejected on the stamp.
+    _m, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert any("gate_today_p50_s" in p for p in problems), problems
+    # A member whose job measured LONGER than its steps does not inflate the
+    # gate: the cap only ever shortens it.
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 400.0, "lint": 400.0, "typecheck": 400.0}
+    margin, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert problems == [], problems
+    assert margin == 0.0
+
+
 def test_opt77_certificate_fails_on_tampered_numbers():
     vr = _load_verify_report()
     # An inflated credited saving is caught by the re-derivation.

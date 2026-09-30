@@ -710,7 +710,13 @@ unversioned and updates by reinstall from `main`.
   into an extra column and the report's own self-check then read only the
   fragment before the split; brackets and parentheses were not neutralised at
   all, so a job named `[click](http://example.test)` rendered as a working link
-  inside the audit's own table. Every markdown-active character is now escaped.
+  inside the audit's own table, and angle brackets were not neutralised either,
+  so a name written as an HTML tag could make the report load a remote image
+  the moment a reader opened it. Backticks and asterisks are swapped for an
+  apostrophe and every one of the remaining markdown-active characters is now
+  backslash-escaped. One case stays out of reach and is now written down as
+  such: a job named as a bare web address becomes a link with no punctuation to
+  escape.
   The row's count and job list cover every held-back candidate while its reason
   is only the most common one, so the reason now says "most commonly" whenever
   more than one reason contributed instead of asserting one cause of every job
@@ -732,7 +738,14 @@ unversioned and updates by reinstall from `main`.
   is now judged against the wait it sets today (its slowest member, since the
   members run in parallel): at or below it the merge is unchanged and the
   saving is reported, above it the group is held back and said to be held back.
-  "Every job in the workflow" is read from what the workflow declares.
+  "Every job in the workflow" is read from what the workflow declares. That
+  wait is capped by how long each job was actually measured to take, never
+  taken from its parts alone — a job's typical setup added to its typical task
+  is not its typical duration, and where the two disagree the longer of them
+  would have credited a change that makes the merge slower as though it were
+  free. The report's self-check works the cap out from the measurements again
+  rather than repeating the sum, so an overstated wait is caught instead of
+  copied.
 - **2026-09-30** — **The repeated-setup (OPT77) and stalled-checkout (OPT80)
   patterns now say when they measured something and could not decide it.** Both
   kept a private tally of why they held candidates back, but nothing showed it,

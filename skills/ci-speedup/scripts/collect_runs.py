@@ -8909,9 +8909,25 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                 # only when consolidating would LENGTHEN the merge gate"), so
                 # the comparison is the consolidated job against the gate the
                 # group sets today.
-                gate_today = round(max(float(candidates[n]["setup_p50"])
-                                       + float(candidates[n]["useful_p50"])
-                                       for n in names), 1)
+                # Today's gate is the slowest member — read from what the
+                # members MEASURED, not from their step components alone.
+                # `setup_p50` and `useful_p50` are two medians taken separately
+                # over the sampled occurrences, and their sum is not the median
+                # of the job's duration: setups of 10/100/100s beside tasks of
+                # 100/100/10s make a 110s job read as 200s. Overstating today's
+                # gate credits a consolidation as free when the duration
+                # actually measured says the wait would grow, so the component
+                # sum is capped by the member's own measured p50. A member the
+                # sample carries no p50 for keeps its component sum: capping to
+                # zero would withhold on missing data rather than on evidence.
+                member_gates: dict[str, float] = {}
+                for n in names:
+                    _steps = (float(candidates[n]["setup_p50"])
+                              + float(candidates[n]["useful_p50"]))
+                    _measured = float(job_p50.get(n) or 0.0)
+                    member_gates[n] = (min(_steps, _measured) if _measured > 0
+                                       else _steps)
+                gate_today = round(max(member_gates.values()), 1)
                 if projected > gate_today:
                     # Consolidating really would make the merge slower. Held
                     # back rather than dropped in silence: the reader is told a
@@ -8983,11 +8999,10 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             f"{sampled_saved_s / 60.0:.1f} runner-min across {occurrences} sampled "
             f"run(s), ~{credited:.0f} runner-min/mo ({basis}). The consolidated job "
             f"projects to {projected:.0f}s (setup + the slowest task, run "
-            + (f"concurrently), against the {tallest_p50:.0f}s this workflow's "
-               f"slowest job takes today — these jobs are every job the workflow "
-               f"declares, so they set the wait themselves and consolidating them "
-               f"leaves it "
-               + ("unchanged" if margin == 0 else f"{margin:.0f}s shorter") + "."
+            + (f"concurrently), against the {tallest_p50:.0f}s the group's "
+               f"slowest member takes today — every job this workflow declares "
+               f"is in the group, so the group sets the pull-request wait "
+               f"itself, and consolidating it leaves that wait unchanged."
                if whole_workflow_group else
                f"concurrently), {margin:.0f}s below the {tallest_p50:.0f}s "
                f"`{tallest_job}` job, which becomes this workflow's longest job "

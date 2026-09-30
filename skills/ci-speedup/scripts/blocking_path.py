@@ -5169,8 +5169,9 @@ _OPT77_WITHHOLD_PHRASES: dict[str, str] = {
         "the sampled runs never had every job in the group run together, so the "
         "saving could not be measured",
     "collapsing_the_whole_workflow_would_lengthen_the_merge_gate":
-        "these are every job the workflow declares, so they set the wait "
-        "themselves, and collapsing them into one would make that wait longer",
+        "every job the workflow declares is in the group, so the group sets "
+        "the pull-request wait itself, and collapsing it into one job would "
+        "make that wait longer",
     "no_job_outside_the_group_runs_often_enough_to_measure_against":
         "other jobs exist, but none ran often enough in the sampled runs to show "
         "that merging these would not make the pipeline slower",
@@ -5232,9 +5233,11 @@ _WITHHELD_MODAL_LEAD = "most commonly, "
 # a LIVE cell separator — the row splits into an extra column and the
 # self-check's own cell regex reads only the fragment before the split. `[`,
 # `]`, `(` and `)` are escaped because a job named `[click](http://example.test)`
-# would otherwise render as a working link inside the audit's own table, and `_`
-# because a name with two of them opens an italic run.
-_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_")
+# would otherwise render as a working link inside the audit's own table, `_`
+# because a name with two of them opens an italic run, and `<` / `>` because
+# `<https://example.test>` is a GFM autolink — the same harm by another spelling
+# — and a raw `<details>` / `<img …>` is live HTML inside the cell.
+_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_", "<", ">")
 
 
 def _withheld_cell_text(text: object) -> str:
