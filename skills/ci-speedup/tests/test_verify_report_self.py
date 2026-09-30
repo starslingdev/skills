@@ -9434,7 +9434,7 @@ def test_held_back_verifier_rederives_escaped_job_names(tmp_path):
     vr = _load_verify_report()
     rows = [{"workflow_file": "ci.yml", "job": "a|b `x`\nc", "gate": "no_monthly_volume"}]
     path = _withheld_doc(tmp_path, rows)
-    cell = ("1 candidate cache(s) held back (a\\|b 'x' c): the job's monthly run "
+    cell = ("1 candidate cache(s) held back (a\\|b \\`x\\` c): the job's monthly run "
             "count was unknown, so its saving could not be sized.")
     report = ("## 🗄️ Data sources\n\n| Source | Coverage | Feeds |\n"
               f"| cache hit/miss verdicts | {cell} | x |\n")

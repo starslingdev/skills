@@ -2879,6 +2879,13 @@ def test_withheld_setup_and_checkout_candidates_reach_the_data_sources_table():
     assert ("2 candidate checkout(s) held back (build, e2e): " + bp._WITHHELD_MODAL_LEAD
             + bp._OPT80_WITHHOLD_PHRASES["log_carries_no_progress_vocabulary"]
             + ".") in r80, r80
+    # Both assertions above build their expectation out of the very table they
+    # are checking, so they hold whatever it says. The hedge itself is the
+    # behaviour, so it is pinned as literal text: absent progress output in a
+    # log is an OBSERVATION, and naming the switch as its cause is the claim
+    # this reason must not make.
+    assert ("the slow runs' logs show no fetch progress lines (most likely "
+            "because progress output is switched off)") in r80, r80
     for raw in ("needs_graph_undecidable", "log_carries_no_progress_vocabulary",
                 "top reason", "measured but"):
         assert raw not in r77 + r80, (raw, r77, r80)
@@ -2908,7 +2915,9 @@ def test_withheld_row_qualifies_shared_job_names_caps_the_list_and_escapes():
         {"workflow_file": "ci.yml", "job": "a|b`c\nd", "gate": gate}]
     row = _withheld_row(_withheld_foot(doc), "checkout stall: held back")
     assert row.count("|") - row.count("\\|") == 4, row
-    assert "`" not in row and "\n" not in row, row
+    # every backtick escaped, so none can open a code span across the cell
+    assert "\n" not in row, row
+    assert re.sub(r"\\`", "", row).count("`") == 0, row
 
 
 def test_withheld_row_never_prints_an_unmapped_gate_code():
@@ -8086,7 +8095,9 @@ def test_held_back_line_escapes_repo_controlled_job_names():
     cells = [c for c in line.replace("\\|", "").split("|") if c.strip()]
     assert len(cells) == 3, line            # source, coverage, feeds: the pipe did not split
     assert "`x`" not in line and "\n" not in line, line
-    assert "a\\|b 'x' c" in line, line
+    # the name survives intact, escaped rather than substituted: two jobs whose
+    # names differ only in their punctuation stay two names in the row
+    assert "a\\|b \\`x\\` c" in line, line
 
 
 def test_held_back_line_merges_early_and_late_gates_and_keeps_the_tie_rule():
@@ -8169,6 +8180,22 @@ def test_held_back_job_names_cannot_split_the_row_or_become_a_link():
     assert "[click](http://example.test)" not in line, line
     assert "\\[click\\]\\(http://example.test\\)" in line, line
     assert len([c for c in re.split(r"(?<!\\)\|", line) if c.strip()]) == 3, line
+
+    # The row exists to say WHICH candidates were held back, so two different
+    # jobs must not arrive as one name. Backticks and asterisks used to be
+    # swapped for an apostrophe, which collapsed `a*b`, "a`b" and `a'b` into a
+    # single rendered string; both are ordinary GFM backslash escapes, so the
+    # name survives instead.
+    def _cell_of(job):
+        return _held_back_cell([{"workflow_file": "ci.yml", "job": job,
+                                 "gate": "no_monthly_volume"}])
+
+    rendered = {_cell_of(j) for j in ("a*b", "a`b", "a'b")}
+    assert len(rendered) == 3, rendered
+    assert "a\\*b" in _cell_of("a*b"), _cell_of("a*b")
+    assert "a\\`b" in _cell_of("a`b"), _cell_of("a`b")
+    # …and neither can still open a code span or an emphasis run
+    assert _gfm_cells(_cell_of("a`b`c")) == 3, _cell_of("a`b`c")
 
     # an emphasis run a name would otherwise open across the rest of the cell
     line = _held_back_cell([

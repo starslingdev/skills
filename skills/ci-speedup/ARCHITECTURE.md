@@ -1100,12 +1100,14 @@ sources row label, its counted noun and its "Used for" cell, and
 "N candidate … held back (<jobs>): <reason>." — the entries distinct and sorted,
 workflow-qualified as `<workflow.yml> / <job>` when two workflows share a job
 name (an OPT77 entry is the whole group), at most five then ", and K more", every
-repo-controlled name escaped for the table (backticks and `*` swapped for an
-apostrophe, then `\` `|` `[` `]` `(` `)` `_` `<` `>` backslash-escaped, `\`
-first, so a name can neither split the row, nor turn itself into a link, nor
-open raw HTML. Out of scope, and unfixable by character escaping: GFM's
-extended autolink turns a BARE `https://...` job name into a live link with no
-punctuation to escape); the reason a plain-English phrase for the commonest gate,
+repo-controlled name escaped for the table (`\` `|` `[` `]` `(` `)` `_` `<` `>`
+`` ` `` and `*` backslash-escaped, `\` first, so a name can neither split the
+row, nor turn itself into a link, nor open raw HTML or a code span. Escaped,
+never substituted: swapping backticks and asterisks for an apostrophe used to
+render three different job names as one, in a row whose whole job is saying
+which candidates were held back. Out of scope, and unfixable by character
+escaping: GFM's extended autolink turns a BARE `https://...` job name into a
+live link with no punctuation to escape); the reason a plain-English phrase for the commonest gate,
 ties alphabetical, and prefixed "most commonly," whenever more than one gate
 contributed — the count and the job list cover every candidate while the reason
 covers only some of them. A pattern contributes only its key, its

@@ -970,16 +970,17 @@ _VR_WITHHELD_MODAL_LEAD = "most commonly, "
 # escaping `|` first turns `a\|b` into `a\\|b`, which GFM reads as an escaped
 # backslash plus a LIVE cell separator. `<` and `>` are in the list because
 # `<https://example.test>` is a GFM autolink and a raw `<details>` is live
-# HTML. A coupling test pins this tuple and the function below
-# byte-identical to `blocking_path`'s.
-_VR_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_", "<", ">")
+# HTML. Backticks and `*` are escaped rather than swapped for an apostrophe,
+# which used to collapse three different names into one. A coupling test pins
+# this tuple and the function below byte-identical to `blocking_path`'s.
+_VR_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_", "<", ">", "`", "*")
 
 
 def _vr_withheld_cell_text(text: object) -> str:
     """The renderer's cell-safe transform of repo-controlled text (whitespace
-    collapsed, backticks and emphasis markers swapped for an apostrophe, every
-    markdown-active character backslash-escaped with `\\` first)."""
-    out = re.sub(r"\s+", " ", str(text)).strip().replace("`", "'").replace("*", "'")
+    collapsed, then every markdown-active character backslash-escaped with
+    `\\` first, so the name survives intact and inert)."""
+    out = re.sub(r"\s+", " ", str(text)).strip()
     for _ch in _VR_WITHHELD_CELL_ESCAPES:
         out = out.replace(_ch, "\\" + _ch)
     return out

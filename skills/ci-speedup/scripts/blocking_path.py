@@ -5236,18 +5236,21 @@ _WITHHELD_MODAL_LEAD = "most commonly, "
 # would otherwise render as a working link inside the audit's own table, `_`
 # because a name with two of them opens an italic run, and `<` / `>` because
 # `<https://example.test>` is a GFM autolink — the same harm by another spelling
-# — and a raw `<details>` / `<img …>` is live HTML inside the cell.
-_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_", "<", ">")
+# — and a raw `<details>` / `<img …>` is live HTML inside the cell. Backticks
+# and `*` are ESCAPED, not swapped for an apostrophe: the row exists to say
+# which candidates were held back, and substitution collapsed `a*b`, "a`b" and
+# `a'b` into one rendered name.
+_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_", "<", ">", "`", "*")
 
 
 def _withheld_cell_text(text: object) -> str:
     """Repo-controlled text (a job or workflow name) made safe for one table
-    cell: whitespace and newlines collapsed, backticks and emphasis markers
-    swapped for an apostrophe so a name cannot open a code span, and every
-    markdown-active character backslash-escaped (`\\` first, see above) so a
-    name cannot split the row or turn itself into a link. `verify_report`
+    cell: whitespace and newlines collapsed, then every markdown-active
+    character backslash-escaped (`\\` first, see above) so a name cannot split
+    the row, open a code span, or turn itself into a link — and so that two
+    names differing only in punctuation stay two names. `verify_report`
     carries a byte-identical transform, pinned equal by a coupling test."""
-    out = re.sub(r"\s+", " ", str(text)).strip().replace("`", "'").replace("*", "'")
+    out = re.sub(r"\s+", " ", str(text)).strip()
     for _ch in _WITHHELD_CELL_ESCAPES:
         out = out.replace(_ch, "\\" + _ch)
     return out

@@ -7208,6 +7208,14 @@ def test_opt77_the_whole_workflow_gate_is_never_longer_than_the_members_measured
         job_p50_by_job={"lint": 400.0, "typecheck": 400.0, "audit": 400.0})
     assert len(out) == 1 and rows == [], (out, rows)
     assert out[0]["setup_consolidation"]["gate_today_p50_s"] == 90.0
+    # The cap's "no measured duration" fallback is unreachable: a job without a
+    # strict p50 never becomes a candidate at all, so it can never be a member
+    # whose gate has to be worked out without one. Pinned here, because the
+    # fallback is only ever what the cap does if that invariant breaks.
+    out, rows, counts = _opt77_whole_workflow(
+        job_p50_by_job={"lint": 70.0, "typecheck": 70.0, "audit": 0.0})
+    assert out == [] and rows == [], (out, rows)
+    assert counts.get("job_no_strict_p50"), counts
 
 
 def test_opt77_does_not_list_groups_it_measured_and_judged():

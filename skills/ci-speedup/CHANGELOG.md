@@ -712,11 +712,13 @@ unversioned and updates by reinstall from `main`.
   all, so a job named `[click](http://example.test)` rendered as a working link
   inside the audit's own table, and angle brackets were not neutralised either,
   so a name written as an HTML tag could make the report load a remote image
-  the moment a reader opened it. Backticks and asterisks are swapped for an
-  apostrophe and every one of the remaining markdown-active characters is now
-  backslash-escaped. One case stays out of reach and is now written down as
-  such: a job named as a bare web address becomes a link with no punctuation to
-  escape.
+  the moment a reader opened it. Every markdown-active character in the name is
+  now backslash-escaped. Backticks and asterisks used to be swapped for an
+  apostrophe instead, which rendered three different job names as the same
+  string in a row whose whole purpose is saying which candidates were held
+  back; they are escaped now too, so the name arrives intact. One case stays
+  out of reach and is written down as such: a job named as a bare web address
+  becomes a link with no punctuation to escape.
   The row's count and job list cover every held-back candidate while its reason
   is only the most common one, so the reason now says "most commonly" whenever
   more than one reason contributed instead of asserting one cause of every job
