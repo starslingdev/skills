@@ -67,7 +67,7 @@ _FIX_TABLE: dict[str, dict[str, str]] = {
                    "  group: ${{ github.workflow }}-${{ github.ref }}"),
     },
     "ci.cache.dependency-cache": {
-        "tldr": "Every run re-downloads all your dependencies from scratch - caching reuses the last install instead of fetching them again.",
+        "tldr": "Every run re-downloads all your dependencies from scratch - caching reuses the last install instead of fetching them again. A cache that measurably costs more than it saves should be removed, and this check reads configuration only, so it cannot see that measurement (ci-speedup's cache measurement can); a repo that removed such a cache still loses this point.",
         "impact": "high", "risk": "low",
         "impact_note": "dependency installs re-download on every run without it",
         "risk_note": "low: a stale cache is keyed by lockfile hash and self-heals",

@@ -83,7 +83,7 @@ Constraints: apply the fix everywhere the practice is missing — the files list
 
 **Not applicable when:** the repo shows NO dependency-install signal at all - no dependency manifest at the repo root (package.json / lockfiles / requirements*.txt / pyproject.toml / go.mod / Cargo.toml / build.gradle / pom.xml / *.csproj / mix.exs / build.sbt / Gemfile / composer.json / pubspec.yaml and the like), no dependency-install command in any workflow or composite step (pip / npm / pnpm / yarn / bun / poetry / uv / composer / bundle / gem / conda / mvn / gradle / dotnet / mix / cabal / stack with an install-style verb, or `go mod download` / `cargo fetch`), and no language setup action (actions/setup-node / setup-python / setup-java / setup-dotnet / setup-go / setup-ruby and the like) - and no cache is already configured; with nothing installed there is nothing to cache, so a missing cache is never a fail (OD-CS19). Any one of those three signals makes the check applicable. OR CI is delegated to cross-repo reusable workflows and no local caching is visible - a mechanism this fact cannot see is never failed
 
-**Why it matters:** Every run re-downloads all your dependencies from scratch - caching reuses the last install instead of fetching them again.
+**Why it matters:** Every run re-downloads all your dependencies from scratch - caching reuses the last install instead of fetching them again. A cache that measurably costs more than it saves should be removed, and this check reads configuration only, so it cannot see that measurement (ci-speedup's cache measurement can); a repo that removed such a cache still loses this point.
 
 **Guide:** https://starsling.dev/best-practices/github-actions/cache-dependencies
 
