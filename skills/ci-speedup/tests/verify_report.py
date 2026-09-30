@@ -5583,6 +5583,73 @@ def _opt79_uncredited_rows_rederived(data: dict) -> list[str]:
     return out
 
 
+_VR_OPT79_EVIDENCE_RE = re.compile(
+    r"measured a p50 of (\d+)s across (\d+) sampled run\(s\) whose log reported a "
+    r"cache HIT, against (\d+)s across (\d+) run\(s\) whose log reported a MISS: "
+    r"the hit path is (\d+)s SLOWER.*?The cache hit on (\d+)% of the (\d+) "
+    r"classified run\(s\); over (\d+) run\(s\)/30d of this job that is ~(\d+) "
+    r"runner-min/mo", re.S)
+_VR_OPT79_SIGNAL_RE = re.compile(
+    r"p50 cache block (\d+)s on (\d+) log-confirmed hit run\(s\) vs (\d+)s on "
+    r"(\d+) log-confirmed miss run\(s\) on .*?\((\d+)s excess per hit run, hit "
+    r"share ([\d.]+), (\d+) run\(s\)/30d\)")
+
+
+def _opt79_prose_rederived(f: dict, cn: dict) -> list[str]:
+    """The numbers a READER sees — the evidence sentence, the measured signal
+    and the evidence table — restated from the stamped block the rest of the
+    arm re-derives. The block can be right while the prose built from it says
+    something else (the miss median in the hit median's place, a multiplied
+    excess, ten times the minutes, a table of hit runs only); nothing else in
+    the report contradicts the prose, so it is checked here."""
+    out: list[str] = []
+    hits, misses = cn.get("hits"), cn.get("misses")
+    eff = _num(cn.get("effective_monthly_volume"))
+    rm = _num(f.get("runner_min_saving"))
+    share = _num(cn.get("hit_share"))
+
+    def _w(v: Any) -> str:
+        n = _num(v)
+        return "?" if n is None else f"{n:.0f}"
+
+    m = _VR_OPT79_EVIDENCE_RE.search(str(f.get("evidence") or ""))
+    if not m:
+        out.append("evidence does not state the measured hit/miss comparison")
+    else:
+        want = (_w(cn.get("hit_path_p50_s")), str(hits), _w(cn.get("miss_path_p50_s")),
+                str(misses), _w(cn.get("waste_s")),
+                "?" if share is None else f"{share * 100:.0f}",
+                str(cn.get("classified_runs")), _w(eff), _w(rm))
+        if m.groups() != want:
+            out.append(f"evidence states {m.groups()} but the stamped block "
+                       f"gives {want}")
+    m = _VR_OPT79_SIGNAL_RE.search(str(f.get("measured_signal") or ""))
+    if not m:
+        out.append("measured_signal does not state the measured comparison")
+    else:
+        want = (_w(cn.get("hit_path_p50_s")), str(hits), _w(cn.get("miss_path_p50_s")),
+                str(misses), _w(cn.get("waste_s")),
+                "?" if share is None else f"{share:.2f}", _w(eff))
+        if m.groups() != want:
+            out.append(f"measured_signal states {m.groups()} but the stamped "
+                       f"block gives {want}")
+    table = _as_dict(_as_dict(f.get("measured_evidence")).get("table"))
+    trows = [r for r in _as_list(table.get("rows")) if isinstance(r, list) and r]
+    per_run = [r for r in _as_list(cn.get("per_run")) if isinstance(r, dict)]
+    for status, total in (("HIT", hits), ("MISS", misses)):
+        shown = [r for r in trows if str(r[0]).upper() == status]
+        want_n = min(4, total) if isinstance(total, int) else None
+        if len(shown) != want_n:
+            out.append(f"the evidence table shows {len(shown)} {status} run(s), "
+                       f"not {want_n}")
+    blocks = {(str(r.get("status") or "").upper(), f"{_num(r.get('block_s')) or 0:.0f}s")
+              for r in per_run}
+    for r in trows:
+        if len(r) > 4 and (str(r[0]).upper(), str(r[4])) not in blocks:
+            out.append(f"evidence table row {r[:5]} matches no measured run")
+    return out
+
+
 def _opt79_net_negative_cache_rederived(f: dict, data: dict) -> tuple[float | None, list[str]]:
     """Independently re-derive OPT79's credited minutes and its neutrality margin
     from the stamped `cache_net_negative` block — never from the finding's prose.
@@ -5622,6 +5689,7 @@ def _opt79_net_negative_cache_rederived(f: dict, data: dict) -> tuple[float | No
             f"affected_jobs {affected!r} do not match the credited job {job!r}")
     problems.extend(_opt79_block_rederived(
         cn, credited=True, finding_rm=_num(f.get("runner_min_saving"))))
+    problems.extend(_opt79_prose_rederived(f, cn))
 
     margin = _below_floor_margin(f, data)
     if margin is None:

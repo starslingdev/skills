@@ -13,6 +13,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import blocking_path as bp  # noqa: E402
@@ -4986,6 +4988,171 @@ def test_opt79_tallies_a_skipped_occurrence_as_skipped():
     out, w = _opt79_withheld(jpr=jpr, logs=logs)
     assert w.get("occurrence_was_skipped") == 2, w
     assert w.get("occurrence_duration_unparseable") is None, w
+
+
+# ---- the verifier catches every single-field lie in a real stamped block ----
+
+def _opt79_credited_problems(edit):
+    import copy
+    vr = _load_verify_report_for_opt79()
+    f = copy.deepcopy(_opt79()[0])
+    edit(f, f["cache_net_negative"])
+    data = {"per_workflow_timing": {"ci.yml": _opt79_crit()}, "findings": [f]}
+    return vr._opt79_net_negative_cache_rederived(f, data)[1]
+
+
+def _set(key, value, *, idx=None, field=None):
+    def _edit(f, cn):
+        if field is not None:
+            cn["per_run"][idx][field] = value
+        elif value is _DEL:
+            del cn[key]
+        else:
+            cn[key] = value
+    return _edit
+
+
+_DEL = object()
+
+
+@pytest.mark.parametrize("edit, needle", [
+    (_set("ambiguous_runs", _DEL), "missing stamped key"),
+    (_set("runner_label", ""), "runner_label missing"),
+    (_set("restore_step", ""), "restore_step missing"),
+    (_set("install_step", ""), "install_step missing"),
+    (_set("post_step", " "), "post_step missing"),
+    (_set(None, -1.0, idx=0, field="restore_s"), "negative step duration"),
+    (_set(None, "macos-14", idx=0, field="runner_label"), "not the credited runner"),
+    (_set(None, "Cache restored from key: k; cache miss", idx=0, field="log_line"),
+     "BOTH a hit and a miss"),
+    (_set(None, "partial_hit", idx=0, field="status"), "unknown cache status"),
+    (_set("hits", 5), "hits 5 != 4"),
+    (_set("misses", 5), "misses 5 != 4"),
+    (_set("classified_runs", 9), "classified_runs 9 != 8"),
+    (_set("job_runs", 0), "job_runs=0"),
+    (_set("sampled_successful_run_count", 0), "sampled_successful_run_count=0"),
+    (_set("monthly_volume", 0), "monthly_volume=0"),
+    (_set("job_runs", 7), "exceed the 7.0 run(s)"),
+    (_set("hit_path_p50_s", 30.0), "hit_path_p50_s 30.0 != 31.0"),
+    (_set("miss_path_p50_s", 13.0), "miss_path_p50_s 13.0 != 12.0"),
+    (_set("waste_floor_s", 6.0), "waste_floor_s 6.0 != 5.0"),
+    (_set("hit_share", 0.6), "hit_share 0.6 != 0.5"),
+    (_set("effective_monthly_volume", 99.0), "effective_monthly_volume 99.0 != 100.0"),
+    (_set("runner_min_saving", 99.0), "cache_net_negative.runner_min_saving 99.0"),
+    (_set("kind", "something_else"), "missing opt79_net_negative_cache evidence"),
+    (lambda f, cn: f.__setitem__("affected_jobs", ["other"]), "affected_jobs"),
+    # the finding's minutes AND the inner stamp agree with each other but not
+    # with the re-derivation: only the re-derivation can catch it
+    (lambda f, cn: (f.__setitem__("runner_min_saving", 99.0),
+                    cn.__setitem__("runner_min_saving", 99.0)), "!= re-derived 15.8"),
+    # …and the prose a reader sees, built from the same block
+    (lambda f, cn: f.__setitem__("evidence", f["evidence"].replace(
+        "p50 of 31s", "p50 of 12s")), "evidence states"),
+    (lambda f, cn: f.__setitem__("evidence", f["evidence"].replace(
+        "19s SLOWER", "57s SLOWER")), "evidence states"),
+    (lambda f, cn: f.__setitem__("evidence", f["evidence"].replace(
+        "~16 runner-min/mo", "~158 runner-min/mo")), "evidence states"),
+    (lambda f, cn: f.__setitem__("measured_signal", f["measured_signal"].replace(
+        "(19s excess", "(57s excess")), "measured_signal states"),
+    (lambda f, cn: f["measured_evidence"]["table"].__setitem__(
+        "rows", [r for r in f["measured_evidence"]["table"]["rows"]
+                 if r[0] == "HIT"]), "MISS run(s)"),
+])
+def test_opt79_verifier_catches_each_tampered_field(edit, needle):
+    problems = _opt79_credited_problems(edit)
+    assert any(needle in p for p in problems), (needle, problems)
+
+
+def test_opt79_verifier_accepts_the_real_block_and_a_named_restore_step():
+    """The untampered block re-derives clean, and a cache step carrying an
+    author's `name:` may quote the log group `Run <cache_ref>` — the header
+    GitHub prints for an action whatever it is named."""
+    assert _opt79_credited_problems(lambda f, cn: None) == []
+    assert _opt79_credited_problems(
+        lambda f, cn: cn.__setitem__("restore_step", "Cache node modules")) == []
+
+
+def _opt79_consistent_block(hit_blocks, miss_blocks, *, monthly=100):
+    """A stamped block whose every number is consistent with its per_run rows,
+    so the only thing the verifier can object to is a GATE it re-checks."""
+    import statistics
+    rows = []
+    for status, blocks, line in (("hit", hit_blocks, _OPT79_HIT_LINE),
+                                 ("miss", miss_blocks, _OPT79_MISS_LINE)):
+        for b in blocks:
+            rows.append({"status": status, "log_line": line,
+                         "log_line_group": "Run actions/cache@v4",
+                         "runner_label": "ubuntu-latest", "restore_s": 0.0,
+                         "install_s": float(b), "post_s": 0.0, "block_s": float(b)})
+    h, m = len(hit_blocks), len(miss_blocks)
+    hp = round(statistics.median(hit_blocks), 1)
+    mp = round(statistics.median(miss_blocks), 1)
+    n = h + m
+    return {
+        "kind": cr._OPT79_UNCREDITED_KIND, "job": "unit", "workflow_file": "ci.yml",
+        "on_critical_path": False, "long_pole_job": "e2e",
+        "runner_label": "ubuntu-latest", "cache_ref": "actions/cache@v4",
+        "restore_step": "Run actions/cache@v4", "install_step": "Run npm ci",
+        "post_step": "Post Run actions/cache@v4", "per_run": rows,
+        "hits": h, "misses": m, "classified_runs": n, "ambiguous_runs": 0,
+        "occurrences_on_other_runner": 0, "hit_path_p50_s": hp,
+        "miss_path_p50_s": mp, "waste_s": round(hp - mp, 1),
+        "waste_floor_s": round(max(5.0, 0.2 * mp), 1),
+        "hit_share": round(h / n, 4), "job_runs": n,
+        "sampled_successful_run_count": n, "monthly_volume": monthly,
+        "effective_monthly_volume": float(monthly), "runner_min_saving": None,
+    }
+
+
+@pytest.mark.parametrize("hits, misses, needle", [
+    ([40, 40], [10, 10, 10], "only 2 hit run(s)"),
+    ([40, 40, 40], [10, 10], "only 2 miss run(s)"),
+    # 5s would pass; 20% of a 100s miss path (20s) does not
+    ([110, 110, 110], [100, 100, 100], "not shown to be net-negative"),
+    ([13, 13, 13], [10, 10, 10], "not shown to be net-negative"),
+    ([40, 40, 40], [10] * 10, "below the 0.25 floor"),
+])
+def test_opt79_verifier_re_checks_the_gates_on_a_consistent_block(hits, misses, needle):
+    """Every stamped number agrees with its runs; only the gate is violated —
+    which the verifier must catch on its own, not by a stamp mismatch."""
+    vr = _load_verify_report_for_opt79()
+    cn = _opt79_consistent_block(hits, misses)
+    problems = vr._opt79_block_rederived(cn, credited=False, finding_rm=None)
+    assert any(needle in p for p in problems), (needle, problems)
+    assert not any("!=" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("edit, needle", [
+    (lambda r: r.__setitem__("kind", "x"), "is not 'opt79_uncredited_pole_cache'"),
+    (lambda r: r.__setitem__("workflow_file", ""), "no workflow_file"),
+    (lambda r: r.pop("on_critical_path"), "no on_critical_path"),
+])
+def test_opt79_verifier_checks_the_uncredited_row_envelope(edit, needle):
+    vr = _load_verify_report_for_opt79()
+    row = _opt79_uncredited(_opt79_pole_crit())
+    edit(row)
+    problems = vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": [row]})
+    assert any(needle in p for p in problems), (needle, problems)
+
+
+def test_opt79_uncredited_check_runs_in_the_report_self_check(tmp_path):
+    """The check is registered with the verifier's run, reads the rows, and
+    fails on a tampered one — an unregistered or always-green check is
+    indistinguishable from a clean result."""
+    import json as _json
+    vr = _load_verify_report_for_opt79()
+    row = _opt79_uncredited(_opt79_pole_crit())
+    rendered = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": [row]}))
+    p = tmp_path / "findings.json"
+    bad = dict(row, waste_s=900.0)
+    p.write_text(_json.dumps({"opt79_uncredited_pole_caches": [bad]}), encoding="utf-8")
+    chk = vr.check_opt79_uncredited_rows_rederived(rendered, p)
+    assert not chk.ok and "waste_s" in chk.detail, chk
+    src = Path(vr.__file__).read_text(encoding="utf-8")
+    body = src.split("def run_checks(", 1)[1].split("\ndef ", 1)[0]
+    assert "check_opt79_uncredited_rows_rederived(" in body
 
 
 # ============ OPT80 checkout stalls on the tail ============
