@@ -8843,20 +8843,26 @@ def test_withheld_cache_candidates_must_be_disclosed(tmp_path):
     assert not chk.ok and "held back" in chk.detail, chk
     row = ("| cache hit/miss verdicts | {} | Why a probed cache produced "
            "no finding |\n")
+    # Two gates contributed, so the reason is hedged — it holds for two of the
+    # three jobs the row names, not for all three.
     honest = silent + row.format(
-        "3 candidate cache(s) held back (build, e2e, unit): too few sampled "
-        "runs missed the cache to compare a miss against a hit.")
+        "3 candidate cache(s) held back (build, e2e, unit): most commonly, too "
+        "few sampled runs missed the cache to compare a miss against a hit.")
     chk = vr.check_coverage_disclosed(honest, path)
     assert chk.ok, chk
-    # wrong count, wrong reason, wrong job list, a leaked gate name: none is a disclosure
+    # wrong count, wrong reason, wrong job list, a leaked gate name, and the
+    # UNHEDGED reason (which asserts one gate's cause of all three jobs): none
+    # is a disclosure
     wrong = (
-        "2 candidate cache(s) held back (build, e2e): too few "
+        "2 candidate cache(s) held back (build, e2e): most commonly, too few "
         "sampled runs missed the cache to compare a miss against a hit.",
-        "3 candidate cache(s) held back (build, e2e, unit): too "
+        "3 candidate cache(s) held back (build, e2e, unit): most commonly, too "
         "many of the sampled runs' logs could not be read to tell how often the "
         "cache hits.",
-        "3 candidate cache(s) held back (build, e2e, other): too "
+        "3 candidate cache(s) held back (build, e2e, other): most commonly, too "
         "few sampled runs missed the cache to compare a miss against a hit.",
+        "3 candidate cache(s) held back (build, e2e, unit): too few sampled "
+        "runs missed the cache to compare a miss against a hit.",
         "3 candidate cache(s) held back (build, e2e, unit): "
         "`fewer_than_min_miss_runs_classified`.",
         "3 candidate cache(s) probed but withheld; top reason: "
@@ -9379,8 +9385,13 @@ def _withheld_phrase(vr, key, gate):
     return table[gate]
 
 
-def _withheld_cell(vr, key, noun, n, jobs, gate):
-    return f"{n} {noun} held back ({jobs}): {_withheld_phrase(vr, key, gate)}."
+def _withheld_cell(vr, key, noun, n, jobs, gate, multi=True):
+    """The expected Coverage cell. `multi` mirrors the renderer's rule: the
+    commonest gate's reason is hedged whenever a second gate also held
+    candidates back, because the count and the job list cover every row while
+    the reason covers only some of them."""
+    lead = vr._VR_WITHHELD_MODAL_LEAD if multi else ""
+    return f"{n} {noun} held back ({jobs}): {lead}{_withheld_phrase(vr, key, gate)}."
 
 
 def test_withheld_setup_and_checkout_candidates_must_be_disclosed(tmp_path):
@@ -9488,15 +9499,41 @@ def test_withheld_gate_without_a_phrase_fails_the_self_check_closed(tmp_path):
 
 def test_withhold_phrase_tables_match_the_renderer_and_the_collector():
     """The verifier carries its own copy (it is an independent re-derivation);
-    a drift between the copies is the thing this pins."""
+    a drift between the copies is the thing this pins.
+
+    Pinned by WALKING the registry, never by hand-written per-pattern lines: a
+    fourth pattern that registers a doc key gets its phrase table compared on
+    the day it is added, instead of contributing a key nobody checks the
+    contents of."""
     import blocking_path as bp
     vr = _load_verify_report()
-    assert vr._VR_OPT77_WITHHOLD_PHRASES == bp._OPT77_WITHHOLD_PHRASES
-    assert vr._VR_OPT80_WITHHOLD_PHRASES == bp._OPT80_WITHHOLD_PHRASES
-    # one registry, all three patterns: same keys, same labels, same nouns
-    assert ([r[:3] for r in vr._VR_WITHHELD_ROWS]
-            == [r[:3] for r in bp._WITHHELD_ROWS])
-    assert set(vr._VR_WITHHELD_PHRASES_BY_KEY) == set(bp._WITHHELD_PHRASES_BY_KEY)
+    # Every field of every row, including the "Used for" cell. Sliced to three,
+    # that cell could be rewritten with the whole suite staying green.
+    assert list(vr._VR_WITHHELD_ROWS) == list(bp._WITHHELD_ROWS)
+    for _key, _label, _noun, _feeds in bp._WITHHELD_ROWS:
+        assert _feeds.strip(), f"{_key} registers an empty 'Used for' cell"
+    # Same registered patterns, and — for each — the same gate→phrase table
+    # CONTENTS, not merely the same key.
+    assert (set(vr._VR_WITHHELD_PHRASES_BY_KEY)
+            == set(bp._WITHHELD_PHRASES_BY_KEY)
+            == {r[0] for r in bp._WITHHELD_ROWS})
+    for key, table in bp._WITHHELD_PHRASES_BY_KEY.items():
+        assert vr._VR_WITHHELD_PHRASES_BY_KEY[key] == table, key
+    # The two shared constants the line's shape depends on…
+    assert vr._VR_WITHHELD_JOBS_SHOWN == bp._WITHHELD_JOBS_SHOWN
+    assert vr._VR_WITHHELD_MODAL_LEAD == bp._WITHHELD_MODAL_LEAD
+    assert vr._VR_WITHHELD_CELL_ESCAPES == bp._WITHHELD_CELL_ESCAPES
+    # `\` must be escaped BEFORE `|`, or `a\|b` becomes an escaped backslash
+    # plus a live cell separator and the row silently grows a column.
+    escapes = list(bp._WITHHELD_CELL_ESCAPES)
+    assert escapes[0] == "\\" and "|" in escapes[1:]
+    # …and the two escapers, which must agree on every byte, not just in spirit.
+    for hostile in ("a|b", "a\\|b", "a\\b", "[click](http://example.test)",
+                    "snake_case_name", "a`b`c", "*em*", "tab\there",
+                    "line\nbreak", "  padded  ", "", "()[]_|\\",
+                    "job (linux) [3.11]", "a**b**c", "x|y|z", "\\\\"):
+        assert vr._vr_withheld_cell_text(hostile) == bp._withheld_cell_text(hostile), (
+            hostile)
 
 
 def test_withheld_setup_and_checkout_lists_that_are_malformed_fail(tmp_path):
@@ -9525,7 +9562,9 @@ def test_withheld_setup_and_checkout_tie_goes_to_the_alphabetically_first_gate(t
             {"workflow_file": "ci.yml", "job": "b", "gate": _G80_B}]
     path = _withheld_77_80_doc(tmp_path, "opt80_withheld_candidates", rows)
     row = "| checkout stall: held back | {} | x |\n"
-    cell = "2 candidate checkout(s) held back (a, b): {}."
+    # Two gates, one candidate each: hedged, like every multi-gate row.
+    cell = ("2 candidate checkout(s) held back (a, b): "
+            + vr._VR_WITHHELD_MODAL_LEAD + "{}.")
     assert vr.check_coverage_disclosed(
         silent + row.format(cell.format(vr._VR_OPT80_WITHHOLD_PHRASES[_G80_B])), path).ok
     assert not vr.check_coverage_disclosed(

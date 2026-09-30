@@ -2870,11 +2870,13 @@ def test_withheld_setup_and_checkout_candidates_reach_the_data_sources_table():
     r77 = _withheld_row(foot, "repeated-setup: held back")
     r80 = _withheld_row(foot, "checkout stall: held back")
     assert r77 and r80, foot
+    # More than one gate contributed on each row, so the commonest gate's
+    # reason is hedged rather than asserted of every group the row names.
     assert ("3 candidate job group(s) held back (a + b + c in ci.yml, "
-            "d + e + f in ci.yml, x + y + z in b.yml): "
+            "d + e + f in ci.yml, x + y + z in b.yml): " + bp._WITHHELD_MODAL_LEAD
             + bp._OPT77_WITHHOLD_PHRASES["needs_graph_undecidable"] + ".") in r77, r77
     # A tie goes to the alphabetically first gate - the verifier's rule too.
-    assert ("2 candidate checkout(s) held back (build, e2e): "
+    assert ("2 candidate checkout(s) held back (build, e2e): " + bp._WITHHELD_MODAL_LEAD
             + bp._OPT80_WITHHOLD_PHRASES["log_carries_no_progress_vocabulary"]
             + ".") in r80, r80
     for raw in ("needs_graph_undecidable", "log_carries_no_progress_vocabulary",
@@ -7999,7 +8001,10 @@ def test_withheld_cache_candidates_reach_the_data_sources_table():
          "gate": "fewer_than_min_miss_runs_classified"}]
     foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
     assert "| cache hit/miss verdicts |" in foot, foot
-    assert ("3 candidate cache(s) held back (e2e, unit, x): too few sampled runs missed the cache to compare "
+    # Two gates contributed, so the commonest gate's reason is hedged: it is
+    # true of two of the three named jobs, not of all of them.
+    assert ("3 candidate cache(s) held back (e2e, unit, x): most commonly, too "
+            "few sampled runs missed the cache to compare "
             "a miss against a hit.") in foot, foot
     assert "fewer_than_min" not in foot and "_runs_classified" not in foot, foot
     # nothing withheld -> no row
@@ -8064,3 +8069,98 @@ def test_held_back_line_merges_early_and_late_gates_and_keeps_the_tie_rule():
          "gate": "job_declares_more_than_one_cache_restore_step"}])
     # tie: alphabetically first gate wins, exactly as before
     assert "restores more than one cache" in line, line
+
+
+def test_held_back_reason_is_hedged_when_more_than_one_gate_contributed():
+    """The count and the named jobs cover EVERY held-back candidate, but the
+    reason is only the commonest gate's. Printed flat, the sentence asserted
+    that reason of every job it named — "7 held back (…): the job restores more
+    than one cache" while two of the seven were held back for something else,
+    with nothing in the row letting the reader see it. A second gate now makes
+    the reason explicitly modal; one gate leaves it unhedged."""
+    rows = ([{"workflow_file": "ci.yml", "job": f"many{i}",
+              "gate": "no_install_step_after_the_cache_step"} for i in range(5)]
+            + [{"workflow_file": "ci.yml", "job": f"few{i}",
+                "gate": "job_declares_more_than_one_cache_restore_step"}
+               for i in range(2)])
+    line = _held_back_cell(rows)
+    assert "7 candidate cache(s) held back" in line, line
+    # the modal gate's reason, and it does NOT claim to hold of all seven
+    assert ("): most commonly, " + bp._OPT79_HELD_BACK_REASONS[
+        "no_install_step_after_the_cache_step"] + ".") in line, line
+    # the minority gate's own reason is not asserted of anyone
+    assert "restores more than one cache" not in line, line
+    # …and one gate for every candidate stays unhedged: there is nothing to hedge.
+    only = _held_back_cell(
+        [{"workflow_file": "ci.yml", "job": f"j{i}",
+          "gate": "no_install_step_after_the_cache_step"} for i in range(3)])
+    assert ("): " + bp._OPT79_HELD_BACK_REASONS[
+        "no_install_step_after_the_cache_step"] + ".") in only, only
+    assert "most commonly" not in only, only
+
+
+def test_held_back_job_names_cannot_split_the_row_or_become_a_link():
+    """Job names are repo-controlled and land in a markdown table cell.
+
+    `a\\|b` was escaped to `a\\\\|b` — GFM reads that as an escaped BACKSLASH
+    followed by a live cell separator, so the row grew a column and the
+    self-check's own cell regex read only the fragment before the split. And a
+    job named `[click](http://example.test)` rendered as a working link inside
+    the audit's own Data sources table."""
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "a\\|b", "gate": "no_monthly_volume"}])
+    # exactly three cells: the row did not grow a column
+    assert len([c for c in re.split(r"(?<!\\)\|", line) if c.strip()]) == 3, line
+
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "[click](http://example.test)",
+         "gate": "no_monthly_volume"}])
+    assert "[click](http://example.test)" not in line, line
+    assert "\\[click\\]\\(http://example.test\\)" in line, line
+    assert len([c for c in re.split(r"(?<!\\)\|", line) if c.strip()]) == 3, line
+
+    # an emphasis run a name would otherwise open across the rest of the cell
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "snake_case_job_name",
+         "gate": "no_monthly_volume"}])
+    assert "snake\\_case\\_job\\_name" in line, line
+
+
+def test_a_gate_with_no_phrase_renders_a_reason_never_its_code():
+    """A gate the phrase tables do not cover is a collector bug the self-check
+    fails on — but until the report is verified the row still renders, and what
+    it renders must read as a reason rather than leak the internal gate name.
+    Pinned at the RENDER level: the constant alone could be rewritten to
+    anything (including a code) with nothing going red."""
+    line = _held_back_cell([{"workflow_file": "ci.yml", "job": "unit",
+                             "gate": "a_gate_no_table_covers"}])
+    assert "a_gate_no_table_covers" not in line, line
+    assert bp._WITHHELD_UNMAPPED_PHRASE in line, line
+    # it has to be prose, not a placeholder or a token
+    assert bp._WITHHELD_UNMAPPED_PHRASE == (
+        "a reason this report has no plain-English wording for")
+    assert "_" not in bp._WITHHELD_UNMAPPED_PHRASE
+
+
+def test_every_held_back_row_keeps_the_static_only_body_alive():
+    """A repository with nothing else to report but one held-back candidate
+    must still render a body, or the Data sources footer — the only place the
+    candidate is disclosed — goes with it and "could not tell" reads as
+    "nothing found". Pinned for EVERY registered pattern, not just OPT79: a row
+    added without this is silent on exactly the repositories it exists for."""
+    for key, label, _noun, _feeds in bp._WITHHELD_ROWS:
+        entry = {"workflow_file": ".github/workflows/nightly.yml",
+                 "gate": "no_monthly_volume"}
+        if key == "opt77_withheld_candidates":
+            entry.update(group="ubuntu-latest/a+b+c", jobs=["a", "b", "c"],
+                         gate="needs_graph_undecidable")
+        else:
+            entry["job"] = "build"
+            if key == "opt80_withheld_candidates":
+                entry["gate"] = "no_tail_run_log_was_probed"
+        doc = {"repo": "o/r", "findings": [], "pr_critical_path": {"poles": []},
+               "data_sources": {}, key: [entry]}
+        assert bp._render_static_only(doc), key
+        md = bp.render(doc, "o/r")
+        assert "held back" in md, (key, md)
+        assert _withheld_row(md, label), (key, md)

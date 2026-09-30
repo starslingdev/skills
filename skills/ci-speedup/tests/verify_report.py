@@ -888,12 +888,19 @@ def _detectors_skipped_violation(report: str,
 # coupling test pins all three equal).
 _VR_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _VR_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
-# (doc key, Data sources row label, counted noun) — as blocking_path renders
-# them. ONE re-derivation serves all three patterns.
+# (doc key, Data sources row label, counted noun, "Used for" cell) — as
+# blocking_path renders them. ONE re-derivation serves all three patterns.
+# The fourth field is carried HERE, not just pinned: it is the column that tells
+# the reader what the row is about, and while the verifier held only three
+# fields it could be replaced with arbitrary text and the whole suite stayed
+# green.
 _VR_WITHHELD_ROWS = (
-    (_VR_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts", "candidate cache(s)"),
-    (_VR_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back", "candidate job group(s)"),
-    (_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back", "candidate checkout(s)"),
+    (_VR_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts", "candidate cache(s)",
+     "Why a candidate cache produced no finding and no uncredited line"),
+    (_VR_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back", "candidate job group(s)",
+     "Why a group of small jobs sharing one setup produced no finding"),
+    (_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back", "candidate checkout(s)",
+     "Why a checkout with a slow tail produced no finding"),
 )
 # The plain-English phrase for every WITHHOLD gate — this verifier's OWN copy of
 # `blocking_path`'s tables (it re-derives the line rather than importing the
@@ -932,9 +939,11 @@ _VR_OPT80_WITHHOLD_PHRASES = {
     "progress_lines_all_outside_step_window":
         "the slow runs' logs show fetch progress only outside the checkout "
         "step's own time window",
+    # An observation, not a cause: a truncated log, a checkout that is not
+    # `actions/checkout`, or unrecognised wording produce the same absence.
     "log_carries_no_progress_vocabulary":
-        "the slow runs' logs show no fetch progress lines (progress output is "
-        "switched off)",
+        "the slow runs' logs show no fetch progress lines (most likely because "
+        "progress output is switched off)",
     "quoted_progress_line_is_credential_shaped":
         "the only log evidence looked like a credential and was discarded",
     "no_tail_run_log_was_probed":
@@ -949,14 +958,25 @@ _VR_WITHHELD_PHRASES_BY_KEY = {
     _VR_OPT80_WITHHELD_DOC_KEY: _VR_OPT80_WITHHOLD_PHRASES,
 }
 _VR_WITHHELD_JOBS_SHOWN = 5
+# Prefixed to the reason when more than one gate held candidates back.
+_VR_WITHHELD_MODAL_LEAD = "most commonly, "
+
+
+# The renderer's escape list, in the renderer's order. `\` MUST stay first:
+# escaping `|` first turns `a\|b` into `a\\|b`, which GFM reads as an escaped
+# backslash plus a LIVE cell separator. A coupling test pins this tuple and the
+# function below byte-identical to `blocking_path`'s.
+_VR_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_")
 
 
 def _vr_withheld_cell_text(text: object) -> str:
     """The renderer's cell-safe transform of repo-controlled text (whitespace
-    collapsed, `|` escaped, backticks and emphasis markers swapped for an
-    apostrophe)."""
-    return (re.sub(r"\s+", " ", str(text)).strip()
-            .replace("`", "'").replace("*", "'").replace("|", "\\|"))
+    collapsed, backticks and emphasis markers swapped for an apostrophe, every
+    markdown-active character backslash-escaped with `\\` first)."""
+    out = re.sub(r"\s+", " ", str(text)).strip().replace("`", "'").replace("*", "'")
+    for _ch in _VR_WITHHELD_CELL_ESCAPES:
+        out = out.replace(_ch, "\\" + _ch)
+    return out
 
 
 def _vr_withheld_entries(rows: list[dict], key: str) -> list[str]:
@@ -1000,7 +1020,12 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
         return (f"the withheld-candidate rows could not be re-derived: findings JSON "
                 f"at {findings_path} is unreadable ({type(exc).__name__})"), ""
     note = ""
-    for key, label, noun in _VR_WITHHELD_ROWS:
+    # `feeds` (the "Used for" cell) is not re-derived from the run's data — it
+    # is fixed prose — but it IS carried here so the coupling test can pin all
+    # four fields against the renderer's registry. Held as three fields, it was
+    # the one part of a held-back row that could be rewritten with the whole
+    # suite staying green.
+    for key, label, noun, _feeds in _VR_WITHHELD_ROWS:
         raw = _as_dict(data).get(key)
         # The renderer quietly drops non-objects and names a gate-less entry
         # `unknown`; here either is a collector bug, not "nothing withheld".
@@ -1043,7 +1068,11 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
         jobs = ", ".join(entries[:_VR_WITHHELD_JOBS_SHOWN])
         if len(entries) > _VR_WITHHELD_JOBS_SHOWN:
             jobs += f", and {len(entries) - _VR_WITHHELD_JOBS_SHOWN} more"
-        expected = f"{len(rows)} {noun} held back ({jobs}): {phrases[top]}."
+        # The reason is only the COMMONEST gate's, while the count and the named
+        # entries cover every row — so it is hedged whenever a second gate
+        # contributed. The renderer carries the same rule.
+        lead = _VR_WITHHELD_MODAL_LEAD if len(counts) > 1 else ""
+        expected = f"{len(rows)} {noun} held back ({jobs}): {lead}{phrases[top]}."
         if not m:
             return (f"{len(rows)} {noun} were held back ({key}) but the Data sources "
                     f"table has no '{label}' row - an undecided candidate reads as "

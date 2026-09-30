@@ -5191,9 +5191,13 @@ _OPT80_WITHHOLD_PHRASES: dict[str, str] = {
     "progress_lines_all_outside_step_window":
         "the slow runs' logs show fetch progress only outside the checkout "
         "step's own time window",
+    # Absent progress vocabulary is an OBSERVATION, not a cause: the log may
+    # also be truncated, the checkout may not be `actions/checkout`, or the
+    # wording may simply be one this audit does not recognise. Hedged like its
+    # siblings rather than asserting the switch is off.
     "log_carries_no_progress_vocabulary":
-        "the slow runs' logs show no fetch progress lines (progress output is "
-        "switched off)",
+        "the slow runs' logs show no fetch progress lines (most likely because "
+        "progress output is switched off)",
     "quoted_progress_line_is_credential_shaped":
         "the only log evidence looked like a credential and was discarded",
     "no_tail_run_log_was_probed":
@@ -5214,15 +5218,33 @@ _WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
 _WITHHELD_UNMAPPED_PHRASE = "a reason this report has no plain-English wording for"
 # Named entries before ", and K more".
 _WITHHELD_JOBS_SHOWN = 5
+# Prefixed to the reason when more than one gate held candidates back, so the
+# sentence stops asserting the commonest gate's reason of every job it names.
+_WITHHELD_MODAL_LEAD = "most commonly, "
+
+
+# The markdown-active characters a repo-controlled name is backslash-escaped
+# for, IN THIS ORDER. `\` MUST come first: escaping `|` before `\` turns the
+# name `a\|b` into `a\\|b`, which GFM reads as an escaped backslash followed by
+# a LIVE cell separator — the row splits into an extra column and the
+# self-check's own cell regex reads only the fragment before the split. `[`,
+# `]`, `(` and `)` are escaped because a job named `[click](http://example.test)`
+# would otherwise render as a working link inside the audit's own table, and `_`
+# because a name with two of them opens an italic run.
+_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_")
 
 
 def _withheld_cell_text(text: object) -> str:
     """Repo-controlled text (a job or workflow name) made safe for one table
-    cell: whitespace and newlines collapsed, `|` escaped, backticks and emphasis
-    markers swapped for an apostrophe so a name cannot open a code span or an
-    italic run. `verify_report` carries the same transform."""
-    return (re.sub(r"\s+", " ", str(text)).strip()
-            .replace("`", "'").replace("*", "'").replace("|", "\\|"))
+    cell: whitespace and newlines collapsed, backticks and emphasis markers
+    swapped for an apostrophe so a name cannot open a code span, and every
+    markdown-active character backslash-escaped (`\\` first, see above) so a
+    name cannot split the row or turn itself into a link. `verify_report`
+    carries a byte-identical transform, pinned equal by a coupling test."""
+    out = re.sub(r"\s+", " ", str(text)).strip().replace("`", "'").replace("*", "'")
+    for _ch in _WITHHELD_CELL_ESCAPES:
+        out = out.replace(_ch, "\\" + _ch)
+    return out
 
 
 def _withheld_entries(rows: list[dict[str, Any]], key: str) -> list[str]:
@@ -5260,7 +5282,14 @@ def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
     collector's withheld-candidate lists, or None when nothing was held back.
     N counts every entry; the reason is the commonest gate's phrase (ties go to
     the alphabetically first gate); at most `_WITHHELD_JOBS_SHOWN` entries are
-    named, then ", and K more". `verify_report` re-derives the whole line."""
+    named, then ", and K more". `verify_report` re-derives the whole line.
+
+    The count and the named entries cover EVERY row, but the reason is only the
+    commonest gate's. Printed flat, the sentence asserts that reason of every
+    job it names — untrue as soon as a second gate contributed, and the reader
+    has no way to see it. So the reason is prefixed with `_WITHHELD_MODAL_LEAD`
+    whenever more than one distinct gate is represented, and left unhedged only
+    when one gate accounts for the whole list."""
     rows = [r for r in ((doc or {}).get(key) or []) if isinstance(r, dict)]
     if not rows:
         return None
@@ -5274,7 +5303,8 @@ def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
     if len(entries) > _WITHHELD_JOBS_SHOWN:
         jobs += f", and {len(entries) - _WITHHELD_JOBS_SHOWN} more"
     phrase = _WITHHELD_PHRASES_BY_KEY[key].get(top, _WITHHELD_UNMAPPED_PHRASE)
-    return f"{len(rows)} {noun} held back ({jobs}): {phrase}."
+    lead = _WITHHELD_MODAL_LEAD if len(counts) > 1 else ""
+    return f"{len(rows)} {noun} held back ({jobs}): {lead}{phrase}."
 
 
 def _data_sources_footer(doc: dict[str, Any], repo: str,
