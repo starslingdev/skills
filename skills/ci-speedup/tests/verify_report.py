@@ -973,20 +973,99 @@ _VR_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _VR_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
 # (doc key, Data sources row label, counted noun) — as blocking_path renders them.
 _VR_WITHHELD_77_80_ROWS = (
-    (_VR_OPT77_WITHHELD_DOC_KEY, "repeated-setup verdicts", "candidate job group(s)"),
-    (_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall verdicts", "candidate checkout(s)"),
+    (_VR_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back", "candidate job group(s)"),
+    (_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back", "candidate checkout(s)"),
 )
+# The plain-English phrase for every WITHHOLD gate — this verifier's OWN copy of
+# `blocking_path`'s tables (it re-derives the line rather than importing the
+# renderer's answer; a coupling test pins the copies equal, and another pins them
+# to the gates the collector can record). A recorded gate with no phrase here
+# fails the check: a code is never accepted in place of a reason.
+_VR_OPT77_WITHHOLD_PHRASES = {
+    "no_yaml_jobs":
+        "the workflow file could not be read, so which jobs depend on which was unknown",
+    "needs_graph_undecidable":
+        "which jobs wait on which could not be fully traced, so merging them "
+        "could not be shown safe",
+    "group_never_ran_complete_in_one_sampled_run":
+        "the sampled runs never had every job in the group run together, so the "
+        "saving could not be measured",
+    "no_job_outside_the_group_runs_often_enough_to_measure_against":
+        "other jobs exist, but none ran often enough in the sampled runs to show "
+        "that merging these would not make the pipeline slower",
+}
+_VR_OPT80_WITHHOLD_PHRASES = {
+    "fewer_than_the_minimum_tail_runs":
+        "too few slow checkouts in the sampled runs to tell a stall from a one-off",
+    "retry_configuration_could_not_be_read":
+        "the checkout's retry and timeout settings could not be read from the workflow",
+    "tail_run_has_no_log_to_fetch":
+        "the slow runs had no log to read (still running or skipped)",
+    "tail_run_step_window_unreadable":
+        "the slow runs' checkout step times could not be read, so their logs "
+        "could not be checked",
+    "tail_run_log_unavailable":
+        "the slow runs' logs could not be retrieved (most likely expired)",
+    "log_carries_no_parseable_timestamps":
+        "the slow runs' logs carry no timestamps, so a pause could not be measured",
+    "log_lines_without_timestamps":
+        "too much of the slow runs' logs lacks timestamps to trust a pause measurement",
+    "progress_lines_all_outside_step_window":
+        "the slow runs' logs show fetch progress only outside the checkout "
+        "step's own time window",
+    "log_carries_no_progress_vocabulary":
+        "the slow runs' logs show no fetch progress lines (progress output is "
+        "switched off)",
+    "quoted_progress_line_is_credential_shaped":
+        "the only log evidence looked like a credential and was discarded",
+    "no_tail_run_log_was_probed":
+        "no slow run's log was read",
+    "tail_run_past_the_log_probe_budget":
+        "there were more slow runs than the audit reads logs for, and the rest "
+        "were never read",
+}
+_VR_WITHHELD_PHRASES_BY_KEY = {
+    _VR_OPT77_WITHHELD_DOC_KEY: _VR_OPT77_WITHHOLD_PHRASES,
+    _VR_OPT80_WITHHELD_DOC_KEY: _VR_OPT80_WITHHOLD_PHRASES,
+}
+_VR_WITHHELD_JOBS_SHOWN = 5
+
+
+def _vr_withheld_cell_text(text: object) -> str:
+    """The renderer's cell-safe transform of repo-controlled text (whitespace
+    collapsed, `|` escaped, backticks swapped for an apostrophe)."""
+    return (re.sub(r"\s+", " ", str(text)).strip()
+            .replace("`", "'").replace("|", "\\|"))
+
+
+def _vr_withheld_entries(rows: list[dict], key: str) -> list[str]:
+    def _wf(r: dict) -> str:
+        return str(r.get("workflow_file") or "").replace("\\", "/").rsplit("/", 1)[-1]
+
+    if key == _VR_OPT77_WITHHELD_DOC_KEY:
+        return [" + ".join(sorted(_vr_withheld_cell_text(j) for j in r["jobs"]))
+                + (f" in {_vr_withheld_cell_text(_wf(r))}" if _wf(r) else "")
+                for r in rows]
+    wfs_of: dict[str, set[str]] = {}
+    for r in rows:
+        wfs_of.setdefault(r["job"], set()).add(_wf(r))
+    return [(f"{_vr_withheld_cell_text(r['job'])} ({_vr_withheld_cell_text(_wf(r))})"
+             if len(wfs_of[r["job"]]) > 1 and _wf(r)
+             else _vr_withheld_cell_text(r["job"])) for r in rows]
 
 
 def _withheld_77_80_disclosure_violation(report: str, findings_path: Path | None
                                          ) -> tuple[str | None, str]:
-    """OPT77 (repeated setup) and OPT80 (checkout stalls) can measure a candidate
-    and still be unable to decide it. Each such candidate is listed on the
-    findings doc, and the report must say so in that detector's Data sources row
-    — the count and the commonest gate (ties to the alphabetically first), both
-    re-derived here. Without the row a measured-but-undecided candidate reads as
-    "measured, nothing found"; a row with nothing behind it is a claim the run
-    never made."""
+    """OPT77 (repeated setup) and OPT80 (checkout stalls) can be unable to decide
+    a candidate. Each such candidate is listed on the findings doc, and the report
+    must say so in that detector's Data sources row. The WHOLE cell is re-derived
+    here — the count, the named jobs (workflow-qualified when two workflows share
+    a name, at most five then "and K more") and the plain-English reason for the
+    commonest gate (ties to the alphabetically first) — and compared to what the
+    report says. Without the row a candidate the audit could not decide reads as
+    "nothing found"; a row with nothing behind it is a claim the run never made;
+    a gate with no phrase is a collector bug and fails rather than printing a
+    code."""
     if not findings_path:
         return None, ""
     try:
@@ -1007,29 +1086,47 @@ def _withheld_77_80_disclosure_violation(report: str, findings_path: Path | None
             return (f"{key} carries an entry that is not an object with a named "
                     "gate - the withheld row cannot be re-derived"), ""
         rows = list(raw or [])
-        m = re.search(rf"^\|\s*{re.escape(label)}\s*\|\s*(.+?)\s*\|", report,
-                      re.MULTILINE)
+        # The named jobs are part of the line, so an entry must carry them.
+        for r in rows:
+            if key == _VR_OPT77_WITHHELD_DOC_KEY:
+                ok = (isinstance(r.get("jobs"), list) and bool(r["jobs"])
+                      and all(isinstance(j, str) and j.strip() for j in r["jobs"]))
+            else:
+                ok = isinstance(r.get("job"), str) and bool(r["job"].strip())
+            if not ok:
+                return (f"{key} carries an entry that names no job - the withheld "
+                        "row cannot be re-derived"), ""
+        phrases = _VR_WITHHELD_PHRASES_BY_KEY[key]
+        for r in rows:
+            if r["gate"] not in phrases:
+                return (f"{key} records gate {r['gate']!r}, which has no plain-English "
+                        "phrase in verify_report - the withheld row cannot be "
+                        "re-derived, and a code is never a reason"), ""
+        m = re.search(rf"^\|\s*{re.escape(label)}\s*\|\s*((?:\\\||[^|])+?)\s*\|",
+                      report, re.MULTILINE)
         if not rows:
             if m:
-                return (f"Data sources row '{label}' declares candidates measured but "
-                        f"withheld, but the run recorded none under {key}"), ""
+                return (f"Data sources row '{label}' declares candidates held back, "
+                        f"but the run recorded none under {key}"), ""
             continue
         counts: dict[str, int] = {}
         for r in rows:
-            g = str(r.get("gate") or "unknown")
-            counts[g] = counts.get(g, 0) + 1
+            counts[r["gate"]] = counts.get(r["gate"], 0) + 1
         top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        entries = _vr_withheld_entries(rows, key)
+        jobs = ", ".join(entries[:_VR_WITHHELD_JOBS_SHOWN])
+        if len(entries) > _VR_WITHHELD_JOBS_SHOWN:
+            jobs += f" and {len(entries) - _VR_WITHHELD_JOBS_SHOWN} more"
+        expected = f"{len(rows)} {noun} held back ({jobs}): {phrases[top]}."
         if not m:
-            return (f"{len(rows)} {noun} were measured and then withheld (top reason "
-                    f"{top}, {key}) but the Data sources table has no '{label}' row - "
-                    "a measured-but-undecided candidate reads as measured and clean"), ""
+            return (f"{len(rows)} {noun} were held back ({key}) but the Data sources "
+                    f"table has no '{label}' row - an undecided candidate reads as "
+                    "measured and clean"), ""
         cell = _strip_render_artifacts(m.group(1))
-        got = re.search(rf"(\d+) {re.escape(noun)} measured but withheld; "
-                        r"top reason: ([a-z0-9_]+)", cell)
-        if not got or int(got.group(1)) != len(rows) or got.group(2) != top:
-            return (f"Data sources '{label}' cell {cell!r} does not state the "
-                    f"{len(rows)} withheld {noun} and top reason {top!r}"), ""
-        note += f"; {len(rows)} withheld {noun} disclosed"
+        if cell != _strip_render_artifacts(expected):
+            return (f"Data sources '{label}' cell {cell!r} is not the re-derived "
+                    f"line {expected!r}"), ""
+        note += f"; {len(rows)} held-back {noun} disclosed"
     return None, note
 
 

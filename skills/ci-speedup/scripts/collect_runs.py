@@ -8592,8 +8592,10 @@ def _supersede_opt65_with_opt77(
 _OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 # The group-level exits that are a VERDICT on a measured candidate group, not a
 # withhold: the members depend on each other, the prefix is not shared work,
-# the YAML steps differ, the setup is too small to matter, consolidating would
-# reach the tallest remaining job, or the credited saving rounds to zero. Every
+# the YAML steps differ, the setup is too small to matter, the group is the whole
+# workflow (no job outside it, so merging can only keep or lengthen the wait),
+# consolidating would reach the tallest remaining job, or the credited saving
+# rounds to zero. Every
 # OTHER exit routed through `_drop_group` once a group has formed means the
 # audit could not tell, and is listed under the key above — a new group-level
 # exit must go through `_drop_group` to be disclosed.
@@ -8603,6 +8605,7 @@ _OPT77_VERDICT_GATES = frozenset({
     "downstream_job_needs_a_member",
     "yaml_setup_steps_differ_across_the_group",
     "setup_prefix_below_absolute_floor",
+    "group_is_the_whole_workflow",
     "projected_consolidated_job_is_not_below_the_tallest_remaining_job",
     "neutrality_margin_not_positive",
     "credited_runner_minutes_round_to_zero",
@@ -8876,6 +8879,14 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                     continue
             eligible.append((p50v, nm))
         if not eligible:
+            if not excluded and not (observed_any - member_names):
+                # No job outside the group exists at all: the group IS the
+                # workflow. Those jobs run in parallel today, so merging them can
+                # only keep or lengthen the wait. A verdict, not an unknown.
+                _drop_group(group_id, names, "group_is_the_whole_workflow")
+                continue
+            # Jobs outside the group exist but none ran often enough (or has a
+            # strict p50) to carry the proof: genuinely unknown, so HELD BACK.
             _drop_group(group_id, names,
                         "no_job_outside_the_group_runs_often_enough_to_measure_against",
                         excluded=excluded)

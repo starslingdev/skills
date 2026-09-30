@@ -10,7 +10,7 @@
     {
       "id": 1002,
       "name": "Unit matrix",
-      "path": ".github/workflows/matrix.yml",
+      "path": ".github/workflows/build-matrix.yml",
       "state": "active"
     },
     {

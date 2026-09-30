@@ -5137,27 +5137,131 @@ _OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
 # (doc key, Data sources row label, counted noun, "Used for" cell). The row
 # label and the noun are what `verify_report` matches on.
 _WITHHELD_77_80_ROWS: tuple[tuple[str, str, str, str], ...] = (
-    (_OPT77_WITHHELD_DOC_KEY, "repeated-setup verdicts", "candidate job group(s)",
-     "Why a measured group of small jobs sharing one setup produced no finding"),
-    (_OPT80_WITHHELD_DOC_KEY, "checkout stall verdicts", "candidate checkout(s)",
-     "Why a checkout with a measured slow tail produced no finding"),
+    (_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back", "candidate job group(s)",
+     "Why a group of small jobs sharing one setup produced no finding"),
+    (_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back", "candidate checkout(s)",
+     "Why a checkout with a slow tail produced no finding"),
 )
 
+# One plain-English, self-justifying phrase per WITHHOLD gate: every gate the
+# collector can record under `opt77_withheld_candidates` /
+# `opt80_withheld_candidates` (a verdict is never withheld, so it has no phrase).
+# The row prints the phrase, never the internal gate name. A gate without a
+# phrase fails `verify_report` (it carries its own equal copy, pinned by a
+# coupling test) rather than printing a code, and a test enumerates the
+# collector's recordable gates so a new one cannot ship without its phrase.
+_OPT77_WITHHOLD_PHRASES: dict[str, str] = {
+    "no_yaml_jobs":
+        "the workflow file could not be read, so which jobs depend on which was unknown",
+    "needs_graph_undecidable":
+        "which jobs wait on which could not be fully traced, so merging them "
+        "could not be shown safe",
+    "group_never_ran_complete_in_one_sampled_run":
+        "the sampled runs never had every job in the group run together, so the "
+        "saving could not be measured",
+    "no_job_outside_the_group_runs_often_enough_to_measure_against":
+        "other jobs exist, but none ran often enough in the sampled runs to show "
+        "that merging these would not make the pipeline slower",
+}
+_OPT80_WITHHOLD_PHRASES: dict[str, str] = {
+    "fewer_than_the_minimum_tail_runs":
+        "too few slow checkouts in the sampled runs to tell a stall from a one-off",
+    "retry_configuration_could_not_be_read":
+        "the checkout's retry and timeout settings could not be read from the workflow",
+    "tail_run_has_no_log_to_fetch":
+        "the slow runs had no log to read (still running or skipped)",
+    "tail_run_step_window_unreadable":
+        "the slow runs' checkout step times could not be read, so their logs "
+        "could not be checked",
+    "tail_run_log_unavailable":
+        "the slow runs' logs could not be retrieved (most likely expired)",
+    "log_carries_no_parseable_timestamps":
+        "the slow runs' logs carry no timestamps, so a pause could not be measured",
+    "log_lines_without_timestamps":
+        "too much of the slow runs' logs lacks timestamps to trust a pause measurement",
+    "progress_lines_all_outside_step_window":
+        "the slow runs' logs show fetch progress only outside the checkout "
+        "step's own time window",
+    "log_carries_no_progress_vocabulary":
+        "the slow runs' logs show no fetch progress lines (progress output is "
+        "switched off)",
+    "quoted_progress_line_is_credential_shaped":
+        "the only log evidence looked like a credential and was discarded",
+    "no_tail_run_log_was_probed":
+        "no slow run's log was read",
+    "tail_run_past_the_log_probe_budget":
+        "there were more slow runs than the audit reads logs for, and the rest "
+        "were never read",
+}
+_WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
+    _OPT77_WITHHELD_DOC_KEY: _OPT77_WITHHOLD_PHRASES,
+    _OPT80_WITHHELD_DOC_KEY: _OPT80_WITHHOLD_PHRASES,
+}
+# What the row says for a gate with no phrase. Never the code; `verify_report`
+# fails on the same gate, so this text cannot reach a verified report.
+_WITHHELD_UNMAPPED_PHRASE = "the reason was not recorded in a form this report can state"
+# Named entries before "and K more".
+_WITHHELD_JOBS_SHOWN = 5
 
-def _withheld_candidates_summary(doc: dict[str, Any] | None,
-                                 key: str) -> tuple[int, str]:
-    """`(candidates withheld, the commonest gate)` from one of the collector's
-    withheld-candidate lists; ties go to the alphabetically first gate. `(0, "")`
-    when nothing was withheld. `verify_report` re-derives the same pair."""
+
+def _withheld_cell_text(text: object) -> str:
+    """Repo-controlled text (a job or workflow name) made safe for one table
+    cell: whitespace and newlines collapsed, `|` escaped, backticks swapped for
+    an apostrophe so a name cannot open a code span. `verify_report` carries the
+    same transform."""
+    return (re.sub(r"\s+", " ", str(text)).strip()
+            .replace("`", "'").replace("|", "\\|"))
+
+
+def _withheld_entries(rows: list[dict[str, Any]], key: str) -> list[str]:
+    """The named jobs of one withheld-candidate list, in collector order. An
+    OPT77 entry is a group ("lint + test in ci.yml"); an OPT80 entry is a job,
+    qualified with its workflow only when two workflows share the job name."""
+    def _wf(r: dict[str, Any]) -> str:
+        return str(r.get("workflow_file") or "").replace("\\", "/").rsplit("/", 1)[-1]
+
+    out: list[str] = []
+    if key == _OPT77_WITHHELD_DOC_KEY:
+        for r in rows:
+            jobs = r.get("jobs")
+            names = sorted(_withheld_cell_text(j) for j in jobs) if isinstance(
+                jobs, list) and jobs else [_withheld_cell_text(r.get("group") or "a group")]
+            wf = _wf(r)
+            out.append(" + ".join(names) + (f" in {_withheld_cell_text(wf)}" if wf else ""))
+        return out
+    wfs_of: dict[str, set[str]] = {}
+    for r in rows:
+        wfs_of.setdefault(str(r.get("job") or ""), set()).add(_wf(r))
+    for r in rows:
+        name = str(r.get("job") or "")
+        wf = _wf(r)
+        shown = _withheld_cell_text(name or "a job")
+        out.append(f"{shown} ({_withheld_cell_text(wf)})"
+                   if len(wfs_of[name]) > 1 and wf else shown)
+    return out
+
+
+def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
+                              noun: str) -> str | None:
+    """`N <noun> held back (<jobs>): <plain-English reason>.` from one of the
+    collector's withheld-candidate lists, or None when nothing was held back.
+    N counts every entry; the reason is the commonest gate's phrase (ties go to
+    the alphabetically first gate); at most `_WITHHELD_JOBS_SHOWN` entries are
+    named, then "and K more". `verify_report` re-derives the whole line."""
     rows = [r for r in ((doc or {}).get(key) or []) if isinstance(r, dict)]
     if not rows:
-        return 0, ""
+        return None
     counts: dict[str, int] = {}
     for r in rows:
         g = str(r.get("gate") or "unknown")
         counts[g] = counts.get(g, 0) + 1
     top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
-    return len(rows), top
+    entries = _withheld_entries(rows, key)
+    jobs = ", ".join(entries[:_WITHHELD_JOBS_SHOWN])
+    if len(entries) > _WITHHELD_JOBS_SHOWN:
+        jobs += f" and {len(entries) - _WITHHELD_JOBS_SHOWN} more"
+    phrase = _WITHHELD_PHRASES_BY_KEY[key].get(top, _WITHHELD_UNMAPPED_PHRASE)
+    return f"{len(rows)} {noun} held back ({jobs}): {phrase}."
 
 
 def _data_sources_footer(doc: dict[str, Any], repo: str,
@@ -5277,16 +5381,14 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
             _parts.append(f"{_api} from the gh contents API (default branch HEAD)")
         rows.append(("workflow YAML", " / ".join(_parts),
                      "`on:` triggers, matrix/shard axes, job timeouts (detector inputs)"))
-    # Candidates OPT77 (repeated setup) and OPT80 (checkout stalls) measured and
-    # then WITHHELD because the audit could not decide them. Without these rows
+    # Candidates OPT77 (repeated setup) and OPT80 (checkout stalls) HELD BACK
+    # because the audit could not decide them. Without these rows
     # the report reads "measured, nothing found" where the audit could not tell.
-    # `verify_report` re-derives both numbers from the collector's lists.
+    # `verify_report` re-derives the whole line from the collector's lists.
     for _key, _label, _noun, _feeds in _WITHHELD_77_80_ROWS:
-        _wn, _wtop = _withheld_candidates_summary(doc, _key)
-        if _wn:
-            rows.append((_label,
-                         f"{_wn} {_noun} measured but withheld; top reason: `{_wtop}`",
-                         _feeds))
+        _wline = _withheld_candidates_line(doc, _key, _noun)
+        if _wline:
+            rows.append((_label, _wline, _feeds))
     out = ["## 🗄️ Data sources", ""]
     if lead:
         out += lead

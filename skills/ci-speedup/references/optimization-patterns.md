@@ -1198,15 +1198,20 @@ saved:   (N - 1) x setup, every run
 has formed (at least three jobs on one runner sharing one setup prefix), every
 exit is either a *verdict* — the members depend on each other, the prefix is not
 shared work, the YAML steps differ, the setup is too small, consolidating
-would reach the tallest remaining job, or the credited saving rounds to zero —
+would reach the tallest remaining job, the credited saving rounds to zero, or
+the group *is* the whole workflow (no job outside it, so the jobs run in parallel
+today and merging them can only keep or lengthen the wait) —
 or a *could not tell*: the `needs:` graph
-is undecidable, the group never ran complete in one sampled run, or no job
-outside it runs often enough to measure against. Each could-not-tell group is
-listed on the findings document (`opt77_withheld_candidates`), and the report's
-Data sources table carries a `repeated-setup verdicts` row — "N candidate job
-group(s) measured but withheld; top reason: `gate`" — which `verify_report.py`
-re-derives, so an undecided group never reads as "measured, nothing found".
-Verdicts are not counted there.
+is undecidable, the group never ran complete in one sampled run, or jobs outside
+it exist but none runs often enough to measure against. Each could-not-tell group
+is listed on the findings document (`opt77_withheld_candidates`), and the
+report's Data sources table carries a `repeated-setup: held back` row — "N
+candidate job group(s) held back (lint + test + typecheck in ci.yml): the
+sampled runs never had every job in the group run together, so the saving could
+not be measured." The groups are named (workflow-qualified, at most five, then
+"and K more"), the reason is a plain-English phrase for the commonest gate, and
+`verify_report.py` re-derives the whole line, so an undecided group never reads
+as "measured, nothing found". Verdicts are not counted there.
 
 **What counts as the setup prefix.** Only the *leading* run of setup-classified
 steps, and only steps the classifier recognises. In full, a step name opening
@@ -1996,9 +2001,12 @@ silent, undecidable or never fetched (only the newest four are) could still have
 supplied the missing proof. Each could-not-tell
 checkout is listed on the findings document (`opt80_withheld_candidates`, named
 by its commonest such reason), and the report's Data sources table carries a
-`checkout stall verdicts` row — "N candidate checkout(s) measured but withheld;
-top reason: `gate`" — which `verify_report.py` re-derives, so an undecided tail
-never reads as "measured, nothing found".
+`checkout stall: held back` row — "N candidate checkout(s) held back (build):
+too few slow checkouts in the sampled runs to tell a stall from a one-off." The
+jobs are named (workflow-qualified when two workflows share a name, at most five,
+then "and K more"), the reason is a plain-English phrase for the commonest gate,
+and `verify_report.py` re-derives the whole line, so an undecided tail never
+reads as "measured, nothing found".
 
 **Log text is untrusted third-party data.** Only lines from the closed progress
 vocabulary above are ever read, the two quoted lines are quoted and never acted

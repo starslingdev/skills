@@ -9347,48 +9347,73 @@ def _withheld_77_80_doc(tmp_path, key, rows):
     return p
 
 
+_G77_A = "needs_graph_undecidable"
+_G77_B = "no_job_outside_the_group_runs_often_enough_to_measure_against"
+_G80_A = "tail_run_log_unavailable"
+_G80_B = "log_carries_no_progress_vocabulary"
+
+# (doc key, row label, counted noun, rows, expected jobs text, top gate, other gate)
 _WITHHELD_77_80_CASES = (
-    ("opt77_withheld_candidates", "repeated-setup verdicts",
+    ("opt77_withheld_candidates", "repeated-setup: held back",
      "candidate job group(s)",
-     [{"workflow_file": "ci.yml", "group": "ubuntu-latest/a+b+c",
-       "jobs": ["a", "b", "c"], "gate": "needs_graph_undecidable"},
-      {"workflow_file": "ci.yml", "group": "ubuntu-latest/d+e+f",
-       "jobs": ["d", "e", "f"], "gate": "needs_graph_undecidable"},
-      {"workflow_file": "b.yml", "group": "ubuntu-latest/x+y+z",
-       "jobs": ["x", "y", "z"],
-       "gate": "no_job_outside_the_group_runs_often_enough_to_measure_against"}],
-     "needs_graph_undecidable",
-     "no_job_outside_the_group_runs_often_enough_to_measure_against"),
-    ("opt80_withheld_candidates", "checkout stall verdicts",
+     [{"workflow_file": ".github/workflows/ci.yml", "group": "ubuntu-latest/a+b+c",
+       "jobs": ["a", "b", "c"], "gate": _G77_A},
+      {"workflow_file": ".github/workflows/ci.yml", "group": "ubuntu-latest/d+e+f",
+       "jobs": ["d", "e", "f"], "gate": _G77_A},
+      {"workflow_file": ".github/workflows/b.yml", "group": "ubuntu-latest/x+y+z",
+       "jobs": ["x", "y", "z"], "gate": _G77_B}],
+     "a + b + c in ci.yml, d + e + f in ci.yml, x + y + z in b.yml",
+     _G77_A, _G77_B),
+    ("opt80_withheld_candidates", "checkout stall: held back",
      "candidate checkout(s)",
-     [{"workflow_file": "ci.yml", "job": "build", "gate": "tail_run_log_unavailable"},
-      {"workflow_file": "ci.yml", "job": "e2e", "gate": "tail_run_log_unavailable"},
-      {"workflow_file": "b.yml", "job": "x",
-       "gate": "log_carries_no_progress_vocabulary"}],
-     "tail_run_log_unavailable", "log_carries_no_progress_vocabulary"),
+     [{"workflow_file": "ci.yml", "job": "build", "gate": _G80_A},
+      {"workflow_file": "ci.yml", "job": "e2e", "gate": _G80_A},
+      {"workflow_file": "b.yml", "job": "x", "gate": _G80_B}],
+     "build, e2e, x", _G80_A, _G80_B),
 )
+
+
+def _withheld_phrase(vr, key, gate):
+    table = (vr._VR_OPT77_WITHHOLD_PHRASES if key.startswith("opt77")
+             else vr._VR_OPT80_WITHHOLD_PHRASES)
+    return table[gate]
+
+
+def _withheld_cell(vr, key, noun, n, jobs, gate):
+    return f"{n} {noun} held back ({jobs}): {_withheld_phrase(vr, key, gate)}."
 
 
 def test_withheld_setup_and_checkout_candidates_must_be_disclosed(tmp_path):
     vr = _load_verify_report()
     silent = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
-    for key, label, noun, rows, top, other in _WITHHELD_77_80_CASES:
+    for key, label, noun, rows, jobs, top, other in _WITHHELD_77_80_CASES:
         path = _withheld_77_80_doc(tmp_path, key, rows)
         chk = vr.check_coverage_disclosed(silent, path)
-        assert not chk.ok and "withheld" in chk.detail, (key, chk)
-        row = f"| {label} | {{}} | Why a measured candidate produced no finding |\n"
-        honest = silent + row.format(
-            f"3 {noun} measured but withheld; top reason: `{top}`")
+        assert not chk.ok and "held back" in chk.detail, (key, chk)
+        row = f"| {label} | {{}} | Why a candidate produced no finding |\n"
+        honest = silent + row.format(_withheld_cell(vr, key, noun, 3, jobs, top))
         chk = vr.check_coverage_disclosed(honest, path)
         assert chk.ok, (key, chk)
-        # a wrong count either way, or a reason that is not the commonest one, is
-        # not a disclosure
-        for cell in (f"2 {noun} measured but withheld; top reason: `{top}`",
-                     f"4 {noun} measured but withheld; top reason: `{top}`",
-                     f"3 {noun} measured but withheld; top reason: `{other}`"):
+        # the whole line is re-derived: a wrong count, a wrong or missing job, a
+        # reason that is not the commonest one, or the raw gate name in place of
+        # the phrase is not a disclosure
+        for cell in (_withheld_cell(vr, key, noun, 2, jobs, top),
+                     _withheld_cell(vr, key, noun, 4, jobs, top),
+                     _withheld_cell(vr, key, noun, 3, jobs, other),
+                     _withheld_cell(vr, key, noun, 3, jobs.split(", ")[0], top),
+                     _withheld_cell(vr, key, noun, 3, jobs + ", zzz", top),
+                     f"3 {noun} held back ({jobs}): {top}.",
+                     f"3 {noun} measured but withheld; top reason: `{top}`"):
             chk = vr.check_coverage_disclosed(silent + row.format(cell), path)
             assert not chk.ok, (key, cell, chk)
-        # …and a row with nothing behind it is a claim the run never made.
+        # the old row labels no longer satisfy the check
+        old = {"repeated-setup: held back": "repeated-setup verdicts",
+               "checkout stall: held back": "checkout stall verdicts"}[label]
+        chk = vr.check_coverage_disclosed(
+            silent + f"| {old} | {_withheld_cell(vr, key, noun, 3, jobs, top)} | x |\n",
+            path)
+        assert not chk.ok, (key, chk)
+        # ...and a row with nothing behind it is a claim the run never made.
         chk = vr.check_coverage_disclosed(
             honest, _withheld_77_80_doc(tmp_path, key, []))
         assert not chk.ok, (key, chk)
@@ -9396,7 +9421,7 @@ def test_withheld_setup_and_checkout_candidates_must_be_disclosed(tmp_path):
 
 def test_withheld_setup_and_checkout_rows_the_renderer_writes_pass_the_verifier(tmp_path):
     """The coupling that matters: the renderer's own row, not a hand-written one,
-    satisfies the self-check — and removing it reddens the check."""
+    satisfies the self-check, and removing it reddens the check."""
     import json as _json
     import blocking_path as bp
     vr = _load_verify_report()
@@ -9408,9 +9433,68 @@ def test_withheld_setup_and_checkout_rows_the_renderer_writes_pass_the_verifier(
     foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
     chk = vr.check_coverage_disclosed(foot, p)
     assert chk.ok, (chk, foot)
-    for label in ("repeated-setup verdicts", "checkout stall verdicts"):
+    for label in ("repeated-setup: held back", "checkout stall: held back"):
         stripped = "\n".join(ln for ln in foot.splitlines() if label not in ln)
         assert not vr.check_coverage_disclosed(stripped, p).ok, label
+
+
+def test_withheld_rows_round_trip_hostile_job_names_and_shared_names(tmp_path):
+    """Job names are repo-controlled text. The renderer's escaped row must still
+    verify, and two workflows sharing a job name are told apart."""
+    import json as _json
+    import blocking_path as bp
+    vr = _load_verify_report()
+    doc = {"data_sources": {},
+           "opt80_withheld_candidates": [
+               {"workflow_file": ".github/workflows/ci.yml", "job": "build",
+                "gate": _G80_A},
+               {"workflow_file": ".github/workflows/release.yml", "job": "build",
+                "gate": _G80_A},
+               {"workflow_file": "ci.yml", "job": "a|b`c\nd *x*", "gate": _G80_B}] +
+           [{"workflow_file": "ci.yml", "job": f"j{i}", "gate": _G80_A}
+            for i in range(6)]}
+    p = tmp_path / "findings.json"
+    p.write_text(_json.dumps(doc), encoding="utf-8")
+    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    assert "build (ci.yml), build (release.yml)" in foot and "more)" in foot, foot
+    chk = vr.check_coverage_disclosed(foot, p)
+    assert chk.ok, (chk, foot)
+    # dropping a qualifier the verifier derives is a mismatch
+    bad = foot.replace("build (release.yml)", "build")
+    assert not vr.check_coverage_disclosed(bad, p).ok
+
+
+def test_withheld_gate_without_a_phrase_fails_the_self_check_closed(tmp_path):
+    """An unmapped gate must never be printed as a code and accepted: the
+    verifier cannot derive its line, so it fails and names the gate."""
+    vr = _load_verify_report()
+    for key, noun, row in (
+            ("opt77_withheld_candidates", "candidate job group(s)",
+             {"workflow_file": "ci.yml", "group": "g", "jobs": ["a", "b", "c"],
+              "gate": "brand_new_gate"}),
+            ("opt80_withheld_candidates", "candidate checkout(s)",
+             {"workflow_file": "ci.yml", "job": "a", "gate": "brand_new_gate"})):
+        path = _withheld_77_80_doc(tmp_path, key, [row])
+        label = ("repeated-setup: held back" if key.startswith("opt77")
+                 else "checkout stall: held back")
+        for cell in (f"1 {noun} held back (a): brand_new_gate.",
+                     f"1 {noun} held back (a): the audit could not tell."):
+            chk = vr.check_coverage_disclosed(
+                "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+                f"| {label} | {cell} | x |\n", path)
+            assert (not chk.ok and "brand_new_gate" in chk.detail
+                    and "no plain-English phrase" in chk.detail), (key, chk)
+
+
+def test_withhold_phrase_tables_match_the_renderer_and_the_collector():
+    """The verifier carries its own copy (it is an independent re-derivation);
+    a drift between the copies is the thing this pins."""
+    import blocking_path as bp
+    vr = _load_verify_report()
+    assert vr._VR_OPT77_WITHHOLD_PHRASES == bp._OPT77_WITHHOLD_PHRASES
+    assert vr._VR_OPT80_WITHHOLD_PHRASES == bp._OPT80_WITHHOLD_PHRASES
+    assert vr._VR_WITHHELD_77_80_ROWS[0][1] == bp._WITHHELD_77_80_ROWS[0][1]
+    assert vr._VR_WITHHELD_77_80_ROWS[1][1] == bp._WITHHELD_77_80_ROWS[1][1]
 
 
 def test_withheld_setup_and_checkout_lists_that_are_malformed_fail(tmp_path):
@@ -9420,7 +9504,7 @@ def test_withheld_setup_and_checkout_lists_that_are_malformed_fail(tmp_path):
     a reason called `unknown`."""
     vr = _load_verify_report()
     silent = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
-    for key, _label, _noun, rows, _top, _other in _WITHHELD_77_80_CASES:
+    for key, _label, _noun, rows, _jobs, _top, _other in _WITHHELD_77_80_CASES:
         for bad in ({"gate": "x"}, "tail_run_log_unavailable",
                     rows + ["not-an-object"],
                     rows[:1] + [{"workflow_file": "ci.yml", "job": "z"}],
@@ -9435,16 +9519,40 @@ def test_withheld_setup_and_checkout_tie_goes_to_the_alphabetically_first_gate(t
     only case where a drift between them shows."""
     vr = _load_verify_report()
     silent = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
-    rows = [{"workflow_file": "ci.yml", "job": "a", "gate": "tail_run_log_unavailable"},
-            {"workflow_file": "ci.yml", "job": "b",
-             "gate": "log_carries_no_progress_vocabulary"}]
+    rows = [{"workflow_file": "ci.yml", "job": "a", "gate": _G80_A},
+            {"workflow_file": "ci.yml", "job": "b", "gate": _G80_B}]
     path = _withheld_77_80_doc(tmp_path, "opt80_withheld_candidates", rows)
-    row = "| checkout stall verdicts | 2 candidate checkout(s) measured but withheld; " \
-          "top reason: `{}` | x |\n"
+    row = "| checkout stall: held back | {} | x |\n"
+    cell = "2 candidate checkout(s) held back (a, b): {}."
     assert vr.check_coverage_disclosed(
-        silent + row.format("log_carries_no_progress_vocabulary"), path).ok
+        silent + row.format(cell.format(vr._VR_OPT80_WITHHOLD_PHRASES[_G80_B])), path).ok
     assert not vr.check_coverage_disclosed(
-        silent + row.format("tail_run_log_unavailable"), path).ok
+        silent + row.format(cell.format(vr._VR_OPT80_WITHHOLD_PHRASES[_G80_A])), path).ok
+
+
+def test_withheld_entries_missing_their_jobs_fail(tmp_path):
+    """The jobs are part of the re-derived line, so an entry with none cannot be
+    re-derived and is a collector bug, however honest the row reads."""
+    vr = _load_verify_report()
+    for key, label, noun, bad in (
+            ("opt77_withheld_candidates", "repeated-setup: held back",
+             "candidate job group(s)",
+             [{"workflow_file": "ci.yml", "group": "g", "gate": _G77_A}]),
+            ("opt77_withheld_candidates", "repeated-setup: held back",
+             "candidate job group(s)",
+             [{"workflow_file": "ci.yml", "group": "g", "jobs": [], "gate": _G77_A}]),
+            ("opt80_withheld_candidates", "checkout stall: held back",
+             "candidate checkout(s)",
+             [{"workflow_file": "ci.yml", "gate": _G80_A}]),
+            ("opt80_withheld_candidates", "checkout stall: held back",
+             "candidate checkout(s)",
+             [{"workflow_file": "ci.yml", "job": "", "gate": _G80_A}])):
+        report = ("## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+                  f"| {label} | 1 {noun} held back (a): "
+                  f"{_withheld_phrase(vr, key, bad[0]['gate'])}. | x |\n")
+        chk = vr.check_coverage_disclosed(report, _withheld_77_80_doc(tmp_path, key, bad))
+        assert not chk.ok and key in chk.detail and "names no job" in chk.detail, (
+            key, bad, chk)
 
 
 def test_withheld_setup_and_checkout_rows_fail_on_an_unreadable_findings_file(tmp_path):

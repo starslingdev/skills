@@ -1075,13 +1075,21 @@ checkout with a measured tail that exited unresolved, outside
 undecided tail runs could still have supplied the missing proof, named by their
 commonest reason). The per-gate tallies (`opt77_withheld_by_gate`,
 `opt80_withheld_by_gate`) are for maintainers; these lists reach the reader. `blocking_path._data_sources_footer` renders one Data
-sources row per non-empty list (`repeated-setup verdicts` /
-`checkout stall verdicts`: "N candidate … measured but withheld; top reason:
-`gate`", the commonest gate, ties alphabetical), and `verify_report.py`'s
-`check_coverage_disclosed` re-derives the count and the reason from the findings
-document — failing a report that omits the row, misstates it, or carries one
-with nothing behind it. The three files name the keys as constants a coupling
-test pins equal.
+sources row per non-empty list (`repeated-setup: held back` /
+`checkout stall: held back`: "N candidate … held back (<jobs>): <reason>." — the
+jobs named workflow-qualified when two workflows share a name, at most five then
+"and K more"; the reason a plain-English phrase for the commonest gate, ties
+alphabetical). The phrase tables (`_OPT77_WITHHOLD_PHRASES` /
+`_OPT80_WITHHOLD_PHRASES`) map EVERY withhold gate the collector can record, and
+a test enumerates those gates from the detectors' source so a new gate cannot
+ship without a phrase. `verify_report.py`'s `check_coverage_disclosed` carries
+its own copy of the tables (pinned equal by a coupling test) and re-derives the
+whole line — count, jobs, reason — from the findings document, failing a report
+that omits the row, misstates any part of it, prints a gate name instead of a
+phrase, or carries a row with nothing behind it; a recorded gate with no phrase
+fails closed. A group that is the whole workflow (`group_is_the_whole_workflow`,
+no job outside it) is a verdict, not a withhold, and is never listed. The three
+files name the keys as constants a coupling test pins equal.
 
 OPT80 (checkout stalls on the tail) is the third measured Tier-2 lever, and the
 first whose admission rests on a LOG rather than on a timing alone. It measures

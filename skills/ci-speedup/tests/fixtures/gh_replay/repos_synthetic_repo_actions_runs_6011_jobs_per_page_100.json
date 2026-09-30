@@ -1,5 +1,5 @@
 {
- "total_count": 10,
+ "total_count": 11,
  "jobs": [
   {
    "id": 60110,
@@ -23,9 +23,17 @@
      "conclusion": "success"
     },
     {
-     "name": "Build",
+     "name": "Run actions/checkout@v4",
      "number": 2,
      "started_at": "2026-06-24T11:00:05Z",
+     "completed_at": "2026-06-24T11:00:13Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Build",
+     "number": 3,
+     "started_at": "2026-06-24T11:00:13Z",
      "completed_at": "2026-06-24T11:01:35Z",
      "status": "completed",
      "conclusion": "success"
@@ -426,6 +434,53 @@
      "number": 6,
      "started_at": "2026-06-24T01:01:20Z",
      "completed_at": "2026-06-24T01:01:20Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 160119,
+   "run_id": 6011,
+   "name": "docs-format",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-24T11:00:05Z",
+   "completed_at": "2026-06-24T11:00:25Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/6011/job/160119",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-24T11:00:05Z",
+     "completed_at": "2026-06-24T11:00:07Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-24T11:00:07Z",
+     "completed_at": "2026-06-24T11:00:11Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run pip install -r docs/requirements.txt",
+     "number": 3,
+     "started_at": "2026-06-24T11:00:11Z",
+     "completed_at": "2026-06-24T11:00:19Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run make docs-format",
+     "number": 4,
+     "started_at": "2026-06-24T11:00:19Z",
+     "completed_at": "2026-06-24T11:00:25Z",
      "status": "completed",
      "conclusion": "success"
     }

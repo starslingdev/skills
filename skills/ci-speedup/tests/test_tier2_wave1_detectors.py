@@ -7020,13 +7020,15 @@ def _opt77_withheld(jpr=None, crit=None, wf=None, monthly=100):
 def test_opt77_lists_the_groups_it_measured_but_could_not_resolve():
     names = ("lint", "typecheck", "audit")
     run = [_setup_job(n, 80.0, 10.0) for n in names]
-    # Nothing outside the group to measure the consolidated job against: the
-    # audit cannot tell whether the merge gate stays unchanged -> WITHHELD.
     crit = {"floor_p50": 90.0, "long_pole_p50": 90.0,
-            "job_p50": {n: 90.0 for n in names},
+            "job_p50": dict({n: 90.0 for n in names}, docs=300.0),
             "job_runner": {n: "ubuntu-latest" for n in names},
             "runner_scope": "ubuntu-latest"}
-    out, rows = _opt77_withheld(jpr=[run, list(run)], crit=crit,
+    # A job outside the group EXISTS (`docs`) but ran in only one of the two
+    # sampled runs, so it cannot carry the proof that the merge gate stays
+    # unchanged: the audit cannot tell -> WITHHELD.
+    with_docs = run + [_setup_job("docs", 5.0, 40.0)]
+    out, rows = _opt77_withheld(jpr=[with_docs, list(run)], crit=crit,
                                 wf=_opt77_wf(names=names))
     assert out == []
     assert rows == [{
@@ -7038,6 +7040,26 @@ def test_opt77_lists_the_groups_it_measured_but_could_not_resolve():
     # A `needs:` graph the audit cannot reason about is also "could not tell".
     out, rows = _opt77_withheld(wf=_opt77_wf(needs={"audit": ["ghost"]}))
     assert out == [] and [r["gate"] for r in rows] == ["needs_graph_undecidable"], rows
+
+
+def test_opt77_a_group_that_is_the_whole_workflow_is_a_verdict_not_a_withhold():
+    """No job exists outside the group, so the jobs run in parallel today and
+    merging them can only keep or lengthen the wait. That is decided, not
+    unknown: it is counted as a withhold gate but never listed as held back."""
+    names = ("lint", "typecheck", "audit")
+    run = [_setup_job(n, 80.0, 10.0) for n in names]
+    crit = {"floor_p50": 90.0, "long_pole_p50": 90.0,
+            "job_p50": {n: 90.0 for n in names},
+            "job_runner": {n: "ubuntu-latest" for n in names},
+            "runner_scope": "ubuntu-latest"}
+    counts: dict = {}
+    rows: list = []
+    out = cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", [run, list(run)], crit, _opt77_wf(names=names), 100, 0,
+        withheld=counts, withheld_candidates=rows)
+    assert out == [] and rows == [], rows
+    assert counts.get("group_is_the_whole_workflow") == 1, counts
+    assert "no_job_outside_the_group_runs_often_enough_to_measure_against" not in counts
 
 
 def test_opt77_does_not_list_groups_it_measured_and_judged():
@@ -7152,7 +7174,7 @@ def test_verdict_gate_sets_are_pinned_exactly():
     assert cr._OPT77_VERDICT_GATES == {
         "prefix_has_no_recognizable_shared_work", "member_needs_member",
         "downstream_job_needs_a_member", "yaml_setup_steps_differ_across_the_group",
-        "setup_prefix_below_absolute_floor",
+        "setup_prefix_below_absolute_floor", "group_is_the_whole_workflow",
         "projected_consolidated_job_is_not_below_the_tallest_remaining_job",
         "neutrality_margin_not_positive", "credited_runner_minutes_round_to_zero",
     }

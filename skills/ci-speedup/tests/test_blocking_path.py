@@ -2837,40 +2837,145 @@ def test_data_sources_footer_reports_logs_when_the_job_logs_tier_ran():
     assert "job logs | not run" in "\n".join(bp._data_sources_footer(doc3, "o/r"))
 
 
+def _withheld_foot(doc):
+    return "\n".join(bp._data_sources_footer(doc, "o/r"))
+
+
+def _withheld_row(foot, label):
+    return next((ln for ln in foot.splitlines() if ln.startswith(f"| {label} |")), "")
+
+
 def test_withheld_setup_and_checkout_candidates_reach_the_data_sources_table():
-    """OPT77 (repeated setup) and OPT80 (checkout stalls) can measure a candidate
-    and still be unable to decide it (no job to measure the consolidation
-    against, a tail run's log gone). Without a line saying so the report reads
-    "measured, nothing found" for "measured, could not tell"."""
+    """OPT77 (repeated setup) and OPT80 (checkout stalls) can be unable to decide
+    a candidate (no job to measure the consolidation against, a tail run's log
+    gone). Without a line saying so the report reads "nothing found" for "could
+    not tell". The row names the jobs and gives the reason in plain English -
+    never the internal gate name."""
     doc = _doc_one_pole()
     doc["data_sources"] = {**doc["data_sources"], "tiers_run": ["gh-timing"]}
     doc["opt77_withheld_candidates"] = [
-        {"workflow_file": "ci.yml", "group": "ubuntu-latest/a+b+c",
-         "jobs": ["a", "b", "c"], "gate": "needs_graph_undecidable"},
-        {"workflow_file": "ci.yml", "group": "ubuntu-latest/d+e+f",
+        {"workflow_file": ".github/workflows/ci.yml", "group": "ubuntu-latest/a+b+c",
+         "jobs": ["c", "a", "b"], "gate": "needs_graph_undecidable"},
+        {"workflow_file": ".github/workflows/ci.yml", "group": "ubuntu-latest/d+e+f",
          "jobs": ["d", "e", "f"],
          "gate": "no_job_outside_the_group_runs_often_enough_to_measure_against"},
-        {"workflow_file": "b.yml", "group": "ubuntu-latest/x+y+z",
+        {"workflow_file": ".github/workflows/b.yml", "group": "ubuntu-latest/x+y+z",
          "jobs": ["x", "y", "z"], "gate": "needs_graph_undecidable"}]
     doc["opt80_withheld_candidates"] = [
         {"workflow_file": "ci.yml", "job": "build",
          "gate": "tail_run_log_unavailable"},
         {"workflow_file": "ci.yml", "job": "e2e",
          "gate": "log_carries_no_progress_vocabulary"}]
-    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
-    assert "| repeated-setup verdicts |" in foot, foot
-    assert ("3 candidate job group(s) measured but withheld; top reason: "
-            "`needs_graph_undecidable`") in foot, foot
-    assert "| checkout stall verdicts |" in foot, foot
-    # A tie goes to the alphabetically first gate — the verifier's rule too.
-    assert ("2 candidate checkout(s) measured but withheld; top reason: "
-            "`log_carries_no_progress_vocabulary`") in foot, foot
+    foot = _withheld_foot(doc)
+    r77 = _withheld_row(foot, "repeated-setup: held back")
+    r80 = _withheld_row(foot, "checkout stall: held back")
+    assert r77 and r80, foot
+    assert ("3 candidate job group(s) held back (a + b + c in ci.yml, "
+            "d + e + f in ci.yml, x + y + z in b.yml): "
+            + bp._OPT77_WITHHOLD_PHRASES["needs_graph_undecidable"] + ".") in r77, r77
+    # A tie goes to the alphabetically first gate - the verifier's rule too.
+    assert ("2 candidate checkout(s) held back (build, e2e): "
+            + bp._OPT80_WITHHOLD_PHRASES["log_carries_no_progress_vocabulary"]
+            + ".") in r80, r80
+    for raw in ("needs_graph_undecidable", "log_carries_no_progress_vocabulary",
+                "top reason", "measured but"):
+        assert raw not in r77 + r80, (raw, r77, r80)
+    assert "verdicts" not in foot
     # nothing withheld -> no row
     doc["opt77_withheld_candidates"] = []
     doc.pop("opt80_withheld_candidates")
-    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
-    assert "repeated-setup verdicts" not in foot
-    assert "checkout stall verdicts" not in foot
+    foot = _withheld_foot(doc)
+    assert "repeated-setup: held back" not in foot
+    assert "checkout stall: held back" not in foot
+
+
+def test_withheld_row_qualifies_shared_job_names_caps_the_list_and_escapes():
+    doc = _doc_one_pole()
+    doc["data_sources"] = {**doc["data_sources"], "tiers_run": ["gh-timing"]}
+    gate = "tail_run_log_unavailable"
+    doc["opt80_withheld_candidates"] = (
+        [{"workflow_file": ".github/workflows/ci.yml", "job": "build", "gate": gate},
+         {"workflow_file": ".github/workflows/release.yml", "job": "build", "gate": gate}]
+        + [{"workflow_file": "ci.yml", "job": f"j{i}", "gate": gate} for i in range(5)])
+    row = _withheld_row(_withheld_foot(doc), "checkout stall: held back")
+    assert ("7 candidate checkout(s) held back (build (ci.yml), build (release.yml), "
+            "j0, j1, j2 and 2 more): ") in row, row
+    # Job names are repo-controlled text: a pipe, backticks and a newline must not
+    # break the table row or open a code span.
+    doc["opt80_withheld_candidates"] = [
+        {"workflow_file": "ci.yml", "job": "a|b`c\nd", "gate": gate}]
+    row = _withheld_row(_withheld_foot(doc), "checkout stall: held back")
+    assert row.count("|") - row.count("\\|") == 4, row
+    assert "`" not in row and "\n" not in row, row
+
+
+def test_withheld_row_never_prints_an_unmapped_gate_code():
+    doc = _doc_one_pole()
+    doc["data_sources"] = {**doc["data_sources"], "tiers_run": ["gh-timing"]}
+    doc["opt80_withheld_candidates"] = [
+        {"workflow_file": "ci.yml", "job": "build", "gate": "brand_new_gate_code"}]
+    row = _withheld_row(_withheld_foot(doc), "checkout stall: held back")
+    assert row and "brand_new_gate_code" not in row, row
+
+
+def _withhold_gates_recordable_in_the_collector():
+    """Every gate the collector can write into a withheld-candidates list, read
+    from the detectors' own source: the literals handed to `_drop_group` /
+    `_unresolved`, the no-proof reasons OPT80 collects, and the names the
+    independence check returns. A gate added there without a phrase fails here."""
+    import ast
+    tree = ast.parse((_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8"))
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    found77, found80 = set(), set()
+
+    def lits(node):
+        return {c.value for c in ast.walk(node)
+                if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+
+    def calls(fn, name):
+        return [c for c in ast.walk(fn) if isinstance(c, ast.Call)
+                and ((isinstance(c.func, ast.Name) and c.func.id == name)
+                     or (isinstance(c.func, ast.Attribute) and c.func.attr == name))]
+
+    d77 = fns["_detect_opt77_repeated_setup_across_small_jobs"]
+    for c in calls(d77, "_drop_group"):
+        found77 |= lits(c.args[2]) if len(c.args) > 2 else set()
+    for n in ast.walk(fns["_consolidation_group_is_independent"]):
+        if isinstance(n, ast.Return) and n.value is not None:
+            found77 |= lits(n.value)
+    d80 = fns["_detect_opt80_checkout_tail_stall"]
+    for c in calls(d80, "_unresolved"):
+        found80 |= lits(c.args[1]) if len(c.args) > 1 else set()
+    for c in calls(d80, "append"):
+        if isinstance(c.func.value, ast.Name) and c.func.value.id in (
+                "reasons", "open_reasons"):
+            found80 |= lits(c)
+    found80 |= lits(ast.parse("x=['tail_run_past_the_log_probe_budget',"
+                              "'no_tail_run_log_was_probed']"))
+    for n in ast.walk(fns["_opt80_stall_in_log"]):
+        if isinstance(n, ast.Return) and isinstance(n.value, ast.Tuple):
+            found80 |= lits(n.value)
+    return (found77 - set(cr._OPT77_VERDICT_GATES),
+            found80 - set(cr._OPT80_VERDICT_GATES))
+
+
+def test_every_recordable_withhold_gate_has_a_plain_english_phrase():
+    g77, g80 = _withhold_gates_recordable_in_the_collector()
+    # the scan must actually be reading the detectors
+    assert {"needs_graph_undecidable",
+            "no_job_outside_the_group_runs_often_enough_to_measure_against"} <= g77, g77
+    assert {"tail_run_log_unavailable", "fewer_than_the_minimum_tail_runs",
+            "tail_run_past_the_log_probe_budget"} <= g80, g80
+    assert g77 - set(bp._OPT77_WITHHOLD_PHRASES) == set(), (
+        "OPT77 withhold gate with no phrase", g77 - set(bp._OPT77_WITHHOLD_PHRASES))
+    assert g80 - set(bp._OPT80_WITHHOLD_PHRASES) == set(), (
+        "OPT80 withhold gate with no phrase", g80 - set(bp._OPT80_WITHHOLD_PHRASES))
+    # a verdict is never withheld, so a phrase for one is dead text
+    assert not set(bp._OPT77_WITHHOLD_PHRASES) & set(cr._OPT77_VERDICT_GATES)
+    assert not set(bp._OPT80_WITHHOLD_PHRASES) & set(cr._OPT80_VERDICT_GATES)
+    for phrase in (*bp._OPT77_WITHHOLD_PHRASES.values(),
+                   *bp._OPT80_WITHHOLD_PHRASES.values()):
+        assert phrase and "_" not in phrase and "$" not in phrase, phrase
 
 
 def test_second_pole_role_names_the_real_slowest_concurrent_check_above_it():
