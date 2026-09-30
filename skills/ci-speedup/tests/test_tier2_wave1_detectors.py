@@ -4877,7 +4877,7 @@ def test_opt79_counts_other_default_caching_actions_as_a_second_cache():
     invisible, so a job with one of them AND `actions/cache` passed as a
     one-cache job and one verdict priced two caches."""
     for uses in ("Swatinem/rust-cache@v2", "gradle/actions/setup-gradle@v4",
-                 "gradle/gradle-build-action@v3"):
+                 "gradle/gradle-build-action@v3", "bahmutov/npm-install@v1"):
         block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
             {"uses": uses},
             {"uses": "actions/cache@v4",

@@ -414,8 +414,8 @@ family reads, so retuning it there moves this gate too.
    OPT79 counts it as on everywhere, which can only withhold), so a job pairing
    either with an `actions/cache` step is a multi-cache job and withholds. So do
    actions that restore a cache of their own (`Swatinem/rust-cache`,
-   `gradle/actions/setup-gradle`, `gradle/gradle-build-action`, sccache and
-   ccache actions): beside a cache OPT79 prices they make two caches, and on
+   `gradle/actions/setup-gradle`, `gradle/gradle-build-action`,
+   `bahmutov/npm-install`, sccache and ccache actions): beside a cache OPT79 prices they make two caches, and on
    their own they withhold as `cache_action_is_not_one_this_pattern_measures`.
    A ref that is not a version tag (a commit SHA, a branch) names no major
    version, even when the SHA starts with digits.

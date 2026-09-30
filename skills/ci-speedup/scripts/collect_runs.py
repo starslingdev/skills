@@ -15246,7 +15246,8 @@ _OPT79_INSTALL_ECOSYSTEMS: tuple[tuple[Any, str], ...] = (
 # price has two caches, and one log verdict cannot price the block.
 _OPT79_OTHER_CACHE_USES_RE = _re.compile(
     r"^(swatinem/rust-cache|gradle/actions/setup-gradle|gradle/gradle-build-action|"
-    r"mozilla-actions/sccache-action|hendrikmuhs/ccache-action)(@|$)", _re.I)
+    r"mozilla-actions/sccache-action|hendrikmuhs/ccache-action|"
+    r"bahmutov/npm-install)(@|$)", _re.I)
 _OPT79_SETUP_ECOSYSTEMS = {
     "actions/setup-node": "node", "actions/setup-python": "python",
     "actions/setup-go": "go", "astral-sh/setup-uv": "python",
