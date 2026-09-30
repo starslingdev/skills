@@ -712,11 +712,14 @@ unversioned and updates by reinstall from `main`.
   were gone. The Data sources table now carries one row per pattern when that
   happens: "N candidate job group(s) measured but withheld; top reason: `gate`"
   and "N candidate checkout(s) measured but withheld; top reason: `gate`". Only
-  undecided candidates count; a candidate measured and judged fine (the jobs
-  depend on each other, the logs show a smooth fetch) does not. The report's
-  self-check re-derives both rows from the findings and fails a report that
-  omits one, misstates its count or reason, or carries one with nothing behind
-  it. It mirrors the row the cache pattern (OPT79) adds for the same gap.
+  undecided candidates count; a candidate measured and decided (the jobs
+  depend on each other, the logs show a smooth fetch) does not. A slow checkout
+  whose logs were not all read, because only the newest four are fetched, counts
+  as undecided when the unread runs could still have proven a stall. The
+  report's self-check re-derives both rows from the findings and fails a report
+  that omits one, misstates its count or reason, or carries one with nothing
+  behind it, and it fails a malformed withheld list rather than reading it as
+  empty. (#111)
 
 - **2026-09-29** — **The stalled-checkout pattern (OPT80) no longer misses a
   stall, or invents one, in three cases.** A low-speed setting on some other

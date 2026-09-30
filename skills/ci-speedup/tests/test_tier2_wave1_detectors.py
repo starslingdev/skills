@@ -7005,7 +7005,7 @@ def test_opt79_a_job_with_no_cache_is_not_a_held_back_candidate():
 # candidate and then been unable to decide it. Each detector now also appends
 # every candidate it could NOT RESOLVE to an explicit list — a candidate measured
 # and judged fine (a verdict) is not on it — which the report states as one Data
-# sources row and `verify_report` re-derives (the OPT79 design, #106).
+# sources row and `verify_report` re-derives.
 
 
 def _opt77_withheld(jpr=None, crit=None, wf=None, monthly=100):
@@ -7114,6 +7114,54 @@ def test_opt80_does_not_list_checkouts_it_measured_and_judged():
     # …and a finding that fires is not withheld.
     out, rows = _opt80_withheld()
     assert len(out) == 1 and rows == [], rows
+
+
+def test_opt80_counts_tail_runs_past_the_log_budget_as_still_open():
+    """Only the newest `_OPT80_LOG_PROBE_MAX` tail runs are fetched. A tail run
+    the budget never reached could still have been the missing proof, so three
+    smooth logs and one missing one among six tail runs is NOT decided: the two
+    unread runs (stalled, here) could have carried the two proofs required."""
+    assert cr._OPT80_LOG_PROBE_MAX == 4
+    runs = _opt80_runs([10.0] * 8 + [120.0] * 6)
+    tail_ids = [r[0]["id"] for r in runs][-6:]
+    logs = {jid: _OPT80_SMOOTH_LOG for jid in tail_ids[:3]}
+    logs.update({jid: _OPT80_STALLED_LOG for jid in tail_ids[4:]})
+    out, rows = _opt80_withheld(jpr=runs, logs=logs)
+    assert out == []
+    assert [r["job"] for r in rows] == ["build"], rows
+    # Four smooth probed logs and two unread: still open for the same reason.
+    logs = {jid: _OPT80_SMOOTH_LOG for jid in tail_ids[:4]}
+    out, rows = _opt80_withheld(jpr=runs, logs=logs)
+    assert out == [] and [r["job"] for r in rows] == ["build"], rows
+    # With exactly four tail runs every one is read, so the three-smooth case
+    # stays a verdict (pinned above) — the budget only matters past the cap.
+
+
+def test_opt80_lists_a_single_slow_checkout_as_undecided():
+    """One tail run cannot prove a stall (two are required), so the job is
+    listed as undecided rather than judged."""
+    out, rows = _opt80_withheld(jpr=_opt80_runs([10.0] * 5 + [60.0]))
+    assert out == []
+    assert rows == [{"workflow_file": "ci.yml", "job": "build",
+                     "gate": "fewer_than_the_minimum_tail_runs"}], rows
+
+
+def test_verdict_gate_sets_are_pinned_exactly():
+    """A gate moved into a verdict set stops being disclosed with nothing going
+    red, so both sets are pinned by exact membership."""
+    assert cr._OPT77_VERDICT_GATES == {
+        "prefix_has_no_recognizable_shared_work", "member_needs_member",
+        "downstream_job_needs_a_member", "yaml_setup_steps_differ_across_the_group",
+        "setup_prefix_below_absolute_floor",
+        "projected_consolidated_job_is_not_below_the_tallest_remaining_job",
+        "neutrality_margin_not_positive", "credited_runner_minutes_round_to_zero",
+    }
+    assert cr._OPT80_VERDICT_GATES == {
+        "tail_without_log_gap", "tail_pause_was_advancing_or_pre_transfer",
+        "tail_pause_was_after_the_transfer_completed",
+        "retry_or_abort_already_configured", "tail_excess_not_positive",
+        "credited_runner_minutes_round_to_zero",
+    }
 
 
 def test_opt80_withheld_candidates_reach_the_findings_document():

@@ -8592,9 +8592,11 @@ def _supersede_opt65_with_opt77(
 _OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 # The group-level exits that are a VERDICT on a measured candidate group, not a
 # withhold: the members depend on each other, the prefix is not shared work,
-# the YAML steps differ, the setup is too small to matter, or consolidating
-# would reach the tallest remaining job. Every OTHER exit once a group has
-# formed means the audit could not tell, and is listed under the key above.
+# the YAML steps differ, the setup is too small to matter, consolidating would
+# reach the tallest remaining job, or the credited saving rounds to zero. Every
+# OTHER exit routed through `_drop_group` once a group has formed means the
+# audit could not tell, and is listed under the key above — a new group-level
+# exit must go through `_drop_group` to be disclosed.
 _OPT77_VERDICT_GATES = frozenset({
     "prefix_has_no_recognizable_shared_work",
     "member_needs_member",
@@ -9546,10 +9548,11 @@ def _opt80_stall_in_log(log: str,
 # renderer and the verifier: a coupling test pins the three constants equal.
 _OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
 # The exits, once a job's checkout has measured a tail, that are a VERDICT
-# rather than a withhold: the tail runs' logs were read and show a smooth, an
-# advancing or a post-transfer pause (not a stall), the fix is already in
-# place, or the measured excess is nothing. Every other exit after the tail is
-# measured means the audit could not tell.
+# rather than a withhold: the tail runs' logs were read and show a smooth fetch,
+# a pause that was advancing or came before the transfer, or one after the
+# transfer completed (not a stall); the fix is already in place; or the measured
+# excess or credited minutes are nothing. Every other exit after the tail is
+# measured, at a site that calls `_unresolved`, means the audit could not tell.
 _OPT80_VERDICT_GATES = frozenset({
     "tail_without_log_gap",
     "tail_pause_was_advancing_or_pre_transfer",
@@ -9610,8 +9613,9 @@ def _detect_opt80_checkout_tail_stall(
     unresolved — anything but a verdict (`_OPT80_VERDICT_GATES`) — is also
     appended to `withheld_candidates` as `{workflow_file, job, gate}`, which the
     report renders as its own Data sources row. After the log probe that means
-    the unread or undecidable tail runs could still have supplied the missing
-    proof; the gate named is the commonest such reason."""
+    the unread or undecidable tail runs — including any past the
+    `_OPT80_LOG_PROBE_MAX` budget, which were never fetched — could still have
+    supplied the missing proof; the gate named is the commonest such reason."""
     def _no(gate: str, **ctx: Any) -> None:
         if withheld is not None:
             withheld[gate] = withheld.get(gate, 0) + 1
@@ -9866,9 +9870,12 @@ def _detect_opt80_checkout_tail_stall(
             # Unresolved only when the tail runs the audit could NOT read or
             # decide could still have supplied the missing proof. Runs whose
             # logs were read and showed no stall are a verdict, and when those
-            # alone keep the job below the minimum the audit did decide.
+            # alone keep the job below the minimum the audit did decide. A tail
+            # run past the probe budget was never read, so it is open too.
             open_reasons = [g for g in (reasons or ["no_tail_run_log_was_probed"])
                             if g not in _OPT80_VERDICT_GATES]
+            open_reasons += (["tail_run_past_the_log_probe_budget"]
+                             * (len(fetchable) - len(probe)))
             if len(proven) + len(open_reasons) >= _OPT80_MIN_PROVEN_TAIL_RUNS:
                 tally: dict[str, int] = {}
                 for g in open_reasons:

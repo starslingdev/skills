@@ -1197,8 +1197,9 @@ saved:   (N - 1) x setup, every run
 **Groups it could not decide are named in the report.** Once a candidate group
 has formed (at least three jobs on one runner sharing one setup prefix), every
 exit is either a *verdict* — the members depend on each other, the prefix is not
-shared work, the YAML steps differ, the setup is too small, or consolidating
-would reach the tallest remaining job — or a *could not tell*: the `needs:` graph
+shared work, the YAML steps differ, the setup is too small, consolidating
+would reach the tallest remaining job, or the credited saving rounds to zero —
+or a *could not tell*: the `needs:` graph
 is undecidable, the group never ran complete in one sampled run, or no job
 outside it runs often enough to measure against. Each could-not-tell group is
 listed on the findings document (`opt77_withheld_candidates`), and the report's
@@ -1986,11 +1987,13 @@ with nothing to report.
 
 **Checkouts it could not decide are named in the report.** A job whose checkout
 measured a tail is a candidate. Its exit is a *verdict* when the tail runs' logs
-were read and show a smooth, advancing or post-transfer pause, when the retry or
-abort is already configured, or when the measured excess is nothing. It is a
-*could not tell* when there were too few tail runs, the retry configuration
-could not be read, or the tail runs whose logs were unavailable, silent or
-undecidable could still have supplied the missing proof. Each could-not-tell
+were read and show a smooth fetch, a pause that was advancing or came before the
+transfer, or one after the transfer completed; when the retry or abort is
+already configured; or when the measured excess or credited minutes are nothing.
+It is a *could not tell* when there were too few tail runs, the retry
+configuration could not be read, or the tail runs whose logs were unavailable,
+silent, undecidable or never fetched (only the newest four are) could still have
+supplied the missing proof. Each could-not-tell
 checkout is listed on the findings document (`opt80_withheld_candidates`, named
 by its commonest such reason), and the report's Data sources table carries a
 `checkout stall verdicts` row — "N candidate checkout(s) measured but withheld;

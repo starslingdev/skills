@@ -1071,8 +1071,10 @@ OPT77 and OPT80 each also keep an explicit list of the candidates they measured
 but could NOT decide — `opt77_withheld_candidates` (a formed group that exited on
 anything outside `_OPT77_VERDICT_GATES`) and `opt80_withheld_candidates` (a
 checkout with a measured tail that exited unresolved, outside
-`_OPT80_VERDICT_GATES`). The per-gate tallies above are for maintainers; these
-lists reach the reader. `blocking_path._data_sources_footer` renders one Data
+`_OPT80_VERDICT_GATES`; after the log probe, only when the unread, unfetched or
+undecided tail runs could still have supplied the missing proof, named by their
+commonest reason). The per-gate tallies (`opt77_withheld_by_gate`,
+`opt80_withheld_by_gate`) are for maintainers; these lists reach the reader. `blocking_path._data_sources_footer` renders one Data
 sources row per non-empty list (`repeated-setup verdicts` /
 `checkout stall verdicts`: "N candidate … measured but withheld; top reason:
 `gate`", the commonest gate, ties alphabetical), and `verify_report.py`'s
