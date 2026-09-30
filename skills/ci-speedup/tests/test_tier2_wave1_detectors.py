@@ -5593,6 +5593,91 @@ def test_opt79_uncredited_check_runs_in_the_report_self_check(tmp_path):
     assert "check_opt79_uncredited_rows_rederived(" in body
 
 
+def test_opt79_verifier_rejects_a_merge_wait_on_a_workflow_no_pr_runs():
+    vr = _load_verify_report_for_opt79()
+    pole = _opt79_pole_crit(long_pole_job=_OPT79_JOB,
+                            job_p50={_OPT79_JOB: 660.0, "integration": 600.0,
+                                     "e2e": 600.0})
+    row = _opt79_uncredited(pole)
+    assert row["on_critical_path"] is True
+    assert vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": [row]}) == []
+    row["workflow_gates_pull_requests"] = False
+    assert any("runs on no pull request" in p for p in
+               vr._opt79_uncredited_rows_rederived(
+                   {"opt79_uncredited_pole_caches": [row]}))
+
+
+def test_opt79_verifier_rejects_a_volume_on_a_row_with_no_monthly_volume():
+    vr = _load_verify_report_for_opt79()
+    row = _opt79_uncredited(_opt79_pole_crit())
+    row["monthly_volume"] = None
+    row["effective_monthly_volume"] = None
+    assert vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": [row]}) == []
+    row["effective_monthly_volume"] = 100.0
+    assert any("stamped on a row with no monthly volume" in p for p in
+               vr._opt79_uncredited_rows_rederived(
+                   {"opt79_uncredited_pole_caches": [row]}))
+
+
+def test_opt79_verifier_rejects_a_phantom_or_miscounted_uncredited_block(tmp_path):
+    """A rendered "N cache(s) measured net-negative" header the run never
+    recorded is a fabricated claim; a header whose count disagrees with the
+    rows is a miscounted one. Both must redden the self-check."""
+    import json as _json
+    vr = _load_verify_report_for_opt79()
+    row = _opt79_uncredited(_opt79_pole_crit())
+    rendered = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": [row]}))
+    empty = tmp_path / "empty.json"
+    empty.write_text(_json.dumps({"opt79_uncredited_pole_caches": []}), encoding="utf-8")
+    chk = vr.check_opt79_uncredited_rows_rederived(rendered, empty)
+    assert not chk.ok and "recorded none" in chk.detail, chk
+    one = tmp_path / "one.json"
+    one.write_text(_json.dumps({"opt79_uncredited_pole_caches": [row]}), encoding="utf-8")
+    assert vr.check_opt79_uncredited_rows_rederived(rendered, one).ok
+    miscount = rendered.replace("1 cache(s) measured", "3 cache(s) measured")
+    assert miscount != rendered
+    chk = vr.check_opt79_uncredited_rows_rederived(miscount, one)
+    assert not chk.ok and "states 3 cache(s)" in chk.detail, chk
+
+
+def test_opt79_verifier_rejects_an_evidence_table_row_no_run_measured():
+    def _edit(f, cn):
+        rows = f["measured_evidence"]["table"]["rows"]
+        rows[0] = list(rows[0])
+        rows[0][4] = "999s"
+    problems = _opt79_credited_problems(_edit)
+    assert any("matches no measured run" in p for p in problems), problems
+
+
+def test_opt79_setup_go_and_setup_uv_default_on_version_floors():
+    """setup-go caches by default from v4 (`cache` default `true`, action.yml
+    @v4.0.0), setup-uv from v5 (`enable-cache` default `auto`, @v5.0.0). An
+    off-by-one on either floor leaves a real second cache uncounted."""
+    st = cr._opt79_setup_cache_state
+    assert st("actions/setup-go@v4", {}) == "on"
+    assert st("actions/setup-go@v3", {}) == "off"
+    assert st("astral-sh/setup-uv@v5", {}) == "on"
+    assert st("astral-sh/setup-uv@v4", {}) == "off"
+    # a branch names no version: default-on actions count as caching
+    assert st("actions/setup-go@main", {}) == "on"
+    assert st("astral-sh/setup-uv@main", {}) == "on"
+
+
+def test_opt79_a_moved_workspace_stays_moved():
+    """A checkout into `path:` followed by a root checkout: the workspace root
+    may now hold either tree, so the root `package.json` OPT79 read is still
+    not known to be the one setup-node reads."""
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        {"uses": "actions/checkout@v4", "with": {"path": "web"}},
+        _OPT79_CHECKOUT, {"uses": "actions/setup-node@v5"}, {"run": "npm ci"}),
+        package_json={"packageManager": "npm@10.8.2"})
+    assert block is None and gate == \
+        "setup_action_cache_default_depends_on_repository_files", gate
+
+
 # ---- one pinning test per detector gate nothing else reached ----
 
 def test_opt79_withholds_when_a_block_step_name_is_carried_twice():
