@@ -5254,7 +5254,17 @@ def _withheld_entries(rows: list[dict[str, Any]], key: str) -> list[str]:
     """The distinct, sorted entries of one withheld-candidate list. An OPT77
     entry is a group ("lint + test in ci.yml"); an OPT79 / OPT80 entry is a job,
     qualified with its workflow file only when two workflows share the job
-    name, so the two stay tellable apart."""
+    name, so the two stay tellable apart.
+
+    The `(unnamed job)` / `"a group"` fallbacks below are UNREACHABLE from any
+    real detector path — every recording site is guarded, by an explicit
+    `ctx.get("job")` on OPT79's pre-probe exit and structurally everywhere else
+    (candidate names are built from a list that skips blanks) — and
+    `verify_report` fails a run that produces one outright. They are kept
+    deliberately, because the renderer's job is to always produce a report,
+    even from a document a bug has malformed, and an entry rendered as an empty
+    string is worse than one rendered as a visible marker. A test pins that no
+    detector path can reach them."""
     def _wf(r: dict[str, Any]) -> str:
         return str(r.get("workflow_file") or "").replace("\\", "/").rsplit("/", 1)[-1]
 

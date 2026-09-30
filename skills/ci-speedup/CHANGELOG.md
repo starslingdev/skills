@@ -703,6 +703,36 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-09-30** — **A held-back row can no longer break its own table, link
+  out of the report, or overstate its reason (#112).** Job names are controlled
+  by the audited repository and land in a markdown table cell. A backslash was
+  not escaped before the cell separator, so a job named `a\|b` split its row
+  into an extra column and the report's own self-check then read only the
+  fragment before the split; brackets and parentheses were not neutralised at
+  all, so a job named `[click](http://example.test)` rendered as a working link
+  inside the audit's own table. Every markdown-active character is now escaped.
+  The row's count and job list cover every held-back candidate while its reason
+  is only the most common one, so the reason now says "most commonly" whenever
+  more than one reason contributed instead of asserting one cause of every job
+  it names. One checkout reason asserted a cause the evidence does not
+  establish ("progress output is switched off") and is hedged like its
+  siblings. The guard that stops a reason shipping as an internal code now
+  recognises every way the checkout detector records one, so two reasons it
+  previously could not see are no longer listed by hand inside the guard
+  itself.
+- **2026-09-30** — **A workflow whose jobs all share one setup no longer loses
+  its saving in silence (#112).** The repeated-setup pattern (OPT77) sizes what
+  collapsing small jobs that each re-pay the same setup would save on the bill.
+  When every job in the workflow was in the group it used a separate rule that
+  was wrong twice: it decided "nothing outside this group" from the sampled
+  runs, so a workflow declaring a job that never ran in the sampled window — a
+  main-gated release job, a job behind a condition — was misclassified and
+  dropped without a word; and it assumed collapsing could only lengthen the
+  wait, which is a wall-clock argument applied to a bill-only saving. The group
+  is now judged against the wait it sets today (its slowest member, since the
+  members run in parallel): at or below it the merge is unchanged and the
+  saving is reported, above it the group is held back and said to be held back.
+  "Every job in the workflow" is read from what the workflow declares.
 - **2026-09-30** — **The repeated-setup (OPT77) and stalled-checkout (OPT80)
   patterns now say when they measured something and could not decide it.** Both
   kept a private tally of why they held candidates back, but nothing showed it,
@@ -718,14 +748,13 @@ unversioned and updates by reinstall from `main`.
   cause, never an internal code. This is the same held-back disclosure the cache
   check (OPT79) already gave: all three patterns now share one mechanism — one
   row builder, one job list, one self-check — so a fourth pattern discloses a
-  held-back candidate by registering its reasons, not by growing a fourth copy. Only undecided candidates count; a candidate
-  that was decided (the jobs depend on each other, the logs show a smooth fetch)
-  does not. A slow checkout whose logs were not all read, because only the newest
-  four are fetched, counts as undecided when the unread runs could still have
-  proven a stall. A group of small jobs that is the whole workflow, with no other
-  job to compare against, is now treated as decided (merging them in parallel
-  can only keep or lengthen the wait) instead of held back; the case where other
-  jobs exist but none ran often enough to compare against stays held back. The
+  held-back candidate by registering its reasons, not by growing a fourth copy.
+  Only undecided candidates count; a candidate that was decided (the jobs depend
+  on each other, the logs show a smooth fetch) does not. A slow checkout whose
+  logs were not all read, because only the newest four are fetched, counts as
+  undecided when the unread runs could still have proven a stall. A group of
+  small jobs where other jobs exist but none ran often enough to compare against
+  stays held back. The
   report's self-check re-derives each whole line (count, jobs, reason) from the
   findings and fails a report that omits one, misstates any part, prints a code
   in place of the reason, or carries one with nothing behind it; a gate with no

@@ -8153,6 +8153,41 @@ def test_held_back_job_names_cannot_split_the_row_or_become_a_link():
     assert "snake\\_case\\_job\\_name" in line, line
 
 
+def test_no_collector_path_can_record_a_held_back_entry_with_no_job():
+    """The renderer carries `(unnamed job)` / "a group" fallbacks and the
+    self-check hard-REJECTS an entry that names no job, so the two would
+    disagree if any real detector path could produce one. Read off the
+    collector: every site that appends to a withheld-candidate list guards the
+    name, so the fallbacks are defence against a malformed document, never a
+    shape a run can reach — and the self-check's strictness cannot redden a
+    real audit."""
+    import ast
+    import collect_runs as _cr
+    src = (_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    sites = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "append"
+             and isinstance(n.func.value, ast.Name)
+             and n.func.value.id == "withheld_candidates"]
+    assert len(sites) == 4, [ast.dump(s)[:80] for s in sites]   # 77, 79 x2, 80
+    for s in sites:
+        d = s.args[0]
+        assert isinstance(d, ast.Dict), ast.dump(s)
+        keys = {k.value for k in d.keys if isinstance(k, ast.Constant)}
+        assert "job" in keys or "jobs" in keys, keys
+    # OPT79's pre-probe site is the only one whose name is not structurally
+    # non-empty, and it is guarded by an explicit truthiness test.
+    assert 'and ctx.get("job")' in src
+
+    # …and the renderer still renders something legible if one ever appeared —
+    # escaped like any other name, so it reads "(unnamed job)" on the page.
+    line = _held_back_cell([{"workflow_file": "ci.yml", "job": "",
+                             "gate": "no_monthly_volume"}])
+    assert "\\(unnamed job\\)" in line, line
+    assert _cr is not None
+
+
 def test_a_gate_with_no_phrase_renders_a_reason_never_its_code():
     """A gate the phrase tables do not cover is a collector bug the self-check
     fails on — but until the report is verified the row still renders, and what
