@@ -513,9 +513,12 @@ unversioned and updates by reinstall from `main`.
   the sparse / blobless checkout option (`filter: blob:none`, `sparse-checkout:`)
   between a full clone and depth 1; OPT77 points at OPT73's base-image approach
   for jobs that must stay separate; OPT25's sharded case notes that a file-granular
-  runner's imbalance is file size (split the largest files before adding shards);
-  OPT14's swap table gains `tsc --noEmit` -> `tsgo --noEmit` (native preview, same
-  checker), kept distinct from the esbuild/swc anti-row. Catalog text only; no
+  runner's imbalance is file size (split the largest files before adding shards; not for Playwright `fullyParallel`);
+  OPT14's swap table gains `tsc --noEmit` -> TypeScript 7 (native port, stable,
+  command still `tsc`; only the vendor's own speedup figure, with the
+  no-compiler-API and changed-defaults caveats), kept distinct from the
+  esbuild/swc anti-row. OPT28's delete-the-checkout advice lists the indirect
+  repo dependencies to rule out first. Catalog text only; no
   detector or rendered-output change.
 
 - **2026-09-09** — **The planned before/after check can no longer claim a
