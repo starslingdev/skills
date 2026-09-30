@@ -508,6 +508,16 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-09-30** — **Five fix moves the catalog only half-covered are now in the
+  advice.** OPT28 gains "delete the checkout step if no step reads a file" and
+  the sparse / blobless checkout option (`filter: blob:none`, `sparse-checkout:`)
+  between a full clone and depth 1; OPT77 points at OPT73's base-image approach
+  for jobs that must stay separate; OPT25's sharded case notes that a file-granular
+  runner's imbalance is file size (split the largest files before adding shards);
+  OPT14's swap table gains `tsc --noEmit` -> `tsgo --noEmit` (native preview, same
+  checker), kept distinct from the esbuild/swc anti-row. Catalog text only; no
+  detector or rendered-output change.
+
 - **2026-09-09** — **The planned before/after check can no longer claim a
   speedup it did not measure.** The approved (still unimplemented) post-fix
   verification methodology told the future implementation to stamp one universal
