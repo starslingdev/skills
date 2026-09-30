@@ -674,6 +674,23 @@ unversioned and updates by reinstall from `main`.
   numbers, and it treats a malformed log-probe count as an error rather than as
   zero. (#106)
 
+- **2026-09-29** — **Node jobs using `setup-node` v5 or later are no longer
+  silently skipped by the cache-costs-more-than-it-saves pattern (OPT79).** From
+  v5, `setup-node` turns on a package-manager cache by itself when the
+  repository's `package.json` names the package manager, and the audit used to
+  treat every such job as "might have a second cache" and hold it back, which
+  silenced the pattern on the commonest Node job shape. It now reads
+  `package.json` the way `setup-node` does (v5: `packageManager` naming npm,
+  yarn or pnpm; v6 and later: `devEngines.packageManager` or `packageManager`
+  naming npm; off whenever `package-manager-cache` is anything but `true`) and
+  counts that cache only when it is really on. When it is on, it counts as the
+  job's cache and can be measured, and the fix names `package-manager-cache:
+  false`; when it is off, a job with `setup-node` plus its own cache step is
+  measured normally. The file is read once per repository, only when some job
+  needs it, from the local checkout when there is one. When it cannot be read,
+  or the job checks out somewhere other than the repository root, the job is
+  still held back and counted under the same reason as before. (#106)
+
 - **2026-09-29** — **The stalled-checkout pattern (OPT80) no longer misses a
   stall, or invents one, in three cases.** A low-speed setting on some other
   step, or a `git config` applied after the checkout had already run, no longer

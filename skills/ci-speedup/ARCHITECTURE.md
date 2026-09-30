@@ -1138,6 +1138,28 @@ family's own miss line (`<package manager> cache is not found`) and
 `astral-sh/setup-uv`'s pair. Both extras are kept OPT79-local so the eight other
 cache patterns reading the shared matcher are unaffected.
 
+`actions/setup-node` v5+ with no `cache:` input caches AUTOMATICALLY when the
+repo-root `package.json` names the package manager, so whether such a job has
+one cache or two is a fact about that file, not the YAML.
+`_opt79_resolve_package_json` reads it ONCE per repo, and only when
+`_opt79_package_json_needed` finds a sampled job whose cache count depends on it,
+from the verified `--root` checkout first and otherwise with one
+`contents/package.json` call — the same sources, in the same order, as
+`_fetch_workflow_docs` — and the parsed object is passed to BOTH the plan and the
+detector, so they share one answer. `_opt79_setup_node_auto_cache` mirrors
+setup-node's `getNameFromPackageManagerField` per major: v5 reads the top-level
+`packageManager` for npm / yarn / pnpm (`^(?:\^)?(npm|yarn|pnpm)@`); v6+ read
+`devEngines.packageManager` then `packageManager` for npm only
+(`^(\^)?npm(@.*)?$`); a SHA or branch ref is decided only when both rules
+agree. `package-manager-cache` is on only when empty or `true`, as in setup-node.
+On → a real cache (priced like any other, stamped `setup_node_auto_cache` so the
+recipe names `package-manager-cache: false`); off → not a cache; unknown (file
+missing / 404 / fetch failed / invalid JSON / not an object; no checkout before
+the setup step, or a checkout into a `path:` or of another `repository:`, which
+`_opt79_checkout_state` tracks; a SHA whose rules disagree) → fail closed as
+`setup_action_cache_default_depends_on_repository_files`. The read is stamped
+in `data_sources.setup_node_package_json` as `{needed, source, readable}`.
+
 That scan is SCOPED to the restore step's own `##[group]Run <step>` … block,
 which ends ONLY at the next `##[group]Run ` or `##[group]Post ` header; the
 action's inner groups and every `##[endgroup]` are skipped (`actions/cache`
@@ -1150,9 +1172,16 @@ per-run row stamps `log_line_group`, and the verifier refuses a row whose group
 is not the restore step. A log with no such group withholds the occurrence.
 
 Inside that group, a log showing both a miss and a hit line is excluded, never
-guessed, in either order. A miss followed by a hit is what a `restore-keys`
-partial match prints; it is not a clean hit, so it is withheld rather than
-counted. Only successful job runs are classified. An occurrence whose log was
+guessed, in either order (`run_log_shows_both_a_hit_and_a_miss_line`). A
+`restore-keys` fallback prints only `Cache restored from key: <key>`, so
+`_opt79_classify_log` returns the `partial_hit` verdict when the restored key
+differs from the echoed primary `key:` or when the post step saved a new cache;
+it is not a clean hit and is withheld
+(`run_log_shows_a_partial_restore_keys_hit`). Only successful job runs are
+classified (`occurrence_did_not_succeed` otherwise: a failed or cancelled run
+also skips the post save); a skipped occurrence is `occurrence_was_skipped`, and
+a block step whose timestamps are absent or unparseable withholds its occurrence
+as `step_timestamps_unparseable_in_this_occurrence`. An occurrence whose log was
 never fetched is counted as unread rather than folded into a population;
 an occurrence past the per-job 8-log cap is tallied
 `beyond_the_per_job_log_probe_cap`, not as unread. When
@@ -1264,9 +1293,15 @@ cache tail fraction are asserted IDENTICAL to the engine's; the hit/miss regexes
 are independent re-readings and are only spot-checked line by line.
 
 Every gate that withheld is counted into `findings_doc["opt79_withheld_by_gate"]`
-and logged at DEBUG; the report also discloses withheld candidates in one line
-("measured but withheld: N, top reason") so a withheld cache is not
-indistinguishable from no cache. The probe's own cost is stamped ONCE, in
+and logged at DEBUG (a credit-eligible job on a workflow with no measured volume
+is `no_monthly_volume`, counted after it is measured). A candidate whose logs were
+probed and which then exits on anything but a verdict (`_OPT79_VERDICT_GATES`:
+measured healthy, or hitting too rarely) is also appended to
+`findings_doc["opt79_withheld_candidates"]` as `{workflow_file, job, gate}`;
+`blocking_path` renders it as the `cache hit/miss verdicts` Data sources row
+("N candidate cache(s) probed but withheld; top reason: `<gate>`") and
+`verify_report.py` re-derives the count and the top gate, so a withheld cache is
+not indistinguishable from no cache. The probe's own cost is stamped ONCE, in
 `data_sources.cache_probe_logs` as `{planned, probed, returned, budget}` — the
 row the report renders and the verifier re-derives; when `planned` exceeds
 `probed` the rendered cell says so. And when probes were planned but NOTHING came

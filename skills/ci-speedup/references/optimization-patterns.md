@@ -410,7 +410,42 @@ family reads, so retuning it there moves this gate too.
    Caches that are **on by default** count toward "exactly one": `setup-go`
    caches unless it says `cache: false`, and `astral-sh/setup-uv` caches through
    `enable-cache`, so a job pairing either with an `actions/cache` step is a
-   multi-cache job and withholds. The cache is followed by an **install**
+   multi-cache job and withholds.
+
+   `actions/setup-node` **v5+ with no `cache:` input** caches automatically when
+   the repository's `package.json` names the package manager, so OPT79 reads that
+   file the way setup-node does and counts the cache **only when it is really
+   on**. setup-node reads `$GITHUB_WORKSPACE/package.json` (the repository root,
+   whatever `working-directory` says) and switches the automatic cache off when
+   `package-manager-cache` is anything but `true` (default `true`). The field
+   rule depends on the major version: **v5** reads the top-level
+   `packageManager` and auto-caches `npm@…`, `yarn@…` and `pnpm@…` (a bare `npm`
+   with no `@` does not match); **v6 and later** read
+   `devEngines.packageManager` (an object, or an array of objects, by `name`)
+   and then `packageManager`, and auto-cache **npm only** (`npm`, `npm@…`,
+   `^npm@…`). `cache-dependency-path` changes which lockfile is hashed, not
+   whether the cache is on. The outcomes:
+   - **on** — it is a real cache. Beside an `actions/cache` step the job is a
+     two-cache job and withholds; on its own it is the cache OPT79 prices, read
+     from setup-node's own log lines, and the fix names
+     `package-manager-cache: false` because there is no `cache:` input to
+     remove.
+   - **off** — it is not a cache, so a job running setup-node v5 next to its own
+     `actions/cache` step is measured like any other.
+   - **unknown** — `package.json` is missing, a 404, a failed fetch, invalid
+     JSON or not a JSON object; the job has no checkout before the setup step,
+     or checks out into a `path:` or another `repository:`, so the root file is
+     not the one OPT79 read; or the ref is a SHA or branch on which the v5 and
+     v6 rules disagree. These fail closed as
+     `setup_action_cache_default_depends_on_repository_files`, counted in the
+     per-gate tally.
+
+   The file is read **once per repository**, and only when a sampled job's cache
+   count depends on it: from the local checkout when `--root` has it, else one
+   `contents/package.json` call against the default branch — the same sources,
+   in the same order, as the workflow YAML (`data_sources.setup_node_package_json`
+   records which). Like the YAML, it is the audited commit's copy, not each
+   run's own. The cache is followed by an **install**
    step, and the **first step after the cache must be a recognised install**
    (`first_step_after_cache_is_not_a_recognised_install` withholds otherwise — a
    build or test step in between would be priced as part of the cache's cost).
@@ -455,13 +490,20 @@ family reads, so retuning it there moves this gate too.
    occurrence rather than guessing.
 
    Inside that group, a log showing **both** a miss and a hit line is
-   **excluded and counted**, never guessed, in either order. A miss followed by a
-   hit is what a `restore-keys` partial match prints, and a partial match is not
-   a clean hit — its restore size and time are not the exact-key restore this
-   comparison prices — so it is withheld rather than counted as one.
+   **excluded and counted** (`run_log_shows_both_a_hit_and_a_miss_line`), never
+   guessed, in either order. A `restore-keys` fallback looks different:
+   `actions/cache` prints only `Cache restored from key: <key>`, so it is read
+   as a **partial hit** (`run_log_shows_a_partial_restore_keys_hit`) when the
+   restored key differs from the primary `key:` the step echoed, or when the
+   post step saved a new cache (`Cache saved with key` / `Cache saved with the
+   key`), which an exact hit never does. A partial hit is not a clean hit — its
+   restore size and time are not the exact-key restore this comparison prices —
+   so it is withheld rather than counted as one.
 
    Only **successful** job runs are classified: a failed or cancelled run's
-   step timings are truncated and would poison either population.
+   step timings are truncated and its post save does not run, so it is withheld
+   as `occurrence_did_not_succeed`. An occurrence GitHub skipped never ran and
+   is counted as `occurrence_was_skipped`.
 
    An occurrence whose log was never fetched is **counted as unread**, not folded
    into the populations; an occurrence past the per-job log cap of 8 is tallied
@@ -483,7 +525,10 @@ family reads, so retuning it there moves this gate too.
    open on the term that matters most: on `actions/cache` the save runs on a
    MISS, so silently zeroing it removes the biggest miss-side term and
    manufactures the excess. A post step that started and never completed
-   withholds the occurrence; a post label that matched **no** occurrence
+   withholds the occurrence; a block step whose timestamps are missing or do
+   not parse did not measure 0s, it did not measure, and withholds the
+   occurrence as `step_timestamps_unparseable_in_this_occurrence`; a post label
+   that matched **no** occurrence
    withholds the job; and `actions/cache/restore`, which has no post phase at
    all, records that there is no save rather than inventing a step name. That
    is only true when no *separate* `actions/cache/save` step exists in the job;
@@ -514,11 +559,16 @@ walked first, and every occurrence it cuts is counted. The report's Data sources
 row states both what was planned and what was read. This probe runs during
 collection and does **not** need `--with-logs`.
 
-**Withheld candidates are disclosed.** A job that was measured but withheld by a
-gate does not vanish: the report carries a one-line note of the form "measured
-but withheld: N, top reason", so a repository with a withheld cache reads
-differently from one with no cache at all. The full per-gate tally stays in
-`opt79_withheld_by_gate`.
+**Withheld candidates are disclosed.** A candidate whose logs were probed and
+which a gate then withheld does not vanish: each one is recorded as
+`{workflow_file, job, gate}` in `opt79_withheld_candidates`, and the report's
+Data sources table carries a **`cache hit/miss verdicts`** row — "N candidate
+cache(s) probed but withheld; top reason: `<gate>`" (ties go to the
+alphabetically first gate) — which `verify_report.py` re-derives from that list.
+So a repository with a withheld cache reads differently from one with no cache
+at all. A cache measured healthy, or one hitting too rarely to judge (step 6), is
+a verdict, not a withhold, and is not listed. The full per-gate tally, including
+every shape gate that cost no log fetch, stays in `opt79_withheld_by_gate`.
 
 Every gate about a job's SHAPE — no cache, two caches, a separate save step, no
 recognised install right after the cache, a package-manager mismatch — is
@@ -537,7 +587,10 @@ runner_min  = waste_s × hit_share × effective_monthly / 60
 
 `effective_monthly` is the workflow's 30-day volume for the sampled event scope,
 scaled by how often this job actually ran in the sample, so a conditional job is
-not billed at the whole workflow's frequency. `sizing_basis = "measured"`.
+not billed at the whole workflow's frequency. `sizing_basis = "measured"`. A
+below-the-floor job on a workflow with no measured 30-day volume cannot be
+credited and is withheld as `no_monthly_volume`, after it is measured (the
+uncredited row below needs no volume and stamps it as null).
 
 The credited figure is a **lower bound** on what removing the cache would save:
 the miss path it is measured against still pays the restore step and the post
