@@ -7771,6 +7771,26 @@ def test_uncredited_pole_cache_survives_a_report_with_nothing_else_in_it():
     assert "merge wait" not in md, md
 
 
+def test_static_only_keeps_the_withheld_cache_disclosure():
+    """A repository with no measured poles and no other findings whose cache
+    was probed and then withheld: the static-only body treated that as nothing
+    to say, collapsed to the one-line no-critical-path note, and the Data
+    sources row that says "probed, could not tell" was never rendered."""
+    doc = {
+        "repo": "o/r",
+        "findings": [],
+        "pr_critical_path": {"poles": []},
+        "data_sources": {},
+        "opt79_withheld_candidates": [
+            {"workflow_file": ".github/workflows/nightly.yml", "job": "build",
+             "gate": "population_truncated_by_unread_logs"}],
+    }
+    static = bp._render_static_only(doc)
+    assert static, "the static-only body must not be empty with a withheld cache"
+    md = bp.render(doc, "o/r")
+    assert "probed but withheld" in md, md
+
+
 def _uncredited_row(**kw):
     row = {
         "kind": "opt79_uncredited_pole_cache",

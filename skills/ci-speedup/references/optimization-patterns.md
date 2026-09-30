@@ -400,19 +400,28 @@ family reads, so retuning it there moves this gate too.
 
 1. From the **workflow file** (never from the observed step list), the job must
    declare exactly **one** cache-restore step — `actions/cache`,
-   `actions/cache/restore`, or an `owner/setup-*` action with a `cache:` input
-   set to anything other than `false` / `no` / `off`; `cache: ${{ … }}` is an
+   `actions/cache/restore`, or an `owner/setup-*` action whose cache input
+   (`cache:`, or `enable-cache` / `bundler-cache` where that is the switch) is
+   set to anything other than empty / `false` / `no` / `off`; `cache: ${{ … }}` is an
    unevaluated expression whose value the static parse cannot know and withholds
    rather than reading as a yes — and **that cache step must be saved by its own
    post phase**. A separate `actions/cache/save` step withholds
    (`cache_is_saved_by_a_separate_step`): the save runs on the miss path but is
    not the restore's post phase, so the three-step block cannot measure it.
-   Caches that are **on by default** count toward "exactly one": `setup-go`
-   caches unless it says `cache: false`, and `astral-sh/setup-uv` caches through
-   `enable-cache`, so a job pairing either with an `actions/cache` step is a
-   multi-cache job and withholds.
+   Caches that are **on by default** count toward "exactly one": `setup-go` v4+
+   caches unless it says `cache: false`, and `astral-sh/setup-uv` v5+ defaults
+   `enable-cache` to `auto` (on GitHub-hosted runners, off on self-hosted ones;
+   OPT79 counts it as on everywhere, which can only withhold), so a job pairing
+   either with an `actions/cache` step is a multi-cache job and withholds. So do
+   actions that restore a cache of their own (`Swatinem/rust-cache`,
+   `gradle/actions/setup-gradle`, `gradle/gradle-build-action`, sccache and
+   ccache actions): beside a cache OPT79 prices they make two caches, and on
+   their own they withhold as `cache_action_is_not_one_this_pattern_measures`.
+   A ref that is not a version tag (a commit SHA, a branch) names no major
+   version, even when the SHA starts with digits.
 
-   `actions/setup-node` **v5+ with no `cache:` input** caches automatically when
+   `actions/setup-node` **v5+ with no `cache:` input** (or an empty one, which
+   setup-node reads the same way) caches automatically when
    the repository's `package.json` names the package manager, so OPT79 reads that
    file the way setup-node does and counts the cache **only when it is really
    on**. setup-node reads `$GITHUB_WORKSPACE/package.json` (the repository root,
@@ -440,18 +449,23 @@ family reads, so retuning it there moves this gate too.
      `setup_action_cache_default_depends_on_repository_files`, counted in the
      per-gate tally.
 
-   The file is read **once per repository**, and only when a sampled job's cache
-   count depends on it: from the local checkout when `--root` has it, else one
+   The file is read **once per repository**, and only when the cache count of a
+   job in a sampled workflow depends on it: from the local checkout when `--root` has it, else one
    `contents/package.json` call against the default branch — the same sources,
    in the same order, as the workflow YAML (`data_sources.setup_node_package_json`
    records which). Like the YAML, it is the audited commit's copy, not each
    run's own. The cache is followed by an **install**
-   step, and the **first step after the cache must be a recognised install**
-   (`first_step_after_cache_is_not_a_recognised_install` withholds otherwise — a
-   build or test step in between would be priced as part of the cache's cost).
-   That install must also belong to the **same package manager** the cache is
-   for (`install_package_manager_does_not_match_cache` withholds a pnpm store
-   cache followed by `npm ci`, for example). An install step is recognised by **what it runs**, not by what it was
+   step, and **no unrecognised `run:` step may sit between the cache and that
+   install** (`first_step_after_cache_is_not_a_recognised_install` withholds
+   otherwise — the unrecognised step, `cd web && npm ci` say, may be the real
+   install, and pricing a later one pairs the cache with the wrong step). The
+   cache must name a **known package store** — a `setup-*` action's ecosystem, or
+   an `actions/cache` path naming exactly one store
+   (`cache_path_names_no_known_package_store` withholds otherwise: a browser or
+   build-output cache pays off in a later step outside the measured block, so
+   its cost would read as pure waste) — and the install must belong to the
+   **same ecosystem** (`install_package_manager_does_not_match_cache` withholds a
+   `node_modules` cache followed by `pip install`, for example). An install step is recognised by **what it runs**, not by what it was
    called, so `name: Install dependencies` over `run: npm ci` is found like any
    other — and a step *named* `npm ci` that *runs* `npm run build` is not one. A
    multi-line `run:` block must be installs **all the way down**: `pip install
@@ -491,14 +505,18 @@ family reads, so retuning it there moves this gate too.
 
    Inside that group, a log showing **both** a miss and a hit line is
    **excluded and counted** (`run_log_shows_both_a_hit_and_a_miss_line`), never
-   guessed, in either order. A `restore-keys` fallback looks different:
-   `actions/cache` prints only `Cache restored from key: <key>`, so it is read
-   as a **partial hit** (`run_log_shows_a_partial_restore_keys_hit`) when the
-   restored key differs from the primary `key:` the step echoed, or when the
+   guessed, in either order. A `restore-keys` fallback prints no miss line: the
+   `@actions/cache` toolkit prints `Cache hit for restore-key: <key>` and the
+   action then `Cache restored from key: <key>`, so it is read as a **partial
+   hit** (`run_log_shows_a_partial_restore_keys_hit`) on that toolkit line, when
+   the restored key differs from the primary `key:` the step echoed, or when the
    post step saved a new cache (`Cache saved with key` / `Cache saved with the
    key`), which an exact hit never does. A partial hit is not a clean hit — its
    restore size and time are not the exact-key restore this comparison prices —
-   so it is withheld rather than counted as one.
+   so it is excluded from both paths rather than counted as a hit, and still
+   counts in the hit share's denominator. When excluded runs leave too few hits
+   or misses, the job withholds as `population_truncated_by_excluded_runs`, not
+   as a thin sample.
 
    Only **successful** job runs are classified: a failed or cancelled run's
    step timings are truncated and its post save does not run, so it is withheld
@@ -537,7 +555,8 @@ family reads, so retuning it there moves this gate too.
    The block's p50 over the hit runs must exceed its p50 over the
    miss runs by at least **max(5s, 20% of the miss path)** — a named floor, so a
    one-second "loss" never renders as a finding.
-6. The **hit share** across the classified runs must be at least **0.25**. A
+6. The **hit share** — exact hits over every run read and kept, the excluded
+   partial-restore and two-verdict runs included — must be at least **0.25**. A
    cache that almost never hits has a key-entropy problem, which OPT6 and OPT8
    own; route there rather than report the same cache twice.
 7. To be **credited**, the job's measured p50 must sit **strictly below the
@@ -581,7 +600,7 @@ line below.
 
 ```
 waste_s     = p50(cache block | HIT runs) − p50(cache block | MISS runs)
-hit_share   = hits / (hits + misses)                       [classified runs only]
+hit_share   = hits / (hits + misses + ambiguous)           [every run read and kept]
 runner_min  = waste_s × hit_share × effective_monthly / 60
 ```
 
@@ -694,9 +713,9 @@ one number as an answer. Every key below is hard-required by that re-derivation:
 | `runner_label` / `cache_ref` | the one runner class every credited run ran on, and the cache action the block was built around |
 | `restore_step` / `install_step` / `post_step` | the three steps, as named in the YAML, that both paths measure; `post_step` is null for `actions/cache/restore`, which has no post phase |
 | `per_run[]` | one row per credited run: its `status`, the **verbatim** `log_line` that verdict came from, the `log_line_group` it was read in (which must be the restore step), its `runner_label`, and `restore_s` / `install_s` / `post_s` / `block_s` |
-| `hits` / `misses` / `classified_runs` / `ambiguous_runs` / `occurrences_on_other_runner` | the populations, the multi-cache runs excluded from them, and the occurrences dropped for running on another runner label |
+| `hits` / `misses` / `classified_runs` / `ambiguous_runs` / `occurrences_on_other_runner` | the populations, the two-verdict and partial-restore runs excluded from them (still counted in the hit share), and the occurrences dropped for running on another runner label |
 | `hit_path_p50_s` / `miss_path_p50_s` / `waste_s` / `waste_floor_s` | the two medians, their difference, and the floor it had to clear |
-| `hit_share` | `hits / classified_runs` |
+| `hit_share` | `hits / (classified_runs + ambiguous_runs)` |
 | `job_runs` / `sampled_successful_run_count` / `monthly_volume` / `effective_monthly_volume` | the scaling; `classified_runs` can never exceed `job_runs`, which can never exceed the sampled run count |
 | `runner_min_saving` | restated inside the block and checked against the finding's own; **null** on an uncredited row, where a number would be a failure |
 

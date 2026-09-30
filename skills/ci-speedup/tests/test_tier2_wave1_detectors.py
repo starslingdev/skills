@@ -3867,7 +3867,9 @@ def test_opt79_excludes_a_run_whose_log_shows_both_a_hit_and_a_miss():
     out, w = _opt79_withheld(jpr=jpr, logs=logs)
     assert out == []
     assert w.get("run_log_shows_both_a_hit_and_a_miss_line") == 2, w
-    assert w.get("fewer_than_min_hit_runs_classified") == 1, w
+    # blamed on the excluded runs, not on a thin population
+    assert w.get("population_truncated_by_excluded_runs") == 1, w
+    assert w.get("fewer_than_min_hit_runs_classified") is None, w
 
 
 def test_opt79_withholds_a_run_whose_log_has_no_cache_line():
@@ -4424,7 +4426,7 @@ def test_opt79_stamps_no_post_step_for_a_restore_only_cache():
     nothing to fail open on. The block says so with null rather than inventing a
     label, and the verifier accepts null."""
     wf = _opt79_wf(steps=[
-        {"uses": "actions/cache/restore@v4", "with": {"path": "n", "key": "k"}},
+        {"uses": "actions/cache/restore@v4", "with": {"path": "node_modules", "key": "k"}},
         {"run": "npm ci"}, {"run": "npm test"}])
     jpr, logs = _opt79_sample(hit=(28.0, 3.0, 0.0), miss=(1.0, 7.0, 0.0),
                               group="Run actions/cache/restore@v4")
@@ -4448,9 +4450,9 @@ def test_opt79_withholds_a_restore_only_cache_saved_by_a_separate_step():
     label for it. Measuring without it shortens the miss path and can
     manufacture the excess this pattern reports, so the shape is withheld."""
     wf = _opt79_wf(steps=[
-        {"uses": "actions/cache/restore@v4", "with": {"path": "n", "key": "k"}},
+        {"uses": "actions/cache/restore@v4", "with": {"path": "node_modules", "key": "k"}},
         {"run": "npm ci"}, {"run": "npm test"},
-        {"uses": "actions/cache/save@v4", "with": {"path": "n", "key": "k"}}])
+        {"uses": "actions/cache/save@v4", "with": {"path": "node_modules", "key": "k"}}])
     jpr, logs = _opt79_sample(hit=(28.0, 3.0, 0.0), miss=(1.0, 7.0, 0.0),
                               group="Run actions/cache/restore@v4")
     for run_jobs in jpr:
@@ -4549,7 +4551,7 @@ def test_opt79_withholds_an_install_step_that_also_runs_something_else():
     `pip install -e .` / `pytest -q` read as "the install" and the whole step —
     test suite included — was charged to both sides of the comparison."""
     wf = _opt79_wf(steps=[
-        {"uses": "actions/cache@v4", "with": {"path": "n", "key": "k"}},
+        {"uses": "actions/cache@v4", "with": {"path": "node_modules", "key": "k"}},
         {"run": "pip install -e .\npytest -q"},
         {"run": "npm test"}])
     out, w = _opt79_withheld(wf=wf)
@@ -4557,7 +4559,7 @@ def test_opt79_withholds_an_install_step_that_also_runs_something_else():
     assert w.get("install_step_also_runs_non_install_commands") == 1, w
     # …a block whose every line IS an install is still the install step.
     wf_ok = _opt79_wf(steps=[
-        {"uses": "actions/cache@v4", "with": {"path": "n", "key": "k"}},
+        {"uses": "actions/cache@v4", "with": {"path": "node_modules", "key": "k"}},
         {"name": "Run npm ci", "run": "npm ci\nnpm install --no-save x"},
         {"run": "npm test"}])
     block, gate = cr._opt79_cache_block(_OPT79_JOB, wf_ok)
@@ -4569,12 +4571,12 @@ def test_opt79_reads_what_the_install_step_runs_not_what_it_is_called():
     `npm ci` that RUNS `npm run build` was priced as the install. The command
     decides what a step IS; the name only says where to find its duration."""
     wf = _opt79_wf(steps=[
-        {"uses": "actions/cache@v4", "with": {"path": "n", "key": "k"}},
+        {"uses": "actions/cache@v4", "with": {"path": "node_modules", "key": "k"}},
         {"name": "npm ci", "run": "npm run build"}])
     block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
     assert block is None and gate == "no_install_step_after_the_cache_step"
     wf = _opt79_wf(steps=[
-        {"uses": "actions/cache@v4", "with": {"path": "n", "key": "k"}},
+        {"uses": "actions/cache@v4", "with": {"path": "node_modules", "key": "k"}},
         {"name": "Install dependencies", "run": "npm test"}])
     block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
     assert block is None and gate == "no_install_step_after_the_cache_step"
@@ -4594,6 +4596,35 @@ def test_opt79_blames_unread_logs_rather_than_a_thin_population():
     assert w.get("occurrence_has_no_captured_log") == 6, w
     assert w.get("population_truncated_by_unread_logs") == 1, w
     assert w.get("fewer_than_min_hit_runs_classified") is None, w
+
+
+def test_opt79_blames_excluded_runs_rather_than_a_thin_population():
+    """Runs the audit READ and then excluded (restore group not found, no cache
+    line, a hit and a miss, a partial restore-keys hit, another runner) are not
+    evidence that a cache rarely hits. Disclosed as `fewer_than_min_*` the
+    report said "we looked and it rarely hits" about runs it could not use."""
+    jpr, logs = _opt79_sample(hits=4, misses=4)
+    # Every HIT run's restore step group is missing from its log: all four
+    # land in `unscoped`, and the classified hit population is zero.
+    for run_jobs in jpr[:4]:
+        logs[run_jobs[0]["id"]] = _opt79_log(_OPT79_HIT_LINE, group="Run something/else@v1")
+    withheld_candidates = []
+    w = {}
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), _opt79_wf(), 100, 0,
+        logs_by_job_id=logs, withheld=w, withheld_candidates=withheld_candidates)
+    assert out == []
+    assert w.get("restore_step_log_group_not_found_in_the_run_log") == 4, w
+    assert w.get("population_truncated_by_excluded_runs") == 1, w
+    assert w.get("fewer_than_min_hit_runs_classified") is None, w
+    assert [c["gate"] for c in withheld_candidates] == [
+        "population_truncated_by_excluded_runs"]
+    # …while a population that is genuinely thin, with nothing excluded, still
+    # says so.
+    jpr, logs = _opt79_sample(hits=2)
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("fewer_than_min_hit_runs_classified") == 1, w
+    assert w.get("population_truncated_by_excluded_runs") is None, w
 
 
 def test_opt79_counts_an_occurrence_whose_duration_will_not_parse():
@@ -4814,14 +4845,51 @@ def test_opt79_withholds_an_install_from_another_package_manager():
         {"uses": "actions/setup-python@v5", "with": {"cache": "pip"}},
         {"run": "npm ci"}))
     assert block is None and gate == "install_package_manager_does_not_match_cache", gate
-    # the matching pair, and a cache whose ecosystem cannot be told, still pass
+    # the matching pair still passes
     block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
         _OPT79_NODE_CACHE, {"run": "npm ci"}))
     assert gate == "" and block, gate
+
+
+def test_opt79_withholds_a_cache_whose_package_store_cannot_be_told():
+    """A cache whose path names no package store is not shown to feed the
+    install after it. `~/.cache/ms-playwright` before `npm ci` pays off in a
+    later browser-install step, outside the measured block, so its restore and
+    save read as pure waste — a false "costs more than it saves". Unknown is
+    withheld, never paired by default."""
+    for path in ("build-output", "~/.cache/ms-playwright",
+                 "node_modules\n~/.cache/pip"):          # two stores: unknown too
+        block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+            {"uses": "actions/cache@v4", "with": {"path": path, "key": "k"}},
+            {"run": "npm ci"}))
+        assert block is None and gate == \
+            "cache_path_names_no_known_package_store", (path, gate)
+    # a setup action with no known ecosystem is unknown as well
     block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
-        {"uses": "actions/cache@v4", "with": {"path": "build-output", "key": "k"}},
-        {"run": "pip install -r requirements.txt"}))
-    assert gate == "" and block, gate
+        {"uses": "actions/setup-dotnet@v4", "with": {"cache": True}},
+        {"run": "npm ci"}))
+    assert block is None and gate == "cache_path_names_no_known_package_store", gate
+
+
+def test_opt79_counts_other_default_caching_actions_as_a_second_cache():
+    """Actions that cache without an `actions/cache` or `owner/setup-*` shape —
+    `Swatinem/rust-cache`, `gradle/actions/setup-gradle` (two slashes) — were
+    invisible, so a job with one of them AND `actions/cache` passed as a
+    one-cache job and one verdict priced two caches."""
+    for uses in ("Swatinem/rust-cache@v2", "gradle/actions/setup-gradle@v4",
+                 "gradle/gradle-build-action@v3"):
+        block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+            {"uses": uses},
+            {"uses": "actions/cache@v4",
+             "with": {"path": "~/.cargo/registry", "key": "k"}},
+            {"run": "cargo fetch"}))
+        assert block is None and gate == \
+            "job_declares_more_than_one_cache_restore_step", (uses, gate)
+        # alone, it is a cache this pattern does not price: counted as such
+        block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+            {"uses": uses}, {"run": "cargo fetch"}))
+        assert block is None and gate == \
+            "cache_action_is_not_one_this_pattern_measures", (uses, gate)
 
 
 def test_opt79_counts_caches_that_setup_actions_turn_on_by_default():
@@ -5093,6 +5161,181 @@ def test_opt79_withholds_a_partial_restore_keys_hit():
         _opt79_log("  key: node-modules-abc123", _OPT79_HIT_LINE),
         {"restore": "Run actions/cache@v4", "cache_ref": "actions/cache@v4"})
     assert status == "hit", status
+
+
+def test_opt79_hit_share_counts_the_excluded_partial_restores():
+    """The credited minutes are `waste x hit_share x volume`, and the waste is
+    per EXACT hit. A partial restore-keys hit and a two-verdict run are
+    excluded from both paths but are still runs: leaving them out of the
+    share's denominator priced the exact-hit rate as if they never happened.
+    4 exact hits, 4 misses and 4 partial restores is a 1-in-3 exact-hit rate,
+    not 1-in-2."""
+    jpr, logs = _opt79_sample(hits=8, misses=4)
+    partial = (_opt79_log(_OPT79_HIT_LINE)
+               + "2026-06-01T00:00:09.0Z ##[group]Post Run actions/cache@v4\n"
+               + "2026-06-01T00:00:09.5Z Cache saved with key: node-modules-abc123\n")
+    for jid in sorted(logs)[:4]:
+        logs[jid] = partial
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("run_log_shows_a_partial_restore_keys_hit") == 4, w
+    cn = out[0]["cache_net_negative"]
+    assert cn["hits"] == 4 and cn["misses"] == 4 and cn["ambiguous_runs"] == 4
+    assert cn["hit_share"] == round(4 / 12, 4), cn["hit_share"]
+    # 19s x (4/12) x 100 / 60 = 10.6, not the 15.8 a 1-in-2 share gives
+    assert out[0]["runner_min_saving"] == 10.6, out[0]["runner_min_saving"]
+    assert "of the 12 run(s) read" in out[0]["evidence"], out[0]["evidence"]
+    vr = _load_verify_report_for_opt79()
+    data = {"per_workflow_timing": {"ci.yml": _opt79_crit()}, "findings": [out[0]]}
+    assert vr._opt79_net_negative_cache_rederived(out[0], data)[1] == []
+    # …and the verifier re-derives the share WITH them: a stamp that quietly
+    # drops the ambiguous runs from the denominator is caught.
+    import copy
+    bad = copy.deepcopy(out[0])
+    bad["cache_net_negative"]["hit_share"] = 0.5
+    assert any("hit_share" in p for p in
+               vr._opt79_net_negative_cache_rederived(bad, data)[1])
+
+
+@pytest.mark.parametrize("ref", [
+    "0aaccfd4f3b7d1a1c1e3c5d5c5a5b5c5d5e5f5a5",   # a SHA opening with a digit
+    "49933ea5288caeca8642d1e84afbd3f7d6820020",
+    "11bd71901bbe5b1630ceea73d27597364c9af683",
+])
+def test_opt79_reads_a_digit_led_sha_as_an_unknown_major(ref):
+    """`v?(\\d+)` read a SHA that happens to start with digits as a version:
+    `@0aaccfd…` became major 0 (setup-go "never caches"), `@49933ea…` major
+    49933 (setup-node's v6+ rule, decided outright). A SHA pins a tag nobody
+    named, so it must take the path documented for it: default-on actions
+    count as caching, setup-node decides only where v5 and v6+ agree."""
+    assert cr._opt79_setup_cache_state(f"actions/setup-go@{ref}", {}) == "on"
+    assert cr._opt79_setup_cache_state(
+        f"actions/setup-node@{ref}", {},
+        {"packageManager": "pnpm@9.1.0"}) == "maybe"
+    # a real tag still reads as its major
+    assert cr._opt79_setup_cache_state("actions/setup-go@v3", {}) == "off"
+    assert cr._opt79_setup_cache_state("actions/setup-go@v5.0.1", {}) == "on"
+
+
+def test_opt79_setup_node_empty_cache_input_falls_through_to_the_automatic_cache():
+    """setup-node v5 and v6: `if (cache) {…} else if (packagemanagercache)
+    {auto}`. An EMPTY `cache:` is falsy in that JS, so the automatic cache
+    still turns on. Reading it as "off" priced a job with setup-node's auto
+    cache AND its own `actions/cache` as a one-cache job."""
+    npm = {"packageManager": "npm@10.8.2"}
+    for ref in ("v5", "v6"):
+        assert cr._opt79_setup_cache_state(
+            f"actions/setup-node@{ref}", {"cache": ""}, npm) == "on", ref
+        block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+            _OPT79_CHECKOUT,
+            {"uses": f"actions/setup-node@{ref}", "with": {"cache": ""}},
+            _OPT79_NODE_CACHE, {"run": "npm ci"}), package_json=npm)
+        assert block is None and gate == \
+            "job_declares_more_than_one_cache_restore_step", (ref, gate)
+    # v4 has no automatic cache: empty is still no cache
+    assert cr._opt79_setup_cache_state(
+        "actions/setup-node@v4", {"cache": ""}, npm) == "off"
+
+
+def test_opt79_uncredited_lines_are_matched_per_workflow_not_per_job_name():
+    """Two workflows can each carry a net-negative cache on a job called
+    `build`. Matching rendered lines on the job name alone compared the second
+    row with the first row's line and failed an honest report."""
+    vr = _load_verify_report_for_opt79()
+    base = {"hits": 4, "misses": 4, "on_critical_path": False,
+            "workflow_gates_pull_requests": True, "floor_p50_s": 600.0}
+    rows = [dict(base, job="build", workflow_file="ci.yml", waste_s=19.0),
+            dict(base, job="build", workflow_file="release.yml", waste_s=40.0)]
+    report = "\n".join(bp._opt79_uncredited_block({cr._OPT79_UNCREDITED_DOC_KEY: rows}))
+    assert vr._opt79_uncredited_rows_rendered(report, rows) == []
+    # …and a line that states another workflow's numbers is still caught
+    lie = report.replace("by 40s", "by 41s")
+    assert vr._opt79_uncredited_rows_rendered(lie, rows), lie
+    # …and so is a line whose REASON is false: a job that is not the long pole
+    # told its saving is on the merge wait, or a PR workflow told no PR runs it.
+    merge_lie = report.replace(
+        "is at or above this workflow's second-slowest job (600s), so this audit "
+        "cannot prove that shrinking it leaves the merge gate unchanged",
+        "is this workflow's slowest job, so the saving is on the merge wait", 1)
+    assert merge_lie != report
+    assert any("merge wait" in p for p in
+               vr._opt79_uncredited_rows_rendered(merge_lie, rows)), merge_lie
+    no_pr_lie = report.replace(
+        "is at or above this workflow's second-slowest job (600s)",
+        "runs in a workflow that does not run on pull requests (600s)", 1)
+    assert any("no pull request" in p for p in
+               vr._opt79_uncredited_rows_rendered(no_pr_lie, rows)), no_pr_lie
+
+
+def test_opt79_withheld_doc_key_and_verdict_gates_are_one_contract():
+    """The withheld-candidates key is written by the collector and read by the
+    renderer and the verifier; renaming it on one side stopped the row
+    rendering and the verifier then saw nothing to check."""
+    vr = _load_verify_report_for_opt79()
+    assert cr._OPT79_WITHHELD_DOC_KEY == bp._OPT79_WITHHELD_DOC_KEY \
+        == vr._VR_OPT79_WITHHELD_DOC_KEY
+    # the two verdict exits must be exactly the gates the detector drops with,
+    # or a healthy cache is disclosed as "could not tell"
+    wc: list = []
+    jpr, logs = _opt79_sample(hit=(1.0, 7.0, 4.0))
+    cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), _opt79_wf(), 100, 0, logs_by_job_id=logs,
+        withheld={}, withheld_candidates=wc)
+    assert wc == []
+    w: dict = {}
+    jpr, logs = _opt79_sample(hits=3, misses=10)
+    cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), _opt79_wf(), 100, 0, logs_by_job_id=logs,
+        withheld=w, withheld_candidates=wc)
+    assert w.get(cr._OPT79_GATE_HIT_SHARE_BELOW_TAIL) == 1, w
+    assert wc == [], wc
+    assert cr._OPT79_VERDICT_GATES == {cr._OPT79_GATE_NOT_SLOWER,
+                                       cr._OPT79_GATE_HIT_SHARE_BELOW_TAIL}
+
+
+def test_opt79_reads_a_partial_restore_from_the_real_toolkit_log_shape():
+    """`@actions/cache` (the toolkit every cache action is built on) prints its
+    own hit line BEFORE the action's `Cache restored from key:` — `Cache hit
+    for restore-key: <key>` on a fallback (toolkit `cache.ts`:
+    `if (isRestoreKeyMatch) core.info(`Cache hit for restore-key: …`)`), then
+    `Cache restored successfully`. The classifier kept the FIRST hit line and
+    read the restored key from it alone, so on a real log the key check never
+    fired and a fallback with no save line (`actions/cache/restore`, a failed
+    save) counted as a clean hit."""
+    block = {"restore": "Run actions/cache@v4", "cache_ref": "actions/cache@v4"}
+    fallback = _opt79_log(
+        "with:", "  path: node_modules", "  key: node-modules-abc123",
+        "Cache hit for restore-key: node-modules-000fff",
+        "Cache restored successfully",
+        "Cache restored from key: node-modules-000fff")
+    assert cr._opt79_classify_log(fallback, block)[0] == "partial_hit"
+    # the toolkit line alone decides it, with no key echo and no save line
+    bare = _opt79_log("Cache hit for restore-key: node-modules-000fff",
+                      "Cache restored successfully")
+    assert cr._opt79_classify_log(bare, block)[0] == "partial_hit"
+    # …and the exact hit in the same shape is still a hit
+    exact = _opt79_log(
+        "with:", "  path: node_modules", "  key: node-modules-abc123",
+        "Cache hit for: node-modules-abc123",
+        "Cache restored successfully",
+        "Cache restored from key: node-modules-abc123")
+    assert cr._opt79_classify_log(exact, block)[0] == "hit"
+    # a key longer than the 160-character display cut is compared whole
+    long_key = "node-modules-" + "a" * 170
+    exact_long = _opt79_log(f"  key: {long_key}",
+                            f"Cache restored from key: {long_key}")
+    assert cr._opt79_classify_log(exact_long, block)[0] == "hit"
+
+
+def test_opt79_classifies_a_miss_that_saved_as_a_miss():
+    """A real miss log always carries the post step's save line. The save test
+    belongs to the HIT branch only; moved ahead of the verdict it would turn
+    every real miss into a partial hit, and no fixture carried a save line."""
+    log = (_opt79_log(_OPT79_MISS_LINE)
+           + "2026-06-01T00:00:09.0Z ##[group]Post Run actions/cache@v4\n"
+           + "2026-06-01T00:00:09.5Z Cache saved with key: node-modules-abc123\n")
+    status, _line, _grp = cr._opt79_classify_log(
+        log, {"restore": "Run actions/cache@v4", "cache_ref": "actions/cache@v4"})
+    assert status == "miss", status
 
 
 def test_opt79_counts_occurrences_beyond_the_per_job_cap_as_capped_not_unread():

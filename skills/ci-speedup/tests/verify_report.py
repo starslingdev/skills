@@ -5512,7 +5512,15 @@ def _opt79_block_rederived(cn: dict, *, credited: bool,
         problems.append(
             f"hit path is only {waste}s slower than the miss path, under the "
             f"{waste_floor}s floor - the cache is not shown to be net-negative")
-    hit_share = hits / float(classified) if classified else 0.0
+    # The ambiguous runs (partial restores, two-verdict runs) were read and
+    # excluded from both paths, but they are still runs that did not take the
+    # measured hit path: the share is of every run read, not of the two paths.
+    amb = cn.get("ambiguous_runs")
+    if not isinstance(amb, int) or isinstance(amb, bool) or amb < 0:
+        problems.append(f"ambiguous_runs={amb!r} is not a non-negative count")
+        amb = 0
+    read = classified + amb
+    hit_share = hits / float(read) if read else 0.0
     if not _close(cn.get("hit_share"), round(hit_share, 4), 0.001):
         problems.append(f"hit_share {cn.get('hit_share')!r} != {round(hit_share, 4)}")
     if hit_share < _VR_OPT79_TAIL_MIN_FRAC:
@@ -5587,12 +5595,19 @@ _VR_OPT79_EVIDENCE_RE = re.compile(
     r"measured a p50 of (\d+)s across (\d+) sampled run\(s\) whose log reported a "
     r"cache HIT, against (\d+)s across (\d+) run\(s\) whose log reported a MISS: "
     r"the hit path is (\d+)s SLOWER.*?The cache hit on (\d+)% of the (\d+) "
-    r"classified run\(s\); over (\d+) run\(s\)/30d of this job that is ~(\d+) "
+    r"run\(s\) read; over (\d+) run\(s\)/30d of this job that is ~(\d+) "
     r"runner-min/mo", re.S)
 _VR_OPT79_SIGNAL_RE = re.compile(
     r"p50 cache block (\d+)s on (\d+) log-confirmed hit run\(s\) vs (\d+)s on "
     r"(\d+) log-confirmed miss run\(s\) on .*?\((\d+)s excess per hit run, hit "
     r"share ([\d.]+), (\d+) run\(s\)/30d\)")
+
+
+def _read_runs(cn: dict) -> str:
+    """The runs the evidence sentence says were read: both paths plus the
+    ambiguous runs excluded from them (the hit share's denominator)."""
+    c, a = _num(cn.get("classified_runs")), _num(cn.get("ambiguous_runs"))
+    return "?" if c is None or a is None else f"{c + a:.0f}"
 
 
 def _opt79_prose_rederived(f: dict, cn: dict) -> list[str]:
@@ -5619,7 +5634,7 @@ def _opt79_prose_rederived(f: dict, cn: dict) -> list[str]:
         want = (_w(cn.get("hit_path_p50_s")), str(hits), _w(cn.get("miss_path_p50_s")),
                 str(misses), _w(cn.get("waste_s")),
                 "?" if share is None else f"{share * 100:.0f}",
-                str(cn.get("classified_runs")), _w(eff), _w(rm))
+                _read_runs(cn), _w(eff), _w(rm))
         if m.groups() != want:
             out.append(f"evidence states {m.groups()} but the stamped block "
                        f"gives {want}")
@@ -6216,8 +6231,8 @@ def check_opt79_uncredited_rows_rederived(report: str,
 _VR_OPT79_UNCREDITED_HEADER_RE = re.compile(
     r"(\d+) cache\(s\) measured net-negative on a job this audit cannot price")
 _VR_OPT79_UNCREDITED_LINE_RE = re.compile(
-    r"^> - a cache on (.+?)(?: in \S+\.ya?ml)? measured net-negative by (\d+)s per "
-    r"cache hit \((\d+) hit / (\d+) miss run\(s\) sampled\)", re.MULTILINE)
+    r"^> - a cache on (.+?)(?: in (\S+\.ya?ml))? measured net-negative by (\d+)s per "
+    r"cache hit \((\d+) hit / (\d+) miss run\(s\) sampled\);(.*)$", re.MULTILINE)
 
 
 def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
@@ -6237,10 +6252,13 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
     if int(header.group(1)) != len(rows):
         out.append(f"the report states {header.group(1)} cache(s) measured "
                    f"net-negative but the run recorded {len(rows)}")
-    lines: dict[str, tuple[int, int, int]] = {}
+    # Keyed by (job, workflow file): two workflows can each carry a
+    # net-negative cache on a job of the same name.
+    lines: dict[tuple[str, str], tuple[tuple[int, int, int], str]] = {}
     for m in _VR_OPT79_UNCREDITED_LINE_RE.finditer(plain):
-        lines.setdefault(m.group(1), (int(m.group(2)), int(m.group(3)),
-                                      int(m.group(4))))
+        lines.setdefault((m.group(1), m.group(2) or ""),
+                         ((int(m.group(3)), int(m.group(4)), int(m.group(5))),
+                          m.group(6)))
     for i, row in enumerate(rows):
         cn = _as_dict(row)
         job = str(cn.get("job") or "").strip()
@@ -6248,16 +6266,33 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
         if not job:
             out.append(f"{tag}: has no job name, so the report cannot list it")
             continue
-        got = lines.get(job)
-        if got is None:
-            out.append(f"{tag}: `{job}` is not listed in the report")
+        wf = str(cn.get("workflow_file") or "").strip()
+        found = lines.get((job, wf))
+        if found is None:
+            out.append(f"{tag}: `{job}`{' in ' + wf if wf else ''} is not listed "
+                       "in the report")
             continue
+        got, why = found
         waste = _num(cn.get("waste_s"))
         want = (round(waste) if waste is not None else None,
                 cn.get("hits"), cn.get("misses"))
         if got != want:
             out.append(f"{tag}: `{job}` renders (excess, hits, misses) {got} but "
                        f"the row carries {want}")
+        # WHY it is uncredited is a claim too: only the long pole of a
+        # workflow that gates a PR may be told its saving is on the merge wait,
+        # and only a workflow no PR runs may be told no PR waits on it.
+        says_merge_wait = "on the merge wait" in why
+        says_no_pr = "does not run on pull requests" in why
+        if says_merge_wait != bool(cn.get("on_critical_path")):
+            out.append(f"{tag}: `{job}` line {'claims' if says_merge_wait else 'omits'}"
+                       f" the merge wait but on_critical_path is "
+                       f"{cn.get('on_critical_path')!r}")
+        no_pr = (not cn.get("on_critical_path")
+                 and cn.get("workflow_gates_pull_requests") is False)
+        if says_no_pr != no_pr:
+            out.append(f"{tag}: `{job}` line {'says' if says_no_pr else 'does not say'}"
+                       " no pull request runs it, against the row's stamps")
     return out
 
 

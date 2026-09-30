@@ -1127,10 +1127,12 @@ without `--with-logs`; the cache-evidence and push-probe logs are already read
 under `--with-logs`, so what is new is that this probe needs no flag.
 For a job whose workflow file declares exactly one cache-restore step
 (`actions/cache`, `actions/cache/restore`, or an `owner/setup-*` action with
-`cache:` set; caches on by default — `setup-go` unless `cache: false`,
-`setup-uv` via `enable-cache` — count toward the "exactly one") that is saved by
-its own post phase, and whose FIRST following step is a recognised install for
-the same package manager, it classifies the sampled occurrences
+its cache input set; caches on by default — `setup-go` v4+ unless `cache:
+false`, `setup-uv` v5+ via `enable-cache`, and self-caching actions such as
+`Swatinem/rust-cache` or `setup-gradle` (`_OPT79_OTHER_CACHE_USES_RE`) — count
+toward the "exactly one") that is saved by its own post phase, names a known
+package store, and is followed by a recognised install of the same ecosystem
+with no unrecognised `run:` step in between, it classifies the sampled occurrences
 HIT or MISS from the verbatim cache line — the `_CACHE_HIT_RE` / `_CACHE_MISS_RE`
 the rest of the cache family reads, plus `_OPT79_EXTRA_MISS_RE` /
 `_OPT79_EXTRA_HIT_RE` for the wordings those two cannot match: the `setup-*`
@@ -1138,11 +1140,11 @@ family's own miss line (`<package manager> cache is not found`) and
 `astral-sh/setup-uv`'s pair. Both extras are kept OPT79-local so the eight other
 cache patterns reading the shared matcher are unaffected.
 
-`actions/setup-node` v5+ with no `cache:` input caches AUTOMATICALLY when the
+`actions/setup-node` v5+ with no (or an empty) `cache:` input caches AUTOMATICALLY when the
 repo-root `package.json` names the package manager, so whether such a job has
 one cache or two is a fact about that file, not the YAML.
 `_opt79_resolve_package_json` reads it ONCE per repo, and only when
-`_opt79_package_json_needed` finds a sampled job whose cache count depends on it,
+`_opt79_package_json_needed` finds a job in a sampled workflow whose cache count depends on it,
 from the verified `--root` checkout first and otherwise with one
 `contents/package.json` call — the same sources, in the same order, as
 `_fetch_workflow_docs` — and the parsed object is passed to BOTH the plan and the
@@ -1150,8 +1152,9 @@ detector, so they share one answer. `_opt79_setup_node_auto_cache` mirrors
 setup-node's `getNameFromPackageManagerField` per major: v5 reads the top-level
 `packageManager` for npm / yarn / pnpm (`^(?:\^)?(npm|yarn|pnpm)@`); v6+ read
 `devEngines.packageManager` then `packageManager` for npm only
-(`^(\^)?npm(@.*)?$`); a SHA or branch ref is decided only when both rules
-agree. `package-manager-cache` is on only when empty or `true`, as in setup-node.
+(`^(\^)?npm(@.*)?$`); a SHA or branch ref (`_opt79_ref_major` accepts only a
+version tag, so a SHA that starts with digits is not a major) is decided only
+when both rules agree. `package-manager-cache` is on only when empty or `true`, as in setup-node.
 On → a real cache (priced like any other, stamped `setup_node_auto_cache` so the
 recipe names `package-manager-cache: false`); off → not a cache; unknown (file
 missing / 404 / fetch failed / invalid JSON / not an object; no checkout before
@@ -1173,11 +1176,15 @@ is not the restore step. A log with no such group withholds the occurrence.
 
 Inside that group, a log showing both a miss and a hit line is excluded, never
 guessed, in either order (`run_log_shows_both_a_hit_and_a_miss_line`). A
-`restore-keys` fallback prints only `Cache restored from key: <key>`, so
-`_opt79_classify_log` returns the `partial_hit` verdict when the restored key
-differs from the echoed primary `key:` or when the post step saved a new cache;
-it is not a clean hit and is withheld
-(`run_log_shows_a_partial_restore_keys_hit`). Only successful job runs are
+`restore-keys` fallback prints no miss line — the `@actions/cache` toolkit prints
+`Cache hit for restore-key: <key>` before the action's `Cache restored from key:`
+— so `_opt79_classify_log` returns the `partial_hit` verdict on that toolkit
+line, when the restored key (read from whichever line carries it) differs from
+the echoed primary `key:`, or when the post step saved a new cache; it is not a
+clean hit and is excluded (`run_log_shows_a_partial_restore_keys_hit`). Partial
+and two-verdict runs stay in the hit share's denominator
+(`hits / (hits + misses + ambiguous)`), so the minutes are priced on the share
+of runs that took the exact-hit path. Only successful job runs are
 classified (`occurrence_did_not_succeed` otherwise: a failed or cancelled run
 also skips the post save); a skipped occurrence is `occurrence_was_skipped`, and
 a block step whose timestamps are absent or unparseable withholds its occurrence
@@ -1186,7 +1193,10 @@ never fetched is counted as unread rather than folded into a population;
 an occurrence past the per-job 8-log cap is tallied
 `beyond_the_per_job_log_probe_cap`, not as unread. When
 unread occurrences leave either population short the withhold says
-`population_truncated_by_unread_logs` rather than blaming a thin sample.
+`population_truncated_by_unread_logs` rather than blaming a thin sample; runs
+that were read and then set aside (no restore group, no cache line, two
+verdicts, a partial restore, another runner, a block that did not measure) do
+the same as `population_truncated_by_excluded_runs`.
 
 The install step is recognised from what it RUNS, never from its display name —
 so the near-universal `name: Install dependencies` spelling is found, and a step
@@ -1195,15 +1205,15 @@ block whose every line is not an install (`pip install -e .` then `pytest -q`)
 withholds rather than charging the test suite to both sides. The display name is
 still what the step's duration is looked up by.
 
-Four shape gates answer from the workflow YAML alone, so those jobs cost no log
-fetch: a SEPARATE `actions/cache/save` step withholds
+Among the shape gates that answer from the workflow YAML alone (so those jobs
+cost no log fetch): a SEPARATE `actions/cache/save` step withholds
 (`cache_is_saved_by_a_separate_step` — its save is not the restore's post phase,
-so the block cannot measure it); a job whose FIRST step after the cache is not a
-recognised install withholds
-(`first_step_after_cache_is_not_a_recognised_install`); an install whose package
-manager does not match the cache withholds
-(`install_package_manager_does_not_match_cache`); and more than one cache,
-counting the on-by-default ones, withholds.
+so the block cannot measure it); an unrecognised `run:` step between the cache
+and the install withholds (`first_step_after_cache_is_not_a_recognised_install`
+— it may be the real install); a cache naming no known package store withholds
+(`cache_path_names_no_known_package_store`); an install whose ecosystem does not
+match the cache withholds (`install_package_manager_does_not_match_cache`); and
+more than one cache, counting the on-by-default and self-caching ones, withholds.
 
 Three things keep it honest. The step set comes from the YAML and a step the run
 RENDERED but did not time counts as 0s, so GitHub's one-second granularity cannot
@@ -1264,7 +1274,9 @@ at-or-above-the-floor-but-below-the-pole case is part of that follow-up and is
 the easier half, but it still needs a neutrality argument for the merge gate
 before it can be credited; this version proves none.
 
-Its gh cost is the one new one in this wave: a capped log probe, run during
+Its gh cost is a capped log probe plus at most one `contents/package.json` read
+per repo (only when a setup-node v5+ automatic cache decides a job's cache count
+and the checkout cannot serve the file). The log probe is run during
 collection WITHOUT `--with-logs`,
 (`_OPT79_LOG_PROBE_MAX = 8` occurrences per candidate job,
 `_OPT79_MAX_CANDIDATE_JOBS = 2` jobs per workflow, candidates ranked by job p50 —

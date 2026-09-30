@@ -47,7 +47,7 @@ unversioned and updates by reinstall from `main`.
   it, on a workflow that can gate a pull request at all. It adds nothing to any
   total, and the report's own self-check re-derives it from the same per-run
   measurements it re-derives the credited findings from. Reading the logs is the
-  one new cost, and it is capped at eight runs of one job, two jobs per workflow
+  main new cost, and it is capped at eight runs of one job, two jobs per workflow
   and twenty-four fetches across the whole repository, spent on the
   longest-running cached jobs in the repository first; the report states both how
   many log reads were planned and how many were made. The install step is
@@ -69,10 +69,33 @@ unversioned and updates by reinstall from `main`.
   ci-score's dependency-caching check, which reads configuration only; reconciling
   the two is an open decision, not a behaviour either skill implements today.
   (#106)
-  **2026-09-29:** a job that saves its cache in a separate `actions/cache/save`
-  step is now withheld, since that save cannot be timed on the miss side, and a
-  cache hit or miss line printed after the cache step's input block closes (the
-  real `actions/cache` log layout) is now read as that step's verdict. (#106)
+  **What it holds back on, and how it counts caches** (2026-09-30): a job is held
+  back, and counted under its reason, when its input is ambiguous. That covers a
+  cache saved in a separate `actions/cache/save` step; a `${{ … }}` cache input;
+  an unrecognised command (`cd web && npm ci`) between the cache and the install;
+  an install of a different package manager than the cache; a cache whose path
+  names no known package store (a browser or build-output cache pays off in a
+  later step, outside what is measured); a second cache anywhere in the job,
+  including the ones `setup-go` (v4+) and `setup-uv` (v5+) turn on by default and
+  caching actions such as `Swatinem/rust-cache` and `setup-gradle`; a step whose
+  times cannot be read; and a run that did not succeed. `setup-node` v5+ turns on
+  a package-manager cache by itself when `package.json` names the package
+  manager, so the audit reads `package.json` the way each `setup-node` version
+  does (v5: `packageManager` naming npm, yarn or pnpm; v6+: `devEngines` or
+  `packageManager` naming npm; off when `package-manager-cache` is not `true`; an
+  empty `cache:` input behaves like no input) and counts that cache only when it
+  is on. `package.json` is read once per repository, and only when a job needs it
+  — the one gh call the pattern adds besides the logs. An action pinned to a
+  commit SHA is treated as an unknown version, never as a version number read
+  from the SHA's leading digits. A restore from a fallback key (`Cache hit for
+  restore-key:`, a restored key that differs from the step's own, or a new cache
+  saved after the restore) is neither path of the comparison: it is excluded from
+  both, but still counts in the hit share, so the minutes are priced on the share
+  of runs that took the exact-hit path. When runs the audit read had to be set
+  aside and too few were left to compare, the reason given is the set-aside runs,
+  not a thin sample. When the audit read a cache's logs and still could not
+  decide, the data-sources table says how many caches that happened to and the
+  most common reason, even on a report with nothing else to show. (#106)
 
 - **2026-09-25** — **A checkout that occasionally hangs is now reported as a
   stalled fetch, with the two log lines that prove it — and with the retry that
@@ -649,47 +672,6 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
-
-- **2026-09-29** — **The cache-costs-more-than-it-saves pattern (OPT79) now holds
-  back wherever its input is ambiguous, and says so when it does.** A cache
-  restored from a fallback key (an older cache restored, a new one saved) is no
-  longer counted as a clean hit, and a run whose cache step prints both a hit and
-  a miss is set aside in either order. A cache that `setup-go` (v4 and later) or
-  `setup-uv` (v5 and later) turns on by default now counts, so a job with one of
-  those plus its own cache step is no longer read as having one cache, and a plain
-  `setup-go` job can be measured. The cache is no longer paired with the wrong
-  install: when an unrecognised command (`cd web && npm ci`) sits between the
-  cache and the install, or the install belongs to a different package manager
-  than the cache, the job is held back. Only runs that succeeded are compared,
-  a step whose times cannot be read holds its run back instead of counting as zero
-  seconds, and a skipped run is labelled as skipped. When the audit read a
-  cache's logs and still could not decide, the report's data-sources table now
-  says how many caches that happened to and the most common reason; runs past the
-  eight-per-job log limit are counted as capped rather than as failed reads; and
-  each workflow whose logs all failed to come back is named on its own. A measured
-  cache on a job the audit cannot price is kept even when the workflow's monthly
-  run count is unknown, is described correctly on a workflow that pull requests
-  never run, and is never shown with a missing number; the report's self-check
-  now fails if any such cache is left off the page or shown with different
-  numbers, and it treats a malformed log-probe count as an error rather than as
-  zero. (#106)
-
-- **2026-09-29** — **Node jobs using `setup-node` v5 or later are no longer
-  silently skipped by the cache-costs-more-than-it-saves pattern (OPT79).** From
-  v5, `setup-node` turns on a package-manager cache by itself when the
-  repository's `package.json` names the package manager, and the audit used to
-  treat every such job as "might have a second cache" and hold it back, which
-  silenced the pattern on the commonest Node job shape. It now reads
-  `package.json` the way `setup-node` does (v5: `packageManager` naming npm,
-  yarn or pnpm; v6 and later: `devEngines.packageManager` or `packageManager`
-  naming npm; off whenever `package-manager-cache` is anything but `true`) and
-  counts that cache only when it is really on. When it is on, it counts as the
-  job's cache and can be measured, and the fix names `package-manager-cache:
-  false`; when it is off, a job with `setup-node` plus its own cache step is
-  measured normally. The file is read once per repository, only when some job
-  needs it, from the local checkout when there is one. When it cannot be read,
-  or the job checks out somewhere other than the repository root, the job is
-  still held back and counted under the same reason as before. (#106)
 
 - **2026-09-29** — **The stalled-checkout pattern (OPT80) no longer misses a
   stall, or invents one, in three cases.** A low-speed setting on some other

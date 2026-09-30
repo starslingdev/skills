@@ -7835,8 +7835,13 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # report collapsed to the one-line no-critical-path note, which is exactly
     # the silence this block exists to break.
     uncredited_lines = _opt79_uncredited_block(doc)
+    # A cache that was probed and then withheld is disclosed in the Data sources
+    # footer; collapsing to the one-line note would drop the footer with it and
+    # let "probed, could not tell" read as "nothing found".
+    withheld_n, _top = _opt79_withheld_summary(doc)
     if (not tier2_lines and not also_lines and not queue_lines
-            and not incomplete and not broken and not uncredited_lines):
+            and not incomplete and not broken and not uncredited_lines
+            and not withheld_n):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")

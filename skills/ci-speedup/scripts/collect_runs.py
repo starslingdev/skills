@@ -15197,8 +15197,10 @@ _OPT79_SETUP_USES_RE = _re.compile(r"^[\w.-]+/setup-[\w.-]+(@|$)", _re.I)
 #     v4); it has NO `cache:` input at all.
 #   * `ruby/setup-ruby`    — `bundler-cache`, default `false`.
 # Every other `setup-*` action is switched by `cache:` and is off without it.
-# A ref that is not a `vN` tag (a SHA, a branch) is read as the current major,
-# so a default-on action pinned by SHA still counts as caching.
+# A ref that is not a version tag (a SHA — even one starting with digits — or a
+# branch) names no major (`_opt79_ref_major`), so a default-on action pinned by
+# SHA still counts as caching. `enable-cache: auto` is on only on GitHub-hosted
+# runners; counting it as on everywhere can only withhold, never price.
 _OPT79_SETUP_CACHE_INPUTS: dict[str, tuple[str, int | None]] = {
     "actions/setup-go": ("cache", 4),
     "astral-sh/setup-uv": ("enable-cache", 5),
@@ -15226,8 +15228,8 @@ _OPT79_SETUP_NODE_NPM_RE = _re.compile(r"(\^)?npm(@.*)?")   # fullmatch = JS ^�
 _OPT79_OFF_VALUES = ("false", "no", "off")
 # The package-manager ECOSYSTEM of an install command, of a `setup-*` action and
 # of an `actions/cache` path. A cache and the install it is paired with must
-# agree whenever both are knowable; an ecosystem that cannot be told is `None`
-# and never blocks.
+# BOTH be knowable and agree; a cache whose ecosystem cannot be told (`None`)
+# withholds (`cache_path_names_no_known_package_store`).
 _OPT79_INSTALL_ECOSYSTEMS: tuple[tuple[Any, str], ...] = (
     (_re.compile(r"^(run )?(npm|pnpm|yarn|bun) ", _re.I), "node"),
     (_re.compile(r"^(run )?(pip3?|pipenv|poetry|uv|python3? -m pip) ", _re.I), "python"),
@@ -15238,6 +15240,13 @@ _OPT79_INSTALL_ECOSYSTEMS: tuple[tuple[Any, str], ...] = (
     (_re.compile(r"^(run )?cargo ", _re.I), "rust"),
     (_re.compile(r"^(run )?mvn ", _re.I), "java"),
 )
+# Actions that restore a cache of their own with no `actions/cache` step and no
+# `owner/setup-*` shape (`gradle/actions/setup-gradle` has two slashes). This
+# pattern does not price them, but a job carrying one next to a cache it DOES
+# price has two caches, and one log verdict cannot price the block.
+_OPT79_OTHER_CACHE_USES_RE = _re.compile(
+    r"^(swatinem/rust-cache|gradle/actions/setup-gradle|gradle/gradle-build-action|"
+    r"mozilla-actions/sccache-action|hendrikmuhs/ccache-action)(@|$)", _re.I)
 _OPT79_SETUP_ECOSYSTEMS = {
     "actions/setup-node": "node", "actions/setup-python": "python",
     "actions/setup-go": "go", "astral-sh/setup-uv": "python",
@@ -15284,6 +15293,11 @@ _OPT79_EXTRA_HIT_RE = _re.compile(
 # family). Either sign makes the run neither path of the comparison.
 _OPT79_PRIMARY_KEY_RE = _re.compile(r"^key:\s*(\S+)\s*$")
 _OPT79_RESTORED_KEY_RE = _re.compile(r"cache restored from key:\s*(\S+)", _re.I)
+# `@actions/cache`'s own line on a fallback (toolkit `cache.ts`: `Cache hit for
+# restore-key: ${matchedKey}`), printed before the action's `Cache restored
+# from key:` — so the FIRST hit line in a real log is the toolkit's, not the
+# action's, and the key has to be read from whichever line carries it.
+_OPT79_RESTORE_KEY_HIT_RE = _re.compile(r"cache hit for restore-key:", _re.I)
 _OPT79_SAVED_RE = _re.compile(r"cache saved with (the )?key\b", _re.I)
 # The INSTALL verbs, and only those. This is deliberately NARROWER than
 # `_SETUP_STEP_RE`, which also classifies checkout / configure / cache / restore
@@ -15342,10 +15356,10 @@ _OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 # withhold: the cache measured healthy, or it misses so often that its problem is
 # the key (OPT6/OPT8), not its cost. Every other job-level exit after the probe
 # means the audit could not tell, and is recorded under the key above.
-_OPT79_VERDICT_GATES = frozenset({
-    "hit_path_not_slower_than_the_miss_path_by_the_floor",
-    "hit_share_below_the_tail_floor",
-})
+_OPT79_GATE_NOT_SLOWER = "hit_path_not_slower_than_the_miss_path_by_the_floor"
+_OPT79_GATE_HIT_SHARE_BELOW_TAIL = "hit_share_below_the_tail_floor"
+_OPT79_VERDICT_GATES = frozenset({_OPT79_GATE_NOT_SLOWER,
+                                  _OPT79_GATE_HIT_SHARE_BELOW_TAIL})
 
 
 def _opt79_yaml_step_display(step: dict[str, Any]) -> str | None:
@@ -15443,6 +15457,20 @@ def _opt79_setup_node_auto_cache(major: int | None, package_json: Any) -> str:
     return "on" if _v6() else "off"
 
 
+def _opt79_ref_major(ref: str) -> int | None:
+    """The major version a `uses:` ref names, or None when it names none.
+
+    Only a version TAG (`v5`, `v5.1`, `v5.1.2`, optionally without the `v`)
+    carries a major. A commit SHA does not, even one that happens to start with
+    digits (`@49933ea5…` is not major 49933, `@0aaccfd…` is not major 0), and a
+    branch does not: both take the unknown-major path, where a default-on action
+    counts as caching and setup-node is decided only when v5 and v6+ agree."""
+    m = _re.fullmatch(r"v?(\d+)(?:\.\d+){0,2}", (ref or "").strip())
+    if not m or len(m.group(1)) > 4:
+        return None
+    return int(m.group(1))
+
+
 def _opt79_setup_cache_state(uses: str, with_in: dict[str, Any],
                              package_json: Any = None) -> str:
     """Whether a `setup-*` step restores a cache: `on`, `off`, `maybe` (it may,
@@ -15457,20 +15485,26 @@ def _opt79_setup_cache_state(uses: str, with_in: dict[str, Any],
     that)."""
     action, _, ref = uses.partition("@")
     action = action.strip().lower()
-    m = _re.match(r"v?(\d+)", ref.strip())
-    major = int(m.group(1)) if m else None
+    major = _opt79_ref_major(ref)
     input_name, on_from = _OPT79_SETUP_CACHE_INPUTS.get(action, ("cache", None))
     raw = with_in.get(input_name)
+    node_auto = action == "actions/setup-node" and (
+        major is None or major >= _OPT79_SETUP_NODE_AUTO_CACHE_FROM_MAJOR)
     if raw is not None:
         val = str(raw).strip()
         if "${{" in val:
             return "expr"
-        # `cache: ''` / `cache: false` is the action's own "no cache" spelling.
-        return "off" if (not val or val.lower() in _OPT79_OFF_VALUES) else "on"
+        if not val and node_auto:
+            # setup-node v5+: `if (cache) {…} else if (packagemanagercache)
+            # {auto}` — an EMPTY `cache:` is falsy there and falls through to
+            # the automatic cache, exactly as an absent one does.
+            raw = None
+        else:
+            # `cache: ''` / `cache: false` is the action's own "no cache" spelling.
+            return "off" if (not val or val.lower() in _OPT79_OFF_VALUES) else "on"
     if on_from is not None and (major is None or major >= on_from):
         return "on"
-    if action == "actions/setup-node" and (
-            major is None or major >= _OPT79_SETUP_NODE_AUTO_CACHE_FROM_MAJOR):
+    if node_auto:
         pmc = with_in.get("package-manager-cache")
         pmc_val = "" if pmc is None else str(pmc).strip()
         if "${{" in pmc_val:
@@ -15550,7 +15584,8 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
       * `job_declares_no_cache_restore_step` — no cache at all, counting the
         caches `setup-*` actions turn on BY DEFAULT (`_OPT79_SETUP_CACHE_INPUTS`).
       * `job_declares_more_than_one_cache_restore_step` — two caches, counting
-        default-on and possible (`maybe`) setup caches. The log's hit line may
+        default-on and possible (`maybe`) setup caches and self-caching actions
+        (`_OPT79_OTHER_CACHE_USES_RE`). The log's hit line may
         belong to either, so one verdict cannot price the block. Never guessed.
       * `setup_action_cache_default_depends_on_repository_files` — the only
         cache is a `setup-node` default that `package.json` decides, and that
@@ -15558,6 +15593,8 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
         invalid), the job's workspace root is not this repository's root (no
         checkout before the setup step, a checkout into a `path:`, or of another
         `repository:`), or a SHA ref whose v5 and v6+ rules disagree.
+      * `cache_action_is_not_one_this_pattern_measures` — the only cache is a
+        self-caching action (`Swatinem/rust-cache`, `setup-gradle`, …).
       * `cache_step_has_no_renderable_name` — nothing to match a duration by.
       * `install_step_also_runs_non_install_commands` — the install step's
         `run:` block runs more than the install.
@@ -15568,9 +15605,11 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
         then `pnpm install`) sits between the cache and the install chosen. It
         may be the real install, and pricing a later one pairs the cache with
         the wrong step.
+      * `cache_path_names_no_known_package_store` — the cache's ecosystem cannot
+        be told (an `actions/cache` path naming no store, or two; a `setup-*`
+        action with no known ecosystem), so it is not shown to feed the install.
       * `install_package_manager_does_not_match_cache` — the cache's ecosystem
-        (a `setup-*` action, or an `actions/cache` path naming one store) and
-        the install's package manager are both knowable and disagree.
+        and the install's disagree.
       * `step_display_name_is_ambiguous_within_the_job` — the restore or install
         display name is carried by two declared steps, so its duration cannot be
         attributed.
@@ -15591,6 +15630,7 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
     cache_idx: list[int] = []
     auto_idx: set[int] = set()
     possible = 0
+    other = 0
     cache_ref = ""
     workspace = "none"
     for i, step in enumerate(steps):
@@ -15606,6 +15646,9 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
             cache_idx.append(i)
             cache_ref = uses
             continue
+        if _OPT79_OTHER_CACHE_USES_RE.match(uses):
+            other += 1
+            continue
         if _OPT79_SETUP_USES_RE.match(uses):
             with_in = step.get("with") if isinstance(step.get("with"), dict) else {}
             # setup-node reads `$GITHUB_WORKSPACE/package.json`; the file OPT79
@@ -15619,15 +15662,17 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
                 cache_idx.append(i)
                 cache_ref = uses
                 if (uses.partition("@")[0].strip().lower() == "actions/setup-node"
-                        and (with_in or {}).get("cache") is None):
+                        and not str((with_in or {}).get("cache") or "").strip()):
                     auto_idx.add(i)
             elif state == "maybe":
                 possible += 1
-    if len(cache_idx) + possible > 1:
+    if len(cache_idx) + possible + other > 1:
         return None, "job_declares_more_than_one_cache_restore_step"
     if not cache_idx:
         if possible:
             return None, "setup_action_cache_default_depends_on_repository_files"
+        if other:
+            return None, "cache_action_is_not_one_this_pattern_measures"
         return None, "job_declares_no_cache_restore_step"
 
     ci = cache_idx[0]
@@ -15665,7 +15710,13 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
         return None, "first_step_after_cache_is_not_a_recognised_install"
     cache_eco = _opt79_cache_ecosystem(steps[ci])
     install_eco = _opt79_install_ecosystem(install_cmd)
-    if cache_eco and install_eco and cache_eco != install_eco:
+    if cache_eco is None:
+        # A cache that names no package store (or two) is not SHOWN to feed
+        # this install. A browser or build-output cache before `npm ci` pays
+        # off in a later step outside the measured block, so its restore and
+        # save would read as pure waste. Unknown withholds; it never pairs.
+        return None, "cache_path_names_no_known_package_store"
+    if cache_eco != install_eco:
         return None, "install_package_manager_does_not_match_cache"
     # GitHub renders an action's post phase as `Post ` + the step's display name.
     # Whether it actually RAN is a duration question; whether it EXISTS is not —
@@ -15827,25 +15878,36 @@ def _opt79_classify_log(log: str, block: dict[str, Any]) -> tuple[str, str, str]
         return "unscoped", "", ""
     hit_line = miss_line = ""
     primary_key = restored_key = ""
+    restore_key_fallback = False
     for raw_line in lines:
         clean = _clean_log_line(raw_line)
+        # Keys are compared WHOLE: `_clean_log_line` cuts at 160 characters
+        # for display, and a long key cut on one line and not the other would
+        # read an exact hit as a fallback.
+        bare = _TS_PREFIX_RE.sub("", raw_line).strip()
         if not primary_key and not (hit_line or miss_line):
-            km = _OPT79_PRIMARY_KEY_RE.match(clean)
+            km = _OPT79_PRIMARY_KEY_RE.match(bare)
             if km:
                 primary_key = km.group(1)
+        # The toolkit's own fallback line, printed before the action's
+        # `Cache restored from key:` — a direct partial-restore signal.
+        if _OPT79_RESTORE_KEY_HIT_RE.search(raw_line):
+            restore_key_fallback = True
+        if not restored_key:
+            rm = _OPT79_RESTORED_KEY_RE.search(bare)
+            if rm:
+                restored_key = rm.group(1)
         if not miss_line and (_CACHE_MISS_RE.search(raw_line)
                               or _OPT79_EXTRA_MISS_RE.search(raw_line)):
             miss_line = clean
         if not hit_line and (_CACHE_HIT_RE.search(raw_line)
                              or _OPT79_EXTRA_HIT_RE.search(raw_line)):
             hit_line = clean
-            rm = _OPT79_RESTORED_KEY_RE.search(raw_line)
-            restored_key = rm.group(1) if rm else ""
-        if hit_line and miss_line:
-            break
     if hit_line and miss_line:
         return "both", hit_line, group
     if hit_line:
+        if restore_key_fallback:
+            return "partial_hit", hit_line, group
         if primary_key and restored_key and restored_key != primary_key:
             return "partial_hit", hit_line, group
         if _OPT79_SAVED_RE.search(log or ""):
@@ -16339,6 +16401,11 @@ def _detect_opt79_net_negative_cache(
         rows: list[dict[str, Any]] = []
         ambiguous = 0
         unread = 0
+        # Runs whose log WAS read and then could not be used (no restore group,
+        # no cache line, two verdicts, a partial restore, another runner, a
+        # block that did not measure). Like `unread`, these are not evidence
+        # that the cache rarely hits or misses.
+        excluded = 0
         # Mirrors `_opt79_log_plan`: the first `_OPT79_LOG_PROBE_MAX`
         # log-bearing occurrences are the ones a log was fetched for. An
         # occurrence past that window was never going to be read — a disclosed
@@ -16395,31 +16462,37 @@ def _detect_opt79_net_negative_cache(
                 # way to tell its cache line from a build tool's. Never guessed:
                 # `cache miss, executing …` from Turborepo in the test step would
                 # otherwise classify a hit run as a two-cache job.
+                excluded += 1
                 _no("restore_step_log_group_not_found_in_the_run_log", job=name)
                 continue
             if status == "both":
                 # A hit line AND a miss line in the one restore step: two
                 # verdicts, so the block's cost cannot be attributed to one.
                 ambiguous += 1
+                excluded += 1
                 _no("run_log_shows_both_a_hit_and_a_miss_line", job=name)
                 continue
             if status == "partial_hit":
                 # A restore-keys fallback: an older cache restored under another
                 # key and a new one saved. Neither path of the comparison.
                 ambiguous += 1
+                excluded += 1
                 _no("run_log_shows_a_partial_restore_keys_hit", job=name)
                 continue
             if status == "none":
+                excluded += 1
                 _no("run_log_shows_no_cache_hit_or_miss_line", job=name)
                 continue
             label = _occurrence_runner_label(job) or ""
             if label != declared:
                 other_runner.append(label)
+                excluded += 1
                 _no("occurrence_ran_on_another_runner_label", job=name,
                     declared=declared, observed=label)
                 continue
             durs, present, gate = _opt79_block_durations(job, block)
             if not durs:
+                excluded += 1
                 _no(gate, job=name)
                 continue
             for _slot in ("restore", "post"):
@@ -16466,6 +16539,15 @@ def _detect_opt79_net_negative_cache(
                   unread=unread, classified=classified,
                   hits=len(hits), misses=len(misses))
             continue
+        if excluded and (len(hits) < _OPT79_MIN_HITS
+                         or len(misses) < _OPT79_MIN_MISSES):
+            # Same reasoning, for runs that WERE read: a log whose restore
+            # group is missing, or that shows a partial restore, says nothing
+            # about how often this cache hits.
+            _drop(name, "population_truncated_by_excluded_runs",
+                  excluded=excluded, classified=classified,
+                  hits=len(hits), misses=len(misses))
+            continue
         if len(hits) < _OPT79_MIN_HITS:
             _drop(name, "fewer_than_min_hit_runs_classified", hits=len(hits),
                   minimum=_OPT79_MIN_HITS)
@@ -16474,11 +16556,16 @@ def _detect_opt79_net_negative_cache(
             _drop(name, "fewer_than_min_miss_runs_classified",
                   misses=len(misses), minimum=_OPT79_MIN_MISSES)
             continue
-        hit_share = len(hits) / float(classified)
+        # The share of the runs READ that were EXACT hits. The excess is per
+        # exact hit, so the ambiguous runs (a partial restore-keys hit, a
+        # two-verdict run) stay in the denominator: they were real runs of this
+        # job that did not take the measured hit path, and leaving them out
+        # would price the exact-hit rate as if they never happened.
+        hit_share = len(hits) / float(classified + ambiguous)
         if hit_share < _CACHE_TAIL_MIN_FRAC:
             # A cache that almost never hits has a KEY problem, not a cost
             # problem — OPT6/OPT8 own that. Route there; never double-report.
-            _drop(name, "hit_share_below_the_tail_floor",
+            _drop(name, _OPT79_GATE_HIT_SHARE_BELOW_TAIL,
                   hit_share=round(hit_share, 3), floor=_CACHE_TAIL_MIN_FRAC)
             continue
         # Rounded BEFORE the waste is taken, because these are the numbers that
@@ -16493,7 +16580,7 @@ def _detect_opt79_net_negative_cache(
         waste_floor = round(max(_OPT79_MIN_WASTE_S,
                                 _OPT79_MIN_WASTE_FRAC * miss_p50), 1)
         if waste < waste_floor:
-            _drop(name, "hit_path_not_slower_than_the_miss_path_by_the_floor",
+            _drop(name, _OPT79_GATE_NOT_SLOWER,
                   hit_p50=round(hit_p50, 1), miss_p50=round(miss_p50, 1),
                   waste=waste, floor=waste_floor)
             continue
@@ -16565,7 +16652,7 @@ def _detect_opt79_net_negative_cache(
             f"cache HIT, against {miss_p50:.0f}s across {len(misses)} run(s) whose "
             f"log reported a MISS: the hit path is {waste:.0f}s SLOWER, so restoring "
             f"this cache costs more than not having it. The cache hit on "
-            f"{hit_share * 100:.0f}% of the {classified} classified run(s); over "
+            f"{hit_share * 100:.0f}% of the {classified + ambiguous} run(s) read; over "
             f"{effective:.0f} run(s)/30d of this job that is ~{credited:.0f} "
             f"runner-min/mo. Comparison measured on `{declared}` only.")
         rows_render = [[r["status"].upper(), f"{r['restore_s']:.0f}s",
