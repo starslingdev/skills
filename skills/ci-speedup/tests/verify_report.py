@@ -699,12 +699,27 @@ def _cache_probe_count_violation(report: str, findings_path: Path | None
         return (f"the cache-probe row could not be re-derived: findings JSON at "
                 f"{findings_path} is unreadable ({type(exc).__name__})"), ""
     probe = _as_dict(_as_dict(_as_dict(data).get("data_sources")).get("cache_probe_logs"))
-    probed = probe.get("probed")
-    probed = probed if isinstance(probed, int) else 0
-    returned = probe.get("returned")
-    returned = returned if isinstance(returned, int) else 0
-    planned = probe.get("planned")
-    planned = planned if isinstance(planned, int) else 0
+
+    def _count(key: str, required: bool) -> int | None:
+        v = probe.get(key)
+        if v is None and not required:
+            return 0
+        return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+    # A block that exists must be well-formed. Reading a string, a bool or a
+    # missing count as 0 turns "the count that says the probe happened is
+    # broken" into "nothing was probed" — and a report with no probe row then
+    # passes. An ABSENT block is a run from before the probe existed.
+    if probe:
+        probed = _count("probed", True)
+        returned = _count("returned", True)
+        planned = _count("planned", False)
+        if probed is None or returned is None or planned is None:
+            return (f"the cache-probe counts in findings are malformed "
+                    f"({ {k: probe.get(k) for k in ('probed', 'returned', 'planned')} }) "
+                    "- a count that cannot be read is not a zero"), ""
+    else:
+        probed = returned = planned = 0
     if not m:
         if probed > 0:
             return (f"{probed} job log(s) were read for the cache hit/miss comparison "
@@ -732,6 +747,52 @@ def _cache_probe_count_violation(report: str, findings_path: Path | None
                 f"budget allowed {probed}, but the Data sources cell {cell!r} does "
                 "not say so"), ""
     return None, f"; cache-probe count honest ({returned}/{probed} read)"
+
+
+_DS_CACHE_VERDICTS_ROW_RE = re.compile(
+    r"^\|\s*cache hit/miss verdicts\s*\|\s*(.+?)\s*\|", re.MULTILINE)
+_VR_OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
+
+
+def _opt79_withheld_disclosure_violation(report: str, findings_path: Path | None
+                                         ) -> tuple[str | None, str]:
+    """The cache hit/miss probe can read a candidate's logs and still withhold
+    it. `opt79_withheld_candidates` records each one, and the report must say so
+    in its `cache hit/miss verdicts` Data sources row — the count and the
+    commonest gate (ties to the alphabetically first), both re-derived here.
+    Without the row a probed-but-undecided cache reads as "measured, nothing
+    found"; a row with nothing behind it is a claim the run never made."""
+    if not findings_path:
+        return None, ""
+    try:
+        data = json.loads(Path(findings_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return (f"the withheld-cache row could not be re-derived: findings JSON at "
+                f"{findings_path} is unreadable ({type(exc).__name__})"), ""
+    rows = [r for r in _as_list(_as_dict(data).get(_VR_OPT79_WITHHELD_DOC_KEY))
+            if isinstance(r, dict)]
+    m = _DS_CACHE_VERDICTS_ROW_RE.search(report)
+    if not rows:
+        if m:
+            return ("Data sources declares cache candidates probed but withheld, "
+                    "but the run recorded none"), ""
+        return None, ""
+    counts: dict[str, int] = {}
+    for r in rows:
+        g = str(r.get("gate") or "unknown")
+        counts[g] = counts.get(g, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    if not m:
+        return (f"{len(rows)} cache candidate(s) were probed and then withheld "
+                f"(top reason {top}) but the Data sources table does not say so - "
+                "a probed-but-undecided cache reads as measured and clean"), ""
+    cell = _strip_render_artifacts(m.group(1))
+    got = re.search(r"(\d+) candidate cache\(s\) probed but withheld; top reason: "
+                    r"([a-z0-9_]+)", cell)
+    if not got or int(got.group(1)) != len(rows) or got.group(2) != top:
+        return (f"Data sources withheld-cache cell {cell!r} does not state the "
+                f"{len(rows)} withheld candidate(s) and top reason {top!r}"), ""
+    return None, f"; {len(rows)} withheld cache candidate(s) disclosed"
 
 
 def _gh_errors_disclosure_violation(report: str, findings_path: Path | None) -> tuple[str | None, str]:
@@ -813,6 +874,11 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
     probe_violation, probe_note = _cache_probe_count_violation(report, findings_path)
     if probe_violation:
         return Check(name, False, probe_violation)
+    withheld_violation, withheld_note = _opt79_withheld_disclosure_violation(
+        report, findings_path)
+    if withheld_violation:
+        return Check(name, False, withheld_violation)
+    probe_note += withheld_note
     gh_violation, gh_note = _gh_errors_disclosure_violation(report, findings_path)
     if gh_violation:
         return Check(name, False, gh_violation)
@@ -5409,7 +5475,15 @@ def _opt79_block_rederived(cn: dict, *, credited: bool,
         problems.append(f"job_runs={cn.get('job_runs')!r}")
     if denom is None or denom <= 0:
         problems.append(f"sampled_successful_run_count={cn.get('sampled_successful_run_count')!r}")
-    if monthly is None or monthly <= 0:
+    # An uncredited row carries no sizing, so an unknown volume is stated as
+    # null (both volume fields). A credited one is priced on it and needs it.
+    null_volume = (not credited and cn.get("monthly_volume") is None)
+    if null_volume:
+        if cn.get("effective_monthly_volume") is not None:
+            problems.append(
+                f"effective_monthly_volume {cn.get('effective_monthly_volume')!r} "
+                "stamped on a row with no monthly volume")
+    elif monthly is None or monthly <= 0:
         problems.append(f"monthly_volume={cn.get('monthly_volume')!r}")
     if job_runs is not None and denom is not None and job_runs > denom:
         problems.append(
@@ -5446,18 +5520,18 @@ def _opt79_block_rederived(cn: dict, *, credited: bool,
             f"hit share {round(hit_share, 3)} is below the {_VR_OPT79_TAIL_MIN_FRAC} "
             "floor - a cache that rarely hits is a key problem, not a cost one")
 
+    if not credited and cn.get("runner_min_saving") is not None:
+        # An uncredited row must carry NO sizing. A number here would enter a
+        # total through the first reader that treated the two rows alike.
+        problems.append(
+            f"an uncredited pole cache stamps runner_min_saving "
+            f"{cn.get('runner_min_saving')!r}; it must carry no sizing")
     if job_runs is not None and denom is not None and denom > 0 and monthly:
         effective = round(float(monthly) * min(max(job_runs / denom, 0.0), 1.0), 3)
         if not _close(cn.get("effective_monthly_volume"), effective, 0.011):
             problems.append(
                 f"effective_monthly_volume {cn.get('effective_monthly_volume')!r} != {effective}")
         if not credited:
-            # An uncredited row must carry NO sizing. A number here would enter a
-            # total through the first reader that treated the two rows alike.
-            if cn.get("runner_min_saving") is not None:
-                problems.append(
-                    f"an uncredited pole cache stamps runner_min_saving "
-                    f"{cn.get('runner_min_saving')!r}; it must carry no sizing")
             return problems
         expected_rm = round(waste * hit_share * effective / 60.0, 1)
         rm = finding_rm
@@ -5475,9 +5549,11 @@ def _opt79_uncredited_rows_rederived(data: dict) -> list[str]:
     """Every uncredited OPT79 pole row re-derived from its own `per_run`, and
     checked to contribute to no total.
 
-    These rows are rendered as prose with no number, which is exactly why they
-    needed a check: nothing else in the report contradicts a `waste_s` somebody
-    edited, and the sizing follow-up will be built on them."""
+    These rows render with their measured excess per cache hit (`waste_s`) and
+    their hit/miss populations, but with no runner-minutes and no wall-clock
+    figure, so no total contradicts an edited `waste_s`; this re-derivation is
+    what does. `check_opt79_uncredited_rows_rederived` additionally pairs every
+    row with the line the report renders for it."""
     out: list[str] = []
     rows = _as_list(data.get(_VR_OPT79_UNCREDITED_DOC_KEY))
     for i, row in enumerate(rows):
@@ -5497,6 +5573,11 @@ def _opt79_uncredited_rows_rederived(data: dict) -> list[str]:
             out.append(
                 f"{tag}: claims the critical path, but {cn.get('job')!r} is not "
                 f"this workflow's long pole {cn.get('long_pole_job')!r}")
+        elif cn.get("on_critical_path") and \
+                cn.get("workflow_gates_pull_requests") is False:
+            out.append(
+                f"{tag}: claims the critical path on a workflow that runs on no "
+                "pull request")
         out.extend(f"{tag}: {msg}" for msg in _opt79_block_rederived(
             cn, credited=False, finding_rm=None))
     return out
@@ -6051,12 +6132,65 @@ def check_opt79_uncredited_rows_rederived(report: str,
     if err:
         return Check(name, True, err, skipped=True)
     rows = _as_list(_as_dict(data).get(_VR_OPT79_UNCREDITED_DOC_KEY))
+    rendered = _VR_OPT79_UNCREDITED_HEADER_RE.search(_strip_render_artifacts(report))
     if not rows:
+        if rendered:
+            return Check(name, False, "the report lists caches measured "
+                         "net-negative, but the run recorded none")
         return Check(name, True, "no uncredited net-negative caches")
     bad = _opt79_uncredited_rows_rederived(_as_dict(data))
+    bad.extend(_opt79_uncredited_rows_rendered(report, rows))
     return Check(name, not bad,
-                 f"{len(rows)} uncredited cache row(s) re-derived"
+                 f"{len(rows)} uncredited cache row(s) re-derived and rendered"
                  if not bad else "; ".join(bad[:6]))
+
+
+_VR_OPT79_UNCREDITED_HEADER_RE = re.compile(
+    r"(\d+) cache\(s\) measured net-negative on a job this audit cannot price")
+_VR_OPT79_UNCREDITED_LINE_RE = re.compile(
+    r"^> - a cache on (.+?)(?: in \S+\.ya?ml)? measured net-negative by (\d+)s per "
+    r"cache hit \((\d+) hit / (\d+) miss run\(s\) sampled\)", re.MULTILINE)
+
+
+def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
+    """Every uncredited row must REACH the page, with the numbers it carries.
+
+    The re-derivation proves a row's numbers; nothing proved the renderer
+    showed it. A row the renderer skipped (no job, no numeric excess, no integer
+    populations) was verified and then silently absent. So: the header's count
+    must equal the rows the run recorded, and each row's job must have its own
+    line stating its `waste_s` (whole seconds) and hit/miss populations."""
+    plain = _strip_render_artifacts(report)
+    out: list[str] = []
+    header = _VR_OPT79_UNCREDITED_HEADER_RE.search(plain)
+    if not header:
+        return [f"{len(rows)} uncredited cache row(s) recorded but the report "
+                "renders none of them"]
+    if int(header.group(1)) != len(rows):
+        out.append(f"the report states {header.group(1)} cache(s) measured "
+                   f"net-negative but the run recorded {len(rows)}")
+    lines: dict[str, tuple[int, int, int]] = {}
+    for m in _VR_OPT79_UNCREDITED_LINE_RE.finditer(plain):
+        lines.setdefault(m.group(1), (int(m.group(2)), int(m.group(3)),
+                                      int(m.group(4))))
+    for i, row in enumerate(rows):
+        cn = _as_dict(row)
+        job = str(cn.get("job") or "").strip()
+        tag = f"{_VR_OPT79_UNCREDITED_DOC_KEY}[{i}]"
+        if not job:
+            out.append(f"{tag}: has no job name, so the report cannot list it")
+            continue
+        got = lines.get(job)
+        if got is None:
+            out.append(f"{tag}: `{job}` is not listed in the report")
+            continue
+        waste = _num(cn.get("waste_s"))
+        want = (round(waste) if waste is not None else None,
+                cn.get("hits"), cn.get("misses"))
+        if got != want:
+            out.append(f"{tag}: `{job}` renders (excess, hits, misses) {got} but "
+                       f"the row carries {want}")
+    return out
 
 
 def check_tier2_measured_basis(report: str, findings_path: Path | None) -> Check:

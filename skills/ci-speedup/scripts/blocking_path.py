@@ -5220,6 +5220,16 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
             cov += f" (capped at {_bud} for the repository)"
         rows.append(("cache hit/miss log probe", cov,
                      "Splitting a cached job's runs into cache hits and misses"))
+    # Candidates the probe read and then WITHHELD (too few misses, logs that
+    # never came back, a runner change…). Without this row the report reads
+    # "measured, nothing found" where the audit could not tell. `verify_report`
+    # re-derives both numbers from `opt79_withheld_candidates`.
+    _wn, _wtop = _opt79_withheld_summary(doc)
+    if _wn:
+        rows.append(("cache hit/miss verdicts",
+                     f"{_wn} candidate cache(s) probed but withheld; top reason: "
+                     f"`{_wtop}`",
+                     "Why a probed cache produced no finding and no uncredited line"))
     # WHICH workflow YAML fed the detectors. `collect_runs` stamps this, and until now
     # nothing rendered it — so the reader could not tell whether the `on:`/matrix/timeout
     # signals came off the audited checkout or off the default branch's HEAD (the two
@@ -5453,11 +5463,42 @@ def _pr_floor_fallback_banner(doc: dict[str, Any], cp: dict[str, Any]) -> list[s
             "the figures as the PR-floor accordingly.", ""]
 
 
-# The findings-doc key the collector writes uncredited OPT79 rows under. A
-# STRING CONTRACT between two files: renaming it in the collector used to stop
-# this block rendering with nothing going red, so both sides name the constant
-# and a coupling test pins them equal.
+# The findings-doc keys the collector writes OPT79's uncredited rows and its
+# withheld candidates under. STRING CONTRACTS between files: renaming one in the
+# collector would stop its line rendering with nothing going red, so every side
+# names the constant and a coupling test pins them equal.
 _OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
+_OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
+
+
+def _opt79_uncredited_row_is_renderable(r: Any) -> bool:
+    """A row the uncredited block can state: a job name, a numeric excess and
+    integer hit/miss populations. Anything else would render as "by ?s" or
+    "None hit" — a measurement line with no measurement in it — so it is not
+    rendered, and `verify_report` fails on the count it no longer matches."""
+    if not isinstance(r, dict) or not str(r.get("job") or "").strip():
+        return False
+    waste = r.get("waste_s")
+    if isinstance(waste, bool) or not isinstance(waste, (int, float)):
+        return False
+    return all(isinstance(r.get(k), int) and not isinstance(r.get(k), bool)
+               for k in ("hits", "misses"))
+
+
+def _opt79_withheld_summary(doc: dict[str, Any] | None) -> tuple[int, str]:
+    """`(candidates withheld, the commonest gate)` from the collector's
+    withheld-candidate list; ties go to the alphabetically first gate. `(0, "")`
+    when nothing was withheld. `verify_report` re-derives the same pair."""
+    rows = [r for r in ((doc or {}).get(_OPT79_WITHHELD_DOC_KEY) or [])
+            if isinstance(r, dict)]
+    if not rows:
+        return 0, ""
+    counts: dict[str, int] = {}
+    for r in rows:
+        g = str(r.get("gate") or "unknown")
+        counts[g] = counts.get(g, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    return len(rows), top
 
 
 def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
@@ -5468,22 +5509,26 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
     wall-clock claim, no neutrality certificate, no Tier-2 row. The measurement
     is as real as a credited one; what is missing is the sizing.
 
-    WHY it is missing differs by job, and saying the same thing about both was a
-    false claim. `not below the cluster floor` spans everything from the
-    SECOND-ranked job upwards. Only the workflow's long pole, on a workflow that
-    can gate a PR, actually carries the merge wait; for every other job at or
-    above the floor the saving is pure runner-minutes, and the reason it is not
-    credited is that this version cannot prove shrinking it leaves the gate
-    unchanged. The row stamps which case it is (`on_critical_path`), and this
-    block says only what that stamp supports — never a merge wait on a
-    schedule-only workflow, and never "this workflow's slowest job" about a job
-    that is not.
+    WHY it is missing differs by job. `not below the cluster floor` spans
+    everything from the SECOND-ranked job upwards. Only the workflow's long
+    pole, on a workflow that can gate a PR, actually carries the merge wait
+    (`on_critical_path`). On a workflow no pull request runs
+    (`workflow_gates_pull_requests` false) there is no merge gate at all and the
+    saving is pure runner-minutes. For every other job at or above the floor the
+    saving is runner-minutes too, uncredited because this version cannot prove
+    shrinking it leaves the gate unchanged. The block says only what those
+    stamps support — never a merge wait or a merge gate on a workflow that has
+    none, and never "this workflow's slowest job" about a job that is not.
 
     Rendered beside `_dropped_unprovable_banner`, its nearest precedent: a
     measured fact deliberately kept out of the numbers and shown anyway. [] when
     there is nothing to say."""
-    rows = (doc or {}).get(_OPT79_UNCREDITED_DOC_KEY) or []
-    rows = [r for r in rows if isinstance(r, dict) and r.get("job")]
+    # A row with no job, no numeric excess or no integer populations cannot be
+    # stated. It is left out HERE and caught by `verify_report`, which fails when
+    # the rendered count differs from the rows the run measured — a malformed
+    # row reddens the report instead of vanishing from it.
+    rows = [r for r in ((doc or {}).get(_OPT79_UNCREDITED_DOC_KEY) or [])
+            if _opt79_uncredited_row_is_renderable(r)]
     if not rows:
         return []
     lines = ["> [!NOTE]",
@@ -5496,11 +5541,15 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
         wf = str(r.get("workflow_file") or "")
         waste = r.get("waste_s")
         hits, misses = r.get("hits"), r.get("misses")
-        waste_txt = f"{float(waste):.0f}s" if isinstance(waste, (int, float)) else "?"
+        waste_txt = f"{float(waste):.0f}s"
         where = f" in `{wf}`" if wf else ""
         if r.get("on_critical_path"):
             why = (f"`{job}` is this workflow's slowest job, so the saving is on "
                    "the merge wait and is **not credited** in this version.")
+        elif r.get("workflow_gates_pull_requests") is False:
+            why = (f"`{job}` runs in a workflow that does not run on pull "
+                   "requests, so no pull request waits on it; the saving is "
+                   "runner-minutes only and is **not credited** in this version.")
         else:
             floor = r.get("floor_p50_s")
             floor_txt = (f" ({float(floor):.0f}s)"

@@ -3925,7 +3925,7 @@ def test_opt79_withholds_when_the_workflow_yaml_is_unparsed():
 def test_opt79_withholds_without_a_monthly_volume():
     out, w = _opt79_withheld(monthly=None)
     assert out == []
-    assert w.get("no_monthly_volume_or_no_sampled_runs") == 1, w
+    assert w.get("no_monthly_volume") == 1, w
 
 
 def test_opt79_withholds_an_occurrence_whose_install_never_measured():
@@ -4161,6 +4161,8 @@ def test_opt79_counts_the_occurrences_whose_log_it_never_captured():
     exists to prevent: attributing 'we never looked' to 'we looked and found
     little'."""
     jpr, logs = _opt79_sample(extra_runs=3)
+    # the log-less runs first, so they sit inside the per-job probe window
+    jpr = jpr[-3:] + jpr[:-3]
     withheld: dict = {}
     out = _opt79(jpr, logs, withheld=withheld)
     assert len(out) == 1, withheld
@@ -4461,30 +4463,6 @@ def test_opt79_reads_a_cache_verdict_printed_after_the_input_group_closes():
 
 # ---- reading the cache line, and only the cache line ----
 
-def test_opt79_reads_a_restore_keys_partial_hit_as_a_hit():
-    """`restore-keys` is the commonest `actions/cache` spelling: the exact key
-    misses, a prefix fallback is restored, and BOTH lines appear in the restore
-    step's own output. Classifying that `both` discarded the run and blamed a job
-    the YAML gate had already proved has exactly one cache."""
-    jpr, logs = _opt79_sample()
-    for jid in sorted(logs)[:4]:                 # the four hit runs
-        logs[jid] = _opt79_log(
-            "Cache not found for input keys: node-modules-abc123",
-            "Cache restored from key: node-modules-")
-    withheld: dict = {}
-    out = _opt79(jpr, logs, withheld=withheld)
-    assert len(out) == 1, withheld
-    cn = out[0]["cache_net_negative"]
-    assert cn["hits"] == 4 and cn["misses"] == 4
-    assert withheld.get("run_log_shows_both_a_hit_and_a_miss_line") is None
-    # …and the other order is still two caches, not a fallback.
-    jpr, logs = _opt79_sample()
-    logs[sorted(logs)[0]] = _opt79_log(
-        "Cache restored from key: other-abc", "Cache not found for input keys: x")
-    out, w = _opt79_withheld(jpr=jpr, logs=logs)
-    assert w.get("run_log_shows_both_a_hit_and_a_miss_line") == 1, w
-
-
 def test_opt79_ignores_a_build_tool_cache_line_outside_the_restore_step():
     """Turborepo prints `cache miss, executing <task>` for every uncached task,
     Gradle prints `Build cache miss for task …`, and both land in the TEST step.
@@ -4586,6 +4564,8 @@ def test_opt79_blames_unread_logs_rather_than_a_thin_population():
     Reported as `fewer_than_min_*`, a budget trim and an expired log read as "we
     looked and found little" about runs nobody read."""
     jpr, logs = _opt79_sample(hits=2, misses=4, extra_runs=6)
+    # the log-less runs first, so they sit inside the per-job probe window
+    jpr = jpr[-6:] + jpr[:-6]
     out, w = _opt79_withheld(jpr=jpr, logs=logs)
     assert out == []
     assert w.get("occurrence_has_no_captured_log") == 6, w
@@ -4723,6 +4703,268 @@ def test_opt79_uncredited_doc_key_is_one_contract():
     assert vr._VR_OPT79_UNCREDITED_DOC_KEY == cr._OPT79_UNCREDITED_DOC_KEY
     assert vr._VR_OPT79_UNCREDITED_KIND == cr._OPT79_UNCREDITED_KIND
     assert vr._VR_OPT79_CREDITED_KIND == cr._OPT79_CREDITED_KIND
+
+
+# ---- review fixes: fail closed wherever the input is ambiguous ----
+
+def _opt79_steps(*steps):
+    return _opt79_wf(steps=list(steps))
+
+
+_OPT79_NODE_CACHE = {"uses": "actions/cache@v4",
+                     "with": {"path": "node_modules", "key": "k"}}
+
+
+def test_opt79_records_every_probed_candidate_it_withheld():
+    """A candidate whose logs were probed and then withheld reads, on the page,
+    exactly like "measured, nothing found". Each one is recorded with the gate
+    that stopped it so the report can say so; a cache MEASURED healthy is a
+    verdict, not a withhold, and is not recorded."""
+    jpr, logs = _opt79_sample(misses=2)
+    rows: list = []
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), _opt79_wf(), 100, 0,
+        logs_by_job_id=logs, withheld_candidates=rows)
+    assert out == []
+    assert rows == [{"workflow_file": "ci.yml", "job": _OPT79_JOB,
+                     "gate": "fewer_than_min_miss_runs_classified"}], rows
+    healthy_jpr, healthy_logs = _opt79_sample(hit=(2.0, 3.0, 0.0))
+    rows = []
+    assert cr._detect_opt79_net_negative_cache(
+        "ci.yml", healthy_jpr, _opt79_crit(), _opt79_wf(), 100, 0,
+        logs_by_job_id=healthy_logs, withheld_candidates=rows) == []
+    assert rows == [], rows
+
+
+def test_opt79_uncredited_rows_must_all_reach_the_page():
+    """The uncredited rows are re-derived number by number, but nothing checked
+    they RENDER. A row the renderer dropped (no job name, no measured excess)
+    was verified and then never shown — the measurement the block exists to
+    surface, lost between the JSON and the page with every check green."""
+    import json as _json
+    import tempfile
+    vr = _load_verify_report_for_opt79()
+    row = _opt79_uncredited(_opt79_pole_crit())
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "findings.json"
+        p.write_text(_json.dumps({"opt79_uncredited_pole_caches": [row]}),
+                     encoding="utf-8")
+        rendered = "\n".join(bp._opt79_uncredited_block(
+            {"opt79_uncredited_pole_caches": [row]}))
+        assert vr.check_opt79_uncredited_rows_rederived(rendered, p).ok
+        chk = vr.check_opt79_uncredited_rows_rederived("# report\n", p)
+        assert not chk.ok, chk
+        # a row with no job is not silently filtered: the rendered count no
+        # longer matches the rows the run measured.
+        nameless = dict(row, job="")
+        p.write_text(_json.dumps({"opt79_uncredited_pole_caches": [row, nameless]}),
+                     encoding="utf-8")
+        rendered = "\n".join(bp._opt79_uncredited_block(
+            {"opt79_uncredited_pole_caches": [row, nameless]}))
+        chk = vr.check_opt79_uncredited_rows_rederived(rendered, p)
+        assert not chk.ok, chk
+
+
+def test_opt79_withholds_an_unrecognised_step_between_the_cache_and_the_install():
+    """`cd web && npm ci`, `echo …` then `npm ci`, `corepack enable` then
+    `pnpm install`: the first run step after the cache IS the install, but its
+    first line is not an install verb, so the selector skipped it and paired the
+    cache with whatever install came next — a `pip install` of a different
+    ecosystem, priced as the step this node cache was meant to shorten."""
+    for first in ("cd web && npm ci", "echo installing\nnpm ci",
+                  "corepack enable\npnpm install"):
+        block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+            _OPT79_NODE_CACHE, {"run": first}, {"run": "npm ci"},
+            {"run": "npm test"}))
+        assert block is None, (first, block)
+        assert gate == "first_step_after_cache_is_not_a_recognised_install", (first, gate)
+
+
+def test_opt79_withholds_an_install_from_another_package_manager():
+    """A cache whose ecosystem the workflow names (a `node_modules` path, a
+    `setup-python` `cache: pip`) paired with an install of a DIFFERENT package
+    manager is not the install that cache feeds."""
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        _OPT79_NODE_CACHE, {"run": "pip install -r requirements.txt"}))
+    assert block is None and gate == "install_package_manager_does_not_match_cache", gate
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        {"uses": "actions/setup-python@v5", "with": {"cache": "pip"}},
+        {"run": "npm ci"}))
+    assert block is None and gate == "install_package_manager_does_not_match_cache", gate
+    # the matching pair, and a cache whose ecosystem cannot be told, still pass
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        _OPT79_NODE_CACHE, {"run": "npm ci"}))
+    assert gate == "" and block, gate
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        {"uses": "actions/cache@v4", "with": {"path": "build-output", "key": "k"}},
+        {"run": "pip install -r requirements.txt"}))
+    assert gate == "" and block, gate
+
+
+def test_opt79_counts_caches_that_setup_actions_turn_on_by_default():
+    """`actions/setup-go@v4+` caches unless `cache: false`, and
+    `astral-sh/setup-uv@v5+` caches by default through `enable-cache` (it has no
+    `cache:` input at all). Reading only `cache:` missed both: a job with one of
+    them AND an `actions/cache` step passed the "exactly one cache" gate, and a
+    plain `setup-go` job was tallied as declaring no cache."""
+    go_default = {"uses": "actions/setup-go@v5", "with": {"go-version": "1.22"}}
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        go_default, {"uses": "actions/cache@v4",
+                     "with": {"path": "~/go/pkg/mod", "key": "k"}},
+        {"run": "go mod download"}))
+    assert block is None and gate == "job_declares_more_than_one_cache_restore_step", gate
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        go_default, {"run": "go mod download"}))
+    assert gate == "" and block["cache_ref"] == "actions/setup-go@v5", (block, gate)
+    for off in ({"uses": "actions/setup-go@v5", "with": {"cache": False}},
+                {"uses": "actions/setup-go@v3"}):
+        block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+            off, {"run": "go mod download"}))
+        assert gate == "job_declares_no_cache_restore_step", (off, gate)
+    uv_default = {"uses": "astral-sh/setup-uv@v6"}
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        uv_default, {"run": "uv sync"}))
+    assert gate == "" and block["cache_ref"] == "astral-sh/setup-uv@v6", (block, gate)
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        {"uses": "astral-sh/setup-uv@v6", "with": {"enable-cache": "false"}},
+        {"run": "uv sync"}))
+    assert gate == "job_declares_no_cache_restore_step", gate
+    # …and a setup-node that may cache by default (v5+, decided by package.json)
+    # is a possible second cache next to an explicit one: never guessed.
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, _opt79_steps(
+        {"uses": "actions/setup-node@v5"}, _OPT79_NODE_CACHE, {"run": "npm ci"}))
+    assert gate == "job_declares_more_than_one_cache_restore_step", gate
+
+
+def test_opt79_withholds_a_restore_keys_fallback_rather_than_calling_it_a_hit():
+    """`actions/cache` prints only `Cache restored from key: <key>` on a
+    restore-keys fallback — it never prints a miss line first. A miss line
+    followed by a hit line in one restore step is therefore not the fallback it
+    was read as; it is two verdicts, and it is withheld."""
+    jpr, logs = _opt79_sample()
+    for jid in sorted(logs)[:4]:
+        logs[jid] = _opt79_log(
+            "Cache not found for input keys: node-modules-abc123",
+            "Cache restored from key: node-modules-")
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert out == []
+    assert w.get("run_log_shows_both_a_hit_and_a_miss_line") == 4, w
+
+
+def test_opt79_withholds_a_partial_restore_keys_hit():
+    """A restore-keys fallback restores an OLDER cache under a different key and
+    then SAVES a new one in the post step. That run paid the restore, the
+    install's catch-up and a save: it is neither path of the comparison, and
+    counting it as a clean hit loads the hit side with a miss-side cost."""
+    jpr, logs = _opt79_sample()
+    # (1) the restored key differs from the primary key the step echoed
+    jid0 = sorted(logs)[0]
+    logs[jid0] = _opt79_log("with:", "  path: node_modules",
+                            "  key: node-modules-abc123",
+                            "Cache restored from key: node-modules-000fff")
+    # (2) a hit whose post step saved a new cache
+    jid1 = sorted(logs)[1]
+    logs[jid1] = (_opt79_log(_OPT79_HIT_LINE)
+                  + "2026-06-01T00:00:09.0Z ##[group]Post Run actions/cache@v4\n"
+                  + "2026-06-01T00:00:09.5Z Cache saved with key: node-modules-abc123\n")
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("run_log_shows_a_partial_restore_keys_hit") == 2, w
+    assert out == []            # 2 clean hits left: under the population floor
+    # an exact-key hit whose echoed key matches is still a clean hit
+    status, _line, _grp = cr._opt79_classify_log(
+        _opt79_log("  key: node-modules-abc123", _OPT79_HIT_LINE),
+        {"restore": "Run actions/cache@v4", "cache_ref": "actions/cache@v4"})
+    assert status == "hit", status
+
+
+def test_opt79_counts_occurrences_beyond_the_per_job_cap_as_capped_not_unread():
+    """The plan reads at most eight occurrences of one job; the detector walks
+    every sampled run. Occurrences nine and up were never going to be read, and
+    counting them as `occurrence_has_no_captured_log` made a deliberate cap look
+    like a failed fetch — and blamed the job's thin population on unread logs."""
+    jpr, logs = _opt79_sample(hits=6, misses=4)
+    planned = {j["id"] for _p, _wf, j in
+               cr._opt79_log_plan("ci.yml", jpr, _opt79_crit(), _opt79_wf())}
+    assert len(planned) == cr._OPT79_LOG_PROBE_MAX
+    logs = {k: v for k, v in logs.items() if k in planned}
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert out == []
+    assert w.get("beyond_the_per_job_log_probe_cap") == 2, w
+    assert w.get("occurrence_has_no_captured_log") is None, w
+    assert w.get("population_truncated_by_unread_logs") is None, w
+    assert w.get("fewer_than_min_miss_runs_classified") == 1, w
+
+
+def test_opt79_names_each_workflow_whose_probe_returned_no_log():
+    """The not-evaluated disclosure fired only when NO log came back repo-wide,
+    so one workflow whose every probe 404'd beside another that returned logs
+    read as evaluated-and-clean."""
+    kept = [(10.0, "a.yml", {"id": 1}), (10.0, "a.yml", {"id": 2}),
+            (20.0, "b.yml", {"id": 3}), (20.0, "b.yml", {"id": 4})]
+    got = cr._opt79_workflows_with_no_returned_log(kept, {1: "log"})
+    assert got == [("b.yml", 2)], got
+    assert cr._opt79_workflows_with_no_returned_log(kept, {}) == [
+        ("a.yml", 2), ("b.yml", 2)]
+    assert cr._opt79_workflows_with_no_returned_log(kept, {1: "l", 3: "l"}) == []
+
+
+def test_opt79_measures_an_uncredited_cache_with_no_monthly_volume():
+    """The uncredited row carries no sizing, so it never needed a volume — but
+    the detector returned on a missing volume before measuring anything, and a
+    pole cache whose logs had already been fetched was dropped unmeasured."""
+    jpr, logs = _opt79_sample()
+    rows: list = []
+    w: dict = {}
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_pole_crit(), _opt79_wf(), None, 0,
+        logs_by_job_id=logs, uncredited=rows, withheld=w, is_pr=True)
+    assert out == []
+    assert len(rows) == 1, w
+    assert rows[0]["monthly_volume"] is None
+    assert rows[0]["effective_monthly_volume"] is None
+    vr = _load_verify_report_for_opt79()
+    assert vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": rows}) == []
+    # the CREDITED path still needs a volume to price anything
+    out, w = _opt79_withheld(monthly=None)
+    assert out == [] and w.get("no_monthly_volume") == 1, w
+
+
+def test_opt79_withholds_a_step_whose_timestamps_do_not_parse():
+    """A rendered restore step whose timestamps will not parse did not measure
+    0s — it did not measure. Zeroing it strips a term off one side."""
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr[:2]:
+        for st in run_jobs[0]["steps"]:
+            if st["name"] == "Run actions/cache@v4":
+                st["started_at"] = st["completed_at"] = "not-a-time"
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("step_timestamps_unparseable_in_this_occurrence") == 2, w
+    assert out == []
+
+
+def test_opt79_classifies_only_occurrences_that_succeeded():
+    """`actions/cache` saves in a post step that runs only on success, so a
+    failed occurrence's miss path is missing its save — a shorter miss path
+    that manufactures excess."""
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr[4:6]:
+        run_jobs[0]["conclusion"] = "failure"
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("occurrence_did_not_succeed") == 2, w
+    assert out == []
+
+
+def test_opt79_tallies_a_skipped_occurrence_as_skipped():
+    """A skipped job has no duration because it never ran — not because its
+    timestamps are broken."""
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr[:2]:
+        run_jobs[0]["conclusion"] = "skipped"
+        run_jobs[0]["completed_at"] = run_jobs[0]["started_at"]
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("occurrence_was_skipped") == 2, w
+    assert w.get("occurrence_duration_unparseable") is None, w
 
 
 # ============ OPT80 checkout stalls on the tail ============

@@ -8780,6 +8780,74 @@ def test_cache_probe_check_says_so_when_it_cannot_read_the_findings(tmp_path):
     assert bad and "unreadable" in bad, (bad, note)
 
 
+def test_cache_probe_check_fails_closed_on_malformed_counts(tmp_path):
+    """A probe count that is not an integer is not zero. Reading `"8"` (or a
+    missing `returned`) as 0 let a report with no probe row pass a run that
+    recorded eight reads — the count that says the probe happened was malformed,
+    and the check treated malformed as "nothing happened"."""
+    import json as _json
+    vr = _load_verify_report()
+    p = tmp_path / "findings.json"
+    for probe in ({"probed": "8", "returned": 8, "budget": 24},
+                  {"probed": 8, "budget": 24},
+                  {"probed": True, "returned": True, "budget": 24},
+                  {"probed": 8, "returned": 8, "planned": "9", "budget": 24}):
+        p.write_text(_json.dumps({"data_sources": {"cache_probe_logs": probe}}),
+                     encoding="utf-8")
+        bad, _ = vr._cache_probe_count_violation("## Data sources\n", p)
+        assert bad and "malformed" in bad, (probe, bad)
+    # …a well-formed zero is still a clean "nothing probed", and a doc with no
+    # probe block at all (a run from before the probe existed) is not malformed.
+    p.write_text(_json.dumps({"data_sources": {"cache_probe_logs": {
+        "probed": 0, "returned": 0, "planned": 0, "budget": 24}}}), encoding="utf-8")
+    assert vr._cache_probe_count_violation("## Data sources\n", p)[0] is None
+    p.write_text(_json.dumps({"data_sources": {}}), encoding="utf-8")
+    assert vr._cache_probe_count_violation("## Data sources\n", p)[0] is None
+
+
+def _withheld_doc(tmp_path, rows):
+    import json as _json
+    p = tmp_path / "findings.json"
+    p.write_text(_json.dumps({"data_sources": {},
+                              "opt79_withheld_candidates": rows}), encoding="utf-8")
+    return p
+
+
+def test_withheld_cache_candidates_must_be_disclosed(tmp_path):
+    """The cache hit/miss probe read a candidate's logs and then withheld it. A
+    report that says nothing about that reads exactly like "measured, nothing
+    found" — the reader is told the cache is fine when the audit could not tell.
+    The tally has to reach the page, and the self-check has to pair the two."""
+    vr = _load_verify_report()
+    rows = [{"workflow_file": "ci.yml", "job": "unit",
+             "gate": "fewer_than_min_miss_runs_classified"},
+            {"workflow_file": "ci.yml", "job": "e2e",
+             "gate": "fewer_than_min_miss_runs_classified"},
+            {"workflow_file": "nightly.yml", "job": "build",
+             "gate": "population_truncated_by_unread_logs"}]
+    path = _withheld_doc(tmp_path, rows)
+    silent = "## 🗄️ Data sources\n\n| Source | Coverage | Feeds |\n"
+    chk = vr.check_coverage_disclosed(silent, path)
+    assert not chk.ok and "withheld" in chk.detail, chk
+    row = ("| cache hit/miss verdicts | {} | Why a probed cache produced "
+           "no finding |\n")
+    honest = silent + row.format(
+        "3 candidate cache(s) probed but withheld; top reason: "
+        "`fewer_than_min_miss_runs_classified`")
+    chk = vr.check_coverage_disclosed(honest, path)
+    assert chk.ok, chk
+    # a wrong count, or a reason that is not the commonest one, is not a disclosure
+    for cell in ("2 candidate cache(s) probed but withheld; top reason: "
+                 "`fewer_than_min_miss_runs_classified`",
+                 "3 candidate cache(s) probed but withheld; top reason: "
+                 "`population_truncated_by_unread_logs`"):
+        chk = vr.check_coverage_disclosed(silent + row.format(cell), path)
+        assert not chk.ok, (cell, chk)
+    # …and a row with nothing behind it is a claim the run never made.
+    chk = vr.check_coverage_disclosed(honest, _withheld_doc(tmp_path, []))
+    assert not chk.ok, chk
+
+
 # ── OPT80: the verifier re-derives the checkout tail, never trusts it ──
 # The pattern is admissible only because it PROVES the stall instead of
 # inferring it from a duration (the reason OPT49 was cut). So the arm has to

@@ -31,14 +31,14 @@ unversioned and updates by reinstall from `main`.
   less. It withholds — visibly, with a per-gate tally on every run — unless the job
   declares exactly one cache followed by an install, at least three hit runs and
   three miss runs are classified from their logs, every credited run is on the same
-  runner label, the hit path is slower by at least 5 seconds or 20%, the cache hits
+  runner label, the hit path is slower by at least the larger of 5 seconds and
+  20% of the miss path, the cache hits
   on at least a quarter of classified runs, and the job sits below the workflow's
   slowest-but-one job. The cache line is read only inside the restore step's own
   section of the log, so a monorepo's build tool printing "cache miss" while it
   runs the tests can never be mistaken for this cache; a run whose log shows both
-  a hit and a miss elsewhere in that section is a job with two caches and is
-  excluded, never guessed, while a miss immediately followed by a hit is the
-  ordinary fallback-key spelling and counts as the hit it is. It credits no
+  a hit and a miss in that section, in either order, is excluded, never
+  guessed. It credits no
   wall-clock time. A cache on a job the audit cannot prove is safe to shrink is
   measured on exactly the same evidence and reported with no number attached: one
   line saying the cache was measured to cost more than it saves, how much per
@@ -64,7 +64,7 @@ unversioned and updates by reinstall from `main`.
   run whose log was never fetched is counted as unread rather than as a run with
   nothing to say, so a thin result never gets blamed on the repository, and a
   probe wave that mostly failed says that instead of "this cache rarely misses".
-  If no log came back at all the report names the detector as unevaluated rather
+  A workflow none of whose probed logs came back is named as unevaluated rather
   than letting an absent finding read as a clean one. A repo that acts on this finding will still be marked down by
   ci-score's dependency-caching check, which reads configuration only; reconciling
   the two is an open decision, not a behaviour either skill implements today.
@@ -649,6 +649,30 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-09-29** — **The cache-costs-more-than-it-saves pattern (OPT79) now holds
+  back wherever its input is ambiguous, and says so when it does.** A cache
+  restored from a fallback key (an older cache restored, a new one saved) is no
+  longer counted as a clean hit, and a run whose cache step prints both a hit and
+  a miss is set aside in either order. A cache that `setup-go` (v4 and later) or
+  `setup-uv` (v5 and later) turns on by default now counts, so a job with one of
+  those plus its own cache step is no longer read as having one cache, and a plain
+  `setup-go` job can be measured. The cache is no longer paired with the wrong
+  install: when an unrecognised command (`cd web && npm ci`) sits between the
+  cache and the install, or the install belongs to a different package manager
+  than the cache, the job is held back. Only runs that succeeded are compared,
+  a step whose times cannot be read holds its run back instead of counting as zero
+  seconds, and a skipped run is labelled as skipped. When the audit read a
+  cache's logs and still could not decide, the report's data-sources table now
+  says how many caches that happened to and the most common reason; runs past the
+  eight-per-job log limit are counted as capped rather than as failed reads; and
+  each workflow whose logs all failed to come back is named on its own. A measured
+  cache on a job the audit cannot price is kept even when the workflow's monthly
+  run count is unknown, is described correctly on a workflow that pull requests
+  never run, and is never shown with a missing number; the report's self-check
+  now fails if any such cache is left off the page or shown with different
+  numbers, and it treats a malformed log-probe count as an error rather than as
+  zero. (#106)
 
 - **2026-09-29** — **The stalled-checkout pattern (OPT80) no longer misses a
   stall, or invents one, in three cases.** A low-speed setting on some other

@@ -7756,3 +7756,78 @@ def test_uncredited_pole_cache_survives_a_report_with_nothing_else_in_it():
     assert "not credited" in md and "`build`" in md
     # …and a schedule-only workflow is never told its saving is on a merge wait.
     assert "merge wait" not in md, md
+
+
+def _uncredited_row(**kw):
+    row = {
+        "kind": "opt79_uncredited_pole_cache",
+        "workflow_file": ".github/workflows/nightly.yml",
+        "job": "build",
+        "runner_label": "ubuntu-latest",
+        "restore_step": "Run actions/cache@v4",
+        "install_step": "Run npm ci",
+        "waste_s": 19.0, "hits": 5, "misses": 4,
+        "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
+        "job_p50_s": 600.0, "floor_p50_s": 300.0,
+        "long_pole_job": "build", "long_pole_p50_s": 600.0,
+        "on_critical_path": False,
+    }
+    row.update(kw)
+    return row
+
+
+def test_uncredited_cache_on_a_workflow_that_gates_no_pr_says_so():
+    """A workflow no pull request runs has no merge gate to leave unchanged. The
+    row was told "this audit cannot prove that shrinking it leaves the merge gate
+    unchanged" — a sentence about a gate that does not exist, which reads as a
+    reason to hesitate over a saving that is pure runner-minutes."""
+    md = "\n".join(bp._opt79_uncredited_block({
+        "opt79_uncredited_pole_caches": [
+            _uncredited_row(workflow_gates_pull_requests=False)]}))
+    assert "merge gate" not in md, md
+    assert "merge wait" not in md, md
+    assert "does not run on pull requests" in md, md
+    assert "not credited" in md
+
+
+def test_uncredited_cache_rows_without_their_numbers_are_not_rendered():
+    """A row missing its measured excess or its populations rendered as
+    "by ?s … (None hit / None miss run(s) sampled)" — a measurement line with no
+    measurement in it. Such a row is not rendered (and the report's self-check
+    fails on the resulting count mismatch)."""
+    rows = [_uncredited_row(job="good"),
+            _uncredited_row(job="nowaste", waste_s=None),
+            _uncredited_row(job="nohits", hits=None),
+            _uncredited_row(job="nomisses", misses="4")]
+    md = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": rows}))
+    assert "`good`" in md
+    for job in ("nowaste", "nohits", "nomisses"):
+        assert f"`{job}`" not in md, md
+    assert "?s" not in md and "None hit" not in md, md
+    assert "**1 cache(s) measured net-negative" in md, md
+
+
+def test_withheld_cache_candidates_reach_the_data_sources_table():
+    """The cache hit/miss probe can read a candidate's logs and still withhold it
+    (too few misses, unread logs, a runner change). Without a line saying so the
+    report reads "measured, nothing found" for "measured, could not tell"."""
+    doc = _doc_one_pole()
+    doc["data_sources"] = {**doc["data_sources"], "tiers_run": ["gh-timing"],
+                           "cache_probe_logs": {"probed": 8, "returned": 8,
+                                                "budget": 24}}
+    doc["opt79_withheld_candidates"] = [
+        {"workflow_file": "ci.yml", "job": "unit",
+         "gate": "population_truncated_by_unread_logs"},
+        {"workflow_file": "ci.yml", "job": "e2e",
+         "gate": "fewer_than_min_miss_runs_classified"},
+        {"workflow_file": "b.yml", "job": "x",
+         "gate": "fewer_than_min_miss_runs_classified"}]
+    foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    assert "| cache hit/miss verdicts |" in foot, foot
+    assert ("3 candidate cache(s) probed but withheld; top reason: "
+            "`fewer_than_min_miss_runs_classified`") in foot, foot
+    # nothing withheld -> no row
+    doc["opt79_withheld_candidates"] = []
+    assert "cache hit/miss verdicts" not in "\n".join(
+        bp._data_sources_footer(doc, "o/r"))
