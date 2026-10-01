@@ -1135,14 +1135,18 @@ never its own row builder. The phrase tables (`_OPT77_WITHHOLD_PHRASES`,
 `_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`) map EVERY withhold gate
 their collector can record. What a test actually guarantees is narrower than
 "a new gate cannot ship without a phrase": it enumerates the gates it can READ
-from the detectors' source — the literals handed to `_drop_group` /
-`_unresolved`, the names the independence check and `_opt80_stall_in_log`
-return, and the reasons accumulated in `reasons` / `open_reasons` by `.append`,
+from FOUR sources in the detectors' own code — the literals handed to
+`_drop_group` / `_unresolved`, the names the independence check returns, the
+names `_opt80_stall_in_log` returns, and the reasons accumulated by `.append`,
 `.extend`, `+=` or an assignment's fallback default — and fails when one of
-those has no phrase. A gate recorded in some other shape is invisible to the
-scan: through a differently-named local, assembled at runtime, passed to
-`_drop_group` by keyword instead of positionally, or recorded in a helper other
-than the four functions the scan reads. The
+those has no phrase, or when a phrase has no gate that records it. The
+accumulators are DERIVED from the detector (a list-valued local the function
+iterates into a gate sink, plus anything built out of one) rather than listed
+in the test: listed, a renamed accumulator silently took its gates out of the
+scan's reach while the scan went on reporting the ones it still saw. A gate
+recorded in some other shape is still invisible: assembled at runtime, passed
+to `_drop_group` by keyword instead of positionally, or recorded in a helper
+other than the four functions the scan reads. The
 backstop for that one is `verify_report`, which fails the report closed rather
 than printing a code. `verify_report.py`'s `check_coverage_disclosed` carries
 its own copy of the tables (pinned equal by a coupling test) and re-derives the

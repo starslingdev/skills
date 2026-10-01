@@ -2929,24 +2929,82 @@ def test_withheld_row_never_prints_an_unmapped_gate_code():
     assert row and "brand_new_gate_code" not in row, row
 
 
-# The local names OPT80 accumulates its no-proof reasons in. A gate reaches the
-# report through one of these, whichever statement writes it.
-_REASON_ACCUMULATORS = ("reasons", "open_reasons")
+def _reason_accumulators(fn):
+    """The local names OPT80 accumulates its no-proof reasons in, DERIVED from
+    the function rather than listed here.
+
+    They used to be listed (`("reasons", "open_reasons")`), which is the same
+    defect one level up from the one the derivation fixed: a hardcoded name is
+    a name the guard cannot notice being renamed, and the scan would then read
+    zero gates out of an accumulator while still reporting the ones it found.
+
+    Derivation: a list-valued local is an accumulator when the function
+    iterates over it and hands the loop variable to a gate sink — `_no`'s gate
+    argument, or `_unresolved`'s (`for gate in sorted(set(reasons)) or [...]`
+    gives `reasons`) — and so is any list-valued local built out of one
+    (`open_reasons = [g for g in (reasons or [...]) ...]`).
+    """
+    import ast
+    list_valued = set()
+    for n in ast.walk(fn):
+        if (isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
+                and isinstance(n.value, (ast.List, ast.ListComp))):
+            list_valued.add(n.target.id)
+        elif isinstance(n, ast.Assign) and isinstance(n.value, (ast.List, ast.ListComp)):
+            list_valued |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+        elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+            list_valued.add(n.target.id)
+
+    def _names(node):
+        return {c.id for c in ast.walk(node) if isinstance(c, ast.Name)}
+
+    def _gate_sink_for(target):
+        """True when this `for` body hands its loop variable to a gate sink —
+        `_no`'s gate argument or `_unresolved`'s."""
+        for n in ast.walk(target):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)):
+                continue
+            if n.func.id == "_no" and n.args and target_name in _names(n.args[0]):
+                return True
+            if (n.func.id == "_unresolved" and len(n.args) > 1
+                    and target_name in _names(n.args[1])):
+                return True
+        return False
+
+    acc = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.For) and isinstance(n.target, ast.Name):
+            target_name = n.target.id
+            if any(_gate_sink_for(b) for b in n.body):
+                acc |= _names(n.iter) & list_valued
+    # …and anything built OUT of an accumulator is one too: the open reasons
+    # are filtered out of the collected ones and then handed on.
+    for _ in range(10):
+        grown = set(acc)
+        for n in ast.walk(fn):
+            if isinstance(n, (ast.Assign, ast.AugAssign)):
+                targets = (n.targets if isinstance(n, ast.Assign) else [n.target])
+                if _names(n.value) & acc:
+                    grown |= {t.id for t in targets
+                              if isinstance(t, ast.Name) and t.id in list_valued}
+        if grown == acc:
+            break
+        acc = grown
+    return acc
 
 
 def _withhold_gates_recordable_in_the_collector():
     """Every gate the collector can write into a withheld-candidates list, read
-    from the detectors' own source: the literals handed to `_drop_group` /
-    `_unresolved`, the no-proof reasons OPT80 collects (by `.append`, `.extend`,
-    `+=` or an assignment's fallback default), and the names the independence
-    check returns. A gate added there without a phrase fails here.
+    from the detectors' own source. FOUR sources, which is what the scan reads:
+    the literals handed to `_drop_group` / `_unresolved`, the names the
+    independence check returns, the names `_opt80_stall_in_log` returns, and
+    the no-proof reasons OPT80 collects (by `.append`, `.extend`, `+=` or an
+    assignment's fallback default). A gate added to any of them without a
+    phrase fails here.
 
-    Nothing in this scan is hardcoded. Two OPT80 gates used to be, because they
-    are recorded by `open_reasons += [...]` and by the `reasons or [<default>]`
-    inside an assignment rather than by `.append` — and a gate the guard lists
-    for itself is a gate the guard cannot notice disappearing, which also left
-    the "the scan is really reading the detectors" canary below passing on two
-    names the scan never read."""
+    Nothing in this scan is hardcoded — including the names of the reason
+    accumulators, which `_reason_accumulators` derives from the function (see
+    there for why listing them was the same defect one level up)."""
     import ast
     tree = ast.parse((_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8"))
     fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
@@ -2970,21 +3028,20 @@ def _withhold_gates_recordable_in_the_collector():
     d80 = fns["_detect_opt80_checkout_tail_stall"]
     for c in calls(d80, "_unresolved"):
         found80 |= lits(c.args[1]) if len(c.args) > 1 else set()
-    # Every way the reason accumulators are written to, not just `.append`.
-    # `open_reasons += [...]` (an AugAssign) and the `reasons or [<default>]`
-    # fallback inside `open_reasons = [...]` (a plain Assign) both record gates
-    # the scan could not see, so their two literals were hardcoded here — and a
-    # hardcoded literal is a gate the guard cannot notice going missing.
+    accumulators = _reason_accumulators(d80)
+    assert accumulators, "no reason accumulator derived from the OPT80 detector"
+
+    # Every way the derived accumulators are written to, not just `.append`.
     def _writes_a_reason_list(node):
         if isinstance(node, (ast.Assign, ast.AugAssign)):
             targets = (node.targets if isinstance(node, ast.Assign)
                        else [node.target])
-            return any(isinstance(t, ast.Name) and t.id in _REASON_ACCUMULATORS
+            return any(isinstance(t, ast.Name) and t.id in accumulators
                        for t in targets)
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr in ("append", "extend")):
+                and node.func.attr in ("append", "extend", "insert")):
             return (isinstance(node.func.value, ast.Name)
-                    and node.func.value.id in _REASON_ACCUMULATORS)
+                    and node.func.value.id in accumulators)
         return False
 
     for n in ast.walk(d80):
@@ -3004,10 +3061,25 @@ def test_every_recordable_withhold_gate_has_a_plain_english_phrase():
             "no_job_outside_the_group_runs_often_enough_to_measure_against"} <= g77, g77
     assert {"tail_run_log_unavailable", "fewer_than_the_minimum_tail_runs",
             "tail_run_past_the_log_probe_budget"} <= g80, g80
+    # …and enough of them that an accumulator whose name the scan failed to
+    # derive cannot pass unnoticed: every non-verdict phrase must have been read
+    # back out of the source.
+    assert len(g80) >= len(bp._OPT80_WITHHOLD_PHRASES), (
+        "the scan read fewer OPT80 gates than there are phrases - an "
+        "accumulator the derivation missed", sorted(g80))
     assert g77 - set(bp._OPT77_WITHHOLD_PHRASES) == set(), (
         "OPT77 withhold gate with no phrase", g77 - set(bp._OPT77_WITHHOLD_PHRASES))
     assert g80 - set(bp._OPT80_WITHHOLD_PHRASES) == set(), (
         "OPT80 withhold gate with no phrase", g80 - set(bp._OPT80_WITHHOLD_PHRASES))
+    # …and the reverse: a phrase for a gate no collector path can record is
+    # dead text that reads like coverage. Nothing is allowlisted today; an
+    # entry here must name the path the scan cannot see.
+    assert set(bp._OPT77_WITHHOLD_PHRASES) - g77 == set(), (
+        "OPT77 phrase for a gate nothing records",
+        sorted(set(bp._OPT77_WITHHOLD_PHRASES) - g77))
+    assert set(bp._OPT80_WITHHOLD_PHRASES) - g80 == set(), (
+        "OPT80 phrase for a gate nothing records",
+        sorted(set(bp._OPT80_WITHHOLD_PHRASES) - g80))
     # a verdict is never withheld, so a phrase for one is dead text
     assert not set(bp._OPT77_WITHHOLD_PHRASES) & set(cr._OPT77_VERDICT_GATES)
     assert not set(bp._OPT80_WITHHOLD_PHRASES) & set(cr._OPT80_VERDICT_GATES)
@@ -8222,28 +8294,91 @@ def test_no_collector_path_can_record_a_held_back_entry_with_no_job():
     """The renderer carries `(unnamed job)` / "a group" fallbacks and the
     self-check hard-REJECTS an entry that names no job, so the two would
     disagree if any real detector path could produce one. Read off the
-    collector: every site that appends to a withheld-candidate list guards the
-    name, so the fallbacks are defence against a malformed document, never a
-    shape a run can reach — and the self-check's strictness cannot redden a
-    real audit."""
+    collector: every site that adds to a withheld-candidate list is an append
+    of a dict literal whose name field is bound to a non-empty expression, and
+    OPT79's pre-probe site — the only one whose name is not structurally
+    non-empty — appends under a condition that tests it.
+
+    The scan used to match `withheld_candidates.append(<Name>)` only, so an
+    `extend`, an `insert`, a `+=` or a row built one line earlier escaped it
+    entirely — and `len(sites) == 4` still passed, because a site the scan
+    cannot see is not a site it counts. It now matches every way the list can
+    be written to, and asserts each one is the recognised shape. The OPT79
+    guard is located by walking that function's conditions rather than by
+    grepping the whole file for the text of the test, which matched wherever
+    it happened to live."""
     import ast
     import collect_runs as _cr
     src = (_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
-    sites = [n for n in ast.walk(tree)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-             and n.func.attr == "append"
-             and isinstance(n.func.value, ast.Name)
-             and n.func.value.id == "withheld_candidates"]
-    assert len(sites) == 4, [ast.dump(s)[:80] for s in sites]   # 77, 79 x2, 80
-    for s in sites:
-        d = s.args[0]
-        assert isinstance(d, ast.Dict), ast.dump(s)
-        keys = {k.value for k in d.keys if isinstance(k, ast.Constant)}
-        assert "job" in keys or "jobs" in keys, keys
+
+    def _is_target(node):
+        return isinstance(node, ast.Name) and node.id == "withheld_candidates"
+
+    writes = []
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and _is_target(n.func.value)):
+            writes.append((n.func.attr, n))
+        elif isinstance(n, ast.AugAssign) and _is_target(n.target):
+            writes.append(("+=", n))
+        elif (isinstance(n, ast.Assign)
+              and any(_is_target(t) for t in n.targets)):
+            writes.append(("=", n))
+    # 77, 79 pre-probe, 79 post-probe, 80 — and every one of them an
+    # `append(<dict literal>)`, never an `extend`, an `insert` or a `+=`.
+    assert len(writes) == 4, [(k, ast.dump(n)[:60]) for k, n in writes]
+    for kind, n in writes:
+        assert kind == "append", (kind, ast.dump(n)[:80])
+        d = n.args[0]
+        assert isinstance(d, ast.Dict), ast.dump(n)[:120]
+        named = {k.value: v for k, v in zip(d.keys, d.values)
+                 if isinstance(k, ast.Constant)}
+        key = "job" if "job" in named else "jobs"
+        assert key in named, sorted(named)
+        # the name is BOUND to something, not a literal blank or None
+        value = named[key]
+        assert not (isinstance(value, ast.Constant)
+                    and not str(value.value or "").strip()), ast.dump(value)
+
     # OPT79's pre-probe site is the only one whose name is not structurally
-    # non-empty, and it is guarded by an explicit truthiness test.
-    assert 'and ctx.get("job")' in src
+    # non-empty. Its guard is located STRUCTURALLY: the conditions that
+    # actually govern that append, not a substring anywhere in the file.
+    def _guards_of(root, needle):
+        """Every `if` test that encloses `needle` inside `root`."""
+        found = []
+
+        def walk(node, tests):
+            for child in ast.iter_child_nodes(node):
+                if child is needle:
+                    found.extend(tests)
+                if isinstance(child, ast.If):
+                    for b in child.body:
+                        walk(b, tests + [child.test])
+                    for b in child.orelse:
+                        walk(b, tests)
+                else:
+                    walk(child, tests)
+
+        walk(root, [])
+        return found
+
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    pre_probe = [n for _k, n in writes
+                 if any(isinstance(c, ast.Subscript)
+                        and isinstance(c.value, ast.Name) and c.value.id == "ctx"
+                        for c in ast.walk(n))]
+    assert len(pre_probe) == 1, len(pre_probe)
+    guards = _guards_of(fns["_opt79_candidates"], pre_probe[0])
+    assert guards, "OPT79's pre-probe append is not inside any condition"
+    guarded = any(
+        isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+        and c.func.attr == "get" and isinstance(c.func.value, ast.Name)
+        and c.func.value.id == "ctx"
+        and c.args and isinstance(c.args[0], ast.Constant)
+        and c.args[0].value == "job"
+        for t in guards for c in ast.walk(t))
+    assert guarded, [ast.dump(t)[:120] for t in guards]
 
     # …and the renderer still renders something legible if one ever appeared —
     # escaped like any other name, so it reads "(unnamed job)" on the page.
