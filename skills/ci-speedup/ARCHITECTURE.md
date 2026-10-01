@@ -1063,7 +1063,46 @@ shape. The certificate's `proof` token stays `below_cluster_floor` (shared with
 OPT65 as the dispatch key) and is historical for OPT77; `verify_report.py`'s
 `_opt77_consolidation_rederived` arm re-derives the saving, the margin, the
 grouping (each job's own stamped prefix must equal the credited shared one) and
-the eligible set the tallest-remaining job was chosen from. Like OPT65 it claims
+the eligible set the tallest-remaining job was chosen from. When the group is
+every job the workflow DECLARES there is no remaining job, and the comparison is
+against the gate the group sets today: `max_i(job_p50_i)`, the slowest member's
+MEASURED duration. The members run concurrently — the independence gate has
+already shown none of them waits on another — so the longest of them is
+literally what this workflow makes a pull request wait for. At or below that
+gate the merge wait does not lengthen and the runner-minute saving is credited;
+above it the group is held back and disclosed, with both numbers on the entry.
+
+That gate used to be re-assembled from each member's step components,
+`max_i(min(setup_i + useful_i, job_p50_i))`. The capped value is not a
+duration anything took: three members each measuring 400s were told, in the
+report's own prose, that they take 90s today. The component sum survives only
+as a coherence check — the projection can never be below any single member's
+own `setup_i + useful_i`, and `verify_report` reddens if it is, which says the
+stamped medians do not come from one set of runs.
+
+For a group that is the whole workflow, collapsing can never SHORTEN the merge
+wait: each member's useful work is its measured duration minus its setup, read
+off one `started_at`→`completed_at` span, so `setup_i + useful_i == job_p50_i`
+exactly, and the collapsed job's `max(setup) + max(useful)` is therefore at
+least `max_i(job_p50_i)`. The saving is credited only when the two are EQUAL —
+one member holding both the longest setup and the longest task, so the wait is
+unchanged. Otherwise the group is held back and the report says what the
+collapse would cost the merge wait. On real data the credited case is the
+exception and the disclosed hold-back is the common outcome; that disclosure
+is the point of the change, not the credit. The equality is also only as
+stable as a one-second median: a member's p50 moving by a second flips a tie
+into a hold-back, which is the safe direction — the flip can produce a
+disclosed WITHHOLD, never a false FIRE.
+
+"Whole workflow" is decided from the declared jobs, never from the sample, and
+needs one declared key per member. What `verify_report` re-derives from
+MEASUREMENT is the gate itself (`max` over `per_workflow_timing[wf].job_p50`
+for the credited members, which no detector writes) and the workflow's declared
+job keys (`per_workflow_timing[wf].declared_job_keys`, stamped by the workflow
+YAML reader before any detector runs). What it takes from the finding's own
+stamps, and then checks for internal coherence, is the per-member setup/useful
+split and the projection built from it.
+Like OPT65 it claims
 no speedup (`wall_clock_p50_s=0`, `realization=none`), and it shares
 `_billed_job_runner` and `_tier2_scope_event` with it.
 
@@ -1077,26 +1116,63 @@ commonest reason). The per-gate tallies (`opt77_withheld_by_gate`,
 `opt80_withheld_by_gate`) are for maintainers; these lists reach the reader.
 
 The held-back disclosure is ONE mechanism shared by OPT77, OPT79 and OPT80.
-`blocking_path._WITHHELD_ROWS` maps each pattern's findings-doc key to its Data
-sources row label, its counted noun and its "Used for" cell, and
-`_withheld_candidates_line` builds the same sentence for all three:
+`blocking_path._WITHHELD_ROWS` is a `WithheldRow` per pattern — findings-doc
+key, Data sources row label, counted noun, "Used for" cell, and `entry_shape`
+(`"job"` for OPT79 / OPT80, `"group"` for OPT77). The shape is registered
+rather than inferred: both twins used to decide it by comparing the key against
+OPT77's, so a fourth group-shaped pattern would have rendered `(unnamed job)`
+for every candidate in the renderer AND been re-derived the same wrong way in
+`verify_report` — agreeing, and green. `verify_report` reads all five fields,
+including the "Used for" cell, which was previously carried on both sides and
+compared to the report by neither. `_withheld_candidates_line` builds the same
+sentence for all three:
 "N candidate … held back (<jobs>): <reason>." — the entries distinct and sorted,
 workflow-qualified as `<workflow.yml> / <job>` when two workflows share a job
 name (an OPT77 entry is the whole group), at most five then ", and K more", every
-repo-controlled name escaped for the table; the reason a plain-English phrase for
-the commonest gate, ties alphabetical. A pattern contributes only its key, its
+repo-controlled name escaped for the table (`\` `|` `[` `]` `(` `)` `_` `<` `>`
+`` ` `` `*` `&` and `~` backslash-escaped, `\` first, so a name can neither
+split the row, nor turn itself into a link, nor open raw HTML or a code span.
+Escaped, never substituted: swapping backticks and asterisks for an apostrophe
+used to render three different job names as one, in a row whose whole job is
+saying which candidates were held back. `&` and `~` are on the list for the
+same reason — left alone, `A&B` and `A&amp;B` render as the same name. Out of scope, and unfixable by character
+escaping: GFM's extended autolink turns a BARE `https://...` job name into a
+live link with no punctuation to escape); the reason a plain-English phrase for the commonest gate,
+ties alphabetical, and prefixed "most commonly," whenever more than one gate
+contributed, or "equally often," when the top two gates held back the same
+number — the count and the job list cover every candidate while the reason
+covers only some of them, and on an exact split there is no commonest reason
+for "most commonly" to name. The count is of DISTINCT candidates, the same set
+the names and the "and K more" overflow come from; counted over raw rows it
+disagreed with its own job list whenever two rows deduplicated into one. A pattern contributes only its key, its
 row text and its gate→phrase table (registered in `_WITHHELD_PHRASES_BY_KEY`),
 never its own row builder. The phrase tables (`_OPT77_WITHHOLD_PHRASES`,
 `_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`) map EVERY withhold gate
-their collector can record, and
-a test enumerates those gates from the detectors' source so a new gate cannot
-ship without a phrase. `verify_report.py`'s `check_coverage_disclosed` carries
+their collector can record. What a test actually guarantees is narrower than
+"a new gate cannot ship without a phrase": it enumerates the gates it can READ
+from FOUR sources in the detectors' own code — the literals handed to
+`_drop_group` / `_unresolved`, the names the independence check returns, the
+names `_opt80_stall_in_log` returns, and the reasons accumulated by `.append`,
+`.extend`, `+=` or an assignment's fallback default — and fails when one of
+those has no phrase, or when a phrase has no gate that records it. The
+accumulators are DERIVED from the detector (a list-valued local the function
+iterates into a gate sink, plus anything built out of one) rather than listed
+in the test: listed, a renamed accumulator silently took its gates out of the
+scan's reach while the scan went on reporting the ones it still saw. A gate
+recorded in some other shape is still invisible: assembled at runtime, passed
+to `_drop_group` by keyword instead of positionally, or recorded in a helper
+other than the four functions the scan reads. The
+backstop for that one is `verify_report`, which fails the report closed rather
+than printing a code. `verify_report.py`'s `check_coverage_disclosed` carries
 its own copy of the tables (pinned equal by a coupling test) and re-derives the
 whole line — count, jobs, reason — from the findings document, failing a report
 that omits the row, misstates any part of it, prints a gate name instead of a
 phrase, or carries a row with nothing behind it; a recorded gate with no phrase
-fails closed. A group that is the whole workflow (`group_is_the_whole_workflow`,
-no job outside it) is a verdict, not a withhold, and is never listed. The three
+fails closed. A group that is every job the workflow declares is no longer a
+silent verdict: it fires when collapsing it does not lengthen the merge gate,
+and is listed as held back
+(`collapsing_the_whole_workflow_would_lengthen_the_merge_gate`) when it would
+not. The three
 files name the keys as constants a coupling test pins equal.
 
 OPT80 (checkout stalls on the tail) is the third measured Tier-2 lever, and the

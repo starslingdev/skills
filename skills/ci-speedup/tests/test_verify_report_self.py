@@ -8483,6 +8483,262 @@ def test_opt77_certificate_rederives_margin_and_saving():
     assert margin == 510.0
 
 
+def _opt77_whole_workflow_finding(**over):
+    """The same finding, stamped as a group that is every declared job."""
+    f = _opt77_finding(**over)
+    sc = f["setup_consolidation"]
+    sc["group_is_the_whole_workflow"] = True
+    sc["workflow_declared_job_keys"] = ["audit", "lint", "typecheck"]
+    sc["credited_job_keys"] = ["audit", "lint", "typecheck"]
+    sc["gate_today_p50_s"] = 90.0
+    sc["remaining_tallest_job"] = None
+    sc["remaining_tallest_p50_s"] = None
+    sc["remaining_eligible_jobs"] = []
+    return f
+
+
+# No job outside the group, and each member measured at exactly its setup +
+# useful work, so today's gate is 90s and the 90s projection is free.
+_OPT77_WHOLE_DATA = {"per_workflow_timing": {".github/workflows/ci.yml": {
+    "floor_p50": 90.0,
+    "job_p50": {"audit": 90.0, "lint": 90.0, "typecheck": 90.0},
+}}}
+
+
+def test_opt77_whole_workflow_certificate_is_rederived_never_trusted():
+    """The whole-workflow arm decides whether a real audit goes red, and it is
+    the only OPT77 path that credits a finding with no wall-clock headroom at
+    all. Every claim it rests on is re-derived here, and each one tampered with
+    in turn, so the arm cannot decay into a rubber stamp."""
+    vr = _load_verify_report()
+    margin, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), _OPT77_WHOLE_DATA)
+    assert problems == [], problems
+    assert margin == 0.0
+
+    # A job the workflow declares that is not a credited member: the group is
+    # not the whole workflow, whatever the finding stamped.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["workflow_declared_job_keys"] = [
+        "audit", "lint", "release", "typecheck"]
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("release" in p for p in problems), problems
+
+    # …and the sampled axis is checked too, not just the declared one.
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"]["test"] = 600.0
+    _m, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert any("test" in p for p in problems), problems
+
+    # Without the declared keys the claim cannot be re-derived at all, so it is
+    # refused rather than taken on trust.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["workflow_declared_job_keys"] = []
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("no declared job keys" in p for p in problems), problems
+
+    # A stamped gate that is not the one the data yields.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["gate_today_p50_s"] = 400.0
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("gate_today_p50_s" in p for p in problems), problems
+
+    # A remaining tallest job named in a group that has nothing outside it.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["remaining_tallest_job"] = "test"
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("remaining tallest job" in p for p in problems), problems
+
+    # …and its p50, which was checked on the name alone.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["remaining_tallest_p50_s"] = 600.0
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("remaining tallest p50" in p for p in problems), problems
+
+    # A finding stamped as FIRED whose projection is above today's gate: the
+    # longest setup and the longest task sit on different members, so
+    # consolidating would lengthen the merge and nothing may be credited.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["per_job"] = {
+        "lint": {"setup_p50_s": 100.0, "useful_work_p50_s": 10.0,
+                 "setup_steps": ["set up job", "actions/checkout"]},
+        "typecheck": {"setup_p50_s": 100.0, "useful_work_p50_s": 10.0,
+                      "setup_steps": ["set up job", "actions/checkout"]},
+        "audit": {"setup_p50_s": 60.0, "useful_work_p50_s": 50.0,
+                  "setup_steps": ["set up job", "actions/checkout"]},
+    }
+    f["setup_consolidation"]["projected_consolidated_p50_s"] = 150.0
+    f["setup_consolidation"]["gate_today_p50_s"] = 110.0
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 110.0, "lint": 110.0, "typecheck": 110.0}
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert margin is None, margin
+    assert any("ABOVE" in p for p in problems), problems
+
+
+def test_opt77_whole_workflow_gate_is_the_slowest_members_measured_duration():
+    """Today's gate for a whole-workflow group is the slowest member's measured
+    p50 — the members run concurrently, so that is what a pull request waits
+    for. The arm re-derives it from `job_p50`, which the detector does not
+    write, so an overstated gate is caught rather than reproduced."""
+    vr = _load_verify_report()
+    # Each member measured 70s while the projection is 90s: not free.
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 70.0, "lint": 70.0, "typecheck": 70.0}
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["gate_today_p50_s"] = 70.0
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert margin is None, margin
+    assert any("ABOVE" in p for p in problems), problems
+    # …and a finding that stamps a gate the measurement does not yield is
+    # rejected on the stamp.
+    _m, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert any("gate_today_p50_s" in p for p in problems), problems
+    # Three members each measuring 400s: the 90s projection cannot lengthen a
+    # 400s wait, so the saving is free and the margin is the whole difference.
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 400.0, "lint": 400.0, "typecheck": 400.0}
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["gate_today_p50_s"] = 400.0
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert problems == [], problems
+    assert margin == 310.0
+
+
+def test_opt77_whole_workflow_gate_carries_the_same_tolerance_as_its_siblings():
+    """The detector projects the consolidated job from UNROUNDED medians; the
+    self-check re-derives it from the components as stamped, rounded to one
+    decimal. The two can land a tenth apart, and this was the only comparison
+    in the arm made exactly — so a consolidation measured as free was rejected
+    with "projected consolidated job 60.0 is ABOVE the 59.9 gate", which reads
+    as the audit refusing its own measurement. Same 0.11 tolerance as every
+    other comparison here.
+
+    Setups of 49.96s and tasks of 9.96s: the detector projects 59.9s against a
+    59.9s gate and fires; the stamped components round to 50.0 and 10.0, so
+    re-derivation yields 60.0."""
+    vr = _load_verify_report()
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 59.93, "lint": 59.93, "typecheck": 59.93}
+    f = _opt77_whole_workflow_finding()
+    sc = f["setup_consolidation"]
+    sc["per_job"] = {n: {"setup_p50_s": 50.0, "useful_work_p50_s": 10.0,
+                         "setup_steps": ["set up job", "actions/checkout"]}
+                     for n in ("audit", "lint", "typecheck")}
+    sc["setup_p50_s"] = 50.0
+    sc["sampled_saved_s"] = 200.0
+    sc["runner_min_saving"] = f["runner_min_saving"] = 166.7
+    sc["projected_consolidated_p50_s"] = 59.9
+    sc["gate_today_p50_s"] = 59.9
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert problems == [], problems
+    assert margin == -0.1
+    # …and a projection genuinely above the gate is still refused.
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 50.0, "lint": 50.0, "typecheck": 50.0}
+    sc["gate_today_p50_s"] = 50.0
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert margin is None and any("ABOVE" in p for p in problems), problems
+
+
+def test_opt77_whole_workflow_per_job_must_name_the_members_not_merely_count_them():
+    """`len(per_job) != len(member)` is a cardinality check: a stamp with the
+    right number of entries under a renamed key passed, so the renamed member
+    was never looked up in `job_p50` at all and the gate was re-derived from
+    the wrong set. A missing measurement is refused outright — assembling a
+    gate out of step components is the overstatement this arm exists to
+    refuse — and a component stamped as absent is not read as zero."""
+    vr = _load_verify_report()
+    # An EXTRA entry keeps the member set covered, so every per-member check
+    # upstream passes and only the identity of the key set catches it.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["per_job"]["docs"] = {
+        "setup_p50_s": 80.0, "useful_work_p50_s": 10.0,
+        "setup_steps": ["set up job", "actions/checkout"]}
+    margin, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert margin is None
+    assert any("not the credited members" in p for p in problems), problems
+    # …and a renamed member is refused rather than quietly re-derived from the
+    # entries that happen to be there.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["per_job"]["lint-renamed"] = (
+        f["setup_consolidation"]["per_job"].pop("lint"))
+    margin, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert margin is None and any("lint" in p for p in problems), problems
+    # A member with no measured p50 is a malformed stamp, not a licence to
+    # fall back to its step components.
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"]["lint"] = 0.0
+    margin, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert margin is None
+    assert any("no measured job_p50" in p for p in problems), problems
+    # Absent is not zero: a component that is missing or non-numeric reddens
+    # rather than sizing the gate's coherence check at nothing.
+    for bad in (None, "eighty"):
+        f = _opt77_whole_workflow_finding()
+        f["setup_consolidation"]["per_job"]["lint"]["setup_p50_s"] = bad
+        margin, problems = vr._opt77_consolidation_rederived(
+            f, _OPT77_WHOLE_DATA)
+        assert margin is None
+        assert any("missing setup/useful-work p50" in p
+                   for p in problems), (bad, problems)
+
+
+def test_opt77_the_ordinary_arm_may_not_stamp_a_gate_the_group_sets_itself():
+    """The two stamp shapes were enforced on one arm only: a finding measured
+    against the tallest REMAINING job could also carry `gate_today_p50_s`, and
+    nothing read it. The tag itself is read as an identity, so a stamped
+    string "false" can no longer select the whole-workflow arm."""
+    vr = _load_verify_report()
+    data = {"per_workflow_timing": {".github/workflows/ci.yml": {
+        "floor_p50": 90.0,
+        "job_p50": {"audit": 90.0, "lint": 90.0, "typecheck": 90.0,
+                    "test": 600.0}}}}
+    f = _opt77_finding()
+    f["setup_consolidation"]["group_is_the_whole_workflow"] = False
+    f["setup_consolidation"]["credited_job_keys"] = ["audit", "lint", "typecheck"]
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert problems == [] and margin == 510.0, (margin, problems)
+    # the ordinary shape may not carry the whole-workflow gate
+    f["setup_consolidation"]["gate_today_p50_s"] = 90.0
+    _m, problems = vr._opt77_consolidation_rederived(f, data)
+    assert any("gate_today_p50_s" in p for p in problems), problems
+    # a non-boolean tag is named, and never selects the whole-workflow arm
+    f = _opt77_finding()
+    f["setup_consolidation"]["group_is_the_whole_workflow"] = "false"
+    _m, problems = vr._opt77_consolidation_rederived(f, data)
+    assert any("is not true or false" in p for p in problems), problems
+    assert not any("no job outside" in p for p in problems), problems
+
+
+def test_opt77_declared_job_keys_are_checked_against_the_per_workflow_record():
+    """The whole-workflow claim rests entirely on "these are every job the
+    workflow declares" — and the arm checked OPT77's stamp of that against
+    OPT77's own reading of the same file, which proves nothing. The declared
+    keys are now written per workflow by the YAML reader, before any detector
+    runs, and a stamp that under-enumerates them reddens."""
+    vr = _load_verify_report()
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    crit = data["per_workflow_timing"][".github/workflows/ci.yml"]
+    crit["declared_job_keys"] = ["audit", "lint", "typecheck"]
+    margin, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert problems == [] and margin == 0.0, problems
+    # The workflow really declares a fourth job the finding does not stamp.
+    crit["declared_job_keys"] = ["audit", "lint", "release", "typecheck"]
+    _m, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert any("this workflow declares" in p for p in problems), problems
+    assert any("release" in p for p in problems), problems
+
+
 def test_opt77_certificate_fails_on_tampered_numbers():
     vr = _load_verify_report()
     # An inflated credited saving is caught by the re-derivation.
@@ -8841,22 +9097,27 @@ def test_withheld_cache_candidates_must_be_disclosed(tmp_path):
     silent = "## 🗄️ Data sources\n\n| Source | Coverage | Feeds |\n"
     chk = vr.check_coverage_disclosed(silent, path)
     assert not chk.ok and "held back" in chk.detail, chk
-    row = ("| cache hit/miss verdicts | {} | Why a probed cache produced "
-           "no finding |\n")
+    row = "| cache hit/miss verdicts | {} | " + _CACHE_FEEDS + " |\n"
+    # Two gates contributed, so the reason is hedged — it holds for two of the
+    # three jobs the row names, not for all three.
     honest = silent + row.format(
-        "3 candidate cache(s) held back (build, e2e, unit): too few sampled "
-        "runs missed the cache to compare a miss against a hit.")
+        "3 candidate cache(s) held back (build, e2e, unit): most commonly, too "
+        "few sampled runs missed the cache to compare a miss against a hit.")
     chk = vr.check_coverage_disclosed(honest, path)
     assert chk.ok, chk
-    # wrong count, wrong reason, wrong job list, a leaked gate name: none is a disclosure
+    # wrong count, wrong reason, wrong job list, a leaked gate name, and the
+    # UNHEDGED reason (which asserts one gate's cause of all three jobs): none
+    # is a disclosure
     wrong = (
-        "2 candidate cache(s) held back (build, e2e): too few "
+        "2 candidate cache(s) held back (build, e2e): most commonly, too few "
         "sampled runs missed the cache to compare a miss against a hit.",
-        "3 candidate cache(s) held back (build, e2e, unit): too "
+        "3 candidate cache(s) held back (build, e2e, unit): most commonly, too "
         "many of the sampled runs' logs could not be read to tell how often the "
         "cache hits.",
-        "3 candidate cache(s) held back (build, e2e, other): too "
+        "3 candidate cache(s) held back (build, e2e, other): most commonly, too "
         "few sampled runs missed the cache to compare a miss against a hit.",
+        "3 candidate cache(s) held back (build, e2e, unit): too few sampled "
+        "runs missed the cache to compare a miss against a hit.",
         "3 candidate cache(s) held back (build, e2e, unit): "
         "`fewer_than_min_miss_runs_classified`.",
         "3 candidate cache(s) probed but withheld; top reason: "
@@ -9229,6 +9490,36 @@ def test_tier2_accepts_a_checkout_stall_on_the_rendered_long_pole(tmp_path: Path
     assert chk.ok and not chk.skipped, chk
 
 
+def test_tier2_accepts_a_whole_workflow_consolidation_on_the_rendered_long_pole(
+        tmp_path: Path):
+    """The pole rule is a PROXY for "the credited work is not on the merge
+    gate". An OPT77 group that is the whole workflow contains EVERY job the
+    workflow declares, so on a small repository its tallest member is very
+    often the rendered pole — and the proxy would reject a finding whose
+    wall-clock neutrality the arm below re-derives from measurement: the
+    collapsed job must not outlast the slowest member, pole or not. Exempted
+    on OPT80's argument, and on that argument only."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    f = doc["findings"][0]
+    f["pattern"] = "OPT77"
+    f.pop("checkout_stall", None)
+    f["affected_jobs"] = ["build"]
+    f["tier2_neutrality"] = {"proof": "below_cluster_floor", "margin_s": 0.0}
+    f["setup_consolidation"] = {"group_is_the_whole_workflow": True}
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "Long pole" in report and "build" in report, report[:400]
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert "Long pole" not in str(chk.detail), chk
+    # …and the exemption is the whole-workflow shape, not OPT77 in general: a
+    # group measured against a job OUTSIDE it has no such re-derivation of the
+    # pole, so the proxy still applies.
+    f["setup_consolidation"] = {"group_is_the_whole_workflow": False}
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "Long pole" in str(chk.detail), chk
+
+
 def test_tier2_still_rejects_a_non_checkout_stall_finding_on_the_rendered_long_pole(
         tmp_path: Path):
     """The RULE the OPT80 exemption is carved out of, pinned. Without this, the
@@ -9301,12 +9592,48 @@ def test_held_back_verifier_rederives_escaped_job_names(tmp_path):
     vr = _load_verify_report()
     rows = [{"workflow_file": "ci.yml", "job": "a|b `x`\nc", "gate": "no_monthly_volume"}]
     path = _withheld_doc(tmp_path, rows)
-    cell = ("1 candidate cache(s) held back (a\\|b 'x' c): the job's monthly run "
+    cell = ("1 candidate cache(s) held back (a\\|b \\`x\\` c): the job's monthly run "
             "count was unknown, so its saving could not be sized.")
     report = ("## 🗄️ Data sources\n\n| Source | Coverage | Feeds |\n"
-              f"| cache hit/miss verdicts | {cell} | x |\n")
+              f"| cache hit/miss verdicts | {cell} | " + _CACHE_FEEDS + " |\n")
     chk = vr.check_coverage_disclosed(report, path)
     assert chk.ok, chk
+
+
+def test_held_back_verifier_rederives_every_hostile_name_both_ways(tmp_path):
+    """The two escapers are pinned byte-identical to each other, which is one
+    implementation checked twice: dropping a character from BOTH tuples in
+    lockstep left this file's suite green for ten of the eleven it covered,
+    because nothing here drove a hostile name through the public check.
+
+    So, per name: the correctly-escaped cell must PASS `check_coverage_disclosed`,
+    and the RAW unescaped cell must FAIL it. The second half is what makes a
+    dropped escape visible — if the character is not escaped, the two cells are
+    the same string and the pair cannot both hold."""
+    import blocking_path as bp
+    vr = _load_verify_report()
+    # The list, enumerated. Pinned HERE as well as renderer-to-verifier,
+    # because the two tuples are pinned to each OTHER: dropping a character
+    # from both in lockstep kept them equal and left everything green.
+    assert bp._WITHHELD_CELL_ESCAPES == (
+        "\\", "|", "[", "]", "(", ")", "_", "<", ">", "`", "*", "&", "~")
+    for ch in bp._WITHHELD_CELL_ESCAPES:
+        assert bp._withheld_cell_text(f"a{ch}b") == f"a\\{ch}b", ch
+    head = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    tail = ("the job's monthly run count was unknown, so its saving could not "
+            "be sized.")
+    for name in _HOSTILE_JOB_NAMES:
+        rows = [{"workflow_file": "ci.yml", "job": name,
+                 "gate": "no_monthly_volume"}]
+        path = _withheld_doc(tmp_path, rows)
+        escaped = vr._vr_withheld_cell_text(name)
+        row = (head + f"| cache hit/miss verdicts | 1 candidate cache(s) held "
+               f"back ({{}}): {tail} | " + _CACHE_FEEDS + " |\n")
+        assert vr.check_coverage_disclosed(row.format(escaped), path).ok, name
+        raw = re.sub(r"\s+", " ", name).strip()
+        if raw == escaped:
+            continue   # nothing in this name needs escaping
+        assert not vr.check_coverage_disclosed(row.format(raw), path).ok, name
 
 
 def test_held_back_verifier_rederives_the_five_job_cap_and_shared_names(tmp_path):
@@ -9323,7 +9650,7 @@ def test_held_back_verifier_rederives_the_five_job_cap_and_shared_names(tmp_path
 
     def cell(jobs):
         return (head + f"| cache hit/miss verdicts | 7 candidate cache(s) held "
-                f"back ({jobs}): {tail} | x |\n")
+                f"back ({jobs}): {tail} | " + _CACHE_FEEDS + " |\n")
     honest = "a, b, c, ci.yml / build, d, and 2 more"
     assert vr.check_coverage_disclosed(cell(honest), path).ok
     for wrong in ("a, b, c, ci.yml / build, and 3 more",
@@ -9373,14 +9700,39 @@ _WITHHELD_77_80_CASES = (
 )
 
 
+_CACHE_FEEDS = "Why a candidate cache produced no finding and no uncredited line"
+_CHECKOUT_FEEDS = "Why a checkout with a slow tail produced no finding"
+# Repo-controlled job names that are hostile to a markdown table cell, one per
+# character the escaper covers plus the shapes that combine them. Shared by the
+# byte-equality coupling test and the end-to-end round trip below.
+_HOSTILE_JOB_NAMES = (
+    "a|b", "a\\|b", "a\\b", "[click](http://example.test)",
+    "snake_case_name", "a`b`c", "*em*", "tab\there",
+    "line\nbreak", "  padded  ", "()[]_|\\",
+    "job (linux) [3.11]", "a**b**c", "x|y|z", "\\\\",
+    "<details>", "<https://example.test>", "A&B", "A&amp;B", "~~gone~~",
+)
+_FEEDS_BY_KEY = {
+    "opt77_withheld_candidates":
+        "Why a group of small jobs sharing one setup produced no finding",
+    "opt79_withheld_candidates": _CACHE_FEEDS,
+    "opt80_withheld_candidates": _CHECKOUT_FEEDS,
+}
+
+
 def _withheld_phrase(vr, key, gate):
     table = (vr._VR_OPT77_WITHHOLD_PHRASES if key.startswith("opt77")
              else vr._VR_OPT80_WITHHOLD_PHRASES)
     return table[gate]
 
 
-def _withheld_cell(vr, key, noun, n, jobs, gate):
-    return f"{n} {noun} held back ({jobs}): {_withheld_phrase(vr, key, gate)}."
+def _withheld_cell(vr, key, noun, n, jobs, gate, multi=True):
+    """The expected Coverage cell. `multi` mirrors the renderer's rule: the
+    commonest gate's reason is hedged whenever a second gate also held
+    candidates back, because the count and the job list cover every row while
+    the reason covers only some of them."""
+    lead = vr._VR_WITHHELD_MODAL_LEAD if multi else ""
+    return f"{n} {noun} held back ({jobs}): {lead}{_withheld_phrase(vr, key, gate)}."
 
 
 def test_withheld_setup_and_checkout_candidates_must_be_disclosed(tmp_path):
@@ -9390,7 +9742,7 @@ def test_withheld_setup_and_checkout_candidates_must_be_disclosed(tmp_path):
         path = _withheld_77_80_doc(tmp_path, key, rows)
         chk = vr.check_coverage_disclosed(silent, path)
         assert not chk.ok and "held back" in chk.detail, (key, chk)
-        row = f"| {label} | {{}} | Why a candidate produced no finding |\n"
+        row = f"| {label} | {{}} | {_FEEDS_BY_KEY[key]} |\n"
         honest = silent + row.format(_withheld_cell(vr, key, noun, 3, jobs, top))
         chk = vr.check_coverage_disclosed(honest, path)
         assert chk.ok, (key, chk)
@@ -9486,17 +9838,66 @@ def test_withheld_gate_without_a_phrase_fails_the_self_check_closed(tmp_path):
                     and "no plain-English phrase" in chk.detail), (key, chk)
 
 
+def test_held_back_row_must_carry_the_used_for_cell_the_pattern_registered(tmp_path):
+    """The "Used for" column was pinned renderer-to-verifier and read by
+    neither: rewriting it in lockstep on both sides survived, because this
+    file bound the field and never compared it to the report. It is the column
+    that tells a reader what the row is about."""
+    vr = _load_verify_report()
+    silent = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    feeds_by_key = {r.doc_key: r.feeds for r in vr._VR_WITHHELD_ROWS}
+    assert feeds_by_key == _FEEDS_BY_KEY
+    for key, label, noun, rows, jobs, top, _other in _WITHHELD_77_80_CASES:
+        path = _withheld_77_80_doc(tmp_path, key, rows)
+        cell = _withheld_cell(vr, key, noun, 3, jobs, top)
+        good = vr.check_coverage_disclosed(
+            silent + f"| {label} | {cell} | {feeds_by_key[key]} |\n", path)
+        assert good.ok, (key, good)
+        bad = vr.check_coverage_disclosed(
+            silent + f"| {label} | {cell} | Why a thing happened |\n", path)
+        assert not bad.ok and "used for" in bad.detail, (key, bad)
+
+
 def test_withhold_phrase_tables_match_the_renderer_and_the_collector():
     """The verifier carries its own copy (it is an independent re-derivation);
-    a drift between the copies is the thing this pins."""
+    a drift between the copies is the thing this pins.
+
+    Pinned by WALKING the registry, never by hand-written per-pattern lines: a
+    fourth pattern that registers a doc key gets its phrase table compared on
+    the day it is added, instead of contributing a key nobody checks the
+    contents of."""
     import blocking_path as bp
     vr = _load_verify_report()
-    assert vr._VR_OPT77_WITHHOLD_PHRASES == bp._OPT77_WITHHOLD_PHRASES
-    assert vr._VR_OPT80_WITHHOLD_PHRASES == bp._OPT80_WITHHOLD_PHRASES
-    # one registry, all three patterns: same keys, same labels, same nouns
-    assert ([r[:3] for r in vr._VR_WITHHELD_ROWS]
-            == [r[:3] for r in bp._WITHHELD_ROWS])
-    assert set(vr._VR_WITHHELD_PHRASES_BY_KEY) == set(bp._WITHHELD_PHRASES_BY_KEY)
+    # Every field of every row, including the "Used for" cell. Sliced to three,
+    # that cell could be rewritten with the whole suite staying green.
+    assert list(vr._VR_WITHHELD_ROWS) == list(bp._WITHHELD_ROWS)
+    for row in bp._WITHHELD_ROWS:
+        assert row.feeds.strip(), f"{row.doc_key} registers an empty 'Used for' cell"
+        assert row.entry_shape in ("job", "group"), row
+    # the shape maps both twins dispatch on are derived from the registry, so a
+    # pattern cannot be registered with one shape and rendered with another
+    assert (bp._WITHHELD_SHAPE_BY_KEY == vr._VR_WITHHELD_SHAPE_BY_KEY
+            == {r.doc_key: r.entry_shape for r in bp._WITHHELD_ROWS})
+    # Same registered patterns, and — for each — the same gate→phrase table
+    # CONTENTS, not merely the same key.
+    assert (set(vr._VR_WITHHELD_PHRASES_BY_KEY)
+            == set(bp._WITHHELD_PHRASES_BY_KEY)
+            == {r.doc_key for r in bp._WITHHELD_ROWS})
+    for key, table in bp._WITHHELD_PHRASES_BY_KEY.items():
+        assert vr._VR_WITHHELD_PHRASES_BY_KEY[key] == table, key
+    # The two shared constants the line's shape depends on…
+    assert vr._VR_WITHHELD_JOBS_SHOWN == bp._WITHHELD_JOBS_SHOWN
+    assert vr._VR_WITHHELD_MODAL_LEAD == bp._WITHHELD_MODAL_LEAD
+    assert vr._VR_WITHHELD_TIED_LEAD == bp._WITHHELD_TIED_LEAD
+    assert vr._VR_WITHHELD_CELL_ESCAPES == bp._WITHHELD_CELL_ESCAPES
+    # `\` must be escaped BEFORE `|`, or `a\|b` becomes an escaped backslash
+    # plus a live cell separator and the row silently grows a column.
+    escapes = list(bp._WITHHELD_CELL_ESCAPES)
+    assert escapes[0] == "\\" and "|" in escapes[1:]
+    # …and the two escapers, which must agree on every byte, not just in spirit.
+    for hostile in _HOSTILE_JOB_NAMES:
+        assert vr._vr_withheld_cell_text(hostile) == bp._withheld_cell_text(hostile), (
+            hostile)
 
 
 def test_withheld_setup_and_checkout_lists_that_are_malformed_fail(tmp_path):
@@ -9524,8 +9925,11 @@ def test_withheld_setup_and_checkout_tie_goes_to_the_alphabetically_first_gate(t
     rows = [{"workflow_file": "ci.yml", "job": "a", "gate": _G80_A},
             {"workflow_file": "ci.yml", "job": "b", "gate": _G80_B}]
     path = _withheld_77_80_doc(tmp_path, "opt80_withheld_candidates", rows)
-    row = "| checkout stall: held back | {} | x |\n"
-    cell = "2 candidate checkout(s) held back (a, b): {}."
+    row = "| checkout stall: held back | {} | " + _CHECKOUT_FEEDS + " |\n"
+    # Two gates, one candidate each: an exact tie, which has no commonest
+    # reason to report, so it is hedged as a tie rather than as a majority.
+    cell = ("2 candidate checkout(s) held back (a, b): "
+            + vr._VR_WITHHELD_TIED_LEAD + "{}.")
     assert vr.check_coverage_disclosed(
         silent + row.format(cell.format(vr._VR_OPT80_WITHHOLD_PHRASES[_G80_B])), path).ok
     assert not vr.check_coverage_disclosed(

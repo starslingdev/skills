@@ -1,23 +1,35 @@
 {
-  "total_count": 3,
-  "workflows": [
-    {
-      "id": 1001,
-      "name": "CI",
-      "path": ".github/workflows/ci.yml",
-      "state": "active"
-    },
-    {
-      "id": 1002,
-      "name": "Unit matrix",
-      "path": ".github/workflows/build-matrix.yml",
-      "state": "active"
-    },
-    {
-      "id": 1003,
-      "name": "Chained",
-      "path": ".github/workflows/chained.yml",
-      "state": "active"
-    }
-  ]
+ "total_count": 5,
+ "workflows": [
+  {
+   "id": 1001,
+   "name": "CI",
+   "path": ".github/workflows/ci.yml",
+   "state": "active"
+  },
+  {
+   "id": 1002,
+   "name": "Unit matrix",
+   "path": ".github/workflows/build-matrix.yml",
+   "state": "active"
+  },
+  {
+   "id": 1003,
+   "name": "Chained",
+   "path": ".github/workflows/chained.yml",
+   "state": "active"
+  },
+  {
+   "id": 1004,
+   "name": "Checks",
+   "path": ".github/workflows/checks.yml",
+   "state": "active"
+  },
+  {
+   "id": 1005,
+   "name": "Gates",
+   "path": ".github/workflows/gates.yml",
+   "state": "active"
+  }
+ ]
 }

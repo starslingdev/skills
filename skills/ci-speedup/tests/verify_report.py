@@ -46,6 +46,7 @@ import statistics
 import subprocess
 import sys
 from dataclasses import dataclass
+from typing import NamedTuple
 from pathlib import Path
 
 # Bounded exception to "this file never imports the renderer" (see the module
@@ -888,13 +889,41 @@ def _detectors_skipped_violation(report: str,
 # coupling test pins all three equal).
 _VR_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _VR_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
-# (doc key, Data sources row label, counted noun) — as blocking_path renders
-# them. ONE re-derivation serves all three patterns.
+# (doc key, Data sources row label, counted noun, "Used for" cell) — as
+# blocking_path renders them. ONE re-derivation serves all three patterns.
+# The fourth field is carried HERE, not just pinned: it is the column that tells
+# the reader what the row is about, and while the verifier held only three
+# fields it could be replaced with arbitrary text and the whole suite stayed
+# green.
+class _VrWithheldRow(NamedTuple):
+    """`blocking_path.WithheldRow`, in this file's own words. `entry_shape`
+    carries whether an entry names one job or a whole group, which both sides
+    used to decide by comparing the key against OPT77's — so a fourth
+    group-shaped pattern would have rendered `(unnamed job)` everywhere and
+    been re-derived the same wrong way here, agreeing and staying green."""
+
+    doc_key: str
+    label: str
+    noun: str
+    feeds: str
+    entry_shape: str
+
+
 _VR_WITHHELD_ROWS = (
-    (_VR_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts", "candidate cache(s)"),
-    (_VR_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back", "candidate job group(s)"),
-    (_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back", "candidate checkout(s)"),
+    _VrWithheldRow(_VR_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts",
+                   "candidate cache(s)",
+                   "Why a candidate cache produced no finding and no uncredited line",
+                   "job"),
+    _VrWithheldRow(_VR_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back",
+                   "candidate job group(s)",
+                   "Why a group of small jobs sharing one setup produced no finding",
+                   "group"),
+    _VrWithheldRow(_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back",
+                   "candidate checkout(s)",
+                   "Why a checkout with a slow tail produced no finding",
+                   "job"),
 )
+_VR_WITHHELD_SHAPE_BY_KEY = {r.doc_key: r.entry_shape for r in _VR_WITHHELD_ROWS}
 # The plain-English phrase for every WITHHOLD gate — this verifier's OWN copy of
 # `blocking_path`'s tables (it re-derives the line rather than importing the
 # renderer's answer; a coupling test pins the copies equal, and another pins them
@@ -909,9 +938,17 @@ _VR_OPT77_WITHHOLD_PHRASES = {
     "group_never_ran_complete_in_one_sampled_run":
         "the sampled runs never had every job in the group run together, so the "
         "saving could not be measured",
+    "collapsing_the_whole_workflow_would_lengthen_the_merge_gate":
+        "every job the workflow declares is in the group, so the group sets "
+        "the pull-request wait itself, and collapsing it into one job would "
+        "make that wait longer",
     "no_job_outside_the_group_runs_often_enough_to_measure_against":
         "other jobs exist, but none ran often enough in the sampled runs to show "
         "that merging these would not make the pipeline slower",
+    "a_job_the_workflow_file_does_not_declare_ran_with_the_group":
+        "every job the workflow file declares is in the group, but the sampled "
+        "runs also carried a job it does not declare, so what would be left "
+        "after merging could not be established",
 }
 _VR_OPT80_WITHHOLD_PHRASES = {
     "fewer_than_the_minimum_tail_runs":
@@ -932,9 +969,11 @@ _VR_OPT80_WITHHOLD_PHRASES = {
     "progress_lines_all_outside_step_window":
         "the slow runs' logs show fetch progress only outside the checkout "
         "step's own time window",
+    # An observation, not a cause: a truncated log, a checkout that is not
+    # `actions/checkout`, or unrecognised wording produce the same absence.
     "log_carries_no_progress_vocabulary":
-        "the slow runs' logs show no fetch progress lines (progress output is "
-        "switched off)",
+        "the slow runs' logs show no fetch progress lines (most likely because "
+        "progress output is switched off)",
     "quoted_progress_line_is_credential_shaped":
         "the only log evidence looked like a credential and was discarded",
     "no_tail_run_log_was_probed":
@@ -949,14 +988,35 @@ _VR_WITHHELD_PHRASES_BY_KEY = {
     _VR_OPT80_WITHHELD_DOC_KEY: _VR_OPT80_WITHHOLD_PHRASES,
 }
 _VR_WITHHELD_JOBS_SHOWN = 5
+# Prefixed to the reason when more than one gate held candidates back, and the
+# tie's own lead for when the top two held back the same number.
+_VR_WITHHELD_MODAL_LEAD = "most commonly, "
+_VR_WITHHELD_TIED_LEAD = "equally often, "
+
+
+# The renderer's escape list, in the renderer's order. `\` MUST stay first:
+# escaping `|` first turns `a\|b` into `a\\|b`, which GFM reads as an escaped
+# backslash plus a LIVE cell separator. `<` and `>` are in the list because
+# `<https://example.test>` is a GFM autolink and a raw `<details>` is live
+# HTML. Backticks and `*` are escaped rather than swapped for an apostrophe,
+# which used to collapse three different names into one; `&` and `~` close the
+# same class, since `A&B` and `A&amp;B` render identically unescaped and
+# `~~x~~` is a strikethrough run. A coupling test pins this tuple and the
+# function below byte-identical to `blocking_path`'s.
+_VR_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_", "<", ">", "`",
+                             "*", "&", "~")
 
 
 def _vr_withheld_cell_text(text: object) -> str:
-    """The renderer's cell-safe transform of repo-controlled text (whitespace
-    collapsed, `|` escaped, backticks and emphasis markers swapped for an
-    apostrophe)."""
-    return (re.sub(r"\s+", " ", str(text)).strip()
-            .replace("`", "'").replace("*", "'").replace("|", "\\|"))
+    """The renderer's cell-safe transform of repo-controlled text: whitespace
+    collapsed, then each of `\\` `|` `[` `]` `(` `)` `_` `<` `>` `` ` `` `*`
+    `&` `~` backslash-escaped, `\\` first, so the name survives intact and
+    inert. The list is enumerated rather than called "every markdown-active
+    character", which was wider than it keeps."""
+    out = re.sub(r"\s+", " ", str(text)).strip()
+    for _ch in _VR_WITHHELD_CELL_ESCAPES:
+        out = out.replace(_ch, "\\" + _ch)
+    return out
 
 
 def _vr_withheld_entries(rows: list[dict], key: str) -> list[str]:
@@ -966,7 +1026,7 @@ def _vr_withheld_entries(rows: list[dict], key: str) -> list[str]:
     def _wf(r: dict) -> str:
         return str(r.get("workflow_file") or "").replace("\\", "/").rsplit("/", 1)[-1]
 
-    if key == _VR_OPT77_WITHHELD_DOC_KEY:
+    if _VR_WITHHELD_SHAPE_BY_KEY.get(key) == "group":
         return sorted({
             " + ".join(sorted(_vr_withheld_cell_text(j) for j in r["jobs"]))
             + (f" in {_vr_withheld_cell_text(_wf(r))}" if _wf(r) else "")
@@ -1000,7 +1060,12 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
         return (f"the withheld-candidate rows could not be re-derived: findings JSON "
                 f"at {findings_path} is unreadable ({type(exc).__name__})"), ""
     note = ""
-    for key, label, noun in _VR_WITHHELD_ROWS:
+    # `feeds` (the "Used for" cell) is not re-derived from the run's data — it
+    # is fixed prose — but it IS carried here so the coupling test can pin all
+    # four fields against the renderer's registry. Held as three fields, it was
+    # the one part of a held-back row that could be rewritten with the whole
+    # suite staying green.
+    for key, label, noun, feeds, shape in _VR_WITHHELD_ROWS:
         raw = _as_dict(data).get(key)
         # The renderer quietly drops non-objects and names a gate-less entry
         # `unknown`; here either is a collector bug, not "nothing withheld".
@@ -1014,7 +1079,7 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
         rows = list(raw or [])
         # The named jobs are part of the line, so an entry must carry them.
         for r in rows:
-            if key == _VR_OPT77_WITHHELD_DOC_KEY:
+            if shape == "group":
                 ok = (isinstance(r.get("jobs"), list) and bool(r["jobs"])
                       and all(isinstance(j, str) and j.strip() for j in r["jobs"]))
             else:
@@ -1028,8 +1093,14 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
                 return (f"{key} records gate {r['gate']!r}, which has no plain-English "
                         "phrase in verify_report - the withheld row cannot be "
                         "re-derived, and a code is never a reason"), ""
-        m = re.search(rf"^\|\s*{re.escape(label)}\s*\|\s*((?:\\\||[^|])+?)\s*\|",
-                      report, re.MULTILINE)
+        # Both the Coverage cell AND the "Used for" cell. Held as a field
+        # nothing read, the third column could be rewritten to anything — in
+        # lockstep on both sides, since the renderer and this file are pinned
+        # to each other — with the whole suite staying green.
+        m = re.search(
+            rf"^\|\s*{re.escape(label)}\s*\|\s*((?:\\\||[^|])+?)\s*\|"
+            rf"\s*((?:\\\||[^|])*?)\s*\|",
+            report, re.MULTILINE)
         if not rows:
             if m:
                 return (f"Data sources row '{label}' declares candidates held back, "
@@ -1038,12 +1109,22 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
         counts: dict[str, int] = {}
         for r in rows:
             counts[r["gate"]] = counts.get(r["gate"], 0) + 1
-        top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        top = ranked[0][0]
         entries = _vr_withheld_entries(rows, key)
         jobs = ", ".join(entries[:_VR_WITHHELD_JOBS_SHOWN])
         if len(entries) > _VR_WITHHELD_JOBS_SHOWN:
             jobs += f", and {len(entries) - _VR_WITHHELD_JOBS_SHOWN} more"
-        expected = f"{len(rows)} {noun} held back ({jobs}): {phrases[top]}."
+        # The reason is only the COMMONEST gate's, while the count and the named
+        # entries cover every candidate — so it is hedged whenever a second gate
+        # contributed, and hedged differently when the top two are tied, because
+        # "most commonly" is false of a tie. The renderer carries the same rule.
+        lead = ""
+        if len(ranked) > 1:
+            lead = (_VR_WITHHELD_TIED_LEAD if ranked[1][1] == ranked[0][1]
+                    else _VR_WITHHELD_MODAL_LEAD)
+        # Counted over distinct entries, like the names and the overflow.
+        expected = f"{len(entries)} {noun} held back ({jobs}): {lead}{phrases[top]}."
         if not m:
             return (f"{len(rows)} {noun} were held back ({key}) but the Data sources "
                     f"table has no '{label}' row - an undecided candidate reads as "
@@ -1052,6 +1133,11 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
         if cell != _strip_render_artifacts(expected):
             return (f"Data sources '{label}' cell {cell!r} is not the re-derived "
                     f"line {expected!r}"), ""
+        used_for = _strip_render_artifacts(m.group(2) or "")
+        if used_for != _strip_render_artifacts(feeds):
+            return (f"Data sources '{label}' says it is used for {used_for!r}, "
+                    f"not {feeds!r} - the column that tells the reader what the "
+                    "row is about is not the one the pattern registered"), ""
         note += f"; {len(rows)} held-back {noun} disclosed"
     return None, note
 
@@ -5470,6 +5556,126 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
         problems.append("missing job_p50")
         return None, problems
     member = {str(j) for j in jobs}
+    # A group that is every job the workflow DECLARES has no remaining job to be
+    # measured against. Its gate today is its own tallest member (the members
+    # run in parallel), so the margin is that gate minus the projected
+    # consolidated duration — and the claim "there is nothing outside this
+    # group" is checked on BOTH axes the detector used: the declared job keys it
+    # stamped must all be credited members, and the sampled `job_p50` must carry
+    # no job outside the group either. One axis alone is what the detector got
+    # wrong: the sample can be missing a declared job that simply never ran.
+    # Read as an identity, never truthily: a stamp of the STRING "false" (or 0,
+    # or None) decided which gate the finding was measured against, and "false"
+    # selected the whole-workflow arm.
+    tag = sc.get("group_is_the_whole_workflow")
+    if tag is not None and tag is not True and tag is not False:
+        problems.append(
+            f"group_is_the_whole_workflow {tag!r} is not true or false - a "
+            "stamp this arm cannot read decides which gate the finding was "
+            "measured against")
+    # The workflow's DECLARED job keys, read from the per-workflow record the
+    # YAML reader writes before any detector runs. Checking OPT77's stamp of
+    # them against OPT77's own reading of the same file proved nothing; this is
+    # a second source, so a stamp that under-enumerates the declared jobs (the
+    # whole basis of "there is nothing outside this group") reddens.
+    declared_record = [str(k) for k in _as_list(crit.get("declared_job_keys"))]
+    declared_stamp = [str(k) for k in _as_list(sc.get("workflow_declared_job_keys"))]
+    if declared_record and sorted(declared_stamp) != sorted(declared_record):
+        problems.append(
+            f"workflow_declared_job_keys {sorted(declared_stamp)!r} != the "
+            f"{sorted(declared_record)!r} this workflow declares")
+    if tag is True:
+        declared = declared_record or declared_stamp
+        credited_keys = {str(k) for k in _as_list(sc.get("credited_job_keys"))}
+        if not declared:
+            problems.append("group_is_the_whole_workflow with no declared job keys "
+                            "stamped - the claim cannot be re-derived")
+            return None, problems
+        outside_declared = sorted(set(declared) - credited_keys)
+        if outside_declared:
+            problems.append(
+                f"group_is_the_whole_workflow but the workflow also declares "
+                f"{outside_declared!r}, which are not credited members")
+        outside_sampled = sorted(k for k in all_p50 if str(k) not in member)
+        if outside_sampled:
+            problems.append(
+                f"group_is_the_whole_workflow but the sampled runs also carried "
+                f"{outside_sampled!r}")
+        # Today's gate is the slowest member's MEASURED p50 — the members run
+        # concurrently, so the longest of them is what a pull request waits for
+        # today. Re-derived here from `job_p50`, which the detector does not
+        # write, rather than by replaying its stamped step components.
+        per_job = _as_dict(sc.get("per_job"))
+        # Cardinality is not identity: a stamp with the right NUMBER of entries
+        # under a renamed key used to pass, miss `job_p50` for a real member,
+        # and take the uncapped branch — reproducing the inflated gate the arm
+        # exists to catch. The key set must be the credited members exactly.
+        if {str(k) for k in per_job} != member:
+            problems.append(
+                f"group_is_the_whole_workflow but per_job names "
+                f"{sorted(str(k) for k in per_job)!r}, not the credited members "
+                f"{sorted(member)!r} - the gate cannot be re-derived")
+            return None, problems
+        # Each member's two components are already required to be numbers and
+        # positive above (`missing setup/useful-work p50`), so nothing here
+        # reads an absent one as zero.
+        measured: list[float] = []
+        for _k in sorted(member):
+            _m = _num(all_p50.get(_k))
+            # No fallback to the component sum. A job without a strict measured
+            # p50 never becomes a member, so this is a malformed stamp, and
+            # assembling a gate out of step components is exactly the
+            # overstatement this arm exists to refuse.
+            if _m is None or _m <= 0:
+                problems.append(
+                    f"group_is_the_whole_workflow but member {_k!r} has no "
+                    f"measured job_p50 ({all_p50.get(_k)!r}) - the gate the group "
+                    "sets today cannot be re-derived")
+                return None, problems
+            measured.append(float(_m))
+        gate_today = round(max(measured), 1)
+        claimed_gate = _num(sc.get("gate_today_p50_s"))
+        if claimed_gate is None or abs(claimed_gate - gate_today) > 0.11:
+            problems.append(
+                f"gate_today_p50_s {sc.get('gate_today_p50_s')!r} != {gate_today}")
+        # The component sum survives only as a coherence check on the medians:
+        # the projection is max(setup) + max(useful), which can never be below
+        # any single member's setup + useful. If it is, the stamped medians do
+        # not come from one set of runs.
+        component_max = max(
+            ((_num(_as_dict(per_job.get(_k)).get("setup_p50_s")) or 0.0)
+             + (_num(_as_dict(per_job.get(_k)).get("useful_work_p50_s")) or 0.0))
+            for _k in sorted(member))
+        if projected + 0.11 < round(component_max, 1):
+            problems.append(
+                f"projected consolidated job {projected} is below the largest "
+                f"member's own setup + useful work ({round(component_max, 1)}) - "
+                "the stamped medians are not coherent")
+        if sc.get("remaining_tallest_job") is not None:
+            problems.append("group_is_the_whole_workflow but a remaining tallest job "
+                            "is named - there is no job outside the group")
+        if sc.get("remaining_tallest_p50_s") is not None:
+            problems.append("group_is_the_whole_workflow but a remaining tallest p50 "
+                            "is stamped - there is no job outside the group")
+        # The same +0.11 tolerance every other comparison in this arm carries.
+        # Exact, it rejected a legitimate FIRE whose stamped values had been
+        # rounded to one decimal on the way through the findings document
+        # ("projected consolidated job 60.0 is ABOVE the 59.9 gate").
+        if projected > gate_today + 0.11:
+            problems.append(
+                f"projected consolidated job {projected} is ABOVE the {gate_today} "
+                "gate the group sets today - consolidating would lengthen the merge")
+            return None, problems
+        return round(gate_today - projected, 1), problems
+    # The ordinary arm: there IS a job outside the group, so the gate the group
+    # sets itself is not what the projection is measured against and must not
+    # be stamped. Enforced on this side too — only the whole-workflow shape was
+    # checked, so a finding could carry both shapes' stamps and pass.
+    if sc.get("gate_today_p50_s") is not None:
+        problems.append(
+            f"group_is_the_whole_workflow is false but gate_today_p50_s "
+            f"{sc.get('gate_today_p50_s')!r} is stamped - the comparison is "
+            "against the tallest remaining job, not a gate the group sets itself")
     # The detector does not max over every remaining job: a job that ran in a
     # minority of the sampled runs cannot carry the neutrality proof, because on
     # the other runs the group's own members are the tallest thing left. It
@@ -6312,7 +6518,23 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
         # slowest job is reported, and reported uncredited — suppressing it would
         # hide the pattern's most valuable case to satisfy an inference that has
         # been replaced by a measurement.
-        if rendered_poles and jobs & rendered_poles and proof != "checkout_tail_excess":
+        # OPT77's whole-workflow groups are the SECOND exemption, on the same
+        # argument. Such a group is every job the workflow declares, so on a
+        # small repository its tallest member is very often a rendered pole —
+        # and the proxy would then reject a finding whose wall-clock
+        # neutrality has been re-derived from measurement right below: the arm
+        # requires `projected <= max_i(job_p50_i)`, which says in so many words
+        # that the collapsed job does not outlast the slowest member, pole or
+        # not. Refusing it would suppress the pattern on exactly the shape it
+        # was reopened for, to satisfy an inference a measurement has replaced.
+        # Narrow by construction: it applies only when the arm below actually
+        # runs and passes, because a failure there lands in `bad` anyway.
+        whole_workflow_opt77 = (
+            str(f.get("pattern") or "") == "OPT77"
+            and _as_dict(f.get("setup_consolidation")).get(
+                "group_is_the_whole_workflow") is True)
+        if (rendered_poles and jobs & rendered_poles
+                and proof != "checkout_tail_excess" and not whole_workflow_opt77):
             bad.append(f"{fid}: affected job is also rendered as a Long pole")
         if proof == "below_cluster_floor":
             got = _num(cert.get("margin_s"))
