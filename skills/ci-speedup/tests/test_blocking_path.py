@@ -2875,8 +2875,10 @@ def test_withheld_setup_and_checkout_candidates_reach_the_data_sources_table():
     assert ("3 candidate job group(s) held back (a + b + c in ci.yml, "
             "d + e + f in ci.yml, x + y + z in b.yml): " + bp._WITHHELD_MODAL_LEAD
             + bp._OPT77_WITHHOLD_PHRASES["needs_graph_undecidable"] + ".") in r77, r77
-    # A tie goes to the alphabetically first gate - the verifier's rule too.
-    assert ("2 candidate checkout(s) held back (build, e2e): " + bp._WITHHELD_MODAL_LEAD
+    # A tie goes to the alphabetically first gate - the verifier's rule too -
+    # and is hedged as a tie, because on an exact split there is no commonest
+    # reason for "most commonly" to be about.
+    assert ("2 candidate checkout(s) held back (build, e2e): " + bp._WITHHELD_TIED_LEAD
             + bp._OPT80_WITHHOLD_PHRASES["log_carries_no_progress_vocabulary"]
             + ".") in r80, r80
     # Both assertions above build their expectation out of the very table they
@@ -8386,6 +8388,45 @@ def test_no_collector_path_can_record_a_held_back_entry_with_no_job():
                              "gate": "no_monthly_volume"}])
     assert "\\(unnamed job\\)" in line, line
     assert _cr is not None
+
+
+def test_a_tied_held_back_reason_says_equally_often_not_most_commonly():
+    """"most commonly" is a claim about which reason dominates, and on an exact
+    split there is no such reason — the sentence asserts something false about
+    the very tie it is standing on. The tie gets its own wording; which of the
+    tied reasons is shown is still the alphabetically first."""
+    rows = [{"workflow_file": "ci.yml", "job": "a",
+             "gate": "tail_run_log_unavailable"},
+            {"workflow_file": "ci.yml", "job": "b",
+             "gate": "no_tail_run_log_was_probed"}]
+    line = bp._withheld_candidates_line(
+        {"opt80_withheld_candidates": rows}, "opt80_withheld_candidates",
+        "candidate checkout(s)")
+    assert bp._WITHHELD_TIED_LEAD in line, line
+    assert bp._WITHHELD_MODAL_LEAD not in line, line
+    # …and an actual majority still reads "most commonly".
+    rows.append({"workflow_file": "ci.yml", "job": "c",
+                 "gate": "tail_run_log_unavailable"})
+    line = bp._withheld_candidates_line(
+        {"opt80_withheld_candidates": rows}, "opt80_withheld_candidates",
+        "candidate checkout(s)")
+    assert bp._WITHHELD_MODAL_LEAD in line, line
+    assert bp._WITHHELD_TIED_LEAD not in line, line
+
+
+def test_the_held_back_count_counts_what_the_row_actually_names():
+    """The count was the number of recorded rows while the names and the "and
+    K more" overflow were the number of DISTINCT entries. Two rows for one job
+    — the same candidate held back at two gates — printed "2 candidate
+    checkout(s) held back (build)", a sentence that disagrees with itself."""
+    rows = [{"workflow_file": "ci.yml", "job": "build",
+             "gate": "tail_run_log_unavailable"},
+            {"workflow_file": "ci.yml", "job": "build",
+             "gate": "no_tail_run_log_was_probed"}]
+    line = bp._withheld_candidates_line(
+        {"opt80_withheld_candidates": rows}, "opt80_withheld_candidates",
+        "candidate checkout(s)")
+    assert line.startswith("1 candidate checkout(s) held back (build): "), line
 
 
 def test_a_registered_pattern_with_no_phrase_table_still_renders_a_report():

@@ -988,8 +988,10 @@ _VR_WITHHELD_PHRASES_BY_KEY = {
     _VR_OPT80_WITHHELD_DOC_KEY: _VR_OPT80_WITHHOLD_PHRASES,
 }
 _VR_WITHHELD_JOBS_SHOWN = 5
-# Prefixed to the reason when more than one gate held candidates back.
+# Prefixed to the reason when more than one gate held candidates back, and the
+# tie's own lead for when the top two held back the same number.
 _VR_WITHHELD_MODAL_LEAD = "most commonly, "
+_VR_WITHHELD_TIED_LEAD = "equally often, "
 
 
 # The renderer's escape list, in the renderer's order. `\` MUST stay first:
@@ -1107,16 +1109,22 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
         counts: dict[str, int] = {}
         for r in rows:
             counts[r["gate"]] = counts.get(r["gate"], 0) + 1
-        top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        top = ranked[0][0]
         entries = _vr_withheld_entries(rows, key)
         jobs = ", ".join(entries[:_VR_WITHHELD_JOBS_SHOWN])
         if len(entries) > _VR_WITHHELD_JOBS_SHOWN:
             jobs += f", and {len(entries) - _VR_WITHHELD_JOBS_SHOWN} more"
         # The reason is only the COMMONEST gate's, while the count and the named
-        # entries cover every row — so it is hedged whenever a second gate
-        # contributed. The renderer carries the same rule.
-        lead = _VR_WITHHELD_MODAL_LEAD if len(counts) > 1 else ""
-        expected = f"{len(rows)} {noun} held back ({jobs}): {lead}{phrases[top]}."
+        # entries cover every candidate — so it is hedged whenever a second gate
+        # contributed, and hedged differently when the top two are tied, because
+        # "most commonly" is false of a tie. The renderer carries the same rule.
+        lead = ""
+        if len(ranked) > 1:
+            lead = (_VR_WITHHELD_TIED_LEAD if ranked[1][1] == ranked[0][1]
+                    else _VR_WITHHELD_MODAL_LEAD)
+        # Counted over distinct entries, like the names and the overflow.
+        expected = f"{len(entries)} {noun} held back ({jobs}): {lead}{phrases[top]}."
         if not m:
             return (f"{len(rows)} {noun} were held back ({key}) but the Data sources "
                     f"table has no '{label}' row - an undecided candidate reads as "
@@ -6510,7 +6518,23 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
         # slowest job is reported, and reported uncredited — suppressing it would
         # hide the pattern's most valuable case to satisfy an inference that has
         # been replaced by a measurement.
-        if rendered_poles and jobs & rendered_poles and proof != "checkout_tail_excess":
+        # OPT77's whole-workflow groups are the SECOND exemption, on the same
+        # argument. Such a group is every job the workflow declares, so on a
+        # small repository its tallest member is very often a rendered pole —
+        # and the proxy would then reject a finding whose wall-clock
+        # neutrality has been re-derived from measurement right below: the arm
+        # requires `projected <= max_i(job_p50_i)`, which says in so many words
+        # that the collapsed job does not outlast the slowest member, pole or
+        # not. Refusing it would suppress the pattern on exactly the shape it
+        # was reopened for, to satisfy an inference a measurement has replaced.
+        # Narrow by construction: it applies only when the arm below actually
+        # runs and passes, because a failure there lands in `bad` anyway.
+        whole_workflow_opt77 = (
+            str(f.get("pattern") or "") == "OPT77"
+            and _as_dict(f.get("setup_consolidation")).get(
+                "group_is_the_whole_workflow") is True)
+        if (rendered_poles and jobs & rendered_poles
+                and proof != "checkout_tail_excess" and not whole_workflow_opt77):
             bad.append(f"{fid}: affected job is also rendered as a Long pole")
         if proof == "below_cluster_floor":
             got = _num(cert.get("margin_s"))

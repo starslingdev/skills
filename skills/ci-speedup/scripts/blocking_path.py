@@ -5255,6 +5255,11 @@ _WITHHELD_SHAPE_BY_KEY: dict[str, str] = {r.doc_key: r.entry_shape
 # Prefixed to the reason when more than one gate held candidates back, so the
 # sentence stops asserting the commonest gate's reason of every job it names.
 _WITHHELD_MODAL_LEAD = "most commonly, "
+# …and when the top two gates held back the SAME number of candidates there is
+# no commonest one to report. "most commonly" then says something false about
+# the tie it is standing on, so the tie gets its own lead. The reason shown is
+# still the alphabetically first of the tied gates.
+_WITHHELD_TIED_LEAD = "equally often, "
 
 
 # The markdown-active characters a repo-controlled name is backslash-escaped
@@ -5307,8 +5312,16 @@ def _withheld_entries(rows: list[dict[str, Any]], key: str) -> list[str]:
     `verify_report` fails a run that produces one outright. They are kept
     deliberately, because the renderer's job is to always produce a report,
     even from a document a bug has malformed, and an entry rendered as an empty
-    string is worse than one rendered as a visible marker. A test pins that no
-    detector path can reach them."""
+    string is worse than one rendered as a visible marker.
+
+    What the test behind that claim checks, exactly: every way the collector's
+    withheld-candidate lists can be written to is an append of a dict literal
+    whose name field is bound to a non-empty expression, and OPT79's
+    pre-probe site — the one name that is not structurally non-empty — sits
+    under a condition that tests it, located by walking that function's own
+    conditions. A site that recorded a row some other way (built elsewhere and
+    passed in by variable) would be caught as an unrecognised shape, but a
+    name that is non-empty in the source and empty at runtime is beyond it."""
     def _wf(r: dict[str, Any]) -> str:
         return str(r.get("workflow_file") or "").replace("\\", "/").rsplit("/", 1)[-1]
 
@@ -5343,12 +5356,15 @@ def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
     the alphabetically first gate); at most `_WITHHELD_JOBS_SHOWN` entries are
     named, then ", and K more". `verify_report` re-derives the whole line.
 
-    The count and the named entries cover EVERY row, but the reason is only the
-    commonest gate's. Printed flat, the sentence asserts that reason of every
-    job it names — untrue as soon as a second gate contributed, and the reader
-    has no way to see it. So the reason is prefixed with `_WITHHELD_MODAL_LEAD`
-    whenever more than one distinct gate is represented, and left unhedged only
-    when one gate accounts for the whole list."""
+    The count and the named entries cover EVERY candidate, but the reason is
+    only the commonest gate's. Printed flat, the sentence asserts that reason
+    of every job it names — untrue as soon as a second gate contributed, and
+    the reader has no way to see it. So the reason is prefixed with
+    `_WITHHELD_MODAL_LEAD` whenever more than one distinct gate is
+    represented, with `_WITHHELD_TIED_LEAD` when the top two gates held back
+    the same number (there is no commonest one to report, and saying "most
+    commonly" of a tie is simply false), and left unhedged only when one gate
+    accounts for the whole list."""
     rows = [r for r in ((doc or {}).get(key) or []) if isinstance(r, dict)]
     if not rows:
         return None
@@ -5356,7 +5372,8 @@ def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
     for r in rows:
         g = str(r.get("gate") or "unknown")
         counts[g] = counts.get(g, 0) + 1
-    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    top = ranked[0][0]
     entries = _withheld_entries(rows, key)
     jobs = ", ".join(entries[:_WITHHELD_JOBS_SHOWN])
     if len(entries) > _WITHHELD_JOBS_SHOWN:
@@ -5367,8 +5384,15 @@ def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
     # unmapped wording instead; `verify_report` still fails such a run.
     phrase = _WITHHELD_PHRASES_BY_KEY.get(key, {}).get(
         top, _WITHHELD_UNMAPPED_PHRASE)
-    lead = _WITHHELD_MODAL_LEAD if len(counts) > 1 else ""
-    return f"{len(rows)} {noun} held back ({jobs}): {lead}{phrase}."
+    lead = ""
+    if len(ranked) > 1:
+        lead = (_WITHHELD_TIED_LEAD if ranked[1][1] == ranked[0][1]
+                else _WITHHELD_MODAL_LEAD)
+    # The count is the number of DISTINCT entries, which is what the names and
+    # the "and K more" overflow are counted from. Counting rows instead made
+    # the line disagree with itself whenever two rows deduplicated into one
+    # entry: "7 cache(s) held back (a, b, c, d, e)" with no overflow at all.
+    return f"{len(entries)} {noun} held back ({jobs}): {lead}{phrase}."
 
 
 def _data_sources_footer(doc: dict[str, Any], repo: str,

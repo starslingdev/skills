@@ -9490,6 +9490,36 @@ def test_tier2_accepts_a_checkout_stall_on_the_rendered_long_pole(tmp_path: Path
     assert chk.ok and not chk.skipped, chk
 
 
+def test_tier2_accepts_a_whole_workflow_consolidation_on_the_rendered_long_pole(
+        tmp_path: Path):
+    """The pole rule is a PROXY for "the credited work is not on the merge
+    gate". An OPT77 group that is the whole workflow contains EVERY job the
+    workflow declares, so on a small repository its tallest member is very
+    often the rendered pole — and the proxy would reject a finding whose
+    wall-clock neutrality the arm below re-derives from measurement: the
+    collapsed job must not outlast the slowest member, pole or not. Exempted
+    on OPT80's argument, and on that argument only."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    f = doc["findings"][0]
+    f["pattern"] = "OPT77"
+    f.pop("checkout_stall", None)
+    f["affected_jobs"] = ["build"]
+    f["tier2_neutrality"] = {"proof": "below_cluster_floor", "margin_s": 0.0}
+    f["setup_consolidation"] = {"group_is_the_whole_workflow": True}
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "Long pole" in report and "build" in report, report[:400]
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert "Long pole" not in str(chk.detail), chk
+    # …and the exemption is the whole-workflow shape, not OPT77 in general: a
+    # group measured against a job OUTSIDE it has no such re-derivation of the
+    # pole, so the proxy still applies.
+    f["setup_consolidation"] = {"group_is_the_whole_workflow": False}
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "Long pole" in str(chk.detail), chk
+
+
 def test_tier2_still_rejects_a_non_checkout_stall_finding_on_the_rendered_long_pole(
         tmp_path: Path):
     """The RULE the OPT80 exemption is carved out of, pinned. Without this, the
@@ -9858,6 +9888,7 @@ def test_withhold_phrase_tables_match_the_renderer_and_the_collector():
     # The two shared constants the line's shape depends on…
     assert vr._VR_WITHHELD_JOBS_SHOWN == bp._WITHHELD_JOBS_SHOWN
     assert vr._VR_WITHHELD_MODAL_LEAD == bp._WITHHELD_MODAL_LEAD
+    assert vr._VR_WITHHELD_TIED_LEAD == bp._WITHHELD_TIED_LEAD
     assert vr._VR_WITHHELD_CELL_ESCAPES == bp._WITHHELD_CELL_ESCAPES
     # `\` must be escaped BEFORE `|`, or `a\|b` becomes an escaped backslash
     # plus a live cell separator and the row silently grows a column.
@@ -9895,9 +9926,10 @@ def test_withheld_setup_and_checkout_tie_goes_to_the_alphabetically_first_gate(t
             {"workflow_file": "ci.yml", "job": "b", "gate": _G80_B}]
     path = _withheld_77_80_doc(tmp_path, "opt80_withheld_candidates", rows)
     row = "| checkout stall: held back | {} | " + _CHECKOUT_FEEDS + " |\n"
-    # Two gates, one candidate each: hedged, like every multi-gate row.
+    # Two gates, one candidate each: an exact tie, which has no commonest
+    # reason to report, so it is hedged as a tie rather than as a majority.
     cell = ("2 candidate checkout(s) held back (a, b): "
-            + vr._VR_WITHHELD_MODAL_LEAD + "{}.")
+            + vr._VR_WITHHELD_TIED_LEAD + "{}.")
     assert vr.check_coverage_disclosed(
         silent + row.format(cell.format(vr._VR_OPT80_WITHHOLD_PHRASES[_G80_B])), path).ok
     assert not vr.check_coverage_disclosed(

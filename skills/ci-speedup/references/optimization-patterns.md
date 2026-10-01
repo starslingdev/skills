@@ -1331,14 +1331,21 @@ as the dispatch key; the meaning is restated wherever it is read — the detecto
 `verify_report.py`'s neutrality arm, `blocking_path.py`'s certificate summary and
 this note.
 
-The held-back row names every candidate but gives only the **commonest** gate's
-reason, so the reason is prefixed "most commonly," whenever a second gate
-contributed, and "equally often," when the top two gates are tied — printed
-flat, the sentence would assert one reason of every candidate it names. So a
-row reads "3 candidate job group(s) held back (lint + test in ci.yml, …): most
-commonly, the sampled runs never had every job in the group run together, so
-the saving could not be measured." Only a list where one gate accounts for
-every candidate is unhedged.
+The held-back row names every candidate but gives only the **commonest**
+gate's reason, so it is hedged: "most commonly," whenever a second gate
+contributed, and "equally often," when the top two gates held back the same
+number (on an exact split there is no commonest reason, and "most commonly"
+would be a false claim about the tie itself). Printed flat, the sentence
+asserts one reason of every candidate it names. A hedged row reads:
+
+> 3 candidate job group(s) held back (lint + test + typecheck in ci.yml, build
+> + docs + e2e in ci.yml, x + y + z in release.yml): most commonly, the
+> sampled runs never had every job in the group run together, so the saving
+> could not be measured.
+
+Only a list where one gate accounts for every candidate is unhedged. The count
+is the number of distinct candidates named, the same number the "and K more"
+overflow is taken from.
 
 The finding must stamp `wall_clock_p50_s=0`, `sizing_basis=measured`, the
 `(N-1) x setup_p50` model in `measured_signal`, and a structured

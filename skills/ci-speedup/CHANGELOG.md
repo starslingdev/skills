@@ -726,7 +726,10 @@ unversioned and updates by reinstall from `main`.
   The row's count and job list cover every held-back candidate while its reason
   is only the most common one, so the reason now says "most commonly" whenever
   more than one reason contributed instead of asserting one cause of every job
-  it names. One checkout reason asserted a cause the evidence does not
+  it names — and "equally often" when two reasons are tied, where there is no
+  most common one and saying there is would be false. The count is of the
+  candidates the row actually names: counted over raw records it could say
+  "2 held back" beside a single name. One checkout reason asserted a cause the evidence does not
   establish ("progress output is switched off") and is hedged like its
   siblings. The guard that stops a reason shipping as an internal code now
   recognises every way the checkout detector records one, so two reasons it

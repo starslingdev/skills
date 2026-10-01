@@ -933,12 +933,13 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     held77 = [ln for ln in report.splitlines()
               if ln.startswith("| repeated-setup: held back |")]
     assert len(held77) == 1, held77
-    # TWO groups, held back for two DIFFERENT reasons — so the sentence names
-    # both groups, prints only the commonest gate's reason, and hedges it with
-    # the modal lead rather than asserting that one reason of both groups.
+    # TWO groups, held back for two DIFFERENT reasons, one each — so the
+    # sentence names both groups, prints only the alphabetically first gate's
+    # reason, and hedges it as a TIE: with one candidate per reason there is no
+    # commonest one, and "most commonly" would be false of the split itself.
     assert ("2 candidate job group(s) held back (alpha + beta + gamma in gates.yml, "
             + "docs-format + docs-links + docs-spell in build-matrix.yml): "
-            + "most commonly, every job the workflow declares is in the group, so "
+            + "equally often, every job the workflow declares is in the group, so "
             + "the group sets the pull-request wait itself, and collapsing it into "
             + "one job would make that wait longer."
             ) in held77[0], held77[0]

@@ -1139,8 +1139,12 @@ same reason — left alone, `A&B` and `A&amp;B` render as the same name. Out of 
 escaping: GFM's extended autolink turns a BARE `https://...` job name into a
 live link with no punctuation to escape); the reason a plain-English phrase for the commonest gate,
 ties alphabetical, and prefixed "most commonly," whenever more than one gate
-contributed — the count and the job list cover every candidate while the reason
-covers only some of them. A pattern contributes only its key, its
+contributed, or "equally often," when the top two gates held back the same
+number — the count and the job list cover every candidate while the reason
+covers only some of them, and on an exact split there is no commonest reason
+for "most commonly" to name. The count is of DISTINCT candidates, the same set
+the names and the "and K more" overflow come from; counted over raw rows it
+disagreed with its own job list whenever two rows deduplicated into one. A pattern contributes only its key, its
 row text and its gate→phrase table (registered in `_WITHHELD_PHRASES_BY_KEY`),
 never its own row builder. The phrase tables (`_OPT77_WITHHOLD_PHRASES`,
 `_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`) map EVERY withhold gate
