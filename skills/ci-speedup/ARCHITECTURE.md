@@ -1106,9 +1106,16 @@ commonest reason). The per-gate tallies (`opt77_withheld_by_gate`,
 `opt80_withheld_by_gate`) are for maintainers; these lists reach the reader.
 
 The held-back disclosure is ONE mechanism shared by OPT77, OPT79 and OPT80.
-`blocking_path._WITHHELD_ROWS` maps each pattern's findings-doc key to its Data
-sources row label, its counted noun and its "Used for" cell, and
-`_withheld_candidates_line` builds the same sentence for all three:
+`blocking_path._WITHHELD_ROWS` is a `WithheldRow` per pattern — findings-doc
+key, Data sources row label, counted noun, "Used for" cell, and `entry_shape`
+(`"job"` for OPT79 / OPT80, `"group"` for OPT77). The shape is registered
+rather than inferred: both twins used to decide it by comparing the key against
+OPT77's, so a fourth group-shaped pattern would have rendered `(unnamed job)`
+for every candidate in the renderer AND been re-derived the same wrong way in
+`verify_report` — agreeing, and green. `verify_report` reads all five fields,
+including the "Used for" cell, which was previously carried on both sides and
+compared to the report by neither. `_withheld_candidates_line` builds the same
+sentence for all three:
 "N candidate … held back (<jobs>): <reason>." — the entries distinct and sorted,
 workflow-qualified as `<workflow.yml> / <job>` when two workflows share a job
 name (an OPT77 entry is the whole group), at most five then ", and K more", every

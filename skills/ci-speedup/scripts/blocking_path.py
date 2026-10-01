@@ -32,7 +32,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
@@ -5141,15 +5141,37 @@ def _coverage_note(ds: dict[str, Any]) -> str:
 _OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 _OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
-# (doc key, Data sources row label, counted noun, "Used for" cell). The row
-# label and the noun are what `verify_report` matches on.
-_WITHHELD_ROWS: tuple[tuple[str, str, str, str], ...] = (
-    (_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts", "candidate cache(s)",
-     "Why a candidate cache produced no finding and no uncredited line"),
-    (_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back", "candidate job group(s)",
-     "Why a group of small jobs sharing one setup produced no finding"),
-    (_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back", "candidate checkout(s)",
-     "Why a checkout with a slow tail produced no finding"),
+class WithheldRow(NamedTuple):
+    """One pattern's whole registration in the held-back disclosure.
+
+    `entry_shape` is the field that used to be missing, and its absence was
+    not visible: both this renderer and `verify_report` hard-branched on
+    `key == _OPT77_WITHHELD_DOC_KEY` to decide whether an entry names one job
+    or a whole group. A fourth group-shaped pattern would therefore have been
+    rendered job-shaped — `(unnamed job)` for every candidate — by both twins
+    alike, so the two agreed and nothing went red. The shape is registered
+    here instead, and both twins dispatch on it."""
+
+    doc_key: str
+    label: str      # the Data sources row's first cell
+    noun: str       # what the count counts
+    feeds: str      # the "Used for" cell
+    entry_shape: str  # "job" (OPT79 / OPT80) or "group" (OPT77)
+
+
+_WITHHELD_ROWS: tuple[WithheldRow, ...] = (
+    WithheldRow(_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts",
+                "candidate cache(s)",
+                "Why a candidate cache produced no finding and no uncredited line",
+                "job"),
+    WithheldRow(_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back",
+                "candidate job group(s)",
+                "Why a group of small jobs sharing one setup produced no finding",
+                "group"),
+    WithheldRow(_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back",
+                "candidate checkout(s)",
+                "Why a checkout with a slow tail produced no finding",
+                "job"),
 )
 
 # One plain-English, self-justifying phrase per WITHHOLD gate: every gate the
@@ -5226,6 +5248,10 @@ _WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
 _WITHHELD_UNMAPPED_PHRASE = "a reason this report has no plain-English wording for"
 # Named entries before ", and K more".
 _WITHHELD_JOBS_SHOWN = 5
+# Which shape an entry takes, by doc key — read from the registry, never from
+# a comparison against one pattern's key.
+_WITHHELD_SHAPE_BY_KEY: dict[str, str] = {r.doc_key: r.entry_shape
+                                          for r in _WITHHELD_ROWS}
 # Prefixed to the reason when more than one gate held candidates back, so the
 # sentence stops asserting the commonest gate's reason of every job it names.
 _WITHHELD_MODAL_LEAD = "most commonly, "
@@ -5279,11 +5305,13 @@ def _withheld_entries(rows: list[dict[str, Any]], key: str) -> list[str]:
         return str(r.get("workflow_file") or "").replace("\\", "/").rsplit("/", 1)[-1]
 
     out: set[str] = set()
-    if key == _OPT77_WITHHELD_DOC_KEY:
+    if _WITHHELD_SHAPE_BY_KEY.get(key) == "group":
         for r in rows:
             jobs = r.get("jobs")
-            names = sorted(_withheld_cell_text(j) for j in jobs) if isinstance(
-                jobs, list) and jobs else [_withheld_cell_text(r.get("group") or "a group")]
+            names = sorted(
+                _withheld_cell_text(str(j).strip() or "(unnamed job)")
+                for j in jobs) if isinstance(jobs, list) and jobs else [
+                    _withheld_cell_text(r.get("group") or "a group")]
             wf = _wf(r)
             out.add(" + ".join(names) + (f" in {_withheld_cell_text(wf)}" if wf else ""))
         return sorted(out)
@@ -5325,7 +5353,12 @@ def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
     jobs = ", ".join(entries[:_WITHHELD_JOBS_SHOWN])
     if len(entries) > _WITHHELD_JOBS_SHOWN:
         jobs += f", and {len(entries) - _WITHHELD_JOBS_SHOWN} more"
-    phrase = _WITHHELD_PHRASES_BY_KEY[key].get(top, _WITHHELD_UNMAPPED_PHRASE)
+    # `.get` on BOTH levels. A pattern registered in `_WITHHELD_ROWS` without a
+    # phrase table used to raise here, which crashes the whole report — and the
+    # renderer's contract is that it always produces one. It degrades to the
+    # unmapped wording instead; `verify_report` still fails such a run.
+    phrase = _WITHHELD_PHRASES_BY_KEY.get(key, {}).get(
+        top, _WITHHELD_UNMAPPED_PHRASE)
     lead = _WITHHELD_MODAL_LEAD if len(counts) > 1 else ""
     return f"{len(rows)} {noun} held back ({jobs}): {lead}{phrase}."
 
@@ -5443,10 +5476,10 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
     # setup (OPT77), a checkout with a slow tail (OPT80). Without these rows the
     # report reads "measured, nothing found" where the audit could not tell.
     # `verify_report` re-derives the whole line from the collector's lists.
-    for _key, _label, _noun, _feeds in _WITHHELD_ROWS:
-        _wline = _withheld_candidates_line(doc, _key, _noun)
+    for _row in _WITHHELD_ROWS:
+        _wline = _withheld_candidates_line(doc, _row.doc_key, _row.noun)
         if _wline:
-            rows.append((_label, _wline, _feeds))
+            rows.append((_row.label, _wline, _row.feeds))
     out = ["## 🗄️ Data sources", ""]
     if lead:
         out += lead
@@ -8102,8 +8135,8 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # A candidate any pattern held back is disclosed in the Data sources footer;
     # collapsing to the one-line note would drop the footer with it and let
     # "measured, could not tell" read as "nothing found".
-    withheld_n = sum(1 for _k, _l, _n, _f in _WITHHELD_ROWS
-                     if _withheld_candidates_line(doc, _k, _n))
+    withheld_n = sum(1 for _r in _WITHHELD_ROWS
+                     if _withheld_candidates_line(doc, _r.doc_key, _r.noun))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
             and not withheld_n):

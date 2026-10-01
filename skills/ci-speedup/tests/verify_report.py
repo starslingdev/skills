@@ -46,6 +46,7 @@ import statistics
 import subprocess
 import sys
 from dataclasses import dataclass
+from typing import NamedTuple
 from pathlib import Path
 
 # Bounded exception to "this file never imports the renderer" (see the module
@@ -894,14 +895,35 @@ _VR_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
 # the reader what the row is about, and while the verifier held only three
 # fields it could be replaced with arbitrary text and the whole suite stayed
 # green.
+class _VrWithheldRow(NamedTuple):
+    """`blocking_path.WithheldRow`, in this file's own words. `entry_shape`
+    carries whether an entry names one job or a whole group, which both sides
+    used to decide by comparing the key against OPT77's — so a fourth
+    group-shaped pattern would have rendered `(unnamed job)` everywhere and
+    been re-derived the same wrong way here, agreeing and staying green."""
+
+    doc_key: str
+    label: str
+    noun: str
+    feeds: str
+    entry_shape: str
+
+
 _VR_WITHHELD_ROWS = (
-    (_VR_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts", "candidate cache(s)",
-     "Why a candidate cache produced no finding and no uncredited line"),
-    (_VR_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back", "candidate job group(s)",
-     "Why a group of small jobs sharing one setup produced no finding"),
-    (_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back", "candidate checkout(s)",
-     "Why a checkout with a slow tail produced no finding"),
+    _VrWithheldRow(_VR_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts",
+                   "candidate cache(s)",
+                   "Why a candidate cache produced no finding and no uncredited line",
+                   "job"),
+    _VrWithheldRow(_VR_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back",
+                   "candidate job group(s)",
+                   "Why a group of small jobs sharing one setup produced no finding",
+                   "group"),
+    _VrWithheldRow(_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back",
+                   "candidate checkout(s)",
+                   "Why a checkout with a slow tail produced no finding",
+                   "job"),
 )
+_VR_WITHHELD_SHAPE_BY_KEY = {r.doc_key: r.entry_shape for r in _VR_WITHHELD_ROWS}
 # The plain-English phrase for every WITHHOLD gate — this verifier's OWN copy of
 # `blocking_path`'s tables (it re-derives the line rather than importing the
 # renderer's answer; a coupling test pins the copies equal, and another pins them
@@ -997,7 +1019,7 @@ def _vr_withheld_entries(rows: list[dict], key: str) -> list[str]:
     def _wf(r: dict) -> str:
         return str(r.get("workflow_file") or "").replace("\\", "/").rsplit("/", 1)[-1]
 
-    if key == _VR_OPT77_WITHHELD_DOC_KEY:
+    if _VR_WITHHELD_SHAPE_BY_KEY.get(key) == "group":
         return sorted({
             " + ".join(sorted(_vr_withheld_cell_text(j) for j in r["jobs"]))
             + (f" in {_vr_withheld_cell_text(_wf(r))}" if _wf(r) else "")
@@ -1036,7 +1058,7 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
     # four fields against the renderer's registry. Held as three fields, it was
     # the one part of a held-back row that could be rewritten with the whole
     # suite staying green.
-    for key, label, noun, _feeds in _VR_WITHHELD_ROWS:
+    for key, label, noun, feeds, shape in _VR_WITHHELD_ROWS:
         raw = _as_dict(data).get(key)
         # The renderer quietly drops non-objects and names a gate-less entry
         # `unknown`; here either is a collector bug, not "nothing withheld".
@@ -1050,7 +1072,7 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
         rows = list(raw or [])
         # The named jobs are part of the line, so an entry must carry them.
         for r in rows:
-            if key == _VR_OPT77_WITHHELD_DOC_KEY:
+            if shape == "group":
                 ok = (isinstance(r.get("jobs"), list) and bool(r["jobs"])
                       and all(isinstance(j, str) and j.strip() for j in r["jobs"]))
             else:
@@ -1064,8 +1086,14 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
                 return (f"{key} records gate {r['gate']!r}, which has no plain-English "
                         "phrase in verify_report - the withheld row cannot be "
                         "re-derived, and a code is never a reason"), ""
-        m = re.search(rf"^\|\s*{re.escape(label)}\s*\|\s*((?:\\\||[^|])+?)\s*\|",
-                      report, re.MULTILINE)
+        # Both the Coverage cell AND the "Used for" cell. Held as a field
+        # nothing read, the third column could be rewritten to anything — in
+        # lockstep on both sides, since the renderer and this file are pinned
+        # to each other — with the whole suite staying green.
+        m = re.search(
+            rf"^\|\s*{re.escape(label)}\s*\|\s*((?:\\\||[^|])+?)\s*\|"
+            rf"\s*((?:\\\||[^|])*?)\s*\|",
+            report, re.MULTILINE)
         if not rows:
             if m:
                 return (f"Data sources row '{label}' declares candidates held back, "
@@ -1092,6 +1120,11 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
         if cell != _strip_render_artifacts(expected):
             return (f"Data sources '{label}' cell {cell!r} is not the re-derived "
                     f"line {expected!r}"), ""
+        used_for = _strip_render_artifacts(m.group(2) or "")
+        if used_for != _strip_render_artifacts(feeds):
+            return (f"Data sources '{label}' says it is used for {used_for!r}, "
+                    f"not {feeds!r} - the column that tells the reader what the "
+                    "row is about is not the one the pattern registered"), ""
         note += f"; {len(rows)} held-back {noun} disclosed"
     return None, note
 

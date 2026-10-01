@@ -728,6 +728,18 @@ unversioned and updates by reinstall from `main`.
   recognises every way the checkout detector records one, so two reasons it
   previously could not see are no longer listed by hand inside the guard
   itself.
+  A held-back row can also no longer take the whole report down with it: a
+  pattern registered without its plain-English wording raised an error that
+  stopped the report being produced at all, where the point of that wording is
+  to keep a report readable when something is wrong. A group of jobs held back
+  with a blank name now shows a visible marker rather than nothing. Whether a
+  held-back entry names one job or a whole group is part of what a pattern
+  registers, instead of being worked out by comparing it against the one
+  group-shaped pattern that exists today — a second group-shaped pattern would
+  have had every candidate rendered as "(unnamed job)", in the report and in
+  the report's own self-check alike, so the two would have agreed. The
+  self-check now also reads the row's third column, which says what the row is
+  about and which nothing checked.
 - **2026-09-30** — **A workflow whose jobs all share one setup no longer loses
   its saving in silence (#112).** The repeated-setup pattern (OPT77) sizes what
   collapsing small jobs that each re-pay the same setup would save on the bill.

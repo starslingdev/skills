@@ -9097,8 +9097,7 @@ def test_withheld_cache_candidates_must_be_disclosed(tmp_path):
     silent = "## 🗄️ Data sources\n\n| Source | Coverage | Feeds |\n"
     chk = vr.check_coverage_disclosed(silent, path)
     assert not chk.ok and "held back" in chk.detail, chk
-    row = ("| cache hit/miss verdicts | {} | Why a probed cache produced "
-           "no finding |\n")
+    row = "| cache hit/miss verdicts | {} | " + _CACHE_FEEDS + " |\n"
     # Two gates contributed, so the reason is hedged — it holds for two of the
     # three jobs the row names, not for all three.
     honest = silent + row.format(
@@ -9566,7 +9565,7 @@ def test_held_back_verifier_rederives_escaped_job_names(tmp_path):
     cell = ("1 candidate cache(s) held back (a\\|b \\`x\\` c): the job's monthly run "
             "count was unknown, so its saving could not be sized.")
     report = ("## 🗄️ Data sources\n\n| Source | Coverage | Feeds |\n"
-              f"| cache hit/miss verdicts | {cell} | x |\n")
+              f"| cache hit/miss verdicts | {cell} | " + _CACHE_FEEDS + " |\n")
     chk = vr.check_coverage_disclosed(report, path)
     assert chk.ok, chk
 
@@ -9585,7 +9584,7 @@ def test_held_back_verifier_rederives_the_five_job_cap_and_shared_names(tmp_path
 
     def cell(jobs):
         return (head + f"| cache hit/miss verdicts | 7 candidate cache(s) held "
-                f"back ({jobs}): {tail} | x |\n")
+                f"back ({jobs}): {tail} | " + _CACHE_FEEDS + " |\n")
     honest = "a, b, c, ci.yml / build, d, and 2 more"
     assert vr.check_coverage_disclosed(cell(honest), path).ok
     for wrong in ("a, b, c, ci.yml / build, and 3 more",
@@ -9635,6 +9634,16 @@ _WITHHELD_77_80_CASES = (
 )
 
 
+_CACHE_FEEDS = "Why a candidate cache produced no finding and no uncredited line"
+_CHECKOUT_FEEDS = "Why a checkout with a slow tail produced no finding"
+_FEEDS_BY_KEY = {
+    "opt77_withheld_candidates":
+        "Why a group of small jobs sharing one setup produced no finding",
+    "opt79_withheld_candidates": _CACHE_FEEDS,
+    "opt80_withheld_candidates": _CHECKOUT_FEEDS,
+}
+
+
 def _withheld_phrase(vr, key, gate):
     table = (vr._VR_OPT77_WITHHOLD_PHRASES if key.startswith("opt77")
              else vr._VR_OPT80_WITHHOLD_PHRASES)
@@ -9657,7 +9666,7 @@ def test_withheld_setup_and_checkout_candidates_must_be_disclosed(tmp_path):
         path = _withheld_77_80_doc(tmp_path, key, rows)
         chk = vr.check_coverage_disclosed(silent, path)
         assert not chk.ok and "held back" in chk.detail, (key, chk)
-        row = f"| {label} | {{}} | Why a candidate produced no finding |\n"
+        row = f"| {label} | {{}} | {_FEEDS_BY_KEY[key]} |\n"
         honest = silent + row.format(_withheld_cell(vr, key, noun, 3, jobs, top))
         chk = vr.check_coverage_disclosed(honest, path)
         assert chk.ok, (key, chk)
@@ -9753,6 +9762,26 @@ def test_withheld_gate_without_a_phrase_fails_the_self_check_closed(tmp_path):
                     and "no plain-English phrase" in chk.detail), (key, chk)
 
 
+def test_held_back_row_must_carry_the_used_for_cell_the_pattern_registered(tmp_path):
+    """The "Used for" column was pinned renderer-to-verifier and read by
+    neither: rewriting it in lockstep on both sides survived, because this
+    file bound the field and never compared it to the report. It is the column
+    that tells a reader what the row is about."""
+    vr = _load_verify_report()
+    silent = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    feeds_by_key = {r.doc_key: r.feeds for r in vr._VR_WITHHELD_ROWS}
+    assert feeds_by_key == _FEEDS_BY_KEY
+    for key, label, noun, rows, jobs, top, _other in _WITHHELD_77_80_CASES:
+        path = _withheld_77_80_doc(tmp_path, key, rows)
+        cell = _withheld_cell(vr, key, noun, 3, jobs, top)
+        good = vr.check_coverage_disclosed(
+            silent + f"| {label} | {cell} | {feeds_by_key[key]} |\n", path)
+        assert good.ok, (key, good)
+        bad = vr.check_coverage_disclosed(
+            silent + f"| {label} | {cell} | Why a thing happened |\n", path)
+        assert not bad.ok and "used for" in bad.detail, (key, bad)
+
+
 def test_withhold_phrase_tables_match_the_renderer_and_the_collector():
     """The verifier carries its own copy (it is an independent re-derivation);
     a drift between the copies is the thing this pins.
@@ -9766,13 +9795,18 @@ def test_withhold_phrase_tables_match_the_renderer_and_the_collector():
     # Every field of every row, including the "Used for" cell. Sliced to three,
     # that cell could be rewritten with the whole suite staying green.
     assert list(vr._VR_WITHHELD_ROWS) == list(bp._WITHHELD_ROWS)
-    for _key, _label, _noun, _feeds in bp._WITHHELD_ROWS:
-        assert _feeds.strip(), f"{_key} registers an empty 'Used for' cell"
+    for row in bp._WITHHELD_ROWS:
+        assert row.feeds.strip(), f"{row.doc_key} registers an empty 'Used for' cell"
+        assert row.entry_shape in ("job", "group"), row
+    # the shape maps both twins dispatch on are derived from the registry, so a
+    # pattern cannot be registered with one shape and rendered with another
+    assert (bp._WITHHELD_SHAPE_BY_KEY == vr._VR_WITHHELD_SHAPE_BY_KEY
+            == {r.doc_key: r.entry_shape for r in bp._WITHHELD_ROWS})
     # Same registered patterns, and — for each — the same gate→phrase table
     # CONTENTS, not merely the same key.
     assert (set(vr._VR_WITHHELD_PHRASES_BY_KEY)
             == set(bp._WITHHELD_PHRASES_BY_KEY)
-            == {r[0] for r in bp._WITHHELD_ROWS})
+            == {r.doc_key for r in bp._WITHHELD_ROWS})
     for key, table in bp._WITHHELD_PHRASES_BY_KEY.items():
         assert vr._VR_WITHHELD_PHRASES_BY_KEY[key] == table, key
     # The two shared constants the line's shape depends on…
@@ -9817,7 +9851,7 @@ def test_withheld_setup_and_checkout_tie_goes_to_the_alphabetically_first_gate(t
     rows = [{"workflow_file": "ci.yml", "job": "a", "gate": _G80_A},
             {"workflow_file": "ci.yml", "job": "b", "gate": _G80_B}]
     path = _withheld_77_80_doc(tmp_path, "opt80_withheld_candidates", rows)
-    row = "| checkout stall: held back | {} | x |\n"
+    row = "| checkout stall: held back | {} | " + _CHECKOUT_FEEDS + " |\n"
     # Two gates, one candidate each: hedged, like every multi-gate row.
     cell = ("2 candidate checkout(s) held back (a, b): "
             + vr._VR_WITHHELD_MODAL_LEAD + "{}.")

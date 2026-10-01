@@ -8253,6 +8253,56 @@ def test_no_collector_path_can_record_a_held_back_entry_with_no_job():
     assert _cr is not None
 
 
+def test_a_registered_pattern_with_no_phrase_table_still_renders_a_report():
+    """`_WITHHELD_PHRASES_BY_KEY[key]` was a bare subscript: a pattern
+    registered in `_WITHHELD_ROWS` whose gate -> phrase table had not been
+    registered too raised a KeyError and took the WHOLE report with it. The
+    renderer's contract is that it always produces a report, even from a
+    document a bug has malformed - so this degrades to the unmapped wording
+    and leaves `verify_report` to fail the run."""
+    line = bp._withheld_candidates_line(
+        {"optzz_withheld_candidates": [
+            {"workflow_file": "ci.yml", "job": "unit", "gate": "some_gate"}]},
+        "optzz_withheld_candidates", "candidate thing(s)")
+    assert line == (f"1 candidate thing(s) held back (unit): "
+                    f"{bp._WITHHELD_UNMAPPED_PHRASE}."), line
+
+
+def test_a_group_shaped_pattern_renders_its_jobs_because_the_shape_is_registered():
+    """Whether an entry names one job or a whole group was decided by
+    comparing the doc key against OPT77's, in the renderer AND in
+    `verify_report`. A fourth group-shaped pattern would therefore have
+    rendered `(unnamed job)` for every candidate - in both twins alike, so
+    they agreed and the suite stayed green. The shape is part of the
+    registration now."""
+    key = "optzz_withheld_candidates"
+    old_rows = bp._WITHHELD_ROWS
+    old_shape = dict(bp._WITHHELD_SHAPE_BY_KEY)
+    try:
+        bp._WITHHELD_ROWS = old_rows + (bp.WithheldRow(
+            key, "mystery: held back", "candidate group(s)",
+            "Why a thing produced no finding", "group"),)
+        bp._WITHHELD_SHAPE_BY_KEY[key] = "group"
+        entries = bp._withheld_entries(
+            [{"workflow_file": ".github/workflows/ci.yml",
+              "jobs": ["lint", "test"], "gate": "g"}], key)
+    finally:
+        bp._WITHHELD_ROWS = old_rows
+        bp._WITHHELD_SHAPE_BY_KEY.clear()
+        bp._WITHHELD_SHAPE_BY_KEY.update(old_shape)
+    assert entries == ["lint + test in ci.yml"], entries
+
+
+def test_a_group_entry_with_a_blank_member_name_renders_a_visible_marker():
+    """The job-shaped path has always had a `(unnamed job)` fallback; the
+    group-shaped one had none, so a blank member rendered as nothing at all
+    and the entry read " in ci.yml"."""
+    entries = bp._withheld_entries(
+        [{"workflow_file": "ci.yml", "jobs": ["  "], "gate": "g"}],
+        bp._OPT77_WITHHELD_DOC_KEY)
+    assert entries == ["\\(unnamed job\\) in ci.yml"], entries
+
+
 def test_a_gate_with_no_phrase_renders_a_reason_never_its_code():
     """A gate the phrase tables do not cover is a collector bug the self-check
     fails on — but until the report is verified the row still renders, and what
@@ -8275,7 +8325,7 @@ def test_every_held_back_row_keeps_the_static_only_body_alive():
     candidate is disclosed — goes with it and "could not tell" reads as
     "nothing found". Pinned for EVERY registered pattern, not just OPT79: a row
     added without this is silent on exactly the repositories it exists for."""
-    for key, label, _noun, _feeds in bp._WITHHELD_ROWS:
+    for key, label, _noun, _feeds, _shape in bp._WITHHELD_ROWS:
         entry = {"workflow_file": ".github/workflows/nightly.yml",
                  "gate": "no_monthly_volume"}
         if key == "opt77_withheld_candidates":
