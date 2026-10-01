@@ -5175,6 +5175,10 @@ _OPT77_WITHHOLD_PHRASES: dict[str, str] = {
     "no_job_outside_the_group_runs_often_enough_to_measure_against":
         "other jobs exist, but none ran often enough in the sampled runs to show "
         "that merging these would not make the pipeline slower",
+    "a_job_the_workflow_file_does_not_declare_ran_with_the_group":
+        "every job the workflow file declares is in the group, but the sampled "
+        "runs also carried a job it does not declare, so what would be left "
+        "after merging could not be established",
 }
 _OPT80_WITHHOLD_PHRASES: dict[str, str] = {
     "fewer_than_the_minimum_tail_runs":

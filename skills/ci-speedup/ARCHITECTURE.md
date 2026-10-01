@@ -1065,21 +1065,33 @@ OPT65 as the dispatch key) and is historical for OPT77; `verify_report.py`'s
 grouping (each job's own stamped prefix must equal the credited shared one) and
 the eligible set the tallest-remaining job was chosen from. When the group is
 every job the workflow DECLARES there is no remaining job, and the comparison is
-against the gate the group sets today, its members running in parallel:
-`max_i(min(setup_i + useful_i, job_p50_i))`. The component sum is CAPPED by the
-member's measured job p50 because `setup_i` and `useful_i` are two medians taken
-separately and their sum is not the median of the job's duration: setups of
-10/100/100s beside tasks of 100/100/10s make a 110s job read as 200s, and an
-overstated gate credits a consolidation as free when the measured wait says it
-would grow. At or below that gate the merge wait is unchanged and the
-runner-minute saving is credited, above it the group is held back and disclosed.
-"Whole workflow" is decided from the declared jobs, never from the sample.
-`margin_s` on this path is always exactly 0: `projected = max_i(setup_i) +
-max_i(useful_i)` is never below `max_i(setup_i + useful_i)`, so the branch
-credits only the exact tie, where one member sets both the longest setup and the
-longest task. `verify_report` re-derives the capped gate from `job_p50` rather
-than replaying the detector's arithmetic, so an overstated gate is caught rather
-than reproduced.
+against the gate the group sets today: `max_i(job_p50_i)`, the slowest member's
+MEASURED duration. The members run concurrently — the independence gate has
+already shown none of them waits on another — so the longest of them is
+literally what this workflow makes a pull request wait for. At or below that
+gate the merge wait does not lengthen and the runner-minute saving is credited;
+above it the group is held back and disclosed, with both numbers on the entry.
+
+That gate used to be re-assembled from each member's step components,
+`max_i(min(setup_i + useful_i, job_p50_i))`, and both halves of that were
+wrong. The projection `max_i(setup_i) + max_i(useful_i)` is never below
+`max_i(setup_i + useful_i)`, so the branch could fire only on an exact tie and
+the saving was reported essentially nowhere. And the capped value is not a
+duration anything took: three members each measuring 400s were told, in the
+report's own prose, that they take 90s today. The component sum survives only
+as a coherence check — the projection can never be below any single member's
+own `setup_i + useful_i`, and `verify_report` reddens if it is, which says the
+stamped medians do not come from one set of runs. FIRE is now reachable
+whenever the tallest member's measured duration absorbs the others' setup.
+
+"Whole workflow" is decided from the declared jobs, never from the sample, and
+needs one declared key per member. What `verify_report` re-derives from
+MEASUREMENT is the gate itself (`max` over `per_workflow_timing[wf].job_p50`
+for the credited members, which no detector writes) and the workflow's declared
+job keys (`per_workflow_timing[wf].declared_job_keys`, stamped by the workflow
+YAML reader before any detector runs). What it takes from the finding's own
+stamps, and then checks for internal coherence, is the per-member setup/useful
+split and the projection built from it.
 Like OPT65 it claims
 no speedup (`wall_clock_p50_s=0`, `realization=none`), and it shares
 `_billed_job_runner` and `_tier2_scope_event` with it.
@@ -1131,8 +1143,8 @@ whole line — count, jobs, reason — from the findings document, failing a rep
 that omits the row, misstates any part of it, prints a gate name instead of a
 phrase, or carries a row with nothing behind it; a recorded gate with no phrase
 fails closed. A group that is every job the workflow declares is no longer a
-silent verdict: it fires when collapsing it leaves the merge gate alone, and is
-listed as held back
+silent verdict: it fires when collapsing it does not lengthen the merge gate,
+and is listed as held back
 (`collapsing_the_whole_workflow_would_lengthen_the_merge_gate`) when it would
 not. The three
 files name the keys as constants a coupling test pins equal.

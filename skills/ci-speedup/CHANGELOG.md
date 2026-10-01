@@ -737,17 +737,27 @@ unversioned and updates by reinstall from `main`.
   main-gated release job, a job behind a condition — was misclassified and
   dropped without a word; and it assumed collapsing could only lengthen the
   wait, which is a wall-clock argument applied to a bill-only saving. The group
-  is now judged against the wait it sets today (its slowest member, since the
-  members run in parallel): at or below it the merge is unchanged and the
-  saving is reported, above it the group is held back and said to be held back.
-  "Every job in the workflow" is read from what the workflow declares. That
-  wait is capped by how long each job was actually measured to take, never
-  taken from its parts alone — a job's typical setup added to its typical task
-  is not its typical duration, and where the two disagree the longer of them
-  would have credited a change that makes the merge slower as though it were
-  free. The report's self-check works the cap out from the measurements again
-  rather than repeating the sum, so an overstated wait is caught instead of
-  copied.
+  is now judged against the wait it sets today — **how long its slowest member
+  was measured to take**, which is what the workflow makes a pull request wait
+  for, since the members run in parallel. At or below it the merge wait does
+  not lengthen and the saving is reported; above it the group is held back and
+  said to be held back, with both durations recorded. "Every job in the
+  workflow" is read from what the workflow declares, and needs one declared job
+  per member. That wait is a measured duration rather than a job's typical
+  setup added to its typical task: the two are not the same number, assembling
+  the wait out of parts could describe three jobs each measuring 400s as taking
+  90s today, and because the collapsed job is projected from those same parts
+  the comparison could almost never come out in the saving's favour — so a free
+  saving was reported essentially nowhere. The report's self-check works the
+  wait out from the measurements itself, and the part-based sum survives only
+  as a consistency test on them. The self-check also reads what the workflow
+  declares from a record written when the workflow file is read, rather than
+  from the pattern's own copy of it, so the claim "this is every job in the
+  workflow" is checked against a second source; it no longer rejects a saving
+  because the two sides rounded a tenth of a second differently; and a saving
+  measured against another job can no longer also carry the whole-workflow
+  wait. A workflow file that could not be read disables three patterns, and now
+  says so in the report instead of reading as "checked, nothing found".
 - **2026-09-30** — **The repeated-setup (OPT77) and stalled-checkout (OPT80)
   patterns now say when they measured something and could not decide it.** Both
   kept a private tally of why they held candidates back, but nothing showed it,

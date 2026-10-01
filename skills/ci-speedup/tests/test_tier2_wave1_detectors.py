@@ -7023,7 +7023,10 @@ def test_opt77_lists_the_groups_it_measured_but_could_not_resolve():
             "runner_scope": "ubuntu-latest"}
     # A job outside the group EXISTS (`docs`) but ran in only one of the two
     # sampled runs, so it cannot carry the proof that the merge gate stays
-    # unchanged: the audit cannot tell -> WITHHELD.
+    # unchanged: the audit cannot tell -> WITHHELD. `docs` is not in the
+    # workflow file either, so the reason is the undeclared-job one: saying
+    # "other jobs exist, but none ran often enough" would describe a job the
+    # workflow does not declare as one of its own.
     with_docs = run + [_setup_job("docs", 5.0, 40.0)]
     out, rows = _opt77_withheld(jpr=[with_docs, list(run)], crit=crit,
                                 wf=_opt77_wf(names=names))
@@ -7032,7 +7035,7 @@ def test_opt77_lists_the_groups_it_measured_but_could_not_resolve():
         "workflow_file": "ci.yml",
         "group": "ubuntu-latest/audit+lint+typecheck",
         "jobs": ["audit", "lint", "typecheck"],
-        "gate": "no_job_outside_the_group_runs_often_enough_to_measure_against",
+        "gate": "a_job_the_workflow_file_does_not_declare_ran_with_the_group",
     }], rows
     # A `needs:` graph the audit cannot reason about is also "could not tell".
     out, rows = _opt77_withheld(wf=_opt77_wf(needs={"audit": ["ghost"]}))
@@ -7079,6 +7082,9 @@ def test_opt77_a_declared_job_that_never_ran_is_still_a_job_outside_the_group():
     assert [r["gate"] for r in rows] == [
         "no_job_outside_the_group_runs_often_enough_to_measure_against"], rows
     assert "collapsing_the_whole_workflow_would_lengthen_the_merge_gate" not in counts
+    # …and the declared job that is outside the group is NAMED on the held-back
+    # entry, so the reason is not just "something else exists".
+    assert rows[0]["declared_outside"] == ["release"], rows
 
 
 def test_opt77_a_whole_workflow_group_that_leaves_the_gate_alone_is_credited():
@@ -7130,7 +7136,7 @@ def test_opt77_a_sampled_job_the_workflow_does_not_declare_is_still_outside_the_
         withheld={}, withheld_candidates=rows)
     assert out == [], out
     assert [r["gate"] for r in rows] == [
-        "no_job_outside_the_group_runs_often_enough_to_measure_against"], rows
+        "a_job_the_workflow_file_does_not_declare_ran_with_the_group"], rows
 
 
 def test_opt77_whole_workflow_is_decided_on_job_keys_not_display_names():
@@ -7186,36 +7192,69 @@ def test_opt77_a_whole_workflow_group_that_would_lengthen_the_gate_is_disclosed(
     assert "_" not in line.split("):", 1)[1], line
 
 
-def test_opt77_the_whole_workflow_gate_is_never_longer_than_the_members_measured():
-    """Today's gate was the median setup PLUS the median useful work, two
-    medians taken separately over the sampled occurrences. Their sum is not the
-    median of the job's duration and can exceed it: setups of 10/100/100s
-    beside tasks of 100/100/10s make a 110s job read as 200s. An overstated
-    gate credits a consolidation as leaving the merge wait unchanged when the
-    duration actually measured says the wait would grow, and the report's
-    self-check repeated the same arithmetic rather than checking it against the
-    measurement. The gate is now clamped to what each member's job took."""
-    # setup 80s + task 10s composes to 90s a member, but the members' measured
-    # duration is 70s, so today's gate is 70s and consolidating to 90s is not free.
+def test_opt77_the_whole_workflow_gate_is_the_slowest_members_measured_duration():
+    """Today's gate for a whole-workflow group is simply the slowest member's
+    MEASURED p50 — the members run concurrently, so that is literally what a
+    pull request waits for today. It used to be re-assembled from each member's
+    step components (`setup_i + useful_i`, capped by the measurement), which
+    made the branch almost unreachable — the projection is never below the
+    largest component sum, so only an exact tie could fire — and made the
+    rendered sentence false: three members each measuring 400s were described
+    as taking 90s today, and the saving they really leave free was withheld."""
+    # Three members measuring 400s each. The components compose to 90s, but 400s
+    # is what the workflow makes a pull request wait for, so collapsing to 90s
+    # cannot lengthen anything: the bill saving is free and is reported.
+    out, rows, _counts = _opt77_whole_workflow(
+        job_p50_by_job={"lint": 400.0, "typecheck": 400.0, "audit": 400.0})
+    assert len(out) == 1 and rows == [], (out, rows)
+    sc = out[0]["setup_consolidation"]
+    assert sc["gate_today_p50_s"] == 400.0, sc
+    assert out[0]["tier2_neutrality"]["margin_s"] == 310.0
+    # …and the sentence the reader sees quotes the duration that was measured.
+    assert "against the 400s the group's slowest member takes today" in (
+        out[0]["evidence"]), out[0]["evidence"]
+    # The slowest member measures 70s while the projection is 90s, so the merge
+    # wait really would grow. Held back, with both numbers on the record.
     out, rows, _counts = _opt77_whole_workflow(
         job_p50_by_job={"lint": 70.0, "typecheck": 70.0, "audit": 70.0})
     assert out == [], out
     assert [r["gate"] for r in rows] == [
         "collapsing_the_whole_workflow_would_lengthen_the_merge_gate"], rows
-    # ...and the clamp only ever shortens the gate: a member whose measured job
-    # runs LONGER than its steps (queue time, teardown) does not inflate it.
-    out, rows, _counts = _opt77_whole_workflow(
-        job_p50_by_job={"lint": 400.0, "typecheck": 400.0, "audit": 400.0})
-    assert len(out) == 1 and rows == [], (out, rows)
-    assert out[0]["setup_consolidation"]["gate_today_p50_s"] == 90.0
-    # The cap's "no measured duration" fallback is unreachable: a job without a
-    # strict p50 never becomes a candidate at all, so it can never be a member
-    # whose gate has to be worked out without one. Pinned here, because the
-    # fallback is only ever what the cap does if that invariant breaks.
+    assert rows[0]["gate_today_p50_s"] == 70.0, rows
+    assert rows[0]["projected_consolidated_p50_s"] == 90.0, rows
+    # A member without a strict measured p50 never becomes a candidate, so the
+    # gate never has to be worked out without a measurement — there is no
+    # component-sum fallback left to take.
     out, rows, counts = _opt77_whole_workflow(
         job_p50_by_job={"lint": 70.0, "typecheck": 70.0, "audit": 0.0})
     assert out == [] and rows == [], (out, rows)
     assert counts.get("job_no_strict_p50"), counts
+
+
+def test_opt77_a_matrix_shaped_whole_workflow_group_is_not_credited():
+    """Three observed jobs can resolve to FEWER declared keys — matrix legs, or
+    a job renamed between runs. "Every declared job is a member" is then true
+    while the members are not one declared job each, and the gate the group
+    sets today is not the gate the consolidated job would face.
+
+    A characterization pin, not a regression proof: the earlier matrix
+    exclusions already reject this shape, so no input was found that reached
+    the whole-workflow branch with duplicate keys. The branch now also requires
+    one declared key per member, so the two defences cannot both be lost
+    silently."""
+    wf = {"jobs": {"lint": {"runs-on": "ubuntu-latest"},
+                   "test": {"runs-on": "ubuntu-latest"}}}
+    names = ("lint", "test (3.11)", "test (3.12)")
+    run = [_setup_job(n, 80.0, 10.0) for n in names]
+    crit = {"floor_p50": 90.0, "long_pole_p50": 90.0,
+            "job_p50": {n: 90.0 for n in names},
+            "job_runner": {n: "ubuntu-latest" for n in names},
+            "runner_scope": "ubuntu-latest"}
+    rows: list = []
+    out = cr._detect_opt77_repeated_setup_across_small_jobs(
+        "ci.yml", [run, list(run)], crit, wf, 100, 0,
+        withheld={}, withheld_candidates=rows)
+    assert out == [], out
 
 
 def test_opt77_does_not_list_groups_it_measured_and_judged():

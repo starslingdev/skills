@@ -923,6 +923,10 @@ _VR_OPT77_WITHHOLD_PHRASES = {
     "no_job_outside_the_group_runs_often_enough_to_measure_against":
         "other jobs exist, but none ran often enough in the sampled runs to show "
         "that merging these would not make the pipeline slower",
+    "a_job_the_workflow_file_does_not_declare_ran_with_the_group":
+        "every job the workflow file declares is in the group, but the sampled "
+        "runs also carried a job it does not declare, so what would be left "
+        "after merging could not be established",
 }
 _VR_OPT80_WITHHOLD_PHRASES = {
     "fewer_than_the_minimum_tail_runs":
@@ -5514,8 +5518,28 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
     # stamped must all be credited members, and the sampled `job_p50` must carry
     # no job outside the group either. One axis alone is what the detector got
     # wrong: the sample can be missing a declared job that simply never ran.
-    if sc.get("group_is_the_whole_workflow"):
-        declared = [str(k) for k in _as_list(sc.get("workflow_declared_job_keys"))]
+    # Read as an identity, never truthily: a stamp of the STRING "false" (or 0,
+    # or None) decided which gate the finding was measured against, and "false"
+    # selected the whole-workflow arm.
+    tag = sc.get("group_is_the_whole_workflow")
+    if tag is not None and tag is not True and tag is not False:
+        problems.append(
+            f"group_is_the_whole_workflow {tag!r} is not true or false - a "
+            "stamp this arm cannot read decides which gate the finding was "
+            "measured against")
+    # The workflow's DECLARED job keys, read from the per-workflow record the
+    # YAML reader writes before any detector runs. Checking OPT77's stamp of
+    # them against OPT77's own reading of the same file proved nothing; this is
+    # a second source, so a stamp that under-enumerates the declared jobs (the
+    # whole basis of "there is nothing outside this group") reddens.
+    declared_record = [str(k) for k in _as_list(crit.get("declared_job_keys"))]
+    declared_stamp = [str(k) for k in _as_list(sc.get("workflow_declared_job_keys"))]
+    if declared_record and sorted(declared_stamp) != sorted(declared_record):
+        problems.append(
+            f"workflow_declared_job_keys {sorted(declared_stamp)!r} != the "
+            f"{sorted(declared_record)!r} this workflow declares")
+    if tag is True:
+        declared = declared_record or declared_stamp
         credited_keys = {str(k) for k in _as_list(sc.get("credited_job_keys"))}
         if not declared:
             problems.append("group_is_the_whole_workflow with no declared job keys "
@@ -5531,40 +5555,81 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
             problems.append(
                 f"group_is_the_whole_workflow but the sampled runs also carried "
                 f"{outside_sampled!r}")
-        # Today's gate is the slowest member, capped by what that member
-        # MEASURED: the stamped `setup_p50_s` and `useful_work_p50_s` are two
-        # medians taken separately, and their sum can exceed the median of the
-        # job's duration. Re-derived against `job_p50` here rather than by
-        # replaying the detector's own arithmetic, so an overstated gate is
-        # caught instead of reproduced.
+        # Today's gate is the slowest member's MEASURED p50 — the members run
+        # concurrently, so the longest of them is what a pull request waits for
+        # today. Re-derived here from `job_p50`, which the detector does not
+        # write, rather than by replaying its stamped step components.
         per_job = _as_dict(sc.get("per_job"))
-        gates = []
-        for _k, _v in per_job.items():
-            _steps = ((_num(_as_dict(_v).get("setup_p50_s")) or 0.0)
-                      + (_num(_as_dict(_v).get("useful_work_p50_s")) or 0.0))
-            _measured = _num(all_p50.get(str(_k))) or 0.0
-            gates.append(min(_steps, _measured) if _measured > 0 else _steps)
-        if len(per_job) != len(member) or not gates:
-            problems.append("group_is_the_whole_workflow but per_job does not cover "
-                            "every credited member - the gate cannot be re-derived")
+        # Cardinality is not identity: a stamp with the right NUMBER of entries
+        # under a renamed key used to pass, miss `job_p50` for a real member,
+        # and take the uncapped branch — reproducing the inflated gate the arm
+        # exists to catch. The key set must be the credited members exactly.
+        if {str(k) for k in per_job} != member:
+            problems.append(
+                f"group_is_the_whole_workflow but per_job names "
+                f"{sorted(str(k) for k in per_job)!r}, not the credited members "
+                f"{sorted(member)!r} - the gate cannot be re-derived")
             return None, problems
-        gate_today = round(max(gates), 1)
+        # Each member's two components are already required to be numbers and
+        # positive above (`missing setup/useful-work p50`), so nothing here
+        # reads an absent one as zero.
+        measured: list[float] = []
+        for _k in sorted(member):
+            _m = _num(all_p50.get(_k))
+            # No fallback to the component sum. A job without a strict measured
+            # p50 never becomes a member, so this is a malformed stamp, and
+            # assembling a gate out of step components is exactly the
+            # overstatement this arm exists to refuse.
+            if _m is None or _m <= 0:
+                problems.append(
+                    f"group_is_the_whole_workflow but member {_k!r} has no "
+                    f"measured job_p50 ({all_p50.get(_k)!r}) - the gate the group "
+                    "sets today cannot be re-derived")
+                return None, problems
+            measured.append(float(_m))
+        gate_today = round(max(measured), 1)
         claimed_gate = _num(sc.get("gate_today_p50_s"))
         if claimed_gate is None or abs(claimed_gate - gate_today) > 0.11:
             problems.append(
                 f"gate_today_p50_s {sc.get('gate_today_p50_s')!r} != {gate_today}")
+        # The component sum survives only as a coherence check on the medians:
+        # the projection is max(setup) + max(useful), which can never be below
+        # any single member's setup + useful. If it is, the stamped medians do
+        # not come from one set of runs.
+        component_max = max(
+            ((_num(_as_dict(per_job.get(_k)).get("setup_p50_s")) or 0.0)
+             + (_num(_as_dict(per_job.get(_k)).get("useful_work_p50_s")) or 0.0))
+            for _k in sorted(member))
+        if projected + 0.11 < round(component_max, 1):
+            problems.append(
+                f"projected consolidated job {projected} is below the largest "
+                f"member's own setup + useful work ({round(component_max, 1)}) - "
+                "the stamped medians are not coherent")
         if sc.get("remaining_tallest_job") is not None:
             problems.append("group_is_the_whole_workflow but a remaining tallest job "
                             "is named - there is no job outside the group")
         if sc.get("remaining_tallest_p50_s") is not None:
             problems.append("group_is_the_whole_workflow but a remaining tallest p50 "
                             "is stamped - there is no job outside the group")
-        if projected > gate_today:
+        # The same +0.11 tolerance every other comparison in this arm carries.
+        # Exact, it rejected a legitimate FIRE whose stamped values had been
+        # rounded to one decimal on the way through the findings document
+        # ("projected consolidated job 60.0 is ABOVE the 59.9 gate").
+        if projected > gate_today + 0.11:
             problems.append(
                 f"projected consolidated job {projected} is ABOVE the {gate_today} "
                 "gate the group sets today - consolidating would lengthen the merge")
             return None, problems
         return round(gate_today - projected, 1), problems
+    # The ordinary arm: there IS a job outside the group, so the gate the group
+    # sets itself is not what the projection is measured against and must not
+    # be stamped. Enforced on this side too — only the whole-workflow shape was
+    # checked, so a finding could carry both shapes' stamps and pass.
+    if sc.get("gate_today_p50_s") is not None:
+        problems.append(
+            f"group_is_the_whole_workflow is false but gate_today_p50_s "
+            f"{sc.get('gate_today_p50_s')!r} is stamped - the comparison is "
+            "against the tallest remaining job, not a gate the group sets itself")
     # The detector does not max over every remaining job: a job that ran in a
     # minority of the sampled runs cannot carry the neutrality proof, because on
     # the other runs the group's own members are the tallest thing left. It

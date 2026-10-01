@@ -1173,20 +1173,32 @@ saved:   (N - 1) x setup, every run
 
    **When the group is every job the workflow DECLARES** there is no remaining
    job to compare against — but the group still sets a gate today, because its
-   members run in parallel: `max_i(min(setup_i + useful_i, job_p50_i))`. The
-   component sum is capped by the member's own measured job p50, because a
-   median setup added to a median task is not the median of the job's duration
-   and can exceed it — and an overstated gate credits a consolidation as free
-   when what was measured says the merge would get slower. The same rule then
-   applies to that gate. Fire when `max(setup) + max(useful)` is at or below it
-   (the merge wait is unchanged, so the runner-minute saving is free); hold the
-   group back when the projection is above it, and say so
-   (`collapsing_the_whole_workflow_would_lengthen_the_merge_gate`). "Whole
-   workflow" is read off the workflow's **declared** jobs, never off the sampled
-   runs: a declared job that simply never ran in the sampled window — a
+   members run in parallel: `max_i(job_p50_i)`, **the slowest member's measured
+   duration**. That is literally what the workflow makes a pull request wait
+   for today. Fire when `max(setup) + max(useful)` is at or below it (the merge
+   wait does not lengthen, so the runner-minute saving is free); hold the group
+   back when the projection is above it, and say so
+   (`collapsing_the_whole_workflow_would_lengthen_the_merge_gate`), with the
+   two durations recorded on the held-back entry.
+
+   **When this fires in practice**: whenever the tallest member's own duration
+   absorbs the setup the other members pay — one member doing real work beside
+   a row of small checks that each re-pay the same install. It does *not* fire
+   when every member is roughly the same size and the longest setup and the
+   longest task sit on different members, which is exactly when consolidating
+   them really would make the merge wait longer. The gate was previously
+   re-assembled from each member's step components (`setup_i + useful_i`,
+   capped by the measurement); because the projection is never below the
+   largest such sum, that version could fire only on an exact tie, and it
+   described three members each measuring 400s as taking 90s today.
+
+   "Whole workflow" is read off the workflow's **declared** jobs, never off the
+   sampled runs: a declared job that simply never ran in the sampled window — a
    main-gated `release`, a job behind an `if:` — is still a job outside the
    group, and reading the sample instead classified such workflows as having
-   nothing outside the group and dropped them silently.
+   nothing outside the group and dropped them silently. It also requires one
+   declared job key per member, so several observed jobs resolving to the same
+   declared job cannot satisfy it.
 
    That job has to be a job that actually runs. Only jobs present in a **majority
    of the sampled runs in which the whole group ran** are eligible to carry the
@@ -1219,8 +1231,10 @@ would reach the tallest remaining job, or the credited saving rounds to zero —
 or a *could not tell*: the workflow file could not be read (`no_yaml_jobs`), the
 `needs:` graph
 is undecidable, the group never ran complete in one sampled run, jobs outside
-it exist but none runs often enough to measure against, or the group is every
-job the workflow declares and collapsing it would lengthen the merge gate.
+it exist but none runs often enough to measure against, every job the workflow
+file declares is in the group but the sampled runs also carried one it does not
+declare, or the group is every job the workflow declares and collapsing it
+would lengthen the merge gate.
 Each could-not-tell group
 is listed on the findings document (`opt77_withheld_candidates`), and the
 report's Data sources table carries a `repeated-setup: held back` row — "N
@@ -1311,6 +1325,15 @@ as the dispatch key; the meaning is restated wherever it is read — the detecto
 `verify_report.py`'s neutrality arm, `blocking_path.py`'s certificate summary and
 this note.
 
+The held-back row names every candidate but gives only the **commonest** gate's
+reason, so the reason is prefixed "most commonly," whenever a second gate
+contributed, and "equally often," when the top two gates are tied — printed
+flat, the sentence would assert one reason of every candidate it names. So a
+row reads "3 candidate job group(s) held back (lint + test in ci.yml, …): most
+commonly, the sampled runs never had every job in the group run together, so
+the saving could not be measured." Only a list where one gate accounts for
+every candidate is unhedged.
+
 The finding must stamp `wall_clock_p50_s=0`, `sizing_basis=measured`, the
 `(N-1) x setup_p50` model in `measured_signal`, and a structured
 `setup_consolidation` block that lets `verify_report.py` re-derive both the
@@ -1327,8 +1350,8 @@ re-derivation:
 | `projected_consolidated_p50_s` | `max(setup) + max(useful)` |
 | `remaining_tallest_job` / `remaining_tallest_p50_s` | the job the projection is measured against; both `null` when the group is every declared job, because there is none |
 | `group_is_the_whole_workflow` | true when the group is every job the workflow declares, which is what selects the gate below |
-| `workflow_declared_job_keys` | the workflow's declared job keys; every one must be a credited member, or the claim is refused |
-| `gate_today_p50_s` | the gate the group sets today, `max_i(min(setup_i + useful_i, job_p50_i))`; `null` unless the group is the whole workflow |
+| `workflow_declared_job_keys` | the workflow's declared job keys, checked against the per-workflow record the YAML reader stamps. Every one must be a credited member **when `group_is_the_whole_workflow` is true** — that is the claim the whole-workflow gate rests on; on the ordinary path the key is informational, because a sampled job the file never declares can legitimately be the tallest remaining job |
+| `gate_today_p50_s` | the gate the group sets today, `max_i(job_p50_i)` — the slowest member's measured duration; `null` unless the group is the whole workflow, and refused if stamped otherwise |
 | `credited_job_keys` | the credited members' YAML job keys, which is what `workflow_declared_job_keys` is compared against |
 | `remaining_eligible_jobs` / `remaining_excluded_jobs` | the set that job was chosen from, and every job left out with its reason |
 | `occurrences`, `sampled_successful_run_count`, `monthly_volume`, `scale` | the scaling; `occurrences` can never exceed the sampled run count |

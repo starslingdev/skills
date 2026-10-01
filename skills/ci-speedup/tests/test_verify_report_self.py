@@ -8578,15 +8578,13 @@ def test_opt77_whole_workflow_certificate_is_rederived_never_trusted():
     assert any("ABOVE" in p for p in problems), problems
 
 
-def test_opt77_whole_workflow_gate_is_capped_by_what_the_members_measured():
-    """`setup_p50_s` and `useful_work_p50_s` are two medians taken separately,
-    so their sum can exceed the median of the job's duration. Re-deriving the
-    gate by repeating the detector's own arithmetic would reproduce an
-    overstated gate instead of catching it, and an overstated gate is what
-    turns "consolidating is free" into a merge that gets slower."""
+def test_opt77_whole_workflow_gate_is_the_slowest_members_measured_duration():
+    """Today's gate for a whole-workflow group is the slowest member's measured
+    p50 — the members run concurrently, so that is what a pull request waits
+    for. The arm re-derives it from `job_p50`, which the detector does not
+    write, so an overstated gate is caught rather than reproduced."""
     vr = _load_verify_report()
-    # Components sum to 90s a member, but each member's job measured 70s, so
-    # today's gate is 70s and a 90s projection is NOT free.
+    # Each member measured 70s while the projection is 90s: not free.
     data = copy.deepcopy(_OPT77_WHOLE_DATA)
     data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
         "audit": 70.0, "lint": 70.0, "typecheck": 70.0}
@@ -8595,19 +8593,150 @@ def test_opt77_whole_workflow_gate_is_capped_by_what_the_members_measured():
     margin, problems = vr._opt77_consolidation_rederived(f, data)
     assert margin is None, margin
     assert any("ABOVE" in p for p in problems), problems
-    # …and a finding that stamps the uncapped 90s gate is rejected on the stamp.
+    # …and a finding that stamps a gate the measurement does not yield is
+    # rejected on the stamp.
     _m, problems = vr._opt77_consolidation_rederived(
         _opt77_whole_workflow_finding(), data)
     assert any("gate_today_p50_s" in p for p in problems), problems
-    # A member whose job measured LONGER than its steps does not inflate the
-    # gate: the cap only ever shortens it.
+    # Three members each measuring 400s: the 90s projection cannot lengthen a
+    # 400s wait, so the saving is free and the margin is the whole difference.
     data = copy.deepcopy(_OPT77_WHOLE_DATA)
     data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
         "audit": 400.0, "lint": 400.0, "typecheck": 400.0}
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["gate_today_p50_s"] = 400.0
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert problems == [], problems
+    assert margin == 310.0
+
+
+def test_opt77_whole_workflow_gate_carries_the_same_tolerance_as_its_siblings():
+    """The detector projects the consolidated job from UNROUNDED medians; the
+    self-check re-derives it from the components as stamped, rounded to one
+    decimal. The two can land a tenth apart, and this was the only comparison
+    in the arm made exactly — so a consolidation measured as free was rejected
+    with "projected consolidated job 60.0 is ABOVE the 59.9 gate", which reads
+    as the audit refusing its own measurement. Same 0.11 tolerance as every
+    other comparison here.
+
+    Setups of 49.96s and tasks of 9.96s: the detector projects 59.9s against a
+    59.9s gate and fires; the stamped components round to 50.0 and 10.0, so
+    re-derivation yields 60.0."""
+    vr = _load_verify_report()
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 59.93, "lint": 59.93, "typecheck": 59.93}
+    f = _opt77_whole_workflow_finding()
+    sc = f["setup_consolidation"]
+    sc["per_job"] = {n: {"setup_p50_s": 50.0, "useful_work_p50_s": 10.0,
+                         "setup_steps": ["set up job", "actions/checkout"]}
+                     for n in ("audit", "lint", "typecheck")}
+    sc["setup_p50_s"] = 50.0
+    sc["sampled_saved_s"] = 200.0
+    sc["runner_min_saving"] = f["runner_min_saving"] = 166.7
+    sc["projected_consolidated_p50_s"] = 59.9
+    sc["gate_today_p50_s"] = 59.9
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert problems == [], problems
+    assert margin == -0.1
+    # …and a projection genuinely above the gate is still refused.
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 50.0, "lint": 50.0, "typecheck": 50.0}
+    sc["gate_today_p50_s"] = 50.0
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert margin is None and any("ABOVE" in p for p in problems), problems
+
+
+def test_opt77_whole_workflow_per_job_must_name_the_members_not_merely_count_them():
+    """`len(per_job) != len(member)` is a cardinality check: a stamp with the
+    right number of entries under a renamed key passed, so the renamed member
+    was never looked up in `job_p50` at all and the gate was re-derived from
+    the wrong set. A missing measurement is refused outright — assembling a
+    gate out of step components is the overstatement this arm exists to
+    refuse — and a component stamped as absent is not read as zero."""
+    vr = _load_verify_report()
+    # An EXTRA entry keeps the member set covered, so every per-member check
+    # upstream passes and only the identity of the key set catches it.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["per_job"]["docs"] = {
+        "setup_p50_s": 80.0, "useful_work_p50_s": 10.0,
+        "setup_steps": ["set up job", "actions/checkout"]}
+    margin, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert margin is None
+    assert any("not the credited members" in p for p in problems), problems
+    # …and a renamed member is refused rather than quietly re-derived from the
+    # entries that happen to be there.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["per_job"]["lint-renamed"] = (
+        f["setup_consolidation"]["per_job"].pop("lint"))
+    margin, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert margin is None and any("lint" in p for p in problems), problems
+    # A member with no measured p50 is a malformed stamp, not a licence to
+    # fall back to its step components.
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"]["lint"] = 0.0
     margin, problems = vr._opt77_consolidation_rederived(
         _opt77_whole_workflow_finding(), data)
-    assert problems == [], problems
-    assert margin == 0.0
+    assert margin is None
+    assert any("no measured job_p50" in p for p in problems), problems
+    # Absent is not zero: a component that is missing or non-numeric reddens
+    # rather than sizing the gate's coherence check at nothing.
+    for bad in (None, "eighty"):
+        f = _opt77_whole_workflow_finding()
+        f["setup_consolidation"]["per_job"]["lint"]["setup_p50_s"] = bad
+        margin, problems = vr._opt77_consolidation_rederived(
+            f, _OPT77_WHOLE_DATA)
+        assert margin is None
+        assert any("missing setup/useful-work p50" in p
+                   for p in problems), (bad, problems)
+
+
+def test_opt77_the_ordinary_arm_may_not_stamp_a_gate_the_group_sets_itself():
+    """The two stamp shapes were enforced on one arm only: a finding measured
+    against the tallest REMAINING job could also carry `gate_today_p50_s`, and
+    nothing read it. The tag itself is read as an identity, so a stamped
+    string "false" can no longer select the whole-workflow arm."""
+    vr = _load_verify_report()
+    data = {"per_workflow_timing": {".github/workflows/ci.yml": {
+        "floor_p50": 90.0,
+        "job_p50": {"audit": 90.0, "lint": 90.0, "typecheck": 90.0,
+                    "test": 600.0}}}}
+    f = _opt77_finding()
+    f["setup_consolidation"]["group_is_the_whole_workflow"] = False
+    f["setup_consolidation"]["credited_job_keys"] = ["audit", "lint", "typecheck"]
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert problems == [] and margin == 510.0, (margin, problems)
+    # the ordinary shape may not carry the whole-workflow gate
+    f["setup_consolidation"]["gate_today_p50_s"] = 90.0
+    _m, problems = vr._opt77_consolidation_rederived(f, data)
+    assert any("gate_today_p50_s" in p for p in problems), problems
+    # a non-boolean tag is named, and never selects the whole-workflow arm
+    f = _opt77_finding()
+    f["setup_consolidation"]["group_is_the_whole_workflow"] = "false"
+    _m, problems = vr._opt77_consolidation_rederived(f, data)
+    assert any("is not true or false" in p for p in problems), problems
+    assert not any("no job outside" in p for p in problems), problems
+
+
+def test_opt77_declared_job_keys_are_checked_against_the_per_workflow_record():
+    """The whole-workflow claim rests entirely on "these are every job the
+    workflow declares" — and the arm checked OPT77's stamp of that against
+    OPT77's own reading of the same file, which proves nothing. The declared
+    keys are now written per workflow by the YAML reader, before any detector
+    runs, and a stamp that under-enumerates them reddens."""
+    vr = _load_verify_report()
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    crit = data["per_workflow_timing"][".github/workflows/ci.yml"]
+    crit["declared_job_keys"] = ["audit", "lint", "typecheck"]
+    margin, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert problems == [] and margin == 0.0, problems
+    # The workflow really declares a fourth job the finding does not stamp.
+    crit["declared_job_keys"] = ["audit", "lint", "release", "typecheck"]
+    _m, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert any("this workflow declares" in p for p in problems), problems
+    assert any("release" in p for p in problems), problems
 
 
 def test_opt77_certificate_fails_on_tampered_numbers():
