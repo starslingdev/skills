@@ -1073,16 +1073,26 @@ gate the merge wait does not lengthen and the runner-minute saving is credited;
 above it the group is held back and disclosed, with both numbers on the entry.
 
 That gate used to be re-assembled from each member's step components,
-`max_i(min(setup_i + useful_i, job_p50_i))`, and both halves of that were
-wrong. The projection `max_i(setup_i) + max_i(useful_i)` is never below
-`max_i(setup_i + useful_i)`, so the branch could fire only on an exact tie and
-the saving was reported essentially nowhere. And the capped value is not a
+`max_i(min(setup_i + useful_i, job_p50_i))`. The capped value is not a
 duration anything took: three members each measuring 400s were told, in the
 report's own prose, that they take 90s today. The component sum survives only
 as a coherence check — the projection can never be below any single member's
 own `setup_i + useful_i`, and `verify_report` reddens if it is, which says the
-stamped medians do not come from one set of runs. FIRE is now reachable
-whenever the tallest member's measured duration absorbs the others' setup.
+stamped medians do not come from one set of runs.
+
+For a group that is the whole workflow, collapsing can never SHORTEN the merge
+wait: each member's useful work is its measured duration minus its setup, read
+off one `started_at`→`completed_at` span, so `setup_i + useful_i == job_p50_i`
+exactly, and the collapsed job's `max(setup) + max(useful)` is therefore at
+least `max_i(job_p50_i)`. The saving is credited only when the two are EQUAL —
+one member holding both the longest setup and the longest task, so the wait is
+unchanged. Otherwise the group is held back and the report says what the
+collapse would cost the merge wait. On real data the credited case is the
+exception and the disclosed hold-back is the common outcome; that disclosure
+is the point of the change, not the credit. The equality is also only as
+stable as a one-second median: a member's p50 moving by a second flips a tie
+into a hold-back, which is the safe direction — the flip can produce a
+disclosed WITHHOLD, never a false FIRE.
 
 "Whole workflow" is decided from the declared jobs, never from the sample, and
 needs one declared key per member. What `verify_report` re-derives from
@@ -1120,11 +1130,12 @@ sentence for all three:
 workflow-qualified as `<workflow.yml> / <job>` when two workflows share a job
 name (an OPT77 entry is the whole group), at most five then ", and K more", every
 repo-controlled name escaped for the table (`\` `|` `[` `]` `(` `)` `_` `<` `>`
-`` ` `` and `*` backslash-escaped, `\` first, so a name can neither split the
-row, nor turn itself into a link, nor open raw HTML or a code span. Escaped,
-never substituted: swapping backticks and asterisks for an apostrophe used to
-render three different job names as one, in a row whose whole job is saying
-which candidates were held back. Out of scope, and unfixable by character
+`` ` `` `*` `&` and `~` backslash-escaped, `\` first, so a name can neither
+split the row, nor turn itself into a link, nor open raw HTML or a code span.
+Escaped, never substituted: swapping backticks and asterisks for an apostrophe
+used to render three different job names as one, in a row whose whole job is
+saying which candidates were held back. `&` and `~` are on the list for the
+same reason — left alone, `A&B` and `A&amp;B` render as the same name. Out of scope, and unfixable by character
 escaping: GFM's extended autolink turns a BARE `https://...` job name into a
 live link with no punctuation to escape); the reason a plain-English phrase for the commonest gate,
 ties alphabetical, and prefixed "most commonly," whenever more than one gate

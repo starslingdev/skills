@@ -9570,6 +9570,42 @@ def test_held_back_verifier_rederives_escaped_job_names(tmp_path):
     assert chk.ok, chk
 
 
+def test_held_back_verifier_rederives_every_hostile_name_both_ways(tmp_path):
+    """The two escapers are pinned byte-identical to each other, which is one
+    implementation checked twice: dropping a character from BOTH tuples in
+    lockstep left this file's suite green for ten of the eleven it covered,
+    because nothing here drove a hostile name through the public check.
+
+    So, per name: the correctly-escaped cell must PASS `check_coverage_disclosed`,
+    and the RAW unescaped cell must FAIL it. The second half is what makes a
+    dropped escape visible — if the character is not escaped, the two cells are
+    the same string and the pair cannot both hold."""
+    import blocking_path as bp
+    vr = _load_verify_report()
+    # The list, enumerated. Pinned HERE as well as renderer-to-verifier,
+    # because the two tuples are pinned to each OTHER: dropping a character
+    # from both in lockstep kept them equal and left everything green.
+    assert bp._WITHHELD_CELL_ESCAPES == (
+        "\\", "|", "[", "]", "(", ")", "_", "<", ">", "`", "*", "&", "~")
+    for ch in bp._WITHHELD_CELL_ESCAPES:
+        assert bp._withheld_cell_text(f"a{ch}b") == f"a\\{ch}b", ch
+    head = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    tail = ("the job's monthly run count was unknown, so its saving could not "
+            "be sized.")
+    for name in _HOSTILE_JOB_NAMES:
+        rows = [{"workflow_file": "ci.yml", "job": name,
+                 "gate": "no_monthly_volume"}]
+        path = _withheld_doc(tmp_path, rows)
+        escaped = vr._vr_withheld_cell_text(name)
+        row = (head + f"| cache hit/miss verdicts | 1 candidate cache(s) held "
+               f"back ({{}}): {tail} | " + _CACHE_FEEDS + " |\n")
+        assert vr.check_coverage_disclosed(row.format(escaped), path).ok, name
+        raw = re.sub(r"\s+", " ", name).strip()
+        if raw == escaped:
+            continue   # nothing in this name needs escaping
+        assert not vr.check_coverage_disclosed(row.format(raw), path).ok, name
+
+
 def test_held_back_verifier_rederives_the_five_job_cap_and_shared_names(tmp_path):
     vr = _load_verify_report()
     rows = [{"workflow_file": f".github/workflows/{w}", "job": j,
@@ -9636,6 +9672,16 @@ _WITHHELD_77_80_CASES = (
 
 _CACHE_FEEDS = "Why a candidate cache produced no finding and no uncredited line"
 _CHECKOUT_FEEDS = "Why a checkout with a slow tail produced no finding"
+# Repo-controlled job names that are hostile to a markdown table cell, one per
+# character the escaper covers plus the shapes that combine them. Shared by the
+# byte-equality coupling test and the end-to-end round trip below.
+_HOSTILE_JOB_NAMES = (
+    "a|b", "a\\|b", "a\\b", "[click](http://example.test)",
+    "snake_case_name", "a`b`c", "*em*", "tab\there",
+    "line\nbreak", "  padded  ", "()[]_|\\",
+    "job (linux) [3.11]", "a**b**c", "x|y|z", "\\\\",
+    "<details>", "<https://example.test>", "A&B", "A&amp;B", "~~gone~~",
+)
 _FEEDS_BY_KEY = {
     "opt77_withheld_candidates":
         "Why a group of small jobs sharing one setup produced no finding",
@@ -9818,10 +9864,7 @@ def test_withhold_phrase_tables_match_the_renderer_and_the_collector():
     escapes = list(bp._WITHHELD_CELL_ESCAPES)
     assert escapes[0] == "\\" and "|" in escapes[1:]
     # …and the two escapers, which must agree on every byte, not just in spirit.
-    for hostile in ("a|b", "a\\|b", "a\\b", "[click](http://example.test)",
-                    "snake_case_name", "a`b`c", "*em*", "tab\there",
-                    "line\nbreak", "  padded  ", "", "()[]_|\\",
-                    "job (linux) [3.11]", "a**b**c", "x|y|z", "\\\\"):
+    for hostile in _HOSTILE_JOB_NAMES:
         assert vr._vr_withheld_cell_text(hostile) == bp._withheld_cell_text(hostile), (
             hostile)
 

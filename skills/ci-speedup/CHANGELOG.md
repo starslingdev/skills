@@ -712,11 +712,15 @@ unversioned and updates by reinstall from `main`.
   all, so a job named `[click](http://example.test)` rendered as a working link
   inside the audit's own table, and angle brackets were not neutralised either,
   so a name written as an HTML tag could make the report load a remote image
-  the moment a reader opened it. Every markdown-active character in the name is
-  now backslash-escaped. Backticks and asterisks used to be swapped for an
-  apostrophe instead, which rendered three different job names as the same
+  the moment a reader opened it. Fourteen characters in the name are now
+  backslash-escaped — `\` `|` `[` `]` `(` `)` `_` `<` `>` `` ` `` `*` `&`
+  `~` — rather than, as this entry previously claimed, every character
+  markdown treats as special. Backticks and asterisks used to be swapped for
+  an apostrophe instead, which rendered three different job names as the same
   string in a row whose whole purpose is saying which candidates were held
-  back; they are escaped now too, so the name arrives intact. One case stays
+  back; they are escaped now too, so the name arrives intact. Ampersands and
+  tildes are escaped for the same reason: left alone, a job called `A&amp;B`
+  renders as `A&B`, and two jobs become one name on the page. One case stays
   out of reach and is written down as such: a job named as a bare web address
   becomes a link with no punctuation to escape.
   The row's count and job list cover every held-back candidate while its reason
@@ -751,16 +755,17 @@ unversioned and updates by reinstall from `main`.
   wait, which is a wall-clock argument applied to a bill-only saving. The group
   is now judged against the wait it sets today — **how long its slowest member
   was measured to take**, which is what the workflow makes a pull request wait
-  for, since the members run in parallel. At or below it the merge wait does
-  not lengthen and the saving is reported; above it the group is held back and
-  said to be held back, with both durations recorded. "Every job in the
+  for, since the members run in parallel. Collapsing a whole workflow can
+  never shorten that wait, so the saving is reported when it is free — when
+  the collapsed job would take exactly as long as the slowest job does
+  today — and otherwise the report says what the collapse would cost the merge
+  wait, instead of saying nothing at all. In practice the second case is the
+  common one, and saying so is the point of the change. "Every job in the
   workflow" is read from what the workflow declares, and needs one declared job
   per member. That wait is a measured duration rather than a job's typical
-  setup added to its typical task: the two are not the same number, assembling
-  the wait out of parts could describe three jobs each measuring 400s as taking
-  90s today, and because the collapsed job is projected from those same parts
-  the comparison could almost never come out in the saving's favour — so a free
-  saving was reported essentially nowhere. The report's self-check works the
+  setup added to its typical task: assembling the wait out of parts could
+  describe three jobs each measuring 400s as taking 90s today, in the report's
+  own words. The report's self-check works the
   wait out from the measurements itself, and the part-based sum survives only
   as a consistency test on them. The self-check also reads what the workflow
   declares from a record written when the workflow file is read, rather than

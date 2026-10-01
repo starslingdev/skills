@@ -1181,16 +1181,22 @@ saved:   (N - 1) x setup, every run
    (`collapsing_the_whole_workflow_would_lengthen_the_merge_gate`), with the
    two durations recorded on the held-back entry.
 
-   **When this fires in practice**: whenever the tallest member's own duration
-   absorbs the setup the other members pay — one member doing real work beside
-   a row of small checks that each re-pay the same install. It does *not* fire
-   when every member is roughly the same size and the longest setup and the
-   longest task sit on different members, which is exactly when consolidating
-   them really would make the merge wait longer. The gate was previously
-   re-assembled from each member's step components (`setup_i + useful_i`,
-   capped by the measurement); because the projection is never below the
-   largest such sum, that version could fire only on an exact tie, and it
-   described three members each measuring 400s as taking 90s today.
+   **When this fires in practice — rarely, and that is honest.** A member's
+   useful work is its measured duration minus its setup, read off one span, so
+   `setup_i + useful_i` is exactly `job_p50_i` and the collapsed job's
+   `max(setup) + max(useful)` is never *below* the slowest member's measured
+   duration. Collapsing a whole workflow can therefore never shorten the merge
+   wait. The saving is credited only when the two are **equal** — one member
+   holding both the longest setup and the longest task, so the wait is
+   unchanged — and otherwise the group is held back with what the collapse
+   would cost. On real repositories the hold-back is the common outcome and the
+   credit is the exception; disclosing the hold-back is the point of this
+   branch, not the credit. The equality is only as stable as a one-second
+   median, and a member's p50 moving by a second flips a credit into a
+   hold-back — the safe direction, since the flip can never invent a credit.
+   The gate itself was previously re-assembled from each member's step
+   components, capped by the measurement, which described three members each
+   measuring 400s as taking 90s today.
 
    "Whole workflow" is read off the workflow's **declared** jobs, never off the
    sampled runs: a declared job that simply never ran in the sampled window — a

@@ -5269,16 +5269,24 @@ _WITHHELD_MODAL_LEAD = "most commonly, "
 # — and a raw `<details>` / `<img …>` is live HTML inside the cell. Backticks
 # and `*` are ESCAPED, not swapped for an apostrophe: the row exists to say
 # which candidates were held back, and substitution collapsed `a*b`, "a`b" and
-# `a'b` into one rendered name.
-_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_", "<", ">", "`", "*")
+# `a'b` into one rendered name. `&` and `~` close the same
+# two-names-collapse class by another route: `A&B` and `A&amp;B` render
+# identically as HTML entities unless the ampersand is escaped, and `~~x~~` is
+# a strikethrough run. The list is exactly these characters, enumerated
+# wherever it is described — "every markdown-active character" was a claim the
+# tuple did not keep.
+_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_", "<", ">", "`",
+                          "*", "&", "~")
 
 
 def _withheld_cell_text(text: object) -> str:
     """Repo-controlled text (a job or workflow name) made safe for one table
-    cell: whitespace and newlines collapsed, then every markdown-active
-    character backslash-escaped (`\\` first, see above) so a name cannot split
-    the row, open a code span, or turn itself into a link — and so that two
-    names differing only in punctuation stay two names. `verify_report`
+    cell: whitespace and newlines collapsed, then each of
+    `\\` `|` `[` `]` `(` `)` `_` `<` `>` `` ` `` `*` `&` `~` backslash-escaped
+    (`\\` first, see above) so a name cannot split the row, open a code span,
+    or turn itself into a link — and so that two names differing only in
+    punctuation stay two names. Enumerated, not "every markdown-active
+    character": that claim was wider than the list kept. `verify_report`
     carries a byte-identical transform, pinned equal by a coupling test."""
     out = re.sub(r"\s+", " ", str(text)).strip()
     for _ch in _WITHHELD_CELL_ESCAPES:

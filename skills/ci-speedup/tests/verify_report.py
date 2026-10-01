@@ -997,15 +997,20 @@ _VR_WITHHELD_MODAL_LEAD = "most commonly, "
 # backslash plus a LIVE cell separator. `<` and `>` are in the list because
 # `<https://example.test>` is a GFM autolink and a raw `<details>` is live
 # HTML. Backticks and `*` are escaped rather than swapped for an apostrophe,
-# which used to collapse three different names into one. A coupling test pins
-# this tuple and the function below byte-identical to `blocking_path`'s.
-_VR_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_", "<", ">", "`", "*")
+# which used to collapse three different names into one; `&` and `~` close the
+# same class, since `A&B` and `A&amp;B` render identically unescaped and
+# `~~x~~` is a strikethrough run. A coupling test pins this tuple and the
+# function below byte-identical to `blocking_path`'s.
+_VR_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_", "<", ">", "`",
+                             "*", "&", "~")
 
 
 def _vr_withheld_cell_text(text: object) -> str:
-    """The renderer's cell-safe transform of repo-controlled text (whitespace
-    collapsed, then every markdown-active character backslash-escaped with
-    `\\` first, so the name survives intact and inert)."""
+    """The renderer's cell-safe transform of repo-controlled text: whitespace
+    collapsed, then each of `\\` `|` `[` `]` `(` `)` `_` `<` `>` `` ` `` `*`
+    `&` `~` backslash-escaped, `\\` first, so the name survives intact and
+    inert. The list is enumerated rather than called "every markdown-active
+    character", which was wider than it keeps."""
     out = re.sub(r"\s+", " ", str(text)).strip()
     for _ch in _VR_WITHHELD_CELL_ESCAPES:
         out = out.replace(_ch, "\\" + _ch)
