@@ -17183,7 +17183,8 @@ def _opt79_pole_finding(
     # and one that `needs:` it. The cap compares job DURATIONS only (it does not
     # follow the chain), so the prose names the next job's duration and the gap,
     # and never says that job "finishes at" a time or sets the merge wait - a
-    # chained next job does neither. The figure is conservative either way.
+    # chained next job does neither. The figure is conservative when that job
+    # runs alongside or directly after; a longer `needs:` chain is not modeled.
     nxt_ref = (f"its next-tallest job, `{nxt}`," if nxt
                else "its next-tallest job")
     if capped:
