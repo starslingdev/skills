@@ -1360,30 +1360,46 @@ carries the merge wait. That job's raw wall-clock is the measured excess
 `waste_s`, pre-capped by CAP 1 (§5) through `bound_within_workflow`:
 `min(waste_s, long_pole_p50 − floor_p50)`, i.e. shorten the pole only as far as
 the next-tallest job, because past that the next job is the pole. The capped
-figure is stamped under `cache_net_negative.pole_sizing` (`headroom_s`,
-`raw_wall_clock_s`, `capped_by_next_tallest_job`) and then goes through the SAME
+figure and its inputs are stamped under `cache_net_negative.pole_sizing`
+(`waste_s`, `long_pole_job`, `long_pole_p50_s`, `next_tallest_job`,
+`floor_p50_s`, `headroom_s`, `raw_wall_clock_s` and `capped_by_next_tallest_job`) and then goes through the SAME
 cross-cutting cascade every wall-clock-positive finding gets in `collect()` (the
 developer-facing gate, the measured critical-path floor, the cross-workflow
 floor), with any further shrink recorded in `wall_clock_derivation`. The finding
 shares the `_opt79_stamp` measurement block with the other two outcomes, has
-`runner_min_saving` null and no `tier2_neutrality`, and renders where every other
-wall-clock finding renders, with `risk: LOW`, the guardrail (re-key or narrow
+`runner_min_saving` null and no `tier2_neutrality`, and stamps
+`on_critical_path` and `workflow_gates_pull_requests` both `true`. A long pole
+TIED with the next-tallest job (zero headroom) is not credited: shrinking it
+moves no merge wait, so it falls through to the uncredited line. `blocking_path`
+renders the finding inside that job's long-pole section (`_opt79_pole_for` /
+`_opt79_pole_block`), opened by an `<!-- opt79-pole:<id> -->` marker, as
+`💾 Measured cache cost - OPT79 · <title> (<id>) - up to **Ns** off the merge wait`,
+with `risk: LOW`, the guardrail (re-key or narrow
 before removing; valid for this runner class only; never narrow what the install
-installs) and a rollout line. Runner-minutes are deliberately NOT stated: the
+installs) and a rollout line. It needs that placement because its capped figure
+is often below the 30s long-pole floor, which would otherwise drop it from the
+"Also noticed" appendix as a valueless pole-job row; it also counts as a catalog
+match for the pole, so that pole gets no gap-fill or gap capture. The appendix
+skips a pole-cache finding whose job is a drilled pole, so it never renders
+twice; only when the job is not a drilled pole does it fall through to "Also
+noticed". Runner-minutes are deliberately NOT stated: the
 runner-minute section requires the below-the-floor neutrality proof, which the
 slowest job cannot have. The neutrality certificate is only required to promote a
 finding into the runner-minute section; a finding that saves merge-wait time does
 not need one, because the wall-clock bound cascade already handles "shorten only
 as far as the next job". `verify_report.py` re-derives `min(waste, headroom)` from
 the stamped block and fails any mismatch, any such finding carrying
-`tier2_neutrality` or a non-null `runner_min_saving`, and any uncredited row still
-stamped `on_critical_path: true`, a row shape that no longer exists.
+`tier2_neutrality` or a non-null `runner_min_saving`, and any uncredited row whose
+`on_critical_path` is missing or not `false`.
 
-The uncredited line therefore covers exactly two cases: a workflow that runs on no
-pull request (runner-minutes only, unpriced here) and a job at or above the floor
-that is not the long pole. The row stamps `long_pole_job`, `long_pole_p50_s`,
-`job_p50_s` and `floor_p50_s` but no `on_critical_path`, so the renderer has no
-merge-wait branch: it says the job is at or above the workflow's second-slowest
+The uncredited line therefore covers exactly three cases, all of them jobs not
+strictly below the floor: any such job in a workflow that runs on no pull request
+(runner-minutes only, unpriced here; that workflow's below-the-floor jobs still
+take the credited runner-minute arm), a job at or above the floor
+that is not the long pole, and a long pole tied with the next-tallest job (no
+headroom). The row stamps `long_pole_job`, `long_pole_p50_s`, `job_p50_s`,
+`floor_p50_s`, `workflow_gates_pull_requests` and `on_critical_path`, which is
+always `false` there, so the renderer has no merge-wait branch: it says the job is at or above the workflow's second-slowest
 job, so this audit cannot prove that shrinking it leaves the merge gate unchanged.
 A schedule-only workflow is never told it has a merge wait at all. The docs take
 that same conservative framing: at or above the floor and below the pole is

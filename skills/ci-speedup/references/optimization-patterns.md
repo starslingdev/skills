@@ -638,14 +638,25 @@ excess is credited.
    `waste_s`, first capped by the existing within-workflow bound,
    `min(waste_s, long_pole_p50 − floor_p50)` (shorten the pole only as far as the
    next-tallest job, because past that the next job is the pole), and stamped
-   under `cache_net_negative.pole_sizing` as `headroom_s`, `raw_wall_clock_s`
-   and `capped_by_next_tallest_job`. It then goes through the same cross-cutting
+   under `cache_net_negative.pole_sizing` as `waste_s`, `long_pole_job`, `long_pole_p50_s`, `next_tallest_job`,
+   `floor_p50_s`, `headroom_s`, `raw_wall_clock_s` and `capped_by_next_tallest_job`.
+   It then goes through the same cross-cutting
    cascade every wall-clock finding gets (the developer-facing gate, the measured
    critical-path floor and the cross-workflow floor), and any further shrink is
-   recorded in `wall_clock_derivation`. It renders where every other
-   wall-clock finding renders, with `risk: LOW`, the guardrail below (re-key or
+   recorded in `wall_clock_derivation`. A long pole TIED with the next-tallest
+   job (zero headroom) is not credited here: shrinking it moves no merge wait,
+   because the other job still finishes then, so it falls through to outcome 3.
+   The finding renders inside that job's long-pole section of the report, opened
+   by an `<!-- opt79-pole:<id> -->` marker, as
+   `💾 Measured cache cost - OPT79 · <title> (<id>) - up to **Ns** off the merge wait`,
+   with `risk: LOW`, the guardrail below (re-key or
    narrow before removing; valid for this runner class only; never narrow what
-   the install installs) and a rollout line. Every number is from the audited
+   the install installs) and a rollout line. It needs that placement because its
+   capped figure is often below the 30s long-pole floor, which would otherwise
+   drop it from the "Also noticed" appendix as a valueless pole-job row; it also
+   counts as a catalog match for that pole, so the pole gets no gap-fill. Only
+   when the job is not a drilled long pole (for example, the workflow is not on
+   the merge-gating spine) does the finding fall through to "Also noticed". Every number is from the audited
    repository's own p50s and runs. Runner-minutes are deliberately not stated: the
    runner-minute section requires the below-the-floor neutrality proof, which the
    slowest job cannot have. The neutrality certificate is only required to promote
@@ -656,9 +667,12 @@ excess is credited.
    neutrality argument for these, so they are an uncredited row, rendered as one
    numberless line beside the dropped-unprovable note (the nearest precedent: a
    measured fact deliberately kept out of the numbers and shown anyway). Exactly
-   two cases land here: a workflow that runs on no pull request (the saving is
-   runner-minutes only, and unpriced here), and a job at or above the floor that
-   is not the long pole.
+   three cases land here, all of them jobs not strictly below the floor: any
+   such job in a workflow that runs on no pull request (the saving is
+   runner-minutes only, and unpriced here; that workflow's below-the-floor jobs
+   still take outcome 1), a job at or above the floor that
+   is not the long pole, and a long pole tied with the next-tallest job (no
+   headroom, so no merge wait of its own).
 
 > a cache on `unit` measured net-negative by 19s per cache hit (4 hit / 4 miss
 > run(s) sampled); `unit` is at or above this workflow's second-slowest job
@@ -739,25 +753,35 @@ by that re-derivation:
 | `runner_min_saving` | restated inside the block and checked against the finding's own; **null** on an uncredited row, where a number would be a failure |
 
 An uncredited row carries every key above plus `workflow_file`, `job_p50_s`,
-`floor_p50_s`, `long_pole_job` and `long_pole_p50_s`. The wall-clock finding for
-the long pole (`opt79_pole_net_negative_cache`) carries the same block plus
-`cache_net_negative.pole_sizing` (`headroom_s`, `raw_wall_clock_s`,
-`capped_by_next_tallest_job`), and its `runner_min_saving` is null.
+`floor_p50_s`, `long_pole_job`, `long_pole_p50_s`,
+`workflow_gates_pull_requests` and `on_critical_path`, which is always `false`
+there. The wall-clock finding for the long pole
+(`opt79_pole_net_negative_cache`) carries the same block and placement keys,
+with `on_critical_path` and `workflow_gates_pull_requests` both `true`, plus
+`cache_net_negative.pole_sizing` (`waste_s`, `long_pole_job`, `long_pole_p50_s`, `next_tallest_job`,
+`floor_p50_s`, `headroom_s`, `raw_wall_clock_s` and `capped_by_next_tallest_job`),
+and its `runner_min_saving` is null.
 
 The re-derivation recomputes each row's `block_s` from its three parts, re-reads
 every row's quoted line against the hit and miss matchers (a row labelled `hit`
 whose line says the cache was not found is a failure, and so is a row quoting
 both), recomputes both medians, the waste, the floor, the hit share, the
 effective volume and the credited minutes, and re-derives the margin from
-Uncredited rows go through the same re-derivation with the
+`per_workflow_timing`. Uncredited rows go through the same re-derivation with the
 credited-minutes and neutrality branches skipped, and one extra check: they must
-carry no sizing at all, and none may still be stamped `on_critical_path: true`
-(that row shape no longer exists; the long pole is credited as a wall-clock
-finding instead). The wall-clock finding (`opt79_pole_net_negative_cache`) is
-re-derived the same way, plus one arm: `min(waste_s, headroom_s)` is recomputed
-from the stamped `pole_sizing` block and must equal `raw_wall_clock_s`, and a
-finding of that kind carrying `tier2_neutrality` or a non-null
-`runner_min_saving` fails. A tampered number anywhere in that chain reddens the
+carry no sizing at all, and every row must carry `on_critical_path` stamped
+`false` (a row missing the key, or stamped `true`, fails; the long pole is
+credited as a wall-clock finding instead). The wall-clock finding
+(`opt79_pole_net_negative_cache`) is re-derived the same way, plus one arm: the
+headroom is re-derived as `long_pole_p50_s − floor_p50_s` from the stamped block
+(cross-checked against `per_workflow_timing`; zero or negative headroom fails),
+`round(min(waste_s, headroom), 1)` must agree with every `pole_sizing` key and
+equal `wall_clock_uncapped_p50_s` (or `wall_clock_p50_s` when the cascade did
+not shrink it), every `wall_clock_derivation` step must go down, give a reason
+and end on the credited figure, the evidence sentence is restated from the
+block, and the rendered block must appear exactly once with its id, its title
+and `<N>s off the merge wait`. A finding without `tier2_neutrality` that is not
+this kind, or one carrying a non-null `runner_min_saving`, fails. A tampered number anywhere in that chain reddens the
 report.
 
 The verifier restates the engine in two different ways, and the tests say which
