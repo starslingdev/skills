@@ -1,0 +1,170 @@
+{
+ "total_count": 3,
+ "jobs": [
+  {
+   "id": 80011,
+   "run_id": 8001,
+   "name": "contracts",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-26T01:00:00Z",
+   "completed_at": "2026-06-26T01:06:40Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/8001/job/80011",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-26T01:00:00Z",
+     "completed_at": "2026-06-26T01:00:02Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-26T01:00:02Z",
+     "completed_at": "2026-06-26T01:00:20Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/setup-node@v4",
+     "number": 3,
+     "started_at": "2026-06-26T01:00:20Z",
+     "completed_at": "2026-06-26T01:00:40Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm ci",
+     "number": 4,
+     "started_at": "2026-06-26T01:00:40Z",
+     "completed_at": "2026-06-26T01:03:20Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm run contracts",
+     "number": 5,
+     "started_at": "2026-06-26T01:03:20Z",
+     "completed_at": "2026-06-26T01:06:40Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 80012,
+   "run_id": 8001,
+   "name": "schema",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-26T01:00:00Z",
+   "completed_at": "2026-06-26T01:06:40Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/8001/job/80012",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-26T01:00:00Z",
+     "completed_at": "2026-06-26T01:00:02Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-26T01:00:02Z",
+     "completed_at": "2026-06-26T01:00:20Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/setup-node@v4",
+     "number": 3,
+     "started_at": "2026-06-26T01:00:20Z",
+     "completed_at": "2026-06-26T01:00:40Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm ci",
+     "number": 4,
+     "started_at": "2026-06-26T01:00:40Z",
+     "completed_at": "2026-06-26T01:03:20Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm run schema",
+     "number": 5,
+     "started_at": "2026-06-26T01:03:20Z",
+     "completed_at": "2026-06-26T01:06:40Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 80013,
+   "run_id": 8001,
+   "name": "typecheck",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-26T01:00:00Z",
+   "completed_at": "2026-06-26T01:06:40Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/8001/job/80013",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-26T01:00:00Z",
+     "completed_at": "2026-06-26T01:00:02Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-26T01:00:02Z",
+     "completed_at": "2026-06-26T01:00:20Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/setup-node@v4",
+     "number": 3,
+     "started_at": "2026-06-26T01:00:20Z",
+     "completed_at": "2026-06-26T01:00:40Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm ci",
+     "number": 4,
+     "started_at": "2026-06-26T01:00:40Z",
+     "completed_at": "2026-06-26T01:03:20Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm run typecheck",
+     "number": 5,
+     "started_at": "2026-06-26T01:03:20Z",
+     "completed_at": "2026-06-26T01:06:40Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  }
+ ]
+}

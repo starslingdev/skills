@@ -113,7 +113,15 @@ _JOB_ID = 9001
 #            pins `setup-node@v4`, so the read never happens here (asserted via
 #            `data_sources.setup_node_package_json.needed`), and on a repo that
 #            needs it the cost is +0 with a checkout, +1 without.)
-_GOLDEN_GH_QUERY_COUNT = 56
+#   68  now  (+12 for the two OPT77 whole-workflow workflows added to the corpus,
+#            `checks.yml` (1004) and `gates.yml` (1005) — SIX calls each, and the
+#            same six any workflow costs: one all-status run-list page, three
+#            `runs/{id}/jobs` pages (three sampled runs each), one `per_page=1`
+#            monthly-volume count, and one `commits?path=<wf>&per_page=2`
+#            config-era boundary lookup. Both are push-only, so neither pays the
+#            event-scoped `event=pull_request` volume call a PR workflow does, and
+#            OPT77 reads no job logs at all — zero log fetches for either.)
+_GOLDEN_GH_QUERY_COUNT = 68
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).
@@ -270,6 +278,107 @@ jobs:
 """
 
 
+# OPT77's WHOLE-WORKFLOW arm, both outcomes. A group is "the whole workflow"
+# when every job the YAML DECLARES is a credited member and the sample carried
+# nothing else — there is then no remaining job to measure the consolidated job
+# against, so the comparison is against the gate the group sets TODAY (its
+# slowest member's measured p50). That arm has its own stamps
+# (`group_is_the_whole_workflow`, `gate_today_p50_s`, and `remaining_tallest_*`
+# deliberately `None`), its own rendered sentence, and its own re-derivation in
+# `verify_report`. None of it was reached by this e2e before these two
+# workflows existed: a hard `raise` placed inside either branch left the whole
+# test green.
+#
+# Both are PUSH-only, so neither joins the PR spine, the critical path or the
+# close's poles — the chain/headline assertions above are untouched by them.
+#
+# (wf id 1004) FIRES. Three independent same-runner jobs, each declaring the
+# same checkout → setup-node → `npm ci` prefix and measuring 400s (200s of
+# setup, a 200s task). The projection is `max(setup) + max(useful)` = 400s,
+# which is exactly the 400s the slowest member takes today, so consolidating
+# them does NOT lengthen the merge gate and the runner-minute saving is
+# credited. (The projection can never be BELOW the tallest member's own
+# setup + task, so an exact tie is the whole of this arm's firing region —
+# which is why the old "re-assemble the gate from step components" code could
+# fire almost nowhere.)
+_WF4_ID = 1004
+_WF4_YAML = """name: Checks
+on:
+  push:
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run typecheck
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run contracts
+  schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run schema
+"""
+
+# (wf id 1005) WITHHELD. The same shape, sized so the projection LOSES:
+# `alpha` and `beta` pay 100s of setup for a 10s task, `gamma` pays 60s for a
+# 50s task, and every one of them measures 110s. The consolidated job projects
+# to max(setup) 100s + max(task) 50s = 150s, which is 40s MORE than the 110s
+# the group sets today — so the bill saving is real but taking it would make
+# the merge wait longer. No finding; the group is disclosed on the findings
+# document and in the report's held-back row instead of vanishing.
+_WF5_ID = 1005
+_WF5_YAML = """name: Gates
+on:
+  push:
+
+jobs:
+  alpha:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run alpha
+  beta:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run beta
+  gamma:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run gamma
+"""
+
+
 def _init_repo(root: Path, origin: str | None = _REPO) -> None:
     """A one-commit git checkout carrying just the workflows the fixture corpus
     was recorded against. Committer identity travels via env vars (not global
@@ -284,6 +393,8 @@ def _init_repo(root: Path, origin: str | None = _REPO) -> None:
     (root / ".github" / "workflows" / "ci.yml").write_text(_WF_YAML, encoding="utf-8")
     (root / ".github" / "workflows" / "build-matrix.yml").write_text(_WF2_YAML, encoding="utf-8")
     (root / ".github" / "workflows" / "chained.yml").write_text(_WF3_YAML, encoding="utf-8")
+    (root / ".github" / "workflows" / "checks.yml").write_text(_WF4_YAML, encoding="utf-8")
+    (root / ".github" / "workflows" / "gates.yml").write_text(_WF5_YAML, encoding="utf-8")
     env = {**os.environ,
            "GIT_AUTHOR_NAME": "ci-speedup-test", "GIT_AUTHOR_EMAIL": "test@example.com",
            "GIT_COMMITTER_NAME": "ci-speedup-test", "GIT_COMMITTER_EMAIL": "test@example.com"}
@@ -324,7 +435,7 @@ def _monthly_volume_endpoints_bracket() -> list[str]:
     for off in range(-1, 31):
         since = ((now + _dt.timedelta(seconds=off)) - _dt.timedelta(days=30)
                  ).strftime("%Y-%m-%dT%H:%M:%SZ")
-        for wf_id in (_WF_ID, _WF2_ID, _WF3_ID):
+        for wf_id in (_WF_ID, _WF2_ID, _WF3_ID, _WF4_ID, _WF5_ID):
             out.append(f"repos/{_REPO}/actions/workflows/{wf_id}/runs"
                        f"?per_page=1&created=>={since}")
             out.append(f"repos/{_REPO}/actions/workflows/{wf_id}/runs"
@@ -425,12 +536,18 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # DISPATCH and the supersede step that follows it were pinned only by reading
     # collect()'s source: `new = [] if True else _detect_opt77(...)` and deleting
     # the supersede line each left the whole suite green. This executes them.
-    o77 = [f for f in data["findings"] if f.get("pattern") == "OPT77"]
+    o77_all = [f for f in data["findings"] if f.get("pattern") == "OPT77"]
+    o77 = [f for f in o77_all if "build-matrix.yml" in str(f.get("workflow_file", ""))]
     assert len(o77) == 1, (
         "the three plain same-runner lint checks in build-matrix.yml must promote one "
         f"OPT77 consolidation (got {[f.get('affected_jobs') for f in o77]!r})")
     sc = o77[0].get("setup_consolidation") or {}
     assert sc.get("kind") == "opt77_repeated_setup", sc
+    # …and this one went down the ORDINARY arm, so it carries that arm's stamps
+    # and NOT the whole-workflow arm's. The two shapes are mutually exclusive;
+    # a finding carrying both is a finding whose gate cannot be re-derived.
+    assert sc.get("group_is_the_whole_workflow") is False, sc
+    assert sc.get("gate_today_p50_s") is None, sc
     assert sorted(sc.get("credited_jobs") or []) == [
         "lint (biome)", "lint (eslint)", "lint (stylelint)"], sc.get("credited_jobs")
     assert o77[0].get("wall_clock_p50_s") in (0, 0.0)
@@ -465,9 +582,70 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
         {"workflow_file": ".github/workflows/build-matrix.yml",
          "group": "ubuntu-latest/docs-format+docs-links+docs-spell",
          "jobs": ["docs-format", "docs-links", "docs-spell"],
-         "gate": "group_never_ran_complete_in_one_sampled_run"}], (
+         "gate": "group_never_ran_complete_in_one_sampled_run"},
+        # …and the WITHHOLD half of the whole-workflow arm (checks.yml's sibling,
+        # `gates.yml`, wf 1005). Three jobs are every job that workflow declares,
+        # so there is nothing left to measure the consolidated job against and the
+        # comparison is against the gate the group sets today: 110s, the slowest
+        # member's measured p50. The projection is max(setup) 100s + max(task) 50s
+        # = 150s, so taking the bill saving would make the merge wait 40s LONGER.
+        # Held back — and the two numbers that make the refusal checkable go onto
+        # the findings document with it, because the Data sources cell prints one
+        # reason for the whole list and cannot carry a per-candidate number.
+        {"workflow_file": ".github/workflows/gates.yml",
+         "group": "ubuntu-latest/alpha+beta+gamma",
+         "jobs": ["alpha", "beta", "gamma"],
+         "gate": "collapsing_the_whole_workflow_would_lengthen_the_merge_gate",
+         "gate_today_p50_s": 110.0,
+         "projected_consolidated_p50_s": 150.0}], (
         "the held-back docs group must be listed on the findings document: "
         f"{data.get('opt77_withheld_candidates')!r}")
+    # …counted on the per-gate tally too, so the whole-workflow refusal has a
+    # visible firing rate rather than being indistinguishable from a dead gate.
+    assert (data["opt77_withheld_by_gate"].get(
+        "collapsing_the_whole_workflow_would_lengthen_the_merge_gate") == 1), (
+        "the whole-workflow withhold must be counted once: "
+        f"{data.get('opt77_withheld_by_gate')!r}")
+    # …and no OPT77 finding was promoted for that workflow.
+    assert not [f for f in o77_all if "gates.yml" in str(f.get("workflow_file", ""))], (
+        "gates.yml's group projects ABOVE the gate it sets today — it must not "
+        "promote a finding")
+
+    # ---- OPT77's WHOLE-WORKFLOW arm, the FIRING half (checks.yml, wf 1004) ----
+    # The only OPT77 path that credits a group with no remaining job to measure
+    # against, and the only one with a separate re-derivation in verify_report.
+    # Nothing reached it before this fixture: a hard `raise` inside the FIRE
+    # branch, and separately inside the WITHHOLD branch, each left this e2e
+    # green (while a `raise` at `if not eligible:` reddened it — groups formed,
+    # but neither arm ran).
+    o77_whole = [f for f in o77_all if "checks.yml" in str(f.get("workflow_file", ""))]
+    assert len(o77_whole) == 1, (
+        "checks.yml's three same-runner jobs are every job it declares and their "
+        "projection ties the gate they set today — exactly one OPT77 finding "
+        f"(got {[f.get('affected_jobs') for f in o77_whole]!r})")
+    scw = o77_whole[0].get("setup_consolidation") or {}
+    assert scw.get("kind") == "opt77_repeated_setup", scw
+    assert scw.get("credited_jobs") == ["contracts", "schema", "typecheck"], scw
+    assert scw.get("group_is_the_whole_workflow") is True, scw
+    # Today's gate is the slowest member's MEASURED p50 (400s), never the sum of
+    # its step components — three members measuring 400s were once told in the
+    # report's own prose that they take 90s today.
+    assert scw.get("gate_today_p50_s") == 400.0, scw
+    assert scw.get("projected_consolidated_p50_s") == 400.0, scw
+    assert scw.get("workflow_declared_job_keys") == [
+        "contracts", "schema", "typecheck"], scw
+    # The ordinary arm's stamps are explicitly NULL here: there is no job outside
+    # the group, so naming one would be a fabrication — and a `None` that leaks
+    # into the rendered sentence is what the render assertions below rule out.
+    assert scw.get("remaining_tallest_job") is None, scw
+    assert scw.get("remaining_tallest_p50_s") is None, scw
+    assert o77_whole[0].get("wall_clock_p50_s") in (0, 0.0), o77_whole[0]
+    assert (o77_whole[0].get("runner_min_saving") or 0) > 0, o77_whole[0]
+    _ev_whole = str(o77_whole[0].get("evidence") or "")
+    assert ("against the 400s the group's slowest member takes today" in _ev_whole
+            and "does not lengthen that wait" in _ev_whole), _ev_whole
+    assert "None" not in _ev_whole, _ev_whole
+    assert "becomes this workflow's longest job" not in _ev_whole, _ev_whole
 
     # OPT79 end to end, including the LOG fetch nothing else in the plain path
     # makes. `build-matrix.yml`'s `deps` job restores a cache and then installs; the
@@ -715,7 +893,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # Which YAML source fed the detectors is a fact ABOUT the report, so it is stamped.
     # `--root` is a real checkout of the synthetic repo here, so every workflow is read
     # off disk and none over the API.
-    assert ds.get("workflow_yaml_source") == {"checkout": 3, "api": 0}, (
+    assert ds.get("workflow_yaml_source") == {"checkout": 5, "api": 0}, (
         f"workflow YAML provenance not stamped as expected: {ds.get('workflow_yaml_source')!r}")
 
     render = subprocess.run(
@@ -755,12 +933,39 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     held77 = [ln for ln in report.splitlines()
               if ln.startswith("| repeated-setup: held back |")]
     assert len(held77) == 1, held77
-    assert ("1 candidate job group(s) held back (docs-format + docs-links + "
-            + "docs-spell in build-matrix.yml): the sampled runs never had every job in "
-            + "the group run together, so the saving could not be measured."
+    # TWO groups, held back for two DIFFERENT reasons, one each — so the
+    # sentence names both groups, prints only the alphabetically first gate's
+    # reason, and hedges it as a TIE: with one candidate per reason there is no
+    # commonest one, and "most commonly" would be false of the split itself.
+    assert ("2 candidate job group(s) held back (alpha + beta + gamma in gates.yml, "
+            + "docs-format + docs-links + docs-spell in build-matrix.yml): "
+            + "equally often, every job the workflow declares is in the group, so "
+            + "the group sets the pull-request wait itself, and collapsing it into "
+            + "one job would make that wait longer."
             ) in held77[0], held77[0]
     assert "group_never_ran_complete_in_one_sampled_run" not in report
+    assert "collapsing_the_whole_workflow_would_lengthen_the_merge_gate" not in report
     assert "repeated-setup verdicts" not in report
+
+    # OPT77's whole-workflow arm reaches the READER. The detector and the
+    # verifier both passed above; a renderer that dropped the finding, or that
+    # printed the now-`None` `remaining_tallest_*` stamps into the sentence,
+    # would leave both green and ship "…below the None `None` job".
+    _whole_lines = [ln for ln in report.splitlines()
+                    if "the group's slowest member takes today" in ln]
+    assert _whole_lines, (
+        "the whole-workflow OPT77 finding is on the findings document but its "
+        "sentence is not in the rendered report")
+    for _ln in _whole_lines:
+        assert "against the 400s the group's slowest member takes today" in _ln, _ln
+        assert ("so the group sets the pull-request wait itself, and consolidating "
+                "it does not lengthen that wait.") in _ln, _ln
+        # The ordinary arm's two leaks, ruled out on the rendered line itself:
+        # a `None` from the nulled stamps, and the remaining-tallest clause that
+        # describes a job this workflow does not have.
+        assert "None" not in _ln, _ln
+        assert "becomes this workflow's longest job" not in _ln, _ln
+    assert str(o77_whole[0]["id"]) in report, o77_whole[0]["id"]
 
     # OPT80 reaches the READER, not just the findings document. The block above
     # proves the detector fired and the verifier accepted it; a renderer that

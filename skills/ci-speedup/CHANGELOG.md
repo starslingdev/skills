@@ -703,6 +703,81 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-09-30** — **A held-back row can no longer break its own table, link
+  out of the report, or overstate its reason (#112).** Job names are controlled
+  by the audited repository and land in a markdown table cell. A backslash was
+  not escaped before the cell separator, so a job named `a\|b` split its row
+  into an extra column and the report's own self-check then read only the
+  fragment before the split; brackets and parentheses were not neutralised at
+  all, so a job named `[click](http://example.test)` rendered as a working link
+  inside the audit's own table, and angle brackets were not neutralised either,
+  so a name written as an HTML tag could make the report load a remote image
+  the moment a reader opened it. Fourteen characters in the name are now
+  backslash-escaped — `\` `|` `[` `]` `(` `)` `_` `<` `>` `` ` `` `*` `&`
+  `~` — rather than, as this entry previously claimed, every character
+  markdown treats as special. Backticks and asterisks used to be swapped for
+  an apostrophe instead, which rendered three different job names as the same
+  string in a row whose whole purpose is saying which candidates were held
+  back; they are escaped now too, so the name arrives intact. Ampersands and
+  tildes are escaped for the same reason: left alone, a job called `A&amp;B`
+  renders as `A&B`, and two jobs become one name on the page. One case stays
+  out of reach and is written down as such: a job named as a bare web address
+  becomes a link with no punctuation to escape.
+  The row's count and job list cover every held-back candidate while its reason
+  is only the most common one, so the reason now says "most commonly" whenever
+  more than one reason contributed instead of asserting one cause of every job
+  it names — and "equally often" when two reasons are tied, where there is no
+  most common one and saying there is would be false. The count is of the
+  candidates the row actually names: counted over raw records it could say
+  "2 held back" beside a single name. One checkout reason asserted a cause the evidence does not
+  establish ("progress output is switched off") and is hedged like its
+  siblings. The guard that stops a reason shipping as an internal code now
+  recognises every way the checkout detector records one, so two reasons it
+  previously could not see are no longer listed by hand inside the guard
+  itself.
+  A held-back row can also no longer take the whole report down with it: a
+  pattern registered without its plain-English wording raised an error that
+  stopped the report being produced at all, where the point of that wording is
+  to keep a report readable when something is wrong. A group of jobs held back
+  with a blank name now shows a visible marker rather than nothing. Whether a
+  held-back entry names one job or a whole group is part of what a pattern
+  registers, instead of being worked out by comparing it against the one
+  group-shaped pattern that exists today — a second group-shaped pattern would
+  have had every candidate rendered as "(unnamed job)", in the report and in
+  the report's own self-check alike, so the two would have agreed. The
+  self-check now also reads the row's third column, which says what the row is
+  about and which nothing checked.
+- **2026-09-30** — **A workflow whose jobs all share one setup no longer loses
+  its saving in silence (#112).** The repeated-setup pattern (OPT77) sizes what
+  collapsing small jobs that each re-pay the same setup would save on the bill.
+  When every job in the workflow was in the group it used a separate rule that
+  was wrong twice: it decided "nothing outside this group" from the sampled
+  runs, so a workflow declaring a job that never ran in the sampled window — a
+  main-gated release job, a job behind a condition — was misclassified and
+  dropped without a word; and it assumed collapsing could only lengthen the
+  wait, which is a wall-clock argument applied to a bill-only saving. The group
+  is now judged against the wait it sets today — **how long its slowest member
+  was measured to take**, which is what the workflow makes a pull request wait
+  for, since the members run in parallel. Collapsing a whole workflow can
+  never shorten that wait, so the saving is reported when it is free — when
+  the collapsed job would take exactly as long as the slowest job does
+  today — and otherwise the report says what the collapse would cost the merge
+  wait, instead of saying nothing at all. In practice the second case is the
+  common one, and saying so is the point of the change. "Every job in the
+  workflow" is read from what the workflow declares, and needs one declared job
+  per member. That wait is a measured duration rather than a job's typical
+  setup added to its typical task: assembling the wait out of parts could
+  describe three jobs each measuring 400s as taking 90s today, in the report's
+  own words. The report's self-check works the
+  wait out from the measurements itself, and the part-based sum survives only
+  as a consistency test on them. The self-check also reads what the workflow
+  declares from a record written when the workflow file is read, rather than
+  from the pattern's own copy of it, so the claim "this is every job in the
+  workflow" is checked against a second source; it no longer rejects a saving
+  because the two sides rounded a tenth of a second differently; and a saving
+  measured against another job can no longer also carry the whole-workflow
+  wait. A workflow file that could not be read disables three patterns, and now
+  says so in the report instead of reading as "checked, nothing found".
 - **2026-09-30** — **The repeated-setup (OPT77) and stalled-checkout (OPT80)
   patterns now say when they measured something and could not decide it.** Both
   kept a private tally of why they held candidates back, but nothing showed it,
@@ -718,14 +793,13 @@ unversioned and updates by reinstall from `main`.
   cause, never an internal code. This is the same held-back disclosure the cache
   check (OPT79) already gave: all three patterns now share one mechanism — one
   row builder, one job list, one self-check — so a fourth pattern discloses a
-  held-back candidate by registering its reasons, not by growing a fourth copy. Only undecided candidates count; a candidate
-  that was decided (the jobs depend on each other, the logs show a smooth fetch)
-  does not. A slow checkout whose logs were not all read, because only the newest
-  four are fetched, counts as undecided when the unread runs could still have
-  proven a stall. A group of small jobs that is the whole workflow, with no other
-  job to compare against, is now treated as decided (merging them in parallel
-  can only keep or lengthen the wait) instead of held back; the case where other
-  jobs exist but none ran often enough to compare against stays held back. The
+  held-back candidate by registering its reasons, not by growing a fourth copy.
+  Only undecided candidates count; a candidate that was decided (the jobs depend
+  on each other, the logs show a smooth fetch) does not. A slow checkout whose
+  logs were not all read, because only the newest four are fetched, counts as
+  undecided when the unread runs could still have proven a stall. A group of
+  small jobs where other jobs exist but none ran often enough to compare against
+  stays held back. The
   report's self-check re-derives each whole line (count, jobs, reason) from the
   findings and fails a report that omits one, misstates any part, prints a code
   in place of the reason, or carries one with nothing behind it; a gate with no

@@ -2870,13 +2870,24 @@ def test_withheld_setup_and_checkout_candidates_reach_the_data_sources_table():
     r77 = _withheld_row(foot, "repeated-setup: held back")
     r80 = _withheld_row(foot, "checkout stall: held back")
     assert r77 and r80, foot
+    # More than one gate contributed on each row, so the commonest gate's
+    # reason is hedged rather than asserted of every group the row names.
     assert ("3 candidate job group(s) held back (a + b + c in ci.yml, "
-            "d + e + f in ci.yml, x + y + z in b.yml): "
+            "d + e + f in ci.yml, x + y + z in b.yml): " + bp._WITHHELD_MODAL_LEAD
             + bp._OPT77_WITHHOLD_PHRASES["needs_graph_undecidable"] + ".") in r77, r77
-    # A tie goes to the alphabetically first gate - the verifier's rule too.
-    assert ("2 candidate checkout(s) held back (build, e2e): "
+    # A tie goes to the alphabetically first gate - the verifier's rule too -
+    # and is hedged as a tie, because on an exact split there is no commonest
+    # reason for "most commonly" to be about.
+    assert ("2 candidate checkout(s) held back (build, e2e): " + bp._WITHHELD_TIED_LEAD
             + bp._OPT80_WITHHOLD_PHRASES["log_carries_no_progress_vocabulary"]
             + ".") in r80, r80
+    # Both assertions above build their expectation out of the very table they
+    # are checking, so they hold whatever it says. The hedge itself is the
+    # behaviour, so it is pinned as literal text: absent progress output in a
+    # log is an OBSERVATION, and naming the switch as its cause is the claim
+    # this reason must not make.
+    assert ("the slow runs' logs show no fetch progress lines (most likely "
+            "because progress output is switched off)") in r80, r80
     for raw in ("needs_graph_undecidable", "log_carries_no_progress_vocabulary",
                 "top reason", "measured but"):
         assert raw not in r77 + r80, (raw, r77, r80)
@@ -2906,7 +2917,9 @@ def test_withheld_row_qualifies_shared_job_names_caps_the_list_and_escapes():
         {"workflow_file": "ci.yml", "job": "a|b`c\nd", "gate": gate}]
     row = _withheld_row(_withheld_foot(doc), "checkout stall: held back")
     assert row.count("|") - row.count("\\|") == 4, row
-    assert "`" not in row and "\n" not in row, row
+    # every backtick escaped, so none can open a code span across the cell
+    assert "\n" not in row, row
+    assert re.sub(r"\\`", "", row).count("`") == 0, row
 
 
 def test_withheld_row_never_prints_an_unmapped_gate_code():
@@ -2918,11 +2931,82 @@ def test_withheld_row_never_prints_an_unmapped_gate_code():
     assert row and "brand_new_gate_code" not in row, row
 
 
+def _reason_accumulators(fn):
+    """The local names OPT80 accumulates its no-proof reasons in, DERIVED from
+    the function rather than listed here.
+
+    They used to be listed (`("reasons", "open_reasons")`), which is the same
+    defect one level up from the one the derivation fixed: a hardcoded name is
+    a name the guard cannot notice being renamed, and the scan would then read
+    zero gates out of an accumulator while still reporting the ones it found.
+
+    Derivation: a list-valued local is an accumulator when the function
+    iterates over it and hands the loop variable to a gate sink — `_no`'s gate
+    argument, or `_unresolved`'s (`for gate in sorted(set(reasons)) or [...]`
+    gives `reasons`) — and so is any list-valued local built out of one
+    (`open_reasons = [g for g in (reasons or [...]) ...]`).
+    """
+    import ast
+    list_valued = set()
+    for n in ast.walk(fn):
+        if (isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
+                and isinstance(n.value, (ast.List, ast.ListComp))):
+            list_valued.add(n.target.id)
+        elif isinstance(n, ast.Assign) and isinstance(n.value, (ast.List, ast.ListComp)):
+            list_valued |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+        elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+            list_valued.add(n.target.id)
+
+    def _names(node):
+        return {c.id for c in ast.walk(node) if isinstance(c, ast.Name)}
+
+    def _gate_sink_for(target):
+        """True when this `for` body hands its loop variable to a gate sink —
+        `_no`'s gate argument or `_unresolved`'s."""
+        for n in ast.walk(target):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)):
+                continue
+            if n.func.id == "_no" and n.args and target_name in _names(n.args[0]):
+                return True
+            if (n.func.id == "_unresolved" and len(n.args) > 1
+                    and target_name in _names(n.args[1])):
+                return True
+        return False
+
+    acc = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.For) and isinstance(n.target, ast.Name):
+            target_name = n.target.id
+            if any(_gate_sink_for(b) for b in n.body):
+                acc |= _names(n.iter) & list_valued
+    # …and anything built OUT of an accumulator is one too: the open reasons
+    # are filtered out of the collected ones and then handed on.
+    for _ in range(10):
+        grown = set(acc)
+        for n in ast.walk(fn):
+            if isinstance(n, (ast.Assign, ast.AugAssign)):
+                targets = (n.targets if isinstance(n, ast.Assign) else [n.target])
+                if _names(n.value) & acc:
+                    grown |= {t.id for t in targets
+                              if isinstance(t, ast.Name) and t.id in list_valued}
+        if grown == acc:
+            break
+        acc = grown
+    return acc
+
+
 def _withhold_gates_recordable_in_the_collector():
     """Every gate the collector can write into a withheld-candidates list, read
-    from the detectors' own source: the literals handed to `_drop_group` /
-    `_unresolved`, the no-proof reasons OPT80 collects, and the names the
-    independence check returns. A gate added there without a phrase fails here."""
+    from the detectors' own source. FOUR sources, which is what the scan reads:
+    the literals handed to `_drop_group` / `_unresolved`, the names the
+    independence check returns, the names `_opt80_stall_in_log` returns, and
+    the no-proof reasons OPT80 collects (by `.append`, `.extend`, `+=` or an
+    assignment's fallback default). A gate added to any of them without a
+    phrase fails here.
+
+    Nothing in this scan is hardcoded — including the names of the reason
+    accumulators, which `_reason_accumulators` derives from the function (see
+    there for why listing them was the same defect one level up)."""
     import ast
     tree = ast.parse((_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8"))
     fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
@@ -2946,12 +3030,25 @@ def _withhold_gates_recordable_in_the_collector():
     d80 = fns["_detect_opt80_checkout_tail_stall"]
     for c in calls(d80, "_unresolved"):
         found80 |= lits(c.args[1]) if len(c.args) > 1 else set()
-    for c in calls(d80, "append"):
-        if isinstance(c.func.value, ast.Name) and c.func.value.id in (
-                "reasons", "open_reasons"):
-            found80 |= lits(c)
-    found80 |= lits(ast.parse("x=['tail_run_past_the_log_probe_budget',"
-                              "'no_tail_run_log_was_probed']"))
+    accumulators = _reason_accumulators(d80)
+    assert accumulators, "no reason accumulator derived from the OPT80 detector"
+
+    # Every way the derived accumulators are written to, not just `.append`.
+    def _writes_a_reason_list(node):
+        if isinstance(node, (ast.Assign, ast.AugAssign)):
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target])
+            return any(isinstance(t, ast.Name) and t.id in accumulators
+                       for t in targets)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("append", "extend", "insert")):
+            return (isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in accumulators)
+        return False
+
+    for n in ast.walk(d80):
+        if _writes_a_reason_list(n):
+            found80 |= lits(n)
     for n in ast.walk(fns["_opt80_stall_in_log"]):
         if isinstance(n, ast.Return) and isinstance(n.value, ast.Tuple):
             found80 |= lits(n.value)
@@ -2966,10 +3063,25 @@ def test_every_recordable_withhold_gate_has_a_plain_english_phrase():
             "no_job_outside_the_group_runs_often_enough_to_measure_against"} <= g77, g77
     assert {"tail_run_log_unavailable", "fewer_than_the_minimum_tail_runs",
             "tail_run_past_the_log_probe_budget"} <= g80, g80
+    # …and enough of them that an accumulator whose name the scan failed to
+    # derive cannot pass unnoticed: every non-verdict phrase must have been read
+    # back out of the source.
+    assert len(g80) >= len(bp._OPT80_WITHHOLD_PHRASES), (
+        "the scan read fewer OPT80 gates than there are phrases - an "
+        "accumulator the derivation missed", sorted(g80))
     assert g77 - set(bp._OPT77_WITHHOLD_PHRASES) == set(), (
         "OPT77 withhold gate with no phrase", g77 - set(bp._OPT77_WITHHOLD_PHRASES))
     assert g80 - set(bp._OPT80_WITHHOLD_PHRASES) == set(), (
         "OPT80 withhold gate with no phrase", g80 - set(bp._OPT80_WITHHOLD_PHRASES))
+    # …and the reverse: a phrase for a gate no collector path can record is
+    # dead text that reads like coverage. Nothing is allowlisted today; an
+    # entry here must name the path the scan cannot see.
+    assert set(bp._OPT77_WITHHOLD_PHRASES) - g77 == set(), (
+        "OPT77 phrase for a gate nothing records",
+        sorted(set(bp._OPT77_WITHHOLD_PHRASES) - g77))
+    assert set(bp._OPT80_WITHHOLD_PHRASES) - g80 == set(), (
+        "OPT80 phrase for a gate nothing records",
+        sorted(set(bp._OPT80_WITHHOLD_PHRASES) - g80))
     # a verdict is never withheld, so a phrase for one is dead text
     assert not set(bp._OPT77_WITHHOLD_PHRASES) & set(cr._OPT77_VERDICT_GATES)
     assert not set(bp._OPT80_WITHHOLD_PHRASES) & set(cr._OPT80_VERDICT_GATES)
@@ -7999,7 +8111,10 @@ def test_withheld_cache_candidates_reach_the_data_sources_table():
          "gate": "fewer_than_min_miss_runs_classified"}]
     foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
     assert "| cache hit/miss verdicts |" in foot, foot
-    assert ("3 candidate cache(s) held back (e2e, unit, x): too few sampled runs missed the cache to compare "
+    # Two gates contributed, so the commonest gate's reason is hedged: it is
+    # true of two of the three named jobs, not of all of them.
+    assert ("3 candidate cache(s) held back (e2e, unit, x): most commonly, too "
+            "few sampled runs missed the cache to compare "
             "a miss against a hit.") in foot, foot
     assert "fewer_than_min" not in foot and "_runs_classified" not in foot, foot
     # nothing withheld -> no row
@@ -8054,7 +8169,9 @@ def test_held_back_line_escapes_repo_controlled_job_names():
     cells = [c for c in line.replace("\\|", "").split("|") if c.strip()]
     assert len(cells) == 3, line            # source, coverage, feeds: the pipe did not split
     assert "`x`" not in line and "\n" not in line, line
-    assert "a\\|b 'x' c" in line, line
+    # the name survives intact, escaped rather than substituted: two jobs whose
+    # names differ only in their punctuation stay two names in the row
+    assert "a\\|b \\`x\\` c" in line, line
 
 
 def test_held_back_line_merges_early_and_late_gates_and_keeps_the_tie_rule():
@@ -8064,3 +8181,339 @@ def test_held_back_line_merges_early_and_late_gates_and_keeps_the_tie_rule():
          "gate": "job_declares_more_than_one_cache_restore_step"}])
     # tie: alphabetically first gate wins, exactly as before
     assert "restores more than one cache" in line, line
+
+
+def test_held_back_reason_is_hedged_when_more_than_one_gate_contributed():
+    """The count and the named jobs cover EVERY held-back candidate, but the
+    reason is only the commonest gate's. Printed flat, the sentence asserted
+    that reason of every job it named — "7 held back (…): the job restores more
+    than one cache" while two of the seven were held back for something else,
+    with nothing in the row letting the reader see it. A second gate now makes
+    the reason explicitly modal; one gate leaves it unhedged."""
+    rows = ([{"workflow_file": "ci.yml", "job": f"many{i}",
+              "gate": "no_install_step_after_the_cache_step"} for i in range(5)]
+            + [{"workflow_file": "ci.yml", "job": f"few{i}",
+                "gate": "job_declares_more_than_one_cache_restore_step"}
+               for i in range(2)])
+    line = _held_back_cell(rows)
+    assert "7 candidate cache(s) held back" in line, line
+    # the modal gate's reason, and it does NOT claim to hold of all seven
+    assert ("): most commonly, " + bp._OPT79_HELD_BACK_REASONS[
+        "no_install_step_after_the_cache_step"] + ".") in line, line
+    # the minority gate's own reason is not asserted of anyone
+    assert "restores more than one cache" not in line, line
+    # …and one gate for every candidate stays unhedged: there is nothing to hedge.
+    only = _held_back_cell(
+        [{"workflow_file": "ci.yml", "job": f"j{i}",
+          "gate": "no_install_step_after_the_cache_step"} for i in range(3)])
+    assert ("): " + bp._OPT79_HELD_BACK_REASONS[
+        "no_install_step_after_the_cache_step"] + ".") in only, only
+    assert "most commonly" not in only, only
+
+
+def test_held_back_job_names_cannot_split_the_row_or_become_a_link():
+    """Job names are repo-controlled and land in a markdown table cell.
+
+    `a\\|b` was escaped to `a\\\\|b` — GFM reads that as an escaped BACKSLASH
+    followed by a live cell separator, so the row grew a column and the
+    self-check's own cell regex read only the fragment before the split. And a
+    job named `[click](http://example.test)` rendered as a working link inside
+    the audit's own Data sources table."""
+    def _gfm_cells(row: str) -> int:
+        """Count the row's cells the way GFM does: a backslash escapes exactly
+        the character after it, so a `|` ends a cell unless an ODD run of
+        backslashes precedes it. Counting with a `(?<!\\)\\|` lookbehind has
+        precisely the blind spot this test exists to catch — it declines to
+        split `a\\\\|b`, which GFM reads as an escaped backslash followed by a
+        LIVE separator, so the broken escaper would score three cells here."""
+        cells, buf, i = [], [], 0
+        while i < len(row):
+            if row[i] == "\\" and i + 1 < len(row):
+                buf.append(row[i:i + 2])
+                i += 2
+            elif row[i] == "|":
+                cells.append("".join(buf))
+                buf = []
+                i += 1
+            else:
+                buf.append(row[i])
+                i += 1
+        cells.append("".join(buf))
+        return len([c for c in cells if c.strip()])
+
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "a\\|b", "gate": "no_monthly_volume"}])
+    # exactly three cells: the row did not grow a column
+    assert _gfm_cells(line) == 3, line
+    # `\` escaped first, THEN `|`: `a\|b` -> `a\\\|b`, never `a\\|b`
+    assert "a\\\\\\|b" in line, line
+
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "[click](http://example.test)",
+         "gate": "no_monthly_volume"}])
+    assert "[click](http://example.test)" not in line, line
+    assert "\\[click\\]\\(http://example.test\\)" in line, line
+    assert len([c for c in re.split(r"(?<!\\)\|", line) if c.strip()]) == 3, line
+
+    # The row exists to say WHICH candidates were held back, so two different
+    # jobs must not arrive as one name. Backticks and asterisks used to be
+    # swapped for an apostrophe, which collapsed `a*b`, "a`b" and `a'b` into a
+    # single rendered string; both are ordinary GFM backslash escapes, so the
+    # name survives instead.
+    def _cell_of(job):
+        return _held_back_cell([{"workflow_file": "ci.yml", "job": job,
+                                 "gate": "no_monthly_volume"}])
+
+    rendered = {_cell_of(j) for j in ("a*b", "a`b", "a'b")}
+    assert len(rendered) == 3, rendered
+    assert "a\\*b" in _cell_of("a*b"), _cell_of("a*b")
+    assert "a\\`b" in _cell_of("a`b"), _cell_of("a`b")
+    # …and neither can still open a code span or an emphasis run
+    assert _gfm_cells(_cell_of("a`b`c")) == 3, _cell_of("a`b`c")
+
+    # an emphasis run a name would otherwise open across the rest of the cell
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "snake_case_job_name",
+         "gate": "no_monthly_volume"}])
+    assert "snake\\_case\\_job\\_name" in line, line
+
+    # `<https://example.test>` is a GFM autolink and renders as a working link
+    # exactly like the `[click](...)` form above; a raw `<img …>` / `<details>`
+    # is live HTML inside the cell. Angle brackets are the same harm, so they
+    # are neutralised the same way.
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "<https://example.test>",
+         "gate": "no_monthly_volume"}])
+    assert "<https://example.test>" not in line, line
+    assert "\\<https://example.test\\>" in line, line
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "<details open>build</details>",
+         "gate": "no_monthly_volume"}])
+    assert "<details open>" not in line, line
+
+
+def test_no_collector_path_can_record_a_held_back_entry_with_no_job():
+    """The renderer carries `(unnamed job)` / "a group" fallbacks and the
+    self-check hard-REJECTS an entry that names no job, so the two would
+    disagree if any real detector path could produce one. Read off the
+    collector: every site that adds to a withheld-candidate list is an append
+    of a dict literal whose name field is bound to a non-empty expression, and
+    OPT79's pre-probe site — the only one whose name is not structurally
+    non-empty — appends under a condition that tests it.
+
+    The scan used to match `withheld_candidates.append(<Name>)` only, so an
+    `extend`, an `insert`, a `+=` or a row built one line earlier escaped it
+    entirely — and `len(sites) == 4` still passed, because a site the scan
+    cannot see is not a site it counts. It now matches every way the list can
+    be written to, and asserts each one is the recognised shape. The OPT79
+    guard is located by walking that function's conditions rather than by
+    grepping the whole file for the text of the test, which matched wherever
+    it happened to live."""
+    import ast
+    import collect_runs as _cr
+    src = (_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    def _is_target(node):
+        return isinstance(node, ast.Name) and node.id == "withheld_candidates"
+
+    writes = []
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and _is_target(n.func.value)):
+            writes.append((n.func.attr, n))
+        elif isinstance(n, ast.AugAssign) and _is_target(n.target):
+            writes.append(("+=", n))
+        elif (isinstance(n, ast.Assign)
+              and any(_is_target(t) for t in n.targets)):
+            writes.append(("=", n))
+    # 77, 79 pre-probe, 79 post-probe, 80 — and every one of them an
+    # `append(<dict literal>)`, never an `extend`, an `insert` or a `+=`.
+    assert len(writes) == 4, [(k, ast.dump(n)[:60]) for k, n in writes]
+    for kind, n in writes:
+        assert kind == "append", (kind, ast.dump(n)[:80])
+        d = n.args[0]
+        assert isinstance(d, ast.Dict), ast.dump(n)[:120]
+        named = {k.value: v for k, v in zip(d.keys, d.values)
+                 if isinstance(k, ast.Constant)}
+        key = "job" if "job" in named else "jobs"
+        assert key in named, sorted(named)
+        # the name is BOUND to something, not a literal blank or None
+        value = named[key]
+        assert not (isinstance(value, ast.Constant)
+                    and not str(value.value or "").strip()), ast.dump(value)
+
+    # OPT79's pre-probe site is the only one whose name is not structurally
+    # non-empty. Its guard is located STRUCTURALLY: the conditions that
+    # actually govern that append, not a substring anywhere in the file.
+    def _guards_of(root, needle):
+        """Every `if` test that encloses `needle` inside `root`."""
+        found = []
+
+        def walk(node, tests):
+            for child in ast.iter_child_nodes(node):
+                if child is needle:
+                    found.extend(tests)
+                if isinstance(child, ast.If):
+                    for b in child.body:
+                        walk(b, tests + [child.test])
+                    for b in child.orelse:
+                        walk(b, tests)
+                else:
+                    walk(child, tests)
+
+        walk(root, [])
+        return found
+
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    pre_probe = [n for _k, n in writes
+                 if any(isinstance(c, ast.Subscript)
+                        and isinstance(c.value, ast.Name) and c.value.id == "ctx"
+                        for c in ast.walk(n))]
+    assert len(pre_probe) == 1, len(pre_probe)
+    guards = _guards_of(fns["_opt79_candidates"], pre_probe[0])
+    assert guards, "OPT79's pre-probe append is not inside any condition"
+    guarded = any(
+        isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+        and c.func.attr == "get" and isinstance(c.func.value, ast.Name)
+        and c.func.value.id == "ctx"
+        and c.args and isinstance(c.args[0], ast.Constant)
+        and c.args[0].value == "job"
+        for t in guards for c in ast.walk(t))
+    assert guarded, [ast.dump(t)[:120] for t in guards]
+
+    # …and the renderer still renders something legible if one ever appeared —
+    # escaped like any other name, so it reads "(unnamed job)" on the page.
+    line = _held_back_cell([{"workflow_file": "ci.yml", "job": "",
+                             "gate": "no_monthly_volume"}])
+    assert "\\(unnamed job\\)" in line, line
+    assert _cr is not None
+
+
+def test_a_tied_held_back_reason_says_equally_often_not_most_commonly():
+    """"most commonly" is a claim about which reason dominates, and on an exact
+    split there is no such reason — the sentence asserts something false about
+    the very tie it is standing on. The tie gets its own wording; which of the
+    tied reasons is shown is still the alphabetically first."""
+    rows = [{"workflow_file": "ci.yml", "job": "a",
+             "gate": "tail_run_log_unavailable"},
+            {"workflow_file": "ci.yml", "job": "b",
+             "gate": "no_tail_run_log_was_probed"}]
+    line = bp._withheld_candidates_line(
+        {"opt80_withheld_candidates": rows}, "opt80_withheld_candidates",
+        "candidate checkout(s)")
+    assert bp._WITHHELD_TIED_LEAD in line, line
+    assert bp._WITHHELD_MODAL_LEAD not in line, line
+    # …and an actual majority still reads "most commonly".
+    rows.append({"workflow_file": "ci.yml", "job": "c",
+                 "gate": "tail_run_log_unavailable"})
+    line = bp._withheld_candidates_line(
+        {"opt80_withheld_candidates": rows}, "opt80_withheld_candidates",
+        "candidate checkout(s)")
+    assert bp._WITHHELD_MODAL_LEAD in line, line
+    assert bp._WITHHELD_TIED_LEAD not in line, line
+
+
+def test_the_held_back_count_counts_what_the_row_actually_names():
+    """The count was the number of recorded rows while the names and the "and
+    K more" overflow were the number of DISTINCT entries. Two rows for one job
+    — the same candidate held back at two gates — printed "2 candidate
+    checkout(s) held back (build)", a sentence that disagrees with itself."""
+    rows = [{"workflow_file": "ci.yml", "job": "build",
+             "gate": "tail_run_log_unavailable"},
+            {"workflow_file": "ci.yml", "job": "build",
+             "gate": "no_tail_run_log_was_probed"}]
+    line = bp._withheld_candidates_line(
+        {"opt80_withheld_candidates": rows}, "opt80_withheld_candidates",
+        "candidate checkout(s)")
+    assert line.startswith("1 candidate checkout(s) held back (build): "), line
+
+
+def test_a_registered_pattern_with_no_phrase_table_still_renders_a_report():
+    """`_WITHHELD_PHRASES_BY_KEY[key]` was a bare subscript: a pattern
+    registered in `_WITHHELD_ROWS` whose gate -> phrase table had not been
+    registered too raised a KeyError and took the WHOLE report with it. The
+    renderer's contract is that it always produces a report, even from a
+    document a bug has malformed - so this degrades to the unmapped wording
+    and leaves `verify_report` to fail the run."""
+    line = bp._withheld_candidates_line(
+        {"optzz_withheld_candidates": [
+            {"workflow_file": "ci.yml", "job": "unit", "gate": "some_gate"}]},
+        "optzz_withheld_candidates", "candidate thing(s)")
+    assert line == (f"1 candidate thing(s) held back (unit): "
+                    f"{bp._WITHHELD_UNMAPPED_PHRASE}."), line
+
+
+def test_a_group_shaped_pattern_renders_its_jobs_because_the_shape_is_registered():
+    """Whether an entry names one job or a whole group was decided by
+    comparing the doc key against OPT77's, in the renderer AND in
+    `verify_report`. A fourth group-shaped pattern would therefore have
+    rendered `(unnamed job)` for every candidate - in both twins alike, so
+    they agreed and the suite stayed green. The shape is part of the
+    registration now."""
+    key = "optzz_withheld_candidates"
+    old_rows = bp._WITHHELD_ROWS
+    old_shape = dict(bp._WITHHELD_SHAPE_BY_KEY)
+    try:
+        bp._WITHHELD_ROWS = old_rows + (bp.WithheldRow(
+            key, "mystery: held back", "candidate group(s)",
+            "Why a thing produced no finding", "group"),)
+        bp._WITHHELD_SHAPE_BY_KEY[key] = "group"
+        entries = bp._withheld_entries(
+            [{"workflow_file": ".github/workflows/ci.yml",
+              "jobs": ["lint", "test"], "gate": "g"}], key)
+    finally:
+        bp._WITHHELD_ROWS = old_rows
+        bp._WITHHELD_SHAPE_BY_KEY.clear()
+        bp._WITHHELD_SHAPE_BY_KEY.update(old_shape)
+    assert entries == ["lint + test in ci.yml"], entries
+
+
+def test_a_group_entry_with_a_blank_member_name_renders_a_visible_marker():
+    """The job-shaped path has always had a `(unnamed job)` fallback; the
+    group-shaped one had none, so a blank member rendered as nothing at all
+    and the entry read " in ci.yml"."""
+    entries = bp._withheld_entries(
+        [{"workflow_file": "ci.yml", "jobs": ["  "], "gate": "g"}],
+        bp._OPT77_WITHHELD_DOC_KEY)
+    assert entries == ["\\(unnamed job\\) in ci.yml"], entries
+
+
+def test_a_gate_with_no_phrase_renders_a_reason_never_its_code():
+    """A gate the phrase tables do not cover is a collector bug the self-check
+    fails on — but until the report is verified the row still renders, and what
+    it renders must read as a reason rather than leak the internal gate name.
+    Pinned at the RENDER level: the constant alone could be rewritten to
+    anything (including a code) with nothing going red."""
+    line = _held_back_cell([{"workflow_file": "ci.yml", "job": "unit",
+                             "gate": "a_gate_no_table_covers"}])
+    assert "a_gate_no_table_covers" not in line, line
+    assert bp._WITHHELD_UNMAPPED_PHRASE in line, line
+    # it has to be prose, not a placeholder or a token
+    assert bp._WITHHELD_UNMAPPED_PHRASE == (
+        "a reason this report has no plain-English wording for")
+    assert "_" not in bp._WITHHELD_UNMAPPED_PHRASE
+
+
+def test_every_held_back_row_keeps_the_static_only_body_alive():
+    """A repository with nothing else to report but one held-back candidate
+    must still render a body, or the Data sources footer — the only place the
+    candidate is disclosed — goes with it and "could not tell" reads as
+    "nothing found". Pinned for EVERY registered pattern, not just OPT79: a row
+    added without this is silent on exactly the repositories it exists for."""
+    for key, label, _noun, _feeds, _shape in bp._WITHHELD_ROWS:
+        entry = {"workflow_file": ".github/workflows/nightly.yml",
+                 "gate": "no_monthly_volume"}
+        if key == "opt77_withheld_candidates":
+            entry.update(group="ubuntu-latest/a+b+c", jobs=["a", "b", "c"],
+                         gate="needs_graph_undecidable")
+        else:
+            entry["job"] = "build"
+            if key == "opt80_withheld_candidates":
+                entry["gate"] = "no_tail_run_log_was_probed"
+        doc = {"repo": "o/r", "findings": [], "pr_critical_path": {"poles": []},
+               "data_sources": {}, key: [entry]}
+        assert bp._render_static_only(doc), key
+        md = bp.render(doc, "o/r")
+        assert "held back" in md, (key, md)
+        assert _withheld_row(md, label), (key, md)

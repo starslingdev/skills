@@ -32,7 +32,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
@@ -5141,15 +5141,37 @@ def _coverage_note(ds: dict[str, Any]) -> str:
 _OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 _OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
-# (doc key, Data sources row label, counted noun, "Used for" cell). The row
-# label and the noun are what `verify_report` matches on.
-_WITHHELD_ROWS: tuple[tuple[str, str, str, str], ...] = (
-    (_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts", "candidate cache(s)",
-     "Why a candidate cache produced no finding and no uncredited line"),
-    (_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back", "candidate job group(s)",
-     "Why a group of small jobs sharing one setup produced no finding"),
-    (_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back", "candidate checkout(s)",
-     "Why a checkout with a slow tail produced no finding"),
+class WithheldRow(NamedTuple):
+    """One pattern's whole registration in the held-back disclosure.
+
+    `entry_shape` is the field that used to be missing, and its absence was
+    not visible: both this renderer and `verify_report` hard-branched on
+    `key == _OPT77_WITHHELD_DOC_KEY` to decide whether an entry names one job
+    or a whole group. A fourth group-shaped pattern would therefore have been
+    rendered job-shaped — `(unnamed job)` for every candidate — by both twins
+    alike, so the two agreed and nothing went red. The shape is registered
+    here instead, and both twins dispatch on it."""
+
+    doc_key: str
+    label: str      # the Data sources row's first cell
+    noun: str       # what the count counts
+    feeds: str      # the "Used for" cell
+    entry_shape: str  # "job" (OPT79 / OPT80) or "group" (OPT77)
+
+
+_WITHHELD_ROWS: tuple[WithheldRow, ...] = (
+    WithheldRow(_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts",
+                "candidate cache(s)",
+                "Why a candidate cache produced no finding and no uncredited line",
+                "job"),
+    WithheldRow(_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back",
+                "candidate job group(s)",
+                "Why a group of small jobs sharing one setup produced no finding",
+                "group"),
+    WithheldRow(_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back",
+                "candidate checkout(s)",
+                "Why a checkout with a slow tail produced no finding",
+                "job"),
 )
 
 # One plain-English, self-justifying phrase per WITHHOLD gate: every gate the
@@ -5168,9 +5190,17 @@ _OPT77_WITHHOLD_PHRASES: dict[str, str] = {
     "group_never_ran_complete_in_one_sampled_run":
         "the sampled runs never had every job in the group run together, so the "
         "saving could not be measured",
+    "collapsing_the_whole_workflow_would_lengthen_the_merge_gate":
+        "every job the workflow declares is in the group, so the group sets "
+        "the pull-request wait itself, and collapsing it into one job would "
+        "make that wait longer",
     "no_job_outside_the_group_runs_often_enough_to_measure_against":
         "other jobs exist, but none ran often enough in the sampled runs to show "
         "that merging these would not make the pipeline slower",
+    "a_job_the_workflow_file_does_not_declare_ran_with_the_group":
+        "every job the workflow file declares is in the group, but the sampled "
+        "runs also carried a job it does not declare, so what would be left "
+        "after merging could not be established",
 }
 _OPT80_WITHHOLD_PHRASES: dict[str, str] = {
     "fewer_than_the_minimum_tail_runs":
@@ -5191,9 +5221,13 @@ _OPT80_WITHHOLD_PHRASES: dict[str, str] = {
     "progress_lines_all_outside_step_window":
         "the slow runs' logs show fetch progress only outside the checkout "
         "step's own time window",
+    # Absent progress vocabulary is an OBSERVATION, not a cause: the log may
+    # also be truncated, the checkout may not be `actions/checkout`, or the
+    # wording may simply be one this audit does not recognise. Hedged like its
+    # siblings rather than asserting the switch is off.
     "log_carries_no_progress_vocabulary":
-        "the slow runs' logs show no fetch progress lines (progress output is "
-        "switched off)",
+        "the slow runs' logs show no fetch progress lines (most likely because "
+        "progress output is switched off)",
     "quoted_progress_line_is_credential_shaped":
         "the only log evidence looked like a credential and was discarded",
     "no_tail_run_log_was_probed":
@@ -5214,31 +5248,91 @@ _WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
 _WITHHELD_UNMAPPED_PHRASE = "a reason this report has no plain-English wording for"
 # Named entries before ", and K more".
 _WITHHELD_JOBS_SHOWN = 5
+# Which shape an entry takes, by doc key — read from the registry, never from
+# a comparison against one pattern's key.
+_WITHHELD_SHAPE_BY_KEY: dict[str, str] = {r.doc_key: r.entry_shape
+                                          for r in _WITHHELD_ROWS}
+# Prefixed to the reason when more than one gate held candidates back, so the
+# sentence stops asserting the commonest gate's reason of every job it names.
+_WITHHELD_MODAL_LEAD = "most commonly, "
+# …and when the top two gates held back the SAME number of candidates there is
+# no commonest one to report. "most commonly" then says something false about
+# the tie it is standing on, so the tie gets its own lead. The reason shown is
+# still the alphabetically first of the tied gates.
+_WITHHELD_TIED_LEAD = "equally often, "
+
+
+# The markdown-active characters a repo-controlled name is backslash-escaped
+# for, IN THIS ORDER. `\` MUST come first: escaping `|` before `\` turns the
+# name `a\|b` into `a\\|b`, which GFM reads as an escaped backslash followed by
+# a LIVE cell separator — the row splits into an extra column and the
+# self-check's own cell regex reads only the fragment before the split. `[`,
+# `]`, `(` and `)` are escaped because a job named `[click](http://example.test)`
+# would otherwise render as a working link inside the audit's own table, `_`
+# because a name with two of them opens an italic run, and `<` / `>` because
+# `<https://example.test>` is a GFM autolink — the same harm by another spelling
+# — and a raw `<details>` / `<img …>` is live HTML inside the cell. Backticks
+# and `*` are ESCAPED, not swapped for an apostrophe: the row exists to say
+# which candidates were held back, and substitution collapsed `a*b`, "a`b" and
+# `a'b` into one rendered name. `&` and `~` close the same
+# two-names-collapse class by another route: `A&B` and `A&amp;B` render
+# identically as HTML entities unless the ampersand is escaped, and `~~x~~` is
+# a strikethrough run. The list is exactly these characters, enumerated
+# wherever it is described — "every markdown-active character" was a claim the
+# tuple did not keep.
+_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_", "<", ">", "`",
+                          "*", "&", "~")
 
 
 def _withheld_cell_text(text: object) -> str:
     """Repo-controlled text (a job or workflow name) made safe for one table
-    cell: whitespace and newlines collapsed, `|` escaped, backticks and emphasis
-    markers swapped for an apostrophe so a name cannot open a code span or an
-    italic run. `verify_report` carries the same transform."""
-    return (re.sub(r"\s+", " ", str(text)).strip()
-            .replace("`", "'").replace("*", "'").replace("|", "\\|"))
+    cell: whitespace and newlines collapsed, then each of
+    `\\` `|` `[` `]` `(` `)` `_` `<` `>` `` ` `` `*` `&` `~` backslash-escaped
+    (`\\` first, see above) so a name cannot split the row, open a code span,
+    or turn itself into a link — and so that two names differing only in
+    punctuation stay two names. Enumerated, not "every markdown-active
+    character": that claim was wider than the list kept. `verify_report`
+    carries a byte-identical transform, pinned equal by a coupling test."""
+    out = re.sub(r"\s+", " ", str(text)).strip()
+    for _ch in _WITHHELD_CELL_ESCAPES:
+        out = out.replace(_ch, "\\" + _ch)
+    return out
 
 
 def _withheld_entries(rows: list[dict[str, Any]], key: str) -> list[str]:
     """The distinct, sorted entries of one withheld-candidate list. An OPT77
     entry is a group ("lint + test in ci.yml"); an OPT79 / OPT80 entry is a job,
     qualified with its workflow file only when two workflows share the job
-    name, so the two stay tellable apart."""
+    name, so the two stay tellable apart.
+
+    The `(unnamed job)` / `"a group"` fallbacks below are UNREACHABLE from any
+    real detector path — every recording site is guarded, by an explicit
+    `ctx.get("job")` on OPT79's pre-probe exit and structurally everywhere else
+    (candidate names are built from a list that skips blanks) — and
+    `verify_report` fails a run that produces one outright. They are kept
+    deliberately, because the renderer's job is to always produce a report,
+    even from a document a bug has malformed, and an entry rendered as an empty
+    string is worse than one rendered as a visible marker.
+
+    What the test behind that claim checks, exactly: every way the collector's
+    withheld-candidate lists can be written to is an append of a dict literal
+    whose name field is bound to a non-empty expression, and OPT79's
+    pre-probe site — the one name that is not structurally non-empty — sits
+    under a condition that tests it, located by walking that function's own
+    conditions. A site that recorded a row some other way (built elsewhere and
+    passed in by variable) would be caught as an unrecognised shape, but a
+    name that is non-empty in the source and empty at runtime is beyond it."""
     def _wf(r: dict[str, Any]) -> str:
         return str(r.get("workflow_file") or "").replace("\\", "/").rsplit("/", 1)[-1]
 
     out: set[str] = set()
-    if key == _OPT77_WITHHELD_DOC_KEY:
+    if _WITHHELD_SHAPE_BY_KEY.get(key) == "group":
         for r in rows:
             jobs = r.get("jobs")
-            names = sorted(_withheld_cell_text(j) for j in jobs) if isinstance(
-                jobs, list) and jobs else [_withheld_cell_text(r.get("group") or "a group")]
+            names = sorted(
+                _withheld_cell_text(str(j).strip() or "(unnamed job)")
+                for j in jobs) if isinstance(jobs, list) and jobs else [
+                    _withheld_cell_text(r.get("group") or "a group")]
             wf = _wf(r)
             out.add(" + ".join(names) + (f" in {_withheld_cell_text(wf)}" if wf else ""))
         return sorted(out)
@@ -5260,7 +5354,17 @@ def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
     collector's withheld-candidate lists, or None when nothing was held back.
     N counts every entry; the reason is the commonest gate's phrase (ties go to
     the alphabetically first gate); at most `_WITHHELD_JOBS_SHOWN` entries are
-    named, then ", and K more". `verify_report` re-derives the whole line."""
+    named, then ", and K more". `verify_report` re-derives the whole line.
+
+    The count and the named entries cover EVERY candidate, but the reason is
+    only the commonest gate's. Printed flat, the sentence asserts that reason
+    of every job it names — untrue as soon as a second gate contributed, and
+    the reader has no way to see it. So the reason is prefixed with
+    `_WITHHELD_MODAL_LEAD` whenever more than one distinct gate is
+    represented, with `_WITHHELD_TIED_LEAD` when the top two gates held back
+    the same number (there is no commonest one to report, and saying "most
+    commonly" of a tie is simply false), and left unhedged only when one gate
+    accounts for the whole list."""
     rows = [r for r in ((doc or {}).get(key) or []) if isinstance(r, dict)]
     if not rows:
         return None
@@ -5268,13 +5372,27 @@ def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
     for r in rows:
         g = str(r.get("gate") or "unknown")
         counts[g] = counts.get(g, 0) + 1
-    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    top = ranked[0][0]
     entries = _withheld_entries(rows, key)
     jobs = ", ".join(entries[:_WITHHELD_JOBS_SHOWN])
     if len(entries) > _WITHHELD_JOBS_SHOWN:
         jobs += f", and {len(entries) - _WITHHELD_JOBS_SHOWN} more"
-    phrase = _WITHHELD_PHRASES_BY_KEY[key].get(top, _WITHHELD_UNMAPPED_PHRASE)
-    return f"{len(rows)} {noun} held back ({jobs}): {phrase}."
+    # `.get` on BOTH levels. A pattern registered in `_WITHHELD_ROWS` without a
+    # phrase table used to raise here, which crashes the whole report — and the
+    # renderer's contract is that it always produces one. It degrades to the
+    # unmapped wording instead; `verify_report` still fails such a run.
+    phrase = _WITHHELD_PHRASES_BY_KEY.get(key, {}).get(
+        top, _WITHHELD_UNMAPPED_PHRASE)
+    lead = ""
+    if len(ranked) > 1:
+        lead = (_WITHHELD_TIED_LEAD if ranked[1][1] == ranked[0][1]
+                else _WITHHELD_MODAL_LEAD)
+    # The count is the number of DISTINCT entries, which is what the names and
+    # the "and K more" overflow are counted from. Counting rows instead made
+    # the line disagree with itself whenever two rows deduplicated into one
+    # entry: "7 cache(s) held back (a, b, c, d, e)" with no overflow at all.
+    return f"{len(entries)} {noun} held back ({jobs}): {lead}{phrase}."
 
 
 def _data_sources_footer(doc: dict[str, Any], repo: str,
@@ -5390,10 +5508,10 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
     # setup (OPT77), a checkout with a slow tail (OPT80). Without these rows the
     # report reads "measured, nothing found" where the audit could not tell.
     # `verify_report` re-derives the whole line from the collector's lists.
-    for _key, _label, _noun, _feeds in _WITHHELD_ROWS:
-        _wline = _withheld_candidates_line(doc, _key, _noun)
+    for _row in _WITHHELD_ROWS:
+        _wline = _withheld_candidates_line(doc, _row.doc_key, _row.noun)
         if _wline:
-            rows.append((_label, _wline, _feeds))
+            rows.append((_row.label, _wline, _row.feeds))
     out = ["## 🗄️ Data sources", ""]
     if lead:
         out += lead
@@ -8049,8 +8167,8 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # A candidate any pattern held back is disclosed in the Data sources footer;
     # collapsing to the one-line note would drop the footer with it and let
     # "measured, could not tell" read as "nothing found".
-    withheld_n = sum(1 for _k, _l, _n, _f in _WITHHELD_ROWS
-                     if _withheld_candidates_line(doc, _k, _n))
+    withheld_n = sum(1 for _r in _WITHHELD_ROWS
+                     if _withheld_candidates_line(doc, _r.doc_key, _r.noun))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
             and not withheld_n):
