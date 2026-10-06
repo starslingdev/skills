@@ -1229,8 +1229,9 @@ the sampled occurrences. Every withhold increments
 `findings_doc["opt80_withheld_by_gate"]`, the same visible-zero discipline OPT77
 carries.
 
-OPT79 (a cache that costs more than it saves) is a measured lever: a Tier-2 bill lever below the cluster floor, a wall-clock lever on the long pole
-(alongside OPT64, OPT65, OPT77 and OPT80). It reads job LOGS during collection
+OPT79 (a cache that costs more than it saves) is a measured lever: a wall-clock
+lever on the long pole, and a Tier-2 bill lever below the cluster floor
+(alongside OPT64, OPT65, OPT77 and OPT80 as Tier-2 bill levers). It reads job LOGS during collection
 without `--with-logs`; the cache-evidence and push-probe logs are already read
 under `--with-logs`, so what is new is that this probe needs no flag.
 For a job whose workflow file declares exactly one cache-restore step
@@ -1390,7 +1391,8 @@ slowest job of another pull-request workflow, or any in a static-only report)
 renders the same marked block in `_opt79_off_pole_block`, a short section
 before "Also noticed", so every pole-cache finding renders exactly once with
 its merge-wait seconds and the appendix never summarizes it as "no bill
-saving". The pole's waterfall and agent prompt name OPT79 and point at its
+saving". Unless a leaf, structural or data-driven match fired first, the pole's
+waterfall and agent prompt name OPT79 and point at its
 block (`opt79_present` / `opt79=`) instead of the data-driven "see Also
 noticed" pointer or the coverage-gap wording, and when the generic cascade
 lowered the figure the block prints each `wall_clock_derivation` step and its
@@ -1411,8 +1413,11 @@ take the credited runner-minute arm), a job at or above the floor
 that is not the long pole, and a long pole tied with the next-tallest job (no
 headroom). The row stamps `long_pole_job`, `long_pole_p50_s`, `job_p50_s`,
 `floor_p50_s`, `workflow_gates_pull_requests` and `on_critical_path`, which is
-always `false` there, so the renderer has no merge-wait branch: it says the job is at or above the workflow's second-slowest
-job, so this audit cannot prove that shrinking it leaves the merge gate unchanged.
+always `false` there, so the renderer has no merge-wait branch. It has two
+wordings: for a workflow no pull request runs it says the workflow "does not run
+on pull requests"; otherwise it says the job is "at or above the
+second-slowest job", so this audit cannot prove that shrinking it leaves the
+merge gate unchanged.
 A schedule-only workflow is never told it has a merge wait at all. The docs take
 that same conservative framing: at or above the floor and below the pole is
 uncredited because no neutrality argument for the merge gate exists, not merely

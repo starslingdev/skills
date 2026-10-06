@@ -5971,9 +5971,11 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
 
     WHY it is missing differs by job. `not below the cluster floor` spans
     everything from the SECOND-ranked job upwards. The workflow's long pole, on
-    a workflow that can gate a PR, is NOT here: its excess sits on the merge
-    wait, so it is a credited wall-clock finding rendered at its pole
-    (`_opt79_pole_block`), and `verify_report` fails an uncredited row that
+    a workflow that can gate a PR, is NOT here unless it is TIED with the next
+    job (no headroom, so a tied long pole IS here): an untied one has its excess
+    on the merge wait, so it is a credited wall-clock finding rendered at its
+    pole (`_opt79_pole_block`) OR in the off-pole block
+    (`_opt79_off_pole_block`), and `verify_report` fails an uncredited row that
     claims the merge wait. On a workflow no pull request runs
     (`workflow_gates_pull_requests` false) there is no merge gate at all and the
     saving is pure runner-minutes. For every other job at or above the floor the
@@ -7185,11 +7187,6 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         wfb = _wf_base(str(f.get("workflow_file") or ""))
         # ALL jobs must be drilled poles — else a co-affected non-pole job would lose its disclosure.
         return all((wfb, _job_base(str(j))) in pole_jobs for j in jobs)
-
-    def _on_drilled_pole(f: dict[str, Any]) -> bool:
-        jobs = f.get("affected_jobs") or []
-        wfb = _wf_base(str(f.get("workflow_file") or ""))
-        return bool(jobs) and all((wfb, _job_base(str(j))) in pole_jobs for j in jobs)
 
     elig = [f for f in findings
             if not f.get("advisory") and not _is_pole_structural(f)

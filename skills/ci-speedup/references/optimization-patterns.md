@@ -616,7 +616,9 @@ scaled by how often this job actually ran in the sample, so a conditional job is
 not billed at the whole workflow's frequency. `sizing_basis = "measured"`. A
 below-the-floor job on a workflow with no measured 30-day volume cannot be
 credited and is withheld as `no_monthly_volume`, after it is measured (the
-uncredited row below needs no volume and stamps it as null).
+uncredited row and the wall-clock pole finding below need no volume and may stamp
+it, and the effective volume, as null; the pole finding's `runner_min_saving`
+is null too).
 
 The credited figure is a **lower bound** on what removing the cache would save:
 the miss path it is measured against still pays the restore step and the post
@@ -655,8 +657,9 @@ excess is credited.
    the install installs) and a rollout line. It needs that placement because its
    capped figure is often below the 30s long-pole floor, which would otherwise
    drop it from the "Also noticed" appendix as a valueless pole-job row; it also
-   counts as a catalog match for that pole, so the pole gets no gap-fill, and the
-   pole's waterfall and agent prompt name OPT79 and point at its block. When the
+   counts as a catalog match for that pole, so the pole gets no gap-fill, and
+   (unless a leaf, structural or data-driven match fired first) the pole's
+   waterfall and agent prompt name OPT79 and point at its block. When the
    job is not a drilled long pole (for example, the slowest job of another
    pull-request workflow), the same marked block renders in a short section
    before "Also noticed", never as an appendix row. When a cross-check bound
@@ -746,7 +749,7 @@ by that re-derivation:
 
 | key | what it carries |
 |---|---|
-| `kind` | `opt79_net_negative_cache` for a credited runner-minute finding, `opt79_pole_net_negative_cache` for a credited wall-clock finding on the workflow's long pole, `opt79_uncredited_pole_cache` for an uncredited row — the tag that routes the block to this re-derivation instead of the generic one |
+| `kind` | `opt79_net_negative_cache` for a credited runner-minute finding, `opt79_pole_net_negative_cache` for a credited wall-clock finding on the workflow's long pole, `opt79_uncredited_pole_cache` for an uncredited row (the "pole" in that name is historical: the rows are any job at or above the floor other than an untied slowest job) — the tag that routes the block to this re-derivation instead of the generic one |
 | `job` | the credited job; must be the finding's only `affected_jobs` entry |
 | `runner_label` / `cache_ref` | the one runner class every credited run ran on, and the cache action the block was built around |
 | `restore_step` / `install_step` / `post_step` | the three steps, as named in the YAML, that both paths measure; `post_step` is null for `actions/cache/restore`, which has no post phase |
@@ -754,8 +757,8 @@ by that re-derivation:
 | `hits` / `misses` / `classified_runs` / `ambiguous_runs` / `occurrences_on_other_runner` | the populations, the two-verdict and partial-restore runs excluded from them (still counted in the hit share), and the occurrences dropped for running on another runner label |
 | `hit_path_p50_s` / `miss_path_p50_s` / `waste_s` / `waste_floor_s` | the two medians, their difference, and the floor it had to clear |
 | `hit_share` | `hits / (classified_runs + ambiguous_runs)` |
-| `job_runs` / `sampled_successful_run_count` / `monthly_volume` / `effective_monthly_volume` | the scaling; `classified_runs` can never exceed `job_runs`, which can never exceed the sampled run count |
-| `runner_min_saving` | restated inside the block and checked against the finding's own; **null** on an uncredited row, where a number would be a failure |
+| `job_runs` / `sampled_successful_run_count` / `monthly_volume` / `effective_monthly_volume` | the scaling; `classified_runs` can never exceed `job_runs`, which can never exceed the sampled run count; the two volumes may be null on the pole finding and the uncredited row |
+| `runner_min_saving` | restated inside the block and checked against the finding's own; **null** on an uncredited row and on the wall-clock pole finding (neither carries minutes), where a number would be a failure |
 
 An uncredited row carries every key above plus `workflow_file`, `job_p50_s`,
 `floor_p50_s`, `long_pole_job`, `long_pole_p50_s`,

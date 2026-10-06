@@ -626,13 +626,14 @@ unversioned and updates by reinstall from `main`.
   whether the next job runs alongside the slowest one or after it through
   `needs:`; it never says that job finishes at a time or sets the merge wait.
   The usual cross-check bounds can lower it further, and the block then prints
-  each step and its reason. The pole's waterfall and agent prompt name OPT79
+  each step and its reason. Unless a leaf, structural or data-driven match
+  fired first, the pole's waterfall and agent prompt name OPT79
   and point at its block, rather than calling the pole a coverage gap.
   Runner-minutes are deliberately not stated on it: the runner-minute section
   needs proof that a job sits below the second-slowest
   job, which the slowest job cannot have. The "not credited" line now covers only
-  workflows no pull request runs and jobs at or above the floor that are not the
-  slowest (including a slowest job tied with the next one). The report's
+  workflows no pull request runs and jobs at or above the floor other than an
+  untied slowest job. The report's
   self-check re-derives the capped number from the stamped measurements, rejects
   any OPT79 finding that claims wall-clock under a below-the-floor certificate,
   checks that the job it names as the cap is the tallest other job the run

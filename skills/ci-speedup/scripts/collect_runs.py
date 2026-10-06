@@ -15567,10 +15567,11 @@ _OPT79_INSTALL_RE = _re.compile(
 # design), so it declares the same tuple and a coupling test asserts the two are
 # identical — one list, two readers, no drift.
 #
-# ONE tuple for BOTH outputs. A credited finding and an uncredited pole row are
-# the same measurement; only the sizing differs. Both are built by
-# `_opt79_stamp`, so every `waste_s` and median on either kind of row ships with
-# the `per_run` rows the report's self-check re-derives it from.
+# ONE tuple for ALL THREE outputs. A credited runner-minute finding, a credited
+# wall-clock pole finding and an uncredited row are the same measurement; only
+# the sizing differs. All are built by `_opt79_stamp`, so every `waste_s` and
+# median on any kind of row ships with the `per_run` rows the report's
+# self-check re-derives it from.
 _OPT79_STAMP_KEYS = (
     "kind",
     "job",
@@ -15586,7 +15587,7 @@ _OPT79_STAMP_KEYS = (
     "monthly_volume", "effective_monthly_volume",
     "runner_min_saving",
 )
-# The two `kind` tags the stamp carries, and the findings-doc key the uncredited
+# The `kind` tags the stamp carries (the third is below), and the findings-doc key the uncredited
 # rows travel under. The key is a STRING CONTRACT between the collector (which
 # writes it) and `blocking_path` (which renders it); renaming it on one side
 # would silently stop the line rendering, so it is a named constant on both
@@ -15597,7 +15598,8 @@ _OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
 # The THIRD kind: a net-negative cache on the workflow's LONG POLE, on a
 # workflow that gates pull requests. Its excess sits on the merge wait, so it is
 # a credited WALL-CLOCK finding (capped at the headroom to the next-tallest
-# job) with no runner-minutes — never a Tier-2 row, never an uncredited line.
+# job) with no runner-minutes — never in the runner-minute section (the `tier`
+# field may still be 2), never an uncredited line.
 # Pinned equal to the verifier's `_VR_OPT79_POLE_KIND` by a coupling test.
 _OPT79_POLE_KIND = "opt79_pole_net_negative_cache"
 # The pole finding's pre-cascade sizing, stamped under
@@ -16239,8 +16241,8 @@ def _opt79_candidates(
     sampled jobs' own timings), so a job whose SHAPE rules it out — no cache, two
     caches, no install after the cache — costs no log fetch. The cluster-floor
     test is NOT one of these gates: a job at or above the floor is probed like
-    any other, and what it can produce is an uncredited line rather than a
-    credited finding.
+    any other, and what it can produce is a credited wall-clock pole finding
+    or an uncredited line rather than a credited runner-minute finding.
 
     Deliberately NOT gated on the monthly volume: the plan pass has only the
     unscoped volume in hand while the detector uses the event-scoped one, and a
@@ -16331,8 +16333,8 @@ def _opt79_candidates(
         if not declared:
             _no("runner_label_not_one_known_billed_label", job=name)
             continue
-        # THE NEUTRALITY TEST, and the reason this lever credits runner-minutes
-        # only. A job strictly below the workflow's cluster floor cannot set the
+        # THE NEUTRALITY TEST, and the reason runner-minutes are credited only
+        # to jobs below the floor. A job strictly below the workflow's cluster floor cannot set the
         # merge gate, so making it faster provably cannot make the gate longer —
         # which is the certificate a credited finding ships.
         #
@@ -16352,7 +16354,8 @@ def _opt79_candidates(
         block["below_cluster_floor"] = below
         # WHICH job is at or above the floor matters to what the report may say.
         # `not below` covers everything from the SECOND-ranked job upwards, and
-        # only the long pole itself sets the merge wait. Stamped so the renderer
+        # only an untied long pole sets the merge wait (a slowest job tied with
+        # the next one has no headroom). Stamped so the renderer
         # can tell the two apart instead of calling both of them "the slowest
         # job" (the second-slowest job's saving is pure runner-minutes, and
         # telling its owner the time is on the merge wait is simply false).
@@ -16594,17 +16597,19 @@ def _opt79_stamp(
     effective: float | None,
     runner_min_saving: float | None,
 ) -> dict[str, Any]:
-    """THE measured block, built ONCE for both of this detector's outputs.
+    """THE measured block, built ONCE for all three of this detector's outputs.
 
-    A credited finding and an uncredited pole row differ in exactly two things:
-    the `kind` tag and whether there are minutes. Everything else — the per-run
+    The credited runner-minute finding, the credited wall-clock pole finding and
+    the uncredited row differ in the `kind` tag and in whether there are minutes
+    (only the runner-minute finding carries them). Everything else — the per-run
     rows the verifier re-derives the medians from, the populations, the
     multipliers — is the same measurement, so it is the same builder.
 
-    An uncredited row carries no sizing, so it may be measured on a workflow
-    whose monthly volume is unknown; it then stamps `monthly_volume` and
-    `effective_monthly_volume` as null rather than as a zero that reads like a
-    measured "never runs". A credited row always has both."""
+    A row that carries no minutes (the pole finding and the uncredited row) may
+    be measured on a workflow whose monthly volume is unknown; it then stamps
+    `monthly_volume` and `effective_monthly_volume` as null rather than as a
+    zero that reads like a measured "never runs". A runner-minute finding
+    always has both volumes."""
     return {
         "kind": kind,
         "job": job,
@@ -16966,8 +16971,8 @@ def _detect_opt79_net_negative_cache(
         # THE CREDITED WALL-CLOCK ARM. A cache on the workflow's LONG POLE, on a
         # workflow that gates pull requests, is the one case where its excess
         # sits on the merge wait — so it is sized as WALL-CLOCK, not withheld.
-        # The saving cannot exceed the headroom to the next-tallest job (past
-        # that, the next job gates the run); the cap is the shared
+        # The saving cannot exceed the gap to the next-tallest job's p50 (a
+        # saving larger than that gap is not claimed); the cap is the shared
         # within-workflow bound every other finding uses, not a second formula.
         # A long pole TIED with the next job has no headroom: shrinking it moves
         # no merge wait, so it falls through to the uncredited line below.
@@ -17024,7 +17029,8 @@ def _detect_opt79_net_negative_cache(
                 # WHERE the job sits, stated rather than implied. `not below the
                 # floor` spans everything from the second-ranked job upwards.
                 # Without these the renderer could not tell the second-slowest
-                # job from a PR workflow's from a schedule-only one's.
+                # job from the slowest job, or a PR workflow's from a
+                # schedule-only one's.
                 row["long_pole_job"] = str(block.get("long_pole_job") or "")
                 row["long_pole_p50_s"] = block.get("long_pole_p50_s")
                 row["job_p50_s"] = block.get("job_p50_s")
@@ -17111,7 +17117,8 @@ def _detect_opt79_net_negative_cache(
 
 def _opt79_next_tallest_job(crit: dict[str, Any], pole: str) -> str:
     """The job whose p50 is the workflow's cluster floor: the tallest job other
-    than the long pole (`_critical_path` takes the floor from the same ranking).
+    than the long pole (`_critical_path` takes the floor from the same p50s;
+    ties are broken by job name here).
     Named on the pole finding so the reader sees WHICH job caps the saving."""
     ranked = sorted(
         ((float(v or 0.0), str(k)) for k, v in (crit.get("job_p50") or {}).items()
@@ -19714,13 +19721,15 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             wf_path, jobs_per_run, crit, _wf_docs.get(wf_path, {}),
             opt65_monthly, next_id, logs_by_job_id=opt79_logs,
             withheld=_opt79_gates,
-            # Measured net-negative caches that cannot be PRICED because their
-            # job is not below the cluster floor. Not findings (no minutes, no
-            # certificate, no Tier-2 row) — the renderer states them as one
-            # uncredited line each, so the case worth the most is not silent.
+            # Measured net-negative caches that cannot be credited, because
+            # their job is not below the cluster floor and is not the headroom-
+            # bearing long pole of a PR workflow. Not findings (no minutes, no
+            # certificate) — the renderer states them as one uncredited line
+            # each, so a measured excess is never silent.
             uncredited=findings_doc.setdefault(_OPT79_UNCREDITED_DOC_KEY, []),
-            # Whether this workflow can gate a PR at all. Without it the row
-            # cannot say whether the waste is on a merge wait.
+            # Whether this workflow can gate a PR at all. Decides what an
+            # uncredited row says AND whether the credited wall-clock pole
+            # arm fires (a long pole on a workflow no PR runs is never credited).
             is_pr=is_pr,
             # Candidates whose logs were probed and then withheld: rendered as
             # one Data sources line so "could not tell" never reads as clean.
