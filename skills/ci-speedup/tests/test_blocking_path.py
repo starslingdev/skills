@@ -7925,15 +7925,15 @@ def test_data_sources_cache_probe_row_states_what_the_budget_cut():
 
 
 def test_uncredited_pole_cache_is_reported_even_though_it_is_not_sized():
-    """The most valuable instance of a net-negative cache is the one on the
-    workflow's SLOWEST job, because there the waste is on the merge wait rather
-    than only on the bill. This version cannot size that saving, and the old
-    behaviour was to skip the job in the candidate selector — so its logs were
-    never fetched, its cache was never classified, and the report was
+    """A net-negative cache on a job at or above its workflow's cluster floor
+    that is NOT the long pole of a pull-request workflow cannot be priced: the
+    audit cannot prove shrinking it leaves the merge gate unchanged. The old
+    behaviour skipped such jobs in the candidate selector, so the report was
     byte-identical to one for a repository with no such cache.
 
-    It is measured like any other now and stated with NO number: the reader
-    learns the cache exists and that the saving is not credited here."""
+    It is measured like any other and stated with NO number: the reader
+    learns the cache exists and that the saving is not credited here. (The
+    long pole of a PR workflow is a credited wall-clock finding instead.)"""
     doc = _doc_one_pole()
     doc["opt79_uncredited_pole_caches"] = [{
         "kind": "opt79_uncredited_pole_cache",
@@ -7944,17 +7944,19 @@ def test_uncredited_pole_cache_is_reported_even_though_it_is_not_sized():
         "install_step": "Run npm ci",
         "waste_s": 19.0, "hits": 5, "misses": 4,
         "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
-        "job_p50_s": 600.0, "floor_p50_s": 300.0,
-        "long_pole_job": "build", "long_pole_p50_s": 600.0,
-        "on_critical_path": True,
+        "job_p50_s": 300.0, "floor_p50_s": 300.0,
+        "long_pole_job": "e2e", "long_pole_p50_s": 600.0,
+        "workflow_gates_pull_requests": True,
+        "on_critical_path": False,
     }]
     lines = bp._opt79_uncredited_block(doc)
     md = "\n".join(lines)
     assert "build" in md
     assert "19s" in md                      # the measured excess, per hit
     assert "5 hit" in md and "4 miss" in md  # the sample it came from
-    assert "this workflow's slowest job" in md
-    assert "merge wait" in md
+    assert "second-slowest job (300s)" in md
+    assert "this workflow's slowest job" not in md
+    assert "merge wait" not in md
     assert "not credited" in md
     # It must NOT read as a sized saving: no runner-minutes, no wall-clock claim.
     assert "min/mo" not in md
@@ -7981,12 +7983,69 @@ def test_uncredited_pole_cache_reaches_the_rendered_report():
         "waste_s": 19.0, "hits": 5, "misses": 4,
         "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
         "job_p50_s": 600.0, "floor_p50_s": 300.0,
-        "long_pole_job": "build", "long_pole_p50_s": 600.0,
-        "on_critical_path": True,
+        "long_pole_job": "e2e", "long_pole_p50_s": 700.0,
+        "workflow_gates_pull_requests": True,
+        "on_critical_path": False,
     }]
     md = bp.render(doc, "o/r")
     assert "not credited" in md
     assert "`build`" in md
+
+
+def test_uncredited_block_never_claims_the_merge_wait():
+    """The merge-wait sentence is gone from the uncredited block: the long pole
+    of a pull-request workflow is a credited wall-clock finding rendered at its
+    pole. A row stamped `on_critical_path: True` (which `verify_report` fails)
+    still renders without that claim rather than repeating it."""
+    md = "\n".join(bp._opt79_uncredited_block({
+        "opt79_uncredited_pole_caches": [
+            _uncredited_row(on_critical_path=True,
+                            workflow_gates_pull_requests=True)]}))
+    assert "merge wait" not in md, md
+    assert "this workflow's slowest job" not in md, md
+    assert "not credited" in md, md
+
+
+def _opt79_pole_finding(**kw):
+    f = {
+        "id": "f7", "pattern": "OPT79",
+        "title": "A Cache That Costs More Than It Saves",
+        "workflow_file": ".github/workflows/ci.yml", "affected_jobs": ["build"],
+        "evidence": "On `build` the hit path is 21s SLOWER.",
+        "wall_clock_p50_s": 18.0, "runner_min_saving": None,
+        "sizing_basis": "measured", "risk": "LOW",
+        "guardrail": "Re-key or narrow the cache first.",
+        "rollout": "Re-measure the hit-vs-miss block.",
+        "fix_recipe_anchor": "opt79--a-cache-that-costs-more-than-it-saves",
+        "cache_net_negative": {"kind": "opt79_pole_net_negative_cache",
+                               "job": "build"},
+    }
+    f.update(kw)
+    return f
+
+
+def test_opt79_pole_finding_renders_at_its_pole_with_its_merge_wait():
+    """The pole-cache finding's credited figure is capped at the headroom to the
+    next-tallest job, routinely under the 30s long-pole floor — as a pole-job
+    row with no bill saving the appendix would drop it as valueless. It renders
+    AT the pole instead, with its id, title and seconds, and no minutes."""
+    pole = {"check": "build", "job": "build",
+            "workflow_file": ".github/workflows/ci.yml"}
+    f = _opt79_pole_finding()
+    assert bp._opt79_pole_for(pole, [f]) == [f]
+    other_wf = dict(pole, workflow_file=".github/workflows/release.yml")
+    assert bp._opt79_pole_for(other_wf, [f]) == []
+    # a below-the-floor OPT79 is the Tier-2 arm, not this block
+    credited = _opt79_pole_finding(cache_net_negative={
+        "kind": "opt79_net_negative_cache", "job": "build"})
+    assert bp._opt79_pole_for(pole, [credited]) == []
+    md = "\n".join(bp._opt79_pole_block([f], "https://x/catalog.md"))
+    assert md.startswith("<!-- opt79-pole:f7 -->"), md
+    head = md.split("\n")[1]
+    assert "A Cache That Costs More Than It Saves" in head and "`f7`" in head
+    assert "up to **18s** off the merge wait" in head
+    assert "min/mo" not in md
+    assert "#opt79--a-cache-that-costs-more-than-it-saves" in md
 
 
 def test_uncredited_pole_cache_survives_a_report_with_nothing_else_in_it():

@@ -4345,24 +4345,247 @@ def test_opt79_does_not_call_the_second_slowest_job_this_workflow_s_slowest():
     assert "not credited" in rendered
 
 
-def test_opt79_says_merge_wait_only_for_the_long_pole_of_a_pr_workflow():
-    """…and the long pole of a workflow that can gate a PR still gets the
-    original sentence, because there it is true."""
+def test_opt79_pole_cache_on_a_workflow_no_pr_runs_stays_uncredited():
+    """The long pole of a workflow that cannot gate a PR carries no merge wait,
+    so it is NOT the credited wall-clock arm: it stays an uncredited row, and
+    the row never claims the merge wait."""
     pole = _opt79_pole_crit(long_pole_job=_OPT79_JOB,
                             job_p50={_OPT79_JOB: 660.0, "integration": 600.0,
-                                     "e2e": 600.0})
-    row = _opt79_uncredited(pole)
-    assert row["on_critical_path"] is True
-    rendered = "\n".join(bp._opt79_uncredited_block(
-        {"opt79_uncredited_pole_caches": [row]}))
-    assert "this workflow's slowest job" in rendered
-    assert "merge wait" in rendered
-
-    # …and never on a workflow that cannot gate a PR at all.
+                                     "e2e": 590.0})
     off_pr = _opt79_uncredited(pole, is_pr=False)
     assert off_pr["on_critical_path"] is False
+    assert off_pr["workflow_gates_pull_requests"] is False
     assert "merge wait" not in "\n".join(bp._opt79_uncredited_block(
         {"opt79_uncredited_pole_caches": [off_pr]}))
+
+
+# ---- OPT79 on the slowest job of a pull-request workflow: credited wall-clock ----
+#
+# The sizing follow-up. A net-negative cache on the workflow's LONG POLE, on a
+# workflow that gates pull requests, is the case where the excess sits on the
+# merge wait. It is now a credited WALL-CLOCK finding: the measured excess per
+# hit run, capped at the headroom to the next-tallest job (beyond that, the next
+# job gates the run). Runner-minutes are NOT stated on it — the bill section
+# needs a below-the-floor proof a long pole cannot have.
+
+_OPT79_POLE_KIND = "opt79_pole_net_negative_cache"
+
+
+def _opt79_pole_of(lp, floor):
+    """`unit` (the cached job) is the long pole at `lp`; `integration` is the
+    next-tallest job at `floor`, which is therefore the cluster floor."""
+    return _opt79_pole_crit(
+        long_pole_job=_OPT79_JOB, long_pole_p50=lp, floor_p50=floor,
+        job_p50={_OPT79_JOB: lp, "integration": floor, "e2e": floor - 10.0})
+
+
+def _opt79_pole_run(crit, *, is_pr=True, monthly=100):
+    jpr, logs = _opt79_sample()
+    rows: list = []
+    withheld: dict = {}
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, crit, _opt79_wf(), monthly, 0,
+        logs_by_job_id=logs, uncredited=rows, is_pr=is_pr, withheld=withheld)
+    return out, rows, withheld
+
+
+def test_opt79_pole_cache_on_a_pr_workflow_is_a_credited_wall_clock_finding():
+    out, rows, _w = _opt79_pole_run(_opt79_pole_of(660.0, 600.0))
+    assert rows == [], "a pole cache on a PR workflow is a finding, not a row"
+    assert len(out) == 1, out
+    f = out[0]
+    cn = f["cache_net_negative"]
+    assert cn["kind"] == _OPT79_POLE_KIND
+    assert f["affected_jobs"] == [_OPT79_JOB]
+    # 31s hit path vs 12s miss path: 19s per hit, under the 60s headroom.
+    assert cn["waste_s"] == 19.0
+    assert f["wall_clock_p50_s"] == 19.0
+    # Runner-minutes are not stated — on the finding or on the block.
+    assert f["runner_min_saving"] is None and cn["runner_min_saving"] is None
+    # Not a Tier-2 runner-minute row: no below-the-floor certificate.
+    assert "tier2_neutrality" not in f
+    assert f["sizing_basis"] == "measured"
+    assert f["tier"] == 1 and f["realization"] == "direct"
+    assert cn["on_critical_path"] is True
+    assert cn["workflow_gates_pull_requests"] is True
+    ps = cn["pole_sizing"]
+    assert tuple(ps) == cr._OPT79_POLE_SIZING_KEYS
+    assert ps["waste_s"] == 19.0 and ps["headroom_s"] == 60.0
+    assert ps["raw_wall_clock_s"] == 19.0
+    assert ps["capped_by_next_tallest_job"] is False
+    assert ps["long_pole_job"] == _OPT79_JOB and ps["next_tallest_job"] == "integration"
+    assert ps["long_pole_p50_s"] == 660.0 and ps["floor_p50_s"] == 600.0
+    assert f["risk"] == "LOW"
+    assert "re-key or narrow" in f["guardrail"].lower()
+    assert "re-measure" in f["rollout"]
+    ev = f["evidence"]
+    assert f"`{_OPT79_JOB}` is this workflow's slowest job at 660s" in ev, ev
+    assert "`integration` finishes at 600s" in ev, ev
+    assert "the hit path is 19s SLOWER" in ev, ev
+    assert "runner-minutes are not stated" in ev.lower(), ev
+    # the same measured table a credited finding renders
+    assert f["measured_evidence"]["table"]["rows"], f["measured_evidence"]
+
+
+def test_opt79_pole_cap_binds_when_the_excess_exceeds_the_headroom():
+    out, rows, _w = _opt79_pole_run(_opt79_pole_of(610.0, 600.0))
+    assert rows == [] and len(out) == 1
+    f = out[0]
+    ps = f["cache_net_negative"]["pole_sizing"]
+    assert ps["waste_s"] == 19.0 and ps["headroom_s"] == 10.0
+    assert ps["raw_wall_clock_s"] == 10.0 == f["wall_clock_p50_s"]
+    assert ps["capped_by_next_tallest_job"] is True
+    assert "so at most 10s of that excess comes off the merge wait" in f["evidence"]
+
+
+def test_opt79_pole_finding_carries_no_minutes_even_without_a_volume():
+    """The wall-clock arm needs no monthly volume; an unknown one is null."""
+    out, rows, _w = _opt79_pole_run(_opt79_pole_of(660.0, 600.0), monthly=None)
+    assert len(out) == 1 and rows == []
+    cn = out[0]["cache_net_negative"]
+    assert cn["monthly_volume"] is None and cn["effective_monthly_volume"] is None
+    assert out[0]["runner_min_saving"] is None
+
+
+def test_opt79_pole_tied_with_the_next_job_has_no_headroom_and_stays_uncredited():
+    """A long pole TIED with the next-tallest job: shrinking it moves no merge
+    wait (the other job still finishes then), so there is nothing to credit.
+    It stays an uncredited row — and that row does not claim the merge wait."""
+    out, rows, _w = _opt79_pole_run(_opt79_pole_of(600.0, 600.0))
+    assert out == []
+    assert len(rows) == 1 and rows[0]["on_critical_path"] is False
+
+
+def test_opt79_second_slowest_job_on_a_pr_workflow_stays_uncredited():
+    out, rows, _w = _opt79_pole_run(_opt79_pole_crit())
+    assert out == []
+    assert len(rows) == 1 and rows[0]["on_critical_path"] is False
+
+
+def test_opt79_pole_sizing_uses_the_shared_within_workflow_bound(monkeypatch):
+    """The cap is the SAME code every other finding's within-workflow cap runs,
+    not a second hand-rolled formula."""
+    calls = []
+    real = cr.bound_within_workflow
+
+    def spy(value, ctx):
+        calls.append((value, ctx.affected_jobs))
+        return real(value, ctx)
+    monkeypatch.setattr(cr, "bound_within_workflow", spy)
+    out, _rows, _w = _opt79_pole_run(_opt79_pole_of(610.0, 600.0))
+    assert out and calls == [(19.0, (_OPT79_JOB,))], calls
+
+
+def test_opt79_pole_sizing_keys_match_the_verifier_contract():
+    vr = _load_verify_report_for_opt79()
+    assert tuple(cr._OPT79_POLE_SIZING_KEYS) == tuple(vr._VR_OPT79_POLE_SIZING_KEYS)
+    assert vr._VR_OPT79_POLE_KIND == cr._OPT79_POLE_KIND == _OPT79_POLE_KIND
+
+
+def _opt79_pole_data(f, crit):
+    return {"per_workflow_timing": {"ci.yml": crit}, "findings": [f]}
+
+
+def test_opt79_verifier_rederives_the_real_pole_finding():
+    """The real detector's output, capped and uncapped, re-derives clean."""
+    vr = _load_verify_report_for_opt79()
+    for lp in (660.0, 610.0):
+        crit = _opt79_pole_of(lp, 600.0)
+        f = _opt79_pole_run(crit)[0][0]
+        assert vr._opt79_finding_rederived(f, _opt79_pole_data(f, crit)) == []
+
+
+def _opt79_pole_problems(edit, lp=610.0):
+    import copy
+    vr = _load_verify_report_for_opt79()
+    crit = _opt79_pole_of(lp, 600.0)
+    f = copy.deepcopy(_opt79_pole_run(crit)[0][0])
+    edit(f)
+    return vr._opt79_finding_rederived(f, _opt79_pole_data(f, crit))
+
+
+@pytest.mark.parametrize("edit, needle", [
+    # the credited number is not the capped excess
+    (lambda f: f.__setitem__("wall_clock_p50_s", 19.0), "wall-clock"),
+    (lambda f: f.__setitem__("wall_clock_p50_s", 900.0), "wall-clock"),
+    # the measured excess edited
+    (lambda f: f["cache_net_negative"].__setitem__("waste_s", 900.0), "waste_s"),
+    # any other kind
+    (lambda f: f["cache_net_negative"].__setitem__("kind", "x"), "kind"),
+    (lambda f: f["cache_net_negative"].__setitem__(
+        "kind", "opt79_net_negative_cache"), "kind"),
+    # minutes stated on the finding
+    (lambda f: f.__setitem__("runner_min_saving", 12.0), "runner-minutes"),
+    # not the long pole / not a PR workflow
+    (lambda f: f["cache_net_negative"].__setitem__("on_critical_path", False),
+     "on_critical_path"),
+    (lambda f: f["cache_net_negative"].__setitem__(
+        "workflow_gates_pull_requests", False), "workflow_gates_pull_requests"),
+    (lambda f: f.__setitem__("affected_jobs", ["integration"]), "affected_jobs"),
+    # the stamped headroom is not the timing the run measured
+    (lambda f: f["cache_net_negative"].__setitem__("floor_p50_s", 500.0), "floor"),
+    (lambda f: f["cache_net_negative"]["pole_sizing"].__setitem__(
+        "capped_by_next_tallest_job", False), "capped"),
+    # a derivation that goes UP, or shrinks with no reason, or ends elsewhere
+    (lambda f: f.update(wall_clock_uncapped_p50_s=10.0, wall_clock_p50_s=12.0,
+                        wall_clock_derivation=[{"bound": "b", "from_s": 10.0,
+                                                "to_s": 12.0, "reason": "r"}]),
+     "derivation"),
+    (lambda f: f.update(wall_clock_uncapped_p50_s=10.0, wall_clock_p50_s=4.0,
+                        wall_clock_derivation=[{"bound": "b", "from_s": 10.0,
+                                                "to_s": 4.0, "reason": ""}]),
+     "derivation"),
+    (lambda f: f.update(wall_clock_uncapped_p50_s=10.0, wall_clock_p50_s=4.0,
+                        wall_clock_derivation=[{"bound": "b", "from_s": 10.0,
+                                                "to_s": 5.0, "reason": "r"}]),
+     "derivation"),
+    # a below-the-floor certificate on a wall-clock finding
+    (lambda f: f.__setitem__("tier2_neutrality", {"proof": "below_cluster_floor",
+                                                  "margin_s": 1.0}),
+     "below-the-floor"),
+])
+def test_opt79_verifier_rejects_a_tampered_pole_finding(edit, needle):
+    problems = _opt79_pole_problems(edit)
+    assert any(needle in p for p in problems), (needle, problems)
+
+
+def test_opt79_verifier_accepts_an_honest_cascade_shrink_on_a_pole_finding():
+    def shrink(f):
+        f.update(wall_clock_uncapped_p50_s=10.0, wall_clock_p50_s=4.0,
+                 wall_clock_derivation=[{"bound": "measured-critical-path",
+                                         "from_s": 10.0, "to_s": 4.0,
+                                         "reason": "a slower check gates the PR"}])
+    assert _opt79_pole_problems(shrink) == []
+
+
+def test_opt79_verifier_rejects_wall_clock_on_a_below_the_floor_finding():
+    """A credited below-the-floor finding is runner-minutes only; the same
+    finding claiming 5s of merge wait contradicts its own certificate."""
+    import copy
+    vr = _load_verify_report_for_opt79()
+    f = copy.deepcopy(_opt79()[0])
+    data = {"per_workflow_timing": {"ci.yml": _opt79_crit()}, "findings": [f]}
+    assert vr._opt79_finding_rederived(f, data) == []
+    f["wall_clock_p50_s"] = 5
+    assert any("wall_clock_p50_s" in p for p in vr._opt79_finding_rederived(f, data))
+    f["wall_clock_p50_s"] = 0.0
+    f["cache_net_negative"]["kind"] = _OPT79_POLE_KIND
+    assert any("kind" in p for p in vr._opt79_finding_rederived(f, data))
+
+
+def test_opt79_verifier_rejects_an_uncredited_row_claiming_the_merge_wait():
+    """No uncredited row can carry the merge wait any more: a pole cache on a
+    pull-request workflow is a credited finding. A row stamped otherwise is a
+    contract violation, whatever else it says."""
+    vr = _load_verify_report_for_opt79()
+    row = _opt79_uncredited(_opt79_pole_crit())
+    assert vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": [row]}) == []
+    row["on_critical_path"] = True
+    row["long_pole_job"] = row["job"]
+    assert any("credited as a finding" in p for p in
+               vr._opt79_uncredited_rows_rederived(
+                   {"opt79_uncredited_pole_caches": [row]}))
 
 
 def test_opt79_uncredited_rows_are_re_derived_by_the_report_self_check():
@@ -4386,7 +4609,8 @@ def test_opt79_uncredited_rows_are_re_derived_by_the_report_self_check():
 
     bad = copy.deepcopy(data)          # claims the merge wait it is not on
     bad["opt79_uncredited_pole_caches"][0]["on_critical_path"] = True
-    assert any("long pole" in p for p in vr._opt79_uncredited_rows_rederived(bad))
+    assert any("credited as a finding" in p
+               for p in vr._opt79_uncredited_rows_rederived(bad))
 
 
 # ---- the post (save) step may not be assumed to be zero ----
@@ -5588,21 +5812,6 @@ def test_opt79_uncredited_check_runs_in_the_report_self_check(tmp_path):
     src = Path(vr.__file__).read_text(encoding="utf-8")
     body = src.split("def run_checks(", 1)[1].split("\ndef ", 1)[0]
     assert "check_opt79_uncredited_rows_rederived(" in body
-
-
-def test_opt79_verifier_rejects_a_merge_wait_on_a_workflow_no_pr_runs():
-    vr = _load_verify_report_for_opt79()
-    pole = _opt79_pole_crit(long_pole_job=_OPT79_JOB,
-                            job_p50={_OPT79_JOB: 660.0, "integration": 600.0,
-                                     "e2e": 600.0})
-    row = _opt79_uncredited(pole)
-    assert row["on_critical_path"] is True
-    assert vr._opt79_uncredited_rows_rederived(
-        {"opt79_uncredited_pole_caches": [row]}) == []
-    row["workflow_gates_pull_requests"] = False
-    assert any("runs on no pull request" in p for p in
-               vr._opt79_uncredited_rows_rederived(
-                   {"opt79_uncredited_pole_caches": [row]}))
 
 
 def test_opt79_verifier_rejects_a_volume_on_a_row_with_no_monthly_volume():
@@ -7400,3 +7609,36 @@ def test_withheld_candidate_keys_are_one_string_contract_across_files():
     assert vr._VR_OPT77_WITHHELD_DOC_KEY == cr._OPT77_WITHHELD_DOC_KEY
     assert bp._OPT80_WITHHELD_DOC_KEY == cr._OPT80_WITHHELD_DOC_KEY
     assert vr._VR_OPT80_WITHHELD_DOC_KEY == cr._OPT80_WITHHELD_DOC_KEY
+
+
+def test_opt79_pole_kind_is_one_contract_across_the_three_files():
+    vr = _load_verify_report_for_opt79()
+    assert cr._OPT79_POLE_KIND == bp._OPT79_POLE_KIND == vr._VR_OPT79_POLE_KIND
+
+
+def test_opt79_findings_check_runs_and_pairs_the_rendered_pole_block(tmp_path):
+    """The pole-cache check is registered with the verifier's run, re-derives
+    the finding, and requires its rendered block — once, with its seconds."""
+    import json as _json
+    vr = _load_verify_report_for_opt79()
+    crit = _opt79_pole_of(610.0, 600.0)
+    f = _opt79_pole_run(crit)[0][0]
+    f["id"] = "f1"
+    report = "\n".join(bp._opt79_pole_block([f], "https://x/catalog.md"))
+    p = tmp_path / "findings.json"
+    p.write_text(_json.dumps({"findings": [f],
+                              "per_workflow_timing": {"ci.yml": crit}}),
+                 encoding="utf-8")
+    chk = vr.check_opt79_findings_rederived(report, p)
+    assert chk.ok, chk
+    for bad_report, needle in (
+            ("", "rendered 0 time(s)"),
+            (report + "\n" + report, "rendered 2 time(s)"),
+            (report.replace("**10s**", "**30s**"), "10s off the merge wait"),
+            (report.replace("<!-- opt79-pole:f1 -->", "<!-- opt79-pole:f9 -->"),
+             "'f9'")):
+        chk = vr.check_opt79_findings_rederived(bad_report, p)
+        assert not chk.ok and needle in chk.detail, (needle, chk)
+    src = Path(vr.__file__).read_text(encoding="utf-8")
+    body = src.split("def run_checks(", 1)[1].split("\ndef ", 1)[0]
+    assert "check_opt79_findings_rederived(" in body

@@ -5735,6 +5735,81 @@ def _pr_floor_fallback_banner(doc: dict[str, Any], cp: dict[str, Any]) -> list[s
 # coupling test pins them equal. (OPT79's withheld-candidate key lives with the
 # other two, beside the shared held-back disclosure.)
 _OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
+# The `cache_net_negative.kind` of OPT79's credited WALL-CLOCK finding: a
+# net-negative cache on the long pole of a workflow that gates pull requests.
+# Same three-file string contract as the key above (pinned by a coupling test).
+_OPT79_POLE_KIND = "opt79_pole_net_negative_cache"
+
+
+def _is_opt79_pole_finding(f: dict[str, Any]) -> bool:
+    """OPT79's wall-clock arm, identified by its stamped kind — never by
+    `wall_clock_p50_s > 0`, which the cross-check cascade may have zeroed."""
+    return (str(f.get("pattern") or "") == "OPT79"
+            and isinstance(f.get("cache_net_negative"), dict)
+            and f["cache_net_negative"].get("kind") == _OPT79_POLE_KIND)
+
+
+def _opt79_pole_for(pole: dict[str, Any],
+                    findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """OPT79 pole-cache finding(s) on THIS drilled pole. They render AT the pole
+    (`_opt79_pole_block`) rather than in the appendix: the finding's whole claim
+    is that its excess sits on this job's share of the merge wait, and its
+    credited figure is routinely below `_WALL_CLOCK_LONG_POLE_FLOOR_S` (it is
+    capped at the headroom to the next-tallest job), which would otherwise drop
+    it as a valueless pole-job row. Same join as `_structural_for_pole`: the
+    job against the pole's check/job, never across workflows."""
+    targets = [t for t in (str(pole.get("check", "")), str(pole.get("job", ""))) if t]
+    if not targets:
+        return []
+    pole_wf = str(pole.get("workflow_file") or "")
+    out: list[dict[str, Any]] = []
+    for f in findings:
+        if f.get("advisory") or not _is_opt79_pole_finding(f):
+            continue
+        if _wf_conflict(pole_wf, str(f.get("workflow_file") or "")):
+            continue
+        jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
+        if any(j == t or _same_matrix(j, t) or _matrix_base(t) == j
+               or _matrix_base(j) == t for j in jobs for t in targets):
+            out.append(f)
+    return out
+
+
+def _opt79_pole_block(findings: list[dict[str, Any]], catalog_url: str) -> list[str]:
+    """Render OPT79's pole-cache finding(s) inside the pole drill. One block per
+    finding, opened by a `<!-- opt79-pole:<id> -->` marker `verify_report` pairs
+    with the finding: the title, the id and the credited merge-wait seconds must
+    appear in the block that follows it. Runner-minutes are deliberately absent."""
+    out: list[str] = []
+    for f in findings:
+        fid = str(f.get("id") or "")
+        title = _flatten_cell(f.get("title") or "OPT79")
+        wc = _num(f.get("wall_clock_p50_s")) or 0.0
+        risk = str(f.get("risk", "")).strip().upper()
+        risk_s = f" - risk **{risk}**" if risk else ""
+        if wc > 0:
+            gain = f"up to **{wc:.0f}s** off the merge wait"
+        else:
+            gain = ("**0s** off the merge wait once the cross-check bounds are "
+                    "applied (see the evidence)")
+        out += [f"<!-- opt79-pole:{fid} -->",
+                f"**💾 Measured cache cost - OPT79 · {title}** (`{fid}`) - {gain}"
+                f"{risk_s}", "",
+                "A cache on this job measured slower on the runs where it HIT than "
+                "on the runs where it MISSED. The saving is wall-clock on this pole, "
+                "capped at the headroom to the next-tallest job; no runner-minutes "
+                "are stated for it.", ""]
+        ev = str(f.get("evidence") or "").strip()
+        if ev:
+            out.append(f"- **What ci-speedup measured:** {_flatten_cell(ev)}")
+        for label, key in (("Guardrail", "guardrail"), ("Rollout", "rollout")):
+            val = str(f.get(key) or "").strip()
+            if val:
+                out.append(f"- **{label}:** {_flatten_cell(val)}")
+        anchor = f.get("fix_recipe_anchor")
+        url = f"{catalog_url}#{anchor}" if anchor else catalog_url
+        out += [f"- **Catalog (background + fix recipe):** {url}", ""]
+    return out
 
 
 def _opt79_uncredited_row_is_renderable(r: Any) -> bool:
@@ -5839,15 +5914,17 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
     is as real as a credited one; what is missing is the sizing.
 
     WHY it is missing differs by job. `not below the cluster floor` spans
-    everything from the SECOND-ranked job upwards. Only the workflow's long
-    pole, on a workflow that can gate a PR, actually carries the merge wait
-    (`on_critical_path`). On a workflow no pull request runs
+    everything from the SECOND-ranked job upwards. The workflow's long pole, on
+    a workflow that can gate a PR, is NOT here: its excess sits on the merge
+    wait, so it is a credited wall-clock finding rendered at its pole
+    (`_opt79_pole_block`), and `verify_report` fails an uncredited row that
+    claims the merge wait. On a workflow no pull request runs
     (`workflow_gates_pull_requests` false) there is no merge gate at all and the
     saving is pure runner-minutes. For every other job at or above the floor the
     saving is runner-minutes too, uncredited because this version cannot prove
     shrinking it leaves the gate unchanged. The block says only what those
     stamps support — never a merge wait or a merge gate on a workflow that has
-    none, and never "this workflow's slowest job" about a job that is not.
+    none, and never "this workflow's slowest job".
 
     Rendered beside `_dropped_unprovable_banner`, its nearest precedent: a
     measured fact deliberately kept out of the numbers and shown anyway. [] when
@@ -5872,10 +5949,7 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
         hits, misses = r.get("hits"), r.get("misses")
         waste_txt = f"{float(waste):.0f}s"
         where = f" in `{wf}`" if wf else ""
-        if r.get("on_critical_path"):
-            why = (f"`{job}` is this workflow's slowest job, so the saving is on "
-                   "the merge wait and is **not credited** in this version.")
-        elif r.get("workflow_gates_pull_requests") is False:
+        if r.get("workflow_gates_pull_requests") is False:
             why = (f"`{job}` runs in a workflow that does not run on pull "
                    "requests, so no pull request waits on it; the saving is "
                    "runner-minutes only and is **not credited** in this version.")
@@ -7056,12 +7130,19 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         # ALL jobs must be drilled poles — else a co-affected non-pole job would lose its disclosure.
         return all((wfb, _job_base(str(j))) in pole_jobs for j in jobs)
 
+    def _on_drilled_pole(f: dict[str, Any]) -> bool:
+        jobs = f.get("affected_jobs") or []
+        wfb = _wf_base(str(f.get("workflow_file") or ""))
+        return bool(jobs) and all((wfb, _job_base(str(j))) in pole_jobs for j in jobs)
+
     elig = [f for f in findings
             if not f.get("advisory") and not _is_pole_structural(f)
             and not _is_tier2_superseded(f)
             and not _tier2_owned_here(f)                          # Tier-2-owned → own section
             and str(f.get("pattern", "")) not in _WAIT_PATTERNS  # → its own §
-            and not _on_pole_job(f)]                              # valueless + all-pole-job → already AS a pole (#5)
+            and not _on_pole_job(f)                               # valueless + all-pole-job → already AS a pole (#5)
+            and not (_is_opt79_pole_finding(f)                    # OPT79 pole cache → rendered AT its pole
+                     and _on_drilled_pole(f))]
     if not elig:
         return [], 0, False
     ranked = _group_by_pattern_ranked(elig)
@@ -9868,6 +9949,9 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # the gap-fill exactly as a structural match does, or the spine self-contradicts
         # the appendix's "sits ON the critical path … See the spine above" note.
         data_driven = _data_driven_for_pole(p, all_findings)
+        # OPT79's pole-cache finding (a measured merge-wait number on THIS job) is a
+        # catalog match too, and renders here rather than in the appendix.
+        opt79_pole = _opt79_pole_for(p, all_findings)
         # An LLM gap-fill analysis only applies to a pole that matched NO catalog
         # detector (SKILL.md phase 4a). A structural- OR data-driven-track match IS a
         # catalog match, so it suppresses the gap-fill exactly as a log-detector match
@@ -9877,7 +9961,8 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # not pull an LLM gap-fill analysis (that path is for poles no detector recognized).
         analysis = (_match(analyses)
                     if (leaf is None and offcat_leaf is None
-                        and not structural and not data_driven) else None)
+                        and not structural and not data_driven
+                        and not opt79_pole) else None)
         out.append(f'<a id="pole-{i}"></a>')
         out.append("")
         # `wf_base` (a workflow FILENAME) and `check` are BOTH arbitrary repo text dropped
@@ -10053,6 +10138,8 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # so this is the only place their risk/guardrail/rollout appears.
         if structural:
             out += _structural_block(structural, catalog_url)
+        if opt79_pole:
+            out += _opt79_pole_block(opt79_pole, catalog_url)
         # A matrix sibling leg that collapsed into THIS representative pole can carry its
         # own structural lever that — since `_structural_for_pole` no longer folds a
         # distinct sibling AND `_also_noticed_block` excludes per-pole structural levers —
@@ -10443,7 +10530,8 @@ def _gap_poles(doc: dict[str, Any],
 
     def _catalog_covers(pole: dict[str, Any]) -> bool:
         return bool(_structural_for_pole(pole, findings)
-                    or _data_driven_for_pole(pole, findings))
+                    or _data_driven_for_pole(pole, findings)
+                    or _opt79_pole_for(pole, findings))
 
     out: list[tuple[dict[str, Any], str, str, str]] = []
     entries = (doc.get("data_bundle") or {}).get("logs") or []

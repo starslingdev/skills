@@ -609,6 +609,25 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-10-06** — **A cache that costs more than it saves on a workflow's slowest
+  job now gets a merge-wait number.** Until now, when the cache check (OPT79)
+  measured a slow cache on the slowest job of a workflow that runs on pull
+  requests — the one place its extra time sits on the merge wait — the report
+  listed it as "measured, not credited" with no number. It is now a finding on
+  that job's long-pole section: the measured extra time per cache hit, capped at
+  the gap to the workflow's next-tallest job (past that, the other job sets the
+  wait), with both jobs and their times named in the evidence ("`prep` is this
+  workflow's slowest job at 120s and `verify` finishes at 100s, so at most 20s of
+  that excess comes off the merge wait"). The usual cross-check bounds can lower
+  it further and say why. Runner-minutes are deliberately not stated on it: the
+  runner-minute section needs proof that a job sits below the second-slowest
+  job, which the slowest job cannot have. The "not credited" line now covers only
+  workflows no pull request runs and jobs at or above the floor that are not the
+  slowest (including a slowest job tied with the next one). The report's
+  self-check re-derives the capped number from the stamped measurements, rejects
+  any OPT79 finding that claims wall-clock under a below-the-floor certificate,
+  and fails an uncredited line that claims the merge wait.
+
 - **2026-09-30** — **Five fix moves the catalog only half-covered are now in the
   advice.** OPT28 gains "delete the checkout step if no step reads a file" and
   the sparse / blobless checkout option (`filter: blob:none`, `sparse-checkout:`)
