@@ -4364,8 +4364,8 @@ def test_opt79_pole_cache_on_a_workflow_no_pr_runs_stays_uncredited():
 # The sizing follow-up. A net-negative cache on the workflow's LONG POLE, on a
 # workflow that gates pull requests, is the case where the excess sits on the
 # merge wait. It is now a credited WALL-CLOCK finding: the measured excess per
-# hit run, capped at the headroom to the next-tallest job (beyond that, the next
-# job gates the run). Runner-minutes are NOT stated on it — the bill section
+# hit run, capped at the gap to the next-tallest job's duration (a conservative
+# cap: it compares durations and does not follow `needs:` chains). Runner-minutes are NOT stated on it — the bill section
 # needs a below-the-floor proof a long pole cannot have.
 
 _OPT79_POLE_KIND = "opt79_pole_net_negative_cache"
@@ -4420,12 +4420,44 @@ def test_opt79_pole_cache_on_a_pr_workflow_is_a_credited_wall_clock_finding():
     assert "re-measure" in f["rollout"]
     ev = f["evidence"]
     assert f"`{_OPT79_JOB}` is this workflow's slowest job at 660s" in ev, ev
-    assert "`integration` finishes at 600s" in ev, ev
+    assert "its next-tallest job, `integration`, runs 600s" in ev, ev
+    assert "the 19s excess fits under that 60s gap, so all 19s of it comes off the merge wait" in ev, ev
     assert "the hit path is 19s SLOWER" in ev, ev
     assert "runner-minutes are not stated" in ev.lower(), ev
     # the same measured table a credited finding renders
     assert f["measured_evidence"]["table"]["rows"], f["measured_evidence"]
 
+
+
+@pytest.mark.parametrize("lp,floor", [(660.0, 600.0), (610.0, 600.0)])
+def test_opt79_pole_prose_never_claims_the_next_job_finishes_or_sets_the_wait(lp, floor):
+    """The cap compares job DURATIONS; it does not follow `needs:` chains. When
+    the next-tallest job `needs:` the pole, it neither "finishes at" its own
+    duration nor sets the merge wait, so no sentence may say either - the
+    wording has to hold for parallel and chained next jobs alike."""
+    out, _rows, _w = _opt79_pole_run(_opt79_pole_of(lp, floor))
+    f = out[0]
+    for txt in (f["evidence"], f["measured_evidence"]["note"], f["size_note"],
+                f["measured_signal"]):
+        assert "finishes at" not in txt, txt
+        assert "sets the merge wait" not in txt, txt
+        assert "gates the merge wait" not in txt, txt
+
+
+@pytest.mark.parametrize("lp,floor", [(660.0, 600.0), (610.0, 600.0)])
+def test_opt79_pole_evidence_is_restated_by_the_verifier_in_both_cap_branches(lp, floor):
+    """The verifier restates the reworded sentence (slowest job, next-tallest
+    job, both durations, the credited figure) in the capped and the uncapped
+    branch, and still catches a tampered number."""
+    import verify_report as vr
+    out, _rows, _w = _opt79_pole_run(_opt79_pole_of(lp, floor))
+    f = out[0]
+    cn = f["cache_net_negative"]
+    assert vr._opt79_pole_prose_rederived(f, cn) == []
+    bad = dict(f, evidence=f["evidence"].replace(
+        "`integration`, runs 600s", "`integration`, runs 590s"))
+    assert bad["evidence"] != f["evidence"]
+    assert vr._opt79_pole_prose_rederived(bad, cn), bad["evidence"]
 
 def test_opt79_pole_cap_binds_when_the_excess_exceeds_the_headroom():
     out, rows, _w = _opt79_pole_run(_opt79_pole_of(610.0, 600.0))
@@ -4435,7 +4467,8 @@ def test_opt79_pole_cap_binds_when_the_excess_exceeds_the_headroom():
     assert ps["waste_s"] == 19.0 and ps["headroom_s"] == 10.0
     assert ps["raw_wall_clock_s"] == 10.0 == f["wall_clock_p50_s"]
     assert ps["capped_by_next_tallest_job"] is True
-    assert "so at most 10s of that excess comes off the merge wait" in f["evidence"]
+    assert ("the audit caps the saving at that 10s gap, so up to 10s of the excess "
+            "comes off the merge wait") in f["evidence"]
 
 
 def test_opt79_pole_finding_carries_no_minutes_even_without_a_volume():

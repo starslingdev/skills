@@ -6135,8 +6135,10 @@ _VR_OPT79_POLE_EVIDENCE_RE = re.compile(
     r"measured a p50 of (\d+)s across (\d+) sampled run\(s\) whose log reported a "
     r"cache HIT, against (\d+)s across (\d+) run\(s\) whose log reported a MISS: "
     r"the hit path is (\d+)s SLOWER.*?`([^`]+)` is this workflow's slowest job at "
-    r"(\d+)s and (?:`([^`]*)`|the next-tallest job) finishes at (\d+)s, so "
-    r"(?:at most|all) (\d+)s of that excess comes off the merge wait", re.S)
+    r"(\d+)s and its next-tallest job(?:, `([^`]*)`,)? runs (\d+)s; "
+    r"(?:the audit caps the saving at that \d+s gap, so up to|the \d+s excess "
+    r"fits under that \d+s gap, so all) (\d+)s of (?:the excess|it) comes off "
+    r"the merge wait", re.S)
 
 
 def _opt79_pole_prose_rederived(f: dict, cn: dict) -> list[str]:

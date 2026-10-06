@@ -1358,8 +1358,13 @@ job's p50, so "not strictly below it" spans everything from second place upwards
 and only the workflow's long pole — on a workflow that can gate a PR — actually
 carries the merge wait. That job's raw wall-clock is the measured excess
 `waste_s`, pre-capped by CAP 1 (§5) through `bound_within_workflow`:
-`min(waste_s, long_pole_p50 − floor_p50)`, i.e. shorten the pole only as far as
-the next-tallest job, because past that the next job is the pole. The capped
+`min(waste_s, long_pole_p50 − floor_p50)`, i.e. credit the pole only as far as
+the next-tallest job's duration. The cap compares job DURATIONS and does not
+follow `needs:` chains, so it is conservative: when the next job `needs:` the
+pole, more of the excess may in fact come off the wait. The finding's prose is
+worded for both shapes (it names the next job's duration and the gap, never a
+time the next job "finishes at" or a claim that it sets the merge wait), and
+`verify_report.py` restates that sentence from the stamps. The capped
 figure and its inputs are stamped under `cache_net_negative.pole_sizing`
 (`waste_s`, `long_pole_job`, `long_pole_p50_s`, `next_tallest_job`,
 `floor_p50_s`, `headroom_s`, `raw_wall_clock_s` and `capped_by_next_tallest_job`) and then goes through the SAME

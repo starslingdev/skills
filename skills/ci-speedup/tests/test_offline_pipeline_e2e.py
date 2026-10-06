@@ -760,8 +760,18 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert pole79.get("sizing_basis") == "measured" and pole79.get("tier") == 1, pole79
     _pev = str(pole79.get("evidence") or "")
     assert "`prep` is this workflow's slowest job at 120s" in _pev, _pev
-    assert "`verify` finishes at 100s" in _pev, _pev
-    assert "so at most 20s of that excess comes off the merge wait" in _pev, _pev
+    assert "its next-tallest job, `verify`, runs 100s" in _pev, _pev
+    assert ("the audit caps the saving at that 20s gap, so up to 20s of the excess "
+            "comes off the merge wait") in _pev, _pev
+    # `verify` has `needs: prep` on this corpus, so it neither "finishes at"
+    # 100s nor sets the merge wait on its own: the cap compares job durations,
+    # not the chain. No sentence the pole finding emits may claim otherwise.
+    _pnote = str((pole79.get("measured_evidence") or {}).get("note") or "")
+    for _txt in (_pev, _pnote, str(pole79.get("size_note") or ""),
+                 str(pole79.get("measured_signal") or "")):
+        assert "finishes at" not in _txt, _txt
+        assert "sets the merge wait" not in _txt, _txt
+        assert "gates the merge wait" not in _txt, _txt
     # Nothing was probed and withheld on this corpus: every candidate decided.
     assert data.get("opt79_withheld_candidates") == [], data.get(
         "opt79_withheld_candidates")

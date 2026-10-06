@@ -636,8 +636,9 @@ excess is credited.
    the slowest job shortens the merge wait, so the finding is sized in
    wall-clock time, not runner-minutes. Its raw wall-clock is the measured
    `waste_s`, first capped by the existing within-workflow bound,
-   `min(waste_s, long_pole_p50 − floor_p50)` (shorten the pole only as far as the
-   next-tallest job, because past that the next job is the pole), and stamped
+   `min(waste_s, long_pole_p50 − floor_p50)` (credit the pole only as far as the
+   next-tallest job's duration; the cap compares durations and does not follow
+   `needs:` chains, so it never overstates the saving), and stamped
    under `cache_net_negative.pole_sizing` as `waste_s`, `long_pole_job`, `long_pole_p50_s`, `next_tallest_job`,
    `floor_p50_s`, `headroom_s`, `raw_wall_clock_s` and `capped_by_next_tallest_job`.
    It then goes through the same cross-cutting

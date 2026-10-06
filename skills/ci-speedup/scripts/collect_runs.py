@@ -17172,14 +17172,22 @@ def _opt79_pole_finding(
     fl50 = round(float(crit.get("floor_p50") or 0.0), 1)
     nxt = _opt79_next_tallest_job(crit, name)
     nxt_txt = f"`{nxt}`" if nxt else "the next-tallest job"
+    # Worded for BOTH shapes of the next job: one that runs alongside this job,
+    # and one that `needs:` it. The cap compares job DURATIONS only (it does not
+    # follow the chain), so the prose names the next job's duration and the gap,
+    # and never says that job "finishes at" a time or sets the merge wait - a
+    # chained next job does neither. The figure is conservative either way.
+    nxt_ref = (f"its next-tallest job, `{nxt}`," if nxt
+               else "its next-tallest job")
     if capped:
-        cap_txt = f"so at most {raw_wc:.0f}s of that excess comes off the merge wait"
+        cap_txt = (f"the audit caps the saving at that {headroom:.0f}s gap, so up "
+                   f"to {raw_wc:.0f}s of the excess comes off the merge wait")
     else:
-        cap_txt = (f"so all {raw_wc:.0f}s of that excess comes off the merge wait "
-                   f"(under the {headroom:.0f}s headroom to {nxt_txt})")
+        cap_txt = (f"the {waste:.0f}s excess fits under that {headroom:.0f}s gap, "
+                   f"so all {raw_wc:.0f}s of it comes off the merge wait")
     evidence = (
         f"{measured_txt} `{name}` is this workflow's slowest job at {lp50:.0f}s "
-        f"and {nxt_txt} finishes at {fl50:.0f}s, {cap_txt}; this workflow runs on "
+        f"and {nxt_ref} runs {fl50:.0f}s; {cap_txt}. This workflow runs on "
         "pull requests, so that time is part of the merge wait. Runner-minutes "
         "are not stated on this finding: the bill section credits a cache like "
         "this only with proof that its job sits below the workflow's "
@@ -17192,9 +17200,11 @@ def _opt79_pole_finding(
         note=(
             note_head
             + "The credited figure is the measured excess per hit run, capped at "
-            f"the {headroom:.0f}s headroom between this job ({lp50:.0f}s) and "
-            f"{nxt_txt} ({fl50:.0f}s): past that, {nxt_txt} sets the merge wait. "
-            "Wall-clock only — runner-minutes are not stated on this finding. "
+            f"the {headroom:.0f}s gap between this job's duration ({lp50:.0f}s) "
+            f"and {nxt_txt}'s ({fl50:.0f}s). The cap compares job durations, so "
+            "it never overstates the saving, whether that job runs alongside "
+            "this one or after it through `needs:`. Wall-clock only - "
+            "runner-minutes are not stated on this finding. "
             + note_guardrail))
     f = _new_finding(
         "OPT79", "MEDIUM", title, wf_path, name, evidence,
@@ -17203,8 +17213,8 @@ def _opt79_pole_finding(
         wc_p50=raw_wc, rm=None,
         size_note=(
             "wall-clock: the measured excess of the hit path over the miss path on "
-            "this workflow's slowest job, capped at the headroom to the "
-            "next-tallest job. Runner-minutes are not stated — the bill section "
+            "this workflow's slowest job, capped at the gap to the next-tallest "
+            "job's duration. Runner-minutes are not stated: the bill section "
             "needs a below-the-floor proof this job cannot have."),
         realization="direct", measured_evidence=me)
     f["tier"] = 1
@@ -17213,8 +17223,8 @@ def _opt79_pole_finding(
         f"p50 cache block {hit_p50:.0f}s on {len(hits)} log-confirmed hit run(s) "
         f"vs {miss_p50:.0f}s on {len(misses)} log-confirmed miss run(s) on "
         f"`{declared}` ({waste:.0f}s excess per hit run on this workflow's slowest "
-        f"job; at most {raw_wc:.0f}s off the merge wait, capped at the headroom to "
-        f"{nxt_txt})")
+        f"job; up to {raw_wc:.0f}s off the merge wait, capped at the gap to "
+        f"{nxt_txt}'s duration)")
     cn = _opt79_stamp(
         kind=_OPT79_POLE_KIND, job=name, block=block, rows=rows,
         hits=len(hits), misses=len(misses), ambiguous=ambiguous,

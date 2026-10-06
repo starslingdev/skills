@@ -615,10 +615,14 @@ unversioned and updates by reinstall from `main`.
   requests — the one place its extra time sits on the merge wait — the report
   listed it as "measured, not credited" with no number. It is now a finding on
   that job's long-pole section: the measured extra time per cache hit, capped at
-  the gap to the workflow's next-tallest job (past that, the other job sets the
-  wait), with both jobs and their times named in the evidence ("`prep` is this
-  workflow's slowest job at 120s and `verify` finishes at 100s, so at most 20s of
-  that excess comes off the merge wait"). The usual cross-check bounds can lower
+  the gap between its duration and the workflow's next-tallest job's (a
+  conservative cap: it compares job durations and does not follow `needs:`
+  chains, so it never overstates the saving), with both jobs and their times
+  named in the evidence ("`prep` is this workflow's slowest job at 120s and its
+  next-tallest job, `verify`, runs 100s; the audit caps the saving at that 20s
+  gap, so up to 20s of the excess comes off the merge wait"). The wording holds
+  whether the next job runs alongside the slowest one or after it through
+  `needs:`; it never says that job finishes at a time or sets the merge wait. The usual cross-check bounds can lower
   it further and say why. Runner-minutes are deliberately not stated on it: the
   runner-minute section needs proof that a job sits below the second-slowest
   job, which the slowest job cannot have. The "not credited" line now covers only
