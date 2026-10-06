@@ -7690,3 +7690,162 @@ def test_opt79_findings_check_runs_and_pairs_the_rendered_pole_block(tmp_path):
     src = Path(vr.__file__).read_text(encoding="utf-8")
     body = src.split("def run_checks(", 1)[1].split("\ndef ", 1)[0]
     assert "check_opt79_findings_rederived(" in body
+
+
+# ---- OPT79 pole arm: pins for verifier checks no other test bites on ----
+
+def test_opt79_verifier_rejects_a_consistently_forged_floor():
+    """A finding forged at a lower floor (590s, so a 20s headroom and an uncapped
+    19s) is self-consistent: block, pole_sizing, wall-clock and evidence all
+    agree. Only the cross-check against the timing the run MEASURED (600s)
+    contradicts it - and it must be the one thing that does."""
+    import copy
+    vr = _load_verify_report_for_opt79()
+    forged = copy.deepcopy(_opt79_pole_run(_opt79_pole_of(610.0, 590.0))[0][0])
+    cn = forged["cache_net_negative"]
+    ps = cn["pole_sizing"]
+    assert cn["floor_p50_s"] == 590.0 == ps["floor_p50_s"]
+    assert ps["headroom_s"] == 20.0 and ps["raw_wall_clock_s"] == 19.0
+    assert forged["wall_clock_p50_s"] == 19.0
+    assert "runs 590s" in forged["evidence"]
+    # Self-consistent against its own (forged) timing...
+    assert vr._opt79_finding_rederived(
+        forged, _opt79_pole_data(forged, _opt79_pole_of(610.0, 590.0))) == []
+    # ...rejected against the timing the run measured, by that check alone.
+    problems = vr._opt79_finding_rederived(
+        forged, _opt79_pole_data(forged, _opt79_pole_of(610.0, 600.0)))
+    assert problems, problems
+    assert all("per_workflow_timing floor_p50" in p for p in problems), problems
+
+
+def test_opt79_verifier_rejects_a_next_tallest_job_that_is_measured_but_shorter():
+    """`e2e` IS a job the run measured, so the not-measured branch passes; it is
+    just not the tallest one other than the pole (590s vs `integration`'s 600s)."""
+    def rename(f):
+        cn = f["cache_net_negative"]
+        old = cn["pole_sizing"]["next_tallest_job"]
+        assert old == "integration"
+        cn["pole_sizing"]["next_tallest_job"] = "e2e"
+        f["evidence"] = f["evidence"].replace(f"`{old}`", "`e2e`")
+    problems = _opt79_pole_problems(rename)
+    assert any("is not the tallest job other than the long pole" in p
+               for p in problems), problems
+
+
+def test_opt79_verifier_rejects_a_derivation_that_does_not_start_where_sizing_ended():
+    """Every step goes down, has a reason and the chain ends on the credited
+    figure - but it starts at 9s when the finding was sized at 10s."""
+    def jump(f):
+        f.update(wall_clock_uncapped_p50_s=10.0, wall_clock_p50_s=4.0,
+                 wall_clock_derivation=[{"bound": "b", "from_s": 9.0,
+                                         "to_s": 4.0, "reason": "r"}])
+    problems = _opt79_pole_problems(jump)
+    assert any("starts at 9.0, not at the previous value 10.0" in p
+               for p in problems), problems
+
+
+def test_opt79_verifier_rejects_a_derivation_with_no_uncapped_figure():
+    """A cascade derivation with no `wall_clock_uncapped_p50_s` stamp: the sized
+    figure must then be read from `wall_clock_p50_s` (4s), which is not the 10s
+    the measured excess allows. Defaulting the sized figure to the re-derived
+    one would let an unstamped cascade through."""
+    def unstamped(f):
+        f.pop("wall_clock_uncapped_p50_s", None)
+        f.update(wall_clock_p50_s=4.0,
+                 wall_clock_derivation=[{"bound": "b", "from_s": 10.0,
+                                         "to_s": 4.0, "reason": "r"}])
+    problems = _opt79_pole_problems(unstamped)
+    assert any(p.startswith("wall_clock_p50_s 4.0 != min(") for p in problems), problems
+    assert any("starts at 10.0, not at the previous value 4.0" in p
+               for p in problems), problems
+
+
+def _opt79_rendered_pole(tmp_path):
+    import json as _json
+    vr = _load_verify_report_for_opt79()
+    crit = _opt79_pole_of(610.0, 600.0)
+    f = _opt79_pole_run(crit)[0][0]
+    f["id"] = "f1"
+    report = "\n".join(bp._opt79_pole_block([f], "https://x/catalog.md"))
+    p = tmp_path / "findings.json"
+    p.write_text(_json.dumps({"findings": [f],
+                              "per_workflow_timing": {"ci.yml": crit}}),
+                 encoding="utf-8")
+    assert vr.check_opt79_findings_rederived(report, p).ok
+    return vr, f, report, p
+
+
+def test_opt79_pole_block_header_must_carry_its_title_and_id(tmp_path):
+    vr, f, report, p = _opt79_rendered_pole(tmp_path)
+    header = report.split("\n")[1]
+    assert f["title"] in header and "(`f1`)" in header, header
+    for bad_header in (header.replace(f["title"], "Some other cache"),
+                       header.replace("(`f1`)", "")):
+        bad = report.replace(header, bad_header)
+        chk = vr.check_opt79_findings_rederived(bad, p)
+        assert not chk.ok and "does not open with its title and id" in chk.detail, chk
+
+
+@pytest.mark.parametrize("claim", ["5 min/mo", "5 runner-min"])
+def test_opt79_pole_block_must_not_state_runner_minutes(tmp_path, claim):
+    vr, _f, report, p = _opt79_rendered_pole(tmp_path)
+    header = report.split("\n")[1]
+    bad = report.replace(header, header + f" - saves {claim}")
+    chk = vr.check_opt79_findings_rederived(bad, p)
+    assert not chk.ok and "states runner-minutes it does not carry" in chk.detail, chk
+
+
+def test_opt79_pole_marker_with_no_opt79_finding_in_the_run_is_rejected(tmp_path):
+    import json as _json
+    vr, _f, report, _p = _opt79_rendered_pole(tmp_path)
+    empty = tmp_path / "empty.json"
+    empty.write_text(_json.dumps({"findings": []}), encoding="utf-8")
+    assert vr.check_opt79_findings_rederived("", empty).ok
+    chk = vr.check_opt79_findings_rederived(report, empty)
+    assert not chk.ok and "recorded no OPT79 finding" in chk.detail, chk
+
+
+# ---- the structural-suppression rule, fed a real OPT79 pole finding ----
+
+def _struct_job(name, steps):
+    sj, t = [], 0
+    for sn, d in steps:
+        sj.append({"name": sn,
+                   "started_at": f"2026-01-01T00:{t//60:02d}:{t%60:02d}Z",
+                   "completed_at": f"2026-01-01T00:{(t+d)//60:02d}:{(t+d)%60:02d}Z"})
+        t += d
+    return {"name": name, "html_url": "https://github.com/demo/demo/runs/1",
+            "steps": sj, "started_at": "2026-01-01T00:00:00Z",
+            "completed_at": f"2026-01-01T00:{t//60:02d}:{t%60:02d}Z",
+            "conclusion": "success"}
+
+
+@pytest.mark.parametrize("wc, suppressed", [
+    (19.0, False),     # the realistic pole-cache excess: far below half the pole
+    (149.0, False),    # just under half the 300s pole
+    (150.0, True),     # exactly half: the >= side of the rule suppresses
+    (200.0, True),
+])
+def test_opt79_pole_finding_suppresses_the_structural_lever_only_from_half_the_pole(
+        wc, suppressed):
+    """An OPT79 pole finding enters `covered_job_savings` via its credited
+    wall-clock like any run-time hygiene finding. It may suppress the pole's
+    own structural lever only once it covers at least half the pole's p50."""
+    steps = [("Checkout", 20), ("Install deps", 40), ("Build", 180), ("Run tests", 60)]
+    lint = [("Checkout", 20), ("Install deps", 40), ("Lint", 40)]
+    runs = [[_struct_job("build-and-test", steps), _struct_job("lint", lint)]
+            for _ in range(5)]
+    wf = ".github/workflows/ci.yml"
+    crit_by_wf = {wf: cr._critical_path(runs)}
+    pole = {"pattern": "OPT79", "workflow_file": wf,
+            "affected_jobs": ["build-and-test"], "wall_clock_p50_s": wc,
+            "runner_min_saving": None,
+            "cache_net_negative": {"kind": _OPT79_POLE_KIND, "job": "build-and-test"}}
+    covered = cr._build_covered_job_savings([pole])
+    assert covered == {cr._struct_toks("build-and-test"): wc}
+    out = cr._detect_structural_candidates(
+        (("build-and-test", 300.0), ("lint", 100.0)), [], crit_by_wf, {wf: runs},
+        cr.RequiredChecks(frozenset({"build-and-test"}), complete=True),
+        {wf: {"pull_request"}}, covered, 0)
+    hit = [f for f in out if "build-and-test" in f.get("title", "")]
+    assert (not hit) is suppressed, (wc, [f.get("pattern") for f in out])

@@ -8048,6 +8048,24 @@ def test_opt79_pole_finding_renders_at_its_pole_with_its_merge_wait():
     assert "#opt79--a-cache-that-costs-more-than-it-saves" in md
 
 
+def test_opt79_pole_finding_joins_its_pole_across_a_matrix_name():
+    """A matrix leg like `test (1)` must still join the pole-cache finding on its
+    job; an exact-name join drops the block off its pole."""
+    wf = ".github/workflows/ci.yml"
+    for pole_job, finding_job in (
+            ("test (1)", "test"),         # the drilled pole is one matrix leg
+            ("test", "test (1)"),         # the finding names the leg, the pole the base
+            ("test (2)", "test (1)")):    # two legs of the same matrix
+        pole = {"check": pole_job, "job": pole_job, "workflow_file": wf}
+        f = _opt79_pole_finding(
+            affected_jobs=[finding_job],
+            cache_net_negative={"kind": "opt79_pole_net_negative_cache",
+                                "job": finding_job})
+        assert bp._opt79_pole_for(pole, [f]) == [f], (pole_job, finding_job)
+        lint = dict(pole, check="lint", job="lint")
+        assert bp._opt79_pole_for(lint, [f]) == [], (pole_job, finding_job)
+
+
 def test_opt79_pole_finding_off_the_drilled_poles_still_renders_its_block():
     """The engine credits the long pole of EVERY pull-request workflow, but only
     the drilled poles render a pole section. A pole-cache finding on another
