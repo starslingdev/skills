@@ -655,9 +655,13 @@ excess is credited.
    the install installs) and a rollout line. It needs that placement because its
    capped figure is often below the 30s long-pole floor, which would otherwise
    drop it from the "Also noticed" appendix as a valueless pole-job row; it also
-   counts as a catalog match for that pole, so the pole gets no gap-fill. Only
-   when the job is not a drilled long pole (for example, the workflow is not on
-   the merge-gating spine) does the finding fall through to "Also noticed". Every number is from the audited
+   counts as a catalog match for that pole, so the pole gets no gap-fill, and the
+   pole's waterfall and agent prompt name OPT79 and point at its block. When the
+   job is not a drilled long pole (for example, the slowest job of another
+   pull-request workflow), the same marked block renders in a short section
+   before "Also noticed", never as an appendix row. When a cross-check bound
+   lowered the figure, the block prints each step and its reason. Every number
+   is from the audited
    repository's own p50s and runs. Runner-minutes are deliberately not stated: the
    runner-minute section requires the below-the-floor neutrality proof, which the
    slowest job cannot have. The neutrality certificate is only required to promote

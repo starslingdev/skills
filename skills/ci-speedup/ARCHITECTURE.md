@@ -1385,9 +1385,16 @@ installs) and a rollout line. It needs that placement because its capped figure
 is often below the 30s long-pole floor, which would otherwise drop it from the
 "Also noticed" appendix as a valueless pole-job row; it also counts as a catalog
 match for the pole, so that pole gets no gap-fill or gap capture. The appendix
-skips a pole-cache finding whose job is a drilled pole, so it never renders
-twice; only when the job is not a drilled pole does it fall through to "Also
-noticed". Runner-minutes are deliberately NOT stated: the
+never takes a pole-cache finding: one whose job is not a drilled pole (the
+slowest job of another pull-request workflow, or any in a static-only report)
+renders the same marked block in `_opt79_off_pole_block`, a short section
+before "Also noticed", so every pole-cache finding renders exactly once with
+its merge-wait seconds and the appendix never summarizes it as "no bill
+saving". The pole's waterfall and agent prompt name OPT79 and point at its
+block (`opt79_present` / `opt79=`) instead of the data-driven "see Also
+noticed" pointer or the coverage-gap wording, and when the generic cascade
+lowered the figure the block prints each `wall_clock_derivation` step and its
+reason. Runner-minutes are deliberately NOT stated: the
 runner-minute section requires the below-the-floor neutrality proof, which the
 slowest job cannot have. The neutrality certificate is only required to promote a
 finding into the runner-minute section; a finding that saves merge-wait time does
