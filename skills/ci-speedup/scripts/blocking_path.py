@@ -3241,7 +3241,8 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
                         structural: list[dict[str, Any]] | None = None,
                         data_driven: list[dict[str, Any]] | None = None,
                         *, cs: "claims.ClaimSet | None" = None,
-                        cross_run_rendered: bool = False) -> str:
+                        cross_run_rendered: bool = False,
+                        opt79: list[dict[str, Any]] | None = None) -> str:
     """Assemble the per-pole agent prompt from the MEASURED context + the per-cause
     static block. Self-contained: pasted alone it gives the agent the gate, the
     drill, the cause + verbatim evidence, the addressable wall-clock ceiling, where
@@ -3257,7 +3258,8 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
     if not meta:
         return _build_generic_agent_prompt(
             pole, candidates, run_url, repo, sha, gate_count, npop, timeline,
-            structural, data_driven, cs=cs, cross_run_rendered=cross_run_rendered)
+            structural, data_driven, cs=cs, cross_run_rendered=cross_run_rendered,
+            opt79=opt79)
     wf = _wf_base(pole.get("workflow_file", ""))
     check = _clean_label(str(pole.get("check", "")))
     dur = _clock(_num(pole.get("p50_s")))
@@ -3360,7 +3362,8 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                                 structural: list[dict[str, Any]] | None = None,
                                 data_driven: list[dict[str, Any]] | None = None,
                                 *, cs: "claims.ClaimSet | None" = None,
-                                cross_run_rendered: bool = False) -> str:
+                                cross_run_rendered: bool = False,
+                                opt79: list[dict[str, Any]] | None = None) -> str:
     """The hand-off for a pole with no log-level catalog detector match: ci-speedup
     measured WHERE the time goes (the gate, the dominant step + its share) but no log
     detector named the sub-cause, so it points the agent at that step to investigate -
@@ -3433,6 +3436,11 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 f"({', '.join(dd_pats)}) matched this pole (see the **Also noticed** "
                 f"section below for the measured lever + its fix recipe); the dominant "
                 f"step below is where that lever's time is spent.")
+    elif opt79:
+        lead = ("starslingdev/ci-speedup measured where the time goes below but does NOT "
+                "prescribe the fix - a measured catalog pattern (OPT79, a cache that "
+                "costs more than it saves) matched this pole (see its **Measured cache "
+                "cost** block above for the measured comparison + its fix recipe).")
     else:
         lead = ("starslingdev/ci-speedup measured where the time goes below but does NOT "
                 "prescribe the fix - and for this job its detectors found no known "
@@ -3490,7 +3498,14 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 "pole's wall time). The step above is the load-bearing one that lever "
                 "targets; open its log (the Audit link) to see what inside it the lever "
                 "reshapes.", ""]
-    else:
+    if opt79:
+        out += ["MEASURED CACHE PATTERN MATCHED",
+                "- OPT79 (a cache that costs more than it saves) matched this pole - "
+                "see its **Measured cache cost** block above: the cache on this job "
+                "measured slower on the runs where it hit than on the runs where it "
+                "missed. Re-key or narrow it first and re-measure; never narrow what "
+                "the install installs.", ""]
+    if not struct_pats and not dd_pats and not opt79:
         out += ["NO CATALOG PATTERN MATCHED",
                 "- ci-speedup's detector set didn't recognize this job's stack, so there "
                 "is no named sub-cause. The step above is the load-bearing one; open its "
@@ -3781,7 +3796,8 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                     analysis_present: bool = False,
                     structural_present: bool = False,
                     data_driven_present: bool = False,
-                    data_driven_on_path: bool = True) -> list[str]:
+                    data_driven_on_path: bool = True,
+                    opt79_present: bool = False) -> list[str]:
     """The ASCII waterfall for one pole (no code fence): the blocking job's steps,
     then - when a log was captured - the dominant step's internals down to the
     root cause.
@@ -3913,6 +3929,12 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
             lines += ["", "   (no log-level detector fired, but a measured **catalog "
                       "pattern** matched this pole - see its entry in the **Also noticed** "
                       "section below, " + _dd_tail]
+        elif log_present and leaf is None and opt79_present:
+            # OPT79's pole cache fired ON this pole and renders in its own block below
+            # (`_opt79_pole_block`) - a catalog match, not a coverage gap.
+            lines += ["", "   (no log-level detector fired, but a measured **catalog "
+                      "pattern** (OPT79, a cache that costs more than it saves) matched this "
+                      "pole - see its **Measured cache cost** block below.)"]
         elif log_present and leaf is None:
             # A log WAS captured but no detector recognized it - surface that loudly
             # rather than silently showing the timeline with no drill (a missed root
@@ -3976,6 +3998,11 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
             lines += ["", "(no log-level detector fired, but a measured **catalog "
                       "pattern** matched this pole - see its entry in the **Also noticed** "
                       "section below, " + _dd_tail]
+        elif opt79_present and leaf is None:
+            # OPT79's pole cache fired ON this pole; its block renders below.
+            lines += ["", "(no log-level detector fired, but a measured **catalog "
+                      "pattern** (OPT79, a cache that costs more than it saves) matched this "
+                      "pole - see its **Measured cache cost** block below.)"]
         elif not log_present:
             lines += ["", f"(no captured log for this job — run with `--log "
                       f"{wf_base.split('.')[0]}=<job log>` to drill into `{dom}`.)"]
@@ -5802,6 +5829,15 @@ def _opt79_pole_block(findings: list[dict[str, Any]], catalog_url: str) -> list[
         ev = str(f.get("evidence") or "").strip()
         if ev:
             out.append(f"- **What ci-speedup measured:** {_flatten_cell(ev)}")
+        # The evidence states the pre-cascade figure; when a cross-check bound
+        # lowered it, say by how much and why, so the two numbers reconcile.
+        steps = [d for d in (f.get("wall_clock_derivation") or [])
+                 if isinstance(d, dict) and str(d.get("reason") or "").strip()]
+        if steps:
+            why = "; ".join(
+                f"{_num(d.get('from_s')) or 0:.0f}s to {_num(d.get('to_s')) or 0:.0f}s: "
+                f"{_flatten_cell(str(d.get('reason')))}" for d in steps)
+            out.append(f"- **Why the figure is lower than the evidence's:** {why}")
         for label, key in (("Guardrail", "guardrail"), ("Rollout", "rollout")):
             val = str(f.get(key) or "").strip()
             if val:
@@ -5810,6 +5846,26 @@ def _opt79_pole_block(findings: list[dict[str, Any]], catalog_url: str) -> list[
         url = f"{catalog_url}#{anchor}" if anchor else catalog_url
         out += [f"- **Catalog (background + fix recipe):** {url}", ""]
     return out
+
+
+def _opt79_off_pole_block(findings: list[dict[str, Any]], catalog_url: str,
+                          rendered: set[str] | None = None) -> list[str]:
+    """OPT79 pole-cache findings whose job is NOT a drilled pole (e.g. the slowest
+    job of a second pull-request workflow, or any in a static-only report). They
+    render the same marked block as at a pole, never as an appendix row: the
+    appendix's bill-saving summary would read "no bill saving" for a figure that
+    is merge-wait seconds, and `verify_report` requires one marked block per
+    pole-cache finding. `rendered` holds the ids already rendered at a pole."""
+    done = rendered or set()
+    rest = [f for f in findings
+            if not f.get("advisory") and _is_opt79_pole_finding(f)
+            and str(f.get("id") or "") not in done]
+    if not rest:
+        return []
+    return ["**💾 Measured cache cost on a workflow's slowest job** - each job below "
+            "is the slowest job of a workflow that runs on pull requests, but not one "
+            "of the long poles drilled above.", "",
+            *_opt79_pole_block(rest, catalog_url)]
 
 
 def _opt79_uncredited_row_is_renderable(r: Any) -> bool:
@@ -7141,8 +7197,7 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             and not _tier2_owned_here(f)                          # Tier-2-owned → own section
             and str(f.get("pattern", "")) not in _WAIT_PATTERNS  # → its own §
             and not _on_pole_job(f)                               # valueless + all-pole-job → already AS a pole (#5)
-            and not (_is_opt79_pole_finding(f)                    # OPT79 pole cache → rendered AT its pole
-                     and _on_drilled_pole(f))]
+            and not _is_opt79_pole_finding(f)]                    # OPT79 pole cache → its own block (at its pole, or `_opt79_off_pole_block`)
     if not elig:
         return [], 0, False
     ranked = _group_by_pattern_ranked(elig)
@@ -7701,6 +7756,8 @@ def _data_driven_for_pole(pole: dict[str, Any],
             continue  # the structural track has its own join (_structural_for_pole)
         if str(f.get("pattern", "")) in _WAIT_PATTERNS:
             continue  # pre-start wait has its own section
+        if _is_opt79_pole_finding(f):
+            continue  # rendered AT the pole (`_opt79_pole_for`), never in the appendix
         if not _saves_wall_clock(f):
             continue  # only a credited-wall-clock finding claims the spine
         jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
@@ -8245,6 +8302,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # report collapsed to the one-line no-critical-path note, which is exactly
     # the silence this block exists to break.
     uncredited_lines = _opt79_uncredited_block(doc)
+    opt79_off_pole = _opt79_off_pole_block(all_findings, catalog_url)
     # A candidate any pattern held back is disclosed in the Data sources footer;
     # collapsing to the one-line note would drop the footer with it and let
     # "measured, could not tell" read as "nothing found".
@@ -8252,7 +8310,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                      if _withheld_candidates_line(doc, _r.doc_key, _r.noun))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
-            and not withheld_n):
+            and not withheld_n and not opt79_off_pole):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")
@@ -8411,6 +8469,8 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *queue_lines]
     if tier2_lines:
         out += ["---", "", *tier2_lines]
+    if opt79_off_pole:
+        out += ["---", "", *opt79_off_pole]
     if also_lines:
         out += ["---", "", *also_lines]
     # Measured net-negative caches that could not be PRICED (their job is not
@@ -9614,6 +9674,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # out of the critical-path list (e.g. a turbo-cache-dependent job fast on cache hits).
     out += _bimodal_note(src, _num(blocker.get("p50_s")))
 
+    opt79_at_pole: set[str] = set()
     for i, p in enumerate(pole_wfs, 1):
         check = _clean_label(str(p.get("check", "")))
         wf_base = _wf_base(p.get("workflow_file", ""))
@@ -10050,7 +10111,8 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                                             analysis_present=bool(analysis),
                                             structural_present=bool(structural),
                                             data_driven_present=bool(data_driven),
-                                            data_driven_on_path=dd_on_path),
+                                            data_driven_on_path=dd_on_path,
+                                            opt79_present=bool(opt79_pole)),
                 "```", ""]
         # The cross-run magnitude check (rendered below) - compute now so the footer
         # only promises it when it actually appears (a categorical finding has none).
@@ -10140,6 +10202,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
             out += _structural_block(structural, catalog_url)
         if opt79_pole:
             out += _opt79_pole_block(opt79_pole, catalog_url)
+            opt79_at_pole.update(str(f.get("id") or "") for f in opt79_pole)
         # A matrix sibling leg that collapsed into THIS representative pole can carry its
         # own structural lever that — since `_structural_for_pole` no longer folds a
         # distinct sibling AND `_also_noticed_block` excludes per-pole structural levers —
@@ -10177,7 +10240,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 leaf, p, floor_pool, run_url, repo, doc.get("commit_sha"),
                 wf_gate.get(str(p.get("workflow_file", "")), 0), npop, timeline,
                 structural=structural, data_driven=data_driven, cs=cs,
-                cross_run_rendered=cross_run_rendered), ""]
+                cross_run_rendered=cross_run_rendered, opt79=opt79_pole), ""]
         # A leaf demoted off-category (issue #16) is kept as a labelled secondary
         # observation below the prompt — never a silent drop of a real (if minority) finding.
         if offcat_leaf is not None:
@@ -10220,6 +10283,9 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out += ["---", "", *queue_lines]
     if tier2_lines:
         out += ["---", "", *tier2_lines]
+    opt79_off_pole = _opt79_off_pole_block(all_findings, catalog_url, opt79_at_pole)
+    if opt79_off_pole:
+        out += ["---", "", *opt79_off_pole]
     if also_lines:
         out += ["---", "", *also_lines]
     if shallow_note and not queue_lines and not also_lines:

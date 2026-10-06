@@ -8048,6 +8048,74 @@ def test_opt79_pole_finding_renders_at_its_pole_with_its_merge_wait():
     assert "#opt79--a-cache-that-costs-more-than-it-saves" in md
 
 
+def test_opt79_pole_finding_off_the_drilled_poles_still_renders_its_block():
+    """The engine credits the long pole of EVERY pull-request workflow, but only
+    the drilled poles render a pole section. A pole-cache finding on another
+    workflow's slowest job fell through to the appendix as a plain row with no
+    `<!-- opt79-pole:<id> -->` marker, so `verify_report` (which requires
+    exactly one block per pole-cache finding) failed the report, and a sub-30s
+    figure read "no bill saving" instead of its merge-wait seconds."""
+    vr = _load_verify_report()
+    f = _opt79_pole_finding()                     # ci.yml / build, not a drilled pole
+    doc = _doc_one_pole()
+    doc["findings"] = [f]
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {},
+                   {"pipeline": "https://github.com/o/r/actions/runs/123"},
+                   "2026-06-08")
+    assert vr._opt79_pole_findings_rendered(md, [f]) == [], md
+    assert "up to **18s** off the merge wait" in md
+    assert not [ln for ln in md.splitlines()
+                if "OPT79" in ln and "no bill saving" in ln], md
+    # ...and in the static-only report, where no pole is drilled at all.
+    static = {"repo": "o/r", "findings": [_opt79_pole_finding()],
+              "pr_critical_path": {"poles": []}, "data_sources": {}}
+    md2 = bp.render(static, "o/r")
+    assert vr._opt79_pole_findings_rendered(md2, static["findings"]) == [], md2
+
+
+def _opt79_on_tests_web(wc: float):
+    return _opt79_pole_finding(
+        workflow_file=".github/workflows/pipeline.yml",
+        affected_jobs=["tests-web"], wall_clock_p50_s=wc,
+        cache_net_negative={"kind": "opt79_pole_net_negative_cache",
+                            "job": "tests-web"})
+
+
+def test_opt79_pole_finding_is_named_at_its_pole_not_sent_to_the_appendix():
+    """A pole-cache finding renders AT its pole. At 30s or more it also joined
+    the data-driven track, so the pole's waterfall and its agent prompt sent the
+    reader to "the **Also noticed** section below", where it is not. Under 30s
+    with an unrecognized log, the same pole read as a coverage gap and its prompt
+    said NO CATALOG PATTERN MATCHED, directly under the OPT79 block."""
+    for wc in (45.0, 18.0):
+        doc = _doc_one_pole()
+        doc["findings"] = [_opt79_on_tests_web(wc)]
+        md = bp.render(doc, {"pipeline": "nothing any detector knows\n"}, {},
+                       {"pipeline": "https://github.com/o/r/actions/runs/123"},
+                       "2026-06-08")
+        assert md.count("<!-- opt79-pole:f7 -->") == 1, md
+        assert "**Also noticed** section" not in md, (wc, md)
+        assert "NO CATALOG PATTERN MATCHED" not in md, (wc, md)
+        assert "coverage gap" not in md, (wc, md)
+        assert "OPT79" in md.split("Prompt for your coding agent", 1)[1], (wc, md)
+
+
+def test_opt79_pole_block_says_why_the_cross_checks_lowered_the_figure():
+    """When the generic cascade shrinks the pole finding, its headline drops
+    (e.g. to 8s) while the evidence still states the pre-cascade 20s. The block
+    printed no reason, so the two numbers contradicted each other with nothing
+    to reconcile them."""
+    f = _opt79_pole_finding(
+        wall_clock_p50_s=8.0, wall_clock_uncapped_p50_s=20.0,
+        wall_clock_derivation=[{
+            "bound": "measured-critical-path", "from_s": 20.0, "to_s": 8.0,
+            "reason": "floored by the slowest concurrent check `lint`"}])
+    md = "\n".join(bp._opt79_pole_block([f], "https://x/catalog.md"))
+    assert "up to **8s** off the merge wait" in md
+    assert "floored by the slowest concurrent check `lint`" in md, md
+    assert "20s" in md, md
+
+
 def test_uncredited_pole_cache_survives_a_report_with_nothing_else_in_it():
     """A schedule-only repository with no measured poles and no other findings
     renders through the degenerate arms, where every other input is empty. The
