@@ -6229,6 +6229,19 @@ def _opt79_pole_finding_rederived(f: dict, data: dict) -> list[str]:
         if str(timing.get("long_pole_job") or job) != job:
             problems.append(f"per_workflow_timing names {timing.get('long_pole_job')!r}, "
                             f"not {job!r}, as this workflow's long pole")
+        # The job the evidence names as the cap must be the tallest OTHER job
+        # the run measured; the prose check alone only compares the evidence
+        # with the same stamped name, so renaming both would pass.
+        jp = _as_dict(timing.get("job_p50"))
+        nxt = str(_as_dict(cn.get("pole_sizing")).get("next_tallest_job") or "")
+        others = {str(k): _num(v) or 0.0 for k, v in jp.items() if str(k) != job}
+        if jp and nxt:
+            if nxt not in others:
+                problems.append(f"pole_sizing.next_tallest_job {nxt!r} is not another "
+                                "job this workflow's timing measured")
+            elif others[nxt] + 0.11 < max(others.values()):
+                problems.append(f"pole_sizing.next_tallest_job {nxt!r} ({others[nxt]}s) "
+                                "is not the tallest job other than the long pole")
     headroom = round(lp - fl, 1)
     if headroom <= 0:
         problems.append(f"no headroom ({lp} - {fl}): a long pole tied with the next "

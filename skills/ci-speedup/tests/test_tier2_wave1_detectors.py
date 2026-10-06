@@ -4582,6 +4582,21 @@ def test_opt79_verifier_rejects_a_tampered_pole_finding(edit, needle):
     assert any(needle in p for p in problems), (needle, problems)
 
 
+def test_opt79_verifier_rejects_a_renamed_next_tallest_job():
+    """The evidence names the job that sets the cap, and the prose check only
+    compares it with the stamped name. Renaming BOTH to a job the run never
+    measured at the floor passed, so the report could name the wrong limiting
+    job. The name must be another job whose measured p50 is the floor."""
+    for name in ("ghost", _OPT79_JOB):
+        def rename(f, name=name):
+            cn = f["cache_net_negative"]
+            old = cn["pole_sizing"]["next_tallest_job"]
+            cn["pole_sizing"]["next_tallest_job"] = name
+            f["evidence"] = f["evidence"].replace(f"`{old}`", f"`{name}`")
+        problems = _opt79_pole_problems(rename)
+        assert any("next_tallest_job" in p for p in problems), (name, problems)
+
+
 def test_opt79_verifier_accepts_an_honest_cascade_shrink_on_a_pole_finding():
     def shrink(f):
         f.update(wall_clock_uncapped_p50_s=10.0, wall_clock_p50_s=4.0,
