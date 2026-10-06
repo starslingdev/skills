@@ -5785,11 +5785,16 @@ _VR_OPT79_TAIL_MIN_FRAC = 0.25
 
 def _opt79_block_rederived(cn: dict, *, credited: bool,
                            finding_rm: float | None) -> list[str]:
-    """Re-derive one stamped OPT79 measurement block — the credited finding's
-    `cache_net_negative`, or an uncredited pole row, which is the SAME block with
-    a different `kind` and no minutes.
+    """Re-derive one stamped OPT79 measurement block — the runner-minute
+    finding's `cache_net_negative`, the wall-clock pole finding's (via
+    `_opt79_pole_finding_rederived`), or an uncredited row, which is the SAME
+    block with a different `kind` and no minutes.
 
-    Everything except the two sizing branches is shared, because the two rows are
+    Here `credited` means "carries minutes": only the runner-minute finding
+    passes True; the pole finding (a credited wall-clock finding) and the
+    uncredited row pass False.
+
+    Everything except the two sizing branches is shared, because the rows are
     the same measurement. The uncredited row used to be a hand-built subset with
     no `per_run`, so its medians and its `waste_s` were bare assertions no check
     could contradict; running the row/median/floor/bounds re-derivation over it
@@ -5893,8 +5898,9 @@ def _opt79_block_rederived(cn: dict, *, credited: bool,
         problems.append(f"job_runs={cn.get('job_runs')!r}")
     if denom is None or denom <= 0:
         problems.append(f"sampled_successful_run_count={cn.get('sampled_successful_run_count')!r}")
-    # An uncredited row carries no sizing, so an unknown volume is stated as
-    # null (both volume fields). A credited one is priced on it and needs it.
+    # A row that carries no minutes has no runner-minute sizing, so an unknown
+    # volume is stated as null (both volume fields). One that carries minutes is
+    # priced on the volume and needs it.
     null_volume = (not credited and cn.get("monthly_volume") is None)
     if null_volume:
         if cn.get("effective_monthly_volume") is not None:
@@ -5947,10 +5953,11 @@ def _opt79_block_rederived(cn: dict, *, credited: bool,
             "floor - a cache that rarely hits is a key problem, not a cost one")
 
     if not credited and cn.get("runner_min_saving") is not None:
-        # An uncredited row must carry NO sizing. A number here would enter a
-        # total through the first reader that treated the two rows alike.
+        # A row that carries no minutes must carry NO runner-minute sizing. A
+        # number here would enter a total through the first reader that treated
+        # the rows alike.
         problems.append(
-            f"an uncredited pole cache stamps runner_min_saving "
+            f"a row that carries no minutes stamps runner_min_saving "
             f"{cn.get('runner_min_saving')!r}; it must carry no sizing")
     if job_runs is not None and denom is not None and denom > 0 and monthly:
         effective = round(float(monthly) * min(max(job_runs / denom, 0.0), 1.0), 3)
@@ -5972,8 +5979,10 @@ def _opt79_block_rederived(cn: dict, *, credited: bool,
 
 
 def _opt79_uncredited_rows_rederived(data: dict) -> list[str]:
-    """Every uncredited OPT79 pole row re-derived from its own `per_run`, and
-    checked to contribute to no total.
+    """Every uncredited OPT79 row re-derived from its own `per_run`, and
+    checked to contribute to no total. ("pole" in the key and kind name,
+    `opt79_uncredited_pole_caches` / `opt79_uncredited_pole_cache`, is historical:
+    the rows are any job at or above the floor other than an untied slowest job.)
 
     These rows render with their measured excess per cache hit (`waste_s`) and
     their hit/miss populations, but with no runner-minutes and no wall-clock
