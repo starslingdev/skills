@@ -618,8 +618,10 @@ unversioned and updates by reinstall from `main`.
   poles, in its own short block before "Also noticed", never as an appendix
   row): the measured extra time per cache hit, capped at
   the gap between its duration and the workflow's next-tallest job's (a
-  conservative cap: it compares job durations and does not follow `needs:`
-  chains, so it never overstates the saving), with both jobs and their times
+  cap that is conservative when the next-tallest job runs alongside the
+  slowest one or directly after it; it compares job durations and does not
+  model a longer `needs:` chain of shorter jobs, which a chain-aware cap in a
+  follow-up would), with both jobs and their times
   named in the evidence ("`prep` is this workflow's slowest job at 120s and its
   next-tallest job, `verify`, runs 100s; the audit caps the saving at that 20s
   gap, so up to 20s of the excess comes off the merge wait"). The wording holds

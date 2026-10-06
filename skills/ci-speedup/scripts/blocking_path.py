@@ -3378,6 +3378,10 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                           if f.get("pattern")})
     dd_pats = sorted({str(f.get("pattern", "")) for f in (data_driven or [])
                       if f.get("pattern")})
+    # OPT79 claims the pole only at the long-pole magnitude (`_opt79_pole_covers`);
+    # a smaller one is mentioned as a side note, never as the pole's explanation.
+    opt79_minor = bool(opt79) and not _opt79_pole_covers(opt79)
+    opt79 = _opt79_pole_covers(opt79)
     wf = _wf_base(pole.get("workflow_file", ""))
     check = _clean_label(str(pole.get("check", "")))
     dur = _clock(_num(pole.get("p50_s")))
@@ -3511,6 +3515,11 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 "is no named sub-cause. The step above is the load-bearing one; open its "
                 "log (the Audit link) and determine what inside it is slow (e.g. an "
                 "uncached build, a serial test phase, a large install).", ""]
+    if opt79_minor:
+        out += ["ALSO MEASURED ON THIS JOB",
+                "- A small measured cache cost (OPT79) is also shown in its **Measured "
+                "cache cost** block above. It is too small to explain this job's time, "
+                "so treat it as a side fix, not the cause.", ""]
     addr = _addressable_plain(pole, candidates)
     if addr:
         out += ["WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)",
@@ -5800,6 +5809,17 @@ def _opt79_pole_for(pole: dict[str, Any],
                or _matrix_base(j) == t for j in jobs for t in targets):
             out.append(f)
     return out
+
+
+def _opt79_pole_covers(findings: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """The OPT79 pole-cache findings that count as catalog COVER for their pole -
+    the ones whose credited saving clears the same magnitude rule every other
+    non-log join uses (`_saves_wall_clock`, i.e. `_WALL_CLOCK_LONG_POLE_FLOOR_S`).
+    Only those suppress the gap-fill / gap capture and replace the "no catalog
+    pattern matched" / coverage-gap wording. A smaller one (e.g. 8s on a 255s
+    pole) still renders its block at the pole, but it does not explain the pole,
+    so the pole is still treated as a coverage gap."""
+    return [f for f in (findings or []) if _saves_wall_clock(f)]
 
 
 def _opt79_pole_block(findings: list[dict[str, Any]], catalog_url: str) -> list[str]:
@@ -10020,7 +10040,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         analysis = (_match(analyses)
                     if (leaf is None and offcat_leaf is None
                         and not structural and not data_driven
-                        and not opt79_pole) else None)
+                        and not _opt79_pole_covers(opt79_pole)) else None)
         out.append(f'<a id="pole-{i}"></a>')
         out.append("")
         # `wf_base` (a workflow FILENAME) and `check` are BOTH arbitrary repo text dropped
@@ -10109,7 +10129,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                                             structural_present=bool(structural),
                                             data_driven_present=bool(data_driven),
                                             data_driven_on_path=dd_on_path,
-                                            opt79_present=bool(opt79_pole)),
+                                            opt79_present=bool(_opt79_pole_covers(opt79_pole))),
                 "```", ""]
         # The cross-run magnitude check (rendered below) - compute now so the footer
         # only promises it when it actually appears (a categorical finding has none).
@@ -10594,7 +10614,7 @@ def _gap_poles(doc: dict[str, Any],
     def _catalog_covers(pole: dict[str, Any]) -> bool:
         return bool(_structural_for_pole(pole, findings)
                     or _data_driven_for_pole(pole, findings)
-                    or _opt79_pole_for(pole, findings))
+                    or _opt79_pole_covers(_opt79_pole_for(pole, findings)))
 
     out: list[tuple[dict[str, Any], str, str, str]] = []
     entries = (doc.get("data_bundle") or {}).get("logs") or []

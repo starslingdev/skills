@@ -4445,6 +4445,24 @@ def test_opt79_pole_prose_never_claims_the_next_job_finishes_or_sets_the_wait(lp
 
 
 @pytest.mark.parametrize("lp,floor", [(660.0, 600.0), (610.0, 600.0)])
+def test_opt79_pole_note_does_not_claim_the_cap_never_overstates(lp, floor):
+    """The duration cap is conservative only when the next-tallest job runs
+    alongside the pole or directly after it. A next-tallest job that `needs:` a
+    shorter setup job can make the real path longer than the pole without the
+    pole being on it (pole 200s; next job 180s after a 50s setup job: the path
+    is 230s, the cap credits 20s, the true saving is 0). The note must state
+    that limit instead of promising the figure is never overstated."""
+    out, _rows, _w = _opt79_pole_run(_opt79_pole_of(lp, floor))
+    f = out[0]
+    for txt in (f["evidence"], f["measured_evidence"]["note"], f["size_note"],
+                f["measured_signal"]):
+        assert "never overstates" not in txt, txt
+    note = f["measured_evidence"]["note"]
+    assert "alongside this one or directly after it" in note, note
+    assert "longer `needs:` chain" in note, note
+
+
+@pytest.mark.parametrize("lp,floor", [(660.0, 600.0), (610.0, 600.0)])
 def test_opt79_pole_evidence_is_restated_by_the_verifier_in_both_cap_branches(lp, floor):
     """The verifier restates the reworded sentence (slowest job, next-tallest
     job, both durations, the credited figure) in the capped and the uncapped

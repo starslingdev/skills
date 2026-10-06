@@ -17209,8 +17209,10 @@ def _opt79_pole_finding(
             + "The credited figure is the measured excess per hit run, capped at "
             f"the {headroom:.0f}s gap between this job's duration ({lp50:.0f}s) "
             f"and {nxt_txt}'s ({fl50:.0f}s). The cap compares job durations, so "
-            "it never overstates the saving, whether that job runs alongside "
-            "this one or after it through `needs:`. Wall-clock only - "
+            "it is conservative when that job runs alongside this one or "
+            "directly after it through `needs:`; it does not model a longer "
+            "`needs:` chain of shorter jobs, which can make another path the "
+            "slowest. Wall-clock only - "
             "runner-minutes are not stated on this finding. "
             + note_guardrail))
     f = _new_finding(

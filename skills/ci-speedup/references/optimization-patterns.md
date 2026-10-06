@@ -639,8 +639,10 @@ excess is credited.
    wall-clock time, not runner-minutes. Its raw wall-clock is the measured
    `waste_s`, first capped by the existing within-workflow bound,
    `min(waste_s, long_pole_p50 − floor_p50)` (credit the pole only as far as the
-   next-tallest job's duration; the cap compares durations and does not follow
-   `needs:` chains, so it never overstates the saving), and stamped
+   next-tallest job's duration; the cap compares durations, so it is
+   conservative when that job runs alongside the pole or directly after it,
+   and it does not model a longer `needs:` chain of shorter jobs, which a
+   chain-aware cap in a follow-up would), and stamped
    under `cache_net_negative.pole_sizing` as `waste_s`, `long_pole_job`, `long_pole_p50_s`, `next_tallest_job`,
    `floor_p50_s`, `headroom_s`, `raw_wall_clock_s` and `capped_by_next_tallest_job`.
    It then goes through the same cross-cutting

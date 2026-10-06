@@ -8102,9 +8102,13 @@ def _opt79_on_tests_web(wc: float):
 def test_opt79_pole_finding_is_named_at_its_pole_not_sent_to_the_appendix():
     """A pole-cache finding renders AT its pole. At 30s or more it also joined
     the data-driven track, so the pole's waterfall and its agent prompt sent the
-    reader to "the **Also noticed** section below", where it is not. Under 30s
-    with an unrecognized log, the same pole read as a coverage gap and its prompt
-    said NO CATALOG PATTERN MATCHED, directly under the OPT79 block."""
+    reader to "the **Also noticed** section below", where it is not.
+
+    It counts as catalog COVER for the pole only under the same magnitude rule
+    every other non-log match uses (`_saves_wall_clock`, the 30s long-pole
+    floor). An 18s cache cost on a 255s pole does not explain the pole: with an
+    unrecognized log the pole stays a coverage gap (waterfall + NO CATALOG
+    PATTERN MATCHED), and the OPT79 block still renders once beside it."""
     for wc in (45.0, 18.0):
         doc = _doc_one_pole()
         doc["findings"] = [_opt79_on_tests_web(wc)]
@@ -8113,9 +8117,30 @@ def test_opt79_pole_finding_is_named_at_its_pole_not_sent_to_the_appendix():
                        "2026-06-08")
         assert md.count("<!-- opt79-pole:f7 -->") == 1, md
         assert "**Also noticed** section" not in md, (wc, md)
-        assert "NO CATALOG PATTERN MATCHED" not in md, (wc, md)
-        assert "coverage gap" not in md, (wc, md)
-        assert "OPT79" in md.split("Prompt for your coding agent", 1)[1], (wc, md)
+        prompt = md.split("Prompt for your coding agent", 1)[1]
+        assert "OPT79" in prompt, (wc, md)
+        if wc >= 30:
+            assert "NO CATALOG PATTERN MATCHED" not in md, (wc, md)
+            assert "coverage gap" not in md, (wc, md)
+            assert "MEASURED CACHE PATTERN MATCHED" in prompt, md
+        else:
+            assert "NO CATALOG PATTERN MATCHED" in prompt, md
+            assert "coverage gap" in md, md
+            # the small cache cost is mentioned, never as the pole's explanation
+            assert "MEASURED CACHE PATTERN MATCHED" not in prompt, md
+            assert "(OPT79, a cache that costs more than it saves) matched this" \
+                not in md, md
+
+
+def test_gap_poles_counts_an_opt79_pole_cache_as_cover_only_at_the_floor():
+    """`_gap_poles` feeds the maintainer gap-capture / detector-draft loop. A
+    drilled pole with an unrecognized log and a >=30s OPT79 pole-cache finding is
+    covered; an 8s one does not explain the pole, so it is still a gap."""
+    for wc, is_gap in ((45.0, False), (8.0, True)):
+        doc = _doc_one_pole()
+        doc["findings"] = [_opt79_on_tests_web(wc)]
+        gaps = bp._gap_poles(doc, {"pipeline": _NO_MATCH_LOG})
+        assert bool(gaps) is is_gap, (wc, gaps)
 
 
 def test_opt79_pole_block_says_why_the_cross_checks_lowered_the_figure():
