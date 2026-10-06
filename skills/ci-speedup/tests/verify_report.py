@@ -5754,6 +5754,42 @@ _VR_OPT79_POLE_SIZING_KEYS = (
     "headroom_s", "raw_wall_clock_s",
     "capped_by_next_tallest_job",
 )
+# A long pole with less than this headroom over the next-tallest job is TIED
+# with it and is never a pole finding. Pinned to collect_runs'
+# `_OPT79_POLE_MIN_HEADROOM_S` by a coupling test.
+_VR_OPT79_POLE_MIN_HEADROOM_S = 1.0
+# The leading words of the plain-English clause the report states for each
+# `uncredited_reason` (`blocking_path._OPT79_UNCREDITED_REASON_PHRASES`); the
+# key set is pinned equal to collect_runs' `_OPT79_UNCREDITED_REASONS`.
+_VR_OPT79_UNCREDITED_REASON_PHRASES: dict[str, str] = {
+    "pole_tied_with_next_job": "it is tied with the next-tallest job",
+    "pole_merge_wait_zeroed_by_cross_check":
+        "the cross-checks found no merge wait it can shorten",
+    "pole_workflow_off_merge_gating_spine":
+        "the pull request can merge without waiting for this job",
+}
+# The events on which a pull request waits for a workflow (the cascade's
+# `wall_clock._DEVELOPER_FACING_EVENTS`).
+_VR_OPT79_PR_EVENTS = frozenset({"pull_request", "merge_group"})
+
+
+def _opt79_sampled_events_problem(data: dict, wf: str, claimed: Any) -> str | None:
+    """`workflow_gates_pull_requests` against the events the run SAMPLED for the
+    workflow (`per_workflow_timing[wf].events`, else `events_by_wf[wf]`). When
+    events were sampled the claim must be exactly "a pull_request / merge_group
+    run was seen"; with none recorded the declared trigger stands unchecked."""
+    timing = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    events = _as_list(timing.get("events")) or _as_list(
+        _as_dict(data.get("events_by_wf")).get(wf))
+    events = [str(e) for e in events if str(e)]
+    if not events:
+        return None
+    want = bool(set(events) & _VR_OPT79_PR_EVENTS)
+    if claimed is not want:
+        return (f"workflow_gates_pull_requests={claimed!r} but the sampled events "
+                f"{sorted(set(events))} {'include' if want else 'include no'} "
+                "pull_request / merge_group run")
+    return None
 # The cache-verdict matchers, restated here rather than imported — this file is
 # standalone by design, and the point of the re-derivation is to judge a stamped
 # verdict with its OWN matcher: a verifier sharing the engine's object could not
@@ -6012,8 +6048,56 @@ def _opt79_uncredited_rows_rederived(data: dict) -> list[str]:
                 "cache on a pull-request workflow is credited as a finding in this "
                 "version; an uncredited row claiming the merge wait is a contract "
                 "violation")
+        out.extend(f"{tag}: {msg}" for msg in _opt79_uncredited_reason_problems(
+            cn, _as_dict(data)))
         out.extend(f"{tag}: {msg}" for msg in _opt79_block_rederived(
             cn, credited=False, finding_rm=None))
+    return out
+
+
+def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
+    """WHY an uncredited row is not the credited pole finding, checked.
+
+    The long pole of a workflow a pull request waits on, with at least 1s of
+    headroom, IS the credited pole finding; as an uncredited row it must name
+    one of the known reasons, and each reason must fit the row's own stamps."""
+    out: list[str] = []
+    job = str(cn.get("job") or "")
+    gates = cn.get("workflow_gates_pull_requests")
+    ev = _opt79_sampled_events_problem(data, str(cn.get("workflow_file") or ""), gates)
+    if ev:
+        out.append(ev)
+    lp, fl = _num(cn.get("long_pole_p50_s")), _num(cn.get("floor_p50_s"))
+    headroom = round(lp - fl, 1) if lp is not None and fl is not None else None
+    is_pole = bool(job) and job == str(cn.get("long_pole_job") or "") and gates is True
+    reason = cn.get("uncredited_reason")
+    if reason is None:
+        if is_pole and (headroom is None or headroom >= _VR_OPT79_POLE_MIN_HEADROOM_S):
+            out.append(
+                f"`{job}` is the long pole of a workflow pull requests wait on, with "
+                f"{headroom!r}s of headroom and no uncredited_reason: it should have "
+                "been the credited pole finding")
+        return out
+    if reason not in _VR_OPT79_UNCREDITED_REASON_PHRASES:
+        return out + [f"uncredited_reason {reason!r} is not one of "
+                      f"{sorted(_VR_OPT79_UNCREDITED_REASON_PHRASES)}"]
+    if not is_pole:
+        out.append(f"uncredited_reason {reason!r} names a pole the row is not: job "
+                   f"{job!r}, long_pole_job {cn.get('long_pole_job')!r}, "
+                   f"workflow_gates_pull_requests {gates!r}")
+    if reason == "pole_tied_with_next_job":
+        if headroom is None or headroom >= _VR_OPT79_POLE_MIN_HEADROOM_S:
+            out.append(f"uncredited_reason {reason!r} but the headroom is {headroom!r}s "
+                       f"- {_VR_OPT79_POLE_MIN_HEADROOM_S}s or more is not a tie")
+    elif headroom is not None and headroom < _VR_OPT79_POLE_MIN_HEADROOM_S:
+        out.append(f"uncredited_reason {reason!r} on a pole with {headroom}s of "
+                   "headroom, which is a tie (pole_tied_with_next_job)")
+    if reason == "pole_merge_wait_zeroed_by_cross_check":
+        if not str(cn.get("uncredited_reason_detail") or "").strip():
+            out.append("uncredited_reason_detail is empty: the cross-check that "
+                       "zeroed the merge wait must be named")
+    elif cn.get("uncredited_reason_detail") is not None:
+        out.append(f"uncredited_reason_detail on a {reason!r} row")
     return out
 
 
@@ -6210,6 +6294,13 @@ def _opt79_pole_finding_rederived(f: dict, data: dict) -> list[str]:
         problems.append(f"workflow_gates_pull_requests="
                         f"{cn.get('workflow_gates_pull_requests')!r}: no pull request "
                         "waits on this workflow, so there is no merge wait to credit")
+    if f.get("off_spine"):
+        problems.append("off_spine=True: the pull request can merge without this "
+                        "job, so a pole finding there must be an uncredited row")
+    ev = _opt79_sampled_events_problem(data, str(f.get("workflow_file") or ""),
+                                       cn.get("workflow_gates_pull_requests"))
+    if ev:
+        problems.append(ev)
     if f.get("runner_min_saving") is not None:
         problems.append(f"the pole finding states runner-minutes "
                         f"{f.get('runner_min_saving')!r}; it has no below-the-floor "
@@ -6228,7 +6319,11 @@ def _opt79_pole_finding_rederived(f: dict, data: dict) -> list[str]:
     # carries it — otherwise a lowered floor widens the headroom at will.
     timing = _as_dict(_as_dict(data.get("per_workflow_timing")).get(
         str(f.get("workflow_file") or "")))
-    if timing:
+    if not timing:
+        problems.append(f"per_workflow_timing has no entry for "
+                        f"{f.get('workflow_file')!r}: the stamped long pole and "
+                        "floor cannot be checked against what the run measured")
+    else:
         for key, stamped in (("long_pole_p50", lp), ("floor_p50", fl)):
             measured = _num(timing.get(key))
             if measured is not None and abs(measured - stamped) > 0.11:
@@ -6244,7 +6339,13 @@ def _opt79_pole_finding_rederived(f: dict, data: dict) -> list[str]:
         jp = _as_dict(timing.get("job_p50"))
         nxt = str(_as_dict(cn.get("pole_sizing")).get("next_tallest_job") or "")
         others = {str(k): _num(v) or 0.0 for k, v in jp.items() if str(k) != job}
-        if jp and nxt:
+        if not nxt:
+            problems.append("pole_sizing.next_tallest_job is empty: the job that "
+                            "caps the saving must be named")
+        elif not jp:
+            problems.append("per_workflow_timing records no job_p50 for this "
+                            "workflow: next_tallest_job cannot be checked")
+        else:
             if nxt not in others:
                 problems.append(f"pole_sizing.next_tallest_job {nxt!r} is not another "
                                 "job this workflow's timing measured")
@@ -6252,9 +6353,9 @@ def _opt79_pole_finding_rederived(f: dict, data: dict) -> list[str]:
                 problems.append(f"pole_sizing.next_tallest_job {nxt!r} ({others[nxt]}s) "
                                 "is not the tallest job other than the long pole")
     headroom = round(lp - fl, 1)
-    if headroom <= 0:
-        problems.append(f"no headroom ({lp} - {fl}): a long pole tied with the next "
-                        "job sets no merge wait of its own")
+    if headroom < _VR_OPT79_POLE_MIN_HEADROOM_S:
+        problems.append(f"under 1s of headroom ({lp} - {fl}): a long pole tied with "
+                        "the next job sets no merge wait of its own")
     raw = round(min(waste, headroom), 1)
     for key, want in (("waste_s", waste), ("long_pole_p50_s", lp),
                       ("floor_p50_s", fl), ("headroom_s", headroom),
@@ -6276,8 +6377,10 @@ def _opt79_pole_finding_rederived(f: dict, data: dict) -> list[str]:
                         f"{headroom}) = {raw}, the wall-clock the measured excess "
                         "allows")
     wc = _num(f.get("wall_clock_p50_s"))
-    if wc is None or wc < 0:
-        problems.append(f"wall_clock_p50_s={f.get('wall_clock_p50_s')!r}")
+    if wc is None or wc <= 0:
+        problems.append(f"wall_clock_p50_s={f.get('wall_clock_p50_s')!r}: a pole "
+                        "cache with no merge wait left to credit must be an "
+                        "uncredited row, not a finding")
     deriv = f.get("wall_clock_derivation")
     if deriv is not None:
         steps = [d for d in _as_list(deriv) if isinstance(d, dict)]
@@ -6992,6 +7095,11 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
                        f"{cn.get('on_critical_path')!r}")
         no_pr = (not cn.get("on_critical_path")
                  and cn.get("workflow_gates_pull_requests") is False)
+        frag = _VR_OPT79_UNCREDITED_REASON_PHRASES.get(
+            str(cn.get("uncredited_reason") or ""))
+        if frag and frag not in why:
+            out.append(f"{tag}: `{job}` line does not state its reason "
+                       f"({cn.get('uncredited_reason')!r}: {frag!r})")
         if says_no_pr != no_pr:
             out.append(f"{tag}: `{job}` line {'says' if says_no_pr else 'does not say'}"
                        " no pull request runs it, against the row's stamps")

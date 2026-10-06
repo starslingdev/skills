@@ -15615,6 +15615,24 @@ _OPT79_POLE_SIZING_KEYS = (
     "headroom_s", "raw_wall_clock_s",
     "capped_by_next_tallest_job",
 )
+# A long pole with less than this much headroom over the next-tallest job is
+# TIED with it: shrinking it moves no merge wait (and the figure would render as
+# 0s), so it is an uncredited row, never a pole finding. Pinned equal to
+# `verify_report._VR_OPT79_POLE_MIN_HEADROOM_S` by a coupling test.
+_OPT79_POLE_MIN_HEADROOM_S = 1.0
+# WHY a workflow's long pole on a pull-request workflow is an uncredited row
+# rather than the credited pole finding. Every such row names one of these on
+# `uncredited_reason`; the renderer states each in plain English
+# (`blocking_path._OPT79_UNCREDITED_REASON_PHRASES`) and `verify_report` fails a
+# pole row with headroom that names none.
+_OPT79_REASON_TIED = "pole_tied_with_next_job"
+_OPT79_REASON_ZEROED = "pole_merge_wait_zeroed_by_cross_check"
+_OPT79_REASON_OFF_SPINE = "pole_workflow_off_merge_gating_spine"
+_OPT79_UNCREDITED_REASONS = frozenset({
+    _OPT79_REASON_TIED, _OPT79_REASON_ZEROED, _OPT79_REASON_OFF_SPINE})
+# The events on which a pull request waits for a workflow: the same set the
+# cascade's `bound_developer_facing` reads (`wall_clock._DEVELOPER_FACING_EVENTS`).
+_OPT79_PR_EVENTS = frozenset({"pull_request", "merge_group"})
 # The candidates whose logs were probed and which were then WITHHELD
 # (`[{workflow_file, job, gate}]`) — rendered as one Data sources row and
 # re-derived by `verify_report`, so "probed, could not tell" never reads as
@@ -16651,6 +16669,7 @@ def _detect_opt79_net_negative_cache(
     is_pr: bool = False,
     withheld_candidates: list[dict[str, Any]] | None = None,
     package_json: Any = None,
+    sampled_events: Any = None,
 ) -> list[dict[str, Any]]:
     """A cache that costs more than it saves (catalog OPT79) — measured.
 
@@ -16713,6 +16732,11 @@ def _detect_opt79_net_negative_cache(
     if not jobs_per_run:
         _no("no_sampled_runs")
         return []
+    # Whether a pull request waits on this workflow is read from the events its
+    # SAMPLED runs carried (the same events `bound_developer_facing` reads), and
+    # from the YAML's declared trigger (`is_pr`) only when no event was sampled.
+    gates_pr = (bool(set(sampled_events) & _OPT79_PR_EVENTS) if sampled_events
+                else bool(is_pr))
     logs = logs_by_job_id or {}
     candidates = _opt79_candidates(
         wf_path, jobs_per_run, crit, wf_doc, withheld=withheld,
@@ -16978,7 +17002,26 @@ def _detect_opt79_net_negative_cache(
         # no merge wait, so it falls through to the uncredited line below.
         # Runner-minutes are not stated: the bill section's admission is a
         # below-the-floor proof, which the slowest job cannot have.
-        if block.get("is_long_pole") and is_pr and not block.get("below_cluster_floor"):
+        def _uncredited_row() -> dict[str, Any]:
+            return _opt79_uncredited_row(
+                _opt79_stamp(
+                    kind=_OPT79_UNCREDITED_KIND, job=name, block=block, rows=rows,
+                    hits=len(hits), misses=len(misses), ambiguous=ambiguous,
+                    other_runner=len(other_runner),
+                    hit_p50=hit_p50, miss_p50=miss_p50, waste=waste,
+                    waste_floor=waste_floor, hit_share=hit_share,
+                    job_runs=job_runs, sampled=sampled,
+                    monthly_volume=monthly_volume if has_volume else None,
+                    effective=(_effective_volume(monthly_volume, job_runs, sampled)
+                               if has_volume else None),
+                    runner_min_saving=None),
+                wf_path=wf_path, gates_pr=gates_pr,
+                long_pole_job=str(block.get("long_pole_job") or ""),
+                long_pole_p50_s=block.get("long_pole_p50_s"),
+                job_p50_s=block.get("job_p50_s"),
+                floor_p50_s=block.get("floor_p50_s"))
+
+        if block.get("is_long_pole") and gates_pr and not block.get("below_cluster_floor"):
             ctx = WallClockContext(workflow=wf_path, crit=crit, affected_jobs=(name,))
             sized = size_wall_clock(
                 waste, ctx, cascade=[("within-workflow", bound_within_workflow)])
@@ -16986,7 +17029,7 @@ def _detect_opt79_net_negative_cache(
             lp50 = float(crit.get("long_pole_p50") or 0.0)
             fl50 = float(crit.get("floor_p50") or 0.0)
             headroom = round(max(lp50 - fl50, 0.0), 1)
-            if raw_wc > 0 and headroom > 0:
+            if headroom >= _OPT79_POLE_MIN_HEADROOM_S and round(raw_wc) > 0:
                 out.append(_opt79_pole_finding(
                     wf_path=wf_path, name=name, declared=declared, block=block,
                     crit=crit, rows=rows, hits=hits, misses=misses,
@@ -17004,6 +17047,15 @@ def _detect_opt79_net_negative_cache(
                     guardrail=_guardrail, title=title,
                     idx=start_idx + len(out) + 1))
                 continue
+            # TIED with the next-tallest job: under a second of headroom moves
+            # no merge wait, so it is an uncredited row that says so, tallied
+            # under its own gate rather than the below-the-floor one.
+            _no(_OPT79_REASON_TIED, job=name, headroom=headroom, raw_wc=raw_wc)
+            if uncredited is not None:
+                row = _uncredited_row()
+                row["uncredited_reason"] = _OPT79_REASON_TIED
+                uncredited.append(row)
+            continue
 
         # MEASURED net-negative. Everything above is the measurement; the floor
         # decides only whether it can be PRICED. A job that is not strictly below
@@ -17014,36 +17066,7 @@ def _detect_opt79_net_negative_cache(
             _no("job_not_strictly_below_the_workflow_cluster_floor", job=name,
                 job_p50=block.get("job_p50_s"), floor_p50=block.get("floor_p50_s"))
             if uncredited is not None:
-                row = _opt79_stamp(
-                    kind=_OPT79_UNCREDITED_KIND, job=name, block=block, rows=rows,
-                    hits=len(hits), misses=len(misses), ambiguous=ambiguous,
-                    other_runner=len(other_runner),
-                    hit_p50=hit_p50, miss_p50=miss_p50, waste=waste,
-                    waste_floor=waste_floor, hit_share=hit_share,
-                    job_runs=job_runs, sampled=sampled,
-                    monthly_volume=monthly_volume if has_volume else None,
-                    effective=(_effective_volume(monthly_volume, job_runs, sampled)
-                               if has_volume else None),
-                    runner_min_saving=None)
-                row["workflow_file"] = wf_path
-                # WHERE the job sits, stated rather than implied. `not below the
-                # floor` spans everything from the second-ranked job upwards.
-                # Without these the renderer could not tell the second-slowest
-                # job from the slowest job, or a PR workflow's from a
-                # schedule-only one's.
-                row["long_pole_job"] = str(block.get("long_pole_job") or "")
-                row["long_pole_p50_s"] = block.get("long_pole_p50_s")
-                row["job_p50_s"] = block.get("job_p50_s")
-                row["floor_p50_s"] = block.get("floor_p50_s")
-                row["workflow_gates_pull_requests"] = bool(is_pr)
-                # Never True on an uncredited row any more. The long pole of a
-                # PR workflow is the credited finding above; what reaches here
-                # is a job that is not the long pole, a workflow no PR runs, or
-                # a long pole TIED with the next job — which sets no merge wait
-                # of its own, because the other job still finishes then.
-                # `verify_report` fails a row stamped True.
-                row["on_critical_path"] = False
-                uncredited.append(row)
+                uncredited.append(_uncredited_row())
             continue
         if not has_volume:
             _drop(name, "no_monthly_volume", monthly_volume=monthly_volume)
@@ -17113,6 +17136,102 @@ def _detect_opt79_net_negative_cache(
         f["guardrail"] = _guardrail
         out.append(f)
     return out
+
+
+def _opt79_uncredited_row(
+    stamped: dict[str, Any],
+    *,
+    wf_path: str,
+    gates_pr: bool,
+    long_pole_job: str,
+    long_pole_p50_s: Any,
+    job_p50_s: Any,
+    floor_p50_s: Any,
+) -> dict[str, Any]:
+    """One uncredited OPT79 row: the stamped measurement block plus WHERE the
+    job sits, stated rather than implied, so the renderer can tell the
+    second-slowest job from a tied pole from a workflow no PR runs. Shared by
+    the detector and by `_opt79_demote_uncredited_poles`, so a demoted pole
+    finding has exactly the shape the detector builds.
+
+    `on_critical_path` is always False here: what reaches an uncredited row sets
+    no merge wait of its own, and `verify_report` fails a row stamped True."""
+    row = dict(stamped)
+    row["kind"] = _OPT79_UNCREDITED_KIND
+    row["runner_min_saving"] = None
+    row["workflow_file"] = wf_path
+    row["long_pole_job"] = long_pole_job
+    row["long_pole_p50_s"] = long_pole_p50_s
+    row["job_p50_s"] = job_p50_s
+    row["floor_p50_s"] = floor_p50_s
+    row["workflow_gates_pull_requests"] = bool(gates_pr)
+    row["on_critical_path"] = False
+    return row
+
+
+# Non-ASCII the cascade's reason prose uses, spelled in ASCII for the report.
+_OPT79_ASCII_SPELLINGS = (("\u2014", " - "), ("\u2013", "-"), ("\u2192", "->"),
+                          ("\u2265", ">="), ("\u2264", "<="), ("\u00d7", "x"),
+                          ("\u2026", "..."), ("\u2018", "'"), ("\u2019", "'"),
+                          ("\u201c", '"'), ("\u201d", '"'))
+
+
+def _opt79_ascii(text: str) -> str:
+    for a, b in _OPT79_ASCII_SPELLINGS:
+        text = text.replace(a, b)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    return " ".join(text.split())
+
+
+def _opt79_demote_uncredited_poles(
+    findings: list[dict[str, Any]],
+    uncredited: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return `findings` without the OPT79 pole findings that no longer carry a
+    merge wait, appending each one to `uncredited` as an uncredited row that
+    says why.
+
+    Run in `collect()` AFTER the generic wall-clock cascade and the off-spine
+    stamping. A pole finding the cascade zeroed (`wall_clock_p50_s <= 0`) is
+    `pole_merge_wait_zeroed_by_cross_check`, with the cascade's own reason(s) as
+    `uncredited_reason_detail`; one whose job the merge-gating spine dropped
+    (`off_spine`) is `pole_workflow_off_merge_gating_spine`. Either way a
+    credited finding stating 0s, or a merge wait the PR does not wait for, is
+    never what reaches the report. The removed finding's id is simply not
+    used (ids are never renumbered; the admission gate drops findings the same
+    way)."""
+    kept: list[dict[str, Any]] = []
+    for f in findings:
+        cn = f.get("cache_net_negative") if isinstance(f, dict) else None
+        if not (isinstance(cn, dict) and cn.get("kind") == _OPT79_POLE_KIND):
+            kept.append(f)
+            continue
+        wc = f.get("wall_clock_p50_s")
+        zeroed = not isinstance(wc, (int, float)) or wc <= 0
+        if not zeroed and not f.get("off_spine"):
+            kept.append(f)
+            continue
+        stamped = {k: cn[k] for k in _OPT79_STAMP_KEYS if k in cn}
+        row = _opt79_uncredited_row(
+            stamped, wf_path=str(cn.get("workflow_file") or f.get("workflow_file") or ""),
+            gates_pr=bool(cn.get("workflow_gates_pull_requests")),
+            long_pole_job=str(cn.get("long_pole_job") or ""),
+            long_pole_p50_s=cn.get("long_pole_p50_s"),
+            job_p50_s=cn.get("job_p50_s"), floor_p50_s=cn.get("floor_p50_s"))
+        if zeroed:
+            row["uncredited_reason"] = _OPT79_REASON_ZEROED
+            reasons = [_opt79_ascii(str(d.get("reason") or ""))
+                       for d in (f.get("wall_clock_derivation") or [])
+                       if isinstance(d, dict)]
+            row["uncredited_reason_detail"] = (
+                "; ".join(r for r in reasons if r)
+                or "the cross-checks left no merge wait for it to shorten")
+        else:
+            row["uncredited_reason"] = _OPT79_REASON_OFF_SPINE
+        logger.debug("OPT79 %s: pole finding %s demoted to uncredited (%s)",
+                     row["workflow_file"], f.get("id"), row["uncredited_reason"])
+        uncredited.append(row)
+    return kept
 
 
 def _opt79_next_tallest_job(crit: dict[str, Any], pole: str) -> str:
@@ -19739,7 +19858,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             withheld_candidates=findings_doc.setdefault(_OPT79_WITHHELD_DOC_KEY, []),
             # The repo-root package.json, read once above: decides whether a
             # setup-node v5+ job's automatic cache is really on.
-            package_json=_opt79_pkg)
+            package_json=_opt79_pkg,
+            # The events this workflow's sampled runs carried: whether a pull
+            # request waits on it is read from these, not the declared trigger.
+            sampled_events=events_by_wf.get(wf_path))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
@@ -20183,6 +20305,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _stamp_off_spine_findings(
         findings, _dropped_non_pr + dropped_non_required,
         [n for n, _ in pr_checks_tuple], crit_by_wf)
+    # An OPT79 pole finding the cascade zeroed, or whose job the spine dropped,
+    # carries no merge wait: it becomes an uncredited row that says why.
+    findings = _opt79_demote_uncredited_poles(
+        findings, findings_doc.setdefault(_OPT79_UNCREDITED_DOC_KEY, []))
+    findings_doc["findings"] = findings
 
     # --with-logs: attach verbatim cache hit/miss log lines (+ run links) to
     # every cache-family finding, so a "cache miss" claim points at the actual

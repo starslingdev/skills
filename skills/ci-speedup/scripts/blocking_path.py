@@ -5981,6 +5981,24 @@ _OPT79_HELD_BACK_REASONS: dict[str, str] = {
 _WITHHELD_PHRASES_BY_KEY[_OPT79_WITHHELD_DOC_KEY] = _OPT79_HELD_BACK_REASONS
 
 
+# WHY the slowest job of a pull-request workflow is listed uncredited, one
+# plain-English clause per `uncredited_reason` the collector stamps
+# (`collect_runs._OPT79_UNCREDITED_REASONS`). `verify_report` carries the
+# leading fragment of each (`_VR_OPT79_UNCREDITED_REASON_PHRASES`) and fails a
+# line that does not state the reason its row carries; a test pins the three
+# key sets equal. `{floor}` / `{detail}` are filled per row.
+_OPT79_UNCREDITED_REASON_PHRASES: dict[str, str] = {
+    "pole_tied_with_next_job":
+        "it is tied with the next-tallest job{floor}, so shrinking it moves no "
+        "merge wait",
+    "pole_merge_wait_zeroed_by_cross_check":
+        "the cross-checks found no merge wait it can shorten: {detail}",
+    "pole_workflow_off_merge_gating_spine":
+        "the pull request can merge without waiting for this job, so its excess "
+        "is not part of the merge wait",
+}
+
+
 def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
     """Caches MEASURED to cost more than they save on a job that is not below its
     workflow's cluster floor — stated, with no number attached.
@@ -6027,7 +6045,18 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
         hits, misses = r.get("hits"), r.get("misses")
         waste_txt = f"{float(waste):.0f}s"
         where = f" in `{wf}`" if wf else ""
-        if r.get("workflow_gates_pull_requests") is False:
+        reason = _OPT79_UNCREDITED_REASON_PHRASES.get(
+            str(r.get("uncredited_reason") or ""))
+        if reason is not None:
+            floor = r.get("floor_p50_s")
+            detail = str(r.get("uncredited_reason_detail") or "").strip().rstrip(".;")
+            clause = reason.format(
+                floor=(f" ({float(floor):.0f}s)"
+                       if isinstance(floor, (int, float)) else ""),
+                detail=detail or "no reason was recorded")
+            why = (f"`{job}` is this workflow's slowest job, but {clause}; "
+                   "**not credited** in this version.")
+        elif r.get("workflow_gates_pull_requests") is False:
             why = (f"`{job}` runs in a workflow that does not run on pull "
                    "requests, so no pull request waits on it; the saving is "
                    "runner-minutes only and is **not credited** in this version.")
