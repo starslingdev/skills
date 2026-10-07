@@ -4418,6 +4418,10 @@ def test_opt79_job_tied_with_the_long_pole_stays_uncredited():
     assert out == [] and len(rows) == 1
     assert "uncredited_reason" not in rows[0], rows[0]
     assert w.get("long_pole_of_a_workflow_no_pull_request_runs") == 1, w
+    # a tied co-pole with no reason on a workflow no PR runs is a legitimate
+    # row: the converse rule must not call it a missed below-the-long-pole credit
+    assert vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": rows}) == []
 
 
 def test_opt79_below_long_pole_token_is_one_contract():

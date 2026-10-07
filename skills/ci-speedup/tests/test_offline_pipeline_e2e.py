@@ -101,10 +101,11 @@ _JOB_ID = 9001
 #            so it costs exactly the per-job cap once. Every other OPT79 gate is
 #            answered from data already in hand, so no log is fetched for a job that
 #            could not produce a finding.)
-#   56  now  (+8 OPT79: `build-matrix.yml`'s `integration` job — that workflow's slowest —
-#            now also restores a cache before its install, so the uncredited path
-#            runs end to end: its second candidate job costs the per-job cap once
-#            more.)
+#   56  now  (+8 OPT79: `build-matrix.yml`'s `integration` job — then that workflow's
+#            slowest — now also restores a cache before its install: its second
+#            candidate job costs the per-job cap once more. Since the `e2e` job was
+#            added it is the credited below-the-long-pole finding instead, so the
+#            uncredited path no longer runs end to end; unit tests cover it.)
 #   56  still (OPT79 now reads the repo-root `package.json` to decide whether
 #            setup-node v5+'s AUTOMATIC cache is on. At most ONE read per repo, and
 #            only when a sampled job runs setup-node v5+ with no `cache:` input;
@@ -1131,32 +1132,32 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
             (lambda d: [f for f in d["findings"] if f.get("pattern") == "OPT79"
                         and f.get("affected_jobs") == ["deps"]
                         ][0]["cache_net_negative"].__setitem__("waste_s", 900.0),
-             "Tier-2 waste_s"),
+             "waste_s 900.0 != 19.0"),
             # the below-the-long-pole finding's excess, and separately its
             # margin, are re-derived (the margin from the slowest job's p50)
             (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
                             and f.get("affected_jobs") == ["integration"]
                             )["cache_net_negative"].__setitem__("waste_s", 900.0),
-             "below-long-pole waste_s"),
+             "waste_s 900.0 != 21.0"),
             (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
                             and f.get("affected_jobs") == ["integration"]
                             )["tier2_neutrality"].__setitem__("margin_s", 61.0),
-             "below-long-pole margin"),
+             "below-long-pole margin 61.0 != re-derived 60.0"),
             # the pole finding's measured excess, and separately its credited
             # merge-wait number, are both re-derived rather than read back
             (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
                             and f.get("affected_jobs") == ["prep"]
                             )["cache_net_negative"].__setitem__("waste_s", 900.0),
-             "pole waste_s"),
+             "pole_sizing.waste_s 21.0 != re-derived 900.0"),
             (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
                             and f.get("affected_jobs") == ["prep"]
                             ).__setitem__("wall_clock_p50_s", 900.0),
-             "pole wall_clock_p50_s"),
+             "wall_clock_p50_s 900.0 != min(waste_s 21.0, headroom 20.0)"),
             # a below-the-floor finding claiming merge-wait time it cannot have
             (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
                             and f.get("affected_jobs") == ["deps"]
                             ).__setitem__("wall_clock_p50_s", 5),
-             "below-floor wall_clock_p50_s")):
+             "a below-the-floor OPT79 finding claims wall_clock_p50_s=5")):
         _bad = json.loads(findings_path.read_text(encoding="utf-8"))
         _tamper(_bad)
         _bad_path = tmp_path / "findings_tampered.json"
@@ -1168,7 +1169,9 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
         assert _v.returncode != 0, (
             f"verify_report accepted a tampered OPT79 field ({_check}):\n"
             f"{_v.stdout}")
-        assert _check.split()[-1] in _v.stdout, (_check, _v.stdout)
+        # the FULL problem phrase, not just its last word: a different check
+        # failing on an unrelated field would otherwise satisfy this
+        assert _check in _v.stdout, (_check, _v.stdout)
 
     # ---- PR-H1 (G5): the promoted-path backstop — UNCONDITIONAL. -------------
     # Before this, the replay corpus promoted nothing, so the Tier-2 render
