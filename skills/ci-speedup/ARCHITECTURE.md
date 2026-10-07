@@ -1352,12 +1352,15 @@ first withholds the occurrence, the second withholds the job, and
 `actions/cache/restore` — which has no post phase — stamps `post_step: null`
 rather than inventing a label (that reading holds only because a separate
 `actions/cache/save` step withholds earlier, so no unmeasured save can exist). And the
-RUNNER-MINUTE credit gate requires the job's p50 to be strictly shorter than
-another job's, so shrinking it cannot make the workflow take longer;
+RUNNER-MINUTE credit gate requires either a still-positive floor margin after
+rounding to 0.1s (`below_cluster_floor`) or a lead of at least 1s over the
+workflow's long pole (`below_long_pole`), so shrinking the job cannot make the
+workflow take longer;
 `wall_clock_p50_s=0` is the conservative lower bound on that finding (below the
 floor the saving may still shorten the gate through a `needs:` chain, which this
-audit does not claim; at or above the floor a job chained to the long pole is not
-credited at all). Below the workflow's cluster floor that proof is
+audit does not claim; at or above the floor a job chained to the long pole of a
+pull-request workflow is not credited at all, while on a push-only workflow it
+is). Below the workflow's cluster floor that proof is
 `below_cluster_floor` — unlike OPT77, the token is not historical for OPT79, it
 is the proof; at or above the floor but below the long pole it is
 `below_long_pole`, measured against the long pole itself. The floor does NOT gate `_opt79_candidates` (which is
@@ -1445,22 +1448,28 @@ the stamped block and fails any mismatch, any such finding carrying
 `tier2_neutrality` or a non-null `runner_min_saving`, and any uncredited row whose
 `on_critical_path` is missing or not `false`.
 
-The two tie thresholds differ and are stated, not unified: the pole arm declines
-a pole whose headroom to the next-tallest job is under 1.0s, while a job counts
-as tied with the long pole (a co-pole) only at 0.0s lead after rounding to 0.1s.
-The uncredited line therefore covers exactly two cases: the long pole of a
-workflow that runs on no pull request (runner-minutes only, unpriced here; tallied
-under `long_pole_of_a_workflow_no_pull_request_runs`, together with a job tied
-with that pole), and the long pole of a pull-request workflow that the wall-clock
+There is ONE tie constant, 1.0s, shared by both arms: the pole arm declines a
+pole whose headroom to the next-tallest job is under 1.0s, and a job counts as
+tied with the long pole (a co-pole) when its lead over the pole is under 1.0s
+(each p50 rounded to 0.1s first).
+The uncredited line therefore covers exactly three cases: (a) the long pole of a
+workflow that runs on no pull request, or a job tied with it (runner-minutes
+only, unpriced here; tallied under `long_pole_of_a_workflow_no_pull_request_runs`);
+(b) the long pole of a pull-request workflow that the wall-clock
 arm declined, with its stamped `uncredited_reason` — tied with the next-tallest
-job (no headroom; a job TIED with the long pole after rounding is a co-pole and
+job (no headroom; a job TIED with the long pole is a co-pole and
 is stamped the same way, tallied under `pole_tied_with_next_job`), zeroed by a
-cross-check, or off the merge-gating spine. The row stamps `long_pole_job`,
+cross-check, or off the merge-gating spine; and (c) a job of a pull-request
+workflow at or above the floor that is `needs:`-chained to the long pole
+(`job_in_a_needs_chain_with_the_long_pole`; the chain's sum is the merge wait, so
+shrinking it can shorten that wait, and on a push-only workflow such a job IS
+credited). The row stamps `long_pole_job`,
 `long_pole_p50_s`, `job_p50_s`, `floor_p50_s`, `workflow_gates_pull_requests` and
-`on_critical_path`, which is always `false` there, so the renderer has no
-merge-wait branch. For a workflow no pull request runs it says the workflow "does
-not run on pull requests"; for a declined pole it states the stamped reason (a
-co-pole reads "tied for this workflow's slowest job"). A schedule-only workflow is
+`on_critical_path`, which is always `false` there (the job is not the credited
+pole), so the renderer has no merge-wait branch. For a workflow no pull request
+runs it says the workflow "does not run on pull requests"; for a declined pole it
+states the stamped reason (a co-pole reads "`{job}` is tied with `{lp_job}`, this
+workflow's slowest job (Ns), so neither job alone sets the merge wait"). A schedule-only workflow is
 never told it has a merge wait at all. The retired "at or above the second-slowest
 job, so this audit cannot prove that shrinking it leaves the merge gate
 unchanged" wording is gone with the case it described, and `verify_report.py`'s

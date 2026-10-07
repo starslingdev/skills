@@ -6023,9 +6023,8 @@ _OPT79_UNCREDITED_REASON_PHRASES: dict[str, str] = {
 
 
 def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
-    """Caches MEASURED to cost more than they save on a workflow's long pole (or a
-    job tied with it) that the audit declined to size — stated, with no number
-    attached.
+    """Caches MEASURED to cost more than they save that the audit declined to
+    size (three cases, listed below) — stated, with no number attached.
 
     These are not findings and never enter a total: no runner-minutes, no
     wall-clock claim, no neutrality certificate, no Tier-2 row. The measurement
@@ -8576,9 +8575,10 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *opt79_off_pole]
     if also_lines:
         out += ["---", "", *also_lines]
-    # Measured net-negative caches that could not be PRICED (the slowest job, or
-    # one tied with it, of a workflow no PR runs; or a PR workflow's slowest job
-    # the pole arm declined). Beside the dropped-unprovable banner, its nearest
+    # Measured net-negative caches that could not be PRICED (three cases: the
+    # slowest job, or one tied with it, of a workflow no PR runs; a PR workflow's
+    # slowest job the pole arm declined; a PR-workflow job `needs:`-chained to the
+    # slowest). Beside the dropped-unprovable banner, its nearest
     # precedent: a measured fact kept out of the numbers and shown anyway.
     out += uncredited_lines
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
@@ -10399,9 +10399,10 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # (§5.5/G15; `check_cost_spine_shallow_disclosed` re-derives it from
         # `data_sources`, so dropping this line is a verify FAIL, not a style choice).
         out += ["---", "", f"> ⚠️ _{shallow_note}_", ""]
-    # Measured net-negative caches that could not be PRICED (the slowest job, or
-    # one tied with it, of a workflow no PR runs; or a PR workflow's slowest job
-    # the pole arm declined). Beside the dropped-unprovable banner, its nearest
+    # Measured net-negative caches that could not be PRICED (three cases: the
+    # slowest job, or one tied with it, of a workflow no PR runs; a PR workflow's
+    # slowest job the pole arm declined; a PR-workflow job `needs:`-chained to the
+    # slowest). Beside the dropped-unprovable banner, its nearest
     # precedent: a measured fact kept out of the numbers and shown anyway.
     out += _opt79_uncredited_block(doc)
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
