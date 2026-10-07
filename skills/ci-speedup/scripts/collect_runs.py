@@ -9716,7 +9716,7 @@ _OPT80_VERDICT_GATES = frozenset({
 def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]],
                      p50: float, slow_ids: list[Any] | None = None,
                      probed_ids: list[Any] | None = None) -> dict[str, Any] | None:
-    """The tail axis of an on-pole, pull-request OPT80 finding: how often a run
+    """The tail axis of a slowest-job, pull-request OPT80 finding: how often a run
     stalls, and how much longer its checkout takes when it does.
 
     Derived ONLY from data the finding already stamps, so `verify_report.py`
@@ -9795,7 +9795,10 @@ def _opt80_merge_gating_jobs(
     """The YAML jobs of `wf_path` a merge waits on, `{job_key: evidence}`, or None
     when that cannot be known. A job is merge-gating when its check is REQUIRED,
     or when a required job in the same workflow transitively `needs:` it — the
-    same reachability `_required_reachable_jobs` scopes the spine with.
+    reachability similar to `_required_reachable_jobs`, which scopes the spine;
+    this one adds a `<workflow> / <job>` fallback when the shared resolver pins
+    nothing, and requires the literal name check (`_opt80_check_names_job`) on
+    every match.
 
     None (unknown) whenever the required set is unread, partial or empty, or the
     workflow has no job graph: the slowest job of a pull-request workflow is NOT
@@ -9952,14 +9955,21 @@ def _detect_opt80_checkout_tail_stall(
     BOUND on what capping recovers — but it is not credited, because it is not a
     p50 quantity, and because the recommended abort leaves a residual.
 
-    THE TAIL AXIS. When the job is the workflow's slowest job AND the workflow
-    runs on pull requests (`is_pr` True — unknown is treated as not), a stalled
-    run sits on that run's merge wait. That is stamped as a separate
+    THE TAIL AXIS. When the job is the workflow's slowest job, the workflow
+    runs on pull requests (`is_pr` True — unknown is treated as not), the
+    workflow's timing was taken from developer events
+    (`_crit_has_developer_timing`; a missing `event_scope` counts as
+    developer-timed here, while the verifier fails it) AND the job is on the
+    merge-gating path (`merge_gating_jobs`: required, or needed by required
+    work; with no complete required-check data the merge wait is not claimed),
+    a stalled run sits on that run's merge wait. That is stamped as a separate
     `checkout_stall.tail_axis` block — "one run in N spends about X s longer on
-    checkout, and that run's log shows the fetch stalling" — derived only from the per-run durations and
-    the LOG-PROVEN tail runs (`_opt80_tail_axis`). It is never summed into
-    `wall_clock_p50_s`, any p50 total, the runner-minute saving or the
-    neutrality certificate; the renderer shows it as its own line at the pole.
+    checkout, and that run's log shows the fetch stalling" — derived only from
+    the per-run durations and the LOG-PROVEN tail runs (`_opt80_tail_axis`). It
+    is never summed into `wall_clock_p50_s`, any p50 total, the runner-minute
+    saving or the neutrality certificate; the renderer shows it as its own line
+    at the pole, or in the off-pole "Checkout stall tails" section when that
+    slowest job was not drilled as a pole.
     A slowest job that gets NO tail line stamps `tail_axis_withheld_reason`,
     renders that reason's sentence (`_OPT80_TAIL_WITHHELD_SENTENCES`, none of
     which claims a merge wait) and counts `tail_line_withheld_<reason>` in

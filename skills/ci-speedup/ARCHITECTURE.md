@@ -1256,7 +1256,9 @@ runner-minutes or the certificate. `verify_report.py`'s
 proofs' own quoted lines, fails a block on a finding off the critical path or
 outside the detector's own gate (`_opt80_tail_axis_eligible`: the workflow is in
 the stamped `declared_pr_workflows`, its `per_workflow_timing` `event_scope` is a
-pull-request event, the job is its `long_pole_job`, and the stamped
+developer event (`pull_request`, `pull_request_target`, `merge_group`; the
+verifier fails a missing `event_scope`, while the collector treats a missing one
+as developer-timed), the job is its `long_pole_job`, and the stamped
 `tail_axis.merge_gating` re-derives from `required_checks`,
 `required_checks_complete` and `workflow_job_graph`), a
 block with no marked line (or a line with no block), and any "one run in N"

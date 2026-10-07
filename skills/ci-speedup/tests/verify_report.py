@@ -6417,15 +6417,17 @@ def _opt80_checkout_stall_rederived(f: dict) -> list[str]:
 
 # ---- OPT80's tail axis ---------------------------------------------------------
 #
-# An on-pole, pull-request OPT80 finding stamps `checkout_stall.tail_axis` and the
+# A slowest-job, pull-request OPT80 finding stamps `checkout_stall.tail_axis` and the
 # report renders it as "one run in N spends about X s longer on checkout, and
 # that run's log shows the fetch stalling" — a separate tail figure, never a p50
 # one. Every number in that sentence is re-derived here from the per-run checkout
 # durations and the per-run stall proofs; the stamped summary values are
 # compared, never trusted. X is the MEDIAN proven run's whole checkout excess:
 # not an upper bound, and not all of it is the proven pause. So the legacy
-# "loses up to X s on checkout to a stalled fetch" wording is matched too and
-# always fails.
+# "loses up to X s on checkout to a stalled fetch" wording is matched too. It
+# always fails for the "loses" forms; the pattern below also accepts "spends
+# about X s on checkout to a stalled fetch", which is not rejected on wording
+# alone and is still held to the re-derived N and X.
 _VR_OPT80_TAIL_MARKER_RE = re.compile(r"<!-- opt80-tail:([^ ]+) -->")
 _VR_OPT80_TAIL_PHRASE_RE = re.compile(
     r"one run in (\d+) (spends about|loses about|loses up to) (\d+)s "
@@ -6749,10 +6751,16 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
     stamped finding's re-derived values, and on any sentence still in the legacy
     "loses up to / about X s on checkout to a stalled fetch" wording (X is a
     median whole-checkout excess: not a ceiling, and not all of it the proven
-    pause). Placement: each marker sits in its own job's Long pole section or
+    pause). Also fails a stamped axis that does not meet the collector's own
+    gate (`_opt80_tail_axis_eligible`: a declared pull-request workflow, a
+    developer `event_scope`, the job is `long_pole_job`, and the merge-gating
+    block re-derives from the required checks and job graph) and one stamped
+    with a non-zero `wall_clock_p50_s` (the tail is never a p50 quantity).
+    Placement: each marker sits in its own job's Long pole section or
     the dedicated Checkout stall tails section (never above the Contents, in a
     runner-minute card or in another job's pole), and every tail sentence sits
-    on a marked line. TOP-LEVEL: the Tier-2 pass compat-skips a report with no
+    on a marked line or inside the same finding's own runner-saving card.
+    TOP-LEVEL: the Tier-2 pass compat-skips a report with no
     Tier-2 stamps, and the tail line lives at the pole."""
     name = "OPT80 tail lines re-derive and pair with their stamped blocks"
     data, err = _load_findings_doc(findings_path)
@@ -6778,8 +6786,8 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
     # ONE placement rule. A tail marker sits in its own job's Long pole section or
     # in the dedicated Checkout stall tails section - never above the Contents
     # (title, provenance, Bottom line), in a runner-minute card or in another
-    # job's pole. And every tail sentence sits on a marked line, so with one
-    # marker per finding the sentence appears exactly once: the tail is a
+    # job's pole. And every tail sentence sits on a marked line or inside the
+    # SAME finding's own runner-saving card (allowed just below): the tail is a
     # separate figure, never headlined or summed, even when its numbers re-derive.
     by_id = {str(f.get("id") or ""): f for f in tails}
     spans: list[tuple[int, int]] = []
@@ -6805,8 +6813,9 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
     for *_rest, said, pos in phrases:
         if not any(a <= pos < b for a, b in spans):
             bad.append(f"a tail sentence {said!r} sits off its marked line, in "
-                       f"{_vr_opt80_enclosing(report, pos)[1]} - it is stated once, "
-                       "on its marked line, never headlined or summed")
+                       f"{_vr_opt80_enclosing(report, pos)[1]} - it belongs on its "
+                       "marked line (or inside the same finding's runner-saving "
+                       "card), never headlined or summed")
     allowed: set[tuple[int, int]] = set()
     want_ids = {str(f.get("id") or "") for f in tails}
     for i in sorted({i for i, _ in marks} - want_ids):
@@ -7145,14 +7154,21 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                     # SLOWEST; a drilled pole is often not that job (a chain
                     # pole such as `prep -> verify`), so False on a rendered
                     # pole is consistent and never fails here.
-                    # One exemption, narrow: a slowest job whose workflow runs on
-                    # pull requests but was not drilled (it ranks below the rendered
-                    # poles) is on its own merge wait without a pole header. It is
-                    # accepted only when its tail line renders OUTSIDE every pole
-                    # section, which `check_opt80_tail_lines` pairs and re-derives.
-                    # The claim itself is re-derived for that exemption: the job
-                    # must be `per_workflow_timing[wf].long_pole_job`, the field
-                    # the collector computed on_critical_path from.
+                    # Three exemptions from "True needs a rendered pole":
+                    #  1. A slowest job whose workflow runs on pull requests but
+                    #     was not drilled (it ranks below the rendered poles) is on
+                    #     its own merge wait without a pole header. It is accepted
+                    #     only when its tail line renders in the dedicated Checkout
+                    #     stall tails section, not merely outside every pole
+                    #     (which a Runner saving card also is);
+                    #     `check_opt80_tail_lines` pairs and re-derives that line.
+                    #     The claim itself is re-derived for this one: the job must
+                    #     be `per_workflow_timing[wf].long_pole_job`, the field the
+                    #     collector computed on_critical_path from.
+                    #  2. A workflow whose recorded events hold no pull-request
+                    #     event (a push-only nightly's job is never a pole).
+                    #  3. A workflow with no rendered pole header at all.
+                    #  (2 and 3 live in `_vr_opt80_slowest_job_can_be_a_pole`.)
                     off_pole_tail = (bool(claimed) and not on_pole
                                      and _vr_opt80_tail_rendered_off_pole(f, report))
                     if off_pole_tail:

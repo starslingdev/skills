@@ -210,7 +210,7 @@ CHECK_CLASS = {
     "Tier-2 R-rows carry re-derived wall-clock-neutral certificates": "fabricated-or-unsupported-finding",  # a promoted row's proof is not backed by the data
     "Tier-2 R-rows use measured sizing basis": "estimated-not-measured",  # exact match: promoted bill rows must be measured, not modeled
     "uncredited net-negative caches re-derive from their own runs": "fabricated-or-unsupported-finding",  # a numberless cache row whose measurements the data does not support
-    "OPT80 tail lines re-derive and pair with their stamped blocks": "fabricated-or-unsupported-finding",  # a tail line whose N or X the per-run checkout rows and stall proofs do not re-derive
+    "OPT80 tail lines re-derive and pair with their stamped blocks": "fabricated-or-unsupported-finding",  # a tail line whose N or X the per-run checkout rows and stall proofs do not re-derive, or that is misplaced, unpaired, in legacy wording, or on a job the collector's gate would not stamp
     "OPT80 slowest-job sentence pairs with its withheld reason": "fabricated-or-unsupported-finding",  # a merge-wait claim, or a no-tail-line reason, the stamped facts do not support
     "Tier-2 section-lead totals match de-overlapped findings": "fabricated-or-unsupported-finding",  # rendered totals not backed by findings
     "no claim or prose cites the closing-down /timing endpoints": "fabricated-or-unsupported-finding",  # cites a data source the pipeline does not use
