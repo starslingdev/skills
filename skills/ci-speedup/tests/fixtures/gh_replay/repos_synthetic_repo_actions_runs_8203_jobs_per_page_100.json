@@ -4,11 +4,11 @@
   {
    "id": 82031,
    "run_id": 8203,
-   "name": "bench",
+   "name": "eslint",
    "status": "completed",
    "conclusion": "success",
-   "started_at": "2026-06-26T06:00:00Z",
-   "completed_at": "2026-06-26T06:02:32Z",
+   "started_at": "2026-06-27T03:00:00Z",
+   "completed_at": "2026-06-27T03:01:35Z",
    "labels": [
     "ubuntu-latest"
    ],
@@ -17,40 +17,48 @@
     {
      "name": "Set up job",
      "number": 1,
-     "started_at": "2026-06-26T06:00:00Z",
-     "completed_at": "2026-06-26T06:00:02Z",
+     "started_at": "2026-06-27T03:00:00Z",
+     "completed_at": "2026-06-27T03:00:02Z",
      "status": "completed",
      "conclusion": "success"
     },
     {
      "name": "Run actions/checkout@v4",
      "number": 2,
-     "started_at": "2026-06-26T06:00:02Z",
-     "completed_at": "2026-06-26T06:00:10Z",
+     "started_at": "2026-06-27T03:00:02Z",
+     "completed_at": "2026-06-27T03:00:05Z",
      "status": "completed",
      "conclusion": "success"
     },
     {
-     "name": "Run benchmarks",
+     "name": "Run actions/setup-node@v4",
      "number": 3,
-     "started_at": "2026-06-26T06:00:10Z",
-     "completed_at": "2026-06-26T06:02:31Z",
+     "started_at": "2026-06-27T03:00:05Z",
+     "completed_at": "2026-06-27T03:00:09Z",
      "status": "completed",
      "conclusion": "success"
     },
     {
-     "name": "Post Run actions/checkout@v4",
+     "name": "Run npm ci",
      "number": 4,
-     "started_at": "2026-06-26T06:02:31Z",
-     "completed_at": "2026-06-26T06:02:32Z",
+     "started_at": "2026-06-27T03:00:09Z",
+     "completed_at": "2026-06-27T03:00:19Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Lint",
+     "number": 5,
+     "started_at": "2026-06-27T03:00:19Z",
+     "completed_at": "2026-06-27T03:01:33Z",
      "status": "completed",
      "conclusion": "success"
     },
     {
      "name": "Complete job",
-     "number": 5,
-     "started_at": "2026-06-26T06:02:32Z",
-     "completed_at": "2026-06-26T06:02:32Z",
+     "number": 6,
+     "started_at": "2026-06-27T03:01:33Z",
+     "completed_at": "2026-06-27T03:01:35Z",
      "status": "completed",
      "conclusion": "success"
     }
@@ -59,53 +67,61 @@
   {
    "id": 82032,
    "run_id": 8203,
-   "name": "bench",
+   "name": "eslint-web",
    "status": "completed",
    "conclusion": "success",
-   "started_at": "2026-06-26T06:00:00Z",
-   "completed_at": "2026-06-26T06:01:32Z",
+   "started_at": "2026-06-27T03:00:00Z",
+   "completed_at": "2026-06-27T03:01:16Z",
    "labels": [
-    "ubuntu-latest-8-cores"
+    "ubuntu-latest"
    ],
    "html_url": "https://github.com/synthetic/repo/actions/runs/8203/job/82032",
    "steps": [
     {
      "name": "Set up job",
      "number": 1,
-     "started_at": "2026-06-26T06:00:00Z",
-     "completed_at": "2026-06-26T06:00:02Z",
+     "started_at": "2026-06-27T03:00:00Z",
+     "completed_at": "2026-06-27T03:00:02Z",
      "status": "completed",
      "conclusion": "success"
     },
     {
      "name": "Run actions/checkout@v4",
      "number": 2,
-     "started_at": "2026-06-26T06:00:02Z",
-     "completed_at": "2026-06-26T06:00:10Z",
+     "started_at": "2026-06-27T03:00:02Z",
+     "completed_at": "2026-06-27T03:00:05Z",
      "status": "completed",
      "conclusion": "success"
     },
     {
-     "name": "Run benchmarks",
+     "name": "Run actions/setup-node@v4",
      "number": 3,
-     "started_at": "2026-06-26T06:00:10Z",
-     "completed_at": "2026-06-26T06:01:31Z",
+     "started_at": "2026-06-27T03:00:05Z",
+     "completed_at": "2026-06-27T03:00:09Z",
      "status": "completed",
      "conclusion": "success"
     },
     {
-     "name": "Post Run actions/checkout@v4",
+     "name": "Run npm ci",
      "number": 4,
-     "started_at": "2026-06-26T06:01:31Z",
-     "completed_at": "2026-06-26T06:01:32Z",
+     "started_at": "2026-06-27T03:00:09Z",
+     "completed_at": "2026-06-27T03:00:19Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Lint web",
+     "number": 5,
+     "started_at": "2026-06-27T03:00:19Z",
+     "completed_at": "2026-06-27T03:01:14Z",
      "status": "completed",
      "conclusion": "success"
     },
     {
      "name": "Complete job",
-     "number": 5,
-     "started_at": "2026-06-26T06:01:32Z",
-     "completed_at": "2026-06-26T06:01:32Z",
+     "number": 6,
+     "started_at": "2026-06-27T03:01:14Z",
+     "completed_at": "2026-06-27T03:01:16Z",
      "status": "completed",
      "conclusion": "success"
     }

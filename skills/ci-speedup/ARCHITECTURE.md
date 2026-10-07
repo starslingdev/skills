@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 79-pattern
-catalog — 72 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80 and OPT81) plus 7 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against an 80-pattern
+catalog — 73 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81 and OPT82) plus 7 **structural /
 critical-path** patterns (OPT70–OPT75 and OPT78, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -1132,10 +1132,10 @@ undecided tail runs could still have supplied the missing proof, named by their
 commonest reason). The per-gate tallies (`opt77_withheld_by_gate`,
 `opt80_withheld_by_gate`) are for maintainers; these lists reach the reader.
 
-The held-back disclosure is ONE mechanism shared by OPT77, OPT79, OPT80 and OPT81.
+The held-back disclosure is ONE mechanism shared by OPT77, OPT79, OPT80, OPT81 and OPT82.
 `blocking_path._WITHHELD_ROWS` is a `WithheldRow` per pattern — findings-doc
 key, Data sources row label, counted noun, "Used for" cell, and `entry_shape`
-(`"job"` for OPT79 / OPT80 / OPT81, `"group"` for OPT77). The shape is registered
+(`"job"` for OPT79 / OPT80 / OPT81 / OPT82, `"group"` for OPT77). The shape is registered
 rather than inferred: both twins used to decide it by comparing the key against
 OPT77's, so a fourth group-shaped pattern would have rendered `(unnamed job)`
 for every candidate in the renderer AND been re-derived the same wrong way in
@@ -1164,7 +1164,7 @@ the names and the "and K more" overflow come from; counted over raw rows it
 disagreed with its own job list whenever two rows deduplicated into one. A pattern contributes only its key, its
 row text and its gate→phrase table (registered in `_WITHHELD_PHRASES_BY_KEY`),
 never its own row builder. The phrase tables (`_OPT77_WITHHOLD_PHRASES`,
-`_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`) map EVERY withhold gate
+`_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`, `_OPT81_WITHHOLD_PHRASES`, and `_OPT82_WITHHOLD_PHRASES`) map EVERY withhold gate
 their collector can record. What a test actually guarantees is narrower than
 "a new gate cannot ship without a phrase": it enumerates the gates it can READ
 from FOUR sources in the detectors' own code — the literals handed to
@@ -1297,6 +1297,99 @@ lines' own timestamps, and the credited minutes — bounding every count against
 the sampled occurrences. Every withhold increments
 `findings_doc["opt80_withheld_by_gate"]`, the same visible-zero discipline OPT77
 carries.
+
+OPT82 (lint builds the whole type graph) is the first hygiene pattern that
+deliberately carries NO number, and its flow is a straight line through four
+modules. `scan.py` reads the ESLint configuration of the checkout into a
+top-level `type_aware_lint` block of the findings document: a config FACT, not a
+finding, and a reader that crashes yields a block with `error` set rather than an
+exception, so the consumer withholds instead of the scan dying. Per config the
+block records whether type-aware parsing is `on`, `off` or `unresolved`, the
+evidence lines (`path:line: text`), the presets seen, the type-aware rules
+enumerated (from `references/type-aware-lint-rules.tsv` plus custom rules whose
+source calls `getParserServices` or `getTypeChecker`, reached by following the
+config's relative imports, bounded) and any rule setting that could not be
+resolved. `collect_runs._detect_opt82_type_aware_lint` then runs per workflow with
+no gh calls at all, from that static block and the timings already sampled:
+a YAML job runs ESLint (directly, or through a `package.json` script it can
+trace), the job costs at least `_OPT82_MIN_LINT_P50_S` (60s) or is the measured
+long pole, type-aware parsing is on in the config that applies to the job's
+directory, and at least one type-aware rule can be named. On a slow lint job,
+anything the read could not see is held back, never read as on or off: an
+unresolvable value (an environment variable, a ternary, a `parserOptions` taken
+from a variable), a lint step handed to turbo / nx / make / a node script or an
+action, a `${{ }}` in the step, an unreadable `package.json`, a shareable config
+package or an unfollowed local import behind an "off" read, a config walk that
+stopped before the lint directory (`truncated` with nothing recorded at or below
+it), and a nested flat config whose effect depends on an ESLint major (10 looks
+configs up per file) that is 10+ or unknown. The scan block records what these
+need: per config `shared_configs`, `unresolved_imports`, `sets_off` and `root`
+(for the legacy upward cascade), plus `truncated`,
+`package_scripts_unreadable` and `eslint_versions`. Local base configs the
+config imports or extends by relative path are followed and read as part of it.
+Config selection picks ESLint's mode first (a flat config at or above the lint
+directory means every `.eslintrc*` is ignored unless `ESLINT_USE_FLAT_CONFIG=false`).
+A custom rule is named only when the plugin's rule mapping and the config's
+`plugins` binding prove which typed source it is; settings whose final value
+depends on config order (on and unscoped off, an unscoped `disableTypeChecked`)
+are unresolved, never named.
+
+The finding it emits has `wall_clock_p50_s = 0`, no runner-minute saving, sizing
+basis `uncredited` and no `_SIZING` entry; `_RM_DOOR_OVERRIDES["OPT82"]` marks it
+not derivable. The reason is that nothing sampled says how much of lint is the
+type graph, so a number would be a guess. What it does carry is a ceiling, the
+lint step's own measured p50 (or the lint job's p50 when the step was not
+separately measured; `ceiling_basis` records which, and every surface names
+the one it used), which `blocking_path.py` renders in the "Also
+noticed" section as an upper bound and never as a forecast, under the summary
+metric "uncredited, benchmark first". Being numberless by design, it is exempt
+from the valueless-pole exclusion (`_on_pole_job`), so a lint job that is also a
+drilled pole still gets its card, and from `_ALSO_NOTICED_CAP`, so it never
+falls into the "+N more" tail where its rules and ledger would not reach the
+reader. Cards are keyed per lint job (`_group_by_pattern_ranked` keys OPT82 by
+pattern + workflow + jobs, like OPT73/OPT77/OPT79), because each job has its own
+configs, rules, ceiling and benchmark directory. The card has its own prompt, not the
+generic bill or off-path saving line: it carries the SIZING clause, tells the
+agent to run the two-command benchmark FIRST, lists each enumerated rule with the
+rewrite QUESTION (never the answer), gives the fix order (rewrite, split into a
+fast syntax-only pass and a type-aware pass limited to exactly those rules,
+native type-aware linter only if the remaining rules are supported) and requires
+the ledger: every rule maps to a pass or to a REPLACED BY row naming what the
+replacement no longer checks, for a human to approve, and a test proves no rule
+is left without a row. Where the type-aware pass may run comes from the
+collector's `merge_group_workflows` stamp (the sampled workflows declaring
+`merge_group`, stamped at the call site because the detector sees one workflow):
+with a merge queue the PR pass may lint an explicit changed-file list while the
+full pass gates the queue; without one (or no stamp) the full type-aware pass
+stays a required whole-tree PR check. ESLint's `--cache` is never offered for the
+type-aware pass (it does not track cross-file type dependencies). The prompt
+never tells the agent to disable rules. `verify_report.py` closes the loop with a
+check that fails an OPT82 finding with a positive `wall_clock_p50_s` or a truthy
+runner-minute saving, with no enumerated rule, stamped from a failed ESLint
+read or from a truncated walk that never reached its lint directory, with no card of its own (matched
+by workflow + job on the card's `**Where:**` line) or whose card omits one of its
+enumerated rules or claims a saving, or whose rendered card lacks the
+ledger sentence or says, in any wording, to switch the rules off (disable, turn
+off, drop / remove, set to `off`, `disableTypeChecked`, move to a non-blocking
+job). That rail reads the card's instruction text only: the measured evidence
+and the command lines (the CI's own lint command, the benchmark's labelled
+timing-only run) are data and are skipped. Its pole double-frame check
+(`check_pole_not_reframed_as_hygiene`) mirrors the engine's OPT82 exemption from
+the valueless-pole exclusion. The detector's call site in `collect()` is guarded: an
+exception inside it skips OPT82 for that workflow and is disclosed through
+`detectors_skipped`, never a crashed data pass.
+
+Every exit is counted in `findings_doc["opt82_withheld_by_gate"]`. Three gates are
+verdicts (the lint job never ran in the sample, it is below the cost threshold,
+type-aware parsing is off) and count only there; one is workflow-level
+(`workflow_yaml_unparsed`, no job to name) and counts only there too. Seventeen
+are could-not-tell exits
+and are also listed in `findings_doc["opt82_withheld_candidates"]`, which feeds the
+shared held-back registry row `type-aware lint: held back` (noun "candidate lint
+job(s)", shape `"job"`), so a lint job this pattern could not decide is named in
+the Data sources table rather than reading as "measured, nothing found".
+The workflow-level `workflow_yaml_unparsed` is never listed; that skip is
+disclosed through `detectors_skipped`.
 
 OPT79 (a cache that costs more than it saves) is a measured lever: a wall-clock
 lever on the long pole, and a Tier-2 bill lever below the cluster floor
@@ -2601,7 +2694,7 @@ wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -2655,7 +2748,7 @@ reported by `scan.py` as having no critical-path router.
   (dominant step/category, redundancy ratio, required-status, shared substep)
   annotate the pole they came from; the catalog OPT70–OPT75 findings are
   therefore **excluded** from the off-path "Also noticed" appendix
-  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76/OPT77/OPT79/OPT80 only; OPT81 renders at its pole or in its own section) since the pole already
+  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76/OPT77/OPT79/OPT80/OPT82 only; OPT81 renders at its pole or in its own section) since the pole already
   represents them. Like every pole, a structural lever carries an agent prompt
   rather than a prescribed fix; for a HIGH-risk lever (e.g. OPT70 scope-to-
   changed) the prompt's failure-mode/guard section tells the agent to state the
@@ -3551,7 +3644,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 79-pattern catalog (METADATA + body per pattern); the source of truth for
+  the 80-pattern catalog (METADATA + body per pattern); the source of truth for
   detection and the report's TL;DR / pattern background.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.

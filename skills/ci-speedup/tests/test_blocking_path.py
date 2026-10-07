@@ -3128,6 +3128,40 @@ def test_opt81_held_back_row_renders_in_plain_english():
     assert any(r.doc_key == bp._OPT81_WITHHELD_DOC_KEY for r in bp._WITHHELD_ROWS)
 
 
+def _opt82_gates_recorded_in_the_detector():
+    """Every gate literal OPT82's detector hands to its `_no(...)` recorder,
+    read from the detector's own source."""
+    import ast
+    tree = ast.parse((_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_detect_opt82_type_aware_lint")
+    return {c.args[0].value for c in ast.walk(fn)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            and c.func.id == "_no" and c.args and isinstance(c.args[0], ast.Constant)
+            and isinstance(c.args[0].value, str)}
+
+
+def test_every_opt82_gate_the_detector_records_is_classified_and_phrased():
+    """A gate added to the OPT82 detector must be a verdict, a workflow-level
+    count, or a held-back gate WITH a phrase; and every phrase must belong to a
+    gate the detector can record."""
+    g = _opt82_gates_recorded_in_the_detector()
+    assert {"type_aware_parsing_off", "lint_script_unresolvable",
+            "no_enumerable_type_aware_rule"} <= g, g        # the scan reads the detector
+    verdict, held = set(cr._OPT82_VERDICT_GATES), set(cr._OPT82_HELD_BACK_GATES)
+    workflow = set(cr._OPT82_WORKFLOW_GATES)
+    assert not (verdict & held) and not (verdict & workflow) and not (held & workflow)
+    assert g - verdict - held - workflow == set(), (
+        "OPT82 gate in no class", sorted(g - verdict - held - workflow))
+    held_recorded = g - verdict - workflow
+    assert held_recorded - set(bp._OPT82_WITHHOLD_PHRASES) == set(), (
+        "OPT82 held-back gate with no phrase",
+        sorted(held_recorded - set(bp._OPT82_WITHHOLD_PHRASES)))
+    assert set(bp._OPT82_WITHHOLD_PHRASES) - held_recorded == set(), (
+        "OPT82 phrase for a gate nothing records",
+        sorted(set(bp._OPT82_WITHHOLD_PHRASES) - held_recorded))
+
+
 def _opt80_tail_render_doc(**kw):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import test_verify_report_self as vs  # noqa: E402
@@ -8863,9 +8897,10 @@ def test_no_collector_path_can_record_a_held_back_entry_with_no_job():
         elif (isinstance(n, ast.Assign)
               and any(_is_target(t) for t in n.targets)):
             writes.append(("=", n))
-    # 77, 79 pre-probe, 79 post-probe, 80, 81 A1, 81 A2 — and every one of them an
-    # `append(<dict literal>)`, never an `extend`, an `insert` or a `+=`.
-    assert len(writes) == 6, [(k, ast.dump(n)[:60]) for k, n in writes]
+    # 77, 79 pre-probe, 79 post-probe, 80, 81 A1, 81 A2, 82 (guarded by `and job`
+    # in its `_no` helper) — and every one of them an `append(<dict literal>)`,
+    # never an `extend`, an `insert` or a `+=`.
+    assert len(writes) == 7, [(k, ast.dump(n)[:60]) for k, n in writes]
     for kind, n in writes:
         assert kind == "append", (kind, ast.dump(n)[:80])
         d = n.args[0]
@@ -9053,3 +9088,39 @@ def test_every_held_back_row_keeps_the_static_only_body_alive():
         md = bp.render(doc, "o/r")
         assert "held back" in md, (key, md)
         assert _withheld_row(md, label), (key, md)
+
+
+def test_opt82_held_back_row_names_the_lint_job_and_its_plain_reason():
+    """OPT82 (type-aware lint) joins the shared held-back registry: a slow lint
+    job whose ESLint config could not be decided is named with a plain-English
+    reason, never a gate code."""
+    rows = [{"workflow_file": ".github/workflows/lint.yml", "job": "eslint",
+             "gate": "type_aware_setting_unresolvable"}]
+    line = bp._withheld_candidates_line(
+        {bp._OPT82_WITHHELD_DOC_KEY: rows}, bp._OPT82_WITHHELD_DOC_KEY,
+        "candidate lint job(s)")
+    assert line == ("1 candidate lint job(s) held back (eslint): "
+                    + bp._OPT82_WITHHOLD_PHRASES["type_aware_setting_unresolvable"]
+                    + "."), line
+    md = bp.render({"repo": "o/r", "findings": [], "pr_critical_path": {"poles": []},
+                    "data_sources": {}, bp._OPT82_WITHHELD_DOC_KEY: rows}, "o/r")
+    assert _withheld_row(md, "type-aware lint: held back"), md
+
+
+def test_opt82_card_uses_its_own_prompt_never_the_generic_bill_line():
+    f = {"id": "f1", "pattern": "OPT82", "severity": "MEDIUM",
+         "title": "Lint Builds the Whole Type Graph",
+         "workflow_file": ".github/workflows/lint.yml", "affected_jobs": ["eslint"],
+         "evidence": "`eslint` runs ESLint with type-aware parsing on.",
+         "fix_recipe_anchor": "opt82--lint-builds-the-whole-type-graph",
+         "wall_clock_p50_s": 0.0, "runner_min_saving": None,
+         "type_aware_lint": {"kind": "opt82_type_aware_lint", "ceiling_s": 78.0,
+                             "ceiling_basis": "lint_step", "configs": ["eslint.config.mjs"],
+                             "rules": [{"rule": "@typescript-eslint/no-floating-promises"}],
+                             "benchmark_commands": {"as_ci_runs_it": "(time npx eslint .)",
+                                                    "without_type_information": "(time x)"}}}
+    lines, n, _ = bp._also_noticed_block([f], "https://example.invalid/c.md")
+    card = "\n".join(lines)
+    assert n == 1 and "uncredited, benchmark first" in card
+    assert bp._OPT82_LEDGER_SENTENCE in card and "SIZING: uncredited." in card
+    assert "runner-min/mo" not in card and "no bill saving" not in card

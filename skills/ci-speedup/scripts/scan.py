@@ -2806,15 +2806,23 @@ def _unfollowable_config_bases(text: str) -> list[str]:
     return out
 
 
-def _vitest_config_files(root: Path) -> "tuple[list[Path], bool, list[Path]]":
+def _vitest_config_files(root: Path, is_config: "Any" = None
+                         ) -> "tuple[list[Path], bool, list[Path]]":
     """Config candidates at the repo root plus a bounded walk beneath it, as
     ``(configs, truncated, manifests)`` — ``manifests`` being the `package.json`
     files in the directories the walk visited (their scripts can carry the CLI
     opt-out).
 
+    ``is_config`` picks which file names count as config (default: the vitest
+    names). OPT82 reuses the same bounded walk for ESLint configs; its consumer
+    holds a lint job back when ``truncated`` is set and nothing the walk
+    recorded sits at or below the job's directory (``eslint_config_walk_incomplete``),
+    because a nearer config there may exist. A truncated walk that DID reach the
+    directory is not held back: ESLint's lookup goes upward from it.
+
     ``truncated`` is True when the walk stopped with ground that could PLAUSIBLY
-    HOLD A CONFIG still unvisited. That matters because the consumer's claim is
-    "no `isolate: false` ANYWHERE", which a partial walk cannot establish: the
+    HOLD A CONFIG still unvisited. That matters because the vitest consumer's
+    claim is "no `isolate: false` ANYWHERE", which a partial walk cannot establish: the
     opt-out may sit in a config the walk never reached. "Walk exhausted" and "no
     config exists" therefore reach the SAME withheld outcome, for different
     reasons, so both are reported.
@@ -2887,7 +2895,7 @@ def _vitest_config_files(root: Path) -> "tuple[list[Path], bool, list[Path]]":
                     truncated = truncated or _may_hold_config(entry)
             elif entry.name == "package.json":
                 manifests.append(entry)
-            elif _is_vitest_config_name(entry.name):
+            elif (is_config or _is_vitest_config_name)(entry.name):
                 found.append(entry)
                 if len(found) >= _VITEST_CONFIG_MAX_FILES:
                     # A cap hit says there is more of exactly the thing we are
@@ -3131,6 +3139,783 @@ def _read_test_runner_isolation_unguarded(root: Path) -> dict[str, Any]:
     )
     block["verdict"] = _isolation_verdict(block)
     return block
+
+
+# --- Type-aware ESLint (OPT82 corroboration, not a finding) -----------------
+# OPT82 ("lint builds the whole type graph") is decided in `collect_runs.py`,
+# where a lint job's measured timings are in hand. Whether that job's ESLint
+# builds a TypeScript program at all is a CONFIG fact, and this reader supplies
+# it and only it: what each ESLint config in the tree says about type-aware
+# parsing, which type-aware rules it turns on, and the package scripts a
+# workflow's `npm run lint` resolves through. It never decides a finding.
+#
+# Read as TEXT, never evaluated. A literal is read; anything else — an
+# identifier, an env var, a ternary, a spread inside `parserOptions` — is
+# UNRESOLVED and the consumer withholds (fail closed), because "type-aware
+# parsing is on" is the finding's whole premise and an expression is not
+# evidence of it. Comments are blanked first, so a commented-out
+# `project: true` is not read as on.
+_TAL_RULES_PATH = (Path(__file__).resolve().parents[1] / "references"
+                   / "type-aware-lint-rules.tsv")
+_TAL_RULES_CACHE: "dict[str, dict[str, Any]] | None" = None
+_ESLINT_FLAT_NAMES = frozenset(f"eslint.config.{e}"
+                               for e in ("js", "mjs", "cjs", "ts", "mts", "cts"))
+_ESLINT_RC_NAMES = frozenset({".eslintrc", ".eslintrc.js", ".eslintrc.cjs",
+                              ".eslintrc.json", ".eslintrc.yaml", ".eslintrc.yml"})
+# Relative imports a config pulls in (a local plugin and its rule files) are
+# followed up to this many files to find CUSTOM type-aware rules.
+_TAL_MAX_FOLLOW = 40
+# A custom rule is type-aware when its source asks the parser for type
+# information. These are the two documented entry points.
+_TAL_TYPED_RULE_SOURCE_RE = re.compile(r"\bgetParserServices\b|\bgetTypeChecker\b")
+# `parserOptions` as an object key (`parserOptions: {`) or a variable
+# (`const parserOptions = {`).
+_TAL_PARSER_OPTIONS_RE = re.compile(r"""(?<![\w$.])(["']?)parserOptions\1\s*[:=]\s*""")
+_TAL_PROJECT_KEY_RE = re.compile(
+    r"""(?<![\w$.-])(["']?)(projectService|project)\1\s*:\s*""")
+_TAL_PROJECT_SHORTHAND_RE = re.compile(r"[{,]\s*(projectService|project)\s*(?=[,}])")
+# A rule entry: a quoted `<namespace>/<rule>` key and its value.
+_TAL_RULE_KEY_RE = re.compile(r"""(["'])(@?[\w.-]+/[\w./-]+)\1\s*:\s*""")
+# Type-checked presets. camelCase (flat `tseslint.configs.recommendedTypeChecked`)
+# and kebab (`plugin:@typescript-eslint/strict-type-checked`, legacy
+# `recommended-requiring-type-checking`). `disableTypeChecked` /
+# `disable-type-checked` turns type information OFF and never matches: the
+# capture group admits only recommended / strict / stylistic.
+# A preset counts only where it is REFERENCED as a config: a member of a
+# `configs` object (`configs.x`, `configs?.x`, `configs['x']`), a spread of a
+# destructured preset (`...x`), or a `<plugin>/<preset>` string
+# (`plugin:@typescript-eslint/x`, flat `extends: ['ts/x']`). The bare name in
+# an unrelated string (`const s = 'recommendedTypeChecked'`) is not a preset.
+_TAL_PRESET_REF = (r"(?:\bconfigs\s*\??\.\s*|\bconfigs\s*\[\s*['\"]|\.\.\.\s*"
+                   r"|['\"](?:plugin:)?@?[\w.-]+/)")
+_TAL_PRESET_CAMEL_RE = re.compile(
+    _TAL_PRESET_REF + r"(recommended|strict|stylistic)TypeChecked(?:Only)?(?![\w$])")
+_TAL_PRESET_KEBAB_RE = re.compile(
+    _TAL_PRESET_REF + r"(recommended|strict|stylistic)-type-checked(?:-only)?(?![\w-])")
+_TAL_PRESET_LEGACY_RE = re.compile(
+    _TAL_PRESET_REF + r"recommended-requiring-type-checking(?![\w-])")
+# typescript-eslint's `all` preset. `configs.all` is ALSO ESLint's own
+# (`js.configs.all`, no type information), so the member form counts only on
+# an object bound to typescript-eslint: an import / require of
+# `typescript-eslint` or `@typescript-eslint/eslint-plugin`, or one of the
+# conventional names for it when the binding is not in this file.
+_TAL_TSESLINT_BINDING_RE = re.compile(
+    r"""(?:\bimport\s+(?:\*\s+as\s+)?([\w$]+)\s+from\s*|"""
+    r"""\b(?:const|let|var)\s+([\w$]+)\s*=\s*require\s*\(\s*)"""
+    r"""["'](?:typescript-eslint|@typescript-eslint/eslint-plugin)["']""")
+_TAL_TSESLINT_DEFAULT_NAMES = ("tseslint", "typescriptEslint", "tsEslint",
+                               "tsPlugin", "typescriptEslintPlugin")
+_TAL_PRESET_ALL_LEGACY_RE = re.compile(r"plugin:@typescript-eslint/all(?![\w-])")
+# `import { configs } from 'typescript-eslint'` (or `configs as tsConfigs`):
+# the named `configs` export, used bare as `configs.all`.
+_TAL_TSESLINT_NAMED_IMPORT_RE = re.compile(
+    r"""\bimport\s+(?:[\w$]+\s*,\s*)?\{([^}]*)\}\s*from\s*"""
+    r"""["'](?:typescript-eslint|@typescript-eslint/eslint-plugin)["']""")
+
+
+def _tal_all_preset_match(text: str) -> "re.Match[str] | None":
+    names = {a or b for a, b in _TAL_TSESLINT_BINDING_RE.findall(text)}
+    names |= set(_TAL_TSESLINT_DEFAULT_NAMES)
+    member = re.compile(
+        r"(?:(?<=\.\.\.)|(?<![\w$.]))(?:" + "|".join(re.escape(n) for n in sorted(names))
+        + r")\s*\??\.\s*configs\s*\??\.\s*all(?![\w$])")
+    found = member.search(text) or _TAL_PRESET_ALL_LEGACY_RE.search(text)
+    if found:
+        return found
+    cfg_names = set()
+    for clause in _TAL_TSESLINT_NAMED_IMPORT_RE.findall(text):
+        for part in clause.split(","):
+            m = re.fullmatch(r"\s*configs(?:\s+as\s+([\w$]+))?\s*", part)
+            if m:
+                cfg_names.add(m.group(1) or "configs")
+    if not cfg_names:
+        return None
+    bare = re.compile(
+        r"(?:(?<=\.\.\.)|(?<![\w$.]))(?:" + "|".join(re.escape(n) for n in sorted(cfg_names))
+        + r")\s*\??\.\s*all(?![\w$])")
+    return bare.search(text)
+
+
+def _load_type_aware_rules() -> "dict[str, dict[str, Any]]":
+    """The committed type-aware rule list (references/type-aware-lint-rules.tsv):
+    rule -> {syntax_only_equivalent, presets}."""
+    global _TAL_RULES_CACHE
+    if _TAL_RULES_CACHE is None:
+        out: dict[str, dict[str, Any]] = {}
+        for line in _TAL_RULES_PATH.read_text(encoding="utf-8").splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            rule, base, presets = line.split("\t")
+            if rule in out:
+                # A duplicate row would silently overwrite the first; fail
+                # closed (the reader's guard turns this into a withheld block).
+                raise ValueError(f"duplicate rule row in {_TAL_RULES_PATH.name}: {rule}")
+            out[rule] = {"syntax_only_equivalent": None if base == "-" else base,
+                         "presets": [] if presets == "-" else presets.split(",")}
+        _TAL_RULES_CACHE = out
+    return _TAL_RULES_CACHE
+
+
+def _is_eslint_config_name(name: str) -> bool:
+    return name in _ESLINT_FLAT_NAMES or name in _ESLINT_RC_NAMES
+
+
+def _tal_strip_js_comments(text: str) -> str:
+    """`//` and `/* */` comments blanked to spaces (newlines kept, so line
+    numbers survive); string contents are left alone."""
+    out = list(text)
+    i, n, quote = 0, len(text), ""
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c in "'\"`":
+            quote = c
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            for k in range(i, j):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _tal_balanced(text: str, start: int) -> str:
+    """The `{...}` / `[...]` literal opening at `start` (string-aware)."""
+    pairs = {"{": "}", "[": "]"}
+    stack: list[str] = []
+    quote = ""
+    i = start
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+        elif c in "'\"`":
+            quote = c
+        elif c in pairs:
+            stack.append(pairs[c])
+        elif stack and c == stack[-1]:
+            stack.pop()
+            if not stack:
+                return text[start:i + 1]
+        i += 1
+    return text[start:]
+
+
+_TAL_LITERAL_END_RE = re.compile(r"\s*(?:[,}\]\n]|$)")
+
+
+def _tal_value(text: str, pos: int) -> "tuple[str, str]":
+    """Classify the JS value starting at `pos`: ("true" | "false" | "string" |
+    "array_of_strings" | "object" | "other", its source text)."""
+    m = re.match(r"\s*", text[pos:])
+    pos += m.end() if m else 0
+    rest = text[pos:]
+    for word in ("true", "false"):
+        if rest.startswith(word) and _TAL_LITERAL_END_RE.match(rest, len(word)) \
+                and not re.match(r"[\w$]", rest[len(word):len(word) + 1]):
+            return word, word
+    if rest[:1] in ("'", '"'):
+        end = rest.find(rest[0], 1)
+        if end > 0 and _TAL_LITERAL_END_RE.match(rest, end + 1):
+            return "string", rest[:end + 1]
+        return "other", rest.split("\n", 1)[0].strip()
+    if rest[:1] == "[":
+        lit = _tal_balanced(text, pos)
+        inner = lit[1:-1].strip()
+        if inner and re.fullmatch(r"""(\s*(['"])[^'"\n]*\2\s*,?)+""", inner):
+            return "array_of_strings", lit
+        return "other", lit.split("\n", 1)[0]
+    if rest[:1] == "{":
+        return "object", _tal_balanced(text, pos)
+    return "other", rest.split("\n", 1)[0].strip().rstrip(",")
+
+
+_TAL_SEVERITY = {"off": "off", "0": "off", "warn": "on", "error": "on",
+                 "1": "on", "2": "on"}
+
+
+def _tal_rule_state_js(text: str, pos: int) -> str:
+    """'on' | 'off' | 'unresolved' for the rule value starting at `pos`."""
+    m = re.match(r"""\s*(?:\[\s*)?(?:(['"])(\w+)\1|(\d))(?=\s*[,\]}\n])""", text[pos:])
+    if not m:
+        return "unresolved"
+    return _TAL_SEVERITY.get((m.group(2) or m.group(3) or "").lower(), "unresolved")
+
+
+def _tal_rule_state_obj(value: Any) -> str:
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, bool):
+        return "unresolved"
+    return _TAL_SEVERITY.get(str(value).lower(), "unresolved") \
+        if isinstance(value, (str, int)) else "unresolved"
+
+
+def _tal_presets_in(text: str) -> list[str]:
+    found = {m.group(1) for m in _TAL_PRESET_CAMEL_RE.finditer(text)}
+    found |= {m.group(1) for m in _TAL_PRESET_KEBAB_RE.finditer(text)}
+    if _TAL_PRESET_LEGACY_RE.search(text):
+        found.add("recommended")
+    if _tal_all_preset_match(text):
+        found.add("all")
+    return sorted(found)
+
+
+# A shareable config package this read does not follow. Known public configs
+# that never turn type-aware parsing on are allowlisted so they stay a verdict.
+_TAL_SHARED_ALLOWLIST = frozenset({
+    "prettier", "eslint-config-prettier", "next", "eslint-config-next",
+    "next/core-web-vitals", "next/typescript", "eslint-config-next/core-web-vitals",
+    "eslint-config-next/typescript"})
+# An imported package that IS a shareable ESLint config by its name: the
+# `eslint-config-*` convention, or a scoped package with `eslint` in its path
+# (`@acme/eslint-config`, `@repo/config/eslint`) that is not ESLint itself, a
+# plugin, or typescript-eslint.
+_TAL_SHARED_IMPORT_RE = re.compile(
+    r"^(?:eslint-config(?:-[\w.-]+)?|@(?!eslint/|typescript-eslint/)[\w.-]+/"
+    r"(?![\w./-]*eslint-plugin)[\w./-]*\beslint\b[\w./-]*)(?:/[\w./-]*)?$")
+_TAL_IMPORT_ONLY_RE = re.compile(
+    r"""(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)(["'])([^"'\n]+)\1""")
+_TAL_EXTENDS_RE = re.compile(r"""(?<![\w$.])(["']?)extends\1\s*:\s*""")
+_TAL_ROOT_TRUE_RE = re.compile(r"""(?<![\w$.])(["']?)root\1\s*:\s*true(?![\w$])""")
+
+
+def _tal_is_relative(spec: str) -> bool:
+    return spec.startswith("./") or spec.startswith("../")
+
+
+def _tal_shared_from_extends(specs: "list[str]") -> list[str]:
+    """Legacy `extends` entries naming a shareable config package: anything
+    that is not `eslint:*`, `plugin:*`, a path, or allowlisted."""
+    return [s for s in specs
+            if s and not s.startswith(("eslint:", "plugin:", ".", "/"))
+            and s not in _TAL_SHARED_ALLOWLIST]
+
+
+_TAL_DISABLE_TYPE_CHECKED_RE = re.compile(
+    r"""\bconfigs\s*\??\.\s*disableTypeChecked(?![\w$])"""
+    r"""|["'](?:plugin:)?@?[\w.-]+/disable-type-checked["']""")
+_TAL_FILES_KEY_RE = re.compile(r"""(?<![\w$.])(["']?)files\1\s*:""")
+
+
+def _tal_objects(text: str) -> "list[tuple[int, int]]":
+    """Every `{...}` literal in `text` as (start, end) offsets (string-aware)."""
+    out: list[tuple[int, int]] = []
+    stack: list[int] = []
+    quote = ""
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+        elif c in "'\"`":
+            quote = c
+        elif c == "{":
+            stack.append(i)
+        elif c == "}" and stack:
+            out.append((stack.pop(), i))
+        i += 1
+    return out
+
+
+def _tal_scoped(text: str, objs: "list[tuple[int, int]]", pos: int) -> bool:
+    """True when `pos` sits inside a config object that has its OWN `files:`
+    key: the setting there applies to some files only."""
+    for s, e in objs:
+        if not (s < pos < e):
+            continue
+        for m in _TAL_FILES_KEY_RE.finditer(text, s + 1, e):
+            if not any(s < cs < m.start() < ce for cs, ce in objs):
+                return True
+    return False
+
+
+def _tal_read_js(text: str, name: str, flat: bool = True) -> dict[str, Any]:
+    """One JS/TS config (flat `eslint.config.*` or a JS `.eslintrc`), as text."""
+    code = _tal_strip_js_comments(text)
+    evidence: list[str] = []
+    unresolved: list[str] = []
+    explicit: dict[str, set[str]] = {}
+    sets_off = False
+    extends: list[str] = []
+    for m in _TAL_EXTENDS_RE.finditer(code):
+        kind, lit = _tal_value(code, m.end())
+        if kind in ("string", "array_of_strings"):
+            extends += re.findall(r"""["']([^"'\n]+)["']""", lit)
+        elif kind == "other" and lit[:1] == "[":
+            # a mixed array (`['./base.js', require.resolve('x')]`): its literals
+            extends += re.findall(r"""["']([^"'\n]+)["']""",
+                                  _tal_balanced(code, code.index(lit, m.end())))
+    imports = [m.group(2).strip() for m in _TAL_IMPORT_ONLY_RE.finditer(code)]
+    shared = [s for s in imports if not _tal_is_relative(s)
+              and _TAL_SHARED_IMPORT_RE.match(s) and s not in _TAL_SHARED_ALLOWLIST]
+    if not flat:
+        shared += _tal_shared_from_extends(extends)
+
+    def _line(pos: int) -> str:
+        ln, src = _vitest_line_at(code, pos)
+        return f"{name}:{ln}: {src[:160]}"
+
+    for m in _TAL_PARSER_OPTIONS_RE.finditer(code):
+        kind, lit = _tal_value(code, m.end())
+        if kind != "object":
+            unresolved.append(_line(m.start()))
+            continue
+        if re.search(r"\.\.\.", lit):
+            unresolved.append(_line(m.start()))       # a spread can override anything
+        base = code.index(lit, m.end())
+        for k in _TAL_PROJECT_KEY_RE.finditer(lit):
+            vkind, _src = _tal_value(lit, k.end())
+            at = base + k.start()
+            if vkind in ("true", "string", "array_of_strings") or (
+                    vkind == "object" and k.group(2) == "projectService"):
+                evidence.append(_line(at))
+            elif vkind == "false" or (vkind == "other" and re.fullmatch(
+                    r"(?:null|undefined)\s*[,}\]]?", _src.strip())):
+                sets_off = True       # `false` / `null` / `undefined`: documented OFF
+                continue
+            else:
+                unresolved.append(_line(at))
+        for k in _TAL_PROJECT_SHORTHAND_RE.finditer(lit):
+            unresolved.append(_line(base + k.start()))
+    presets = _tal_presets_in(code)
+    for p in presets:
+        hit = (_tal_all_preset_match(code) if p == "all" else
+               (_TAL_PRESET_CAMEL_RE.search(code) or _TAL_PRESET_KEBAB_RE.search(code)
+                or _TAL_PRESET_LEGACY_RE.search(code)))
+        if hit:
+            evidence.append(_line(hit.start()))
+    objs = _tal_objects(code)
+    # `disableTypeChecked` turns type information back OFF. Scoped to some
+    # files (`{ files: ['**/*.js'], ... }`, the documented use) the rest stays
+    # on; unscoped, the outcome depends on config ORDER this read does not
+    # model, so it is unresolved rather than read as on.
+    if evidence:
+        for m in _TAL_DISABLE_TYPE_CHECKED_RE.finditer(code):
+            if not _tal_scoped(code, objs, m.start()):
+                unresolved.append(_line(m.start()))
+    for m in _TAL_RULE_KEY_RE.finditer(code):
+        state = _tal_rule_state_js(code, m.end())
+        if state == "off" and _tal_scoped(code, objs, m.start()):
+            state = "off_scoped"
+        explicit.setdefault(m.group(2), set()).add(state)
+    return {"evidence": sorted(set(evidence)), "unresolved": sorted(set(unresolved)),
+            "presets": presets, "explicit": explicit, "sets_off": sets_off,
+            "root": bool(_TAL_ROOT_TRUE_RE.search(code)),
+            "extends": [e for e in extends if _tal_is_relative(e)],
+            "shared": sorted(set(shared))}
+
+
+def _tal_read_obj(obj: Any, name: str) -> dict[str, Any]:
+    """One structured config (`.eslintrc.json/.yaml`, `package.json#eslintConfig`):
+    the top level and every `overrides[]` entry."""
+    evidence: list[str] = []
+    unresolved: list[str] = []
+    presets: set[str] = set()
+    explicit: dict[str, set[str]] = {}
+    sets_off = False
+    disable_unscoped = False
+    extends: list[str] = []
+    blocks = [obj] if isinstance(obj, dict) else []
+    if isinstance(obj, dict) and isinstance(obj.get("overrides"), list):
+        blocks += [o for o in obj["overrides"] if isinstance(o, dict)]
+    for b in blocks:
+        po = b.get("parserOptions")
+        if po is not None and not isinstance(po, dict):
+            unresolved.append(f"{name}: parserOptions is not a mapping")
+        for key in ("project", "projectService"):
+            if not isinstance(po, dict) or key not in po:
+                continue
+            v = po.get(key)
+            if v is None or v is False:
+                sets_off = True       # `false` / `null`: documented OFF
+                continue
+            if v is True or (isinstance(v, str) and v) or (
+                    isinstance(v, list) and v and all(isinstance(x, str) and x for x in v)) or (
+                    key == "projectService" and isinstance(v, dict)):
+                evidence.append(f"{name}: parserOptions.{key}: {json.dumps(v)[:120]}")
+            else:
+                unresolved.append(f"{name}: parserOptions.{key}: {json.dumps(v)[:120]}")
+        ext = b.get("extends")
+        for e in ([ext] if isinstance(ext, str) else ext if isinstance(ext, list) else []):
+            extends.append(str(e))
+            got = _tal_presets_in(json.dumps(str(e)))
+            if got:
+                presets |= set(got)
+                evidence.append(f"{name}: extends {e}")
+        scoped = b is not obj           # every `overrides[]` entry has `files`
+        for e in ([ext] if isinstance(ext, str) else ext if isinstance(ext, list) else []):
+            if not scoped and _TAL_DISABLE_TYPE_CHECKED_RE.search(json.dumps(str(e))):
+                disable_unscoped = True
+        rules = b.get("rules")
+        if isinstance(rules, dict):
+            for r, v in rules.items():
+                if "/" in str(r):
+                    state = _tal_rule_state_obj(v)
+                    if state == "off" and scoped:
+                        state = "off_scoped"
+                    explicit.setdefault(str(r), set()).add(state)
+    if disable_unscoped and evidence:
+        unresolved.append(f"{name}: extends disable-type-checked for every file")
+    return {"evidence": sorted(set(evidence)), "unresolved": sorted(set(unresolved)),
+            "presets": sorted(presets), "explicit": explicit, "sets_off": sets_off,
+            "root": bool(isinstance(obj, dict) and obj.get("root") is True),
+            "extends": [e for e in extends if _tal_is_relative(e)],
+            "shared": sorted(set(_tal_shared_from_extends(extends)))}
+
+
+def _tal_parse_obj_text(text: str) -> Any:
+    """A structured config's text (JSON, JSONC with comments or trailing
+    commas, or YAML) as an object, or None."""
+    stripped = _tal_strip_js_comments(text)
+    for cand in (stripped, re.sub(r",(\s*[}\]])", r"\1", stripped)):
+        try:
+            return json.loads(cand)
+        except ValueError:
+            continue
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+
+
+def _tal_is_obj_config(name: str) -> bool:
+    return name.endswith((".json", ".yaml", ".yml")) or name == ".eslintrc"
+
+
+def _tal_read_any(path: Path, text: str, name: str, flat: bool
+                  ) -> "dict[str, Any] | None":
+    """One config-shaped file, structured or JS, or None when unreadable."""
+    if _tal_is_obj_config(path.name):
+        obj = _tal_parse_obj_text(text)
+        return _tal_read_obj(obj, name) if isinstance(obj, dict) else None
+    return _tal_read_js(text, name, flat=flat)
+
+
+_TAL_IMPORT_BINDING_RE = re.compile(
+    r"""(?:\bimport\s+([\w$]+)\s*(?:,\s*\{[^}]*\})?\s+from\s*"""
+    r"""|\bimport\s+\*\s+as\s+([\w$]+)\s+from\s*"""
+    r"""|\b(?:const|let|var)\s+([\w$]+)\s*=\s*require\s*\(\s*)(["'])([^"'\n]+)\4""")
+_TAL_PLUGINS_RE = re.compile(r"""(?<![\w$.])(["']?)plugins\1\s*:\s*(?=\{)""")
+_TAL_PLUGIN_ENTRY_RE = re.compile(
+    r"""(["']?)([\w@./-]+)\1\s*:\s*([\w$]+)(?=\s*[,}])|(?<=[{,])\s*([\w$]+)\s*(?=[,}])""")
+
+
+class _TalCustomRules:
+    """Which `<namespace>/<rule>` keys are PROVEN to be custom type-aware rules.
+
+    A followed file whose code asks for type information is a typed rule
+    SOURCE. A rule key is proven typed only when (1) the plugin module that
+    imports that source maps the rule's short name to the imported binding
+    (`'no-foo': noFoo`), and (2) the config binds that plugin module under the
+    rule's namespace (`plugins: { local }` with `import local from './...'`).
+    A file-name match alone, or a mapping under an unbound namespace, is
+    UNPROVEN: the rule is reported unresolved, never named."""
+
+    def __init__(self) -> None:
+        self.typed: list[tuple[Path, str, str, str]] = []   # path, stem, source, code
+        self.importers: dict[Path, list[tuple[Path, "str | None", str]]] = {}
+        self.ns_paths: dict[str, Path] = {}
+
+    def lookup(self, ns: str, short: str) -> "tuple[str, str] | str | None":
+        key_re = re.compile(r"(?<![\w$-])(['\"]?)" + re.escape(short) + r"\1\s*:")
+        unproven = False
+        for path, stem, source, code in self.typed:
+            for imp, binding, imp_code in self.importers.get(path, []):
+                if binding and re.search(
+                        r"(?<![\w$-])(['\"]?)" + re.escape(short) + r"\1\s*:\s*"
+                        + re.escape(binding) + r"(?![\w$])", imp_code):
+                    if self.ns_paths.get(ns) == imp:
+                        return "typed", source
+                    unproven = True
+            if stem == short or key_re.search(code):
+                unproven = True
+        return "unproven" if unproven else None
+
+
+def _tal_follow(path: Path, text: str, root: Path, rel: "Any", flat: bool,
+                first_specs: "list[str]"
+                ) -> "tuple[_TalCustomRules, list[str], list[dict[str, Any]]]":
+    """Follow the config's RELATIVE imports and relative `extends` (bounded).
+
+    Returns the custom-rule evidence (`_TalCustomRules`: every followed file
+    whose code asks for type information, who imports it under which binding,
+    and which plugin namespace each config binds to which local module), the
+    specifiers that could not be followed, and the READ of every other followed
+    file: a local base config (`import base from './base.mjs'; export default
+    [...base]`, `extends: ['./eslint/base.js']`) carries parserOptions, presets
+    and rules that apply to this config exactly as if they were written in it."""
+    custom = _TalCustomRules()
+    typed_paths: list[tuple[Path, str]] = []
+    texts: dict[Path, str] = {}
+    unresolved: list[str] = []
+    reads: list[dict[str, Any]] = []
+    start = path.resolve()
+    queue: list[tuple[Path, str, list[str]]] = [(start, text, list(first_specs))]
+    seen = {start}
+    followed = 0
+    while queue:
+        cur, cur_text, specs = queue.pop(0)
+        code = "" if _tal_is_obj_config(cur.name) else _tal_strip_js_comments(cur_text)
+        texts[cur] = code
+        if cur != start:
+            if _TAL_TYPED_RULE_SOURCE_RE.search(code):
+                typed_paths.append((cur, rel(cur)))
+            else:
+                r = _tal_read_any(cur, cur_text, rel(cur), flat)
+                if r is None:
+                    unresolved.append(f"{rel(cur)} (unreadable)")
+                else:
+                    reads.append(r)
+                    specs = specs + r["extends"]
+        bindings: dict[str, str] = {}
+        for m in _TAL_IMPORT_BINDING_RE.finditer(code):
+            bindings.setdefault(m.group(5).strip(), m.group(1) or m.group(2) or m.group(3))
+        local_paths: dict[str, Path] = {}
+        all_specs = [m.group(2).strip() for m in _VITEST_IMPORT_SPEC_RE.finditer(code)]
+        for spec in all_specs + specs:
+            if not _tal_is_relative(spec):
+                continue
+            target = _resolve_local_import(cur, spec, root)
+            if target is None:
+                unresolved.append(f"{rel(cur)}: {spec}")
+                continue
+            binding = bindings.get(spec)
+            if binding:
+                local_paths[binding] = target
+            if (cur, binding, code) not in custom.importers.setdefault(target, []):
+                custom.importers[target].append((cur, binding, code))
+            if target in seen:
+                continue
+            seen.add(target)
+            followed += 1
+            if followed > _TAL_MAX_FOLLOW:
+                unresolved.append(f"{rel(cur)}: {spec} (follow cap)")
+                continue
+            try:
+                t = _read_config_text(target)
+            except OSError:
+                t = None
+            if t is None:
+                unresolved.append(f"{rel(cur)}: {spec} (unreadable)")
+                continue
+            queue.append((target, t, []))
+        # `plugins: { local }` / `plugins: { 'local': plugin }`: namespace -> module
+        for m in _TAL_PLUGINS_RE.finditer(code):
+            lit = _tal_balanced(code, m.end())
+            for e in _TAL_PLUGIN_ENTRY_RE.finditer(lit):
+                ns, binding = (e.group(2), e.group(3)) if e.group(3) else (e.group(4), e.group(4))
+                if ns and binding in local_paths:
+                    custom.ns_paths.setdefault(ns, local_paths[binding])
+    for p, source in typed_paths:
+        stem = p.name.split(".")[0]
+        if stem == "index":
+            stem = p.parent.name
+        custom.typed.append((p, stem, source, texts.get(p, "")))
+    return custom, unresolved, reads
+
+
+def _tal_merge(read: dict[str, Any], others: "list[dict[str, Any]]") -> dict[str, Any]:
+    """A config's own read plus the reads of the local files it pulls in."""
+    out = {"evidence": list(read["evidence"]), "unresolved": list(read["unresolved"]),
+           "presets": sorted(set(read["presets"]).union(
+               *(o["presets"] for o in others))),
+           "explicit": {k: set(v) for k, v in read["explicit"].items()},
+           "sets_off": read.get("sets_off", False)
+           or any(o.get("sets_off") for o in others),
+           "root": read.get("root", False),
+           "shared": sorted(set(read.get("shared") or []).union(
+               *(o.get("shared") or [] for o in others)))}
+    for o in others:
+        out["evidence"] += o["evidence"]
+        out["unresolved"] += o["unresolved"]
+        for k, v in o["explicit"].items():
+            out["explicit"].setdefault(k, set()).update(v)
+    out["evidence"] = sorted(set(out["evidence"]))
+    out["unresolved"] = sorted(set(out["unresolved"]))
+    return out
+
+
+def _tal_block(**overrides: Any) -> dict[str, Any]:
+    """The ONE definition of the `type_aware_lint` block's shape. Defaults are
+    fail-closed: nothing read, walk incomplete."""
+    block: dict[str, Any] = {
+        "configs": [],
+        "unreadable": [],
+        "truncated": True,
+        "package_scripts": {},
+        "package_scripts_unreadable": [],
+        # {package dir: the `eslint` version spec its package.json declares}.
+        # The consumer reads the major: ESLint 10 looks a flat config up from
+        # each linted file, ESLint 9 from the working directory.
+        "eslint_versions": {},
+        "rules_source": "references/type-aware-lint-rules.tsv",
+        "error": None,
+    }
+    block.update(overrides)
+    return block
+
+
+def _read_type_aware_lint(root: Path) -> dict[str, Any]:
+    """Read the repo's ESLint config(s) for OPT82. Never raises: a crashed
+    reader yields a block the consumer withholds on, and says so."""
+    try:
+        return _read_type_aware_lint_unguarded(root)
+    except Exception as e:  # noqa: BLE001 — fail closed, never take the scan down
+        print(f"ci-speedup: the ESLint config reader failed ({type(e).__name__}: "
+              f"{e}); the type-aware lint check (OPT82) will be WITHHELD for this "
+              "repo — this is a scanner failure, not a fact about the repo.",
+              file=sys.stderr)
+        return _tal_block(error=type(e).__name__)
+
+
+def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
+    root = root.resolve()
+    rules_catalog = _load_type_aware_rules()
+    paths, truncated, manifests = _vitest_config_files(root, _is_eslint_config_name)
+
+    def _rel(path: Path) -> str:
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:                                  # pragma: no cover
+            return path.name
+
+    def _dir(rel: str) -> str:
+        return rel.rsplit("/", 1)[0] if "/" in rel else ""
+
+    configs: list[dict[str, Any]] = []
+    unreadable: list[str] = []
+    scripts: dict[str, dict[str, str]] = {}
+    scripts_unreadable: list[str] = []
+    eslint_versions: dict[str, str] = {}
+
+    def _finish(rel: str, fmt: str, read: dict[str, Any],
+                typed: "_TalCustomRules", imp_unresolved: list[str]) -> None:
+        expanded: set[str] = set()
+        for p in read["presets"]:
+            expanded |= {r for r, meta in rules_catalog.items()
+                         if p == "all" or p in meta["presets"]}
+        rules: set[str] = set()
+        rule_unresolved: list[str] = []
+        custom: list[dict[str, str]] = []
+        for r, states in read["explicit"].items():
+            ns, _sep, short = r.rpartition("/")
+            is_ts = r in rules_catalog
+            proof = (None if r.startswith("@typescript-eslint/") or is_ts
+                     else typed.lookup(ns, short))
+            if not (is_ts or proof):
+                continue
+            # Set sets are unordered: "on" and an UNSCOPED "off" for the same
+            # rule means the outcome depends on config order this read does
+            # not model. Never named; reported unresolved.
+            conflict = "on" in states and "off" in states
+            if "on" in states and not conflict and proof != "unproven":
+                rules.add(r)
+                if isinstance(proof, tuple):
+                    custom.append({"rule": r, "source": proof[1]})
+            elif "unresolved" in states or conflict or (
+                    "on" in states and proof == "unproven"):
+                rule_unresolved.append(r)
+        for r in expanded:
+            st = read["explicit"].get(r, set())
+            if "unresolved" in st or ("on" in st and "off" in st):
+                rule_unresolved.append(r)
+            elif r not in read["explicit"] or st - {"off"}:
+                rules.add(r)
+        type_aware = ("unresolved" if read["unresolved"]
+                      else "on" if read["evidence"] else "off")
+        configs.append({
+            "path": rel, "dir": _dir(rel), "format": fmt,
+            "type_aware": type_aware,
+            "type_aware_evidence": read["evidence"][:6],
+            "unresolved": read["unresolved"][:6],
+            "presets": read["presets"],
+            "rules": sorted(rules),
+            "rule_unresolved": sorted(set(rule_unresolved) - rules),
+            "custom_rules": sorted(custom, key=lambda c: c["rule"]),
+            "unresolved_imports": sorted(set(imp_unresolved))[:6],
+            # `project: false` / `null` set literally: a nearer legacy config
+            # that turns type-aware parsing OFF shadows an ancestor's ON.
+            "sets_off": bool(read.get("sets_off")),
+            # legacy `.eslintrc` `root: true`: the upward cascade stops here.
+            "root": bool(read.get("root")),
+            # shareable config packages this read does not follow.
+            "shared_configs": list(read.get("shared") or [])[:6],
+        })
+
+    for path in paths:
+        rel = _rel(path)
+        try:
+            text = _read_config_text(path)
+        except OSError:
+            text = None
+        if text is None:
+            unreadable.append(rel)
+            continue
+        flat = path.name.startswith("eslint.config.")
+        read = _tal_read_any(path, text, rel, flat)
+        if read is None:
+            unreadable.append(rel)
+            continue
+        typed, imp_unresolved, base_reads = _tal_follow(
+            path, text, root, _rel, flat, read["extends"])
+        _finish(rel, "flat" if flat else "eslintrc", _tal_merge(read, base_reads),
+                typed, imp_unresolved)
+    for path in manifests:
+        rel = _rel(path)
+        try:
+            text = _read_config_text(path)
+            data = json.loads(text) if text is not None else None
+        except (OSError, ValueError):
+            data = None
+        if not isinstance(data, dict):
+            scripts_unreadable.append(_dir(rel))
+            continue
+        deps = {**(data.get("dependencies") if isinstance(data.get("dependencies"), dict)
+                   else {}),
+                **(data.get("devDependencies") if isinstance(data.get("devDependencies"),
+                                                             dict) else {})}
+        if isinstance(deps.get("eslint"), str):
+            eslint_versions[_dir(rel)] = deps["eslint"]
+        sc = data.get("scripts")
+        scripts[_dir(rel)] = ({str(k): str(v) for k, v in sc.items()
+                               if isinstance(v, str)} if isinstance(sc, dict) else {})
+        if isinstance(data.get("eslintConfig"), dict):
+            _finish(rel, "package.json", _tal_read_obj(data["eslintConfig"], rel),
+                    _TalCustomRules(), [])
+    return _tal_block(
+        configs=sorted(configs, key=lambda c: c["path"]),
+        unreadable=sorted(unreadable),
+        truncated=truncated,
+        package_scripts=scripts,
+        package_scripts_unreadable=sorted(scripts_unreadable),
+        eslint_versions=eslint_versions,
+    )
 
 
 def _detect_turbo(root: Path, ci_turbo_tasks: set[str] | None = None):
@@ -3889,6 +4674,11 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
         # (`blocking_path`'s `vitest-isolate-pool`) must read before it can
         # claim the repo is still paying for per-file isolation.
         "test_runner_isolation": _read_test_runner_isolation(root),
+        # What the repo's ESLint config(s) say about TYPE-AWARE parsing and
+        # which type-aware rules are on, plus the package scripts a workflow's
+        # `npm run lint` resolves through. NOT a finding — the config fact the
+        # data-pass OPT82 detector joins to a slow lint job.
+        "type_aware_lint": _read_type_aware_lint(root),
         "catalog_patterns_total": len(catalog),
         "catalog_patterns_with_detector": len(static_entries) - len(unmatched_patterns),
         "catalog_patterns_without_detector": sorted(unmatched_patterns),
