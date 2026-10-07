@@ -1224,7 +1224,11 @@ evidence and deliberately left uncredited rather than rendered as a p50 saving.
 When the job is the workflow's slowest AND the workflow runs on pull requests
 (the detector's `is_pr`; unknown counts as not) AND its timing came from sampled
 pull-request runs (`_crit_has_developer_timing`: `event_scope` is not the
-`all-events` fallback, which would make every number a push timing), a stalled run sits on that
+`all-events` fallback, which would make every number a push timing) AND the job
+is on the merge-gating path (`_opt80_merge_gating_jobs`: its check is required,
+or a required job in the same workflow transitively `needs:` it; an unread,
+partial or empty required set is UNKNOWN and claims no merge wait, because a
+workflow's slowest job can be a non-required benchmark), a stalled run sits on that
 run's merge wait, so the finding also stamps a SEPARATE tail axis,
 `checkout_stall.tail_axis` = `{sampled_runs n, tail_runs k (log-proven only),
 one_in_n round(n/k), typical_checkout_p50_s, tail_checkout_p50_s (median of the
@@ -1245,7 +1249,9 @@ runner-minutes or the certificate. `verify_report.py`'s
 proofs' own quoted lines, fails a block on a finding off the critical path or
 outside the detector's own gate (`_opt80_tail_axis_eligible`: the workflow is in
 the stamped `declared_pr_workflows`, its `per_workflow_timing` `event_scope` is a
-pull-request event, and the job is its `long_pole_job`), a
+pull-request event, the job is its `long_pole_job`, and the stamped
+`tail_axis.merge_gating` re-derives from `required_checks`,
+`required_checks_complete` and `workflow_job_graph`), a
 block with no marked line (or a line with no block), and any "one run in N"
 sentence whose numbers no block re-derives to. Only the SLOWEST job of a push-only or
 unknown-trigger workflow keeps the uncredited "not credited in this version"

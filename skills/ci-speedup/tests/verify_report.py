@@ -6620,6 +6620,61 @@ def _opt80_tail_axis_rederived(f: dict) -> list[str]:
     return problems
 
 
+def _vr_opt80_check_names_job(check: str, job_key: str, node: dict) -> bool:
+    """Own copy of `collect_runs._opt80_check_names_job`: is the required check
+    `check` the check-run of YAML job `job_key`?"""
+    c = " ".join(str(check).split())
+    name = " ".join(str(node.get("name") or job_key).split())
+    pat = ".+?".join(re.escape(x) for x in re.split(r"\$\{\{.*?\}\}", name))
+    if node.get("matrix"):
+        pat += r"(?: \(.+\))?"
+    for cand in {c, c.rsplit(" / ", 1)[-1]}:
+        if cand == job_key or re.fullmatch(pat, cand):
+            return True
+    return bool(node.get("reusable")) and c.startswith(name + " / ")
+
+
+def _vr_opt80_merge_gating_problems(f: dict, data: dict) -> list[str]:
+    """Re-derive the tail axis's `merge_gating` evidence from the stamped
+    required set and job graph: the required read was complete, the named
+    check is required and is the named required job's check, the finding's job
+    is that YAML job, and it is the required job or in its `needs:` closure."""
+    cs = _as_dict(f.get("checkout_stall"))
+    mg = _as_dict(_as_dict(cs.get("tail_axis")).get("merge_gating"))
+    wf = str(f.get("workflow_file") or "")
+    if not mg:
+        return ["the tail axis names no required check its job gates - the merge "
+                "wait is not shown to include this job"]
+    if data.get("required_checks_complete") is not True:
+        return ["the required-check read was not complete, so no job is shown to "
+                "be on the merge-gating path"]
+    req = {str(r) for r in _as_list(data.get("required_checks"))}
+    rc, rj, jk = (str(mg.get("required_check") or ""), str(mg.get("required_job") or ""),
+                  str(mg.get("job_key") or ""))
+    jobs = _as_dict(_as_dict(data.get("workflow_job_graph")).get(wf))
+    problems: list[str] = []
+    if rc not in req:
+        problems.append(f"merge_gating names {rc!r}, which is not a required check")
+    if rj not in jobs or not _vr_opt80_check_names_job(rc, rj, _as_dict(jobs.get(rj))):
+        problems.append(f"merge_gating's required check {rc!r} is not job {rj!r} of {wf!r}")
+    job = str(cs.get("job") or "")
+    node = _as_dict(jobs.get(jk))
+    if jk not in jobs or " ".join(str(node.get("name") or jk).split()) != job:
+        problems.append(f"merge_gating's job {jk!r} is not the finding's job {job!r}")
+    closure, stack = {rj}, [rj]
+    while stack:
+        for dep in _as_list(_as_dict(jobs.get(stack.pop())).get("needs")):
+            if str(dep) in jobs and str(dep) not in closure:
+                closure.add(str(dep))
+                stack.append(str(dep))
+    if jk not in closure:
+        problems.append(f"{jk!r} is neither the required job {rj!r} nor needed by it")
+    want_basis = "required" if jk == rj else "needed_by_required"
+    if str(mg.get("basis") or "") != want_basis:
+        problems.append(f"merge_gating basis {mg.get('basis')!r} != {want_basis!r}")
+    return problems
+
+
 def _opt80_tail_axis_eligible(f: dict, data: dict) -> list[str]:
     """[] when a stamped tail axis meets the collector's own gate; otherwise why
     not. Mirrors `_detect_opt80_checkout_tail_stall`: the workflow DECLARES a
@@ -6649,6 +6704,7 @@ def _opt80_tail_axis_eligible(f: dict, data: dict) -> list[str]:
         problems.append(
             f"a tail axis is stamped on {job!r}, which is not {wf!r}'s slowest job "
             f"({crit.get('long_pole_job')!r})")
+    problems.extend(_vr_opt80_merge_gating_problems(f, data))
     return problems
 
 

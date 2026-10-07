@@ -2099,7 +2099,9 @@ smaller than the pause it replaces.
 **The tail line (slowest job of a pull-request workflow only).** When the
 stalling job is its workflow's slowest job and the workflow runs on pull
 requests (and was timed on sampled pull-request runs, not on push runs standing
-in for them), a stalled run's checkout sits on that run's merge wait. The report
+in for them), and the job is one the merge actually waits on (a required check,
+or a job a required job `needs:`; with no readable required-check set the
+merge wait is not claimed), a stalled run's checkout sits on that run's merge wait. The report
 then states the tail on its own line, next to that job's merge-wait figure in
 its long-pole section (or in a short block of its own when the job is not one
 of the drilled poles):

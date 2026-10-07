@@ -9482,7 +9482,10 @@ def _opt80_pole_doc():
 
 _OPT80_TAIL_AXIS = {"sampled_runs": 10, "tail_runs": 2, "one_in_n": 5,
                     "typical_checkout_p50_s": 10.0, "tail_checkout_p50_s": 120.0,
-                    "tail_loss_s": 110.0, "on_critical_path": True}
+                    "tail_loss_s": 110.0, "on_critical_path": True,
+                    "merge_gating": {"basis": "required",
+                                     "required_check": "CI / build",
+                                     "required_job": "build", "job_key": "build"}}
 
 
 def _opt80_tail_eligibility(doc, *, event_scope="pull_request", declared=True,
@@ -9497,6 +9500,11 @@ def _opt80_tail_eligibility(doc, *, event_scope="pull_request", declared=True,
         "long_pole_job": long_pole, "long_pole_p50": 121.0,
         "job_p50": {long_pole: 121.0}}
     doc["declared_pr_workflows"] = [wf] if declared else []
+    doc["required_checks"] = ["CI / build"]
+    doc["required_checks_complete"] = True
+    doc.setdefault("workflow_job_graph", {})[wf] = {
+        "build": {"name": "build", "needs": [], "reusable": False, "matrix": False},
+        "bench": {"name": "bench", "needs": [], "reusable": False, "matrix": False}}
     return doc
 
 
@@ -9711,6 +9719,50 @@ def test_opt80_tail_line_is_refused_off_the_pull_request_merge_wait(tmp_path: Pa
     del bare["per_workflow_timing"]
     findings_path.write_text(json.dumps(bare), encoding="utf-8")
     assert not vr.check_opt80_tail_lines(report, findings_path).ok
+
+
+def test_opt80_tail_line_is_refused_on_a_job_no_merge_waits_on(tmp_path: Path):
+    """A workflow's slowest job is not necessarily merge-gating: a slow,
+    non-required benchmark job beside a required fast `test`. The tail axis must
+    name the required check its job is (or is needed by), and the verifier
+    re-derives that from the stamped required set and the job graph."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+
+    def _fails(mutate):
+        bad = copy.deepcopy(doc)
+        mutate(bad)
+        findings_path.write_text(json.dumps(bad), encoding="utf-8")
+        chk = vr.check_opt80_tail_lines(report, findings_path)
+        assert not chk.ok, chk
+        return chk
+
+    axis = lambda d: d["findings"][0]["checkout_stall"]["tail_axis"]  # noqa: E731
+    # The job is not required (the required set names another check) ...
+    _fails(lambda d: d.__setitem__("required_checks", ["CI / bench"]))
+    # ... the required read was partial, or absent ...
+    _fails(lambda d: d.__setitem__("required_checks_complete", False))
+    _fails(lambda d: d.__setitem__("required_checks", None))
+    # ... the axis carries no merge-gating evidence at all ...
+    _fails(lambda d: axis(d).pop("merge_gating"))
+    # ... or claims the job is needed by a required job that does not need it.
+    def _claims_needed(d):
+        d["required_checks"] = ["CI / bench"]
+        axis(d)["merge_gating"] = {"basis": "needed_by_required",
+                                   "required_check": "CI / bench",
+                                   "required_job": "bench", "job_key": "build"}
+    _fails(_claims_needed)
+    # A real `needs:` edge from the required job makes the same claim true.
+    def _really_needed(d):
+        _claims_needed(d)
+        d["workflow_job_graph"][d["findings"][0]["workflow_file"]]["bench"][
+            "needs"] = ["build"]
+    good = copy.deepcopy(doc)
+    _really_needed(good)
+    findings_path.write_text(json.dumps(good), encoding="utf-8")
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
 
 
 def test_opt80_on_critical_path_matches_a_workflow_prefixed_pole_check(tmp_path: Path):

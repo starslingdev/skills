@@ -788,7 +788,14 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert cs_pole.get("tail_axis") == {
         "sampled_runs": 6, "tail_runs": 2, "one_in_n": 3,
         "typical_checkout_p50_s": 5.0, "tail_checkout_p50_s": 110.0,
-        "tail_loss_s": 105.0, "on_critical_path": True}, cs_pole.get("tail_axis")
+        "tail_loss_s": 105.0, "on_critical_path": True,
+        # `CI / test` is a required check (the corpus's classic branch
+        # protection), so the merge waits on it: the tail line is earned. With
+        # no readable required set, or a slow job nothing requires, there is
+        # no tail line at all.
+        "merge_gating": {"basis": "required", "required_check": "CI / test",
+                         "required_job": "test", "job_key": "test"},
+    }, cs_pole.get("tail_axis")
     # The tail line replaces the old "measured … but not credited in this
     # version" sentence for the on-pole pull-request case only.
     assert "not credited in this version" not in str(o80_pole[0].get("evidence")), (
@@ -996,12 +1003,14 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # The self-check re-derives the tail line rather than reading it back: a
     # tampered `one_in_n`, and separately a tail axis stamped on a finding that
     # is off the critical path, must each fail verification.
+    # So must a tail axis on a job the required set does not name.
     for _tamper80 in (
-            lambda cs: cs["tail_axis"].__setitem__("one_in_n", 2),
-            lambda cs: cs.__setitem__("on_critical_path", False)):
+            lambda cs, d: cs["tail_axis"].__setitem__("one_in_n", 2),
+            lambda cs, d: cs.__setitem__("on_critical_path", False),
+            lambda cs, d: d.__setitem__("required_checks", ["prep", "verify"])):
         _bad80 = json.loads(findings_path.read_text(encoding="utf-8"))
         _tamper80(next(f for f in _bad80["findings"]
-                       if f.get("id") == _pole_id)["checkout_stall"])
+                       if f.get("id") == _pole_id)["checkout_stall"], _bad80)
         _bad80_path = tmp_path / "findings_tampered_opt80.json"
         _bad80_path.write_text(json.dumps(_bad80), encoding="utf-8")
         _v80 = subprocess.run(

@@ -9749,6 +9749,84 @@ def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]]
             "tail_loss_s": loss, "on_critical_path": True}
 
 
+def _opt80_check_names_job(check: str, job_key: str, node: dict[str, Any]) -> bool:
+    """Whether the required-check context `check` is the check-run of the YAML job
+    `job_key` (its job-graph `node`). Deliberately literal, so `verify_report.py`
+    re-derives the same answer from the stamped job graph with its own copy:
+    the job's display name or key, whole or as the last ` / ` segment (a plain
+    job's check is `<workflow> / <job>`); a `${{ ... }}` template matched as a
+    wildcard; a matrix job's appended ` (<leg>)`; a reusable caller's
+    `<caller> / <child>` children."""
+    c = " ".join(str(check).split())
+    name = " ".join(str(node.get("name") or job_key).split())
+    parts = _re.split(r"\$\{\{.*?\}\}", name)
+    pat = ".+?".join(_re.escape(x) for x in parts)
+    if node.get("matrix"):
+        pat += r"(?: \(.+\))?"
+    for cand in {c, c.rsplit(" / ", 1)[-1]}:
+        if cand == job_key or _re.fullmatch(pat, cand):
+            return True
+    return bool(node.get("reusable")) and c.startswith(name + " / ")
+
+
+def _opt80_merge_gating_jobs(
+    wf_path: str,
+    required_checks: "RequiredChecks | None",
+    job_graph: dict[str, dict[str, dict[str, Any]]] | None,
+    crit_by_wf: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]] | None:
+    """The YAML jobs of `wf_path` a merge waits on, `{job_key: evidence}`, or None
+    when that cannot be known. A job is merge-gating when its check is REQUIRED,
+    or when a required job in the same workflow transitively `needs:` it — the
+    same reachability `_required_reachable_jobs` scopes the spine with.
+
+    None (unknown) whenever the required set is unread, partial or empty, or the
+    workflow has no job graph: the slowest job of a pull-request workflow is NOT
+    assumed to gate the merge (a slow non-required benchmark beside a required
+    fast `test` is the case this exists for). The evidence names the required
+    check and job, so the self-check re-derives it from `required_checks` and
+    `workflow_job_graph` instead of trusting it."""
+    if not (required_checks is not None and required_checks.complete
+            and required_checks.names and job_graph):
+        return None
+    jobs = job_graph.get(wf_path) or {}
+    if not jobs:
+        return None
+    out: dict[str, dict[str, Any]] = {}
+    anchors: list[tuple[str, str]] = []
+    for r in sorted(required_checks.names):
+        # The shared resolver first; when it pins nothing (a `<workflow> / <job>`
+        # context it does not split), the ONE job of this workflow whose check
+        # the context literally names. Either way the literal predicate must
+        # hold, because that is what the self-check re-derives.
+        node = _check_to_job_node(r, job_graph, crit_by_wf)
+        if node is not None and node[0] == wf_path and node[1] in jobs:
+            jid = node[1]
+        else:
+            hits = [k for k, n in jobs.items()
+                    if _opt80_check_names_job(r, k, n if isinstance(n, dict) else {})]
+            if node is not None or len(hits) != 1:
+                continue
+            jid = hits[0]
+        if not _opt80_check_names_job(r, jid, jobs[jid]):
+            continue
+        anchors.append((r, jid))
+    for r, jid in anchors:
+        out.setdefault(jid, {"basis": "required", "required_check": r,
+                             "required_job": jid, "job_key": jid})
+    for r, jid in anchors:
+        stack, seen = [jid], {jid}
+        while stack:
+            for dep in (jobs.get(stack.pop()) or {}).get("needs") or []:
+                if dep in jobs and dep not in seen:
+                    seen.add(dep)
+                    stack.append(dep)
+                    out.setdefault(dep, {"basis": "needed_by_required",
+                                         "required_check": r,
+                                         "required_job": jid, "job_key": dep})
+    return out
+
+
 def _opt80_tail_phrase(axis: dict[str, Any]) -> str:
     """The sentence the tail axis is rendered as in the finding's evidence string
     (the only caller). `blocking_path.py` hand-copies this f-string, and
@@ -9777,6 +9855,7 @@ def _detect_opt80_checkout_tail_stall(
     notes: dict[str, int] | None = None,
     withheld_candidates: list[dict[str, Any]] | None = None,
     is_pr: bool | None = None,
+    merge_gating_jobs: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Checkout stalls on the tail (catalog OPT80) — measured, and log-proven.
 
@@ -10120,9 +10199,18 @@ def _detect_opt80_checkout_tail_stall(
         # (`is_pr`) AND pull-request timing. Without a sampled pull-request run,
         # `_crit_for` falls back to all events, so `long_pole_job` and every
         # per-run checkout above are push timings that no pull request waited on.
+        # And the job must be on the MERGE-GATING path: required, or needed by
+        # required work (`merge_gating_jobs`, keyed by YAML job). The slowest job
+        # is not necessarily what a merge waits on — a slow non-required
+        # benchmark beside a required fast `test` is not — and with no
+        # required-check data (`None`) the merge wait is not claimed at all.
+        gating = (merge_gating_jobs or {}).get(key)
         tail_axis = (_opt80_tail_axis(per_run, proven, p50)
                      if on_pole and is_pr is True
-                     and _crit_has_developer_timing(crit) else None)
+                     and _crit_has_developer_timing(crit)
+                     and gating is not None else None)
+        if tail_axis is not None:
+            tail_axis["merge_gating"] = dict(gating)
         if tail_axis is not None:
             pole_sentence = (
                 f"`{job_name}` is this workflow's slowest job on pull requests: "
@@ -19606,7 +19694,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             notes=findings_doc.setdefault("opt80_notes", {}),
             # Whether this workflow can gate a PR. Only then does a stall on its
             # slowest job reach a merge wait, and only then is the tail line stamped.
-            is_pr=is_pr)
+            is_pr=is_pr,
+            # ...and only on a job the merge actually waits on: required, or
+            # needed by required work. None (no readable required set) = unknown,
+            # and an unknown merge wait is never claimed.
+            merge_gating_jobs=_opt80_merge_gating_jobs(
+                wf_path, required_checks, findings_doc.get("workflow_job_graph"),
+                crit_by_wf))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 

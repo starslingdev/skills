@@ -6541,12 +6541,18 @@ def test_opt80_names_the_slowest_job_case_in_plain_words():
     assert other[0]["checkout_stall"]["on_critical_path"] is False
 
 
-def _opt80_pr(is_pr, long_pole="build", durations=None):
+# `build` is a required check: the merge waits on it.
+_OPT80_BUILD_GATES = {"build": {"basis": "required", "required_check": "build",
+                                "required_job": "build", "job_key": "build"}}
+
+
+def _opt80_pr(is_pr, long_pole="build", durations=None, merge_gating="required"):
     runs = _opt80_runs(durations)
     gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
+    gating = _OPT80_BUILD_GATES if merge_gating == "required" else merge_gating
     return cr._detect_opt80_checkout_tail_stall(
         gh, "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(long_pole=long_pole),
-        _opt80_wf(), None, 100, 0, is_pr=is_pr)
+        _opt80_wf(), None, 100, 0, is_pr=is_pr, merge_gating_jobs=gating)
 
 
 def test_opt80_stamps_a_tail_axis_on_the_slowest_job_of_a_pull_request_workflow():
@@ -6561,7 +6567,8 @@ def test_opt80_stamps_a_tail_axis_on_the_slowest_job_of_a_pull_request_workflow(
     assert cs["tail_axis"] == {
         "sampled_runs": 10, "tail_runs": 2, "one_in_n": 5,
         "typical_checkout_p50_s": 10.0, "tail_checkout_p50_s": 120.0,
-        "tail_loss_s": 110.0, "on_critical_path": True}
+        "tail_loss_s": 110.0, "on_critical_path": True,
+        "merge_gating": _OPT80_BUILD_GATES["build"]}
     # Never a p50 number, never in the credited minutes or the certificate.
     assert f["wall_clock_p50_s"] == 0.0
     assert f["runner_min_saving"] == 36.7 and cs["runner_min_saving"] == 36.7
@@ -6585,7 +6592,8 @@ def test_opt80_tail_axis_counts_only_log_proven_tail_runs():
     logs[runs[-1][0]["id"]] = _OPT80_SMOOTH_LOG
     out = cr._detect_opt80_checkout_tail_stall(
         _Opt80Gh(logs), "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(),
-        _opt80_wf(), None, 100, 0, is_pr=True)
+        _opt80_wf(), None, 100, 0, is_pr=True,
+        merge_gating_jobs=_OPT80_BUILD_GATES)
     axis = out[0]["checkout_stall"]["tail_axis"]
     assert axis["tail_runs"] == 2 and axis["one_in_n"] == 5, axis
     assert len(out[0]["checkout_stall"]["tail_run_job_ids"]) == 3
@@ -6632,6 +6640,68 @@ def test_opt80_tail_axis_one_in_n_rounds_half_to_even_7_of_2_is_4_and_5_of_2_is_
     assert axis(7, 2)["sampled_runs"] == 7 and axis(5, 2)["tail_runs"] == 2
 
 
+def test_opt80_stamps_no_tail_axis_when_merge_gating_is_unknown():
+    """The slowest job of a pull-request workflow is not necessarily what a merge
+    waits on: a non-required benchmark job can be the slowest while the required
+    `test` job is the gate. With no required-check data for the workflow (an
+    unreadable branch protection, the common case), the audit cannot say the
+    stall is on the merge wait, so it states no tail line."""
+    runs = _opt80_runs()
+    gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
+    out = cr._detect_opt80_checkout_tail_stall(
+        gh, "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(), _opt80_wf(), None,
+        100, 0, is_pr=True)
+    assert len(out) == 1, out
+    assert "tail_axis" not in out[0]["checkout_stall"], out[0]["checkout_stall"]
+    assert "loses up to" not in out[0]["evidence"], out[0]["evidence"]
+
+
+def test_opt80_stamps_no_tail_axis_on_a_slowest_job_no_merge_waits_on():
+    """Required-check data exists and `build` (the slowest job) is neither
+    required nor needed by required work: no tail axis. Listed on the path: it
+    is stamped, carrying the evidence it was stamped on."""
+    for gating in ({}, {"test": {"basis": "required", "required_check": "test",
+                                 "required_job": "test", "job_key": "test"}}):
+        f = _opt80_pr(is_pr=True, merge_gating=gating)[0]
+        assert "tail_axis" not in f["checkout_stall"], gating
+        assert "loses up to" not in f["evidence"], gating
+    f = _opt80_pr(is_pr=True)[0]
+    assert f["checkout_stall"]["tail_axis"]["merge_gating"] == (
+        _OPT80_BUILD_GATES["build"])
+
+
+def _opt80_gating_graph():
+    return {"ci.yml": {
+        "test": {"name": "test", "needs": [], "reusable": False, "matrix": False},
+        "benchmark": {"name": "benchmark", "needs": [], "reusable": False,
+                      "matrix": False},
+        "build": {"name": "build", "needs": [], "reusable": False, "matrix": False},
+        "gate": {"name": "gate", "needs": ["build"], "reusable": False,
+                 "matrix": False}}}
+
+
+def test_opt80_merge_gating_jobs_are_required_or_needed_by_required_work():
+    crit_by_wf = {"ci.yml": {"job_p50": {"test": 50.0, "benchmark": 300.0,
+                                         "build": 100.0, "gate": 1.0},
+                             "event_scope": "pull_request"}}
+    graph = _opt80_gating_graph()
+    req = cr.RequiredChecks(frozenset({"CI / test", "gate"}), True)
+    got = cr._opt80_merge_gating_jobs("ci.yml", req, graph, crit_by_wf)
+    assert set(got) == {"test", "gate", "build"}, got
+    assert got["test"] == {"basis": "required", "required_check": "CI / test",
+                           "required_job": "test", "job_key": "test"}
+    assert got["build"] == {"basis": "needed_by_required", "required_check": "gate",
+                            "required_job": "gate", "job_key": "build"}
+    # The slow benchmark gates nothing.
+    assert "benchmark" not in got
+    # No data, or a partial read, is "unknown" - never "on the merge wait".
+    assert cr._opt80_merge_gating_jobs("ci.yml", None, graph, crit_by_wf) is None
+    assert cr._opt80_merge_gating_jobs(
+        "ci.yml", cr.RequiredChecks(frozenset({"gate"}), False), graph,
+        crit_by_wf) is None
+    assert cr._opt80_merge_gating_jobs("ci.yml", req, None, crit_by_wf) is None
+
+
 def test_opt80_stamps_no_tail_axis_when_no_pull_request_run_was_timed():
     """A workflow that DECLARES pull_request but had no sampled pull-request run
     is timed on whatever ran instead (`_crit_for` falls back to all events, so
@@ -6645,7 +6715,7 @@ def test_opt80_stamps_no_tail_axis_when_no_pull_request_run_was_timed():
     crit["event_scope"] = "all-events"
     out = cr._detect_opt80_checkout_tail_stall(
         gh, "acme/app", _OPT80_WF_PATH, runs, crit, _opt80_wf(), None, 100, 0,
-        is_pr=True)
+        is_pr=True, merge_gating_jobs=_OPT80_BUILD_GATES)
     assert len(out) == 1, out
     f = out[0]
     assert "tail_axis" not in f["checkout_stall"], f["checkout_stall"].get("tail_axis")
