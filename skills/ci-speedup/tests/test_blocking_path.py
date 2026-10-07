@@ -3184,6 +3184,31 @@ def test_opt80_tail_line_renders_in_a_static_only_report():
     assert static.count("<!-- opt80-tail:f1 -->") == 1, static
     assert "one run in 5 loses up to 110s on checkout to a stalled fetch" in static
 
+def test_opt80_off_pole_tail_renders_in_its_own_section_in_both_renders():
+    """A tail on a job that is not a drilled pole gets its own `##` section -
+    never the tail of the last Runner saving card - placed before Also noticed
+    and Data sources, in the full render (with a Contents entry) and in the
+    static-only render (which has no Contents)."""
+    marker = "<!-- opt80-tail:f-promoted -->"
+    for static in (False, True):
+        doc = _opt80_tail_render_doc(pole_check="other", pole_job="other")
+        if static:
+            doc["pr_critical_path"]["poles"] = []
+        md = bp.render(doc)
+        assert md.count(marker) == 1, static
+        head_i = md.find("## ⏱️ Checkout stall tails")
+        assert head_i != -1, (static, md[-3000:])
+        enclosing = re.findall(r"(?m)^## .*$", md[:md.index(marker)])[-1]
+        assert "Checkout stall tails" in enclosing, (static, enclosing)
+        assert '<a id="checkout-stall-tails"></a>' in md
+        for later in ("## 🧹 Also noticed", "## 🗄️ Data sources"):
+            if later in md:
+                assert md.index(later) > head_i, (static, later)
+        if not static:
+            toc = md.split("## 📋 Contents", 1)[1].split("\n## ", 1)[0]
+            assert "(#checkout-stall-tails)" in toc, toc
+
+
 def test_opt80_off_pole_tail_heading_matches_the_render():
     """The off-pole block says "not one of the long poles drilled above" only
     when poles were drilled; a static-only report drills none."""
@@ -3192,7 +3217,7 @@ def test_opt80_off_pole_tail_heading_matches_the_render():
     static = bp._opt80_off_pole_tail_block(doc["findings"], "u", drilled=False)
     assert "drilled above" in "\n".join(drilled)
     assert "drilled above" not in "\n".join(static)
-    assert "no long pole" in static[2], static[2]
+    assert "no long pole" in "\n".join(static), static
     assert "<!-- opt80-tail:f-promoted -->" in static
 
 

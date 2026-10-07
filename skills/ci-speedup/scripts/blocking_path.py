@@ -6259,10 +6259,27 @@ def _opt80_off_pole_tail_block(findings: list[dict[str, Any]], catalog_url: str,
         return []
     where = ("but not one of the long poles drilled above." if drilled else
              "and this report drilled no long pole, so its tail is stated here.")
-    return ["---", "",
-            "**⏱️ Checkout stall tails on a workflow's slowest job** - each job below "
-            f"is the slowest job of a workflow that runs on pull requests, {where}", "",
+    # Its own `##` section (anchor `checkout-stall-tails`): without a heading the
+    # block would read as the tail of whatever section precedes it - the last
+    # Runner saving card - and the tail is never a runner-minute figure.
+    return ["---", "", f'<a id="{_OPT80_TAILS_ANCHOR}"></a>', "",
+            "## ⏱️ Checkout stall tails on a workflow's slowest job", "",
+            "Each job below is the slowest job of a workflow that runs on pull "
+            f"requests, {where}", "",
             *_opt80_tail_block(rest, catalog_url)]
+
+
+_OPT80_TAILS_ANCHOR = "checkout-stall-tails"
+
+
+def _opt80_tails_toc_entry(count: int) -> list[str]:
+    """The Contents pointer to the off-pole tails section ([] for none)."""
+    if count <= 0:
+        return []
+    plural = "s" if count != 1 else ""
+    return [f"**⏱️ Checkout stall tails** - {count} job{plural} whose stalled runs "
+            "take longer on checkout (a separate tail figure, never added to any "
+            f"total): [see below](#{_OPT80_TAILS_ANCHOR}).", ""]
 
 
 def _tier2_unpromoted_accounting(findings: list[dict[str, Any]],
@@ -8434,17 +8451,16 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *queue_lines]
     if tier2_lines:
         out += ["---", "", *tier2_lines]
+    # No pole is drilled here, so every OPT80 tail line renders in the off-pole
+    # section, after the runner-minute cards and before Also noticed. A
+    # tail-axis finding is a Tier-2 finding, so this path is reached.
+    out += _opt80_off_pole_tail_block(all_findings, catalog_url, drilled=False)
     if also_lines:
         out += ["---", "", *also_lines]
     # Measured net-negative caches that could not be PRICED (their job is not
     # below the cluster floor). Beside the dropped-unprovable banner, its nearest
     # precedent: a measured fact kept out of the numbers and shown anyway.
     out += uncredited_lines
-    # No pole is drilled here, so every OPT80 tail line renders in the off-pole
-    # block. A tail-axis finding is a Tier-2 finding, so this path is reached.
-    # `drilled=False`: nothing was drilled here, so the heading must not point
-    # at "the long poles drilled above".
-    out += _opt80_off_pole_tail_block(all_findings, catalog_url, drilled=False)
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
                                       or doc.get("dropped_unprovable"))
     # Issue #12: a static-only report (no measured pole to crown) can still carry a stamped
@@ -9371,11 +9387,13 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # `top_is_gate` carries the removed Level-1 chart's ◀-is-the-gate condition to the
     # Contents' first row: the frequency gate is the slowest single check AND the gate is
     # not a `needs:` chain (a chain's slowest single check is not the gate).
-    out += _toc_block(pole_wfs, wf_gate, npop, also_count, pr_floor=is_pr_floor,
-                      queue_count=queue_count, also_on_path=also_on_path,
-                      runner_spine_count=runner_spine_count,
-                      tier2_toc=tier2_toc,
-                      top_is_gate=(gate_is_slowest and not chain_active))
+    _toc_lines = _toc_block(pole_wfs, wf_gate, npop, also_count, pr_floor=is_pr_floor,
+                            queue_count=queue_count, also_on_path=also_on_path,
+                            runner_spine_count=runner_spine_count,
+                            tier2_toc=tier2_toc,
+                            top_is_gate=(gate_is_slowest and not chain_active))
+    _toc_at = len(out)
+    out += _toc_lines
     # The prose provenance ("Where this data comes from") is consolidated into the
     # 🗄️ Data sources section at the foot (owner UX edit 2026-07-19) — no longer emitted
     # here after the Contents.
@@ -10245,6 +10263,21 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out += ["---", "", *queue_lines]
     if tier2_lines:
         out += ["---", "", *tier2_lines]
+    # OPT80 tail lines whose job was not drilled as a pole above get their own
+    # section here, after the runner-minute cards and before Also noticed (each
+    # renders once: the ids already shown at a pole are read off their markers).
+    _tails_lines = _opt80_off_pole_tail_block(
+        all_findings, catalog_url,
+        set(re.findall(r"<!-- opt80-tail:([^ ]+) -->", "\n".join(out))))
+    out += _tails_lines
+    if _tails_lines and _toc_lines:
+        # The Contents is rendered before the poles decide which tails they
+        # carry, so its pointer is spliced in now, ahead of the Also noticed one.
+        _entry = _opt80_tails_toc_entry(
+            sum(1 for ln in _tails_lines if ln.startswith("<!-- opt80-tail:")))
+        _also_at = next((k for k, ln in enumerate(_toc_lines)
+                         if ln.startswith("**🧹 Also noticed**")), len(_toc_lines))
+        out[_toc_at + _also_at:_toc_at + _also_at] = _entry
     if also_lines:
         out += ["---", "", *also_lines]
     if shallow_note and not queue_lines and not also_lines:
@@ -10258,11 +10291,6 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # below the cluster floor). Beside the dropped-unprovable banner, its nearest
     # precedent: a measured fact kept out of the numbers and shown anyway.
     out += _opt79_uncredited_block(doc)
-    # OPT80 tail lines whose job was not drilled as a pole above (each renders
-    # once: the ids already shown at a pole are read back off their markers).
-    out += _opt80_off_pole_tail_block(
-        all_findings, catalog_url,
-        set(re.findall(r"<!-- opt80-tail:([^ ]+) -->", "\n".join(out))))
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
                                       or doc.get("dropped_unprovable"))
     # The prose provenance block leads the Data sources section (owner UX edit
