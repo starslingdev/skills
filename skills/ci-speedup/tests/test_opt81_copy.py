@@ -330,3 +330,29 @@ def test_opt81_verifier_rejects_an_a1_card_that_misstates_a_median(tmp_path):
     assert bad != good
     r = vr.check_opt81_runner_comparison_rederived(bad, path)
     assert not r.ok and "at p50 90s" in r.detail, r.detail
+
+
+# ---- No measured pole: an OPT81-only doc still renders its section ------------
+
+def test_opt81_only_doc_with_no_measured_pole_renders_the_runner_class_section(tmp_path):
+    """A findings doc with no measured pole whose only findings are OPT81 must
+    not collapse to the bare no-critical-path line: the A1 card renders, the A2
+    renders only as its held-back one-liner, and the report check passes."""
+    a1, a2 = _a1_finding(), _a2_finding()
+    doc = {"repo": "o/r", "scanned_at": "2026-06-08T00:00:00Z",
+           "data_sources": {"runs_sampled": 16, "jobs_sampled": 16,
+                            "workflows_analyzed": 1},
+           "pr_critical_path": {"poles": []},
+           "findings": [a1, a2]}
+    md = bp.render(doc, {}, {}, {}, "2026-06-08")
+    assert md.strip() != "_No measured critical path in this findings JSON._"
+    assert "## 🏎️ Runner class comparisons" in md
+    assert "measured from runs this repository already made" in _opt81_block(md, "f7")
+    held = _opt81_block(md, "f9")
+    assert bp._OPT81_A2_HELD_UNROUTED in held
+    assert "Option 1" not in held and "Option 2" not in held
+    vr = _load_verify_report()
+    path = tmp_path / "f.json"
+    path.write_text(json.dumps(_doc(a1, a2)), encoding="utf-8")
+    chk = vr.check_opt81_runner_comparison_rederived(md, path)
+    assert chk.ok, chk.detail

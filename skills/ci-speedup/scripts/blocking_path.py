@@ -8490,9 +8490,13 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # "measured, could not tell" read as "nothing found".
     withheld_n = sum(1 for _r in _WITHHELD_ROWS
                      if _withheld_candidates_line(doc, _r.doc_key, _r.noun))
+    # An OPT81 finding (a measured runner-class comparison, or a held-back A2) is
+    # something to say too: without counting it, an OPT81-only doc collapsed to
+    # the one-line note and its "Runner class comparisons" section was dropped.
+    opt81_n = len(_opt81_findings(all_findings))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
-            and not withheld_n):
+            and not withheld_n and not opt81_n):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")
