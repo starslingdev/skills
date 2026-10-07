@@ -9765,6 +9765,7 @@ def test_opt80_tail_marker_inside_a_pole_section_is_not_off_pole(tmp_path: Path)
     assert vr._vr_opt80_tail_rendered_off_pole(f, report) is False
     # Off-pole render: the same helper says True, and the check accepts it.
     doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    doc["per_workflow_timing"] = _opt80_pwt("build")
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     f = doc["findings"][0]
     assert vr._vr_opt80_tail_rendered_off_pole(f, report) is True
