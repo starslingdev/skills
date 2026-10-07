@@ -8473,6 +8473,19 @@ def check_opt82_type_aware_lint_uncredited(report: str,
             if missing:
                 bad.append(f"{fid}: its OPT82 card does not list rule(s) "
                            + ", ".join(missing))
+        # A drilled pole whose job carries this finding is CATALOG-COVERED
+        # (`blocking_path._opt82_pole_for`, at any size: OPT82 is uncredited by
+        # design), so its section must never call it a coverage gap.
+        if not f.get("advisory"):
+            for pwf, pcheck, body in _pole_header_sections(report):
+                if (Path(pwf).name, _matrix_base(_cmp_name(pcheck))) not in fkeys:
+                    continue
+                plain = _strip_render_artifacts(body)
+                if ("NO CATALOG PATTERN MATCHED" in plain
+                        or "this is a coverage gap" in plain):
+                    bad.append(f"{fid}: long pole `{pcheck}` carries this OPT82 finding "
+                               "but renders the coverage gap wording - OPT82 is its "
+                               "catalog match")
     for card in cards:
         if _strip_render_artifacts(_VR_OPT82_LEDGER_SENTENCE) not in \
                 _strip_render_artifacts(card):

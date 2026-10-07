@@ -1346,7 +1346,13 @@ metric "uncredited, benchmark first". Being numberless by design, it is exempt
 from the valueless-pole exclusion (`_on_pole_job`), so a lint job that is also a
 drilled pole still gets its card, and from `_ALSO_NOTICED_CAP`, so it never
 falls into the "+N more" tail where its rules and ledger would not reach the
-reader. Cards are keyed per lint job (`_group_by_pattern_ranked` keys OPT82 by
+reader. A drilled pole whose job carries a non-advisory OPT82 finding
+(`_opt82_pole_for`) counts it as that pole's catalog match at any size, unlike
+OPT79, which covers a pole only from 30s: OPT82 is uncredited by design and its
+claim is the named cause, so the pole never reads as a coverage gap, takes no
+gap-fill or gap capture, and its waterfall and prompt point at the card in Also
+noticed; the verifier's OPT82 check fails a covered pole that still renders
+the coverage-gap wording. Cards are keyed per lint job (`_group_by_pattern_ranked` keys OPT82 by
 pattern + workflow + jobs, like OPT73/OPT77/OPT79), because each job has its own
 configs, rules, ceiling and benchmark directory. The card has its own prompt, not the
 generic bill or off-path saving line: it carries the SIZING clause, tells the

@@ -3242,7 +3242,8 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
                         data_driven: list[dict[str, Any]] | None = None,
                         *, cs: "claims.ClaimSet | None" = None,
                         cross_run_rendered: bool = False,
-                        opt79: list[dict[str, Any]] | None = None) -> str:
+                        opt79: list[dict[str, Any]] | None = None,
+                        opt82: list[dict[str, Any]] | None = None) -> str:
     """Assemble the per-pole agent prompt from the MEASURED context + the per-cause
     static block. Self-contained: pasted alone it gives the agent the gate, the
     drill, the cause + verbatim evidence, the addressable wall-clock ceiling, where
@@ -3259,7 +3260,7 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
         return _build_generic_agent_prompt(
             pole, candidates, run_url, repo, sha, gate_count, npop, timeline,
             structural, data_driven, cs=cs, cross_run_rendered=cross_run_rendered,
-            opt79=opt79)
+            opt79=opt79, opt82=opt82)
     wf = _wf_base(pole.get("workflow_file", ""))
     check = _clean_label(str(pole.get("check", "")))
     dur = _clock(_num(pole.get("p50_s")))
@@ -3363,7 +3364,8 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                                 data_driven: list[dict[str, Any]] | None = None,
                                 *, cs: "claims.ClaimSet | None" = None,
                                 cross_run_rendered: bool = False,
-                                opt79: list[dict[str, Any]] | None = None) -> str:
+                                opt79: list[dict[str, Any]] | None = None,
+                                opt82: list[dict[str, Any]] | None = None) -> str:
     """The hand-off for a pole with no log-level catalog detector match: ci-speedup
     measured WHERE the time goes (the gate, the dominant step + its share) but no log
     detector named the sub-cause, so it points the agent at that step to investigate -
@@ -3445,6 +3447,11 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 "prescribe the fix - a measured catalog pattern (OPT79, a cache that "
                 "costs more than it saves) matched this pole (see its **Measured cache "
                 "cost** block above for the measured comparison + its fix recipe).")
+    elif opt82:
+        lead = ("starslingdev/ci-speedup measured where the time goes below but does NOT "
+                "prescribe the fix - a measured catalog pattern (OPT82, lint builds the "
+                "whole type graph) matched this pole (see its card in the **Also "
+                "noticed** section below for the rules, the benchmark and the ledger).")
     else:
         lead = ("starslingdev/ci-speedup measured where the time goes below but does NOT "
                 "prescribe the fix - and for this job its detectors found no known "
@@ -3509,7 +3516,14 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 "measured slower on the runs where it hit than on the runs where it "
                 "missed. Re-key or narrow it first and re-measure; never narrow what "
                 "the install installs.", ""]
-    if not struct_pats and not dd_pats and not opt79:
+    if opt82:
+        out += ["MEASURED LINT PATTERN MATCHED",
+                "- OPT82 (lint builds the whole type graph) matched this pole - see its "
+                "card in the **Also noticed** section below: it names the type-aware "
+                "rules, the benchmark to run first and the rule ledger to keep. It is "
+                "uncredited, so no saving is stated for it; benchmark before changing "
+                "anything.", ""]
+    if not struct_pats and not dd_pats and not opt79 and not opt82:
         out += ["NO CATALOG PATTERN MATCHED",
                 "- ci-speedup's detector set didn't recognize this job's stack, so there "
                 "is no named sub-cause. The step above is the load-bearing one; open its "
@@ -3799,6 +3813,12 @@ def _emit_gantt(out: list[str], steps: list[dict[str, Any]], total: float,
             out.append(core.rstrip())
 
 
+# The waterfall's pointer for a pole whose lint job carries OPT82 (`_opt82_pole_for`).
+_OPT82_POLE_POINTER = ("(no log-level detector fired, but a measured **catalog pattern** "
+                       "(OPT82, lint builds the whole type graph) matched this pole - see "
+                       "its card in the **Also noticed** section below.)")
+
+
 def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                     timeline: dict[str, Any] | None = None,
                     log_present: bool = False,
@@ -3806,7 +3826,8 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                     structural_present: bool = False,
                     data_driven_present: bool = False,
                     data_driven_on_path: bool = True,
-                    opt79_present: bool = False) -> list[str]:
+                    opt79_present: bool = False,
+                    opt82_present: bool = False) -> list[str]:
     """The ASCII waterfall for one pole (no code fence): the blocking job's steps,
     then - when a log was captured - the dominant step's internals down to the
     root cause.
@@ -3944,6 +3965,10 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
             lines += ["", "   (no log-level detector fired, but a measured **catalog "
                       "pattern** (OPT79, a cache that costs more than it saves) matched this "
                       "pole - see its **Measured cache cost** block below.)"]
+        elif log_present and leaf is None and opt82_present:
+            # OPT82 on this pole's lint job (`_opt82_pole_for`) - a catalog match at
+            # any size; its card renders in Also noticed.
+            lines += ["", "   " + _OPT82_POLE_POINTER]
         elif log_present and leaf is None:
             # A log WAS captured but no detector recognized it - surface that loudly
             # rather than silently showing the timeline with no drill (a missed root
@@ -4012,6 +4037,8 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
             lines += ["", "(no log-level detector fired, but a measured **catalog "
                       "pattern** (OPT79, a cache that costs more than it saves) matched this "
                       "pole - see its **Measured cache cost** block below.)"]
+        elif opt82_present and leaf is None:
+            lines += ["", _OPT82_POLE_POINTER]
         elif not log_present:
             lines += ["", f"(no captured log for this job — run with `--log "
                       f"{wf_base.split('.')[0]}=<job log>` to drill into `{dom}`.)"]
@@ -5893,6 +5920,35 @@ def _opt79_pole_covers(findings: list[dict[str, Any]] | None) -> list[dict[str, 
     pole) still renders its block at the pole, but it does not explain the pole,
     so the pole is still treated as a coverage gap."""
     return [f for f in (findings or []) if _saves_wall_clock(f)]
+
+
+def _opt82_pole_for(pole: dict[str, Any],
+                    findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """OPT82 (lint builds the whole type graph) finding(s) on THIS drilled pole's
+    job. Each one is catalog COVER for the pole: OPT82 names the job's cause and
+    targets poles directly (a lint job at 60s or more, or a workflow's slowest
+    job), so the pole must not read as a coverage gap or feed the gap loop.
+    Unlike OPT79 (`_opt79_pole_covers`) no magnitude gates the cover: OPT82 is
+    uncredited BY DESIGN (it carries no saving to clear a floor with), and its
+    claim is the named cause, not a number. Its card stays in Also noticed
+    (`_also_noticed_block` keeps it on a pole job), so the pole only points
+    there. Same join as `_opt79_pole_for`: the job against the pole's
+    check/job, never across workflows."""
+    targets = [t for t in (str(pole.get("check", "")), str(pole.get("job", ""))) if t]
+    if not targets:
+        return []
+    pole_wf = str(pole.get("workflow_file") or "")
+    out: list[dict[str, Any]] = []
+    for f in findings:
+        if f.get("advisory") or str(f.get("pattern") or "") != "OPT82":
+            continue
+        if _wf_conflict(pole_wf, str(f.get("workflow_file") or "")):
+            continue
+        jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
+        if any(j == t or _same_matrix(j, t) or _matrix_base(t) == j
+               or _matrix_base(j) == t for j in jobs for t in targets):
+            out.append(f)
+    return out
 
 
 def _opt79_hit_share_text(cn: Any) -> str:
@@ -10566,6 +10622,9 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # OPT79's pole-cache finding (a measured merge-wait number on THIS job) is a
         # catalog match too, and renders here rather than in the appendix.
         opt79_pole = _opt79_pole_for(p, all_findings)
+        # OPT82 on this pole's lint job is a catalog match at any size (it is
+        # uncredited by design; `_opt82_pole_for`). Its card stays in Also noticed.
+        opt82_pole = _opt82_pole_for(p, all_findings)
         # An LLM gap-fill analysis only applies to a pole that matched NO catalog
         # detector (SKILL.md phase 4a). A structural- OR data-driven-track match IS a
         # catalog match, so it suppresses the gap-fill exactly as a log-detector match
@@ -10576,7 +10635,8 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         analysis = (_match(analyses)
                     if (leaf is None and offcat_leaf is None
                         and not structural and not data_driven
-                        and not _opt79_pole_covers(opt79_pole)) else None)
+                        and not _opt79_pole_covers(opt79_pole)
+                        and not opt82_pole) else None)
         out.append(f'<a id="pole-{i}"></a>')
         out.append("")
         # `wf_base` (a workflow FILENAME) and `check` are BOTH arbitrary repo text dropped
@@ -10672,7 +10732,8 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                                             structural_present=bool(structural),
                                             data_driven_present=bool(data_driven),
                                             data_driven_on_path=dd_on_path,
-                                            opt79_present=bool(_opt79_pole_covers(opt79_pole))),
+                                            opt79_present=bool(_opt79_pole_covers(opt79_pole)),
+                                            opt82_present=bool(opt82_pole)),
                 "```", ""]
         # The cross-run magnitude check (rendered below) - compute now so the footer
         # only promises it when it actually appears (a categorical finding has none).
@@ -10800,7 +10861,8 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 leaf, p, floor_pool, run_url, repo, doc.get("commit_sha"),
                 wf_gate.get(str(p.get("workflow_file", "")), 0), npop, timeline,
                 structural=structural, data_driven=data_driven, cs=cs,
-                cross_run_rendered=cross_run_rendered, opt79=opt79_pole), ""]
+                cross_run_rendered=cross_run_rendered, opt79=opt79_pole,
+                opt82=opt82_pole), ""]
         # A leaf demoted off-category (issue #16) is kept as a labelled secondary
         # observation below the prompt — never a silent drop of a real (if minority) finding.
         if offcat_leaf is not None:
@@ -11174,7 +11236,8 @@ def _gap_poles(doc: dict[str, Any],
     def _catalog_covers(pole: dict[str, Any]) -> bool:
         return bool(_structural_for_pole(pole, findings)
                     or _data_driven_for_pole(pole, findings)
-                    or _opt79_pole_covers(_opt79_pole_for(pole, findings)))
+                    or _opt79_pole_covers(_opt79_pole_for(pole, findings))
+                    or _opt82_pole_for(pole, findings))
 
     out: list[tuple[dict[str, Any], str, str, str]] = []
     entries = (doc.get("data_bundle") or {}).get("logs") or []
