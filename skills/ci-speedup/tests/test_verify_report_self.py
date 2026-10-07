@@ -9936,10 +9936,31 @@ def test_opt80_off_critical_path_job_may_still_be_a_drilled_pole(tmp_path: Path)
     doc = _opt80_tail_doc(pole_check="CI / build", pole_job="build")
     del doc["findings"][0]["checkout_stall"]["tail_axis"]
     doc["findings"][0]["checkout_stall"]["on_critical_path"] = False
+    # A chain pole: the workflow's slowest job is another one.
+    doc["per_workflow_timing"] = _opt80_pwt("prep")
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     assert "CI / build" in report
     chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
     assert chk.ok, chk
+
+
+def test_opt80_on_critical_path_is_rederived_both_ways_from_the_slowest_job(
+        tmp_path: Path):
+    """on_critical_path is the collector's "this job is its workflow's slowest
+    job" (`per_workflow_timing[wf].long_pole_job`), re-derived both ways
+    whatever the rendered poles show: a stale False on the slowest job fails,
+    and so does a True on a job that is not the slowest."""
+    vr = _load_verify_report()
+    for claimed, slowest in ((False, "build"), (True, "deploy")):
+        doc = _opt80_tail_doc(pole_check="CI / build", pole_job="build")
+        del doc["findings"][0]["checkout_stall"]["tail_axis"]
+        doc["findings"][0]["checkout_stall"]["on_critical_path"] = claimed
+        doc["per_workflow_timing"] = _opt80_pwt(slowest)
+        sub = tmp_path / f"{claimed}-{slowest}"
+        sub.mkdir()
+        report, report_path, findings_path = _tier2_artifacts(sub, doc)
+        chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+        assert not chk.ok and "slowest job" in str(chk.detail), (claimed, chk)
 
 
 def test_opt80_pole_match_uses_the_poles_own_job_not_the_last_segment(tmp_path: Path):
@@ -10270,6 +10291,7 @@ def test_tier2_accepts_a_checkout_stall_on_the_rendered_long_pole(tmp_path: Path
     pattern's most valuable case to satisfy an inference a measurement replaced."""
     vr = _load_verify_report()
     doc = _opt80_pole_doc()
+    doc["per_workflow_timing"] = _opt80_pwt("build")
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     assert "Long pole" in report and "build" in report, report[:400]
     chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
