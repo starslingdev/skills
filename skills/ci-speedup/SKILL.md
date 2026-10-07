@@ -47,11 +47,7 @@ findings with a stamped wall-clock-neutrality certificate promote into
 **"Runner-minute reductions (wall-clock-neutral)"**; they cut bill/capacity
 without touching the merge gate and must be source-backed. Everything else drops
 to **"Also noticed"**: modeled, uncertified, advisory, residual hygiene, or
-credited wall-clock levers flagged as on-path. Two kinds never go there: an
-OPT81 runner-class card renders at its pole, or, when its job is not a rendered
-pole, in its own **"Runner class comparisons"** section; and an OPT79 pole-cache
-finding renders at its pole, or in its own off-pole block when its job is not a
-rendered pole.
+credited wall-clock levers flagged as on-path (OPT81 and OPT79 pole findings render at their pole or in their own section, never there).
 
 The spine is **scoped to the merge-blocking checks**: when the data pass resolves
 a real required-check set (branch protection / rulesets, already fetched — read
