@@ -28,13 +28,20 @@ unversioned and updates by reinstall from `main`.
   fast pass and a type-aware pass limited to exactly those rules, with the full
   type-aware pass kept on the merge queue and default branch, and to prove with a
   rule-by-rule ledger and a union test that every rule still runs somewhere. A
-  lint job the audit could not decide on (a script it could not trace, a config
-  it could not read, a setting only known at run time, no rule it could name) is
-  named in a new `type-aware lint: held back` row of the Data sources table rather
-  than passing as "nothing found". The rule list is the new
+  lint job the audit could not decide on is named in a new `type-aware lint: held
+  back` row of the Data sources table, with the reason in plain English, rather
+  than passing as "nothing found": a script it could not trace or a package.json
+  it could not read, lint handed to turbo, nx, lerna, make, Next.js, a node script
+  or an action, a step whose command is only known when the workflow runs, a
+  config it could not read or a folder walk that stopped before the lint job's
+  directory, a setting only known at run time, a shared config package or a
+  local file the config pulls in that it could not read, a nested config whose
+  effect depends on the ESLint version, or no rule it could name. Local base
+  configs a config imports or extends are read as part of it, and the legacy
+  `.eslintrc` cascade up to `root: true` is followed. The rule list is the new
   `references/type-aware-lint-rules.tsv`, taken from typescript-eslint's `main`
   branch on 2026-10-07 (UTC), with its source in the file header. Lint run through
-  a marketplace action or through turbo, nx or lerna is not detected.
+  a generic marketplace action that does not say ESLint is not detected.
 
 - **2026-09-30** — **The report now says, in plain English, which caches it held
   back and why.** When the cache check (OPT79) could not reach a verdict on a

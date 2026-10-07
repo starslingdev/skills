@@ -3090,6 +3090,40 @@ def test_every_recordable_withhold_gate_has_a_plain_english_phrase():
         assert phrase and "_" not in phrase and "$" not in phrase, phrase
 
 
+def _opt82_gates_recorded_in_the_detector():
+    """Every gate literal OPT82's detector hands to its `_no(...)` recorder,
+    read from the detector's own source."""
+    import ast
+    tree = ast.parse((_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_detect_opt82_type_aware_lint")
+    return {c.args[0].value for c in ast.walk(fn)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            and c.func.id == "_no" and c.args and isinstance(c.args[0], ast.Constant)
+            and isinstance(c.args[0].value, str)}
+
+
+def test_every_opt82_gate_the_detector_records_is_classified_and_phrased():
+    """A gate added to the OPT82 detector must be a verdict, a workflow-level
+    count, or a held-back gate WITH a phrase; and every phrase must belong to a
+    gate the detector can record."""
+    g = _opt82_gates_recorded_in_the_detector()
+    assert {"type_aware_parsing_off", "lint_script_unresolvable",
+            "no_enumerable_type_aware_rule"} <= g, g        # the scan reads the detector
+    verdict, held = set(cr._OPT82_VERDICT_GATES), set(cr._OPT82_HELD_BACK_GATES)
+    workflow = set(cr._OPT82_WORKFLOW_GATES)
+    assert not (verdict & held) and not (verdict & workflow) and not (held & workflow)
+    assert g - verdict - held - workflow == set(), (
+        "OPT82 gate in no class", sorted(g - verdict - held - workflow))
+    held_recorded = g - verdict - workflow
+    assert held_recorded - set(bp._OPT82_WITHHOLD_PHRASES) == set(), (
+        "OPT82 held-back gate with no phrase",
+        sorted(held_recorded - set(bp._OPT82_WITHHOLD_PHRASES)))
+    assert set(bp._OPT82_WITHHOLD_PHRASES) - held_recorded == set(), (
+        "OPT82 phrase for a gate nothing records",
+        sorted(set(bp._OPT82_WITHHOLD_PHRASES) - held_recorded))
+
+
 def test_second_pole_role_names_the_real_slowest_concurrent_check_above_it():
     # Regression (two-pole): pole 2's "becomes the gate once X drops" must name the
     # ACTUAL slowest concurrent check above it - which may be an intervening check that

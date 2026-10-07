@@ -508,3 +508,393 @@ def test_the_two_readers_of_the_rule_list_agree():
     """scan.py and collect_runs.py each read the committed list (collect_runs
     must not import scan); pinned equal so neither can drift."""
     assert cr._opt82_rules_catalog() == scan._load_type_aware_rules()
+
+
+# --- detection gates: every "could not tell" is held back, never a verdict ----
+# Each test below builds a case the audit cannot decide and asserts the gate is
+# HELD BACK (counted AND listed with a phrase), not filed as the
+# `type_aware_parsing_off` verdict and not silently skipped.
+
+_OFF_CONFIG = "export default [{ rules: { 'no-console': 'warn' } }];\n"
+
+
+def _wf_with(run: "str | None" = None, wd: "str | None" = None,
+             uses: "str | None" = None, name: str = "Lint") -> dict:
+    wf = json.loads(json.dumps(_WF))
+    step: dict = {"name": name}
+    if uses is not None:
+        step["uses"] = uses
+    else:
+        step["run"] = run
+    if wd is not None:
+        step["working-directory"] = wd
+    wf["jobs"]["eslint"]["steps"][2] = step
+    return wf
+
+
+def _held(withheld, cands, gate):
+    assert withheld.get(gate) == 1, withheld
+    assert [c["gate"] for c in cands] == [gate], cands
+    assert gate in cr._OPT82_HELD_BACK_GATES
+    assert bp._OPT82_WITHHOLD_PHRASES.get(gate), gate
+
+
+def test_a_truncated_walk_that_never_reached_the_lint_dir_is_held_back(tmp_path):
+    root = _tree(tmp_path, _OFF_CONFIG)
+    deep = root / "packages" / "a" / "b" / "c" / "d" / "e"
+    deep.mkdir(parents=True)
+    (deep / "package.json").write_text("{}", encoding="utf-8")
+    (deep / "eslint.config.mjs").write_text(_FLAT_CONFIG_ON, encoding="utf-8")
+    block = scan._read_type_aware_lint(root)
+    assert block["truncated"] is True
+    out, withheld, cands = _detect(
+        block, wf=_wf_with("npx eslint .", wd="packages/a/b/c/d/e"))
+    assert out == []
+    _held(withheld, cands, "eslint_config_walk_incomplete")
+
+
+def test_an_unfollowable_relative_import_is_held_back_not_read_as_off(tmp_path):
+    cfg = ("import base from './eslint/missing-base.mjs';\n"
+           "export default [...base, { rules: { 'no-console': 'warn' } }];\n")
+    block = scan._read_type_aware_lint(_tree(tmp_path, cfg))
+    out, withheld, cands = _detect(block)
+    assert out == []
+    _held(withheld, cands, "config_import_unfollowed")
+
+
+def test_an_unreadable_package_json_is_held_back_by_name(tmp_path):
+    root = _tree(tmp_path)
+    (root / "package.json").write_text("{ not json", encoding="utf-8")
+    out, withheld, cands = _detect(scan._read_type_aware_lint(root))
+    assert out == []
+    _held(withheld, cands, "package_json_unreadable")
+
+
+@pytest.mark.parametrize("name,text", [
+    (".eslintrc.json", json.dumps({"extends": ["@acme/eslint-config"],
+                                   "rules": {"no-console": "warn"}})),
+    ("eslint.config.mjs", "import config from '@acme/eslint-config';\n"
+                          "export default [...config, { rules: { 'no-console': 'warn' } }];\n"),
+    (".eslintrc.js", "module.exports = { extends: ['airbnb', 'prettier'], "
+                     "rules: { 'no-console': 'warn' } };\n"),
+])
+def test_a_shared_config_package_is_held_back_not_read_as_off(tmp_path, name, text):
+    root = _tree(tmp_path)
+    (root / "eslint.config.mjs").unlink()
+    (root / name).write_text(text, encoding="utf-8")
+    out, withheld, cands = _detect(scan._read_type_aware_lint(root))
+    assert out == []
+    _held(withheld, cands, "shared_config_unfollowable")
+
+
+def test_a_known_non_type_aware_shared_config_stays_a_verdict(tmp_path):
+    root = _tree(tmp_path)
+    (root / "eslint.config.mjs").unlink()
+    (root / ".eslintrc.json").write_text(json.dumps(
+        {"extends": ["eslint:recommended", "plugin:@typescript-eslint/recommended",
+                     "prettier", "next/core-web-vitals"]}), encoding="utf-8")
+    out, withheld, cands = _detect(scan._read_type_aware_lint(root))
+    assert out == [] and withheld.get("type_aware_parsing_off") == 1 and cands == []
+
+
+def test_a_typed_rule_with_no_parser_setting_in_view_is_held_back(tmp_path):
+    cfg = ("export default [{ rules: "
+           "{ '@typescript-eslint/no-floating-promises': 'error' } }];\n")
+    out, withheld, cands = _detect(scan._read_type_aware_lint(_tree(tmp_path, cfg)))
+    assert out == []
+    _held(withheld, cands, "type_aware_rule_without_parser_setting")
+
+
+@pytest.mark.parametrize("body", [
+    "turbo run lint", "next lint", "run-p lint:*", "nx run-many -t lint",
+    "node scripts/lint.mjs", "lerna run lint",
+])
+def test_a_lint_script_delegated_to_another_tool_is_held_back(tmp_path, body):
+    root = _tree(tmp_path)
+    pkg = json.loads(_PACKAGE_JSON)
+    pkg["scripts"]["lint"] = body
+    (root / "package.json").write_text(json.dumps(pkg), encoding="utf-8")
+    out, withheld, cands = _detect(scan._read_type_aware_lint(root))
+    assert out == []
+    _held(withheld, cands, "lint_delegated_to_unread_tool")
+
+
+@pytest.mark.parametrize("step", [
+    {"run": "turbo run lint"}, {"run": "npx nx lint web"},
+    {"run": "make lint"}, {"run": "pnpm turbo lint"},
+    {"uses": "./.github/actions/lint"},
+])
+def test_a_lint_step_delegated_to_another_tool_is_held_back(tmp_path, step):
+    wf = _wf_with(step.get("run"), uses=step.get("uses"))
+    out, withheld, cands = _detect(scan._read_type_aware_lint(_tree(tmp_path)), wf=wf)
+    assert out == []
+    _held(withheld, cands, "lint_delegated_to_unread_tool")
+
+
+def test_a_lint_script_in_another_workspace_is_held_back(tmp_path):
+    out, withheld, cands = _detect(scan._read_type_aware_lint(_tree(tmp_path)),
+                                   wf=_wf_with("yarn workspace web lint"))
+    assert out == []
+    _held(withheld, cands, "lint_script_unresolvable")
+
+
+@pytest.mark.parametrize("run", ["npx eslint@8 .", "npx --yes eslint@9 ."])
+def test_a_version_pinned_eslint_is_still_eslint(tmp_path, run):
+    out, withheld, _c = _detect(scan._read_type_aware_lint(_tree(tmp_path)),
+                                wf=_wf_with(run))
+    assert len(out) == 1, withheld
+
+
+@pytest.mark.parametrize("run", ["golangci-lint run", "actionlint",
+                                 "npx stylelint '**/*.css'", "npm run lint:biome"])
+def test_non_eslint_linters_are_never_held_back(tmp_path, run):
+    root = _tree(tmp_path)
+    pkg = json.loads(_PACKAGE_JSON)
+    pkg["scripts"]["lint:biome"] = "biome lint ."
+    (root / "package.json").write_text(json.dumps(pkg), encoding="utf-8")
+    out, withheld, cands = _detect(scan._read_type_aware_lint(root), wf=_wf_with(run))
+    assert out == [] and withheld == {} and cands == [], (run, withheld)
+
+
+@pytest.mark.parametrize("run,wd", [
+    ("npm run lint:${{ matrix.pkg }}", None),
+    ("npm run lint", "${{ matrix.dir }}"),
+])
+def test_a_runtime_expression_in_the_lint_step_has_its_own_gate(tmp_path, run, wd):
+    out, withheld, cands = _detect(scan._read_type_aware_lint(_tree(tmp_path)),
+                                   wf=_wf_with(run, wd=wd))
+    assert out == []
+    _held(withheld, cands, "lint_step_uses_runtime_expression")
+
+
+def test_a_findings_doc_without_the_scan_block_is_held_back_honestly(tmp_path):
+    out, withheld, cands = _detect(None)
+    assert out == []
+    _held(withheld, cands, "type_aware_lint_scan_missing")
+
+
+@pytest.mark.parametrize("eslint_dep,held", [(None, True), ("^10.0.0", True),
+                                             ("^9.12.0", False)])
+def test_a_nested_flat_config_is_ambiguous_unless_eslint_is_known_below_10(
+        tmp_path, eslint_dep, held):
+    root = _tree(tmp_path)
+    pkg = json.loads(_PACKAGE_JSON)
+    if eslint_dep:
+        pkg["devDependencies"] = {"eslint": eslint_dep}
+    (root / "package.json").write_text(json.dumps(pkg), encoding="utf-8")
+    (root / "packages" / "web").mkdir(parents=True)
+    (root / "packages" / "web" / "eslint.config.mjs").write_text(_OFF_CONFIG,
+                                                                 encoding="utf-8")
+    out, withheld, cands = _detect(scan._read_type_aware_lint(root))
+    if held:
+        assert out == []
+        _held(withheld, cands, "eslint_config_lookup_ambiguous")
+    else:
+        assert len(out) == 1, withheld
+
+
+def test_a_preset_name_in_a_plain_string_is_not_type_aware(tmp_path):
+    cfg = ("const s = 'recommendedTypeChecked';\n"
+           "const t = 'strict-type-checked';\n"
+           "export default [{ rules: { 'no-console': 'warn' } }];\n")
+    cfg_read = scan._read_type_aware_lint(_tree(tmp_path, cfg))["configs"][0]
+    assert cfg_read["type_aware"] == "off", cfg_read
+
+
+def test_a_flat_config_that_spreads_a_local_base_reads_the_base(tmp_path):
+    root = _tree(tmp_path, "import base from './config/base.mjs';\n"
+                           "export default [...base, { rules: "
+                           "{ '@typescript-eslint/no-floating-promises': 'error' } }];\n")
+    (root / "config").mkdir()
+    (root / "config" / "base.mjs").write_text(
+        "export default [{ languageOptions: { parserOptions: "
+        "{ projectService: true } } }];\n", encoding="utf-8")
+    out, withheld, _c = _detect(scan._read_type_aware_lint(root))
+    assert len(out) == 1, withheld
+
+
+def test_an_eslintrc_that_extends_a_local_base_reads_the_base(tmp_path):
+    root = _tree(tmp_path)
+    (root / "eslint.config.mjs").unlink()
+    (root / ".eslintrc.js").write_text(
+        "module.exports = { extends: ['./eslint/base.js'], rules: "
+        "{ '@typescript-eslint/no-floating-promises': 'error' } };\n", encoding="utf-8")
+    (root / "eslint").mkdir()
+    (root / "eslint" / "base.js").write_text(
+        "module.exports = { parserOptions: { project: true } };\n", encoding="utf-8")
+    out, withheld, _c = _detect(scan._read_type_aware_lint(root))
+    assert len(out) == 1, withheld
+
+
+@pytest.mark.parametrize("child,fires", [
+    ({"rules": {"no-console": "warn"}}, True),                       # inherits ON
+    ({"root": True, "rules": {"no-console": "warn"}}, False),        # cascade stops
+    ({"parserOptions": {"project": False}}, False),                  # explicit OFF
+])
+def test_a_legacy_eslintrc_cascades_upward_to_root_true(tmp_path, child, fires):
+    root = _tree(tmp_path)
+    (root / "eslint.config.mjs").unlink()
+    (root / ".eslintrc.json").write_text(json.dumps({
+        "root": True, "parserOptions": {"project": True},
+        "rules": {"@typescript-eslint/no-floating-promises": "error"}}), encoding="utf-8")
+    (root / "packages" / "a").mkdir(parents=True)
+    (root / "packages" / "a" / ".eslintrc.json").write_text(json.dumps(child),
+                                                            encoding="utf-8")
+    out, withheld, cands = _detect(scan._read_type_aware_lint(root),
+                                   wf=_wf_with("npx eslint .", wd="packages/a"))
+    if fires:
+        assert len(out) == 1, withheld
+    else:
+        assert out == [] and withheld.get("type_aware_parsing_off") == 1 and cands == []
+
+
+def test_a_one_job_lint_workflow_is_not_a_long_pole_by_default(tmp_path):
+    """A one-job workflow's only job is trivially its own long pole; that must
+    not waive the 60s bar."""
+    block = scan._read_type_aware_lint(_tree(tmp_path))
+    runs = [[r[0]] for r in _runs(25, 20)]
+    crit = cr._critical_path(runs)
+    withheld: dict = {}
+    out = cr._detect_opt82_type_aware_lint(
+        ".github/workflows/lint.yml", runs, crit, _WF, block, 0, withheld=withheld,
+        withheld_candidates=[])
+    assert out == [] and withheld.get("lint_job_below_cost_threshold") == 1, withheld
+
+
+def test_a_jsonc_eslintrc_with_trailing_commas_is_read(tmp_path):
+    root = _tree(tmp_path)
+    (root / "eslint.config.mjs").unlink()
+    (root / ".eslintrc.json").write_text(
+        '{\n  // jsonc\n  "parserOptions": { "project": true, },\n'
+        '  "rules": { "@typescript-eslint/no-floating-promises": "error", },\n}\n',
+        encoding="utf-8")
+    block = scan._read_type_aware_lint(root)
+    assert block["unreadable"] == [] and block["configs"][0]["type_aware"] == "on"
+
+
+def test_project_null_is_a_documented_off_not_unresolved(tmp_path):
+    cfg = _FLAT_CONFIG_ON.replace("projectService: true", "project: null")
+    assert scan._read_type_aware_lint(_tree(tmp_path, cfg))["configs"][0][
+        "type_aware"] == "off"
+
+
+def test_a_duplicate_rule_row_fails_closed_at_load(tmp_path, monkeypatch):
+    bad = tmp_path / "rules.tsv"
+    row = "@typescript-eslint/await-thenable\t-\trecommended\n"
+    bad.write_text(row + row, encoding="utf-8")
+    monkeypatch.setattr(scan, "_TAL_RULES_PATH", bad)
+    monkeypatch.setattr(scan, "_TAL_RULES_CACHE", None)
+    with pytest.raises(ValueError):
+        scan._load_type_aware_rules()
+
+
+@pytest.mark.parametrize("cfg,on", [
+    ("import tseslint from 'typescript-eslint';\n"
+     "export default tseslint.config(tseslint.configs.all);\n", True),
+    ("import tseslint from 'typescript-eslint';\n"
+     "export default [...tseslint.configs.all];\n", True),
+    ("import typescriptEslint from '@typescript-eslint/eslint-plugin';\n"
+     "export default [typescriptEslint.configs.all];\n", True),
+    ("import js from '@eslint/js';\nexport default [js.configs.all];\n", False),
+])
+def test_the_all_preset_reads_on_only_when_it_is_typescript_eslints(tmp_path, cfg, on):
+    c = scan._read_type_aware_lint(_tree(tmp_path, cfg))["configs"][0]
+    assert (c["type_aware"] == "on") is on, c
+    assert ("all" in c["presets"]) is on, c
+
+
+def test_the_legacy_all_preset_string_reads_on(tmp_path):
+    root = _tree(tmp_path)
+    (root / "eslint.config.mjs").unlink()
+    (root / ".eslintrc.json").write_text(json.dumps(
+        {"extends": ["plugin:@typescript-eslint/all"]}), encoding="utf-8")
+    c = scan._read_type_aware_lint(root)["configs"][0]
+    assert c["type_aware"] == "on" and "all" in c["presets"], c
+
+
+# --- fail-closed reader branches (each was downgradable to off by a mutant) ----
+
+@pytest.mark.parametrize("parser_options", [
+    "parserOptions: sharedOpts",                      # taken from a variable
+    "parserOptions: { ...shared, projectService: true }",   # spread inside
+    "parserOptions: { project }",                     # shorthand
+])
+def test_js_parser_options_the_read_cannot_see_are_unresolved(tmp_path, parser_options):
+    cfg = ("export default [{ languageOptions: { " + parser_options + " }, rules: "
+           "{ '@typescript-eslint/no-floating-promises': 'error' } }];\n")
+    root = _tree(tmp_path, cfg)
+    assert scan._read_type_aware_lint(root)["configs"][0]["type_aware"] == "unresolved"
+    out, withheld, cands = _detect(scan._read_type_aware_lint(root))
+    assert out == []
+    _held(withheld, cands, "type_aware_setting_unresolvable")
+
+
+@pytest.mark.parametrize("rc", [
+    {"parserOptions": "./tsconfig.json"},             # not a mapping
+    {"parserOptions": {"project": 5}},                # not a literal on
+    {"parserOptions": {"project": {"a": 1}}},         # object project (only projectService)
+    {"parserOptions": {"project": ["./a.json", 1]}},  # mixed list
+])
+def test_eslintrc_parser_options_the_read_cannot_see_are_unresolved(tmp_path, rc):
+    root = _tree(tmp_path)
+    (root / "eslint.config.mjs").unlink()
+    (root / ".eslintrc.json").write_text(json.dumps(rc), encoding="utf-8")
+    assert scan._read_type_aware_lint(root)["configs"][0]["type_aware"] == "unresolved"
+
+
+@pytest.mark.parametrize("value", ["sev", "isCI ? 'error' : 'off'"])
+def test_a_rule_severity_only_known_at_run_time_is_held_back(tmp_path, value):
+    cfg = ("export default [{ languageOptions: { parserOptions: { projectService: true } },"
+           " rules: { '@typescript-eslint/no-floating-promises': " + value + " } }];\n")
+    block = scan._read_type_aware_lint(_tree(tmp_path, cfg))
+    c = block["configs"][0]
+    assert c["rules"] == [] and c["rule_unresolved"] == [
+        "@typescript-eslint/no-floating-promises"], c
+    out, withheld, cands = _detect(block)
+    assert out == []
+    _held(withheld, cands, "rule_setting_unresolvable")
+
+
+@pytest.mark.parametrize("text", [b"[]\n", b"\xff\xfe{\x00}\x00"])
+def test_an_unreadable_config_is_held_back_never_dropped(tmp_path, text):
+    root = _tree(tmp_path)
+    (root / ".eslintrc.json").write_bytes(text)
+    block = scan._read_type_aware_lint(root)
+    assert ".eslintrc.json" in block["unreadable"]
+    out, withheld, cands = _detect(block)
+    assert out == []
+    _held(withheld, cands, "eslint_config_unreadable")
+
+
+def test_no_config_at_all_is_held_back_never_read_as_off(tmp_path):
+    root = _tree(tmp_path)
+    (root / "eslint.config.mjs").unlink()
+    out, withheld, cands = _detect(scan._read_type_aware_lint(root))
+    assert out == []
+    _held(withheld, cands, "no_eslint_config_found")
+
+
+def test_one_on_and_one_unresolved_applicable_config_is_held_back(tmp_path):
+    root = _tree(tmp_path)
+    (root / "eslint.config.mjs").unlink()
+    (root / ".eslintrc.json").write_text(json.dumps({
+        "root": True, "parserOptions": {"project": True},
+        "rules": {"@typescript-eslint/no-floating-promises": "error"}}), encoding="utf-8")
+    (root / "packages" / "a").mkdir(parents=True)
+    (root / "packages" / "a" / ".eslintrc.json").write_text(json.dumps(
+        {"parserOptions": {"project": 5}}), encoding="utf-8")
+    out, withheld, cands = _detect(scan._read_type_aware_lint(root),
+                                   wf=_wf_with("npx eslint .", wd="packages/a"))
+    assert out == []
+    _held(withheld, cands, "type_aware_setting_unresolvable")
+
+
+def test_verifier_fails_a_finding_stamped_from_a_walk_that_missed_its_dir(tmp_path):
+    f, card = _rendered_card(tmp_path)
+    f["type_aware_lint"]["working_directory"] = "packages/a/b/c/d/e"
+    p = tmp_path / "findings.json"
+    p.write_text(json.dumps({"findings": [f], "type_aware_lint": {
+        "truncated": True, "configs": [{"path": "eslint.config.mjs", "dir": ""}],
+        "unreadable": [], "error": None}}), encoding="utf-8")
+    c = _vr().check_opt82_type_aware_lint_uncredited(card, p)
+    assert not c.ok and "truncated" in c.detail, c.detail

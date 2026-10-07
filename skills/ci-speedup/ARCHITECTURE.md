@@ -1245,9 +1245,19 @@ no gh calls at all, from that static block and the timings already sampled:
 a YAML job runs ESLint (directly, or through a `package.json` script it can
 trace), the job costs at least `_OPT82_MIN_LINT_P50_S` (60s) or is the measured
 long pole, type-aware parsing is on in the config that applies to the job's
-directory, and at least one type-aware rule can be named. Every gate fails closed:
-an unresolvable value (an environment variable, a ternary, a `parserOptions`
-taken from a variable) is held back, never read as on or off.
+directory, and at least one type-aware rule can be named. On a slow lint job,
+anything the read could not see is held back, never read as on or off: an
+unresolvable value (an environment variable, a ternary, a `parserOptions` taken
+from a variable), a lint step handed to turbo / nx / make / a node script or an
+action, a `${{ }}` in the step, an unreadable `package.json`, a shareable config
+package or an unfollowed local import behind an "off" read, a config walk that
+stopped before the lint directory (`truncated` with nothing recorded at or below
+it), and a nested flat config whose effect depends on an ESLint major (10 looks
+configs up per file) that is 10+ or unknown. The scan block records what these
+need: per config `shared_configs`, `unresolved_imports`, `sets_off` and `root`
+(for the legacy upward cascade), plus `truncated`,
+`package_scripts_unreadable` and `eslint_versions`. Local base configs the
+config imports or extends by relative path are followed and read as part of it.
 
 The finding it emits has `wall_clock_p50_s = 0`, no runner-minute saving, sizing
 basis `uncredited` and no `_SIZING` entry; `_RM_DOOR_OVERRIDES["OPT82"]` marks it
@@ -1268,14 +1278,17 @@ rule maps to a pass, and the union of the two configs' enabled rules must equal
 the original set. The prompt never tells the agent to disable rules.
 `verify_report.py` closes the loop with a check that fails an OPT82 finding with
 a positive `wall_clock_p50_s` or a truthy runner-minute saving, with no
-enumerated rule, or whose rendered card lacks the ledger sentence or says
-"disable" about rules. The detector's call site in `collect()` is guarded: an
+enumerated rule, stamped from a failed ESLint read or from a truncated walk that
+never reached its lint directory, or whose rendered card lacks the ledger
+sentence or says "disable" about rules. The detector's call site in `collect()` is guarded: an
 exception inside it skips OPT82 for that workflow and is disclosed through
 `detectors_skipped`, never a crashed data pass.
 
 Every exit is counted in `findings_doc["opt82_withheld_by_gate"]`. Three gates are
 verdicts (the lint job never ran in the sample, it is below the cost threshold,
-type-aware parsing is off) and count only there. Seven are could-not-tell exits
+type-aware parsing is off) and count only there; one is workflow-level
+(`workflow_yaml_unparsed`, no job to name) and counts only there too. Sixteen
+are could-not-tell exits
 and are also listed in `findings_doc["opt82_withheld_candidates"]`, which feeds the
 shared held-back registry row `type-aware lint: held back` (noun "candidate lint
 job(s)", shape `"job"`), so a lint job this pattern could not decide is named in

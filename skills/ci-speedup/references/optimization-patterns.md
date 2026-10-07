@@ -3632,27 +3632,63 @@ after:   fast pass:  eslint, syntax-only rules, no program        (cheap, every 
          merge queue / default branch: the full type-aware pass, unchanged
 ```
 
-**Detection heuristic** (every gate required; every gate fails closed):
+**Detection heuristic** (every gate required; on a slow lint job, every input
+the read could not see is a held-back "could not tell", never a verdict):
 
 1. A YAML job runs ESLint: `eslint` directly (including the `npx`, `pnpm exec`,
-   `yarn` and `bunx` forms), or `npm|pnpm|yarn|bun run <script>` where the script,
-   resolved through `package.json` `scripts` in the step's working directory,
-   runs ESLint. A script that cannot be traced to the command it runs is held
-   back, never guessed.
+   `yarn` and `bunx` forms, and a version-pinned `eslint@8`), or
+   `npm|pnpm|yarn|bun run <script>` where the script, resolved through
+   `package.json` `scripts` in the step's working directory, runs ESLint. A
+   LINT-NAMED step the read cannot follow is held back, never guessed, under
+   its own gate: a lint-named script that is not defined there, is scoped to
+   another package (`--filter`, `yarn workspace <pkg> lint`) or nests past the
+   depth cap (`lint_script_unresolvable`); a `package.json` that could not be
+   read (`package_json_unreadable`); a `${{ }}` expression in the command or the
+   working directory (`lint_step_uses_runtime_expression`); and lint handed to
+   another tool or action (`turbo`, `nx`, `lerna`, `make`, `next lint`,
+   `run-p` / `npm-run-all`, a `node` script, an action step whose name or
+   reference says ESLint, or a local `./` action named lint:
+   `lint_delegated_to_unread_tool`). A step that runs a linter that is not
+   ESLint (golangci-lint, stylelint, biome, actionlint) is not a lint step here.
 2. The job is expensive: its measured p50 is at least 60s
-   (`_OPT82_MIN_LINT_P50_S`), or it is its workflow's measured long pole.
+   (`_OPT82_MIN_LINT_P50_S`), or it is its workflow's measured long pole in a
+   workflow with more than one job (a one-job workflow's only job is trivially
+   its own pole and does not waive the bar).
 3. Type-aware parsing is ON in the ESLint config that applies to the lint job's
-   directory (the file passed with `-c` / `--config`; otherwise the nearest
+   directory: the file passed with `-c` / `--config`; otherwise the nearest
    config at or above that directory, plus nested legacy `.eslintrc*` configs
-   below it, which cascade. A nested flat config is not counted: flat-config
-   lookup starts at the working directory). ON means a literal
-   `parserOptions.project` (`true`, a string or an array), a `projectService`
-   (`true` or an object), or an extended preset ending in `-type-checked` /
-   `TypeChecked` (or `recommended-requiring-type-checking`). The
-   `disable-type-checked` config never counts, and `project: false` is OFF.
-   Comments are stripped before reading. Any other value (an identifier, an
-   environment variable, a ternary, a `parserOptions` taken from a variable) is
-   unresolvable: the candidate is held back, not read as on or off.
+   below it, and, when the nearest is a legacy `.eslintrc*`, its ancestors up to
+   the first with `root: true` (a nearer config that sets `project: false` /
+   `null` shadows the farther ones). A nested FLAT config below the directory
+   applies under ESLint 10, which looks the config up from each linted file,
+   and not under ESLint 9, which looks it up from the working directory. The
+   `eslint` version the nearest `package.json` declares decides: below 10 the
+   nested config is not counted; 10 or above, or no version readable, and the
+   candidate is held back (`eslint_config_lookup_ambiguous`). ON means a literal
+   `parserOptions.project` (`true`, a string or an array of strings), a
+   `projectService` (`true` or an object), or a type-checked preset referenced
+   as a config (`tseslint.configs.recommendedTypeChecked`,
+   `plugin:@typescript-eslint/strict-type-checked`,
+   `recommended-requiring-type-checking`, typescript-eslint's `configs.all`;
+   the bare name in an unrelated string does not count). The
+   `disable-type-checked` config never counts, and `project: false` / `null` is
+   OFF. Comments are stripped before reading. A local base the config pulls in
+   (`import base from './base.mjs'` spread into a flat config, or a relative
+   `extends: ['./eslint/base.js']`) is followed and read as part of the config.
+   Any other value (an identifier, an environment variable, a ternary, a
+   `parserOptions` taken from a variable) is unresolvable: the candidate is held
+   back, not read as on or off. "Off" is a verdict only when the read saw
+   everything that could turn it on: a config that extends a shareable config
+   package (`@acme/eslint-config`, `extends: ['airbnb']`; `prettier` and the
+   `next` configs are known not to and stay a verdict) is held back
+   (`shared_config_unfollowable`), as is one with a local import the read could
+   not follow (`config_import_unfollowed`) and one that turns a type-aware rule
+   on with no parser setting in view (`type_aware_rule_without_parser_setting`:
+   the rule cannot run without one, so it is set somewhere unread).
+   The config walk is bounded; when it stopped before it could show the lint
+   directory was visited (no config recorded at or below it), the candidate is
+   held back (`eslint_config_walk_incomplete`), and the verifier fails an OPT82
+   finding stamped from such a walk or from a failed read.
 4. At least one type-aware rule can be NAMED from the config. Type-aware parsing
    being on somewhere, with no rule named, is a claim about shape and the
    candidate is held back.
@@ -3677,14 +3713,16 @@ deduplicated and a test pins both.
 
 **What is NOT detected** (silent today, by design, not by oversight):
 
-- Lint run through a marketplace action (`uses:`), where no ESLint command is in
-  the workflow YAML.
-- Lint delegated to `turbo`, `nx` or `lerna`, where the command that reaches
-  ESLint lives in another package's configuration.
-- A preset hidden in a shared config package the read cannot follow (an
-  `extends` of an installed package). The prompt handles this at fix time: it
-  tells the agent to compute the REAL enabled rule set with
-  `eslint --print-config <file>` instead of trusting the static read.
+- Lint run through a marketplace action whose name and reference do not say
+  ESLint (a generic "super-linter" step), where no ESLint command is in the
+  workflow YAML.
+- A slow job that is not lint-named and runs ESLint only through a script or
+  tool this read does not follow.
+- On a config that IS read as on with a named rule, a shared config package it
+  also extends may add more type-aware rules than the static read names. The
+  prompt handles this at fix time: it tells the agent to compute the REAL
+  enabled rule set with `eslint --print-config <file>` instead of trusting the
+  static read.
 
 **Withhold gates.** Every exit is counted in `findings_doc["opt82_withheld_by_gate"]`.
 A verdict is a measured "no"; a held-back exit is a "could not tell", listed in
@@ -3697,11 +3735,21 @@ which feeds "Why a slow lint job with type-aware ESLint produced no finding".
 | `lint_job_never_ran_in_sample` | verdict | the lint job did not run in any sampled run |
 | `lint_job_below_cost_threshold` | verdict | the job is under 60s and not a long pole |
 | `type_aware_parsing_off` | verdict | the config applying to the job does not build the type graph |
+| `workflow_yaml_unparsed` | workflow count | the workflow YAML did not parse; there is no job to name, so it is counted only |
 | `lint_script_unresolvable` | held back | the lint step runs a package script this audit could not trace to the command it runs |
+| `lint_step_uses_runtime_expression` | held back | the lint step's command or working directory is only known when the workflow runs |
+| `lint_delegated_to_unread_tool` | held back | the lint step hands lint to another tool or action whose own configuration this audit did not read |
+| `package_json_unreadable` | held back | the package.json that defines the lint step's script could not be read |
+| `type_aware_lint_scan_missing` | held back | the repository scan behind this report carries no ESLint config read (an older scan) |
 | `type_aware_config_reader_failed` | held back | the ESLint config reader failed, so whether lint builds the type graph is unknown |
+| `eslint_config_walk_incomplete` | held back | the bounded config walk stopped before the lint job's directory, so a nearer config may have been missed |
 | `no_eslint_config_found` | held back | no ESLint config was found for the lint job's directory |
 | `eslint_config_unreadable` | held back | an ESLint config the lint job uses could not be read |
+| `eslint_config_lookup_ambiguous` | held back | a nested flat config below the lint directory applies under ESLint 10 and not 9, and the version is 10+ or unknown |
 | `type_aware_setting_unresolvable` | held back | the config sets type-aware parsing from a value only known when it runs |
+| `shared_config_unfollowable` | held back | the lint config extends a package this audit did not read |
+| `config_import_unfollowed` | held back | the ESLint config imports a local file this audit could not read |
+| `type_aware_rule_without_parser_setting` | held back | a type-aware rule is on but type-aware parsing is set somewhere this audit did not read |
 | `rule_setting_unresolvable` | held back | the config sets a type-aware rule from a value only known when it runs |
 | `no_enumerable_type_aware_rule` | held back | type-aware parsing is on, but no type-aware rule could be named from the config |
 
