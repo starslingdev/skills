@@ -2104,13 +2104,15 @@ its long-pole section (or in a short block of its own when the job is not one
 of the drilled poles):
 
 ```
-one run in N loses up to X s on checkout to a stalled fetch
+one run in N loses about X s on checkout to a stalled fetch
 N = round(sampled runs / log-proven tail runs)
 X = median checkout of the log-proven tail runs - p50 checkout of the sample
 ```
 
 Only a tail run whose own log proves the stall counts; a slow checkout with a
-smooth log does not. X is "up to" and applies to roughly one run in N: it is
+smooth log does not. X is the median proven run's loss, not an upper bound (a
+proven run can lose more), so it reads "about" and applies to roughly one run
+in N: it is
 not a typical-run number, so it is never added to the headline, a pole's
 wall-clock figure, any total or the runner-minute section, and
 `wall_clock_p50_s` stays 0. On a push-only (or unknown-trigger) workflow, the

@@ -67,7 +67,7 @@ def test_classification_counts_match_spec():
     # +1 (#1: aggregation-gate poles tell the upstream story, never an optimize-this prompt).
     # +1 (OPT79 (PR #106): uncredited net-negative caches re-derive from their own runs — a numberless
     #     row carries measurements no total contradicts, so it needs its own re-derivation).
-    # +1 (OPT80 tail line: every "one run in N loses up to X s" sentence re-derives from the stamped
+    # +1 (OPT80 tail line: every "one run in N loses about X s" sentence re-derives from the stamped
     #     per-run checkout rows and stall proofs, and pairs with exactly one stamped block).
     assert counts[gs.EXCLUDE] == 1
     assert counts[gs.TRIAGE] == 2

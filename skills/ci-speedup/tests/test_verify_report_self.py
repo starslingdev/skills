@@ -9476,7 +9476,7 @@ def _opt80_pole_doc():
     return doc
 
 
-# ── OPT80's tail axis: "one run in N loses up to X s on checkout" ──
+# ── OPT80's tail axis: "one run in N loses about X s on checkout" ──
 # Every number in the line is re-derived from the per-run checkout durations and
 # the per-run stall proofs; the stamped block is compared, never trusted.
 
@@ -9540,7 +9540,7 @@ def test_opt80_tail_line_renders_at_the_pole_and_pairs_with_its_block(tmp_path: 
     vr = _load_verify_report()
     doc = _opt80_tail_doc()
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
-    line = "one run in 5 loses up to 110s on checkout to a stalled fetch"
+    line = "one run in 5 loses about 110s on checkout to a stalled fetch"
     pole = report.split("Long pole 1", 1)[1].split("\n## ", 1)[0]
     assert "<!-- opt80-tail:f-promoted -->" in pole and line in pole, pole[:1500]
     assert vr.check_opt80_tail_lines(report, findings_path).ok
@@ -9575,8 +9575,15 @@ def test_opt80_tail_line_renders_at_the_pole_and_pairs_with_its_block(tmp_path: 
     chk = vr.check_opt80_tail_lines(moved, findings_path)
     assert not chk.ok and "the line after its marker" in chk.detail, chk
     # A tail sentence anywhere whose numbers the block does not re-derive fails.
-    stray = report + "\none run in 2 loses up to 999s on checkout to a stalled fetch\n"
+    stray = report + "\none run in 2 loses about 999s on checkout to a stalled fetch\n"
     assert not vr.check_opt80_tail_lines(stray, findings_path).ok
+    # X is the MEDIAN proven run's loss, not an upper bound (a proven run can
+    # lose more), so the legacy "loses up to" wording fails even when its
+    # numbers re-derive: a stale sentence cannot slip past the scan.
+    legacy = report.replace("loses about 110s", "loses up to 110s")
+    assert "loses up to 110s" in legacy
+    chk = vr.check_opt80_tail_lines(legacy, findings_path)
+    assert not chk.ok and "up to" in chk.detail, chk
 
 
 def test_opt80_on_critical_path_matches_a_workflow_prefixed_pole_check(tmp_path: Path):

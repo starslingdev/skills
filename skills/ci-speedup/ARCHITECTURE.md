@@ -1227,13 +1227,15 @@ run's merge wait, so the finding also stamps a SEPARATE tail axis,
 `checkout_stall.tail_axis` = `{sampled_runs n, tail_runs k (log-proven only),
 one_in_n round(n/k), typical_checkout_p50_s, tail_checkout_p50_s (median of the
 proven runs), tail_loss_s, on_critical_path}`, and `blocking_path.py` renders it
-as "one run in N loses up to X s on checkout to a stalled fetch": inside the
+as "one run in N loses about X s on checkout to a stalled fetch": inside the
 pole's section beside its merge-wait figure (an `<!-- opt80-tail:<id> -->`
 marked line), or in a short off-pole block when the job is not a drilled pole.
 `tail_loss_s` is the extra checkout time on a stalled run. How much of it
 reaches the merge wait depends on what else gates that run, which this line does
-not model, so it is stated as the checkout loss, not a merge-wait saving, which
-is why it is phrased "up to" and "one run in N". It is never summed into
+not model, so it is stated as the checkout loss, not a merge-wait saving, for
+"one run in N". It is the median proven run's loss, not a ceiling (a proven run
+can lose more), so it reads "about", never "up to"; the self-check fails a
+sentence still worded "up to". It is never summed into
 `wall_clock_p50_s`, the headline, a pole's buy line, the Tier-2 section, the
 runner-minutes or the certificate. `verify_report.py`'s
 `check_opt80_tail_lines` re-derives N and X from `per_run_checkout_s` and the

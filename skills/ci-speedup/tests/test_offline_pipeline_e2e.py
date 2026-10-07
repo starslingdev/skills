@@ -962,7 +962,15 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # the pole's merge-wait figure — and nowhere a p50 number lives. The verifier
     # above re-derived its numbers from the per-run durations and the proofs.
     _pole_id = str(o80_pole[0]["id"])
-    _tail = "one run in 3 loses up to 105s on checkout to a stalled fetch"
+    _tail = "one run in 3 loses about 105s on checkout to a stalled fetch"
+    # X is the median proven run's loss, not a ceiling: run 5004 lost 125 - 5 =
+    # 120s, more than the 105s stated. So the line never says "up to" X.
+    _proven_ids = {p.get("job_id") for p in cs_pole.get("proven_tail_runs") or []}
+    _losses = [float(r["checkout_s"]) - 5.0
+               for r in cs_pole.get("per_run_checkout_s") or []
+               if r.get("job_id") in _proven_ids]
+    assert max(_losses) == 120.0 > 105.0, _losses
+    assert "loses up to" not in report, "a median is not an upper bound"
     _marker = f"<!-- opt80-tail:{_pole_id} -->"
     assert report.count(_marker) == 1, _marker
     _pole1 = report.split('<a id="pole-1"></a>', 1)[1].split('<a id="pole-2"></a>', 1)[0]

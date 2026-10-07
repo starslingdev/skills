@@ -3122,7 +3122,7 @@ def test_opt80_tail_line_states_the_stamped_numbers_as_a_tail_not_a_p50():
     doc = _opt80_tail_render_doc()
     lines = bp._opt80_tail_block(doc["findings"], "https://catalog")
     assert lines[0] == "<!-- opt80-tail:f-promoted -->"
-    assert ("one run in 5 loses up to 110s on checkout to a stalled fetch"
+    assert ("one run in 5 loses about 110s on checkout to a stalled fetch"
             in lines[1]), lines[1]
     assert "never added to any total" in lines[1]
     assert "**~" not in lines[1] and "min/mo" not in lines[1]
@@ -3183,6 +3183,17 @@ def test_opt80_tail_line_renders_in_a_static_only_report():
     static = bp._render_static_only(doc)
     assert static.count("<!-- opt80-tail:f1 -->") == 1, static
     assert "one run in 5 loses up to 110s on checkout to a stalled fetch" in static
+
+def test_opt80_off_pole_tail_heading_matches_the_render():
+    """The off-pole block says "not one of the long poles drilled above" only
+    when poles were drilled; a static-only report drills none."""
+    doc = _opt80_tail_render_doc()
+    drilled = bp._opt80_off_pole_tail_block(doc["findings"], "u")
+    static = bp._opt80_off_pole_tail_block(doc["findings"], "u", drilled=False)
+    assert "drilled above" in "\n".join(drilled)
+    assert "drilled above" not in "\n".join(static)
+    assert "no long pole" in static[2], static[2]
+    assert "<!-- opt80-tail:f-promoted -->" in static
 
 
 def test_second_pole_role_names_the_real_slowest_concurrent_check_above_it():

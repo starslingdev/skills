@@ -9732,8 +9732,9 @@ def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]]
     `tail_loss_s` is the extra checkout time on a stalled run. How much of it
     reaches the merge wait depends on what else gates that run, which this line
     does not model, so it is stated as the checkout loss, not a merge-wait
-    saving. It is rendered as "up to", for roughly one run in N, and it
-    is never a p50 quantity — nothing adds it to a merge-wait or minute total."""
+    saving. It is the MEDIAN proven run's loss, not an upper bound (a proven run
+    can lose more), so it is rendered as "about", for roughly one run in N, and
+    it is never a p50 quantity — nothing adds it to a merge-wait or minute total."""
     k = len(proven)
     n = len(per_run)
     if k <= 0 or n <= 0 or k > n:
@@ -9752,7 +9753,7 @@ def _opt80_tail_phrase(axis: dict[str, Any]) -> str:
     """The sentence the tail axis is rendered as in the finding's evidence string
     (the only caller). `blocking_path.py` hand-copies this f-string, and
     `verify_report.py` matches this exact shape and re-derives its two numbers."""
-    return (f"one run in {int(axis['one_in_n'])} loses up to "
+    return (f"one run in {int(axis['one_in_n'])} loses about "
             f"{float(axis['tail_loss_s']):.0f}s on checkout to a stalled fetch")
 
 
@@ -9797,7 +9798,7 @@ def _detect_opt80_checkout_tail_stall(
     THE TAIL AXIS. When the job is the workflow's slowest job AND the workflow
     runs on pull requests (`is_pr` True — unknown is treated as not), a stalled
     run sits on that run's merge wait. That is stamped as a separate
-    `checkout_stall.tail_axis` block — "one run in N loses up to X s on
+    `checkout_stall.tail_axis` block — "one run in N loses about X s on
     checkout to a stalled fetch" — derived only from the per-run durations and
     the LOG-PROVEN tail runs (`_opt80_tail_axis`). It is never summed into
     `wall_clock_p50_s`, any p50 total, the runner-minute saving or the

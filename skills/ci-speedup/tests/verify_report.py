@@ -6418,13 +6418,15 @@ def _opt80_checkout_stall_rederived(f: dict) -> list[str]:
 # ---- OPT80's tail axis ---------------------------------------------------------
 #
 # An on-pole, pull-request OPT80 finding stamps `checkout_stall.tail_axis` and the
-# report renders it as "one run in N loses up to X s on checkout to a stalled
+# report renders it as "one run in N loses about X s on checkout to a stalled
 # fetch" — a separate tail figure, never a p50 one. Every number in that sentence
 # is re-derived here from the per-run checkout durations and the per-run stall
-# proofs; the stamped summary values are compared, never trusted.
+# proofs; the stamped summary values are compared, never trusted. X is the MEDIAN
+# proven run's loss, not an upper bound, so the legacy "loses up to" wording is
+# matched too and always fails.
 _VR_OPT80_TAIL_MARKER_RE = re.compile(r"<!-- opt80-tail:([^ ]+) -->")
 _VR_OPT80_TAIL_PHRASE_RE = re.compile(
-    r"one run in (\d+) loses up to (\d+)s on checkout to a stalled fetch")
+    r"one run in (\d+) loses (about|up to) (\d+)s on checkout to a stalled fetch")
 
 
 def _vr_opt80_job_rendered_as_pole(f: dict, report: str, data: dict | None = None) -> bool:
@@ -6568,10 +6570,12 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
 
     Fails on a tail axis whose numbers do not re-derive, on one stamped on a
     finding off the critical path, on a stamped block with no marked line (or
-    two), on a marked line with no stamped block, and on ANY "one run in N
-    loses up to X s on checkout" sentence in the report whose N and X are not a
-    stamped finding's re-derived values. TOP-LEVEL: the Tier-2 pass compat-skips
-    a report with no Tier-2 stamps, and the tail line lives at the pole."""
+    two), on a marked line with no stamped block, on ANY "one run in N loses
+    about X s on checkout" sentence in the report whose N and X are not a
+    stamped finding's re-derived values, and on any sentence still worded with
+    the legacy "loses up to" (X is a median, not an upper bound). TOP-LEVEL: the
+    Tier-2 pass compat-skips a report with no Tier-2 stamps, and the tail line
+    lives at the pole."""
     name = "OPT80 tail lines re-derive and pair with their stamped blocks"
     data, err = _load_findings_doc(findings_path)
     if err:
@@ -6580,7 +6584,7 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
              if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT80"
              and "tail_axis" in _as_dict(f.get("checkout_stall"))]
     marks = [(m.group(1), m.end()) for m in _VR_OPT80_TAIL_MARKER_RE.finditer(report)]
-    phrases = [(int(m.group(1)), int(m.group(2)))
+    phrases = [(int(m.group(1)), m.group(2), int(m.group(3)))
                for m in _VR_OPT80_TAIL_PHRASE_RE.finditer(report)]
     if not tails:
         if marks or phrases:
@@ -6599,7 +6603,7 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
         want, _why = _vr_opt80_tail_axis_expected(_as_dict(f.get("checkout_stall")))
         if want is None:
             continue
-        sentence = (f"one run in {want['one_in_n']} loses up to "
+        sentence = (f"one run in {want['one_in_n']} loses about "
                     f"{want['tail_loss_s']:.0f}s on checkout to a stalled fetch")
         allowed.add((int(want["one_in_n"]), int(f"{want['tail_loss_s']:.0f}")))
         hits = [end for i, end in marks if i == fid]
@@ -6610,9 +6614,13 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
         if sentence not in _strip_render_artifacts(line) and sentence not in line:
             bad.append(f"{fid}: the line after its marker does not state the "
                        f"re-derived {sentence!r}")
-    for n, x in phrases:
-        if (n, x) not in allowed:
+    for n, word, x in phrases:
+        if word == "up to":
             bad.append(f"the report says 'one run in {n} loses up to {x}s on checkout', "
+                       "but X is the median proven run's loss, not an upper bound "
+                       "- the sentence must say 'about'")
+        elif (n, x) not in allowed:
+            bad.append(f"the report says 'one run in {n} loses about {x}s on checkout', "
                        "which no stamped tail axis re-derives to")
     return Check(name, not bad,
                  f"{len(tails)} tail line(s) re-derived and paired"

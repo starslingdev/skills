@@ -6232,7 +6232,7 @@ def _opt80_tail_block(findings: list[dict[str, Any]], catalog_url: str) -> list[
         url = f"{catalog_url}#{anchor}" if anchor else catalog_url
         out += [f"<!-- opt80-tail:{fid} -->",
                 f"> **⏱️ Checkout stall tail (OPT80, `{fid}`):** on `{job}` in "
-                f"`{_flatten_cell(wf)}`, one run in {n} loses up to {loss:.0f}s on "
+                f"`{_flatten_cell(wf)}`, one run in {n} loses about {loss:.0f}s on "
                 f"checkout to a stalled fetch. {k} of {sampled} sampled runs have a "
                 f"checkout log that shows the fetch standing still; their median "
                 f"checkout is {tail_p50:.0f}s against a typical {typ:.0f}s. This is a "
@@ -6243,20 +6243,24 @@ def _opt80_tail_block(findings: list[dict[str, Any]], catalog_url: str) -> list[
 
 
 def _opt80_off_pole_tail_block(findings: list[dict[str, Any]], catalog_url: str,
-                               rendered: set[str] | None = None) -> list[str]:
+                               rendered: set[str] | None = None,
+                               drilled: bool = True) -> list[str]:
     """Tail lines whose job is NOT a drilled pole (the slowest job of another
     pull-request workflow, or any in a static-only report). `rendered` holds the
-    ids already shown at a pole; each finding's line renders exactly once."""
+    ids already shown at a pole; each finding's line renders exactly once.
+    `drilled` is False on the static-only render, which drills no pole, so the
+    heading must not point at "the long poles drilled above"."""
     done = rendered or set()
     rest = [f for f in findings
             if not f.get("advisory") and _opt80_tail_axis_of(f) is not None
             and str(f.get("id") or "") not in done]
     if not rest:
         return []
+    where = ("but not one of the long poles drilled above." if drilled else
+             "and this report drilled no long pole, so its tail is stated here.")
     return ["---", "",
             "**⏱️ Checkout stall tails on a workflow's slowest job** - each job below "
-            "is the slowest job of a workflow that runs on pull requests, but not one "
-            "of the long poles drilled above.", "",
+            f"is the slowest job of a workflow that runs on pull requests, {where}", "",
             *_opt80_tail_block(rest, catalog_url)]
 
 
@@ -8437,12 +8441,9 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     out += uncredited_lines
     # No pole is drilled here, so every OPT80 tail line renders in the off-pole
     # block. A tail-axis finding is a Tier-2 finding, so this path is reached.
-    # The off-pole heading ("not one of the long poles drilled above") is shared
-    # with this static-only path, where nothing was drilled at all.
-    # TODO(code agent): the heading wording does not fit the static-only path;
-    # it is a rendered string, so it is deliberately not changed in this
-    # comments-only pass.
-    out += _opt80_off_pole_tail_block(all_findings, catalog_url)
+    # `drilled=False`: nothing was drilled here, so the heading must not point
+    # at "the long poles drilled above".
+    out += _opt80_off_pole_tail_block(all_findings, catalog_url, drilled=False)
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
                                       or doc.get("dropped_unprovable"))
     # Issue #12: a static-only report (no measured pole to crown) can still carry a stamped
