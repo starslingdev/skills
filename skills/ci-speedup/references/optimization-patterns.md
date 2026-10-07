@@ -2104,7 +2104,7 @@ its long-pole section (or in a short block of its own when the job is not one
 of the drilled poles):
 
 ```
-one run in N loses about X s on checkout to a stalled fetch
+one run in N spends about X s longer on checkout, and that run's log shows the fetch stalling
 N = round(sampled runs / log-proven tail runs)
 X = median checkout of the log-proven tail runs - p50 checkout of the sample
 ```

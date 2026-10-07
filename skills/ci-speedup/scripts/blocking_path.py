@@ -6232,8 +6232,9 @@ def _opt80_tail_block(findings: list[dict[str, Any]], catalog_url: str) -> list[
         url = f"{catalog_url}#{anchor}" if anchor else catalog_url
         out += [f"<!-- opt80-tail:{fid} -->",
                 f"> **⏱️ Checkout stall tail (OPT80, `{fid}`):** on `{job}` in "
-                f"`{_flatten_cell(wf)}`, one run in {n} loses about {loss:.0f}s on "
-                f"checkout to a stalled fetch. {k} of {sampled} sampled runs have a "
+                f"`{_flatten_cell(wf)}`, one run in {n} spends about {loss:.0f}s longer "
+                f"on checkout, and that run's log shows the fetch stalling. "
+                f"{k} of {sampled} sampled runs have a "
                 f"checkout log that shows the fetch standing still; their median "
                 f"checkout is {tail_p50:.0f}s against a typical {typ:.0f}s. This is a "
                 "separate tail figure: the typical run never stalls, so it is not part "

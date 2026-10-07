@@ -18,8 +18,8 @@ unversioned and updates by reinstall from `main`.
   checkout-stall pattern (OPT80) used to end that case with "measured but not
   credited in this version", which gave the reader no number to weigh. The
   report now prints a separate tail line in that job's long-pole section, beside
-  its merge-wait figure — "one run in N loses about X s on checkout to a stalled
-  fetch" — or in a short block of its own when the job is not one of the drilled
+  its merge-wait figure — "one run in N spends about X s longer on checkout, and
+  that run's log shows the fetch stalling" — or in a short block of its own when the job is not one of the drilled
   poles. The tail count and the tail median come only from runs whose own log proves the stall. The line is
   never added to the headline, a pole's figure, any total or the runner-minute
   section, and the finding still credits 0s of typical merge wait; a push-only

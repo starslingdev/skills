@@ -3111,7 +3111,7 @@ def test_opt80_tail_line_never_moves_the_headline_or_bottom_line():
     without = bp.render(plain)
     head = lambda r: r.split("## 📋 Contents", 1)[0]  # noqa: E731
     assert head(with_tail) == head(without)
-    assert "stalled fetch" not in head(with_tail)
+    assert "longer on checkout" not in head(with_tail)
     assert "<!-- opt80-tail:" not in without
     assert with_tail.count("<!-- opt80-tail:f-promoted -->") == 1
     tier2 = with_tail.split("## Runner-minute reductions", 1)[-1]
@@ -3122,7 +3122,7 @@ def test_opt80_tail_line_states_the_stamped_numbers_as_a_tail_not_a_p50():
     doc = _opt80_tail_render_doc()
     lines = bp._opt80_tail_block(doc["findings"], "https://catalog")
     assert lines[0] == "<!-- opt80-tail:f-promoted -->"
-    assert ("one run in 5 loses about 110s on checkout to a stalled fetch"
+    assert ("one run in 5 spends about 110s longer on checkout, and that run's log shows the fetch stalling"
             in lines[1]), lines[1]
     assert "never added to any total" in lines[1]
     assert "**~" not in lines[1] and "min/mo" not in lines[1]

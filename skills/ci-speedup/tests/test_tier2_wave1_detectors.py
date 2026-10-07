@@ -6551,8 +6551,8 @@ def _opt80_pr(is_pr, long_pole="build", durations=None):
 
 def test_opt80_stamps_a_tail_axis_on_the_slowest_job_of_a_pull_request_workflow():
     """The owner decision of 2026-10-06: the on-pole pull-request case states the
-    tail on its OWN axis — "one run in N loses about X s on checkout to a stalled
-    fetch" — and still credits no wall-clock. Ten sampled runs, two of them
+    tail on its OWN axis — "one run in N spends about X s longer on checkout, and that run's log
+    shows the fetch stalling" — and still credits no wall-clock. Ten sampled runs, two of them
     log-proven 120s stalls against a 10s p50: one in five, 110s."""
     out = _opt80_pr(is_pr=True)
     assert len(out) == 1, out
@@ -6572,7 +6572,7 @@ def test_opt80_stamps_a_tail_axis_on_the_slowest_job_of_a_pull_request_workflow(
     # The evidence reads the tail line instead of "not credited in this version".
     ev = f["evidence"]
     assert ("`build` is this workflow's slowest job on pull requests: one run in 5 "
-            "loses about 110s on checkout to a stalled fetch") in ev, ev
+            "spends about 110s longer on checkout, and that run's log shows the fetch stalling") in ev, ev
     assert "not credited in this version" not in ev, ev
 
 
@@ -6598,7 +6598,7 @@ def test_opt80_stamps_no_tail_axis_off_the_pull_request_merge_wait():
     for is_pr, pole in ((False, "build"), (None, "build"), (True, "deploy")):
         f = _opt80_pr(is_pr=is_pr, long_pole=pole)[0]
         assert "tail_axis" not in f["checkout_stall"], (is_pr, pole)
-        assert "loses about" not in f["evidence"], (is_pr, pole)
+        assert "spends about" not in f["evidence"], (is_pr, pole)
         assert ("not credited in this version" in f["evidence"]) is (pole == "build")
 
 

@@ -775,7 +775,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # slowest check (`CI / test`, 197s) and checks out in 5s on four of its six
     # sampled pull_request runs and 125s / 95s on two (runs 5004 / 5005), whose
     # logs hold the transfer at 17% for 90s / 60s. The median run never stalls,
-    # so `wall_clock_p50_s` stays 0 — but one run in three loses about 105s on
+    # so `wall_clock_p50_s` stays 0 — but one run in three spends about 105s longer on
     # the merge wait, and that is stamped as a SEPARATE tail axis, re-derived
     # from the per-run durations and the proven runs alone:
     #   sampled_runs 6, tail_runs 2 (log-proven), one_in_n round(6/2) = 3,
@@ -962,7 +962,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # the pole's merge-wait figure — and nowhere a p50 number lives. The verifier
     # above re-derived its numbers from the per-run durations and the proofs.
     _pole_id = str(o80_pole[0]["id"])
-    _tail = "one run in 3 loses about 105s on checkout to a stalled fetch"
+    _tail = "one run in 3 spends about 105s longer on checkout, and that run's log shows the fetch stalling"
     # X is the median proven run's loss, not a ceiling: run 5004 lost 125 - 5 =
     # 120s, more than the 105s stated. So the line never says "up to" X.
     _proven_ids = {p.get("job_id") for p in cs_pole.get("proven_tail_runs") or []}
@@ -979,7 +979,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert _tail in _pole1.split(_marker, 1)[1].split("\n\n", 1)[0], _pole1[:1200]
     # Never in the headline / Bottom line, never in the runner-minute section.
     _head = report.split("## 📋 Contents", 1)[0]
-    assert "stalled fetch" not in _head and "opt80-tail" not in _head, _head
+    assert "longer on checkout" not in _head and "opt80-tail" not in _head, _head
     _tier2 = report.split("## Runner-minute reductions", 1)[1].split("## 🧹", 1)[0]
     assert _marker not in _tier2, "the tail line must never render as a Tier-2 row"
     # The tail is never summed into a total: the replay corpus's runner-minute

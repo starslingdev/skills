@@ -1227,7 +1227,8 @@ run's merge wait, so the finding also stamps a SEPARATE tail axis,
 `checkout_stall.tail_axis` = `{sampled_runs n, tail_runs k (log-proven only),
 one_in_n round(n/k), typical_checkout_p50_s, tail_checkout_p50_s (median of the
 proven runs), tail_loss_s, on_critical_path}`, and `blocking_path.py` renders it
-as "one run in N loses about X s on checkout to a stalled fetch": inside the
+as "one run in N spends about X s longer on checkout, and that run's log shows
+the fetch stalling": inside the
 pole's section beside its merge-wait figure (an `<!-- opt80-tail:<id> -->`
 marked line), or in a short off-pole block when the job is not a drilled pole.
 `tail_loss_s` is the extra checkout time on a stalled run. How much of it
