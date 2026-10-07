@@ -653,7 +653,9 @@ excess is credited.
    because the other job still finishes then, so it falls through to outcome 3.
    The finding renders inside that job's long-pole section of the report, opened
    by an `<!-- opt79-pole:<id> -->` marker, as
-   `💾 Measured cache cost - OPT79 · <title> (<id>) - up to **Ns** off the merge wait`,
+   `💾 Measured cache cost - OPT79 · <title> (<id>) - up to **Ns** off the merge wait on the P% of sampled runs where the cache hit (H of R runs read)`
+   (the figure is the extra time PER CACHE HIT, so the measured hit rate, the
+   stamped `hit_share`, is stated beside it, in the evidence sentence too),
    with `risk: LOW`, the guardrail below (re-key or
    narrow before removing; valid for this runner class only; never narrow what
    the install installs) and a rollout line. It needs that placement because its
@@ -790,7 +792,8 @@ equal `wall_clock_uncapped_p50_s` (or `wall_clock_p50_s` when the cascade did
 not shrink it), every `wall_clock_derivation` step must go down, give a reason
 and end on the credited figure, the evidence sentence is restated from the
 block, and the rendered block must appear exactly once with its id, its title
-and `<N>s off the merge wait`. A finding without `tier2_neutrality` that is not
+and `<N>s off the merge wait` followed by the hit-rate clause whose percentage
+and counts equal the stamped `hit_share`, `hits` and runs read. A finding without `tier2_neutrality` that is not
 this kind, or one carrying a non-null `runner_min_saving`, fails. A tampered number anywhere in that chain reddens the
 report.
 

@@ -4421,7 +4421,11 @@ def test_opt79_pole_cache_on_a_pr_workflow_is_a_credited_wall_clock_finding():
     ev = f["evidence"]
     assert f"`{_OPT79_JOB}` is this workflow's slowest job at 660s" in ev, ev
     assert "its next-tallest job, `integration`, runs 600s" in ev, ev
-    assert "the 19s excess fits under that 60s gap, so all 19s of it comes off the merge wait" in ev, ev
+    assert ("the 19s excess fits under that 60s gap, so all 19s of it comes off the "
+            "merge wait on the 50% of sampled runs where the cache hit (4 of 8 runs "
+            "read)") in ev, ev
+    assert ("up to 19s off the merge wait on the 50% of sampled runs where the "
+            "cache hit (4 of 8 runs read)") in f["measured_signal"], f["measured_signal"]
     assert "the hit path is 19s SLOWER" in ev, ev
     assert "runner-minutes are not stated" in ev.lower(), ev
     # the same measured table a credited finding renders
@@ -4477,6 +4481,27 @@ def test_opt79_pole_evidence_is_restated_by_the_verifier_in_both_cap_branches(lp
     assert bad["evidence"] != f["evidence"]
     assert vr._opt79_pole_prose_rederived(bad, cn), bad["evidence"]
 
+
+@pytest.mark.parametrize("old,new", [
+    ("the 50% of sampled runs", "the 75% of sampled runs"),
+    ("(4 of 8 runs read)", "(4 of 6 runs read)"),
+    ("(4 of 8 runs read)", "(6 of 8 runs read)"),
+    (" on the 50% of sampled runs where the cache hit (4 of 8 runs read)", ""),
+])
+def test_opt79_pole_evidence_hit_share_is_paired_with_the_stamped_share(old, new):
+    """OWNER DECISION 2026-10-06: the merge-wait figure is the time PER CACHE
+    HIT, so the sentence states the measured hit rate beside it. The verifier
+    restates that rate from the stamped `hit_share` and hit / read counts; a
+    sentence with a different rate, different counts, or no rate at all fails."""
+    import verify_report as vr
+    out, _rows, _w = _opt79_pole_run(_opt79_pole_of(610.0, 600.0))
+    f = out[0]
+    cn = f["cache_net_negative"]
+    assert old in f["evidence"], f["evidence"]
+    assert vr._opt79_pole_prose_rederived(f, cn) == []
+    bad = dict(f, evidence=f["evidence"].replace(old, new))
+    assert vr._opt79_pole_prose_rederived(bad, cn), bad["evidence"]
+
 def test_opt79_pole_cap_binds_when_the_excess_exceeds_the_headroom():
     out, rows, _w = _opt79_pole_run(_opt79_pole_of(610.0, 600.0))
     assert rows == [] and len(out) == 1
@@ -4486,7 +4511,8 @@ def test_opt79_pole_cap_binds_when_the_excess_exceeds_the_headroom():
     assert ps["raw_wall_clock_s"] == 10.0 == f["wall_clock_p50_s"]
     assert ps["capped_by_next_tallest_job"] is True
     assert ("the audit caps the saving at that 10s gap, so up to 10s of the excess "
-            "comes off the merge wait") in f["evidence"]
+            "comes off the merge wait on the 50% of sampled runs where the cache hit "
+            "(4 of 8 runs read)") in f["evidence"]
 
 
 def test_opt79_pole_finding_carries_no_minutes_even_without_a_volume():
@@ -7701,6 +7727,15 @@ def test_opt79_findings_check_runs_and_pairs_the_rendered_pole_block(tmp_path):
             ("", "rendered 0 time(s)"),
             (report + "\n" + report, "rendered 2 time(s)"),
             (report.replace("**10s**", "**30s**"), "10s off the merge wait"),
+            # the rendered hit rate is paired with the stamped share: a block
+            # that renders another rate, other counts or no rate is caught
+            (report.replace("the 50% of sampled runs", "the 80% of sampled runs"),
+             "where the cache hit (4 of 8 runs read)"),
+            (report.replace("(4 of 8 runs read)", "(4 of 5 runs read)"),
+             "where the cache hit (4 of 8 runs read)"),
+            (report.replace(" on the 50% of sampled runs where the cache hit "
+                            "(4 of 8 runs read)", ""),
+             "where the cache hit (4 of 8 runs read)"),
             (report.replace("<!-- opt79-pole:f1 -->", "<!-- opt79-pole:f9 -->"),
              "'f9'")):
         chk = vr.check_opt79_findings_rederived(bad_report, p)

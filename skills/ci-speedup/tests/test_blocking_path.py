@@ -8018,7 +8018,8 @@ def _opt79_pole_finding(**kw):
         "rollout": "Re-measure the hit-vs-miss block.",
         "fix_recipe_anchor": "opt79--a-cache-that-costs-more-than-it-saves",
         "cache_net_negative": {"kind": "opt79_pole_net_negative_cache",
-                               "job": "build"},
+                               "job": "build", "hits": 4, "misses": 4,
+                               "ambiguous_runs": 0, "hit_share": 0.5},
     }
     f.update(kw)
     return f
@@ -8043,7 +8044,8 @@ def test_opt79_pole_finding_renders_at_its_pole_with_its_merge_wait():
     assert md.startswith("<!-- opt79-pole:f7 -->"), md
     head = md.split("\n")[1]
     assert "A Cache That Costs More Than It Saves" in head and "`f7`" in head
-    assert "up to **18s** off the merge wait" in head
+    assert ("up to **18s** off the merge wait on the 50% of sampled runs where the "
+            "cache hit (4 of 8 runs read)") in head, head
     assert "min/mo" not in md
     assert "#opt79--a-cache-that-costs-more-than-it-saves" in md
 
@@ -8081,7 +8083,8 @@ def test_opt79_pole_finding_off_the_drilled_poles_still_renders_its_block():
                    {"pipeline": "https://github.com/o/r/actions/runs/123"},
                    "2026-06-08")
     assert vr._opt79_pole_findings_rendered(md, [f]) == [], md
-    assert "up to **18s** off the merge wait" in md
+    assert ("up to **18s** off the merge wait on the 50% of sampled runs where the "
+            "cache hit (4 of 8 runs read)") in md, md
     assert not [ln for ln in md.splitlines()
                 if "OPT79" in ln and "no bill saving" in ln], md
     # ...and in the static-only report, where no pole is drilled at all.

@@ -16656,6 +16656,15 @@ def _opt79_stamp(
     }
 
 
+def _opt79_hit_share_clause(hit_share: float, hits: int, read: int) -> str:
+    """The hit-rate qualifier every OPT79 pole merge-wait figure carries, e.g.
+    "on the 50% of sampled runs where the cache hit (4 of 8 runs read)". The
+    share is the stamped `hit_share` (exact hits over every run read, ambiguous
+    runs included), rendered whole-percent."""
+    return (f"on the {hit_share * 100:.0f}% of sampled runs where the cache hit "
+            f"({hits} of {read} runs read)")
+
+
 def _detect_opt79_net_negative_cache(
     wf_path: str,
     jobs_per_run: list[list[dict[str, Any]]],
@@ -17306,12 +17315,20 @@ def _opt79_pole_finding(
     # runs alongside or directly after; a longer `needs:` chain is not modeled.
     nxt_ref = (f"its next-tallest job, `{nxt}`," if nxt
                else "its next-tallest job")
+    # The figure is the time PER CACHE HIT, so the measured hit rate is stated
+    # beside it (owner decision 2026-10-06): a reader must not take it as the
+    # saving on every run. `verify_report` pairs this clause with the stamped
+    # `hit_share` and hit / read counts.
+    share_txt = _opt79_hit_share_clause(
+        hit_share, len(hits), len(hits) + len(misses) + ambiguous)
     if capped:
         cap_txt = (f"the audit caps the saving at that {headroom:.0f}s gap, so up "
-                   f"to {raw_wc:.0f}s of the excess comes off the merge wait")
+                   f"to {raw_wc:.0f}s of the excess comes off the merge wait "
+                   f"{share_txt}")
     else:
         cap_txt = (f"the {waste:.0f}s excess fits under that {headroom:.0f}s gap, "
-                   f"so all {raw_wc:.0f}s of it comes off the merge wait")
+                   f"so all {raw_wc:.0f}s of it comes off the merge wait "
+                   f"{share_txt}")
     evidence = (
         f"{measured_txt} `{name}` is this workflow's slowest job at {lp50:.0f}s "
         f"and {nxt_ref} runs {fl50:.0f}s; {cap_txt}. This workflow runs on "
@@ -17352,7 +17369,7 @@ def _opt79_pole_finding(
         f"p50 cache block {hit_p50:.0f}s on {len(hits)} log-confirmed hit run(s) "
         f"vs {miss_p50:.0f}s on {len(misses)} log-confirmed miss run(s) on "
         f"`{declared}` ({waste:.0f}s excess per hit run on this workflow's slowest "
-        f"job; up to {raw_wc:.0f}s off the merge wait, capped at the gap to "
+        f"job; up to {raw_wc:.0f}s off the merge wait {share_txt}, capped at the gap to "
         f"{nxt_txt}'s duration)")
     cn = _opt79_stamp(
         kind=_OPT79_POLE_KIND, job=name, block=block, rows=rows,

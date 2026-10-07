@@ -5822,6 +5822,23 @@ def _opt79_pole_covers(findings: list[dict[str, Any]] | None) -> list[dict[str, 
     return [f for f in (findings or []) if _saves_wall_clock(f)]
 
 
+def _opt79_hit_share_text(cn: Any) -> str:
+    """The merge-wait figure is the time PER CACHE HIT, so it is stated beside
+    the measured hit rate: "on the 50% of sampled runs where the cache hit (4 of
+    8 runs read)". Built from the stamped `hit_share`, `hits`, `misses` and
+    `ambiguous_runs`; empty when any is missing (the verifier then fails the
+    block for not stating it)."""
+    cn = cn if isinstance(cn, dict) else {}
+    share = _num(cn.get("hit_share"))
+    counts = [cn.get(k) for k in ("hits", "misses", "ambiguous_runs")]
+    if share is None or not all(isinstance(c, int) and not isinstance(c, bool)
+                                for c in counts):
+        return ""
+    hits, misses, amb = counts
+    return (f"on the {share * 100:.0f}% of sampled runs where the cache hit "
+            f"({hits} of {hits + misses + amb} runs read)")
+
+
 def _opt79_pole_block(findings: list[dict[str, Any]], catalog_url: str) -> list[str]:
     """Render OPT79's pole-cache finding(s) inside the pole drill. One block per
     finding, opened by a `<!-- opt79-pole:<id> -->` marker `verify_report` pairs
@@ -5836,6 +5853,9 @@ def _opt79_pole_block(findings: list[dict[str, Any]], catalog_url: str) -> list[
         risk_s = f" - risk **{risk}**" if risk else ""
         if wc > 0:
             gain = f"up to **{wc:.0f}s** off the merge wait"
+            share = _opt79_hit_share_text(f.get("cache_net_negative"))
+            if share:
+                gain += f" {share}"
         else:
             gain = ("**0s** off the merge wait once the cross-check bounds are "
                     "applied (see the evidence)")

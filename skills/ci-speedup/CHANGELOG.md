@@ -624,7 +624,10 @@ unversioned and updates by reinstall from `main`.
   follow-up would), with both jobs and their times
   named in the evidence ("`prep` is this workflow's slowest job at 120s and its
   next-tallest job, `verify`, runs 100s; the audit caps the saving at that 20s
-  gap, so up to 20s of the excess comes off the merge wait"). The wording holds
+  gap, so up to 20s of the excess comes off the merge wait on the 50% of sampled
+  runs where the cache hit (3 of 6 runs read)"), the figure being per cache hit
+  so the measured hit rate is stated beside it in the evidence and the block
+  header and checked by the report's self-check against the stamped share. The wording holds
   whether the next job runs alongside the slowest one or after it through
   `needs:`; it never says that job finishes at a time or sets the merge wait.
   The usual cross-check bounds can lower it further, and the block then prints

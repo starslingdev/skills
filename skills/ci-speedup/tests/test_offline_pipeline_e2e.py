@@ -762,7 +762,9 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert "`prep` is this workflow's slowest job at 120s" in _pev, _pev
     assert "its next-tallest job, `verify`, runs 100s" in _pev, _pev
     assert ("the audit caps the saving at that 20s gap, so up to 20s of the excess "
-            "comes off the merge wait") in _pev, _pev
+            "comes off the merge wait on the 50% of sampled runs where the cache hit "
+            "(3 of 6 runs read)") in _pev, _pev
+    assert pcn.get("hit_share") == 0.5 and pcn.get("ambiguous_runs") == 0, pcn
     # `verify` has `needs: prep` on this corpus, so it neither "finishes at"
     # 100s nor sets the merge wait on its own: the cap compares job durations,
     # not the chain. No sentence the pole finding emits may claim otherwise.
@@ -1089,6 +1091,8 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     _pole_lines = [ln for ln in report.splitlines()
                    if "A Cache That Costs More Than It Saves" in ln and "20s" in ln]
     assert _pole_lines, "the pole OPT79 finding's title and 20s did not render together"
+    assert any("up to **20s** off the merge wait on the 50% of sampled runs where "
+               "the cache hit (3 of 6 runs read)" in ln for ln in _pole_lines), _pole_lines
     assert "is this workflow's slowest job, so the saving is on the merge wait" \
         not in report
 

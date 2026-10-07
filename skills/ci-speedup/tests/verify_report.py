@@ -6231,7 +6231,22 @@ _VR_OPT79_POLE_EVIDENCE_RE = re.compile(
     r"(\d+)s and its next-tallest job(?:, `([^`]*)`,)? runs (\d+)s; "
     r"(?:the audit caps the saving at that \d+s gap, so up to|the \d+s excess "
     r"fits under that \d+s gap, so all) (\d+)s of (?:the excess|it) comes off "
-    r"the merge wait", re.S)
+    r"the merge wait on the (\d+)% of sampled runs where the cache hit "
+    r"\((\d+) of (\d+) runs read\)", re.S)
+
+
+def _opt79_hit_share_clause(cn: dict) -> str | None:
+    """The hit-rate clause an OPT79 pole merge-wait figure must carry, restated
+    from the STAMPED `hit_share` and counts (`_opt79_block_rederived` re-derives
+    those from per_run). None when a count is not an integer."""
+    share = _num(cn.get("hit_share"))
+    counts = [cn.get(k) for k in ("hits", "misses", "ambiguous_runs")]
+    if share is None or not all(isinstance(c, int) and not isinstance(c, bool)
+                                for c in counts):
+        return None
+    hits, misses, amb = counts
+    return (f"on the {share * 100:.0f}% of sampled runs where the cache hit "
+            f"({hits} of {hits + misses + amb} runs read)")
 
 
 def _opt79_pole_prose_rederived(f: dict, cn: dict) -> list[str]:
@@ -6249,13 +6264,20 @@ def _opt79_pole_prose_rederived(f: dict, cn: dict) -> list[str]:
     m = _VR_OPT79_POLE_EVIDENCE_RE.search(str(f.get("evidence") or ""))
     if not m:
         return ["evidence does not state the measured comparison, the slowest "
-                "job, the next-tallest job and the capped merge-wait figure"]
+                "job, the next-tallest job, the capped merge-wait figure and the "
+                "hit rate it applies to"]
     got = m.groups()
+    share = _num(cn.get("hit_share"))
+    counts = [cn.get(k) for k in ("hits", "misses", "ambiguous_runs")]
+    read = (sum(counts) if all(isinstance(c, int) and not isinstance(c, bool)
+                               for c in counts) else None)
     want = (_w(cn.get("hit_path_p50_s")), str(cn.get("hits")),
             _w(cn.get("miss_path_p50_s")), str(cn.get("misses")),
             _w(cn.get("waste_s")), str(cn.get("job") or ""),
             _w(ps.get("long_pole_p50_s")), str(ps.get("next_tallest_job") or "") or None,
-            _w(ps.get("floor_p50_s")), _w(ps.get("raw_wall_clock_s")))
+            _w(ps.get("floor_p50_s")), _w(ps.get("raw_wall_clock_s")),
+            "?" if share is None else f"{share * 100:.0f}", str(cn.get("hits")),
+            str(read))
     if got != want:
         out.append(f"evidence states {got} but the stamped block gives {want}")
     return out
@@ -6468,6 +6490,14 @@ def _opt79_pole_findings_rendered(report: str, poles: list[dict]) -> list[str]:
         if f"{wc:.0f}s off the merge wait" not in plain:
             out.append(f"{fid}: its block does not state the credited "
                        f"{wc:.0f}s off the merge wait")
+        elif wc > 0:
+            # The figure is per cache hit: the rendered hit rate must be the
+            # stamped share (re-derived from per_run by _opt79_block_rederived).
+            clause = _opt79_hit_share_clause(_as_dict(f.get("cache_net_negative")))
+            want = f"{wc:.0f}s off the merge wait {clause}"
+            if clause is None or want not in plain:
+                out.append(f"{fid}: its block does not state the credited figure "
+                           f"with its stamped hit rate: {want!r}")
         if "min/mo" in plain or "runner-min" in plain:
             out.append(f"{fid}: its block states runner-minutes it does not carry")
     return out
