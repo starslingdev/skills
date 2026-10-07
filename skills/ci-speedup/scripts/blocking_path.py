@@ -5851,14 +5851,12 @@ def _opt79_pole_block(findings: list[dict[str, Any]], catalog_url: str) -> list[
         wc = _num(f.get("wall_clock_p50_s")) or 0.0
         risk = str(f.get("risk", "")).strip().upper()
         risk_s = f" - risk **{risk}**" if risk else ""
-        if wc > 0:
-            gain = f"up to **{wc:.0f}s** off the merge wait"
-            share = _opt79_hit_share_text(f.get("cache_net_negative"))
-            if share:
-                gain += f" {share}"
-        else:
-            gain = ("**0s** off the merge wait once the cross-check bounds are "
-                    "applied (see the evidence)")
+        # A pole finding whose figure rounds to 0s is demoted to an uncredited
+        # row by the collector, and verify_report fails one that reaches here.
+        gain = f"up to **{wc:.0f}s** off the merge wait"
+        share = _opt79_hit_share_text(f.get("cache_net_negative"))
+        if share:
+            gain += f" {share}"
         out += [f"<!-- opt79-pole:{fid} -->",
                 f"**💾 Measured cache cost - OPT79 · {title}** (`{fid}`) - {gain}"
                 f"{risk_s}", "",
@@ -5903,8 +5901,8 @@ def _opt79_off_pole_block(findings: list[dict[str, Any]], catalog_url: str,
     if not rest:
         return []
     return ["**💾 Measured cache cost on a workflow's slowest job** - each job below "
-            "is the slowest job of a workflow that runs on pull requests, but not one "
-            "of the long poles drilled above.", "",
+            "is the slowest job of a workflow that runs on pull requests; its cache "
+            "cost is not shown at a long pole above.", "",
             *_opt79_pole_block(rest, catalog_url)]
 
 
@@ -6053,11 +6051,28 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
             if _opt79_uncredited_row_is_renderable(r)]
     if not rows:
         return []
+    # A ZEROED row was sized - to no merge wait, by the cross-checks - so
+    # "this version cannot size it" is said only of the rows it is true for.
+    _zeroed = "pole_merge_wait_zeroed_by_cross_check"
+    n_zeroed = sum(1 for r in rows if r.get("uncredited_reason") == _zeroed)
+    if n_zeroed == len(rows):
+        lead = ("listed with no number because the cross-checks left no merge "
+                "wait for shrinking them to shorten:")
+        tail = ("only the cross-checks, not the measurement, keep the win off "
+                "the merge wait here.")
+    elif n_zeroed:
+        lead = ("listed with no number - each line says why (this version "
+                "cannot size some; the cross-checks sized others at no merge "
+                "wait):")
+        tail = "no size of the win is credited here."
+    else:
+        lead = ("listed with no number because this version cannot size what "
+                "shrinking them is worth:")
+        tail = "only the size of the win is unstated here."
     lines = ["> [!NOTE]",
              f"> **{len(rows)} cache(s) measured net-negative on a job this audit "
-             "cannot price.** Measured the same way as the credited ones, and "
-             "listed with no number because this version cannot size what "
-             "shrinking them is worth:", ">"]
+             f"cannot price.** Measured the same way as the credited ones, and {lead}",
+             ">"]
     for r in rows:
         job = str(r.get("job") or "")
         wf = str(r.get("workflow_file") or "")
@@ -6074,8 +6089,11 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
                 floor=(f" ({float(floor):.0f}s)"
                        if isinstance(floor, (int, float)) else ""),
                 detail=detail or "no reason was recorded")
-            why = (f"`{job}` is this workflow's slowest job, but {clause}; "
-                   "**not credited** in this version.")
+            # A zeroed row was sized (to no merge wait), so it is not
+            # "not credited in this version" - it is not credited, full stop.
+            credit = ("**not credited**." if r.get("uncredited_reason") == _zeroed
+                      else "**not credited** in this version.")
+            why = f"`{job}` is this workflow's slowest job, but {clause}; {credit}"
         elif (r.get("workflow_gates_pull_requests") is False
               and r.get("declares_pull_request") is True):
             # Declared, but no sampled run was a pull request: say what was
@@ -6102,7 +6120,7 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
             f"> - a cache on `{job}`{where} measured net-negative by {waste_txt} "
             f"per cache hit ({hits} hit / {misses} miss run(s) sampled); {why}")
     lines += [">", "> Re-keying or narrowing such a cache is the same fix as the "
-              "credited ones; only the size of the win is unstated here.", ""]
+              f"credited ones; {tail}", ""]
     return lines
 
 

@@ -8368,3 +8368,38 @@ def test_opt79_undeclared_pull_request_workflow_keeps_its_wording():
     row2 = dict(row, declares_pull_request=True)
     assert any("pull request" in p for p in vr._opt79_uncredited_rows_rendered(
         rendered, [row2]))
+
+
+# ---- OPT79 wording that a zeroed demotion or an off-pole block made false ----
+
+def test_opt79_zeroed_row_is_not_told_this_version_cannot_size_it():
+    """A zeroed row WAS sized - to no merge wait, by the cross-checks. "this
+    version cannot size what shrinking them is worth" and "not credited in this
+    version" are false for it; they stay for a row this version cannot size."""
+    vr = _load_verify_report_for_opt79()
+    f = _opt79_zeroed_pole()
+    rows: list = []
+    cr._opt79_demote_uncredited_poles([f], rows)
+    data = {"per_workflow_timing": {"ci.yml": _opt79_pole_of(660.0, 600.0)},
+            "opt79_uncredited_pole_caches": rows}
+    rendered = "\n".join(bp._opt79_uncredited_block(data))
+    assert "cannot size" not in rendered, rendered
+    assert "in this version" not in rendered, rendered
+    assert "**not credited**" in rendered, rendered
+    assert vr._opt79_uncredited_rows_rendered(rendered, rows) == []
+    # a row this version cannot size keeps both
+    unsized = _opt79_uncredited(_opt79_pole_crit())
+    mixed = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": [unsized]}))
+    assert "cannot size what shrinking" in mixed and "in this version" in mixed
+
+
+def test_opt79_off_pole_block_does_not_claim_its_job_is_not_a_long_pole():
+    """The off-pole block also catches a pole the drill skipped before its
+    OPT79 block (an aggregation gate) and every pole in a static-only report,
+    so "not one of the long poles drilled above" can be false."""
+    f, _data = _opt79_live_pole_and_data()
+    f["id"] = "f9"
+    out = "\n".join(bp._opt79_off_pole_block([f], "https://example.invalid/c"))
+    assert "<!-- opt79-pole:f9 -->" in out
+    assert "not one of the long poles drilled above" not in out, out
