@@ -6433,8 +6433,10 @@ def _vr_opt80_job_rendered_as_pole(f: dict, report: str, data: dict | None = Non
     (`pr_critical_path.poles[].job`), so `CI / e2e / build` (a reusable-workflow
     call whose job is `e2e / build`) never matches a plain `build` in the same
     caller file. Only a header with no stamped pole entry falls back to the
-    check-run name `<workflow name> / <job>` matched whole or on its last
-    ` / ` segment. A header in another workflow file never matches."""
+    check-run name `<workflow name> / <job>`, matched whole or with ONLY the
+    workflow-name prefix (the FIRST ` / ` segment) stripped: `CI / call-a /
+    test` is job `call-a / test`, never a plain `test`. A header in another
+    workflow file never matches."""
     jobs = {_cmp_name(str(j)) for j in _as_list(f.get("affected_jobs")) if str(j)}
     wf_f = str(f.get("workflow_file") or "").rsplit("/", 1)[-1]
     stamped: dict[str, list[tuple[str, str]]] = {}
@@ -6452,7 +6454,7 @@ def _vr_opt80_job_rendered_as_pole(f: dict, report: str, data: dict | None = Non
         if mapped:
             if any(job in jobs for job in mapped):
                 return True
-        elif c in jobs or c.rsplit(" / ", 1)[-1] in jobs:
+        elif c in jobs or (" / " in c and c.split(" / ", 1)[1] in jobs):
             return True
     return False
 

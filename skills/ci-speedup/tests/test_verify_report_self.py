@@ -9622,6 +9622,30 @@ def test_opt80_pole_match_uses_the_poles_own_job_not_the_last_segment(tmp_path: 
     assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
 
 
+def test_opt80_unmapped_pole_strips_only_the_workflow_name_prefix():
+    """With no stamped pole entry to resolve a header's job, the verifier falls
+    back to the check-run name. GitHub names a check-run `<workflow name> /
+    <job>`: the prefix is the FIRST segment. A reusable-workflow job
+    `call-a / build` renders as `CI / call-a / build` and is on that pole; a
+    plain `build` is not on `CI / call-b / build`."""
+    vr = _load_verify_report()
+
+    def report(check):
+        return f"# r\n\n## 🔴 Long pole 1: `ci.yml` ▸ `{check}` - 5m 00s\n\nbody\n"
+
+    def finding(job):
+        return {"workflow_file": ".github/workflows/ci.yml", "affected_jobs": [job]}
+
+    on = vr._vr_opt80_job_rendered_as_pole
+    assert on(finding("call-a / build"), report("CI / call-a / build"), {})
+    assert not on(finding("build"), report("CI / call-b / build"), {})
+    assert on(finding("build"), report("CI / build"), {})
+    assert on(finding("build"), report("build"), {})
+    # Another workflow file's header never matches.
+    assert not on({"workflow_file": ".github/workflows/other.yml",
+                   "affected_jobs": ["build"]}, report("CI / build"), {})
+
+
 def test_opt80_tail_line_off_a_drilled_pole_renders_in_its_own_block(tmp_path: Path):
     """The slowest job of a pull-request workflow that is not drilled: its tail
     line renders once, outside every pole section, and that (only that) excuses
