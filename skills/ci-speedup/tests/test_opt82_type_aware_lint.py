@@ -1046,3 +1046,14 @@ def test_verifier_fails_a_finding_missing_its_evidence_block_kind(tmp_path):
     f["type_aware_lint"]["kind"] = "something_else"
     c = _vr_check(tmp_path, f, card)
     assert not c.ok and "evidence block" in c.detail, c.detail
+
+
+def test_benchmark_tells_the_agent_to_confirm_the_full_type_aware_rule_list(tmp_path):
+    """The audit reads rules from source text; a typed rule it could not read
+    (an unresolved setting, a shared config) stays on in the timing-only run,
+    and ESLint then fails for want of type information instead of timing. The
+    card must have the agent confirm the list with `--print-config` first."""
+    _f, card = _rendered_card(tmp_path)
+    flat = " ".join(card.split())
+    assert "--print-config" in flat.split("LEDGER")[0], flat
+    assert "fails" in flat and "type information" in flat
