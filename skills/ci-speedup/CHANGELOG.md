@@ -727,6 +727,21 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-07** — **The checkout-stall tail line (OPT80) no longer overstates
+  how rare a stall is, or which job a merge waits on.** A slow run whose log
+  could not be read (gone, unparseable, or its stall dropped because the quoted
+  line looked like a credential) is no longer left out of "one run in N" as if
+  its fetch had been smooth; only a log read and shown clean is left out, and the
+  line now says how many logs were read, how many were unreadable and how many
+  were clean. A required check named `<workflow> / <job>` now counts only when
+  the prefix is that job's own workflow name, so another workflow's `deploy /
+  bench` no longer marks this workflow's `bench` as merge-gating, and a required
+  name that matches jobs in two workflows marks neither. A tail line on an
+  aggregation-gate pole now renders in that pole instead of under the "not one of
+  the long poles drilled above" heading. The report's self-check re-derives the
+  unreadable/clean split, the workflow-name prefix and the ambiguity, and checks
+  the "slowest job" claim in both directions.
+
 - **2026-09-30** — **A held-back row can no longer break its own table, link
   out of the report, or overstate its reason (#112).** Job names are controlled
   by the audited repository and land in a markdown table cell. A backslash was

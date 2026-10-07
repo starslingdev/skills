@@ -2109,15 +2109,17 @@ of the drilled poles):
 ```
 one run in N spends about X s longer on checkout, and that run's log shows the fetch stalling
 N = round(sampled runs / counted slow runs)
-counted slow runs = slow runs - (logs read - log-proven runs)
+counted slow runs = slow runs - logs read and shown clean
 X = median checkout of the log-proven tail runs - p50 checkout of the sample
 ```
 
 A slow run is one at or above the tail threshold. Logs are read for at most
-four of them (a cost bound). A slow run whose log was read and does not show
-the stall is left out of N; a slow run whose log was never read is not
+four of them (a cost bound). A slow run whose log was read and shows a clean
+fetch is left out of N; a slow run whose log was never read, or could not be
+read (gone, unparseable, or its stall dropped as credential-shaped), is not
 evidence of a smooth fetch and stays in. The report says how many runs were
-slow, how many of their logs were read and how many of those prove the stall.
+slow, how many of their logs were read, and how many of those prove the stall,
+were unreadable and were clean.
 X uses only the proven runs. X is the median proven run's loss, not an upper
 bound (a proven run can lose more), so it reads "about" and applies to roughly
 one run in N: it is

@@ -10291,7 +10291,6 @@ def _detect_opt80_checkout_tail_stall(
                      and gating is not None else None)
         if tail_axis is not None:
             tail_axis["merge_gating"] = dict(gating)
-        if tail_axis is not None:
             pole_sentence = (
                 f"`{job_name}` is this workflow's slowest job on pull requests: "
                 f"{_opt80_tail_phrase(tail_axis)} - a tail figure, never added to "
