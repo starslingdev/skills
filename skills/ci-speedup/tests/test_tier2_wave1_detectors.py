@@ -7949,15 +7949,15 @@ def test_opt79_pole_arm_is_gated_on_the_sampled_events_not_the_declared_trigger(
         assert len(out) == 1 and rows == [], (events, out, rows)
 
 
-def _opt79_zeroed_pole(off_spine=False, zero=True):
+def _opt79_zeroed_pole(off_spine=False, zero=True, to_s=0.0):
     import copy
     f = copy.deepcopy(_opt79_pole_run(_opt79_pole_of(660.0, 600.0))[0][0])
     f["id"] = "f7"
     if zero:
-        f.update(wall_clock_uncapped_p50_s=19.0, wall_clock_p50_s=0.0, tier=2,
+        f.update(wall_clock_uncapped_p50_s=19.0, wall_clock_p50_s=to_s, tier=2,
                  realization="none",
                  wall_clock_derivation=[{
-                     "bound": "measured-critical-path", "from_s": 19.0, "to_s": 0.0,
+                     "bound": "measured-critical-path", "from_s": 19.0, "to_s": to_s,
                      "reason": "not on the critical path — a slower check "
                                "(CodeQL 900s) gates the PR"}])
     if off_spine:
@@ -7977,7 +7977,8 @@ def test_opt79_a_pole_finding_the_cascade_zeroed_is_demoted_to_an_uncredited_row
     assert row["kind"] == "opt79_uncredited_pole_cache"
     assert row["uncredited_reason"] == "pole_merge_wait_zeroed_by_cross_check"
     assert row["uncredited_reason_detail"] == (
-        "not on the critical path - a slower check (CodeQL 900s) gates the PR")
+        "19s to 0s: not on the critical path - a slower check (CodeQL 900s) "
+        "gates the PR")
     assert row["uncredited_reason_detail"].isascii()
     assert row["on_critical_path"] is False
     assert row["workflow_gates_pull_requests"] is True
@@ -7989,8 +7990,9 @@ def test_opt79_a_pole_finding_the_cascade_zeroed_is_demoted_to_an_uncredited_row
             "opt79_uncredited_pole_caches": rows}
     assert vr._opt79_uncredited_rows_rederived(data) == []
     rendered = "\n".join(bp._opt79_uncredited_block(data))
-    assert ("the cross-checks found no merge wait it can shorten: not on the "
-            "critical path - a slower check (CodeQL 900s) gates the PR") in rendered
+    assert ("the cross-checks found no merge wait it can shorten: 19s to 0s: not "
+            "on the critical path - a slower check (CodeQL 900s) gates the PR"
+            ) in rendered
     assert vr._opt79_uncredited_rows_rendered(rendered, rows) == []
     assert rendered.isascii(), rendered
 
@@ -8163,3 +8165,34 @@ def test_opt79_uncredited_reason_phrases_are_one_contract():
         assert frag in bp._OPT79_UNCREDITED_REASON_PHRASES[k], k
         assert "on the merge wait" not in bp._OPT79_UNCREDITED_REASON_PHRASES[k]
         assert bp._OPT79_UNCREDITED_REASON_PHRASES[k].isascii()
+
+
+# ---- OPT79 pole: a merge wait that ROUNDS to 0s is no merge wait ----
+#
+# The pole arm credits only `round(raw_wc) > 0`, but the cascade can leave
+# 0 < wc < 0.5 (or exactly 0.5, which rounds half-to-even to 0): a credited
+# finding then renders "up to **0s** off the merge wait". Demotion and the
+# verifier both decide on the ROUNDED figure, the one the reader sees.
+
+@pytest.mark.parametrize("to_s", [0.4, 0.5])
+def test_opt79_a_pole_finding_the_cascade_left_under_a_rendered_second_is_demoted(to_s):
+    vr = _load_verify_report_for_opt79()
+    f = _opt79_zeroed_pole(to_s=to_s)
+    rows: list = []
+    assert cr._opt79_demote_uncredited_poles([f], rows) == [], (to_s, rows)
+    row = rows[0]
+    assert row["uncredited_reason"] == "pole_merge_wait_zeroed_by_cross_check"
+    assert f"19s to {to_s:g}s" in row["uncredited_reason_detail"], row
+    data = {"per_workflow_timing": {"ci.yml": _opt79_pole_of(660.0, 600.0)},
+            "opt79_uncredited_pole_caches": rows}
+    assert vr._opt79_uncredited_rows_rederived(data) == []
+
+
+@pytest.mark.parametrize("to_s", [0.4, 0.5])
+def test_opt79_verifier_rejects_a_pole_finding_whose_merge_wait_rounds_to_zero(to_s):
+    vr = _load_verify_report_for_opt79()
+    f = _opt79_zeroed_pole(to_s=to_s)
+    data = {"per_workflow_timing": {"ci.yml": _opt79_pole_of(660.0, 600.0)},
+            "findings": [f]}
+    problems = vr._opt79_finding_rederived(f, data)
+    assert any("must be an uncredited row" in p for p in problems), (to_s, problems)

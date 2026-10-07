@@ -6399,10 +6399,12 @@ def _opt79_pole_finding_rederived(f: dict, data: dict) -> list[str]:
                         f"{headroom}) = {raw}, the wall-clock the measured excess "
                         "allows")
     wc = _num(f.get("wall_clock_p50_s"))
-    if wc is None or wc <= 0:
+    # Judged on the ROUNDED figure the block renders: 0 < wc <= 0.5 renders
+    # "up to 0s off the merge wait", which is no merge wait.
+    if wc is None or round(wc) <= 0:
         problems.append(f"wall_clock_p50_s={f.get('wall_clock_p50_s')!r}: a pole "
-                        "cache with no merge wait left to credit must be an "
-                        "uncredited row, not a finding")
+                        "cache with no merge wait left to credit (it rounds to "
+                        "0s) must be an uncredited row, not a finding")
     deriv = f.get("wall_clock_derivation")
     if deriv is not None:
         steps = [d for d in _as_list(deriv) if isinstance(d, dict)]

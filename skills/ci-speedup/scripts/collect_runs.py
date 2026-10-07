@@ -17192,6 +17192,11 @@ def _opt79_ascii(text: str) -> str:
     return " ".join(text.split())
 
 
+def _opt79_secs(v: Any) -> str:
+    """A cascade step's value as the demotion detail states it: `19s`, `0.4s`."""
+    return f"{float(v):g}s" if isinstance(v, (int, float)) else "?s"
+
+
 def _opt79_demote_uncredited_poles(
     findings: list[dict[str, Any]],
     uncredited: list[dict[str, Any]],
@@ -17216,7 +17221,10 @@ def _opt79_demote_uncredited_poles(
             kept.append(f)
             continue
         wc = f.get("wall_clock_p50_s")
-        zeroed = not isinstance(wc, (int, float)) or wc <= 0
+        # Decided on the ROUNDED figure, the one the report renders: the pole
+        # arm credits only `round(raw_wc) > 0`, and the cascade can leave
+        # 0 < wc <= 0.5, which would render "up to 0s off the merge wait".
+        zeroed = not isinstance(wc, (int, float)) or round(wc) <= 0
         if not zeroed and not f.get("off_spine"):
             kept.append(f)
             continue
@@ -17229,9 +17237,11 @@ def _opt79_demote_uncredited_poles(
             job_p50_s=cn.get("job_p50_s"), floor_p50_s=cn.get("floor_p50_s"))
         if zeroed:
             row["uncredited_reason"] = _OPT79_REASON_ZEROED
-            reasons = [_opt79_ascii(str(d.get("reason") or ""))
-                       for d in (f.get("wall_clock_derivation") or [])
-                       if isinstance(d, dict)]
+            reasons = [
+                f"{_opt79_secs(d.get('from_s'))} to {_opt79_secs(d.get('to_s'))}: "
+                f"{_opt79_ascii(str(d.get('reason') or ''))}"
+                for d in (f.get("wall_clock_derivation") or [])
+                if isinstance(d, dict) and str(d.get("reason") or "").strip()]
             row["uncredited_reason_detail"] = (
                 "; ".join(r for r in reasons if r)
                 or "the cross-checks left no merge wait for it to shorten")
