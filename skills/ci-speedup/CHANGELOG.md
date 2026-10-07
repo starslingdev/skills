@@ -20,7 +20,12 @@ unversioned and updates by reinstall from `main`.
   report now prints a separate tail line in that job's long-pole section, beside
   its merge-wait figure — "one run in N spends about X s longer on checkout, and
   that run's log shows the fetch stalling" — or in a short block of its own when the job is not one of the drilled
-  poles. The tail count and the tail median come only from runs whose own log proves the stall. The line is
+  poles. The line appears only when the job is on the merge-gating path (a
+  required check, or needed by one; with branch protection unreadable no line is
+  printed) and the workflow has sampled pull-request runs. N counts the runs with
+  a slow checkout, leaving out only those whose log was read and shows no stall
+  (a log the probe cap never read is not evidence of a smooth fetch); X comes
+  only from runs whose own log proves the stall. The line is
   never added to the headline, a pole's figure, any total or the runner-minute
   section, and the finding still credits 0s of typical merge wait; a push-only
   workflow (or one whose trigger is unknown) keeps the old sentence on its
