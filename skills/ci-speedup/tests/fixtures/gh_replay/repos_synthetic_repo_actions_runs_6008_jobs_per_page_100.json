@@ -1,5 +1,5 @@
 {
- "total_count": 11,
+ "total_count": 12,
  "jobs": [
   {
    "id": 60080,
@@ -191,6 +191,45 @@
      "number": 6,
      "started_at": "2026-06-24T08:03:11Z",
      "completed_at": "2026-06-24T08:03:15Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 260080,
+   "run_id": 6008,
+   "name": "e2e",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-24T08:00:05Z",
+   "completed_at": "2026-06-24T08:04:05Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/6008/job/260080",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-24T08:00:05Z",
+     "completed_at": "2026-06-24T08:00:05Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-24T08:00:05Z",
+     "completed_at": "2026-06-24T08:00:07Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "End-to-end suite",
+     "number": 3,
+     "started_at": "2026-06-24T08:00:07Z",
+     "completed_at": "2026-06-24T08:04:05Z",
      "status": "completed",
      "conclusion": "success"
     }
