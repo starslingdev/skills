@@ -3647,8 +3647,10 @@ after:   fast pass:  eslint, syntax-only rules, no program        (cheap, every 
    below it, which cascade. A nested flat config is not counted: flat-config
    lookup starts at the working directory). ON means a literal
    `parserOptions.project` (`true`, a string or an array), a `projectService`
-   (`true` or an object), or an extended preset ending in `-type-checked` /
-   `TypeChecked` (or `recommended-requiring-type-checking`). The
+   (`true`, an object or a string value), or an extended preset ending in
+   `-type-checked` / `TypeChecked` / `-only` (the `…TypeCheckedOnly` variants), the
+   `all` preset (`configs.all`, `plugin:@typescript-eslint/all`), or
+   `recommended-requiring-type-checking`. The
    `disable-type-checked` config never counts, and `project: false` is OFF.
    Comments are stripped before reading. Any other value (an identifier, an
    environment variable, a ternary, a `parserOptions` taken from a variable) is
@@ -3697,6 +3699,7 @@ which feeds "Why a slow lint job with type-aware ESLint produced no finding".
 | `lint_job_never_ran_in_sample` | verdict | the lint job did not run in any sampled run |
 | `lint_job_below_cost_threshold` | verdict | the job is under 60s and not a long pole |
 | `type_aware_parsing_off` | verdict | the config applying to the job does not build the type graph |
+| `workflow_yaml_unparsed` | neither | the workflow file could not be parsed; counted in `opt82_withheld_by_gate` but in neither the verdict nor the held-back set, and disclosed through `detectors_skipped` |
 | `lint_script_unresolvable` | held back | the lint step runs a package script this audit could not trace to the command it runs |
 | `type_aware_config_reader_failed` | held back | the ESLint config reader failed, so whether lint builds the type graph is unknown |
 | `no_eslint_config_found` | held back | no ESLint config was found for the lint job's directory |
@@ -3712,7 +3715,7 @@ is the type graph: that depends on the repository's import graph and on how many
 rules need types. What the report can state is a ceiling: the lint step's
 measured p50 (or the lint job's, when the step is not separately measured) is an
 upper bound on what any change to lint can save. It is not a forecast. The
-prompt asks the agent to run a one-command benchmark first, on the same runner,
+prompt asks the agent to run a two-command benchmark first, on the same runner,
 before touching any config: the lint exactly as CI runs it, then the same lint
 with `--parser-options project:false --parser-options projectService:false` plus
 `--rule '<rule>: off'` for each enumerated rule. That second run is for TIMING
