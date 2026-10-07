@@ -5240,9 +5240,10 @@ def _below_long_pole_margin(f: dict, data: dict) -> tuple[float | None, list[str
     long_pole_p50 - job_p50, for a job that is NOT the workflow's long pole.
 
     None (with the reason) when the run measured no long pole for the workflow,
-    when the credited job IS that long pole, or when it is not strictly shorter
-    than it after rounding: a job tied with the slowest job is as slow as the
-    job that sets the merge gate, and the proof says the opposite."""
+    when the credited job IS that long pole, or when it is not at least
+    `_VR_OPT79_POLE_MIN_HEADROOM_S` (1s) shorter than it after rounding: a job
+    within that tie cutoff of the slowest job is a co-pole, as slow as the job
+    that sets the merge gate, and the proof says the opposite."""
     wf = str(f.get("workflow_file") or "")
     crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
     lp_job = str(crit.get("long_pole_job") or "")
@@ -5271,10 +5272,11 @@ def _below_long_pole_margin(f: dict, data: dict) -> tuple[float | None, list[str
                       "below-the-long-pole wording (at or above the second-slowest "
                       "job) would be false"]
     margin = round(lp - max(vals), 1)
-    if margin <= 0:
-        return None, [f"the credited job ({max(vals)}s) is not strictly shorter than "
-                      f"the long pole `{lp_job}` ({lp}s): a job tied with the slowest "
-                      "job carries no below-the-long-pole proof"]
+    if margin < _VR_OPT79_POLE_MIN_HEADROOM_S:
+        return None, [f"the credited job ({max(vals)}s) is not at least "
+                      f"{_VR_OPT79_POLE_MIN_HEADROOM_S}s shorter than the long pole "
+                      f"`{lp_job}` ({lp}s): a job within the tie cutoff of the slowest "
+                      "job is a co-pole and carries no below-the-long-pole proof"]
     return margin, []
 
 
@@ -6133,10 +6135,12 @@ def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
     jp = _num(cn.get("job_p50_s"))
     headroom = round(lp - fl, 1) if lp is not None and fl is not None else None
     lp_job = str(cn.get("long_pole_job") or "")
-    # A job TIED with the long pole is a co-pole: as slow as the job that sets
-    # the merge wait, so it reads as a pole here.
+    # A job TIED with the long pole (within the 1s cutoff the pole arm uses for
+    # headroom) is a co-pole: as slow as the job that sets the merge wait, so it
+    # reads as a pole here.
     lead = round(lp - jp, 1) if lp is not None and jp is not None else None
-    co_pole = bool(job) and job != lp_job and lead is not None and lead <= 0
+    co_pole = (bool(job) and job != lp_job and lead is not None
+               and lead < _VR_OPT79_POLE_MIN_HEADROOM_S)
     is_pole = bool(job) and (job == lp_job or co_pole) and gates is True
     reason = cn.get("uncredited_reason")
     if reason is None:
@@ -6148,7 +6152,8 @@ def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
         # The converse of the below-the-long-pole arm: a job strictly shorter
         # than its workflow's long pole IS that credited runner-minute finding,
         # on any workflow, so listing it here under-reports a priced saving.
-        if lp_job and job and job != lp_job and lead is not None and lead > 0:
+        if (lp_job and job and job != lp_job and lead is not None
+                and lead >= _VR_OPT79_POLE_MIN_HEADROOM_S):
             out.append(
                 f"`{job}` ({jp}s) is {lead}s shorter than its workflow's long pole "
                 f"`{lp_job}` ({lp}s) and names no uncredited_reason: it should have "

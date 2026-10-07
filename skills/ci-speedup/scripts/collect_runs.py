@@ -17105,7 +17105,9 @@ def _detect_opt79_net_negative_cache(
         lp50_s = float(block.get("long_pole_p50_s") or 0.0)
         lp_margin = (round(lp50_s - job_p50, 1)
                      if lp_job and not block.get("is_long_pole") else 0.0)
-        if not below_floor and lp_margin <= 0:
+        # A lead under `_OPT79_POLE_MIN_HEADROOM_S` is a TIE, the same cutoff
+        # the pole arm uses for headroom: such a job is a co-pole, not credited.
+        if not below_floor and lp_margin < _OPT79_POLE_MIN_HEADROOM_S:
             row = _uncredited_row() if uncredited is not None else None
             if not lp_job:
                 _no("long_pole_job_not_recorded", job=name)
@@ -17155,7 +17157,7 @@ def _detect_opt79_net_negative_cache(
                 "workflow's cluster floor, so the time this removes is off the merge "
                 "gate. ")
         else:
-            margin = lp_margin               # > 0 after rounding: the gate above
+            margin = lp_margin               # >= the 1s tie cutoff: the gate above
             cert = {
                 "proof": _OPT79_PROOF_BELOW_LONG_POLE,
                 "margin_s": margin,

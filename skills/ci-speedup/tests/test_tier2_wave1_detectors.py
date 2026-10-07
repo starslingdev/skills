@@ -4410,6 +4410,51 @@ def test_opt79_job_a_hair_under_the_floor_falls_through_to_the_long_pole_arm():
     assert vr._opt79_finding_rederived(f, data) == []
 
 
+@pytest.mark.parametrize("is_pr", [True, False])
+def test_opt79_job_within_a_second_of_the_long_pole_is_a_co_pole(is_pr):
+    """ONE cutoff decides a tie on both arms: the pole arm calls under
+    `_OPT79_POLE_MIN_HEADROOM_S` (1s) of headroom a tie, so a job less than 1s
+    under the long pole is a co-pole, not a credited below-the-long-pole job.
+    On a PR workflow it is stamped `pole_tied_with_next_job`; otherwise it is
+    the no-pull-request row. The verifier agrees (no "should have been
+    credited" complaint, and a forged credit is rejected)."""
+    crit = _opt79_pole_crit(floor_p50=659.6,
+                            job_p50={_OPT79_JOB: 659.6, "integration": 600.0,
+                                     "e2e": 660.0})
+    out, rows, w = _opt79_pole_run(crit, is_pr=is_pr)
+    assert out == [] and len(rows) == 1, (out, rows, w)
+    if is_pr:
+        assert rows[0]["uncredited_reason"] == "pole_tied_with_next_job", rows[0]
+        assert w.get("pole_tied_with_next_job") == 1, w
+    else:
+        assert "uncredited_reason" not in rows[0], rows[0]
+        assert w.get("long_pole_of_a_workflow_no_pull_request_runs") == 1, w
+    vr = _load_verify_report_for_opt79()
+    assert vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": rows}) == []
+    # a credit forged at 0.4s of lead fails verification
+    f, data = _opt79_blp_finding()
+    data["per_workflow_timing"]["ci.yml"] = crit
+    assert any("long pole" in p for p in vr._tier2_below_long_pole_problems(f, data))
+
+
+def test_opt79_job_a_full_second_under_the_long_pole_is_credited():
+    """The other side of the cutoff: exactly 1.0s under the long pole is
+    credited `below_long_pole`, and the verifier accepts it."""
+    crit = _opt79_pole_crit(floor_p50=659.0,
+                            job_p50={_OPT79_JOB: 659.0, "integration": 600.0,
+                                     "e2e": 660.0})
+    out, rows, w = _opt79_pole_run(crit)
+    assert rows == [] and len(out) == 1, (out, rows, w)
+    f = out[0]
+    assert f["tier2_neutrality"]["proof"] == "below_long_pole"
+    assert f["tier2_neutrality"]["margin_s"] == 1.0
+    vr = _load_verify_report_for_opt79()
+    data = {"per_workflow_timing": {"ci.yml": crit}, "findings": [f]}
+    assert vr._tier2_below_long_pole_problems(f, data) == []
+    assert vr._opt79_finding_rederived(f, data) == []
+
+
 def test_opt79_job_tied_with_the_long_pole_stays_uncredited():
     """A job TIED with the long pole is as slow as the job that sets the merge
     wait: neither proof holds. On a pull-request workflow it is stamped like a
