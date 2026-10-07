@@ -16,6 +16,7 @@ publisher disclosure on every surface, and the verifier's re-derivation.
 """
 from __future__ import annotations
 
+import base64
 import copy
 import importlib.util
 import json
@@ -690,3 +691,453 @@ def test_opt81_a1_floored_card_never_claims_a_runner_minute_saving():
     assert "post-merge/scheduled time" in card
     assert "saving only" not in card, card
     assert "rate table" in card
+
+
+# =============================================================================
+# Pins: each test below kills a named mutant the suite above let through.
+# =============================================================================
+
+# ---- A1 floor boundaries ---------------------------------------------------
+
+def test_opt81_a1_gap_exactly_at_the_floor_fires():
+    """The floor is "at least", not "more than": a gap exactly at 30s (slow
+    median under 120s, so the absolute floor rules) and exactly at 25% (slow
+    median 200s, floor 50s) both fire."""
+    found, withheld, *_ = _a1(_runs(slow=[110] * 8, fast=[80] * 8))
+    assert len(found) == 1, withheld
+    fr = found[0]["faster_runner"]
+    assert fr["gap_s"] == 30.0 and fr["floor_s"] == 30.0
+    found, withheld, *_ = _a1(_runs(slow=[200] * 8, fast=[150] * 8))
+    assert len(found) == 1, withheld
+    fr = found[0]["faster_runner"]
+    assert fr["gap_s"] == 50.0 and fr["floor_s"] == 50.0
+
+
+def test_opt81_a1_short_job_is_held_to_the_absolute_30s_floor():
+    """60s vs 40s is a third faster, well past 25%, but only 20s: below the
+    absolute 30s floor, so it is a verdict, not a finding."""
+    found, withheld, cands, *_ = _a1(_runs(slow=[60] * 8, fast=[40] * 8))
+    assert found == [] and withheld.get("gap_below_floor") == 1, withheld
+    assert cands == []
+
+
+# ---- A2 unit gates ----------------------------------------------------------
+
+def test_opt81_a2_fires_on_a_build_dominant_pole():
+    out, withheld, _ = _a2(runs=_a2_runs(work="Build"))
+    assert len(out) == 1, withheld
+    assert out[0]["faster_runner"]["dominant_category"] == "build"
+
+
+@pytest.mark.parametrize("work", [
+    "Run tests and sleep", "Run tests then poll", "Download and run tests",
+    "Run tests and upload", "Fetch and run tests", "Run tests via curl",
+    # case-insensitive: the only matching word is capitalised
+    "Poll test results", "Run tests, Upload",
+])
+def test_opt81_a2_waits_or_moves_bytes_word_list(work):
+    out, withheld, _ = _a2(runs=_a2_runs(work=work))
+    assert out == [] and withheld.get("a2_dominant_step_waits_or_moves_bytes") == 1, (
+        work, withheld)
+
+
+def test_opt81_a2_an_advisory_finding_is_not_a_credited_lever():
+    """An advisory carries no credited saving, so even a large stamped
+    wall-clock on one does not count as a lever covering the pole."""
+    out, withheld, _ = _a2([_f("OPT17", wc=150.0, advisory=True)])
+    assert len(out) == 1, withheld
+    out, withheld, _ = _a2([_f("OPT17", wc=150.0)])
+    assert out == [] and withheld.get("a2_credited_lever_covers_the_pole") == 1
+
+
+def test_opt81_a2_uncredited_cache_exactly_at_the_bar_suppresses():
+    unc = [{"workflow_file": _CI, "job": "test", "waste_s": 30.0}]
+    out, withheld, _ = _a2(unc=unc)
+    assert out == [] and withheld.get("a2_cache_lever_on_the_pole") == 1, withheld
+
+
+# ---- Card lines -------------------------------------------------------------
+
+def test_opt81_a1_credited_card_states_the_merge_wait():
+    f = _a1_finding()
+    assert f["wall_clock_p50_s"] == 60.0
+    card = "\n".join(bp._opt81_card(f, "u"))
+    assert "- **Merge wait:** this job is on the merge-gating path" in card, card
+    assert "not credited" not in card
+
+
+def test_opt81_a2_card_lists_the_cheaper_levers_checked():
+    a2 = _a2_finding()
+    card = "\n".join(bp._opt81_card(a2, "u"))
+    line = next((ln for ln in card.splitlines()
+                 if ln.startswith("- **No cheaper lever found:** ")), None)
+    assert line is not None, card
+    for c in a2["faster_runner"]["cheaper_levers_checked"]:
+        assert c["lever"] in line, c
+
+
+# ---- Rendering routes -------------------------------------------------------
+
+def _pole(check: str, job: str = "bench") -> dict:
+    return {"check": check, "p50_s": 150.0, "workflow_file": _WF, "job": job,
+            "dominant_step": "Run benchmarks", "dominant_p50_s": 139.0,
+            "steps": [{"step": "Run benchmarks", "category": "test", "p50_s": 139.0}]}
+
+
+def _render_doc(findings: list[dict], poles: list[dict]) -> str:
+    doc = {"repo": "o/r", "scanned_at": "2026-06-08T00:00:00Z",
+           "data_sources": {"runs_sampled": 16, "jobs_sampled": 16,
+                            "workflows_analyzed": 1},
+           "findings": findings,
+           "pr_critical_path": {"sampled_pr_count": 20, "sample_target": 20,
+                                "sample_complete": True, "poles": poles}}
+    return bp.render(doc, {}, {}, {}, "2026-06-08")
+
+
+def test_opt81_renders_exactly_once_when_two_poles_map_to_one_finding():
+    f = _a1_finding()
+    md = _render_doc([f], [_pole("bench"), _pole("Bench / bench")])
+    assert md.count('<a id="opt81-f7"></a>') == 1, md
+
+
+def test_opt81_static_only_render_keeps_the_runner_class_section():
+    """No measured pole, so the static-only body renders (it has a hygiene
+    finding to show): the OPT81 card still gets its own section there."""
+    f = _a1_finding()
+    hygiene = {"id": "f8", "pattern": "OPT17", "title": "Dependency cache missing",
+               "severity": "MEDIUM", "workflow_file": _WF, "affected_jobs": ["lint"],
+               "evidence": "no cache step", "runner_min_saving": 5.0,
+               "wall_clock_p50_s": 0.0}
+    md = _render_doc([f, hygiene], [])
+    assert "No measured critical path" not in md.splitlines()[0], md
+    assert "## 🏎️ Runner class comparisons" in md, md
+    assert md.count('<a id="opt81-f7"></a>') == 1
+
+
+def test_opt81_is_never_listed_in_also_noticed():
+    f = _a1_finding()
+    f["wall_clock_p50_s"] = 0.0
+    lines, n, *_ = bp._also_noticed_block([f], "u")
+    assert n == 0 and not any("OPT81" in ln for ln in lines), lines
+
+
+# ---- Held-back phrases: renderer and verifier twins ---------------------------
+
+def test_opt81_held_back_phrase_table_matches_the_verifier_twin():
+    vr = _load_verify_report()
+    assert bp._OPT81_WITHHOLD_PHRASES == vr._VR_OPT81_WITHHOLD_PHRASES
+    assert (bp._WITHHELD_PHRASES_BY_KEY[bp._OPT81_WITHHELD_DOC_KEY]
+            == vr._VR_WITHHELD_PHRASES_BY_KEY[vr._VR_OPT81_WITHHELD_DOC_KEY])
+
+
+def test_opt81_held_back_row_reaches_the_coverage_check(tmp_path):
+    """A rendered OPT81 held-back row is re-derived by `check_coverage_disclosed`
+    from the verifier's own phrase copy: a renderer-only wording edit reddens."""
+    vr = _load_verify_report()
+    doc = {"repo": "o/r", "findings": [], "pr_critical_path": {"poles": []},
+           "data_sources": {},
+           bp._OPT81_WITHHELD_DOC_KEY: [
+               {"workflow_file": _WF, "job": "bench",
+                "gate": "different_operating_system", "half": "A1"}]}
+    md = bp.render(doc, {}, {}, {}, "2026-06-08")
+    assert "runner class: held back" in md, md
+    path = tmp_path / "f.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    chk = vr.check_coverage_disclosed(md, path)
+    assert chk.ok, chk.detail
+
+
+# ---- The verifier: one tamper per sub-check -----------------------------------
+
+def _restamp_a1(f: dict) -> None:
+    """Re-stamp every derived A1 number from the rows, so only the property under
+    test is wrong."""
+    fr = f["faster_runner"]
+    for side in ("slow", "fast"):
+        st = fr[side]
+        durs = [r["duration_s"] for r in fr["rows"] if r["label"] == st["label"]]
+        st["n"] = len(durs)
+        st["p50_s"] = round(cr._percentile(durs, 50), 1)
+    fr["gap_s"] = round(fr["slow"]["p50_s"] - fr["fast"]["p50_s"], 1)
+    fr["floor_s"] = round(max(30.0, 0.25 * fr["slow"]["p50_s"]), 1)
+    fr["credited_pre_cascade_s"] = min(fr["credited_pre_cascade_s"], fr["gap_s"])
+    f["wall_clock_p50_s"] = min(f["wall_clock_p50_s"], fr["credited_pre_cascade_s"])
+
+
+def _tamper_min_samples(f):
+    fr = f["faster_runner"]
+    fast = fr["fast"]["label"]
+    idx = [i for i, r in enumerate(fr["rows"]) if r["label"] == fast]
+    del fr["rows"][idx[-1]]
+    _restamp_a1(f)
+
+
+def _tamper_os(f):
+    fr = f["faster_runner"]
+    for r in fr["rows"]:
+        if r["label"] == fr["fast"]["label"]:
+            r["label"] = "windows-latest-8-cores"
+    fr["fast"].update(label="windows-latest-8-cores", os="windows")
+
+
+def _tamper_step_names(f):
+    f["faster_runner"]["step_names"] = list(f["faster_runner"]["step_names"]) + ["Extra"]
+
+
+def _tamper_gap_below_floor(f):
+    fr = f["faster_runner"]
+    for r in fr["rows"]:
+        if r["label"] == fr["fast"]["label"]:
+            r["duration_s"] = r["duration_s"] + 40.0
+    _restamp_a1(f)
+
+
+@pytest.mark.parametrize("mutate,needle", [
+    (_tamper_min_samples, "below the 8"),
+    (_tamper_os, "different operating systems"),
+    (_tamper_step_names, "does not match the stamped step names"),
+    (_tamper_gap_below_floor, "below its"),
+    (lambda f: f["faster_runner"].__setitem__("min_gap_s", 20.0), "stamped min_gap_s"),
+    (lambda f: f["faster_runner"].__setitem__("min_samples_per_label", 5),
+     "stamped min_samples_per_label"),
+    (lambda f: f["faster_runner"].__setitem__("job_is_workflow_long_pole", False),
+     "not its workflow's long pole"),
+    (lambda f: f["faster_runner"].__setitem__("dominant_label", "ubuntu-latest-8-cores"),
+     "not its workflow's long pole"),
+])
+def test_opt81_verifier_a1_sub_checks_each_redden(mutate, needle):
+    vr = _load_verify_report()
+    f = copy.deepcopy(_a1_finding())
+    mutate(f)
+    problems = vr._opt81_a1_rederived(f)
+    assert any(needle in p for p in problems), problems
+
+
+def test_opt81_verifier_a1_restamp_helper_is_clean():
+    """The tampers above re-stamp derived numbers; untampered, the re-stamp must
+    leave a finding the verifier accepts, or the needles above prove nothing."""
+    vr = _load_verify_report()
+    f = copy.deepcopy(_a1_finding())
+    _restamp_a1(f)
+    assert vr._opt81_a1_rederived(f) == []
+
+
+def test_opt81_verifier_a2_requires_the_advisory_flag():
+    vr = _load_verify_report()
+    f = copy.deepcopy(_a2_finding())
+    f["advisory"] = False
+    assert any("not marked advisory" in p for p in vr._opt81_a2_rederived(f, _doc(f)))
+
+
+def test_opt81_verifier_a2_sees_an_opt79_finding_on_the_pole():
+    vr = _load_verify_report()
+    f = _a2_finding()
+    problems = vr._opt81_a2_rederived(f, _doc(f, _f("OPT79", wc=30.0)))
+    assert any("net-negative cache already addresses" in p for p in problems), problems
+    assert vr._opt81_a2_rederived(f, _doc(f, _f("OPT79", wc=29.0))) == []
+
+
+def _cards_doc(tmp_path, *findings):
+    path = tmp_path / "f.json"
+    path.write_text(json.dumps(_doc(*findings)), encoding="utf-8")
+    return path
+
+
+def test_opt81_verifier_report_level_tampers(tmp_path):
+    vr = _load_verify_report()
+    a1, a2 = _a1_finding(), _a2_finding()
+    path = _cards_doc(tmp_path, a1, a2)
+    c1, c2 = bp._opt81_card(a1, "u"), bp._opt81_card(a2, "u")
+    good = _report_with(c1 + c2)
+    assert vr.check_opt81_runner_comparison_rederived(good, path).ok
+
+    # the A1 prompt fence lost its disclosure, the card kept it
+    t1 = "\n".join(c1)
+    at = t1.index("```text")
+    t1 = t1[:at] + t1[at:].replace(cr._OPT81_DISCLOSURE, "")
+    r = vr.check_opt81_runner_comparison_rederived(_report_with([t1] + c2), path)
+    assert not r.ok and "agent prompt does not carry" in r.detail, r.detail
+
+    # the A1 card no longer states the slow median
+    bad = good.replace("at p50 150s", "at p50 151s")
+    r = vr.check_opt81_runner_comparison_rederived(bad, path)
+    assert not r.ok and "does not state `at p50 150s`" in r.detail, r.detail
+
+    # a card rendered twice
+    r = vr.check_opt81_runner_comparison_rederived(_report_with(c1 + c1 + c2), path)
+    assert not r.ok and "rendered 2 time(s)" in r.detail, r.detail
+
+
+def test_opt81_verifier_accepts_a_held_back_a2_card(tmp_path):
+    """A held-back advisory has no recipe and no prompt: the verifier must read
+    it as held back, not as an A2 card that lost its fence and install line."""
+    vr = _load_verify_report()
+    a1, a2 = _a1_finding(), _a2_finding()
+    path = _cards_doc(tmp_path, a1, a2)
+    held = bp._opt81_card(a2, "u", held_back_by="vitest-isolate-pool")
+    report = _report_with(bp._opt81_card(a1, "u") + held)
+    r = vr.check_opt81_runner_comparison_rederived(report, path)
+    assert r.ok, r.detail
+
+
+@pytest.mark.parametrize("mutate,needle", [
+    (lambda f: f.__setitem__("evidence", f["evidence"].replace(cr._OPT81_DISCLOSURE, "")),
+     "evidence does not carry the disclosure"),
+    (lambda f: f["faster_runner"].__setitem__("disclosure", "altered"),
+     "stamped disclosure is missing or altered"),
+])
+def test_opt81_verifier_disclosure_stamps(tmp_path, mutate, needle):
+    vr = _load_verify_report()
+    a1 = copy.deepcopy(_a1_finding())
+    report = _report_with(bp._opt81_card(a1, "u"))
+    mutate(a1)
+    path = _cards_doc(tmp_path, a1)
+    r = vr.check_opt81_runner_comparison_rederived(report, path)
+    assert not r.ok and needle in r.detail, r.detail
+
+
+# ---- collect(): the real cascade and the A2 wiring ----------------------------
+
+_COLLECT_STEPS = ["Set up job", "Run actions/checkout@v4", "Run tests",
+                  "Post Run actions/checkout@v4", "Complete job"]
+_COLLECT_YAML = ("on:\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                 "    steps:\n      - uses: actions/checkout@v4\n      - run: make test\n")
+
+
+def _cts(s: int) -> str:
+    return f"2026-01-01T{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}Z"
+
+
+class _Opt81Client:
+    """A fake GhClient: one pull-request workflow, `ci.yml`, whose single job
+    `test` is the merge-gating pole. `plan[i]` is run i's (runner label,
+    duration). `yaml=None` makes the workflow file unreadable."""
+
+    gave_up = False
+
+    def __init__(self, plan, yaml=_COLLECT_YAML):
+        self.plan, self.yaml = plan, yaml
+        self.queries = self.errors = 0
+
+    def available(self):
+        return True
+
+    def _job(self, i):
+        label, dur = self.plan[i]
+        fixed = {"Set up job": 2, "Run actions/checkout@v4": 8,
+                 "Post Run actions/checkout@v4": 1, "Complete job": 0}
+        t0 = t = i * 1000
+        steps = []
+        for k, n in enumerate(_COLLECT_STEPS, 1):
+            d = fixed.get(n, dur - 11)
+            steps.append({"name": n, "number": k, "status": "completed",
+                          "conclusion": "success", "started_at": _cts(t),
+                          "completed_at": _cts(t + d)})
+            t += d
+        return {"id": 5000 + i, "run_id": 100 + i, "name": "test", "status": "completed",
+                "conclusion": "success", "started_at": _cts(t0),
+                "completed_at": _cts(t0 + dur), "labels": [label],
+                "runner_name": label, "steps": steps}
+
+    def json(self, endpoint, allow_missing=False):
+        self.queries += 1
+        if endpoint.startswith("repos/o/r/actions/workflows?"):
+            return {"workflows": [{"id": 1, "path": _CI, "name": "CI"}]}
+        m = re.match(r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
+        if m:
+            if re.search(r"per_page=1(?![0-9])", m.group(2)):
+                return {"total_count": 300}
+            return {"workflow_runs": [
+                {"id": 100 + i, "event": "pull_request", "head_sha": f"s{i}",
+                 "created_at": _cts(i * 1000), "run_started_at": _cts(i * 1000),
+                 "updated_at": _cts(i * 1000 + d), "conclusion": "success",
+                 "status": "completed", "run_attempt": 1}
+                for i, (_lb, d) in enumerate(self.plan)]}
+        m = re.match(r"repos/o/r/actions/runs/(\d+)/jobs", endpoint)
+        if m:
+            i = int(m.group(1)) - 100
+            return {"jobs": [self._job(i)] if 0 <= i < len(self.plan) else []}
+        m = re.match(r"repos/o/r/commits/s(\d+)/check-runs", endpoint)
+        if m:
+            j = self._job(int(m.group(1)))
+            return {"check_runs": [{"name": "test", "started_at": j["started_at"],
+                                    "completed_at": j["completed_at"]}]}
+        if endpoint.startswith(f"repos/o/r/contents/{_CI}"):
+            if self.yaml is None:
+                return None
+            return {"content": base64.b64encode(self.yaml.encode()).decode()}
+        if endpoint == "repos/o/r":
+            return {"default_branch": "main"}
+        return None
+
+    def text(self, endpoint, allow_missing=False):
+        self.queries += 1
+        return ""
+
+
+_TWO_LABEL_PLAN = ([("ubuntu-latest", d) for d in _SLOW + [150]]
+                   + [("ubuntu-latest-8-cores", d) for d in _FAST])
+_ONE_LABEL_PLAN = [("ubuntu-latest", 197)] * 10
+
+
+def _collect(monkeypatch, plan, yaml=_COLLECT_YAML, seed=None):
+    client = _Opt81Client(plan, yaml)
+    monkeypatch.setattr(cr, "GhClient", lambda *a, **k: client)
+    doc = {"repo": "o/r", "findings": [
+        {"id": "f1", "pattern": "OPT1", "workflow_file": _CI}]}
+    doc.update(seed or {})
+    return cr.collect(doc, "o/r", max_runs=len(plan), shallow_runs=len(plan))
+
+
+def _o81(doc, half=None):
+    return [f for f in doc["findings"] if f.get("pattern") == "OPT81"
+            and (half is None or f["faster_runner"]["half"] == half)]
+
+
+def test_opt81_a1_credit_survives_the_real_cascade_renders_and_verifies(
+        monkeypatch, tmp_path):
+    """A pull-request pole run 9 times on `ubuntu-latest` (p50 150s) and 8 on
+    `ubuntu-latest-8-cores` (p50 90s): every generic bound in collect() leaves
+    the 60s credit standing, the card says so, and the verifier accepts it."""
+    vr = _load_verify_report()
+    doc = _collect(monkeypatch, _TWO_LABEL_PLAN)
+    assert [p["job"] for p in doc["pr_critical_path"]["poles"]] == ["test"]
+    a1s = _o81(doc, "A1")
+    assert len(a1s) == 1, doc.get("opt81_withheld_by_gate")
+    f = a1s[0]
+    assert f["faster_runner"]["credited_pre_cascade_s"] == 60.0
+    assert f["wall_clock_p50_s"] == 60.0, f
+    # A1 data exists for this job, so the advisory half never fires on it.
+    assert _o81(doc, "A2") == []
+    assert doc["opt81_withheld_by_gate"].get("a2_measured_runner_data_exists") == 1
+    md = bp.render(doc, {}, {}, {}, "2026-06-08")
+    assert md.count(f'<a id="opt81-{f["id"]}"></a>') == 1
+    assert "- **Merge wait:** this job is on the merge-gating path" in md
+    path = tmp_path / "f.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    r = vr.check_opt81_runner_comparison_rederived(md, path)
+    assert r.ok, r.detail
+
+
+def test_opt81_a2_fires_through_collect_on_a_pull_request_pole(monkeypatch):
+    doc = _collect(monkeypatch, _ONE_LABEL_PLAN)
+    a2s = _o81(doc, "A2")
+    assert len(a2s) == 1, doc.get("opt81_withheld_by_gate")
+    assert a2s[0]["affected_jobs"] == ["test"] and a2s[0]["advisory"] is True
+
+
+def test_opt81_a2_reads_the_uncredited_cache_list_through_collect(monkeypatch):
+    seed = {cr._OPT79_UNCREDITED_DOC_KEY: [
+        {"workflow_file": _CI, "job": "test", "waste_s": 40.0}]}
+    doc = _collect(monkeypatch, _ONE_LABEL_PLAN, seed=seed)
+    assert _o81(doc, "A2") == []
+    assert doc["opt81_withheld_by_gate"].get("a2_cache_lever_on_the_pole") == 1
+
+
+def test_opt81_a2_needs_a_declared_pull_request_trigger_through_collect(monkeypatch):
+    """The workflow file is unreadable: its pole still gates (observed PR runs),
+    but A2 fires only on a workflow whose file declares a pull-request trigger."""
+    doc = _collect(monkeypatch, _ONE_LABEL_PLAN, yaml=None)
+    assert [p["job"] for p in doc["pr_critical_path"]["poles"]] == ["test"]
+    assert _o81(doc, "A2") == []
+    assert doc["opt81_withheld_by_gate"].get("a2_not_a_pull_request_workflow") == 1
