@@ -5271,7 +5271,8 @@ def _below_long_pole_margin(f: dict, data: dict) -> tuple[float | None, list[str
                       f"floor ({floor}s): its proof is below_cluster_floor, and the "
                       "below-the-long-pole wording (at or above the second-slowest "
                       "job) would be false"]
-    margin = round(lp - max(vals), 1)
+    # The collector's rounding order: each p50 stamped to 0.1s, then subtracted.
+    margin = round(round(lp, 1) - round(max(vals), 1), 1)
     if margin < _VR_OPT79_POLE_MIN_HEADROOM_S:
         return None, [f"the credited job ({max(vals)}s) is not at least "
                       f"{_VR_OPT79_POLE_MIN_HEADROOM_S}s shorter than the long pole "
