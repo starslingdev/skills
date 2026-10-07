@@ -1367,8 +1367,10 @@ measures both populations as usual and then splits three ways:
   finding described above (`opt79_net_negative_cache`, Tier-2,
   `wall_clock_p50_s=0`), on any workflow, with one of two certificates:
   `below_cluster_floor` (margin `floor_p50 − job_p50`) when the job is strictly
-  below the floor, else `below_long_pole` (margin `long_pole_p50 − job_p50`,
-  strictly positive after rounding, `ref` naming the long pole and both p50s).
+  below the floor with a floor margin still positive after rounding, else
+  `below_long_pole` (margin `long_pole_p50 − job_p50` from the 0.1s-stamped
+  p50s, at least 1s: within 1s of the slowest job counts as tied, the same
+  cutoff the slowest-job arm uses; `ref` naming the long pole and both p50s).
   The second arm is the owner decision of 2026-10-06: shrinking a job shorter
   than the long pole cannot lengthen the gate, because the long pole still sets
   it — the same move OPT77's whole-workflow arm makes against its slowest
@@ -1449,7 +1451,7 @@ co-pole reads "tied for this workflow's slowest job"). A schedule-only workflow 
 never told it has a merge wait at all. The retired "at or above the second-slowest
 job, so this audit cannot prove that shrinking it leaves the merge gate
 unchanged" wording is gone with the case it described, and `verify_report.py`'s
-converse rule fails an uncredited row with no reason whose job is strictly
+converse rule fails an uncredited row with no reason whose job is at least 1s
 shorter than its long pole: that job is the `below_long_pole` finding.
 
 Uncredited rows are not findings — no `runner_min_saving`, no
