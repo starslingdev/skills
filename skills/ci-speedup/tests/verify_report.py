@@ -9515,6 +9515,12 @@ _VR_OPT81_INSTALL_SENTENCE = "installing the StarSling GitHub app"
 # A full A2 card renders only after its render-time log-level sub-gate passed,
 # and says so; a card without this phrase skipped the check (fail-open).
 _VR_OPT81_LOG_CHECKED = "no log-level lever matched this pole's log"
+# The A1 card's runner-minute line may state only that the effect is unknown: a
+# different runner class bills differently and the audit carries no rate table.
+_VR_OPT81_RUNNER_MIN_LINE = "**Runner-minute effect:**"
+_VR_OPT81_RUNNER_MIN_UNKNOWN = (
+    "unknown: a different runner class bills differently and this audit carries no "
+    "rate table")
 # Inline-code spans hold repo-controlled names (a job, a step, a label). A step
 # called `Run tests (30s timeout)` is a name, not a promised saving, so the
 # number ban reads only the advisory's own prose.
@@ -9813,6 +9819,11 @@ def check_opt81_runner_comparison_rederived(report: str,
                 if want not in block:
                     bad.append(f"OPT81 {fid}: the card does not state `{want}` for "
                                f"`{st.get('label')}`")
+            rm_lines = [ln for ln in card.splitlines() if _VR_OPT81_RUNNER_MIN_LINE in ln]
+            if len(rm_lines) != 1 or rm_lines[0].split(_VR_OPT81_RUNNER_MIN_LINE, 1)[1] \
+                    .strip() != f"{_VR_OPT81_RUNNER_MIN_UNKNOWN}.":
+                bad.append(f"OPT81 {fid}: the A1 card's runner-minute line must say only "
+                           f"\"{_VR_OPT81_RUNNER_MIN_UNKNOWN}\" ({rm_lines!r})")
         elif not held:
             if _VR_OPT81_INSTALL_SENTENCE not in block:
                 bad.append(f"OPT81 {fid}: the A2 recipe omits the app-install prerequisite")

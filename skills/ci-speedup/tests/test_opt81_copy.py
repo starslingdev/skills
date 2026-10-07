@@ -208,3 +208,125 @@ def test_opt81_credited_a1_pole_waterfall_points_at_its_card():
         _pole(), None, None, log_present=True, data_driven_present=True,
         data_driven_patterns=("OPT24",)))
     assert "Also noticed" in lines
+
+
+# ---- render(): the leaf hold-back is wired through the real renderer ----------
+
+def _a2_on(wf: str, job: str):
+    f = copy.deepcopy(_a2_finding())
+    f["workflow_file"] = wf
+    f["affected_jobs"] = [job]
+    f["faster_runner"]["job"] = job
+    return f
+
+
+def _a1_on(wf: str, job: str):
+    f = copy.deepcopy(_a1_finding())
+    f["workflow_file"] = wf
+    f["affected_jobs"] = [job]
+    f["faster_runner"]["job"] = job
+    return f
+
+
+def _opt81_block(md: str, fid: str) -> str:
+    anchor = f'<a id="opt81-{fid}"></a>'
+    assert md.count(anchor) == 1, md.count(anchor)
+    rest = md[md.index(anchor) + len(anchor):]
+    ends = [i for i in (rest.find('<a id="'), rest.find("\n## ")) if i >= 0]
+    return rest[:min(ends)] if ends else rest
+
+
+def test_opt81_render_holds_an_a2_back_on_a_matched_leaf_and_never_an_a1():
+    """Kills R01 (hold-back wiring dropped at the call site): a pole whose own
+    log matched a leaf renders the A2 as a held-back line, through render()."""
+    from test_blocking_path import _IMPORT_BOUND_LOG, _doc_one_pole
+    doc = _doc_one_pole()
+    wf = ".github/workflows/pipeline.yml"
+    doc["findings"] = [_a2_on(wf, "tests-web")]
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {}, {}, "2026-06-08")
+    block = _opt81_block(md, "f9")
+    assert "advisory held back" in block and "vitest-isolate-pool" in block, block
+    assert "Option 1" not in block
+    # R03: the same matched leaf never holds back a measured A1 card.
+    doc["findings"] = [_a1_on(wf, "tests-web")]
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {}, {}, "2026-06-08")
+    block = _opt81_block(md, "f7")
+    assert "held back" not in block
+    assert "measured from runs this repository already made" in block
+
+
+def test_opt81_render_holds_an_a2_back_on_an_off_category_leaf():
+    """Kills R02 (call site reads only the on-category leaf): an eslint leaf
+    demoted off-category on a test-dominant pole still matched the pole's log."""
+    from test_blocking_path import _nx_offcategory_doc
+    doc, logs = _nx_offcategory_doc()
+    doc["findings"] = [_a2_on("ci.yml", "Run Checks")]
+    md = bp.render(doc, logs)
+    block = _opt81_block(md, "f9")
+    assert "advisory held back" in block and "eslint-no-cache" in block, block
+    assert "Option 1" not in block
+
+
+# ---- _opt81_for_pole: matrix base and workflow conflict -----------------------
+
+def test_opt81_for_pole_joins_a_matrix_leg_to_its_unexpanded_base():
+    """Kills R09: a finding on job id `bench` belongs to the rendered leg
+    `bench (ubuntu, 3.12)` of the same workflow."""
+    wf = ".github/workflows/bench.yml"
+    f = _a1_on(wf, "bench")
+    pole = {"workflow_file": wf, "check": "bench (ubuntu, 3.12)",
+            "job": "bench (ubuntu, 3.12)"}
+    assert bp._opt81_for_pole(pole, [f]) == [f]
+
+
+def test_opt81_for_pole_never_joins_across_workflows():
+    """Kills R10: the same job name in a different workflow file is not this pole."""
+    f = _a1_on(".github/workflows/other.yml", "bench")
+    pole = {"workflow_file": ".github/workflows/bench.yml", "check": "bench",
+            "job": "bench"}
+    assert bp._opt81_for_pole(pole, [f]) == []
+    assert bp._opt81_for_pole(dict(pole, workflow_file=".github/workflows/other.yml"),
+                              [f]) == [f]
+
+
+# ---- The A1 card's runner-minute line can only say "unknown" ------------------
+
+def test_opt81_verifier_rejects_an_a1_card_with_a_runner_minute_figure(tmp_path):
+    """Kills R13: a made-up runner-minute saving on the A1 card reddens the
+    report check; the measured gap in seconds stays allowed on its own line."""
+    vr = _load_verify_report()
+    a1 = _a1_finding()
+    path = tmp_path / "f.json"
+    path.write_text(json.dumps(_doc(a1)), encoding="utf-8")
+    good = _report_with(bp._opt81_card(a1, "u"))
+    assert vr.check_opt81_runner_comparison_rederived(good, path).ok
+    bad = good.replace(f"**Runner-minute effect:** {bp._OPT81_RUNNER_MIN_UNKNOWN}.",
+                       "**Runner-minute effect:** saves ~60s of runner time.")
+    assert bad != good
+    r = vr.check_opt81_runner_comparison_rederived(bad, path)
+    assert not r.ok and "runner-minute line" in r.detail, r.detail
+    assert vr._VR_OPT81_RUNNER_MIN_UNKNOWN == bp._OPT81_RUNNER_MIN_UNKNOWN
+
+
+def test_opt81_credited_a1_card_states_its_credited_wall_clock():
+    """Kills mutant 18 (the credited merge-wait line deleted): a credited A1
+    names the credited wall-clock, its value, and never 'not credited'."""
+    card = _card(_credited_a1())
+    assert ("- **Merge wait:** this job is on the merge-gating path; the credited "
+            "wall-clock is 1m 00s after the critical-path floors.") in card
+    assert "not credited" not in card
+
+
+def test_opt81_verifier_rejects_an_a1_card_that_misstates_a_median(tmp_path):
+    """Kills mutant 15 (the verifier's `at p50` card check deleted): the card's
+    stated medians must be the stamped ones."""
+    vr = _load_verify_report()
+    a1 = _a1_finding()
+    path = tmp_path / "f.json"
+    path.write_text(json.dumps(_doc(a1)), encoding="utf-8")
+    good = _report_with(bp._opt81_card(a1, "u"))
+    assert vr.check_opt81_runner_comparison_rederived(good, path).ok
+    bad = good.replace("at p50 90s", "at p50 70s")
+    assert bad != good
+    r = vr.check_opt81_runner_comparison_rederived(bad, path)
+    assert not r.ok and "at p50 90s" in r.detail, r.detail
