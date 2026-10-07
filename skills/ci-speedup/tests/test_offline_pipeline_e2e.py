@@ -987,7 +987,9 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
             [sys.executable, str(_SKILL_DIR / "tests" / "verify_report.py"),
              "--report", str(report_path), "--findings", str(_bad80_path)],
             capture_output=True, text=True, env=env, timeout=60)
-        assert _v80.returncode != 0 and "OPT80 tail lines" in _v80.stdout, (
+        # Every check's name is printed, PASS or FAIL: assert the FAIL line itself.
+        assert _v80.returncode != 0 and (
+            "\nFAIL  OPT80 tail lines re-derive" in "\n" + _v80.stdout), (
             _v80.stdout[-2000:])
 
     # The held-back candidate reaches the reader too, in plain English: the count,

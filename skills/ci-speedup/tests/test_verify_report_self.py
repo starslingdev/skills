@@ -9553,7 +9553,27 @@ def test_opt80_tail_line_renders_at_the_pole_and_pairs_with_its_block(tmp_path: 
     # …and so does a stamped block with no rendered line.
     findings_path.write_text(json.dumps(doc), encoding="utf-8")
     stripped = report.replace("<!-- opt80-tail:f-promoted -->", "")
-    assert not vr.check_opt80_tail_lines(stripped, findings_path).ok
+    chk = vr.check_opt80_tail_lines(stripped, findings_path)
+    assert not chk.ok and "rendered 0 time(s), not once" in chk.detail, chk
+    # A marker rendered twice is not "once" either.
+    marker = "<!-- opt80-tail:f-promoted -->"
+    head, tail = report.split(marker, 1)
+    marked_line = tail.lstrip("\n").split("\n", 1)[0]
+    twice = report + "\n" + marker + "\n" + marked_line + "\n"
+    chk = vr.check_opt80_tail_lines(twice, findings_path)
+    assert not chk.ok and "rendered 2 time(s)" in chk.detail, chk
+    # The sentence must sit on the line right after the marker: stating it
+    # elsewhere in the report does not pair it. The sentence is lifted from the
+    # rendered line itself, so this case tracks whatever wording the renderer uses.
+    start = marked_line.index("one run in ")
+    end = marked_line.index("stalled fetch", start) + len("stalled fetch")
+    sentence = marked_line[start:end]
+    moved = (head + marker + "\n" + tail.lstrip("\n").replace(
+        marked_line, "> a checkout line that states no tail figure", 1)
+        + "\n" + sentence + "\n")
+    assert sentence in moved and moved.count(marker) == 1
+    chk = vr.check_opt80_tail_lines(moved, findings_path)
+    assert not chk.ok and "the line after its marker" in chk.detail, chk
     # A tail sentence anywhere whose numbers the block does not re-derive fails.
     stray = report + "\none run in 2 loses up to 999s on checkout to a stalled fetch\n"
     assert not vr.check_opt80_tail_lines(stray, findings_path).ok
@@ -9624,6 +9644,41 @@ def test_opt80_tail_line_off_a_drilled_pole_renders_in_its_own_block(tmp_path: P
     del doc["findings"][0]["checkout_stall"]["tail_axis"]
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
+
+
+def test_opt80_tail_marker_inside_a_pole_section_is_not_off_pole(tmp_path: Path):
+    """The off-pole exemption is earned by WHERE the marker sits, not by the
+    marker existing: a tail line rendered inside a Long pole section is not the
+    off-pole tail block, so a slowest job that is not that pole stays refused."""
+    vr = _load_verify_report()
+    # On-pole render: the marker sits inside `build`'s Long pole section.
+    doc = _opt80_tail_doc()
+    report, _rp, _fp = _tier2_artifacts(tmp_path, doc)
+    marker = "<!-- opt80-tail:f-promoted -->"
+    assert marker in report.split("Long pole 1", 1)[1]
+    f = doc["findings"][0]
+    assert vr._vr_opt80_tail_rendered_off_pole(f, report) is False
+    # Off-pole render: the same helper says True, and the check accepts it.
+    doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    f = doc["findings"][0]
+    assert vr._vr_opt80_tail_rendered_off_pole(f, report) is True
+    assert vr.check_tier2_neutrality_derived(report, findings_path, report_path).ok
+    # Move that marked line into the `deploy` pole section: it is no longer
+    # off-pole, so the `build` job (not a rendered pole) loses the exemption.
+    head, tail = report.split(marker, 1)
+    marked_line = tail.lstrip("\n").split("\n", 1)[0]
+    moved = report.replace(marker + "\n" + marked_line, "", 1)
+    assert marker not in moved
+    pole_hdr = "**The slowest check a typical PR waits on.**"
+    assert moved.count(pole_hdr) == 1
+    moved = moved.replace(pole_hdr, pole_hdr + "\n\n" + marker + "\n" + marked_line, 1)
+    assert moved.count(marker) == 1
+    assert marker in moved.split("Long pole 1", 1)[1].split("\n## ", 1)[0]
+    assert vr._vr_opt80_tail_rendered_off_pole(f, moved) is False
+    report_path.write_text(moved, encoding="utf-8")
+    chk = vr.check_tier2_neutrality_derived(moved, findings_path, report_path)
     assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
 
 
