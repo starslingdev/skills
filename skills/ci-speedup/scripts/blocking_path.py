@@ -5256,6 +5256,9 @@ _OPT81_WITHHOLD_PHRASES: dict[str, str] = {
     "step_lists_differ":
         "the job did not run the same steps on both runner labels, so it is not "
         "the same job on both",
+    "not_interleaved":
+        "the two labels ran in different periods (a runner switch), so the gap "
+        "could come from code changes made in between, not the runner",
     "a2_dominant_step_unresolved":
         "the long pole's step timings could not be read, so whether its time is "
         "compute could not be established",

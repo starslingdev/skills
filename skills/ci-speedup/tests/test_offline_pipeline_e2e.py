@@ -388,19 +388,21 @@ jobs:
 
 # OPT81 A1 (wf id 1006). A runner-comparison matrix: one job, `bench`, with a
 # STATIC display name, run on a standard GitHub-hosted label and on a larger
-# GitHub-hosted size in every one of eight push runs (the workflow is `on: push`) — the same steps on
-# both, 150s at the median on `ubuntu-latest` and 90s on `ubuntu-latest-8-cores`.
+# GitHub-hosted size in every one of eight push runs (the workflow is
+# `on: push`) — the same steps on both, 150s at the median on `ubuntu-latest`
+# and 90s on `ubuntu-latest-8-cores`.
 # The repo's own history therefore already holds both distributions, eight
 # successful samples each, which is exactly what A1 compares; nothing is
 # projected.
 #
-# Blast radius, chosen deliberately: `bench` is this workflow's long pole and
-# runs on both labels 8/8, so `ubuntu-latest` is the dominant label only via the
-# alphabetical tie-break in `max(sorted(...))`; A1 pre-credits the 60s gap, but
-# `bound_developer_facing` floors the credit to 0 because the workflow is
-# push-only (not a pull-request wait), not the cross-workflow cascade. The headline, the chain and
-# every pole assertion above stay exactly as they were. Making it the pole would
-# have rewritten the headline to prove nothing A1's own unit tests do not.
+# Blast radius, chosen deliberately: `bench` is this workflow's long pole, but
+# both labels run in every one of the eight runs, so A1 reads it as a runner
+# matrix: the gap is measured and stated, and no wall-clock is credited (every
+# run executes both legs). The workflow is push-only, so even a credited gap
+# would be floored to 0 by `bound_developer_facing` (not a pull-request wait).
+# The headline, the chain and every pole assertion above stay exactly as they
+# were. Making it the pole would have rewritten the headline to prove nothing
+# A1's own unit tests do not.
 # `timeout-minutes` is declared so OPT57 plans no extra event-scoped run list.
 _WF6_ID = 1006
 _WF6_YAML = """name: Bench
@@ -1072,9 +1074,8 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # A1 (bench.yml, wf 1006): one job measured on two runner classes in runs the
     # repo already made. Every number is the corpus's own: 150s median on eight
     # `ubuntu-latest` runs, 90s on eight `ubuntu-latest-8-cores` runs, the same
-    # five steps on both. Its 60s gap is pre-credited because `bench` is its
-    # workflow's long pole on the slower label, and then floored to 0 by the
-    # cascade: the workflow runs only on push, so it is not a pull-request wait.
+    # five steps on both. Both labels run in every run (a runner matrix), so the
+    # 60s gap is stated and never credited.
     o81 = [f for f in data["findings"] if f.get("pattern") == "OPT81"]
     o81_a1 = [f for f in o81 if (f.get("faster_runner") or {}).get("half") == "A1"]
     o81_a2 = [f for f in o81 if (f.get("faster_runner") or {}).get("half") == "A2"]
@@ -1082,18 +1083,20 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     fr = o81_a1[0]["faster_runner"]
     assert o81_a1[0]["workflow_file"] == ".github/workflows/bench.yml", o81_a1[0]
     assert o81_a1[0]["affected_jobs"] == ["bench"], o81_a1[0]
-    assert fr["slow"] == {"label": "ubuntu-latest", "class": "github-standard",
+    assert {k: v for k, v in fr["slow"].items() if not k.endswith("_run_at")} == {"label": "ubuntu-latest", "class": "github-standard",
                           "os": "linux", "arch": "x64", "size": "",
                           "p50_s": 150.0, "n": 8}, fr["slow"]
-    assert fr["fast"] == {"label": "ubuntu-latest-8-cores", "class": "github-larger",
+    assert {k: v for k, v in fr["fast"].items() if not k.endswith("_run_at")} == {"label": "ubuntu-latest-8-cores", "class": "github-larger",
                           "os": "linux", "arch": "x64", "size": "8",
                           "p50_s": 90.0, "n": 8}, fr["fast"]
     assert fr["gap_s"] == 60.0 and fr["floor_s"] == 37.5, fr
+    assert fr["slow"]["first_run_at"] and fr["fast"]["last_run_at"], fr
     assert len(fr["rows"]) == 16, fr["rows"]
     assert fr["job_is_workflow_long_pole"] is True, fr
-    assert fr["credited_pre_cascade_s"] == 60.0, fr
+    assert fr["runner_matrix"] is True, fr
+    assert fr["credited_pre_cascade_s"] == 0.0, fr
+    assert "every run executes both legs" in fr["credit_reason"], fr
     assert o81_a1[0]["wall_clock_p50_s"] in (0, 0.0), o81_a1[0]
-    assert o81_a1[0].get("wall_clock_uncapped_p50_s") == 60.0, o81_a1[0]
     assert o81_a1[0]["runner_min_saving"] is None, o81_a1[0]
     assert "runs this repository already made" in o81_a1[0]["evidence"]
     assert cr._OPT81_DISCLOSURE in o81_a1[0]["evidence"]

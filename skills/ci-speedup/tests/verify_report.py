@@ -1002,6 +1002,9 @@ _VR_OPT81_WITHHOLD_PHRASES = {
     "step_lists_differ":
         "the job did not run the same steps on both runner labels, so it is not "
         "the same job on both",
+    "not_interleaved":
+        "the two labels ran in different periods (a runner switch), so the gap "
+        "could come from code changes made in between, not the runner",
     "a2_dominant_step_unresolved":
         "the long pole's step timings could not be read, so whether its time is "
         "compute could not be established",
@@ -9542,6 +9545,17 @@ def _vr_opt81_runner_class(label: object) -> "tuple[str, str, str, str] | None":
     return next(iter(found))
 
 
+def _vr_opt81_utc(value: str):
+    from datetime import datetime, timezone
+    if not value:
+        return None
+    try:
+        t = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
+
+
 def _vr_opt81_step_sha(names: list) -> str:
     import hashlib
     return hashlib.sha256("\n".join(str(n) for n in names).encode("utf-8")).hexdigest()[:16]
@@ -9624,14 +9638,44 @@ def _opt81_a1_rederived(f: dict) -> list[str]:
                       ("min_gap_frac", _VR_OPT81_MIN_GAP_FRAC)):
         if _num(fr.get(key)) != float(want):
             out.append(f"OPT81 {fid}: stamped {key} {fr.get(key)!r} is not {want}")
+    # Runner matrix (the two labels co-occur in at least half of the smaller
+    # population's runs) or, otherwise, the two populations must overlap in time.
+    ids = {lb: {r.get("run_id") for r in by_label[lb] if r.get("run_id") is not None}
+           for lb in (ls, lf)}
+    shared = ids[ls] & ids[lf]
+    matrix = bool(shared) and 2 * len(shared) >= min(len(ids[ls]), len(ids[lf]))
+    if fr.get("runner_matrix") is not matrix:
+        out.append(f"OPT81 {fid}: runner_matrix {fr.get('runner_matrix')!r} does not "
+                   f"re-derive from the rows' run ids ({matrix})")
+    spans: dict[str, tuple] = {}
+    for lb in (ls, lf):
+        ts = [_vr_opt81_utc(str(r.get("at") or "")) for r in by_label[lb]]
+        spans[lb] = (None, None) if (not ts or None in ts) else (min(ts), max(ts))
+    if not matrix:
+        (s0, s1), (f0, f1) = spans[ls], spans[lf]
+        if None in (s0, s1, f0, f1) or not (s0 <= f1 and f0 <= s1):
+            out.append(f"OPT81 {fid}: `{ls}` and `{lf}` ran in different periods (or "
+                       "a run time is missing), so the gap is not a runner comparison")
+    for side, lb in (("slow", ls), ("fast", lf)):
+        st = slow if side == "slow" else fast
+        lo, hi = spans[lb]
+        if lo is not None and (_vr_opt81_utc(str(st.get("first_run_at") or "")) != lo
+                               or _vr_opt81_utc(str(st.get("last_run_at") or "")) != hi):
+            out.append(f"OPT81 {fid}: {side} first_run_at/last_run_at do not re-derive "
+                       "from the rows")
     pre = _num(fr.get("credited_pre_cascade_s"))
+    n_slow, n_fast = len(by_label[ls]), len(by_label[lf])
     if pre is None or pre < 0 or pre > gap + 0.05:
         out.append(f"OPT81 {fid}: credited_pre_cascade_s {fr.get('credited_pre_cascade_s')!r} "
                    f"exceeds the measured {gap}s gap")
+    elif pre > 0 and matrix:
+        out.append(f"OPT81 {fid}: wall-clock pre-credited on a runner matrix (both legs "
+                   "run in every run)")
     elif pre > 0 and not (fr.get("job_is_workflow_long_pole") is True
-                          and fr.get("dominant_label") == ls):
+                          and n_slow > n_fast):
         out.append(f"OPT81 {fid}: wall-clock pre-credited on a job that is not its "
-                   "workflow's long pole on the slower label")
+                   "workflow's long pole on the slower label (strictly more runs on "
+                   "the slower label)")
     wc = _num(f.get("wall_clock_p50_s")) or 0.0
     if wc > (pre or 0.0) + 0.05:
         out.append(f"OPT81 {fid}: wall_clock_p50_s {wc} exceeds its pre-cascade credit")

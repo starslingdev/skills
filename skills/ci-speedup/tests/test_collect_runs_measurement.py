@@ -103,7 +103,7 @@ def test_critical_path_empty_is_honest_zero():
     crit = _critical_path([])
     assert crit == {"long_pole_job": "", "long_pole_p50": 0.0, "long_pole_p95": 0.0,
                     "floor_p50": 0.0, "job_p50": {}, "job_bimodal": {},
-                    "job_runner_p50": {}, "runner_scope": "all-runners"}
+                    "runner_scope": "all-runners"}
 
 
 # OPT51 ("Install-to-Test Ratio") is CUT — see test_opt49_is_cut_not_dispatched

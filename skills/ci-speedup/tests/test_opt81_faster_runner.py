@@ -95,6 +95,24 @@ def _runs(slow_label="ubuntu-latest", fast_label="ubuntu-latest-8-cores",
     return out
 
 
+def _alt_runs(slow_label="ubuntu-latest", fast_label="ubuntu-latest-8-cores",
+              slow=_SLOW, fast=_FAST, extra=None, fast_start=None):
+    """One leg per run (no runner matrix). By default the two labels interleave:
+    the slow label on even run ids, the fast on odd ones. `fast_start` instead
+    starts the fast population at that run id (hours after the first run), the
+    shape of a `runs-on` switch."""
+    out = []
+    for i, d in enumerate(slow):
+        out.append([_job("bench", slow_label, d, 100 + 2 * i)])
+    for i, d in enumerate(fast):
+        rid = (101 + 2 * i) if fast_start is None else fast_start + i
+        out.append([_job("bench", fast_label, d, rid)])
+    if extra:
+        for run in out:
+            run.extend(extra(run[0]["run_id"]))
+    return out
+
+
 def _a1(runs, **kw):
     crit = cr._critical_path(runs)
     withheld: dict = {}
@@ -177,15 +195,6 @@ def test_opt81_verifier_constants_stay_coupled_to_the_engine():
     assert cr._OPT81_WITHHELD_DOC_KEY == bp._OPT81_WITHHELD_DOC_KEY
 
 
-def test_critical_path_keeps_the_per_runner_split():
-    crit = cr._critical_path(_runs())
-    split = crit["job_runner_p50"]["bench"]
-    assert split == {"ubuntu-latest": {"p50": 150.0, "n": 8},
-                     "ubuntu-latest-8-cores": {"p50": 90.0, "n": 8}}
-    # the dominant-runner p50 the long pole reports is unchanged
-    assert crit["job_p50"]["bench"] == 150.0
-
-
 # =============================================================================
 # A1 — measured
 # =============================================================================
@@ -197,9 +206,13 @@ def test_opt81_a1_fires_on_the_same_job_on_two_classes():
     fr = f["faster_runner"]
     assert f["pattern"] == "OPT81" and fr["half"] == "A1"
     assert fr["slow"] == {"label": "ubuntu-latest", "class": "github-standard",
-                          "os": "linux", "arch": "x64", "size": "", "p50_s": 150.0, "n": 8}
+                          "os": "linux", "arch": "x64", "size": "", "p50_s": 150.0, "n": 8,
+                          "first_run_at": "2026-06-05T04:00:00Z",
+                          "last_run_at": "2026-06-05T11:00:00Z"}
     assert fr["fast"] == {"label": "ubuntu-latest-8-cores", "class": "github-larger",
-                          "os": "linux", "arch": "x64", "size": "8", "p50_s": 90.0, "n": 8}
+                          "os": "linux", "arch": "x64", "size": "8", "p50_s": 90.0, "n": 8,
+                          "first_run_at": "2026-06-05T04:00:00Z",
+                          "last_run_at": "2026-06-05T11:00:00Z"}
     assert fr["gap_s"] == 60.0 and fr["floor_s"] == 37.5
     assert fr["step_names"] == _STEPS and len(fr["rows"]) == 16
     assert f["runner_min_saving"] is None
@@ -212,22 +225,84 @@ def test_opt81_a1_fires_on_the_same_job_on_two_classes():
 
 
 def test_opt81_a1_credits_the_gap_only_on_the_slow_long_pole():
-    # Alone in its workflow: the long pole, dominant label = the slow one (tie
-    # broken by name), floor 0 -> the whole measured gap is pre-credited.
-    found, *_ = _a1(_runs())
+    # One leg per run, interleaved; the job alone in its workflow is the long pole
+    # and runs on the slow label most (9 vs 8), floor 0 -> the whole gap credits.
+    found, *_ = _a1(_alt_runs(slow=_SLOW + [150]))
     assert found[0]["wall_clock_p50_s"] == 60.0
-    assert found[0]["faster_runner"]["credited_pre_cascade_s"] == 60.0
+    fr = found[0]["faster_runner"]
+    assert fr["credited_pre_cascade_s"] == 60.0 and fr["runner_matrix"] is False
     # Beside a 130s job the headroom is 150 - 130 = 20s: pre-capped there.
-    found, *_ = _a1(_runs(extra=lambda i: [_job("lint", "ubuntu-latest", 130, 100 + i)]))
+    found, *_ = _a1(_alt_runs(slow=_SLOW + [150],
+                              extra=lambda rid: [_job("lint", "ubuntu-latest", 130, rid)]))
     assert found[0]["wall_clock_p50_s"] == 20.0, found[0]["faster_runner"]
     # Not the long pole: measured, stated, not credited.
-    found, *_ = _a1(_runs(extra=lambda i: [_job("e2e", "ubuntu-latest", 400, 100 + i)]))
+    found, *_ = _a1(_alt_runs(slow=_SLOW + [150],
+                              extra=lambda rid: [_job("e2e", "ubuntu-latest", 400, rid)]))
     assert found[0]["wall_clock_p50_s"] == 0.0
     assert "not this workflow's long pole" in found[0]["faster_runner"]["credit_reason"]
-    # The long pole, but it runs on the FAST class most: its median does not move.
-    found, *_ = _a1(_runs(slow=_SLOW[:8], fast=_FAST + [90, 91]))
+    # The long pole, but it runs on the FAST label most: its median does not move.
+    found, *_ = _a1(_alt_runs(fast=_FAST + [90, 91]))
     assert found[0]["wall_clock_p50_s"] == 0.0
-    assert "already runs on the faster class" in found[0]["faster_runner"]["credit_reason"]
+    assert "already runs on the faster" in found[0]["faster_runner"]["credit_reason"]
+
+
+def test_opt81_a1_an_exact_count_tie_is_not_dominant():
+    """8 runs on each label, one leg per run: neither label is the one the job
+    runs on most, whatever the labels' alphabetical order."""
+    for kw in ({}, {"fast_label": "starsling-ubuntu-24.04"}):
+        found, *_ = _a1(_alt_runs(**kw))
+        assert found[0]["wall_clock_p50_s"] == 0.0, kw
+        assert "neither label" in found[0]["faster_runner"]["credit_reason"], kw
+
+
+def test_opt81_a1_runner_matrix_is_measured_but_never_credited():
+    """Both labels in every run (a runner matrix under one display name), the
+    slow label sorting AFTER the fast one. Every run executes both legs, so the
+    finding is stated with matrix wording and no wall-clock credit."""
+    found, withheld, cands, *_ = _a1(_runs(fast_label="starsling-ubuntu-24.04"))
+    assert len(found) == 1, withheld
+    fr = found[0]["faster_runner"]
+    assert fr["runner_matrix"] is True
+    assert found[0]["wall_clock_p50_s"] == 0.0
+    assert "every run executes both legs" in fr["credit_reason"], fr["credit_reason"]
+    assert "already runs on the faster" not in fr["credit_reason"]
+
+
+def test_opt81_a1_withholds_a_runner_switch_as_not_interleaved():
+    """8 runs on the slow label, then (about 100 days later) 8 on the fast one:
+    the shape of a commit that edited `runs-on`. Code changed in between could
+    explain the gap, so it is held back and listed."""
+    found, withheld, cands, *_ = _a1(_alt_runs(fast_start=2500))
+    assert found == []
+    assert withheld.get("not_interleaved") == 1, withheld
+    assert cands == [{"workflow_file": _WF, "job": "bench", "gate": "not_interleaved",
+                      "half": "A1"}]
+    assert "not_interleaved" in bp._OPT81_WITHHOLD_PHRASES
+
+
+def test_opt81_a1_interleaved_single_leg_runs_stamp_their_time_ranges():
+    found, *_ = _a1(_alt_runs())
+    assert len(found) == 1
+    fr = found[0]["faster_runner"]
+    assert fr["slow"]["first_run_at"] == "2026-06-05T04:00:00Z"
+    assert fr["fast"]["last_run_at"] == "2026-06-05T19:00:00Z"
+    assert all(r.get("at") for r in fr["rows"])
+
+
+def test_opt81_verifier_reddens_on_an_uninterleaved_or_matrix_credited_a1():
+    vr = _load_verify_report()
+    f = copy.deepcopy(_a1(_alt_runs())[0][0])
+    f["id"] = "f8"
+    assert vr._opt81_a1_rederived(f) == []
+    for r in f["faster_runner"]["rows"]:
+        if r["label"] == "ubuntu-latest-8-cores":
+            r["at"] = "2027-01-01T00:00:00Z"
+    assert any("different periods" in p for p in vr._opt81_a1_rederived(f))
+    # a matrix finding (both legs in every run) carrying wall-clock credit
+    f = copy.deepcopy(_a1_finding())
+    f["faster_runner"]["credited_pre_cascade_s"] = 30.0
+    f["wall_clock_p50_s"] = 30.0
+    assert any("runner matrix" in p for p in vr._opt81_a1_rederived(f))
 
 
 @pytest.mark.parametrize("kw,gate", [

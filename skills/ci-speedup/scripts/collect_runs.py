@@ -4730,15 +4730,6 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
     job_p95: dict[str, float] = {}
     job_runner: dict[str, str] = {}
     job_bimodal: dict[str, dict[str, Any]] = {}
-    # The per-runner split, KEPT (OPT81 compares a job's populations on two runner
-    # classes). Additive: the long pole, floor and ranking still read only the
-    # dominant runner's p50 below, exactly as before. Nothing in the engine reads
-    # this split: it is stamped for the findings doc / verifier and tests (A1
-    # builds its own success-only split).
-    job_runner_p50: dict[str, dict[str, dict[str, Any]]] = {
-        name: {label: {"p50": _percentile(ds, 50), "n": len(ds)}
-               for label, ds in sorted(by_runner.items())}
-        for name, by_runner in by_job_runner.items()}
     for name, by_runner in by_job_runner.items():
         # This job's dominant runner = the one it ran on most (most samples).
         dominant = max(sorted(by_runner), key=lambda r: len(by_runner[r]))
@@ -4753,7 +4744,7 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
     if not job_p50:
         return {"long_pole_job": "", "long_pole_p50": 0.0, "long_pole_p95": 0.0,
                 "floor_p50": 0.0, "job_p50": {}, "job_bimodal": {},
-                "job_runner_p50": {}, "runner_scope": "all-runners"}
+                "runner_scope": "all-runners"}
     ranked = sorted(job_p50.items(), key=lambda kv: -kv[1])
     long_pole = ranked[0]
     floor = ranked[1][1] if len(ranked) > 1 else 0.0
@@ -4775,7 +4766,6 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         # name -> runner label -> {p50, n}: every runner population, not just the
         # dominant one. Stamped for the findings doc, the verifier and tests; no
         # engine code reads it (A1 builds its own success-only split).
-        "job_runner_p50": job_runner_p50,
         # The long-pole job's runner — the population that gates the wait.
         "runner_scope": lp_runner if lp_runner and lp_runner != "?" else "all-runners",
     }
@@ -10968,6 +10958,42 @@ def _opt81_round(x: float) -> float:
     return round(float(x), 1)
 
 
+def _opt81_is_runner_matrix(rows_a: list[dict[str, Any]],
+                            rows_b: list[dict[str, Any]]) -> bool:
+    """True when the two label populations co-occur in the same runs: at least
+    half of the smaller population's runs also ran the other label."""
+    ids_a = {r.get("run_id") for r in rows_a if r.get("run_id") is not None}
+    ids_b = {r.get("run_id") for r in rows_b if r.get("run_id") is not None}
+    shared = ids_a & ids_b
+    return bool(shared) and 2 * len(shared) >= min(len(ids_a), len(ids_b))
+
+
+def _opt81_utc(value: str) -> "_dt.datetime | None":
+    t = _parse_dt(value) if value else None
+    if t is not None and t.tzinfo is None:
+        t = t.replace(tzinfo=_dt.timezone.utc)
+    return t
+
+
+def _opt81_time_span(rows: list[dict[str, Any]]) -> "tuple[str, str]":
+    """(earliest, latest) run time of a population, as stamped; ("", "") when
+    any row's time cannot be read (then the overlap cannot be shown)."""
+    timed = [(_opt81_utc(str(r.get("at") or "")), str(r.get("at") or "")) for r in rows]
+    if not timed or any(t is None for t, _s in timed):
+        return ("", "")
+    timed.sort(key=lambda ts: ts[0])
+    return (timed[0][1], timed[-1][1])
+
+
+def _opt81_spans_overlap(a: "tuple[str, str]", b: "tuple[str, str]") -> bool:
+    """The two [first, last] ranges intersect: each population's first run is no
+    later than the other's last run."""
+    a0, a1, b0, b1 = (_opt81_utc(x) for x in (*a, *b))
+    if None in (a0, a1, b0, b1):
+        return False
+    return a0 <= b1 and b0 <= a1
+
+
 def _detect_opt81_measured_runner_gap(
     wf_path: str,
     jobs_per_run: list[list[dict[str, Any]]],
@@ -11023,11 +11049,14 @@ def _detect_opt81_measured_runner_gap(
                 "label": label,
                 "duration_s": _opt81_round(d),
                 "step_list_sha": _opt81_step_sha(steps),
+                # When the run was triggered (the run's created_at, else the job's
+                # own timestamps): what the interleaving gate compares.
+                "at": str(job.get("_run_created_at") or job.get("created_at")
+                          or job.get("started_at") or ""),
                 "_steps": steps,
             })
 
     long_pole_job = str(crit.get("long_pole_job") or "")
-    dominant_label = str((crit.get("job_runner") or {}).get(long_pole_job) or "")
     out: list[dict[str, Any]] = []
     for name in sorted(by_job):
         labels = by_job[name]
@@ -11073,6 +11102,15 @@ def _detect_opt81_measured_runner_gap(
         if (cls_a, size_a) == (cls_b, size_b):
             _no("same_runner_class", name, a=a, b=b, cls=cls_a)
             continue
+        # A runner matrix: the two labels co-occur in the same runs (one display
+        # name, both legs per run). Otherwise the two populations must overlap in
+        # time; two disjoint periods are a `runs-on` switch, and code changed in
+        # between could explain the gap.
+        matrix = _opt81_is_runner_matrix(labels[a], labels[b])
+        span = {lb: _opt81_time_span(labels[lb]) for lb in (a, b)}
+        if not matrix and not _opt81_spans_overlap(span[a], span[b]):
+            _no("not_interleaved", name, a=span[a], b=span[b])
+            continue
         shas = {r["step_list_sha"] for lb in (a, b) for r in labels[lb]}
         if len(shas) != 1:
             _no("step_lists_differ", name, distinct=len(shas))
@@ -11090,33 +11128,46 @@ def _detect_opt81_measured_runner_gap(
             continue
 
         # Credit. Only the workflow's long pole carries a merge wait, and only the
-        # slow population is what its p50 describes when the slow label is the one
-        # it runs on most. Pre-capped at the within-workflow headroom here; the
-        # generic cascade in `collect()` then applies the cross-workflow floors.
+        # slow population is what its p50 describes when the job runs on the slow
+        # label STRICTLY more often than on the fast one (counted on the same
+        # successful populations compared here; an exact tie is not dominant). A
+        # runner matrix runs both legs in every run, so it is never credited.
+        # Pre-capped at the within-workflow headroom here; the generic cascade in
+        # `collect()` then applies the cross-workflow floors.
         is_pole = name == long_pole_job
-        dom = str((crit.get("job_runner") or {}).get(name) or "")
-        if is_pole and dom == slow:
+        n_slow, n_fast = len(labels[slow]), len(labels[fast])
+        if matrix:
+            credited = 0.0
+            credit_reason = ("a runner matrix: every run executes both legs; the "
+                             "slower leg sets this workflow's wait, and the audit "
+                             "does not know why the matrix runs both")
+        elif not is_pole:
+            credited = 0.0
+            credit_reason = "the job is not this workflow's long pole"
+        elif n_slow > n_fast:
             pre = bound_within_workflow(
                 gap, WallClockContext(workflow=wf_path, crit=crit,
                                       affected_jobs=(name,)))
             credited = float(pre.value)
             credit_reason = (pre.reason or
                              "the job is this workflow's long pole and runs on the "
-                             "slower class most often")
-        elif is_pole:
+                             "slower label more often than on the faster one")
+        elif n_slow == n_fast:
             credited = 0.0
-            credit_reason = ("the job is this workflow's long pole, but it already runs "
-                             "on the faster class most often, so its median does not move")
+            credit_reason = ("the job is this workflow's long pole, but neither label "
+                             "runs it more often (an exact tie), so its median is not "
+                             "the slower label's")
         else:
             credited = 0.0
-            credit_reason = "the job is not this workflow's long pole"
+            credit_reason = ("the job is this workflow's long pole, but it already runs "
+                             "on the faster label more often, so its median does not "
+                             "move")
         credited = round(max(credited, 0.0), 1)
 
         steps = labels[slow][0]["_steps"]
         rows = [{k: v for k, v in r.items() if k != "_steps"}
                 for lb in (slow, fast) for r in labels[lb]]
         cs, cf = classified[slow], classified[fast]
-        n_slow, n_fast = len(labels[slow]), len(labels[fast])
         evidence = (
             f"`{name}` ran on two runner classes in runs this repository already made: "
             f"{n_fast} successful run(s) on `{fast}` ({_opt81_class_display(cf[0], cf[3])}) "
@@ -11157,9 +11208,11 @@ def _detect_opt81_measured_runner_gap(
             "job": name,
             "workflow_file": wf_path,
             "slow": {"label": slow, "class": cs[0], "os": cs[1], "arch": cs[2],
-                     "size": cs[3], "p50_s": _opt81_round(p50[slow]), "n": n_slow},
+                     "size": cs[3], "p50_s": _opt81_round(p50[slow]), "n": n_slow,
+                     "first_run_at": span[slow][0], "last_run_at": span[slow][1]},
             "fast": {"label": fast, "class": cf[0], "os": cf[1], "arch": cf[2],
-                     "size": cf[3], "p50_s": _opt81_round(p50[fast]), "n": n_fast},
+                     "size": cf[3], "p50_s": _opt81_round(p50[fast]), "n": n_fast,
+                     "first_run_at": span[fast][0], "last_run_at": span[fast][1]},
             "gap_s": _opt81_round(gap),
             "floor_s": _opt81_round(floor),
             "min_gap_s": _OPT81_MIN_GAP_S,
@@ -11170,7 +11223,7 @@ def _detect_opt81_measured_runner_gap(
             "rows": rows,
             "excluded_labels": dict(sorted(excluded.items())),
             "job_is_workflow_long_pole": is_pole,
-            "dominant_label": dom,
+            "runner_matrix": matrix,
             "credited_pre_cascade_s": credited,
             "credit_reason": credit_reason,
             "runner_min_saving_basis": _OPT81_RUNNER_MIN_UNKNOWN,

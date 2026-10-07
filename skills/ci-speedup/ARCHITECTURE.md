@@ -1866,34 +1866,47 @@ from, precisely because the fix removes the signature before stamping.) Red-proo
 
 ### 5.4 OPT81 — a runner-class gap measured from the repo's own runs, and the last-resort runner advisory
 
-`_critical_path` used to keep only each job's DOMINANT runner population (the
-p50 the long pole is ranked on). It now also keeps the whole split,
-`job_runner_p50: name → runner label → {p50, n}`. The ranking, the long pole and
-the floor still read only the dominant population, so nothing that consumed
-`crit` before changes. Nothing in the engine reads the split either: it is
-stamped for the findings doc, the verifier and tests (A1 builds its own
-success-only split).
+`_critical_path` is unchanged: it keeps each job's DOMINANT runner population
+(the p50 the long pole is ranked on) and nothing else. A1 builds its own
+success-only split per label and decides everything, including the credit, from
+that one population.
 
 **A1 (measured).** `_detect_opt81_measured_runner_gap` runs in the per-workflow
 detector loop beside OPT77/79/80. It groups each job's successful occurrences by
-runner label, classifies each label through the named table
-`_OPT81_RUNNER_CLASSES` (standard GitHub-hosted, larger GitHub-hosted size,
-StarSling; anything else, including a generic self-hosted label, is
-unclassifiable and dropped from the comparison with a count), and compares two
-labels only when: each has at least `_OPT81_MIN_SAMPLES_PER_LABEL` (8) samples,
-they are different classes on the same operating system (the rule does not control CPU architecture: `macos-14` is arm and `macos-14-large` is Intel, so a gap there can partly be an architecture difference), every compared run
+runner label and classifies each label through two named tables:
+`_OPT81_RUNNER_CLASSES` gives the class (standard GitHub-hosted, GitHub-hosted
+slim, larger GitHub-hosted size, StarSling), the operating system and the size
+tier (`-N-cores`, macOS `large` / `xlarge`, a StarSling `-N` suffix), and
+`_OPT81_RUNNER_ARCH` gives the processor architecture (`-arm` is arm64; macOS
+`-xlarge` and plain `macos-14`+ are Apple silicon; macOS `-large`, `-intel` and
+`macos-13` and older are Intel; everything else x64). Anything else, including a
+generic self-hosted label, is unclassifiable and dropped from the comparison
+with a count. Two labels are compared only when: each has at least
+`_OPT81_MIN_SAMPLES_PER_LABEL` (8) samples; they share an operating system AND a
+processor architecture (otherwise the gap would measure the platform:
+`different_operating_system` / `different_architecture`, verdicts); they differ in
+class or size tier (two image versions of one class are `same_runner_class`, a
+verdict); the two populations either co-occur in the same runs (a runner matrix:
+at least half of the smaller population's runs also ran the other label) or
+overlap in time (each label's first run is no later than the other's last run;
+two disjoint periods are a `runs-on` switch, where code changed in between could
+explain the gap: `not_interleaved`, held back and listed); every compared run
 executed the same step list (a 16-hex digest of the executed step names, skipped
-steps excluded), and the median gap reaches `max(30s, 25% of the slower median)`.
-The credit is the measured gap only when the job is its workflow's long pole AND
-the slower label is the dominant one; it is pre-capped with `bound_within_workflow`
-(CAP 1) inside the detector and then flows through the generic cascade like any
-credited saving. `runner_min_saving` is always `None`: a different runner class
-bills differently and the skill carries no rate table (the 2026-07-20 pricing
-punt; OPT66 stays retired). Every number is stamped with the per-run rows it
-came from (`faster_runner.rows`: label, duration, step-list digest), and
+steps excluded); and the median gap reaches `max(30s, 25% of the slower median)`.
+The credit is the measured gap only when the job is its workflow's long pole, the
+two labels are not a runner matrix (a matrix runs both legs in every run, so it
+is stated, never credited), and the job ran on the slower label strictly more
+often than on the faster one (an exact tie is not dominant). It is pre-capped
+with `bound_within_workflow` (CAP 1) inside the detector and then flows through
+the generic cascade like any credited saving. `runner_min_saving` is always
+`None`: a different runner class bills differently and the skill carries no rate
+table (the 2026-07-20 pricing punt; OPT66 stays retired). Every number is stamped
+with the per-run rows it came from (`faster_runner.rows`: run id, label, run
+time, duration, step-list digest), and
 `verify_report.check_opt81_runner_comparison_rederived` re-derives both medians,
-both counts, the class decision, the step-list equality, the gap and the floor
-from those rows. The detector costs no gh call.
+both counts, the class / operating-system / architecture / size decision, the
+matrix-or-overlap decision, the step-list equality, the gap, the floor and the
+credit rule from those rows. The detector costs no gh call.
 
 **A2 (advisory).** `_detect_opt81_runner_size_advisory` runs once, AFTER the
 structural track, because its last gate is about the levers the rest of the
