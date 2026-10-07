@@ -59,7 +59,7 @@ def test_opt81_a2_prompt_does_not_overclaim_the_cheaper_lever_search():
     assert "no cheaper lever was found" not in fence
     assert ("This is the last option the audit can name for this job: none of the "
             "cheaper levers it checks for fired here (") in fence
-    assert ("Before benchmarking a bigger runner, check whether the dominant step can "
+    assert ("Before benchmarking a different or larger runner class, check whether the dominant step can "
             "be cached or split; this audit did not prove it cannot.") in fence
 
 

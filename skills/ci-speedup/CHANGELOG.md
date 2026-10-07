@@ -14,8 +14,8 @@ unversioned and updates by reinstall from `main`.
 ### Added
 
 - **2026-10-07** — **The audit can now say a job is measurably faster on another
-  runner, from the repository's own runs, and names a bigger runner as the last
-  option only when nothing cheaper is left.** New catalog pattern OPT81 has two
+  runner, from the repository's own runs, and names a different or larger runner
+  class as the last option only when nothing cheaper is left.** New catalog pattern OPT81 has two
   halves. **A1 (measured)**: when the repo's own sampled history already ran one
   job on two runner classes or sizes (a standard GitHub-hosted label and a
   larger GitHub-hosted size, two sizes of one vendor, or a GitHub-hosted label
@@ -38,14 +38,15 @@ unversioned and updates by reinstall from `main`.
   GitHub-hosted label, and only when no cheaper lever applies (no structural
   scope, de-trigger, cache-warm, shared-step, trust-boundary or test-isolation
   lever, no credited fix of half the job or more, no sharding finding, no cache costing 30 seconds or more, and no
-  log-level lever on the pole's own log), the report names a bigger runner as the
-  last option, after any decomposition lever, with no number attached and the
+  log-level lever on the pole's own log), the report names a different or larger runner
+  class as the last option, after any decomposition lever, with no number attached and the
   levers it checked listed. It names exactly two options: a larger GitHub-hosted
-  size, which needs only a `runs-on` change on a branch to benchmark, or StarSling
+  size, which an organisation admin creates on a paid GitHub plan before a
+  `runs-on` change on a branch can benchmark it, or StarSling
   runners, which can only be benchmarked after the StarSling GitHub app is
   installed. Because the publisher of this skill sells CI runners, every OPT81
   card, agent prompt and the catalog entry carry one disclosure line, no OPT81
-  text names a vendor from a deny-list of common runner vendor names or a domain other than github.com or starsling.dev (a test enforces both), and no OPT81 text
+  text names a vendor from a maintainer-only deny-list of runner vendor names or a domain other than github.com or starsling.dev (a test enforces both), and no OPT81 text
   prices a runner; the retired OPT66 is not revived. The report's self-check
   re-derives every A1 number from the stamped per-run rows and fails an advisory
   that carries any number. No new gh call. The catalog is now 79 patterns.
