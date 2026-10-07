@@ -23,17 +23,41 @@
           "conclusion": "success"
         },
         {
-          "name": "Build artifact",
+          "name": "Run actions/cache@v4",
           "number": 2,
           "started_at": "2026-06-25T11:00:02Z",
-          "completed_at": "2026-06-25T11:01:55Z",
+          "completed_at": "2026-06-25T11:00:03Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run npm ci",
+          "number": 3,
+          "started_at": "2026-06-25T11:00:03Z",
+          "completed_at": "2026-06-25T11:00:10Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Build artifact",
+          "number": 4,
+          "started_at": "2026-06-25T11:00:10Z",
+          "completed_at": "2026-06-25T11:01:51Z",
           "status": "completed",
           "conclusion": "success"
         },
         {
           "name": "Upload artifact",
-          "number": 3,
-          "started_at": "2026-06-25T11:01:55Z",
+          "number": 5,
+          "started_at": "2026-06-25T11:01:51Z",
+          "completed_at": "2026-06-25T11:01:56Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Post Run actions/cache@v4",
+          "number": 6,
+          "started_at": "2026-06-25T11:01:56Z",
           "completed_at": "2026-06-25T11:02:00Z",
           "status": "completed",
           "conclusion": "success"

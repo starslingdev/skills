@@ -821,6 +821,10 @@ _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
     "neutrality_margin_not_positive":
         "the job is about as slow as its workflow's slowest jobs, so removing "
         "the cache could not be shown to leave the pull-request wait unchanged",
+    "needs_chain_with_the_long_pole_unresolved":
+        "the workflow file could not show whether this job waits on, or is "
+        "waited on by, its slowest job, so removing the cache could not be "
+        "shown to leave the pull-request wait unchanged",
 }
 
 
@@ -5263,6 +5267,118 @@ def _below_floor_margin(f: dict, data: dict) -> float | None:
     return round(floor - own, 1)
 
 
+def _below_long_pole_margin(f: dict, data: dict) -> tuple[float | None, list[str]]:
+    """The `below_long_pole` margin re-derived from `per_workflow_timing`:
+    long_pole_p50 - job_p50, for a job that is NOT the workflow's long pole.
+
+    None (with the reason) when the run measured no long pole for the workflow,
+    when the credited job IS that long pole, or when it is not at least
+    `_VR_OPT79_POLE_MIN_HEADROOM_S` (1s) shorter than it after rounding: a job
+    within that tie cutoff of the slowest job is a co-pole, as slow as the job
+    that sets the merge gate, and the proof says the opposite."""
+    wf = str(f.get("workflow_file") or "")
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    lp_job = str(crit.get("long_pole_job") or "")
+    lp = _num(crit.get("long_pole_p50"))
+    job_p50 = _as_dict(crit.get("job_p50"))
+    jobs = [str(j) for j in _as_list(f.get("affected_jobs")) if str(j)]
+    if not lp_job or lp is None or lp <= 0 or not jobs:
+        return None, [f"per_workflow_timing records no long pole for {wf!r}, so "
+                      "the below-the-long-pole margin cannot be re-derived"]
+    if lp_job in jobs:
+        return None, [f"`{lp_job}` IS the workflow's long pole: a below-the-long-pole "
+                      "proof cannot be claimed for the job that sets the merge gate"]
+    vals = [_strict_job_p50(j, job_p50) for j in jobs]
+    vals = [v for v in vals if v is not None and v > 0]
+    if not vals:
+        return None, ["per_workflow_timing records no p50 for the credited job"]
+    floor = _num(crit.get("floor_p50"))
+    # The collector's partition: the below-the-floor arm takes a job only when
+    # its floor margin is POSITIVE after rounding (both sides rounded to 0.1s as
+    # stamped); a job a hair under the floor (margin rounds to 0.0) falls through
+    # to this arm.
+    if (floor is not None and floor > 0
+            and round(round(floor, 1) - round(max(vals), 1), 1) > 0):
+        return None, [f"the credited job ({max(vals)}s) is below the workflow cluster "
+                      f"floor ({floor}s): its proof is below_cluster_floor, and the "
+                      "below_long_pole certificate would be false: the check keeps "
+                      "the two certificates apart"]
+    # The collector's rounding order: each p50 stamped to 0.1s, then subtracted.
+    margin = round(round(lp, 1) - round(max(vals), 1), 1)
+    if margin < _VR_OPT79_POLE_MIN_HEADROOM_S:
+        return None, [f"the credited job ({max(vals)}s) is not at least "
+                      f"{_VR_OPT79_POLE_MIN_HEADROOM_S}s shorter than the long pole "
+                      f"`{lp_job}` ({lp}s): a job within the tie cutoff of the slowest "
+                      "job is a co-pole and carries no below-the-long-pole proof"]
+    return margin, []
+
+
+def _tier2_below_long_pole_problems(f: dict, data: dict) -> list[str]:
+    """The Tier-2 arm for the `below_long_pole` token: OPT79's own (any other
+    pattern claiming it fails), re-derived by OPT79's full arm, with the margin
+    compared against long_pole_p50 - job_p50 from `per_workflow_timing`."""
+    pat = str(f.get("pattern") or "")
+    if pat != "OPT79":
+        return [f"{_VR_OPT79_PROOF_BELOW_LONG_POLE} is OPT79's certificate, claimed "
+                f"by {pat!r}"]
+    want, problems = _opt79_net_negative_cache_rederived(f, data)
+    got = _num(_as_dict(f.get("tier2_neutrality")).get("margin_s"))
+    if got is None or want is None or abs(got - want) > 0.11:
+        problems = problems + [f"below-long-pole margin {got!r} != re-derived {want!r}"]
+    # The margin compares single-job p50s; on a workflow a pull request waits
+    # on, a job in a `needs:` chain with the long pole adds to the merge wait
+    # instead, so the proof does not hold for it. Re-derived from
+    # `workflow_job_graph` when the run recorded one. The collector applies that
+    # exclusion only when the workflow gates pull requests (no PR waits on any
+    # other, so the chain shortens no merge wait); the same gate here reads the
+    # stamped `workflow_gates_pull_requests`, paired against the sampled events
+    # when the run recorded them. A finding without the stamp (pre-stamp
+    # artifact) is read as gating pull requests, so the check fails closed.
+    wf = str(f.get("workflow_file") or "")
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    lp_job = str(crit.get("long_pole_job") or "")
+    stamped = _as_dict(f.get("cache_net_negative")).get("workflow_gates_pull_requests")
+    if isinstance(stamped, bool):
+        ev = _opt79_sampled_events_problem(data, wf, stamped)
+        if ev:
+            problems = problems + [ev]
+    gates_pr = stamped is not False
+    graph_recorded = bool(_as_dict(_as_dict(data.get("workflow_job_graph")).get(wf)))
+    for job in (str(j) for j in _as_list(f.get("affected_jobs")) if str(j)):
+        if not gates_pr:
+            break
+        chained = _vr_opt79_needs_chain(data, wf, job, lp_job)
+        if chained is None and graph_recorded:
+            # The collector holds such a job back: with the graph recorded but
+            # unable to resolve the job or the long pole, "in no chain" is
+            # unproved.
+            problems = problems + [
+                f"the recorded job graph for {wf!r} cannot resolve `{job}` or the "
+                f"long pole `{lp_job}`, so no `needs:` chain is unproved and "
+                f"{_VR_OPT79_PROOF_BELOW_LONG_POLE} cannot be credited"]
+        if chained:
+            problems = problems + [
+                f"`{job}` is in a `needs:` chain with the long pole `{lp_job}`: "
+                "shrinking it may shorten the merge wait, so it is not "
+                f"{_VR_OPT79_PROOF_BELOW_LONG_POLE}"]
+    return problems
+
+
+def _vr_opt79_below_long_pole_off_merge_gate(f: dict, data: dict) -> bool:
+    """True when a `below_long_pole` finding's jobs provably add nothing to the
+    merge wait through a `needs:` chain: the workflow gates no pull request
+    (stamped False), or `workflow_job_graph` resolves every job and proves it
+    in no chain with the long pole. Unresolved or chained -> False."""
+    if _as_dict(f.get("cache_net_negative")).get("workflow_gates_pull_requests") is False:
+        return True
+    wf = str(f.get("workflow_file") or "")
+    lp_job = str(_as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+                 .get("long_pole_job") or "")
+    jobs = [str(j) for j in _as_list(f.get("affected_jobs")) if str(j)]
+    return bool(jobs) and all(
+        _vr_opt79_needs_chain(data, wf, j, lp_job) is False for j in jobs)
+
+
 def _rounding_waste_min(durations: list[float]) -> int:
     vals = [float(d) for d in durations if isinstance(d, (int, float)) and d > 0]
     if len(vals) < 2:
@@ -5771,6 +5887,116 @@ _VR_OPT79_STAMP_KEYS = (
 _VR_OPT79_CREDITED_KIND = "opt79_net_negative_cache"
 _VR_OPT79_UNCREDITED_KIND = "opt79_uncredited_pole_cache"
 _VR_OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
+# OPT79's credited WALL-CLOCK arm (a net-negative cache on the long pole of a
+# workflow that gates pull requests) and its pre-cascade sizing block — both
+# pinned identical to collect_runs' `_OPT79_POLE_KIND` / `_OPT79_POLE_SIZING_KEYS`.
+_VR_OPT79_POLE_KIND = "opt79_pole_net_negative_cache"
+# OPT79's second runner-minute proof: a job at or above the cluster floor that
+# is strictly shorter than the workflow's long pole, margin long_pole_p50 -
+# job_p50. Pinned identical to collect_runs' `_OPT79_PROOF_BELOW_LONG_POLE`.
+_VR_OPT79_PROOF_BELOW_LONG_POLE = "below_long_pole"
+_VR_OPT79_POLE_SIZING_KEYS = (
+    "waste_s",
+    "long_pole_job", "long_pole_p50_s",
+    "next_tallest_job", "floor_p50_s",
+    "headroom_s", "raw_wall_clock_s",
+    "capped_by_next_tallest_job",
+)
+# A long pole with less than this headroom over the next-tallest job is TIED
+# with it and is never a pole finding. Pinned to collect_runs'
+# `_OPT79_POLE_MIN_HEADROOM_S` by a coupling test.
+_VR_OPT79_POLE_MIN_HEADROOM_S = 1.0
+# The leading words of the plain-English clause the report states for each
+# `uncredited_reason` (`blocking_path._OPT79_UNCREDITED_REASON_PHRASES`); the
+# key set is pinned equal to collect_runs' `_OPT79_UNCREDITED_REASONS`.
+_VR_OPT79_UNCREDITED_REASON_PHRASES: dict[str, str] = {
+    "pole_tied_with_next_job": "it is tied with the next-tallest job",
+    "pole_merge_wait_zeroed_by_cross_check":
+        "the cross-checks found no merge wait it can shorten",
+    "pole_workflow_off_merge_gating_spine":
+        "the pull request can merge without waiting for this job",
+    "job_in_a_needs_chain_with_the_long_pole":
+        "it runs in a `needs:` chain with the slowest job",
+}
+_VR_OPT79_REASON_NEEDS_CHAIN = "job_in_a_needs_chain_with_the_long_pole"
+
+
+def _vr_opt79_needs_chain(data: dict, wf: str, job: str,
+                          long_pole_job: str) -> bool | None:
+    """Whether `job` and `long_pole_job` sit in one `needs:` chain (either
+    direction, any depth), re-derived from the scan's `workflow_job_graph`
+    (`{wf: {job_key: {name, needs}}}`). A job is matched by its plain `name:`
+    or its key, with a trailing matrix `(leg)` stripped - the collector's
+    `_job_needs_relations` heuristic. None when the graph is absent or either
+    name resolves to no job: the relation cannot be re-derived then."""
+    jobs = _as_dict(_as_dict(data.get("workflow_job_graph")).get(wf))
+    if not jobs or not job or not long_pole_job:
+        return None
+
+    def _base(v: str) -> str:
+        return re.sub(r"\s*\([^)]+\)\s*$", "", v).strip()
+
+    def _keys(target: str) -> set[str]:
+        out: set[str] = set()
+        for k, m in jobs.items():
+            nm = _as_dict(m).get("name")
+            cand = nm if isinstance(nm, str) and nm and "${{" not in nm else k
+            if _base(str(cand)) == _base(target):
+                out.add(str(k))
+        return out
+
+    jk, pk = _keys(job), _keys(long_pole_job)
+    if not jk or not pk:
+        return None
+    needs_of = {str(k): [str(n) for n in (_as_list(_as_dict(m).get("needs"))
+                                          if not isinstance(_as_dict(m).get("needs"), str)
+                                          else [_as_dict(m).get("needs")])]
+                for k, m in jobs.items()}
+
+    def _reaches(seed: set[str], goal: set[str]) -> bool:
+        seen: set[str] = set()
+        stack = list(seed)
+        while stack:
+            for n in needs_of.get(stack.pop(), []):
+                if n in goal:
+                    return True
+                if n not in seen:
+                    seen.add(n)
+                    stack.append(n)
+        return False
+
+    return _reaches(jk, pk) or _reaches(pk, jk)
+
+
+def _vr_opt79_chain_unresolved(wf: str, job: str, long_pole_job: str) -> str:
+    """The problem for a recorded `workflow_job_graph` in which `job` or the
+    long pole resolves to no job of `wf`: the chain cannot be re-derived, so the
+    verifier fails closed rather than skipping the check."""
+    return (f"`{job}` / long pole `{long_pole_job}` resolve to no job in "
+            f"workflow_job_graph[{wf!r}]: whether they share a `needs:` chain "
+            "cannot be re-derived")
+# The events on which a pull request waits for a workflow (the cascade's
+# `wall_clock._DEVELOPER_FACING_EVENTS`).
+_VR_OPT79_PR_EVENTS = frozenset({"pull_request", "merge_group"})
+
+
+def _opt79_sampled_events_problem(data: dict, wf: str, claimed: Any) -> str | None:
+    """`workflow_gates_pull_requests` against the events the run SAMPLED for the
+    workflow (`per_workflow_timing[wf].events`, else `events_by_wf[wf]`). When
+    events were sampled the claim must be exactly "a pull_request / merge_group
+    run was seen"; with none recorded the declared trigger stands unchecked."""
+    timing = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    events = _as_list(timing.get("events")) or _as_list(
+        _as_dict(data.get("events_by_wf")).get(wf))
+    events = [str(e) for e in events if str(e)]
+    if not events:
+        return None
+    want = bool(set(events) & _VR_OPT79_PR_EVENTS)
+    if claimed is not want:
+        return (f"workflow_gates_pull_requests={claimed!r} but the sampled events "
+                f"{sorted(set(events))} {'include' if want else 'include no'} "
+                "pull_request / merge_group run")
+    return None
 # The cache-verdict matchers, restated here rather than imported — this file is
 # standalone by design, and the point of the re-derivation is to judge a stamped
 # verdict with its OWN matcher: a verifier sharing the engine's object could not
@@ -5802,11 +6028,16 @@ _VR_OPT79_TAIL_MIN_FRAC = 0.25
 
 def _opt79_block_rederived(cn: dict, *, credited: bool,
                            finding_rm: float | None) -> list[str]:
-    """Re-derive one stamped OPT79 measurement block — the credited finding's
-    `cache_net_negative`, or an uncredited pole row, which is the SAME block with
-    a different `kind` and no minutes.
+    """Re-derive one stamped OPT79 measurement block — the runner-minute
+    finding's `cache_net_negative`, the wall-clock pole finding's (via
+    `_opt79_pole_finding_rederived`), or an uncredited row, which is the SAME
+    block with a different `kind` and no minutes.
 
-    Everything except the two sizing branches is shared, because the two rows are
+    Here `credited` means "carries minutes": only the runner-minute finding
+    passes True; the pole finding (a credited wall-clock finding) and the
+    uncredited row pass False.
+
+    Everything except the two sizing branches is shared, because the rows are
     the same measurement. The uncredited row used to be a hand-built subset with
     no `per_run`, so its medians and its `waste_s` were bare assertions no check
     could contradict; running the row/median/floor/bounds re-derivation over it
@@ -5910,8 +6141,9 @@ def _opt79_block_rederived(cn: dict, *, credited: bool,
         problems.append(f"job_runs={cn.get('job_runs')!r}")
     if denom is None or denom <= 0:
         problems.append(f"sampled_successful_run_count={cn.get('sampled_successful_run_count')!r}")
-    # An uncredited row carries no sizing, so an unknown volume is stated as
-    # null (both volume fields). A credited one is priced on it and needs it.
+    # A row that carries no minutes has no runner-minute sizing, so an unknown
+    # volume is stated as null (both volume fields). One that carries minutes is
+    # priced on the volume and needs it.
     null_volume = (not credited and cn.get("monthly_volume") is None)
     if null_volume:
         if cn.get("effective_monthly_volume") is not None:
@@ -5964,10 +6196,11 @@ def _opt79_block_rederived(cn: dict, *, credited: bool,
             "floor - a cache that rarely hits is a key problem, not a cost one")
 
     if not credited and cn.get("runner_min_saving") is not None:
-        # An uncredited row must carry NO sizing. A number here would enter a
-        # total through the first reader that treated the two rows alike.
+        # A row that carries no minutes must carry NO runner-minute sizing. A
+        # number here would enter a total through the first reader that treated
+        # the rows alike.
         problems.append(
-            f"an uncredited pole cache stamps runner_min_saving "
+            f"a row that carries no minutes stamps runner_min_saving "
             f"{cn.get('runner_min_saving')!r}; it must carry no sizing")
     if job_runs is not None and denom is not None and denom > 0 and monthly:
         effective = round(float(monthly) * min(max(job_runs / denom, 0.0), 1.0), 3)
@@ -5989,8 +6222,13 @@ def _opt79_block_rederived(cn: dict, *, credited: bool,
 
 
 def _opt79_uncredited_rows_rederived(data: dict) -> list[str]:
-    """Every uncredited OPT79 pole row re-derived from its own `per_run`, and
-    checked to contribute to no total.
+    """Every uncredited OPT79 row re-derived from its own `per_run`, and
+    checked to contribute to no total. ("pole" in the key and kind name,
+    `opt79_uncredited_pole_caches` / `opt79_uncredited_pole_cache`, is historical:
+    every such row is a long pole or a job tied with one, including a slowest
+    job demoted for being tied, zeroed by the cross-checks or off the
+    merge-gating spine, or a pull-request-workflow job `needs:`-chained to the
+    long pole.)
 
     These rows render with their measured excess per cache hit (`waste_s`) and
     their hit/miss populations, but with no runner-minutes and no wall-clock
@@ -6011,19 +6249,255 @@ def _opt79_uncredited_rows_rederived(data: dict) -> list[str]:
         if "on_critical_path" not in cn:
             out.append(f"{tag}: no on_critical_path - the report cannot say "
                        "whether this saving is on the merge wait")
-        elif cn.get("on_critical_path") and \
-                str(cn.get("job") or "") != str(cn.get("long_pole_job") or ""):
+        elif cn.get("on_critical_path") is not False:
+            # The long pole of a workflow that gates pull requests is OPT79's
+            # credited wall-clock arm now; nothing that reaches this list can
+            # carry the merge wait.
             out.append(
-                f"{tag}: claims the critical path, but {cn.get('job')!r} is not "
-                f"this workflow's long pole {cn.get('long_pole_job')!r}")
-        elif cn.get("on_critical_path") and \
-                cn.get("workflow_gates_pull_requests") is False:
-            out.append(
-                f"{tag}: claims the critical path on a workflow that runs on no "
-                "pull request")
+                f"{tag}: on_critical_path={cn.get('on_critical_path')!r} - a pole "
+                "cache on a pull-request workflow is credited as a finding in this "
+                "version; an uncredited row claiming the merge wait is a contract "
+                "violation")
+        out.extend(f"{tag}: {msg}" for msg in _opt79_uncredited_reason_problems(
+            cn, _as_dict(data)))
         out.extend(f"{tag}: {msg}" for msg in _opt79_block_rederived(
             cn, credited=False, finding_rm=None))
     return out
+
+
+def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
+    """WHY an uncredited row is not the credited pole finding, checked.
+
+    The long pole of a workflow a pull request waits on, with at least 1s of
+    headroom, IS the credited pole finding; as an uncredited row it must name
+    one of the known reasons, and each reason must fit the row's own stamps.
+    A co-pole (a job tied with the long pole, lead under 1s) reads as a pole here.
+    The converse rule also applies: a job strictly shorter than its workflow's
+    long pole is the credited `below_long_pole` finding, so listing it as an
+    uncredited row is rejected."""
+    out: list[str] = []
+    job = str(cn.get("job") or "")
+    gates = cn.get("workflow_gates_pull_requests")
+    ev = _opt79_sampled_events_problem(data, str(cn.get("workflow_file") or ""), gates)
+    if ev:
+        out.append(ev)
+    lp, fl = _num(cn.get("long_pole_p50_s")), _num(cn.get("floor_p50_s"))
+    jp = _num(cn.get("job_p50_s"))
+    headroom = round(lp - fl, 1) if lp is not None and fl is not None else None
+    lp_job = str(cn.get("long_pole_job") or "")
+    # A job TIED with the long pole (within the 1s cutoff the pole arm uses for
+    # headroom) is a co-pole: as slow as the job that sets the merge wait, so it
+    # reads as a pole here.
+    lead = round(lp - jp, 1) if lp is not None and jp is not None else None
+    co_pole = (bool(job) and job != lp_job and lead is not None
+               and lead < _VR_OPT79_POLE_MIN_HEADROOM_S)
+    is_pole = bool(job) and (job == lp_job or co_pole) and gates is True
+    reason = cn.get("uncredited_reason")
+    if reason is None:
+        if is_pole and (headroom is None or headroom >= _VR_OPT79_POLE_MIN_HEADROOM_S):
+            out.append(
+                f"`{job}` is the long pole of a workflow pull requests wait on, with "
+                f"{headroom!r}s of headroom and no uncredited_reason: it should have "
+                "been the credited pole finding")
+        elif gates is True:
+            # Every row the collector lists on a workflow pull requests wait on
+            # carries a stamped reason; one without renders the "no recorded
+            # reason" fallback. Fails ALWAYS - a tie (headroom 0), a co-pole, or
+            # a row with no long pole recorded is no exemption.
+            out.append(
+                f"`{job}` is on a workflow pull requests wait on and names no "
+                "uncredited_reason: the collector never lists such a row, and the "
+                "report could only say no reason was recorded")
+        # The converse of the below-the-long-pole arm: a job strictly shorter
+        # than its workflow's long pole IS that credited runner-minute finding,
+        # on any workflow, so listing it here under-reports a priced saving.
+        if (lp_job and job and job != lp_job and lead is not None
+                and lead >= _VR_OPT79_POLE_MIN_HEADROOM_S):
+            out.append(
+                f"`{job}` ({jp}s) is {lead}s shorter than its workflow's long pole "
+                f"`{lp_job}` ({lp}s) and names no uncredited_reason: it should have "
+                f"been the credited `{_VR_OPT79_PROOF_BELOW_LONG_POLE}` "
+                "runner-minute finding")
+        return out
+    if reason not in _VR_OPT79_UNCREDITED_REASON_PHRASES:
+        return out + [f"uncredited_reason {reason!r} is not one of "
+                      f"{sorted(_VR_OPT79_UNCREDITED_REASON_PHRASES)}"]
+    if reason == _VR_OPT79_REASON_NEEDS_CHAIN:
+        # Not a pole: a job strictly shorter than the long pole of a
+        # pull-request workflow, chained to it by `needs:`. The chain is
+        # re-derived from `workflow_job_graph` when the run recorded it; without
+        # it, only the shape the collector can stamp is accepted (strictly
+        # shorter than its long pole, on a pull-request workflow).
+        # The collector reaches this reason only at a lead of at least the tie
+        # cutoff; under it the job is a co-pole, never a chained job.
+        if not (lp_job and job and job != lp_job and lead is not None
+                and lead >= _VR_OPT79_POLE_MIN_HEADROOM_S and gates is True):
+            out.append(
+                f"uncredited_reason {reason!r} needs a job strictly shorter than "
+                f"its long pole on a pull-request workflow: job {job!r} ({jp}s), "
+                f"long_pole_job {lp_job!r} ({lp}s), workflow_gates_pull_requests "
+                f"{gates!r}")
+        chained = _vr_opt79_needs_chain(
+            data, str(cn.get("workflow_file") or ""), job, lp_job)
+        if chained is False:
+            out.append(f"uncredited_reason {reason!r} but `{job}` and `{lp_job}` "
+                       "share no `needs:` path in workflow_job_graph")
+        elif chained is None and _as_dict(_as_dict(data.get(
+                "workflow_job_graph")).get(str(cn.get("workflow_file") or ""))):
+            # Graph recorded for the workflow but the job or the long pole
+            # resolves to no job in it: fail closed, never a silent skip.
+            out.append(_vr_opt79_chain_unresolved(
+                str(cn.get("workflow_file") or ""), job, lp_job))
+        if cn.get("uncredited_reason_detail") is not None:
+            out.append(f"uncredited_reason_detail on a {reason!r} row")
+        return out
+    # A demotion reason (zeroed by the cross-checks, off the merge-gating
+    # spine) can only come from a pole FINDING the collector demoted, and a pole
+    # finding exists only for the workflow's actual long pole. A co-pole (a job
+    # tied with it) never had one, so those two reasons require job ==
+    # long_pole_job exactly; only the tie reason may sit on a co-pole.
+    demotion = reason in ("pole_merge_wait_zeroed_by_cross_check",
+                          "pole_workflow_off_merge_gating_spine")
+    if not is_pole or (demotion and (job != lp_job or gates is not True)):
+        out.append(f"uncredited_reason {reason!r} names a pole the row is not: job "
+                   f"{job!r}, long_pole_job {cn.get('long_pole_job')!r}, "
+                   f"workflow_gates_pull_requests {gates!r}")
+    # Every reason renders "`job` is this workflow's slowest job, but ...": the
+    # stamps agreeing with each other is not enough when the timing the run
+    # MEASURED names another job as this workflow's long pole.
+    timing = _as_dict(_as_dict(data.get("per_workflow_timing")).get(
+        str(cn.get("workflow_file") or "")))
+    measured_pole = str(timing.get("long_pole_job") or "")
+    if measured_pole and measured_pole != job:
+        out.append(f"uncredited_reason {reason!r} on `{job}`, but "
+                   f"per_workflow_timing names {measured_pole!r} as this "
+                   "workflow's long pole, so the row is not its slowest job")
+    if reason == "pole_tied_with_next_job":
+        if headroom is None or headroom >= _VR_OPT79_POLE_MIN_HEADROOM_S:
+            out.append(f"uncredited_reason {reason!r} but the headroom is {headroom!r}s "
+                       f"- {_VR_OPT79_POLE_MIN_HEADROOM_S}s or more is not a tie")
+    elif headroom is not None and headroom < _VR_OPT79_POLE_MIN_HEADROOM_S:
+        out.append(f"uncredited_reason {reason!r} on a pole with {headroom}s of "
+                   "headroom, which is a tie (pole_tied_with_next_job)")
+    if reason == "pole_merge_wait_zeroed_by_cross_check":
+        if not str(cn.get("uncredited_reason_detail") or "").strip():
+            out.append("uncredited_reason_detail is empty: the cross-check that "
+                       "zeroed the merge wait must be named")
+        out.extend(_opt79_zeroed_derivation_problems(cn, lp, fl))
+    else:
+        if cn.get("uncredited_reason_detail") is not None:
+            out.append(f"uncredited_reason_detail on a {reason!r} row")
+        if cn.get("uncredited_derivation") is not None:
+            out.append(f"uncredited_derivation on a {reason!r} row")
+    if reason == "pole_workflow_off_merge_gating_spine":
+        out.extend(_opt79_off_spine_problems(job, data))
+    return out
+
+
+# Mirrors collect_runs' `_OPT79_ASCII_SPELLINGS` / `_opt79_ascii` /
+# `_opt79_secs`: the demotion detail states each cascade step in ASCII.
+_VR_OPT79_ASCII_SPELLINGS = (("\u2014", " - "), ("\u2013", "-"), ("\u2192", "->"),
+                             ("\u2265", ">="), ("\u2264", "<="), ("\u00d7", "x"),
+                             ("\u2026", "..."), ("\u2018", "'"), ("\u2019", "'"),
+                             ("\u201c", '"'), ("\u201d", '"'))
+
+
+def _vr_opt79_ascii(text: str) -> str:
+    for a, b in _VR_OPT79_ASCII_SPELLINGS:
+        text = text.replace(a, b)
+    text = text.encode("ascii", "backslashreplace").decode("ascii")
+    return " ".join(text.split())
+
+
+def _vr_opt79_secs(v: object) -> str:
+    return f"{float(v):g}s" if isinstance(v, (int, float)) and not isinstance(
+        v, bool) else "?s"
+
+
+def _opt79_zeroed_derivation_problems(cn: dict, lp: float | None,
+                                      fl: float | None) -> list[str]:
+    """`pole_merge_wait_zeroed_by_cross_check`, re-derived from the cascade
+    steps the row carries (`uncredited_derivation`): each step goes down from
+    where the last one ended, starting at the pole's own sizing
+    min(waste_s, long pole - floor), and the last one ends at a figure that
+    ROUNDS to 0s - the one the report would have rendered. The detail must end
+    by stating that last step. A pole demoted with merge wait left fails here."""
+    steps = cn.get("uncredited_derivation")
+    if not isinstance(steps, list) or not steps or not all(
+            isinstance(d, dict) for d in steps):
+        return ["uncredited_derivation is missing or empty: a zeroed merge wait "
+                "must carry the cascade steps that zeroed it"]
+    out: list[str] = []
+    waste = _num(cn.get("waste_s"))
+    prev = (round(min(waste, lp - fl), 1)
+            if waste is not None and lp is not None and fl is not None else None)
+    for i, d in enumerate(steps):
+        a, b = _num(d.get("from_s")), _num(d.get("to_s"))
+        if a is None or b is None or b > a + 1e-9:
+            out.append(f"uncredited_derivation[{i}] does not go down "
+                       f"({d.get('from_s')!r} -> {d.get('to_s')!r})")
+        elif prev is not None and abs(a - prev) > 0.11:
+            out.append(f"uncredited_derivation[{i}] starts at {a}, not at "
+                       f"{prev} (the pole's sizing or the previous step)")
+        if not str(d.get("reason") or "").strip():
+            out.append(f"uncredited_derivation[{i}] has no reason")
+        prev = b
+    last = steps[-1]
+    end = _num(last.get("to_s"))
+    if end is None or round(end) > 0:
+        out.append(f"uncredited_derivation ends at {last.get('to_s')!r}, which "
+                   "rounds to a second or more: the merge wait was not zeroed")
+    want = (f"{_vr_opt79_secs(last.get('from_s'))} to "
+            f"{_vr_opt79_secs(last.get('to_s'))}: "
+            f"{_vr_opt79_ascii(str(last.get('reason') or ''))}")
+    detail = str(cn.get("uncredited_reason_detail") or "")
+    if not detail.endswith(want):
+        out.append(f"uncredited_reason_detail {detail!r} does not end with the "
+                   f"last cascade step {want!r}")
+    return out
+
+
+def _vr_opt79_toks(s: str) -> frozenset:
+    return frozenset(t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t)
+
+
+def _vr_opt79_scope_prefixed(check: str, job: str) -> bool:
+    """Mirror of collect_runs' `_job_name_scope_prefixed`: the job's name
+    appears INTACT in the check name, never fused into a compound."""
+    c, j = check.lower(), job.lower().strip()
+    if not j:
+        return False
+    start = 0
+    while True:
+        i = c.find(j, start)
+        if i < 0:
+            return False
+        before = c[i - 1] if i > 0 else ""
+        after = c[i + len(j)] if i + len(j) < len(c) else ""
+        if not (before and (before.isalnum() or before in "-_")) and not (
+                after and (after.isalnum() or after in "-_")):
+            return True
+        start = i + 1
+
+
+def _opt79_off_spine_problems(job: str, data: dict) -> list[str]:
+    """`pole_workflow_off_merge_gating_spine`, cross-checked: the job must be one
+    the run DROPPED from the merge-gating spine
+    (`pr_critical_path.dropped_non_required_checks` / `dropped_non_pr_checks`),
+    matched as `_stamp_off_spine_findings` matches it (exact tokens, or the
+    job's name intact inside a scope/matrix-prefixed check name)."""
+    cp = _as_dict(data.get("pr_critical_path"))
+    dropped = [str(n) for n in (_as_list(cp.get("dropped_non_required_checks"))
+                                + _as_list(cp.get("dropped_non_pr_checks")))]
+    jt = _vr_opt79_toks(job)
+    for n in dropped:
+        ct = _vr_opt79_toks(n)
+        if jt and (ct == jt or (jt < ct and _vr_opt79_scope_prefixed(n, job))):
+            return []
+    return [f"uncredited_reason 'pole_workflow_off_merge_gating_spine' but `{job}` "
+            f"is not among the checks the merge-gating spine dropped "
+            f"(pr_critical_path dropped_non_required_checks / dropped_non_pr_checks: "
+            f"{dropped[:8]})"]
 
 
 _VR_OPT79_EVIDENCE_RE = re.compile(
@@ -6127,7 +6601,8 @@ def _opt79_net_negative_cache_rederived(f: dict, data: dict) -> tuple[float | No
     The margin is the same quantity the generic `below_cluster_floor` arm
     computes — the job's own p50 below the workflow's cluster floor — re-derived
     from `per_workflow_timing`, because that is what makes `wall_clock_p50_s=0`
-    true for this finding."""
+    a conservative lower bound for this finding. For a `below_long_pole`
+    certificate the margin is instead long_pole_p50 - job_p50."""
     cn = _as_dict(f.get("cache_net_negative"))
     if cn.get("kind") != _VR_OPT79_CREDITED_KIND:
         return None, ["missing opt79_net_negative_cache evidence"]
@@ -6141,12 +6616,368 @@ def _opt79_net_negative_cache_rederived(f: dict, data: dict) -> tuple[float | No
         cn, credited=True, finding_rm=_num(f.get("runner_min_saving"))))
     problems.extend(_opt79_prose_rederived(f, cn))
 
+    # Two proofs make wall_clock_p50_s=0 true for this finding, each with its
+    # own margin: below the cluster floor (floor - job p50), or at/above it but
+    # strictly shorter than the long pole (long_pole_p50 - job p50).
+    proof = str(_as_dict(f.get("tier2_neutrality")).get("proof") or "")
+    if proof == _VR_OPT79_PROOF_BELOW_LONG_POLE:
+        margin, why = _below_long_pole_margin(f, data)
+        problems.extend(why)
+        return margin, problems
     margin = _below_floor_margin(f, data)
     if margin is None:
         problems.append(
             "the credited job's p50 is not strictly below the workflow cluster "
             "floor, so wall_clock_p50_s=0 is not established")
     return margin, problems
+
+
+_VR_OPT79_POLE_EVIDENCE_RE = re.compile(
+    r"measured a p50 of (\d+)s across (\d+) sampled run\(s\) whose log reported a "
+    r"cache HIT, against (\d+)s across (\d+) run\(s\) whose log reported a MISS: "
+    r"the hit path is (\d+)s SLOWER.*?`([^`]+)` is this workflow's slowest job at "
+    r"(\d+)s and its next-tallest job(?:, `([^`]*)`,)? runs (\d+)s; "
+    r"(?:the audit caps the saving at that (?P<cap_gap>\d+)s gap, so up to|the "
+    r"(?P<excess>\d+)s excess fits under that (?P<fit_gap>\d+)s gap, so all) "
+    r"(\d+)s of (?:the excess|it) comes off "
+    r"the merge wait on the (\d+)% of sampled runs where the cache hit "
+    r"\((\d+) of (\d+) runs read\)", re.S)
+# The note restates the cap: the gap, the pole's duration, the next job's.
+_VR_OPT79_POLE_NOTE_RE = re.compile(
+    r"capped at the (\d+)s gap between this job's duration \((\d+)s\) and "
+    r"(?:`([^`]*)`|the next-tallest job)'s \((\d+)s\)")
+
+
+def _opt79_hit_share_clause(cn: dict) -> str | None:
+    """The hit-rate clause an OPT79 pole merge-wait figure must carry, restated
+    from the STAMPED `hit_share` and counts (`_opt79_block_rederived` re-derives
+    those from per_run). None when a count is not an integer."""
+    share = _num(cn.get("hit_share"))
+    counts = [cn.get(k) for k in ("hits", "misses", "ambiguous_runs")]
+    if share is None or not all(isinstance(c, int) and not isinstance(c, bool)
+                                for c in counts):
+        return None
+    hits, misses, amb = counts
+    return (f"on the {share * 100:.0f}% of sampled runs where the cache hit "
+            f"({hits} of {hits + misses + amb} runs read)")
+
+
+def _opt79_pole_prose_rederived(f: dict, cn: dict) -> list[str]:
+    """The pole finding's evidence sentence restated from its stamped block: the
+    two measured paths, the slowest job, the next-tallest job and the capped
+    figure. A tampered sentence would otherwise reach the reader unchallenged —
+    nothing else in the report contradicts it."""
+    out: list[str] = []
+    ps = _as_dict(cn.get("pole_sizing"))
+
+    def _w(v: Any) -> str:
+        n = _num(v)
+        return "?" if n is None else f"{n:.0f}"
+
+    m = _VR_OPT79_POLE_EVIDENCE_RE.search(str(f.get("evidence") or ""))
+    if not m:
+        return ["evidence does not state the measured comparison, the slowest "
+                "job, the next-tallest job, the capped merge-wait figure and the "
+                "hit rate it applies to"]
+    # The named groups (the gap and the excess the sentence states) are paired
+    # with pole_sizing below; the numbered ones are restated as one tuple.
+    named = set(m.re.groupindex.values())
+    got = tuple(g for i, g in enumerate(m.groups(), 1) if i not in named)
+    share = _num(cn.get("hit_share"))
+    counts = [cn.get(k) for k in ("hits", "misses", "ambiguous_runs")]
+    read = (sum(counts) if all(isinstance(c, int) and not isinstance(c, bool)
+                               for c in counts) else None)
+    want = (_w(cn.get("hit_path_p50_s")), str(cn.get("hits")),
+            _w(cn.get("miss_path_p50_s")), str(cn.get("misses")),
+            _w(cn.get("waste_s")), str(cn.get("job") or ""),
+            _w(ps.get("long_pole_p50_s")), str(ps.get("next_tallest_job") or "") or None,
+            _w(ps.get("floor_p50_s")), _w(ps.get("raw_wall_clock_s")),
+            "?" if share is None else f"{share * 100:.0f}", str(cn.get("hits")),
+            str(read))
+    if got != want:
+        out.append(f"evidence states {got} but the stamped block gives {want}")
+    capped_prose = m.group("cap_gap") is not None
+    gap = m.group("cap_gap") if capped_prose else m.group("fit_gap")
+    if gap != _w(ps.get("headroom_s")):
+        out.append(f"evidence states a {gap}s gap but pole_sizing.headroom_s is "
+                   f"{_w(ps.get('headroom_s'))}s")
+    if not capped_prose and m.group("excess") != _w(ps.get("waste_s")):
+        out.append(f"evidence states a {m.group('excess')}s excess but "
+                   f"pole_sizing.waste_s is {_w(ps.get('waste_s'))}s")
+    if capped_prose is not (ps.get("capped_by_next_tallest_job") is True):
+        out.append(f"evidence says the saving is {'' if capped_prose else 'not '}"
+                   "capped at the gap, but pole_sizing.capped_by_next_tallest_job is "
+                   f"{ps.get('capped_by_next_tallest_job')!r}")
+    note = str(_as_dict(f.get("measured_evidence")).get("note") or "")
+    n = _VR_OPT79_POLE_NOTE_RE.search(note)
+    if not n:
+        out.append("the measured-evidence note does not state the gap the saving "
+                   "is capped at between this job's duration and the next-tallest "
+                   "job's")
+    else:
+        for key, said in (("headroom_s", n.group(1)), ("long_pole_p50_s", n.group(2)),
+                          ("floor_p50_s", n.group(4))):
+            if said != _w(ps.get(key)):
+                out.append(f"the note states {said}s where pole_sizing.{key} is "
+                           f"{_w(ps.get(key))}s")
+        if (n.group(3) or "") != str(ps.get("next_tallest_job") or ""):
+            out.append(f"the note names {n.group(3)!r} as the next-tallest job, not "
+                       f"pole_sizing.next_tallest_job "
+                       f"{ps.get('next_tallest_job')!r}")
+    return out
+
+
+def _opt79_pole_finding_rederived(f: dict, data: dict) -> list[str]:
+    """Re-derive OPT79's credited WALL-CLOCK finding — a net-negative cache on
+    the long pole of a workflow that gates pull requests — from its own stamps.
+
+        waste_s  = hit_path_p50 - miss_path_p50     (from per_run, shared arm)
+        headroom = long_pole_p50_s - floor_p50_s     (cross-checked against
+                                                      per_workflow_timing)
+        raw      = round(min(waste_s, headroom), 1)
+
+    `raw` must be what the finding was sized at before the generic cascade
+    (`wall_clock_uncapped_p50_s` when that cascade shrank it, else
+    `wall_clock_p50_s`), and any cascade derivation must only ever go down, give
+    a reason for every step and end on the credited figure. No runner-minutes on
+    the finding or the block: there is no runner-minute certificate to carry them."""
+    cn = _as_dict(f.get("cache_net_negative"))
+    if cn.get("kind") != _VR_OPT79_POLE_KIND:
+        return [f"an OPT79 finding with no runner-minute certificate must be kind "
+                f"{_VR_OPT79_POLE_KIND!r}, not {cn.get('kind')!r}"]
+    problems: list[str] = []
+    job = str(cn.get("job") or "")
+    affected = [str(j) for j in _as_list(f.get("affected_jobs")) if str(j)]
+    if not job or affected != [job] or job != str(cn.get("long_pole_job") or ""):
+        problems.append(
+            f"affected_jobs {affected!r}, job {job!r} and long_pole_job "
+            f"{cn.get('long_pole_job')!r} must all name the one long-pole job")
+    problems.extend(_opt79_block_rederived(cn, credited=False, finding_rm=None))
+    if cn.get("on_critical_path") is not True:
+        problems.append(f"on_critical_path={cn.get('on_critical_path')!r}: a pole "
+                        "finding is credited only because its job carries the merge wait")
+    if cn.get("workflow_gates_pull_requests") is not True:
+        problems.append(f"workflow_gates_pull_requests="
+                        f"{cn.get('workflow_gates_pull_requests')!r}: no pull request "
+                        "waits on this workflow, so there is no merge wait to credit")
+    if f.get("off_spine"):
+        problems.append("off_spine=True: the pull request can merge without this "
+                        "job, so a pole finding there must be an uncredited row")
+    ev = _opt79_sampled_events_problem(data, str(f.get("workflow_file") or ""),
+                                       cn.get("workflow_gates_pull_requests"))
+    if ev:
+        problems.append(ev)
+    if f.get("runner_min_saving") is not None:
+        problems.append(f"the pole finding states runner-minutes "
+                        f"{f.get('runner_min_saving')!r}; it has no runner-minute "
+                        "certificate to carry them")
+
+    ps = _as_dict(cn.get("pole_sizing"))
+    missing = [k for k in _VR_OPT79_POLE_SIZING_KEYS if k not in ps]
+    if missing:
+        problems.append(f"pole_sizing is missing stamped key(s) {missing}")
+    lp, fl = _num(cn.get("long_pole_p50_s")), _num(cn.get("floor_p50_s"))
+    waste = _num(cn.get("waste_s"))
+    if lp is None or fl is None or waste is None:
+        return problems + ["long_pole_p50_s / floor_p50_s / waste_s not stamped - "
+                           "the merge-wait figure cannot be re-derived"]
+    # The stamped timing must be the timing the run measured, when the doc
+    # carries it — otherwise a lowered floor widens the headroom at will.
+    timing = _as_dict(_as_dict(data.get("per_workflow_timing")).get(
+        str(f.get("workflow_file") or "")))
+    if not timing:
+        problems.append(f"per_workflow_timing has no entry for "
+                        f"{f.get('workflow_file')!r}: the stamped long pole and "
+                        "floor cannot be checked against what the run measured")
+    else:
+        for key, stamped in (("long_pole_p50", lp), ("floor_p50", fl)):
+            measured = _num(timing.get(key))
+            if measured is not None and abs(measured - stamped) > 0.11:
+                problems.append(
+                    f"stamped {key}_s {stamped} != per_workflow_timing {key} "
+                    f"{round(measured, 1)} (the floor/long pole the run measured)")
+        if str(timing.get("long_pole_job") or job) != job:
+            problems.append(f"per_workflow_timing names {timing.get('long_pole_job')!r}, "
+                            f"not {job!r}, as this workflow's long pole")
+        # The job the evidence names as the cap must be the tallest OTHER job
+        # the run measured; the prose check alone only compares the evidence
+        # with the same stamped name, so renaming both would pass.
+        jp = _as_dict(timing.get("job_p50"))
+        nxt = str(_as_dict(cn.get("pole_sizing")).get("next_tallest_job") or "")
+        others = {str(k): _num(v) or 0.0 for k, v in jp.items() if str(k) != job}
+        if not nxt:
+            problems.append("pole_sizing.next_tallest_job is empty: the job that "
+                            "caps the saving must be named")
+        elif not jp:
+            problems.append("per_workflow_timing records no job_p50 for this "
+                            "workflow: next_tallest_job cannot be checked")
+        else:
+            if nxt not in others:
+                problems.append(f"pole_sizing.next_tallest_job {nxt!r} is not another "
+                                "job this workflow's timing measured")
+            elif others[nxt] + 0.11 < max(others.values()):
+                problems.append(f"pole_sizing.next_tallest_job {nxt!r} ({others[nxt]}s) "
+                                "is not the tallest job other than the long pole")
+    headroom = round(lp - fl, 1)
+    if headroom < _VR_OPT79_POLE_MIN_HEADROOM_S:
+        problems.append(f"under 1s of headroom ({lp} - {fl}): a long pole tied with "
+                        "the next job sets no merge wait of its own")
+    raw = round(min(waste, headroom), 1)
+    for key, want in (("waste_s", waste), ("long_pole_p50_s", lp),
+                      ("floor_p50_s", fl), ("headroom_s", headroom),
+                      ("raw_wall_clock_s", raw)):
+        if not _close(ps.get(key), want, 0.11):
+            problems.append(f"pole_sizing.{key} {ps.get(key)!r} != re-derived {want}")
+    if ps.get("long_pole_job") != job:
+        problems.append(f"pole_sizing.long_pole_job {ps.get('long_pole_job')!r} != {job!r}")
+    if ps.get("capped_by_next_tallest_job") is not (waste > headroom):
+        problems.append(f"pole_sizing.capped_by_next_tallest_job "
+                        f"{ps.get('capped_by_next_tallest_job')!r} but the excess "
+                        f"{waste}s {'exceeds' if waste > headroom else 'is within'} "
+                        f"the {headroom}s headroom")
+    field = ("wall_clock_uncapped_p50_s" if "wall_clock_uncapped_p50_s" in f
+             else "wall_clock_p50_s")
+    sized = f.get(field)
+    if not _close(sized, raw, 0.11):
+        problems.append(f"{field} {sized!r} != min(waste_s {waste}, headroom "
+                        f"{headroom}) = {raw}, the wall-clock the measured excess "
+                        "allows")
+    wc = _num(f.get("wall_clock_p50_s"))
+    # Judged on the ROUNDED figure the block renders: 0 < wc <= 0.5 renders
+    # "up to 0s off the merge wait", which is no merge wait.
+    if wc is None or round(wc) <= 0:
+        problems.append(f"wall_clock_p50_s={f.get('wall_clock_p50_s')!r}: a pole "
+                        "cache with no merge wait left to credit (it rounds to "
+                        "0s) must be an uncredited row, not a finding")
+    deriv = f.get("wall_clock_derivation")
+    if deriv is not None:
+        steps = [d for d in _as_list(deriv) if isinstance(d, dict)]
+        prev = _num(sized)
+        if not steps:
+            problems.append("wall_clock_derivation is present but empty")
+        for i, d in enumerate(steps):
+            a, b = _num(d.get("from_s")), _num(d.get("to_s"))
+            if a is None or b is None or b > a + 1e-9:
+                problems.append(f"wall_clock_derivation[{i}] does not go down "
+                                f"({d.get('from_s')!r} -> {d.get('to_s')!r})")
+            elif prev is not None and abs(a - prev) > 0.11:
+                problems.append(f"wall_clock_derivation[{i}] starts at {a}, not at "
+                                f"the previous value {prev}")
+            if not str(d.get("reason") or "").strip():
+                problems.append(f"wall_clock_derivation[{i}] shrinks the saving "
+                                "with no reason")
+            prev = b
+        if steps and (prev is None or wc is None or abs(prev - wc) > 0.11):
+            problems.append(f"wall_clock_derivation ends at {prev!r}, not at the "
+                            f"credited wall_clock_p50_s {wc!r}")
+    elif wc is not None and not _close(wc, raw, 0.11):
+        problems.append(f"wall-clock {wc} differs from the sized {raw} with no "
+                        "derivation recorded")
+    problems.extend(_opt79_pole_prose_rederived(f, cn))
+    return problems
+
+
+def _opt79_finding_rederived(f: dict, data: dict) -> list[str]:
+    """Every OPT79 finding, routed by the arm it claims.
+
+    A finding WITH a `tier2_neutrality` certificate is a runner-minute arm
+    (below the cluster floor, or at/above it and below the long pole): it must
+    be kind `opt79_net_negative_cache` and claim no wall-clock (its certificate
+    says the job cannot make the workflow take longer; the full re-derivation, margin
+    included, runs in the Tier-2 pass). A finding WITHOUT one must be the
+    pole arm, re-derived by `_opt79_pole_finding_rederived`. There is no third
+    shape: an OPT79 finding that is neither is a contract violation."""
+    cert = f.get("tier2_neutrality")
+    if cert:
+        out: list[str] = []
+        kind = _as_dict(f.get("cache_net_negative")).get("kind")
+        if kind != _VR_OPT79_CREDITED_KIND:
+            out.append(f"a below-the-floor OPT79 finding must be kind "
+                       f"{_VR_OPT79_CREDITED_KIND!r}, not {kind!r}")
+        wc = f.get("wall_clock_p50_s")
+        if _num(wc) != 0:
+            out.append(f"a runner-minute-certified OPT79 finding claims wall_clock_p50_s="
+                       f"{wc!r}; its certificate says the job cannot make the "
+                       "workflow take longer, so it is runner-minutes only")
+        if f.get("wall_clock_uncapped_p50_s") is not None:
+            out.append("a runner-minute-certified OPT79 finding carries a wall-clock sizing")
+        return out
+    out = _opt79_pole_finding_rederived(f, data)
+    return out
+
+
+_VR_OPT79_POLE_MARKER_RE = re.compile(r"<!-- opt79-pole:([^ ]+) -->")
+
+
+def _opt79_pole_findings_rendered(report: str, poles: list[dict]) -> list[str]:
+    """Every pole-cache finding must REACH the page as its own block, opened by
+    its marker, carrying its title, its id and the credited merge-wait seconds —
+    and no marker may name a finding the run does not have."""
+    out: list[str] = []
+    marks = [(m.group(1), m.start()) for m in _VR_OPT79_POLE_MARKER_RE.finditer(report)]
+    ids = [i for i, _pos in marks]
+    want = {str(f.get("id") or "") for f in poles}
+    for i in sorted(set(ids) - want):
+        out.append(f"the report renders an OPT79 pole-cache block for {i!r}, which "
+                   "is not a pole-cache finding in the run")
+    for f in poles:
+        fid = str(f.get("id") or "")
+        hits = [pos for i, pos in marks if i == fid]
+        if len(hits) != 1:
+            out.append(f"{fid}: the pole-cache finding is rendered {len(hits)} time(s), "
+                       "not once")
+            continue
+        # The block's header is the line right after its marker.
+        lines = report[hits[0]:].split("\n", 2)
+        plain = _strip_render_artifacts(lines[1] if len(lines) > 1 else "")
+        title = _strip_render_artifacts(str(f.get("title") or ""))
+        wc = _num(f.get("wall_clock_p50_s")) or 0.0
+        if title not in plain or fid not in plain:
+            out.append(f"{fid}: its block does not open with its title and id")
+        if f"{wc:.0f}s off the merge wait" not in plain:
+            out.append(f"{fid}: its block does not state the credited "
+                       f"{wc:.0f}s off the merge wait")
+        elif wc > 0:
+            # The figure is per cache hit: the rendered hit rate must be the
+            # stamped share (re-derived from per_run by _opt79_block_rederived).
+            clause = _opt79_hit_share_clause(_as_dict(f.get("cache_net_negative")))
+            want = f"{wc:.0f}s off the merge wait {clause}"
+            if clause is None or want not in plain:
+                out.append(f"{fid}: its block does not state the credited figure "
+                           f"with its stamped hit rate: {want!r}")
+        if "min/mo" in plain or "runner-min" in plain:
+            out.append(f"{fid}: its block states runner-minutes it does not carry")
+    return out
+
+
+def check_opt79_findings_rederived(report: str, findings_path: Path | None) -> Check:
+    """Every OPT79 finding re-derived by the arm it claims, and every pole-cache
+    finding paired with its rendered block.
+
+    TOP-LEVEL, like the uncredited check: the pole finding carries no Tier-2
+    certificate, so the Tier-2 pass (which also compat-SKIPs a report with no
+    Tier-2 stamps) never sees it."""
+    name = "OPT79 findings re-derive by their arm, and pole caches render"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    found = [f for f in _as_list(_as_dict(data).get("findings"))
+             if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT79"]
+    if not found:
+        if _VR_OPT79_POLE_MARKER_RE.search(report):
+            return Check(name, False, "the report renders an OPT79 pole-cache block "
+                         "but the run recorded no OPT79 finding")
+        return Check(name, True, "no OPT79 findings")
+    bad: list[str] = []
+    for f in found:
+        fid = str(f.get("id") or "?")
+        bad.extend(f"{fid}: {msg}" for msg in _opt79_finding_rederived(f, _as_dict(data)))
+    poles = [f for f in found if not f.get("tier2_neutrality")
+             and _as_dict(f.get("cache_net_negative")).get("kind") == _VR_OPT79_POLE_KIND]
+    bad.extend(_opt79_pole_findings_rendered(report, poles))
+    return Check(name, not bad,
+                 f"{len(found)} OPT79 finding(s) re-derived ({len(poles)} pole "
+                 "cache(s) rendered)" if not bad else "; ".join(bad[:6]))
 
 
 # Verbatim copies of the OPT80 constants in `collect_runs.py` — verify_report is
@@ -6523,7 +7354,10 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
         cert_claims = [c for c in _as_list(manifest.get("claims"))
                        if isinstance(c, dict) and c.get("kind") == "tier2_neutrality_line"]
     claim_by_subject = {str(c.get("subject")): c for c in cert_claims}
-    rendered_poles = {_cmp_name(check) for _wf, check, _body in _pole_header_sections(report)}
+    # Keyed by workflow FILE as well as job name: a `test` job in nightly.yml is
+    # not the `test` pole rendered for ci.yml.
+    rendered_poles = {(_wf_base(wf), _cmp_name(check))
+                      for wf, check, _body in _pole_header_sections(report)}
     bad: list[str] = []
     for idx, f in enumerate(ranked, 1):
         fid = _tier2_id(f, idx)
@@ -6561,8 +7395,22 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
             str(f.get("pattern") or "") == "OPT77"
             and _as_dict(f.get("setup_consolidation")).get(
                 "group_is_the_whole_workflow") is True)
-        if (rendered_poles and jobs & rendered_poles
-                and proof != "checkout_tail_excess" and not whole_workflow_opt77):
+        # OPT79's `below_long_pole` is the THIRD exemption, and only where the
+        # proxy's inference has been replaced: a drilled secondary pole that
+        # `workflow_job_graph` PROVES is in no `needs:` chain with its workflow's
+        # long pole (the arm below re-derives that it is strictly shorter than
+        # it), or one on a workflow no pull request waits on (no merge wait; the
+        # arm pairs that stamp with the sampled events). With no graph, or the
+        # chain present on a pull-request workflow, the proxy still applies.
+        unchained_below_long_pole = (
+            proof == _VR_OPT79_PROOF_BELOW_LONG_POLE
+            and str(f.get("pattern") or "") == "OPT79"
+            and _vr_opt79_below_long_pole_off_merge_gate(f, data))
+        wf_key = _wf_base(str(f.get("workflow_file") or ""))
+        on_pole = bool({(wf_key, j) for j in jobs} & rendered_poles)
+        if (rendered_poles and on_pole
+                and proof != "checkout_tail_excess" and not whole_workflow_opt77
+                and not unchained_below_long_pole):
             bad.append(f"{fid}: affected job is also rendered as a Long pole")
         if proof == "below_cluster_floor":
             got = _num(cert.get("margin_s"))
@@ -6586,6 +7434,13 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                 want = _below_floor_margin(f, data)
             if got is None or want is None or abs(got - want) > 0.11:
                 bad.append(f"{fid}: below-floor margin {got!r} != re-derived {want!r}")
+        elif proof == _VR_OPT79_PROOF_BELOW_LONG_POLE:
+            # OPT79's second runner-minute proof: at or above the cluster floor,
+            # strictly shorter than the long pole, and, on a pull-request
+            # workflow, in no `needs:` chain with it. The "rendered as a Long pole" proxy above still applies: it is
+            # what catches a chained job when the run recorded no job graph.
+            bad.extend(f"{fid}: {msg}"
+                       for msg in _tier2_below_long_pole_problems(f, data))
         elif proof == "post_completion_waste":
             if str(f.get("pattern") or "") not in {"OPT35", "OPT46", "OPT57", "OPT64"}:
                 bad.append(
@@ -6619,10 +7474,10 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                 # poles the rule itself reads.
                 if rendered_poles:
                     claimed = _as_dict(f.get("checkout_stall")).get("on_critical_path")
-                    if bool(claimed) != bool(jobs & rendered_poles):
+                    if bool(claimed) != on_pole:
                         bad.append(
                             f"{fid}: on_critical_path={claimed!r} but the job is "
-                            f"{'' if jobs & rendered_poles else 'not '}rendered as "
+                            f"{'' if on_pole else 'not '}rendered as "
                             "a Long pole")
         elif proof == "non_pr_event":
             if not _non_pr_event_corroborated(f, data):
@@ -6733,17 +7588,57 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
         # WHY it is uncredited is a claim too: only the long pole of a
         # workflow that gates a PR may be told its saving is on the merge wait,
         # and only a workflow no PR runs may be told no PR waits on it.
-        says_merge_wait = "on the merge wait" in why
-        says_no_pr = "does not run on pull requests" in why
+        # A flat "shortens the merge wait" is the same claim; the needs-chain
+        # row may say only that shrinking it MAY shorten it.
+        says_merge_wait = ("on the merge wait" in why
+                           or re.search(r"(?<!may )\bshortens the merge wait", why)
+                           is not None)
+        says_undeclared = "does not run on pull requests" in why
+        says_unsampled = "so no measured pull request waits on it" in why
+        says_no_pr = says_undeclared or says_unsampled
         if says_merge_wait != bool(cn.get("on_critical_path")):
             out.append(f"{tag}: `{job}` line {'claims' if says_merge_wait else 'omits'}"
                        f" the merge wait but on_critical_path is "
                        f"{cn.get('on_critical_path')!r}")
         no_pr = (not cn.get("on_critical_path")
                  and cn.get("workflow_gates_pull_requests") is False)
+        frag = _VR_OPT79_UNCREDITED_REASON_PHRASES.get(
+            str(cn.get("uncredited_reason") or ""))
+        lp_job = str(cn.get("long_pole_job") or "")
+        if (frag and lp_job not in ("", job)
+                and cn.get("uncredited_reason") == "pole_tied_with_next_job"):
+            # A co-pole's line names the slowest job it is tied with (the
+            # renderer's twin), not "the next-tallest job", which is itself.
+            frag = _strip_render_artifacts(
+                f"is tied with `{lp_job}`, this workflow's slowest job")
+        # The line is read with its render artifacts stripped (backticks
+        # included), so the fragment is too: the chain reason's `needs:` would
+        # otherwise never match its own rendered line.
+        if frag and _strip_render_artifacts(frag) not in why:
+            out.append(f"{tag}: `{job}` line does not state its reason "
+                       f"({cn.get('uncredited_reason')!r}: {frag!r})")
+        # Only the long pole is the workflow's slowest job: a row whose job is
+        # not it (a `needs:`-chain job, a co-pole) must never be told it is.
+        if (lp_job and lp_job != job and f"{_strip_render_artifacts(job)} is "
+                "this workflow's slowest job" in why):
+            out.append(f"{tag}: `{job}` line calls it this workflow's slowest job, "
+                       f"but the long pole is `{lp_job}`")
         if says_no_pr != no_pr:
             out.append(f"{tag}: `{job}` line {'says' if says_no_pr else 'does not say'}"
                        " no pull request runs it, against the row's stamps")
+        elif no_pr and cn.get("declares_pull_request") is True:
+            # Declared but not sampled: the line must say what was MEASURED.
+            n = cn.get("sampled_successful_run_count")
+            want_txt = (f"none of its {n} sampled runs was a pull request, so no "
+                        "measured pull request waits on it")
+            if says_undeclared or want_txt not in why:
+                out.append(f"{tag}: `{job}` declares pull requests but none was "
+                           f"sampled; its line must say {want_txt!r}, not that the "
+                           "workflow does not run on pull requests")
+        elif no_pr and says_unsampled:
+            out.append(f"{tag}: `{job}` line says the workflow declares pull "
+                       "requests, but the row stamps declares_pull_request="
+                       f"{cn.get('declares_pull_request')!r}")
     return out
 
 
@@ -9893,6 +10788,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_neutrality_derived(report, findings_path, report_path),
         check_tier2_measured_basis(report, findings_path),
         check_opt79_uncredited_rows_rederived(report, findings_path),
+        check_opt79_findings_rederived(report, findings_path),
         check_opt81_runner_comparison_rederived(report, findings_path),
         check_tier2_total_deoverlapped(report, findings_path, report_path),
         check_no_timing_endpoint_citation(report, report_path),
