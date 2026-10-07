@@ -889,6 +889,7 @@ def _detectors_skipped_violation(report: str,
 # coupling test pins all three equal).
 _VR_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _VR_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
+_VR_OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
 # (doc key, Data sources row label, counted noun, "Used for" cell) — as
 # blocking_path renders them. ONE re-derivation serves all three patterns.
 # The fourth field is carried HERE, not just pinned: it is the column that tells
@@ -921,6 +922,10 @@ _VR_WITHHELD_ROWS = (
     _VrWithheldRow(_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back",
                    "candidate checkout(s)",
                    "Why a checkout with a slow tail produced no finding",
+                   "job"),
+    _VrWithheldRow(_VR_OPT82_WITHHELD_DOC_KEY, "type-aware lint: held back",
+                   "candidate lint job(s)",
+                   "Why a slow lint job with type-aware ESLint produced no finding",
                    "job"),
 )
 _VR_WITHHELD_SHAPE_BY_KEY = {r.doc_key: r.entry_shape for r in _VR_WITHHELD_ROWS}
@@ -982,10 +987,33 @@ _VR_OPT80_WITHHOLD_PHRASES = {
         "there were more slow runs than the audit reads logs for, and the rest "
         "were never read",
 }
+_VR_OPT82_WITHHOLD_PHRASES = {
+    "lint_script_unresolvable":
+        "the lint step runs a package script this audit could not trace to the "
+        "command it runs",
+    "type_aware_config_reader_failed":
+        "the ESLint config reader failed, so whether lint builds the type graph "
+        "is unknown",
+    "no_eslint_config_found":
+        "no ESLint config was found for the lint job's directory, so whether it "
+        "builds the type graph is unknown",
+    "eslint_config_unreadable":
+        "an ESLint config the lint job uses could not be read",
+    "type_aware_setting_unresolvable":
+        "the ESLint config sets type-aware parsing from a value only known when "
+        "it runs",
+    "rule_setting_unresolvable":
+        "the ESLint config sets a type-aware rule from a value only known when "
+        "it runs",
+    "no_enumerable_type_aware_rule":
+        "type-aware parsing is on, but no type-aware rule could be named from "
+        "the config",
+}
 _VR_WITHHELD_PHRASES_BY_KEY = {
     _VR_OPT77_WITHHELD_DOC_KEY: _VR_OPT77_WITHHOLD_PHRASES,
     _VR_OPT79_WITHHELD_DOC_KEY: _VR_OPT79_HELD_BACK_REASONS,
     _VR_OPT80_WITHHELD_DOC_KEY: _VR_OPT80_WITHHOLD_PHRASES,
+    _VR_OPT82_WITHHELD_DOC_KEY: _VR_OPT82_WITHHOLD_PHRASES,
 }
 _VR_WITHHELD_JOBS_SHOWN = 5
 # Prefixed to the reason when more than one gate held candidates back, and the
@@ -6719,6 +6747,76 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
     return out
 
 
+# OPT82's ledger sentence — this verifier's own copy of
+# `blocking_path._OPT82_LEDGER_SENTENCE` (a test pins the two equal).
+_VR_OPT82_LEDGER_SENTENCE = (
+    "LEDGER (required before shipping): write a rule-by-rule ledger mapping every "
+    "rule the current config enables (from `eslint --print-config`) to the pass "
+    "that will run it after the change - the fast pass, the type-aware pass, or "
+    "both - and add a test asserting that the union of the two configs' enabled "
+    "rules equals the original set. A rule with no pass is a coverage loss and "
+    "blocks the change.")
+# "disable" applied to rules, in either order, within one sentence. The fix
+# this pattern hands off must never be "turn the type-aware rules off".
+_VR_OPT82_DISABLE_RULES_RE = re.compile(
+    r"\bdisabl\w*\b[^.\n]{0,60}\brules?\b|\brules?\b[^.\n]{0,60}\bdisabl\w*", re.I)
+_VR_OPT82_CARD_RE = re.compile(
+    r"<summary><strong>OPT82 - .*?</details>", re.S)
+
+
+def check_opt82_type_aware_lint_uncredited(report: str,
+                                           findings_path: Path | None) -> Check:
+    """Every OPT82 finding is UNCREDITED and names its rules, and every OPT82
+    card carries the ledger requirement and never says "disable" about rules.
+
+    OPT82 claims a config fact and a measured ceiling, never a saving: a
+    `wall_clock_p50_s > 0` or a runner-minute saving on it is a number the
+    detector cannot have measured. "Type-aware is on" without a named rule is
+    a shape claim. And the card is the hand-off: without the ledger sentence
+    the agent is free to buy speed by dropping rules."""
+    name = "type-aware lint findings are uncredited, name their rules and carry the ledger"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    found = [f for f in _as_list(_as_dict(data).get("findings"))
+             if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT82"]
+    cards = _VR_OPT82_CARD_RE.findall(report)
+    if not found:
+        if cards:
+            return Check(name, False, "the report renders an OPT82 card, but the run "
+                         "recorded no OPT82 finding")
+        return Check(name, True, "no type-aware lint findings")
+    bad: list[str] = []
+    for f in found:
+        fid = str(f.get("id") or "?")
+        wc = _num(f.get("wall_clock_p50_s"))
+        if wc is not None and wc > 0:
+            bad.append(f"{fid}: OPT82 carries wall_clock_p50_s {wc} - it is uncredited "
+                       "by design and must carry no saving")
+        if f.get("runner_min_saving"):
+            bad.append(f"{fid}: OPT82 carries runner_min_saving "
+                       f"{f.get('runner_min_saving')!r} - it is uncredited by design")
+        tal = _as_dict(f.get("type_aware_lint"))
+        if tal.get("kind") != "opt82_type_aware_lint":
+            bad.append(f"{fid}: missing its opt82_type_aware_lint evidence block")
+        rules = [r for r in _as_list(tal.get("rules"))
+                 if str(_as_dict(r).get("rule") or "").strip()]
+        if not rules:
+            bad.append(f"{fid}: OPT82 names no type-aware rule - 'type-aware is on' "
+                       "without a named rule is a shape claim, not a finding")
+    for card in cards:
+        if _strip_render_artifacts(_VR_OPT82_LEDGER_SENTENCE) not in \
+                _strip_render_artifacts(card):
+            bad.append("an OPT82 card is missing the ledger requirement sentence")
+        m = _VR_OPT82_DISABLE_RULES_RE.search(card)
+        if m:
+            bad.append(f"an OPT82 card says {m.group(0)!r} - the hand-off must never "
+                       "disable the type-aware rules")
+    return Check(name, not bad,
+                 f"{len(found)} OPT82 finding(s), {len(cards)} card(s) checked"
+                 if not bad else "; ".join(bad[:6]))
+
+
 def check_tier2_measured_basis(report: str, findings_path: Path | None) -> Check:
     name = "Tier-2 R-rows use measured sizing basis"
     early, data = _tier2_skip_or_data(findings_path, name, report)
@@ -9487,6 +9585,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_neutrality_derived(report, findings_path, report_path),
         check_tier2_measured_basis(report, findings_path),
         check_opt79_uncredited_rows_rederived(report, findings_path),
+        check_opt82_type_aware_lint_uncredited(report, findings_path),
         check_tier2_total_deoverlapped(report, findings_path, report_path),
         check_no_timing_endpoint_citation(report, report_path),
         check_tier2_claims_derivation_basis(report, findings_path, report_path),

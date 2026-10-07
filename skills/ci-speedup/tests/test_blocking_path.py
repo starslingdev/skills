@@ -8327,9 +8327,10 @@ def test_no_collector_path_can_record_a_held_back_entry_with_no_job():
         elif (isinstance(n, ast.Assign)
               and any(_is_target(t) for t in n.targets)):
             writes.append(("=", n))
-    # 77, 79 pre-probe, 79 post-probe, 80 — and every one of them an
-    # `append(<dict literal>)`, never an `extend`, an `insert` or a `+=`.
-    assert len(writes) == 4, [(k, ast.dump(n)[:60]) for k, n in writes]
+    # 77, 79 pre-probe, 79 post-probe, 80, 82 (guarded by `and job` in its
+    # `_no` helper) — and every one of them an `append(<dict literal>)`, never
+    # an `extend`, an `insert` or a `+=`.
+    assert len(writes) == 5, [(k, ast.dump(n)[:60]) for k, n in writes]
     for kind, n in writes:
         assert kind == "append", (kind, ast.dump(n)[:80])
         d = n.args[0]
@@ -8517,3 +8518,39 @@ def test_every_held_back_row_keeps_the_static_only_body_alive():
         md = bp.render(doc, "o/r")
         assert "held back" in md, (key, md)
         assert _withheld_row(md, label), (key, md)
+
+
+def test_opt82_held_back_row_names_the_lint_job_and_its_plain_reason():
+    """OPT82 (type-aware lint) joins the shared held-back registry: a slow lint
+    job whose ESLint config could not be decided is named with a plain-English
+    reason, never a gate code."""
+    rows = [{"workflow_file": ".github/workflows/lint.yml", "job": "eslint",
+             "gate": "type_aware_setting_unresolvable"}]
+    line = bp._withheld_candidates_line(
+        {bp._OPT82_WITHHELD_DOC_KEY: rows}, bp._OPT82_WITHHELD_DOC_KEY,
+        "candidate lint job(s)")
+    assert line == ("1 candidate lint job(s) held back (eslint): "
+                    + bp._OPT82_WITHHOLD_PHRASES["type_aware_setting_unresolvable"]
+                    + "."), line
+    md = bp.render({"repo": "o/r", "findings": [], "pr_critical_path": {"poles": []},
+                    "data_sources": {}, bp._OPT82_WITHHELD_DOC_KEY: rows}, "o/r")
+    assert _withheld_row(md, "type-aware lint: held back"), md
+
+
+def test_opt82_card_uses_its_own_prompt_never_the_generic_bill_line():
+    f = {"id": "f1", "pattern": "OPT82", "severity": "MEDIUM",
+         "title": "Lint Builds the Whole Type Graph",
+         "workflow_file": ".github/workflows/lint.yml", "affected_jobs": ["eslint"],
+         "evidence": "`eslint` runs ESLint with type-aware parsing on.",
+         "fix_recipe_anchor": "opt82--lint-builds-the-whole-type-graph",
+         "wall_clock_p50_s": 0.0, "runner_min_saving": None,
+         "type_aware_lint": {"kind": "opt82_type_aware_lint", "ceiling_s": 78.0,
+                             "ceiling_basis": "lint_step", "configs": ["eslint.config.mjs"],
+                             "rules": [{"rule": "@typescript-eslint/no-floating-promises"}],
+                             "benchmark_commands": {"as_ci_runs_it": "(time npx eslint .)",
+                                                    "without_type_information": "(time x)"}}}
+    lines, n, _ = bp._also_noticed_block([f], "https://example.invalid/c.md")
+    card = "\n".join(lines)
+    assert n == 1 and "uncredited, benchmark first" in card
+    assert bp._OPT82_LEDGER_SENTENCE in card and "SIZING: uncredited." in card
+    assert "runner-min/mo" not in card and "no bill saving" not in card

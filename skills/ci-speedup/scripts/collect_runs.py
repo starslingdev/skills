@@ -5868,6 +5868,13 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
     # checkout step), scaled by that job's own measured run frequency. It is
     # neither the per-job cost spine nor an eliminated-runs slice, so the generic
     # `measured` provenance text would misdescribe the number beside it.
+    # NOT DERIVABLE — OPT82 credits nothing at all: its finding is uncredited by
+    # design (the lint step's p50 is stamped as a CEILING, and a benchmark is
+    # required before any saving is claimed), so there is no number to derive.
+    "OPT82": (_RM_DOOR_NOT_DERIVABLE,
+              "uncredited type-aware lint detector — no runner-minute or wall-clock "
+              "saving is credited; the lint step's measured p50 is stamped as a "
+              "ceiling and the prompt requires a benchmark first"),
     "OPT80": (_RM_DOOR_NOT_DERIVABLE,
               "measured checkout tail-excess detector — basis is one step's "
               "mean-minus-p50 across the sample (jobs API steps[] timestamps), "
@@ -10739,6 +10746,504 @@ def _post_failure_waste_s(legs: list[dict[str, Any]]) -> tuple[float, str, list[
             if name:
                 sibling_names.append(name)
     return wasted, fail_name, sibling_names, fail_end.isoformat()
+
+
+# =============================================================================
+# OPT82 — Lint Builds the Whole Type Graph (uncredited; benchmark required)
+# =============================================================================
+# A lint job that runs ESLint with TYPE-AWARE parsing on builds a TypeScript
+# program for the files it lints, so lint costs roughly what a type-check
+# costs. The detector joins three facts and claims nothing beyond them:
+#   1. a workflow job runs ESLint (directly, or through package.json scripts);
+#   2. that job is measurably expensive (p50 >= `_OPT82_MIN_LINT_P50_S`) or is
+#      its workflow's measured long pole;
+#   3. the ESLint config(s) that job uses turn type-aware parsing on, AND name
+#      at least one type-aware rule (scan's `type_aware_lint` block).
+# No gh call: the config fact is static and the timings are already sampled.
+#
+# SIZING — uncredited by design. Nothing in config or timings says how much
+# of the lint step type information costs; only a benchmark can. The finding
+# carries `wall_clock_p50_s = 0` and no runner-minute saving, stamps the lint
+# step's measured p50 as a CEILING, and its prompt asks for the benchmark
+# first. There is deliberately no `_SIZING` row for OPT82.
+#
+# Every catalog fact this mirrors lives in `references/optimization-patterns.md`
+# under "### OPT82"; the verifier's check is
+# `verify_report.check_opt82_type_aware_lint_uncredited`.
+_OPT82_MIN_LINT_P50_S = 60.0
+# The findings-doc key the collector writes OPT82's WITHHELD candidates under
+# (`[{workflow_file, job, gate}]`). A STRING CONTRACT across the collector, the
+# renderer and the verifier; a coupling test pins the three equal.
+_OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
+# Exits that are a VERDICT about the job: it did not run, it is cheap and off
+# the critical path, or its lint builds no type information. Counted, never
+# listed as held back.
+_OPT82_VERDICT_GATES = frozenset({
+    "lint_job_never_ran_in_sample",
+    "lint_job_below_cost_threshold",
+    "type_aware_parsing_off",
+})
+# Exits on a slow lint job where the audit could not tell. Each is counted AND
+# listed, and renders as the shared held-back row.
+_OPT82_HELD_BACK_GATES = frozenset({
+    "lint_script_unresolvable",
+    "type_aware_config_reader_failed",
+    "no_eslint_config_found",
+    "eslint_config_unreadable",
+    "type_aware_setting_unresolvable",
+    "rule_setting_unresolvable",
+    "no_enumerable_type_aware_rule",
+})
+_OPT82_MAX_SCRIPT_DEPTH = 5
+_OPT82_SEGMENT_SPLIT_RE = _re.compile(r"&&|\|\||;|\||\n")
+# `npm`/`pnpm`/`yarn` flags that move a script to ANOTHER package's directory —
+# which package.json then defines it is not followed, so a lint-named script
+# behind one fails closed.
+_OPT82_SCOPE_FLAGS = frozenset({"--workspace", "-w", "--workspaces", "-ws",
+                                "--filter", "-F", "--prefix", "-C", "--cwd",
+                                "--dir", "-r", "--recursive"})
+_OPT82_PM_BUILTINS = frozenset({
+    "install", "i", "ci", "add", "remove", "rm", "exec", "dlx", "x", "test", "t",
+    "run", "run-script", "init", "publish", "pack", "audit", "outdated", "update",
+    "up", "upgrade", "link", "unlink", "why", "list", "ls", "config", "set",
+    "store", "rebuild", "prune", "dedupe", "env", "info", "version", "create",
+    "workspace", "workspaces", "global", "cache", "node", "help", "start",
+    "--version", "-v"})
+_OPT82_CACHE_FLAGS_WITH_VALUE = frozenset({"--cache-location", "--cache-strategy"})
+
+
+def _opt82_tokens(segment: str) -> list[str]:
+    import shlex
+    try:
+        toks = shlex.split(segment)
+    except ValueError:
+        toks = segment.split()
+    while toks and _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", toks[0]):
+        toks = toks[1:]            # leading `VAR=value` assignments
+    return toks
+
+
+def _opt82_eslint_args(toks: list[str]) -> "list[str] | None":
+    """The args of an ESLint invocation, or None when `toks` is not one."""
+    t = list(toks)
+    for prefix in (["npm", "exec", "--"], ["npm", "exec"], ["pnpm", "exec"],
+                   ["pnpm", "dlx"], ["yarn", "exec"], ["yarn", "dlx"], ["bun", "x"],
+                   ["npx"], ["bunx"], ["yarn"]):
+        if t[:len(prefix)] == prefix:
+            t = t[len(prefix):]
+            while t and t[0].startswith("-") and t[0] != "--":
+                t = t[1:]                  # `npx --no-install eslint`
+            if t[:1] == ["--"]:
+                t = t[1:]
+            break
+    if t and t[0].rsplit("/", 1)[-1] == "eslint":
+        return t[1:]
+    return None
+
+
+def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None"
+                      ) -> "tuple[str, bool] | None":
+    """`(script name, scoped elsewhere?)` when `toks` runs a package script."""
+    if not toks:
+        return None
+    pm, rest = toks[0], toks[1:]
+    if pm not in ("npm", "pnpm", "yarn", "bun"):
+        return None
+    scoped = any(r.split("=", 1)[0] in _OPT82_SCOPE_FLAGS for r in rest)
+    # drop the value of a `--filter X` style flag
+    clean: list[str] = []
+    skip = False
+    for r in rest:
+        if skip:
+            skip = False
+            continue
+        if r in _OPT82_SCOPE_FLAGS and r not in ("-r", "--recursive", "--workspaces", "-ws"):
+            skip = True
+            continue
+        if not r.startswith("-"):
+            clean.append(r)
+    args = clean
+    if not args:
+        return None
+    if args[0] in ("run", "run-script"):
+        return (args[1], scoped) if len(args) > 1 else None
+    if pm == "npm" or args[0] in _OPT82_PM_BUILTINS:
+        return None
+    # `pnpm lint` / `yarn lint`: a script only when the package declares one.
+    if scripts is not None and args[0] in scripts:
+        return args[0], scoped
+    if "lint" in args[0].lower():
+        return args[0], scoped
+    return None
+
+
+def _opt82_resolve_lint(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
+                        chain: "list[str] | None" = None, depth: int = 0
+                        ) -> "tuple[str, str, list[str]] | None":
+    """("eslint", eslint command, script chain) when `cmd` runs ESLint;
+    ("unresolvable", reason, chain) when it runs a lint-named package script
+    this read cannot trace; None when it is not a lint step."""
+    chain = list(chain or [])
+    unresolvable: "tuple[str, str, list[str]] | None" = None
+    for seg in _OPT82_SEGMENT_SPLIT_RE.split(cmd or ""):
+        seg = seg.strip()
+        if not seg:
+            continue
+        lintish = "lint" in seg.lower()
+        if "${{" in seg:
+            if lintish:
+                unresolvable = unresolvable or ("unresolvable", "expression", chain)
+            continue
+        toks = _opt82_tokens(seg)
+        args = _opt82_eslint_args(toks)
+        if args is not None:
+            return "eslint", " ".join(["eslint", *args]), chain
+        scripts = scripts_by_dir.get(wd)
+        ref = _opt82_script_ref(toks, scripts)
+        if ref is None:
+            continue
+        name, scoped = ref
+        lint_named = "lint" in name.lower()
+        body = (scripts or {}).get(name)
+        if scoped or body is None or depth >= _OPT82_MAX_SCRIPT_DEPTH:
+            if lint_named:
+                unresolvable = unresolvable or ("unresolvable", name, chain)
+            continue
+        sub = _opt82_resolve_lint(body, wd, scripts_by_dir,
+                                  chain + [f"{toks[0]} run {name}"], depth + 1)
+        if sub is not None and sub[0] == "eslint":
+            return sub
+        if sub is not None and lint_named:
+            unresolvable = unresolvable or sub
+    return unresolvable
+
+
+def _opt82_norm_dir(value: Any) -> "str | None":
+    """A working directory as a repo-relative posix path ("" = root); None
+    when it is an expression this read cannot evaluate."""
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if "${{" in s:
+        return None
+    s = s.replace("\\", "/")
+    while s.startswith("./"):
+        s = s[2:]
+    s = s.strip("/")
+    return "" if s in ("", ".") else s
+
+
+def _opt82_config_flag(eslint_cmd: str) -> "str | None":
+    toks = _opt82_tokens(eslint_cmd)
+    for i, t in enumerate(toks):
+        if t in ("-c", "--config") and i + 1 < len(toks):
+            return toks[i + 1]
+        if t.startswith("--config="):
+            return t.split("=", 1)[1]
+    return None
+
+
+def _opt82_applicable_configs(block: dict[str, Any], wd: str, explicit: "str | None"
+                              ) -> "tuple[list[dict[str, Any]], list[str]]":
+    """The configs ESLint uses for a lint run in `wd`, and the unreadable
+    config files that could be among them.
+
+    ESLint reads the config passed with `-c` when there is one; otherwise the
+    nearest config at or above the working directory. A legacy `.eslintrc`
+    cascades, so nested eslintrc-format configs below the directory count too;
+    a nested flat config does not (flat lookup starts at the cwd)."""
+    configs = [c for c in (block.get("configs") or []) if isinstance(c, dict)]
+    unreadable = [str(u) for u in (block.get("unreadable") or [])]
+    import posixpath
+    if explicit:
+        p = posixpath.normpath(posixpath.join(wd, explicit)) if wd else \
+            posixpath.normpath(explicit)
+        return ([c for c in configs if c.get("path") == p],
+                [u for u in unreadable if u == p])
+    dirs = {str(c.get("dir") or "") for c in configs} | {
+        (u.rsplit("/", 1)[0] if "/" in u else "") for u in unreadable}
+    near = None
+    d = wd
+    while True:
+        if d in dirs:
+            near = d
+            break
+        if not d:
+            break
+        d = d.rsplit("/", 1)[0] if "/" in d else ""
+    below = (lambda x: x != "" and (wd == "" or x.startswith(wd + "/")))
+    picked = [c for c in configs
+              if (near is not None and c.get("dir") == near)
+              or (below(str(c.get("dir") or "")) and c.get("format") != "flat"
+                  and str(c.get("dir")) != near)]
+    bad = [u for u in unreadable
+           if (u.rsplit("/", 1)[0] if "/" in u else "") == near
+           or below(u.rsplit("/", 1)[0] if "/" in u else "")]
+    return picked, bad
+
+
+def _opt82_benchmark_commands(eslint_cmd: str, wd: str, rules: list[str]
+                              ) -> dict[str, str]:
+    """The one-command benchmark: the lint as CI runs it, and the same lint
+    with type information unset and the enumerated rules off FOR THE TIMING
+    RUN ONLY. Both cold: `--cache` is removed from both."""
+    toks = _opt82_tokens(eslint_cmd)[1:]
+    kept: list[str] = []
+    skip = False
+    for t in toks:
+        if skip:
+            skip = False
+            continue
+        if t == "--cache":
+            continue
+        if t in _OPT82_CACHE_FLAGS_WITH_VALUE:
+            skip = True
+            continue
+        if t.split("=", 1)[0] in _OPT82_CACHE_FLAGS_WITH_VALUE:
+            continue
+        kept.append(t)
+    import shlex
+    base = "npx eslint" + "".join(" " + shlex.quote(t) for t in kept)
+    off = (" --parser-options project:false --parser-options projectService:false"
+           + "".join(f" --rule '{r}: off'" for r in rules))
+    pre = f"cd {shlex.quote(wd)} && " if wd else ""
+    return {"as_ci_runs_it": f"({pre}time {base})",
+            "without_type_information": f"({pre}time {base}{off})"}
+
+
+def _detect_opt82_type_aware_lint(
+    wf_path: str,
+    jobs_per_run: list[list[dict[str, Any]]],
+    crit: dict[str, Any],
+    wf_doc: dict[str, Any] | None,
+    block: dict[str, Any] | None,
+    start_idx: int,
+    withheld: dict[str, int] | None = None,
+    withheld_candidates: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Lint builds the whole type graph (catalog OPT82) — uncredited.
+
+    Fires on a workflow job that runs ESLint, is measurably expensive (p50 at
+    or above `_OPT82_MIN_LINT_P50_S`, or the workflow's long pole), and whose
+    ESLint config turns type-aware parsing on with at least one NAMED
+    type-aware rule. "Type-aware is on somewhere" with no rule to name is a
+    shape claim, not a finding, and is withheld.
+
+    Every exit is counted into `withheld` (stamped as `opt82_withheld_by_gate`).
+    A slow lint job the audit could not decide (`_OPT82_HELD_BACK_GATES`) is
+    also appended to `withheld_candidates`, which the report renders as the
+    shared held-back row. Verdicts (`_OPT82_VERDICT_GATES`) are never listed."""
+    def _no(gate: str, job: str = "", **ctx: Any) -> None:
+        if withheld is not None:
+            withheld[gate] = withheld.get(gate, 0) + 1
+        if (withheld_candidates is not None and gate in _OPT82_HELD_BACK_GATES
+                and job):
+            withheld_candidates.append(
+                {"workflow_file": wf_path, "job": job, "gate": gate})
+        logger.debug("OPT82 %s: withheld by %s%s", wf_path, gate,
+                      (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items()))
+                      if ctx else "")
+
+    doc = wf_doc if isinstance(wf_doc, dict) else {}
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        _no("workflow_yaml_unparsed")
+        return []
+    tal = block if isinstance(block, dict) else {"error": "missing"}
+    scripts_by_dir = {str(k): v for k, v in (tal.get("package_scripts") or {}).items()
+                      if isinstance(v, dict)}
+    job_p50: dict[str, float] = dict(crit.get("job_p50") or {})
+    long_pole = str(crit.get("long_pole_job") or "")
+    wf_defaults = ((doc.get("defaults") or {}).get("run") or {}) \
+        if isinstance(doc.get("defaults"), dict) else {}
+    out: list[dict[str, Any]] = []
+    for key in sorted(jobs, key=str):
+        spec = jobs.get(key)
+        if not isinstance(spec, dict) or not isinstance(spec.get("steps"), list):
+            continue
+        job_defaults = ((spec.get("defaults") or {}).get("run") or {}) \
+            if isinstance(spec.get("defaults"), dict) else {}
+        found: "tuple[str, str, list[str]] | None" = None
+        lint_step: dict[str, Any] = {}
+        wd = ""
+        for step in spec["steps"]:
+            if not isinstance(step, dict) or not isinstance(step.get("run"), str):
+                continue
+            raw_wd = step.get("working-directory",
+                              job_defaults.get("working-directory",
+                                               wf_defaults.get("working-directory")))
+            step_wd = _opt82_norm_dir(raw_wd)
+            res = _opt82_resolve_lint(step["run"], step_wd or "", scripts_by_dir)
+            if res is None:
+                continue
+            if step_wd is None:
+                res = ("unresolvable", "working-directory expression", res[2])
+            if res[0] == "eslint" or found is None:
+                found, lint_step, wd = res, step, step_wd or ""
+            if res[0] == "eslint":
+                break
+        if found is None:
+            continue
+        display = str(spec.get("name") or key).strip()
+        if "${{" in display:
+            name_re = _re.compile("^" + ".+".join(
+                _re.escape(p) for p in _re.split(r"\$\{\{.*?\}\}", display)) + "$")
+            observed = [n for n in job_p50 if name_re.match(n)]
+        else:
+            observed = [n for n in job_p50
+                        if n == display or n.startswith(display + " (")]
+        if not observed:
+            _no("lint_job_never_ran_in_sample", job=display)
+            continue
+        job_name = display if display in observed else sorted(observed)[0]
+        p50 = max(float(job_p50[n]) for n in observed)
+        on_cp = long_pole in observed
+        if p50 < _OPT82_MIN_LINT_P50_S and not on_cp:
+            _no("lint_job_below_cost_threshold", job=job_name, p50=p50)
+            continue
+        if tal.get("error"):
+            _no("type_aware_config_reader_failed", job=job_name)
+            continue
+        if found[0] != "eslint":
+            _no("lint_script_unresolvable", job=job_name, script=found[1])
+            continue
+        eslint_cmd, chain = found[1], found[2]
+        configs, bad = _opt82_applicable_configs(tal, wd, _opt82_config_flag(eslint_cmd))
+        if bad:
+            _no("eslint_config_unreadable", job=job_name, files=bad)
+            continue
+        if not configs:
+            _no("no_eslint_config_found", job=job_name, wd=wd)
+            continue
+        if any(c.get("type_aware") == "unresolved" for c in configs):
+            _no("type_aware_setting_unresolvable", job=job_name)
+            continue
+        on = [c for c in configs if c.get("type_aware") == "on"]
+        if not on:
+            _no("type_aware_parsing_off", job=job_name)
+            continue
+        catalog = _opt82_rules_catalog()
+        rules: dict[str, dict[str, Any]] = {}
+        custom_src = {cr_["rule"]: cr_["source"] for c in on
+                      for cr_ in (c.get("custom_rules") or []) if isinstance(cr_, dict)}
+        for c in on:
+            for r in c.get("rules") or []:
+                rules.setdefault(r, {
+                    "rule": r,
+                    "source": "typescript-eslint" if r in catalog else "custom",
+                    "syntax_only_equivalent": (catalog.get(r) or {}).get(
+                        "syntax_only_equivalent"),
+                    "config": c.get("path"),
+                    **({"rule_source": custom_src[r]} if r in custom_src else {}),
+                })
+        if not rules:
+            if any(c.get("rule_unresolved") for c in on):
+                _no("rule_setting_unresolvable", job=job_name)
+            else:
+                _no("no_enumerable_type_aware_rule", job=job_name)
+            continue
+        rule_list = [rules[r] for r in sorted(rules)]
+        # The lint STEP's own p50 is the ceiling; the job's p50 when the step
+        # could not be measured (its name never matched a sampled step).
+        step_name = str(lint_step.get("name") or "").strip() or (
+            "Run " + str(lint_step.get("run") or "").strip().splitlines()[0])
+        step_durs: list[float] = []
+        for run_jobs in jobs_per_run:
+            for j in run_jobs:
+                if str(j.get("name") or "") not in observed:
+                    continue
+                for st in j.get("steps") or []:
+                    if str(st.get("name") or "").strip() == step_name:
+                        d = _duration_s(st.get("started_at"), st.get("completed_at"))
+                        if d is not None and d > 0:
+                            step_durs.append(d)
+        step_p50 = round(_percentile(step_durs, 50), 1) if step_durs else None
+        ceiling = step_p50 if step_p50 is not None else round(p50, 1)
+        basis = "lint_step" if step_p50 is not None else "lint_job"
+        bench = _opt82_benchmark_commands(eslint_cmd, wd, sorted(rules))
+        title = "Lint Builds the Whole Type Graph"
+        via = (f", via `{' -> '.join(chain)}`" if chain else "")
+        ta_ev = next((e for c in on for e in (c.get("type_aware_evidence") or [])), "")
+        names = ", ".join(f"`{r}`" for r in sorted(rules)[:8]) + (
+            f" and {len(rules) - 8} more" if len(rules) > 8 else "")
+        evidence = (
+            f"`{job_name}` runs ESLint (`{eslint_cmd}`{via}) with type-aware parsing "
+            f"on ({ta_ev}), so every lint run builds a TypeScript program for the "
+            f"files it lints. {len(rules)} type-aware rule(s) are on: {names}. "
+            f"The job measures {p50:.0f}s at p50"
+            + (" and is this workflow's slowest job" if on_cp else "")
+            + (f"; its lint step `{step_name}` measures {step_p50:.0f}s at p50"
+               if step_p50 is not None else "")
+            + f". That {ceiling:.0f}s is the CEILING on what changing lint can save, "
+            "not a forecast: no saving is credited until a benchmark measures it.")
+        me = _measured_evidence(
+            ["Type-aware rule", "Source", "Config"],
+            [[f"`{r['rule']}`", r["source"], f"`{r['config']}`"] for r in rule_list],
+            summary=evidence,
+            note=("Rules are read from the ESLint config text, never evaluated; the "
+                  "typescript-eslint list is references/type-aware-lint-rules.tsv. "
+                  "The lint durations come from the jobs API steps[] timestamps."))
+        f = _new_finding(
+            "OPT82", "MEDIUM", title, wf_path, job_name, evidence,
+            "lint-builds-the-whole-type-graph", _catalog_anchor("OPT82", title),
+            start_idx + len(out) + 1, wc_p50=0.0, rm=None,
+            size_note=(f"uncredited. The lint step's measured p50 ({ceiling:.0f}s) is "
+                       "the CEILING; the saving needs a benchmark (same lint, same "
+                       "runner, without type information) before any number is "
+                       "claimed."),
+            realization="none", measured_evidence=me)
+        f["affected_jobs"] = [job_name]
+        f["sizing_basis"] = "uncredited"
+        f["risk"] = "MEDIUM"
+        f["guardrail"] = (
+            "A rule-by-rule ledger (rule -> pass) and a test that the union of the "
+            "two configs' enabled rules equals the original set. Every rule still "
+            "runs somewhere; the full type-aware pass stays on the merge queue / "
+            "default branch.")
+        f["type_aware_lint"] = {
+            "kind": "opt82_type_aware_lint",
+            "job": job_name,
+            "yaml_job": str(key),
+            "working_directory": wd,
+            "lint_command": eslint_cmd,
+            "script_chain": chain,
+            "lint_step": step_name,
+            "lint_step_p50_s": step_p50,
+            "lint_job_p50_s": round(p50, 1),
+            "ceiling_s": ceiling,
+            "ceiling_basis": basis,
+            "on_critical_path": on_cp,
+            "min_lint_p50_s": _OPT82_MIN_LINT_P50_S,
+            "configs": [c.get("path") for c in on],
+            "type_aware_evidence": [e for c in on
+                                    for e in (c.get("type_aware_evidence") or [])][:6],
+            "rules": rule_list,
+            "benchmark_commands": bench,
+        }
+        out.append(f)
+    return out
+
+
+_OPT82_RULES_CACHE: "dict[str, dict[str, Any]] | None" = None
+
+
+def _opt82_rules_catalog() -> dict[str, dict[str, Any]]:
+    """references/type-aware-lint-rules.tsv (the same file, and the same
+    format, scan.py's `_load_type_aware_rules` reads; a test pins the two
+    readers equal)."""
+    global _OPT82_RULES_CACHE
+    if _OPT82_RULES_CACHE is None:
+        path = (Path(__file__).resolve().parents[1] / "references"
+                / "type-aware-lint-rules.tsv")
+        rows: dict[str, dict[str, Any]] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            rule, base, presets = line.split("\t")
+            rows[rule] = {"syntax_only_equivalent": None if base == "-" else base,
+                          "presets": [] if presets == "-" else presets.split(",")}
+        _OPT82_RULES_CACHE = rows
+    return _OPT82_RULES_CACHE
 
 
 def _detect_opt64_rerun_attempt_waste(
@@ -19444,14 +19949,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
-        # OPT77, OPT79 and OPT80 all answer a safety gate from the workflow
+        # OPT77, OPT79, OPT80 and OPT82 all answer a safety gate from the workflow
         # file (`needs:` independence, the cache step, the checkout step). When
         # it could not be parsed — malformed YAML, or a run without PyYAML —
         # all three return nothing, which reads exactly like "we looked and
         # found nothing". Disclosed through the same channel a fetch failure
         # uses, so the report NAMES the workflow instead.
         if not isinstance((_wf_docs.get(wf_path) or {}).get("jobs"), dict):
-            _skip_detectors(wf_path, ["OPT77", "OPT79", "OPT80"],
+            _skip_detectors(wf_path, ["OPT77", "OPT79", "OPT80", "OPT82"],
                             "its workflow YAML could not be parsed")
         # OPT77 shares OPT65's event-scoped monthly volume (same workflow, same
         # scaling question) so it costs no extra gh call, and reads the workflow
@@ -19520,6 +20025,27 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             # as clean.
             withheld_candidates=findings_doc.setdefault(_OPT80_WITHHELD_DOC_KEY, []),
             notes=findings_doc.setdefault("opt80_notes", {}))
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+
+        # OPT82 joins scan's static `type_aware_lint` block (the ESLint config
+        # fact) to this workflow's sampled timings. It makes NO gh call. Like
+        # OPT77/OPT80 every gate is counted, and a slow lint job it could not
+        # decide is listed for the shared held-back row. The call is GUARDED: a
+        # bug in it skips OPT82 for this workflow, disclosed by name, rather
+        # than taking the whole data pass down.
+        try:
+            new = _detect_opt82_type_aware_lint(
+                wf_path, jobs_per_run, crit, _wf_docs.get(wf_path, {}),
+                findings_doc.get("type_aware_lint"), next_id,
+                withheld=findings_doc.setdefault("opt82_withheld_by_gate", {}),
+                withheld_candidates=findings_doc.setdefault(_OPT82_WITHHELD_DOC_KEY, []))
+        except Exception as e:  # noqa: BLE001 — never take the data pass down
+            logger.warning("OPT82 detector failed on %s: %s: %s",
+                           wf_path, type(e).__name__, e)
+            _skip_detectors(wf_path, ["OPT82"],
+                            f"the type-aware lint check failed ({type(e).__name__})")
+            new = []
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 

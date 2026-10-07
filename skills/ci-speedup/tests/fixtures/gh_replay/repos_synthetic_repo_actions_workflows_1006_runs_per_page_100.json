@@ -1,0 +1,47 @@
+{
+ "total_count": 3,
+ "workflow_runs": [
+  {
+   "id": 8203,
+   "event": "push",
+   "head_sha": "0000000000000000000000000000000000008203",
+   "head_branch": "main",
+   "status": "completed",
+   "conclusion": "success",
+   "created_at": "2026-06-27T03:00:00Z",
+   "updated_at": "2026-06-27T03:01:35Z",
+   "run_started_at": "2026-06-27T03:00:00Z",
+   "head_repository": {
+    "full_name": "synthetic/repo"
+   }
+  },
+  {
+   "id": 8202,
+   "event": "push",
+   "head_sha": "0000000000000000000000000000000000008202",
+   "head_branch": "main",
+   "status": "completed",
+   "conclusion": "success",
+   "created_at": "2026-06-27T02:00:00Z",
+   "updated_at": "2026-06-27T02:01:35Z",
+   "run_started_at": "2026-06-27T02:00:00Z",
+   "head_repository": {
+    "full_name": "synthetic/repo"
+   }
+  },
+  {
+   "id": 8201,
+   "event": "push",
+   "head_sha": "0000000000000000000000000000000000008201",
+   "head_branch": "main",
+   "status": "completed",
+   "conclusion": "success",
+   "created_at": "2026-06-27T01:00:00Z",
+   "updated_at": "2026-06-27T01:01:35Z",
+   "run_started_at": "2026-06-27T01:00:00Z",
+   "head_repository": {
+    "full_name": "synthetic/repo"
+   }
+  }
+ ]
+}

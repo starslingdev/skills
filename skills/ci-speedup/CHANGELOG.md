@@ -13,6 +13,29 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-07** — **The report now flags a slow lint job whose type-aware ESLint
+  rules force it to build the whole type graph.** When a lint job takes a minute
+  or more (or is the slowest job in its workflow) and the repository's ESLint
+  configuration turns on type-aware parsing with at least one rule that needs
+  types, the report names that job, the config lines that switch it on and each
+  type-aware rule it found, including custom rules that ask for type information
+  (OPT82). Lint in that setup costs roughly as much as a type-check, and the
+  finding says so. It carries no saving number: nothing in the sampled runs says
+  how much of lint is the type graph, so the card shows the lint step's measured
+  time as a ceiling, not a forecast, and tells the agent to benchmark first. The
+  suggested change never turns rules off. The agent is asked to rewrite a rule
+  only where a syntax-only form catches the same defects, or to split lint into a
+  fast pass and a type-aware pass limited to exactly those rules, with the full
+  type-aware pass kept on the merge queue and default branch, and to prove with a
+  rule-by-rule ledger and a union test that every rule still runs somewhere. A
+  lint job the audit could not decide on (a script it could not trace, a config
+  it could not read, a setting only known at run time, no rule it could name) is
+  named in a new `type-aware lint: held back` row of the Data sources table rather
+  than passing as "nothing found". The rule list is the new
+  `references/type-aware-lint-rules.tsv`, taken from typescript-eslint's `main`
+  branch on 2026-10-07 (UTC), with its source in the file header. Lint run through
+  a marketplace action or through turbo, nx or lerna is not detected.
+
 - **2026-09-30** — **The report now says, in plain English, which caches it held
   back and why.** When the cache check (OPT79) could not reach a verdict on a
   candidate cache, the Data sources table used to print an internal gate name as

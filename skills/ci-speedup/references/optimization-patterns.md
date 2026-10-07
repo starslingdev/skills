@@ -44,7 +44,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 8 — Release Workflow**: release-path caching + redundancy.
 - **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups.
 - **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory).
-- **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys.
+- **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
 - **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds.
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
 - **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT78` is routed by the drill-time leaf detector rather than the structural router.
@@ -954,7 +954,7 @@ title_template: "Repeated Checkout/Setup Without Artifact Handoff (and Slow Tool
 | Source             | Target                | Realistic speedup                                                                                | Drop-in?          | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------ | --------------------- | ------------------------------------------------------------------------------------------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Prettier**       | **oxfmt**             | **~4–30×** (depends on tree size + tailwind sort)                                                | Mostly            | Drop-in for JS/TS/CSS/MD. Respects `.prettierignore` in scan mode (no positional args); does NOT respect it in explicit-path mode. `npx oxfmt --migrate prettier` produces a config from `.prettierrc`. Tailwind class sort uses oxfmt's own algorithm — order differs from `prettier-plugin-tailwindcss`. `embeddedLanguageFormatting` for JS/TS template literals (CSS-in-JS, `gql\`...\``) is not yet supported.                                                                                                                         |
-| **ESLint**         | **oxlint**            | **~8–20×** realistic (NOT the 50–100× advertised when type-aware rules and custom plugins exist) | Partial fit only  | Recommend a **dual-run scoped ESLint pattern** when ANY of the following are present: custom local rules, `tailwindcss` plugin, type-aware rules requiring `tsgolint`, framework plugins (`convex/*`, `next/*`, `@typescript-eslint/*` type-aware rules), or a `react-hooks/exhaustive-deps` configuration the team relies on. In dual-run, oxlint runs first across the tree; ESLint runs second with a config restricted to the rules oxlint can't replicate. Do NOT recommend a wholesale oxlint-only swap when these gates are present. |
+| **ESLint**         | **oxlint**            | **~8–20×** realistic (NOT the 50–100× advertised when type-aware rules and custom plugins exist) | Partial fit only  | Recommend a **dual-run scoped ESLint pattern** when ANY of the following are present: custom local rules, `tailwindcss` plugin, type-aware rules requiring `tsgolint`, framework plugins (`convex/*`, `next/*`, `@typescript-eslint/*` type-aware rules), or a `react-hooks/exhaustive-deps` configuration the team relies on. In dual-run, oxlint runs first across the tree; ESLint runs second with a config restricted to the rules oxlint can't replicate. Do NOT recommend a wholesale oxlint-only swap when these gates are present. When type-aware rules are on, OPT82's ledger is the prerequisite this row assumes: run it first ([OPT82](#opt82--lint-builds-the-whole-type-graph)). |
 | **Babel**          | **SWC**               | **~10×** compile                                                                                 | Yes for most      | Drop-in via `next/babel`, framework integration, or `@swc/jest`. Verify any custom Babel plugins have SWC equivalents before recommending.                                                                                                                                                                                                                                                                                                                                                                                                  |
 | **Webpack**        | **Turbopack**         | **~2–5×** build                                                                                  | Yes (Next.js 16+) | Default in Next.js 16+. Check for `webpack:` overrides in `next.config.js` that force fallback to webpack — those often need to be ported or removed before Turbopack is actually active.                                                                                                                                                                                                                                                                                                                                                   |
 | **`tsc --noEmit`** (TypeScript 5.x/6.x) | **TypeScript 7** (`typescript@^7`, the native port; the command is still `tsc`) | Vendor-stated "typically 8x to 12x on full builds" (TypeScript 7.0 announcement); measure per repo | Yes for type-check-only steps | Same checker, native and multithreaded: an upgrade of the real type-check, not a swap to a tool that skips it, and NOT the esbuild/swc anti-row below, which strips types. TypeScript 7.0 is stable (7.0.2 is `latest` on npm); the older `tsgo` / `@typescript/native-preview` preview is superseded, so do not recommend it. Caveats: 7.0 ships without a programmatic compiler API (expected in 7.1), so tools that call it (typescript-eslint type-aware rules, webpack/ts-loader style loaders) need the side-by-side `@typescript/typescript6` alias (`tsc6`); 7.0 changes defaults (`strict: true`, `types: []`, no `baseUrl`), so expect new errors on upgrade. On small CI runners, `--checkers` / `--singleThreaded` bound memory. Keep the old compiler for anything needing the API. |
@@ -3594,6 +3594,170 @@ fi
 Note: `ui` can also be set via `TURBO_UI=stream` env var in CI workflows. `outputLogs` can be overridden per-run with `--output-logs` CLI flag. Verify `futureFlags` compatibility with the project's turbo version via Context7.
 
 **Real-world example (mastra)**: PR #14432 added `ui: "stream"` and `futureFlags` at root level, and `outputLogs: "new-only"` on the `build` task.
+
+
+---
+
+### OPT82 — Lint Builds the Whole Type Graph
+
+<!-- METADATA
+pattern: OPT82
+impact: MEDIUM
+class: data-driven
+detector: eslint-type-aware-lint
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,eslint.config.*,.eslintrc*,package.json"
+fix_strategy: lint-builds-the-whole-type-graph
+title_template: "Lint Builds the Whole Type Graph"
+-->
+
+**TL;DR**: A slow lint job runs ESLint with type-aware rules switched on. Those
+rules make ESLint build a TypeScript program for the files it lints, the whole
+type graph, so lint costs roughly as much as a type-check. The report names the
+rules that force that cost and asks for a benchmark before any change. It
+carries no saving number, and it never recommends turning rules off.
+
+**Anti-pattern**: ESLint is normally a syntax-only tool: it parses one file and
+walks its tree. A type-aware rule (`no-floating-promises`, `no-unsafe-*`,
+`no-misused-promises` and the rest of the list in
+`references/type-aware-lint-rules.tsv`) needs types, so the parser is configured
+with `parserOptions.project` or `projectService` and builds a TypeScript program
+that resolves every import of every linted file. One such rule is enough: the
+program is built once for the run, for all rules, including the ones that never
+look at a type.
+
+```
+before:  eslint  ->  build TS program (whole type graph)  ->  every rule, every file   (lint ~ a type-check)
+after:   fast pass:  eslint, syntax-only rules, no program        (cheap, every change)
+         type pass:  eslint, ONLY the type-aware rules, scoped    (changed files / touched packages)
+         merge queue / default branch: the full type-aware pass, unchanged
+```
+
+**Detection heuristic** (every gate required; every gate fails closed):
+
+1. A YAML job runs ESLint: `eslint` directly (including the `npx`, `pnpm exec`,
+   `yarn` and `bunx` forms), or `npm|pnpm|yarn|bun run <script>` where the script,
+   resolved through `package.json` `scripts` in the step's working directory,
+   runs ESLint. A script that cannot be traced to the command it runs is held
+   back, never guessed.
+2. The job is expensive: its measured p50 is at least 60s
+   (`_OPT82_MIN_LINT_P50_S`), or it is its workflow's measured long pole.
+3. Type-aware parsing is ON in the ESLint config that applies to the lint job's
+   directory (the file passed with `-c` / `--config`; otherwise the nearest
+   config at or above that directory, plus nested legacy `.eslintrc*` configs
+   below it, which cascade. A nested flat config is not counted: flat-config
+   lookup starts at the working directory). ON means a literal
+   `parserOptions.project` (`true`, a string or an array), a `projectService`
+   (`true` or an object), or an extended preset ending in `-type-checked` /
+   `TypeChecked` (or `recommended-requiring-type-checking`). The
+   `disable-type-checked` config never counts, and `project: false` is OFF.
+   Comments are stripped before reading. Any other value (an identifier, an
+   environment variable, a ternary, a `parserOptions` taken from a variable) is
+   unresolvable: the candidate is held back, not read as on or off.
+4. At least one type-aware rule can be NAMED from the config. Type-aware parsing
+   being on somewhere, with no rule named, is a claim about shape and the
+   candidate is held back.
+
+How the rules are enumerated: every rule in `references/type-aware-lint-rules.tsv`
+that the config turns on, either explicitly (an entry not set to `off` / `0`) or
+through a type-checked preset and not explicitly off, PLUS custom rules. A custom
+rule counts when its key `<namespace>/<name>` is turned on in the config and its
+source file, reached by following the config's RELATIVE imports (bounded), calls
+`getParserServices` or `getTypeChecker`. A rule whose severity is only known at
+run time (a computed value) is never named; when that leaves no rule to name,
+the candidate is held back (`rule_setting_unresolvable`) rather than read as
+having none. The prompt's `eslint --print-config` ledger covers any rule the
+static read could not name.
+
+The data file lists 63 rules, every typescript-eslint rule documented as
+requiring type information, with the core ESLint rule each one extends (where
+typescript-eslint documents one) and the type-checked presets that enable it.
+Source: typescript-eslint `main` at commit 706298716de5, fetched 2026-10-07 (UTC);
+the header of the file carries the full provenance. The file is sorted and
+deduplicated and a test pins both.
+
+**What is NOT detected** (silent today, by design, not by oversight):
+
+- Lint run through a marketplace action (`uses:`), where no ESLint command is in
+  the workflow YAML.
+- Lint delegated to `turbo`, `nx` or `lerna`, where the command that reaches
+  ESLint lives in another package's configuration.
+- A preset hidden in a shared config package the read cannot follow (an
+  `extends` of an installed package). The prompt handles this at fix time: it
+  tells the agent to compute the REAL enabled rule set with
+  `eslint --print-config <file>` instead of trusting the static read.
+
+**Withhold gates.** Every exit is counted in `findings_doc["opt82_withheld_by_gate"]`.
+A verdict is a measured "no"; a held-back exit is a "could not tell", listed in
+`findings_doc["opt82_withheld_candidates"]` and rendered in the Data sources
+table as the `type-aware lint: held back` row (noun "candidate lint job(s)"),
+which feeds "Why a slow lint job with type-aware ESLint produced no finding".
+
+| gate | kind | what it means |
+|---|---|---|
+| `lint_job_never_ran_in_sample` | verdict | the lint job did not run in any sampled run |
+| `lint_job_below_cost_threshold` | verdict | the job is under 60s and not a long pole |
+| `type_aware_parsing_off` | verdict | the config applying to the job does not build the type graph |
+| `lint_script_unresolvable` | held back | the lint step runs a package script this audit could not trace to the command it runs |
+| `type_aware_config_reader_failed` | held back | the ESLint config reader failed, so whether lint builds the type graph is unknown |
+| `no_eslint_config_found` | held back | no ESLint config was found for the lint job's directory |
+| `eslint_config_unreadable` | held back | an ESLint config the lint job uses could not be read |
+| `type_aware_setting_unresolvable` | held back | the config sets type-aware parsing from a value only known when it runs |
+| `rule_setting_unresolvable` | held back | the config sets a type-aware rule from a value only known when it runs |
+| `no_enumerable_type_aware_rule` | held back | type-aware parsing is on, but no type-aware rule could be named from the config |
+
+**Sizing — uncredited, benchmark required**: There is no `_SIZING` model. The
+finding carries `wall_clock_p50_s = 0`, no runner-minute saving and sizing basis
+`uncredited`, because nothing in the sampled data says how much of the lint step
+is the type graph: that depends on the repository's import graph and on how many
+rules need types. What the report can state is a ceiling: the lint step's
+measured p50 (or the lint job's, when the step is not separately measured) is an
+upper bound on what any change to lint can save. It is not a forecast. The
+prompt asks the agent to run a one-command benchmark first, on the same runner,
+before touching any config: the lint exactly as CI runs it, then the same lint
+with `--parser-options project:false --parser-options projectService:false` plus
+`--rule '<rule>: off'` for each enumerated rule. That second run is for TIMING
+ONLY and is never committed; both runs are cold (no `--cache`). The difference
+is the real size of the prize, measured, and a small difference ends the work.
+
+For scale, Linear reported lint time falling 55% and 68%
+(https://linear.app/now/ci-bottleneck-reworked); their result, not a forecast.
+
+**Fix recipe**, in this order. Dropping the type-aware rules is NOT a fix this
+pattern recommends: every rule the repository enforces today must still run
+somewhere.
+
+- (a) **REWRITE.** For each enumerated rule, ask whether a syntax-only form of the
+  same check exists (the `syntax_only_equivalent` column is a pointer, not an
+  answer: the core rule checks less because it cannot see types). A rule that is
+  satisfied by a syntax-only rule in this repository moves to the fast pass; the
+  question for each rule is whether the replacement catches the same defects.
+- (b) **SPLIT.** Run two ESLint passes. The fast pass runs every syntax-only rule
+  with type-aware parsing off, on every change. The type-aware pass runs exactly
+  the enumerated rules, scoped to the changed files (`--cache`, see OPT9) or to
+  the touched packages (OPT70). The full type-aware pass over the whole tree stays
+  on the merge queue and the default branch, so every rule still runs somewhere.
+- (c) **NATIVE.** Move the type-aware rules to a native type-aware linter
+  (`tsgolint` through oxlint's type-aware mode) only when the remaining rule set
+  is one that tool supports, under the migration-cost contract in OPT14's
+  tool-swap table.
+
+**Guardrail**: The prompt requires a rule-by-rule ledger (rule, then the pass it
+runs in) and a test that the union of the rules enabled by the two configs equals
+the original set, computed from `eslint --print-config`. A rule with no pass blocks
+the change. The shared no-weakening rail applies: the change may not delete a rule,
+lower a severity, widen an ignore list or move a check to a non-blocking job.
+
+**Risk**: MEDIUM. The split changes what runs on every change, and a rule left out
+of both configs would pass silently. The ledger and the union test make that
+failure loud; the type-aware pass on the merge queue bounds the blast radius to a
+later catch rather than a missed one. A file touched in one package can break a
+type-aware rule in another that the scoped pass does not lint, which is why the
+default-branch pass is not optional.
+
+**Why not just oxlint**: oxlint covers most syntax-only rules at a fraction of the
+cost and is the right fast pass. It does not remove the type-aware rules; those
+still need a type-aware tool. See the ESLint → oxlint row in OPT14's tool-swap
+table: OPT82's ledger is the prerequisite that row assumes.
 
 ---
 

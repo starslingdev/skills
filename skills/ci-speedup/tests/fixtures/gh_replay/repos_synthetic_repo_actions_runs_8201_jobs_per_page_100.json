@@ -1,0 +1,68 @@
+{
+ "total_count": 1,
+ "jobs": [
+  {
+   "id": 82011,
+   "run_id": 8201,
+   "name": "eslint",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-27T01:00:00Z",
+   "completed_at": "2026-06-27T01:01:31Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/8201/job/82011",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-27T01:00:00Z",
+     "completed_at": "2026-06-27T01:00:02Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-27T01:00:02Z",
+     "completed_at": "2026-06-27T01:00:05Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/setup-node@v4",
+     "number": 3,
+     "started_at": "2026-06-27T01:00:05Z",
+     "completed_at": "2026-06-27T01:00:09Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm ci",
+     "number": 4,
+     "started_at": "2026-06-27T01:00:09Z",
+     "completed_at": "2026-06-27T01:00:19Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Lint",
+     "number": 5,
+     "started_at": "2026-06-27T01:00:19Z",
+     "completed_at": "2026-06-27T01:01:29Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Complete job",
+     "number": 6,
+     "started_at": "2026-06-27T01:01:29Z",
+     "completed_at": "2026-06-27T01:01:31Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  }
+ ]
+}

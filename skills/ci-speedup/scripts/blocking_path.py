@@ -5141,6 +5141,7 @@ def _coverage_note(ds: dict[str, Any]) -> str:
 _OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 _OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
+_OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
 class WithheldRow(NamedTuple):
     """One pattern's whole registration in the held-back disclosure.
 
@@ -5171,6 +5172,10 @@ _WITHHELD_ROWS: tuple[WithheldRow, ...] = (
     WithheldRow(_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back",
                 "candidate checkout(s)",
                 "Why a checkout with a slow tail produced no finding",
+                "job"),
+    WithheldRow(_OPT82_WITHHELD_DOC_KEY, "type-aware lint: held back",
+                "candidate lint job(s)",
+                "Why a slow lint job with type-aware ESLint produced no finding",
                 "job"),
 )
 
@@ -5236,12 +5241,38 @@ _OPT80_WITHHOLD_PHRASES: dict[str, str] = {
         "there were more slow runs than the audit reads logs for, and the rest "
         "were never read",
 }
+# OPT82: a slow lint job whose ESLint config the audit could not decide. Every
+# gate in `collect_runs._OPT82_HELD_BACK_GATES`, and only those (a verdict is
+# never held back); a test pins the two sets equal.
+_OPT82_WITHHOLD_PHRASES: dict[str, str] = {
+    "lint_script_unresolvable":
+        "the lint step runs a package script this audit could not trace to the "
+        "command it runs",
+    "type_aware_config_reader_failed":
+        "the ESLint config reader failed, so whether lint builds the type graph "
+        "is unknown",
+    "no_eslint_config_found":
+        "no ESLint config was found for the lint job's directory, so whether it "
+        "builds the type graph is unknown",
+    "eslint_config_unreadable":
+        "an ESLint config the lint job uses could not be read",
+    "type_aware_setting_unresolvable":
+        "the ESLint config sets type-aware parsing from a value only known when "
+        "it runs",
+    "rule_setting_unresolvable":
+        "the ESLint config sets a type-aware rule from a value only known when "
+        "it runs",
+    "no_enumerable_type_aware_rule":
+        "type-aware parsing is on, but no type-aware rule could be named from "
+        "the config",
+}
 # Every pattern's gate→phrase table, by doc key. OPT79's table is defined with
 # the rest of its code further down and registers itself there, so this one dict
 # is the single place the renderer looks a reason up.
 _WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
     _OPT77_WITHHELD_DOC_KEY: _OPT77_WITHHOLD_PHRASES,
     _OPT80_WITHHELD_DOC_KEY: _OPT80_WITHHOLD_PHRASES,
+    _OPT82_WITHHELD_DOC_KEY: _OPT82_WITHHOLD_PHRASES,
 }
 # What the row says for a gate with no phrase. Never the code; `verify_report`
 # fails on the same gate, so this text cannot reach a verified report.
@@ -6819,6 +6850,11 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                      for m in members[:8])
     if len(members) > 8:
         locs += f"; +{len(members) - 8} more (see findings JSON)"
+    if pat == "OPT82":
+        # Numberless by design: the generic bill / off-path saving line would
+        # describe it falsely (it may sit ON the critical path, and it claims
+        # no runner-minutes), so it gets its own body.
+        return _opt82_prompt(title, members, url, locs)
     prefer: dict[str, Any] | None = None
     if wait:
         saving = ("Cost: developer WALL-CLOCK wait before the job starts (queue / "
@@ -6893,6 +6929,97 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
         "Do: confirm the pattern at each location above, recover the intent from git",
         "history, and apply the catalog's fix recipe where it is safe. State the",
         "failure mode and how you have guarded it before shipping.",
+    ]
+    return ["#### 🤖 Prompt for your coding agent", "", "```text",
+            *[_fence_safe(l) for l in body], "```"]
+
+
+# OPT82's guardrail, as the prompt states it. ONE literal: the verifier carries
+# an equal copy (pinned by a test) and fails a rendered OPT82 card without it.
+_OPT82_LEDGER_SENTENCE = (
+    "LEDGER (required before shipping): write a rule-by-rule ledger mapping every "
+    "rule the current config enables (from `eslint --print-config`) to the pass "
+    "that will run it after the change - the fast pass, the type-aware pass, or "
+    "both - and add a test asserting that the union of the two configs' enabled "
+    "rules equals the original set. A rule with no pass is a coverage loss and "
+    "blocks the change.")
+
+
+def _opt82_prompt(title: str, members: list[dict[str, Any]], url: str,
+                  locs: str) -> list[str]:
+    """The OPT82 agent prompt: the measured fact, the SIZING ceiling and the
+    benchmark to run FIRST, the named type-aware rules each with the rewrite
+    QUESTION (never the answer), the fix order, the ledger requirement and the
+    shared rail. It never tells the agent to switch rules off as the fix; the
+    only place rules go off is the benchmark's timing run, which is labelled as
+    never committed."""
+    m = members[0]
+    tal = _as_dict(m.get("type_aware_lint"))
+    rules = [str(_as_dict(r).get("rule") or "") for r in _as_list(tal.get("rules"))]
+    rules = [r for r in rules if r]
+    bench = _as_dict(tal.get("benchmark_commands"))
+    ceiling = _num(tal.get("ceiling_s"))
+    basis = ("the lint step" if tal.get("ceiling_basis") == "lint_step"
+             else "the whole lint job (its lint step was not separately measured)")
+    configs = ", ".join(str(c) for c in _as_list(tal.get("configs")) if c) or "the config"
+    ev = _group_evidence(members, compose=True)
+    body = ["ci-speedup measured the pattern below but does NOT prescribe the fix -",
+            "investigate it in the repo and apply a safe change.", "",
+            f"Pattern: OPT82 - {title}.",
+            f"Where: {locs}."]
+    if ev:
+        body.append(f"What ci-speedup saw: {ev}")
+    body += [
+        "",
+        (f"SIZING: uncredited. {basis[0].upper() + basis[1:]} measured "
+         f"{(ceiling or 0):.0f}s at p50; that is the CEILING on what changing lint can "
+         "save, not a forecast, and no saving is credited."),
+        "Run this benchmark FIRST, on the runner type CI uses, and report both",
+        "timings before changing anything (both runs cold, no --cache):",
+        f"  {bench.get('as_ci_runs_it') or '(the lint command as CI runs it)'}",
+        f"  {bench.get('without_type_information') or '(the same command without type information)'}",
+        "The second command turns type information and the rules below off for",
+        "that timing run ONLY; it is a measurement, never a change to commit. If",
+        "the two timings are close, stop: type information is not what makes",
+        "this lint slow, and this finding does not apply.",
+        "Linear reported lint time falling 55% and 68% after splitting type-aware",
+        "lint this way - their result, not a forecast for this repo:",
+        "  https://linear.app/now/ci-bottleneck-reworked",
+        "",
+        f"Type-aware rules {configs} turns on (read from the config text; confirm",
+        "the full enabled set with `npx eslint --print-config <a linted file>`):",
+        *[f"  - {r}" for r in rules],
+        "For EACH rule above, answer before changing anything: does a syntax-only",
+        "rule catch the same problems in THIS codebase? (typescript-eslint",
+        "documents, per rule, whether it extends a core ESLint rule.)",
+        "",
+        "Fix order:",
+        "  (a) REWRITE: where a syntax-only rule covers the same check here, move",
+        "      the check to it, rule by rule, and say why for each.",
+        "  (b) SPLIT into two passes: a fast syntax-only pass on every run, and a",
+        "      type-aware pass restricted to exactly the type-aware rules left",
+        "      after (a), via a second config, scoped to changed files (`--cache`,",
+        "      catalog OPT9) or touched packages (catalog OPT70). Keep the full",
+        "      type-aware pass on the merge queue / default branch. Every rule",
+        "      still runs somewhere.",
+        "  (c) A native type-aware linter (tsgolint via oxlint's type-aware mode)",
+        "      only when the remaining rule set is one it supports, under the",
+        "      catalog OPT14 migration-cost contract.",
+        "Risk: MEDIUM - a rule that ends up in neither pass is a silent coverage",
+        "loss, and a pass scoped to changed files can miss a type error a change",
+        "causes in an unchanged file; the full pass on the merge queue / default",
+        "branch is what catches it.",
+        _OPT82_LEDGER_SENTENCE,
+        "",
+        "Read the catalog entry (background, fix recipe, and guardrail):",
+        f"  {url}", "",
+    ]
+    body += _NO_WEAKENING_LINES + [
+        "",
+        "Do: run the benchmark first and report it, recover the intent of the lint",
+        "config from git history, answer the per-rule question, then apply (a)",
+        "and (b) with the ledger. State the failure mode and how you have guarded",
+        "it before shipping.",
     ]
     return ["#### 🤖 Prompt for your coding agent", "", "```text",
             *[_fence_safe(l) for l in body], "```"]
@@ -7049,6 +7176,12 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         # renders (the all-pole guard keeps it), so its signal is not lost off-path.
         if (_num(f.get("runner_min_saving")) or 0.0) > 0 or _saves_wall_clock(f):
             return False
+        # OPT82 is numberless BY DESIGN (uncredited, benchmark first), not
+        # valueless: its card is the only place its rules and its ledger
+        # requirement reach the reader, so a lint job that is also a drilled
+        # pole keeps it.
+        if str(f.get("pattern", "")) == "OPT82":
+            return False
         jobs = f.get("affected_jobs") or ([f.get("job")] if f.get("job") else [])
         if not jobs:
             return False
@@ -7140,6 +7273,9 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             wc = _num(driver.get("wall_clock_p50_s")) or 0.0
             summary_metric = f"~{_clock(wc)} wall-clock"
             ev = _group_evidence(ms, prefer=driver)
+        elif pat == "OPT82":
+            summary_metric = "uncredited, benchmark first"
+            ev = _group_evidence(ms, compose=True)
         else:
             summary_metric = bill
             # The displayed magnitude is an aggregate over ALL members and "Where" lists
