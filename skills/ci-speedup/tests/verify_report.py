@@ -6451,26 +6451,69 @@ def _vr_opt80_job_rendered_as_pole(f: dict, report: str, data: dict | None = Non
     workflow-name prefix (the FIRST ` / ` segment) stripped: `CI / call-a /
     test` is job `call-a / test`, never a plain `test`. A header in another
     workflow file never matches."""
+    return any(_vr_opt80_pole_is_own(f, wf, check, data)
+               for wf, check, _body in _pole_header_sections(report))
+
+
+def _vr_opt80_pole_is_own(f: dict, wf: str, check: str, data: dict | None = None) -> bool:
+    """Whether ONE Long pole header (`wf` ▸ `check`) is the finding's own job,
+    by the rule `_vr_opt80_job_rendered_as_pole` documents."""
     jobs = {_cmp_name(str(j)) for j in _as_list(f.get("affected_jobs")) if str(j)}
     wf_f = str(f.get("workflow_file") or "").rsplit("/", 1)[-1]
-    stamped: dict[str, list[tuple[str, str]]] = {}
+    if wf_f and wf and wf != wf_f:
+        return False
+    c = _cmp_name(check)
+    mapped = []
     for p in _as_list(_as_dict(_as_dict(data).get("pr_critical_path")).get("poles")):
-        if isinstance(p, dict) and p.get("check") and p.get("job"):
-            stamped.setdefault(_cmp_name(str(p["check"])), []).append(
-                (str(p.get("workflow_file") or "").rsplit("/", 1)[-1],
-                 _cmp_name(str(p["job"]))))
-    for wf, check, _body in _pole_header_sections(report):
-        if wf_f and wf and wf != wf_f:
-            continue
-        c = _cmp_name(check)
-        mapped = [job for p_wf, job in stamped.get(c, [])
-                  if not (wf_f and p_wf and p_wf != wf_f)]
-        if mapped:
-            if any(job in jobs for job in mapped):
-                return True
-        elif c in jobs or (" / " in c and c.split(" / ", 1)[1] in jobs):
-            return True
-    return False
+        if (isinstance(p, dict) and p.get("check") and p.get("job")
+                and _cmp_name(str(p["check"])) == c):
+            p_wf = str(p.get("workflow_file") or "").rsplit("/", 1)[-1]
+            if not (wf_f and p_wf and p_wf != wf_f):
+                mapped.append(_cmp_name(str(p["job"])))
+    if mapped:
+        return any(job in jobs for job in mapped)
+    return c in jobs or (" / " in c and c.split(" / ", 1)[1] in jobs)
+
+
+# The dedicated off-pole section the renderer gives tail lines whose job is not
+# a drilled pole (`## ⏱️ Checkout stall tails on a workflow's slowest job`).
+_VR_OPT80_TAILS_HEADING = "Checkout stall tails"
+_VR_OPT80_HEADING_RE = re.compile(r"(?m)^##\s.*$")
+
+
+def _vr_opt80_enclosing(report: str, pos: int) -> "tuple[str, str]":
+    """(kind, label) of the report section holding offset `pos`: 'head' (above
+    the Contents: title, provenance, Bottom line), 'pole' (label = the Long
+    pole heading), 'tails' (the dedicated off-pole section), 'tier2' (the
+    runner-minute section or a Runner saving card) or 'other'."""
+    contents = report.find("## 📋 Contents")
+    heads = list(_VR_OPT80_HEADING_RE.finditer(report, 0, pos))
+    if (contents != -1 and pos < contents) or not heads:
+        return "head", "the headline / Bottom line (above the Contents)"
+    h = heads[-1].group(0)
+    if "Long pole" in h:
+        return "pole", h
+    if _VR_OPT80_TAILS_HEADING in h:
+        return "tails", h
+    if "Runner saving" in h or "Runner-minute reductions" in h:
+        return "tier2", "the runner-minute section"
+    return "other", h
+
+
+def _vr_opt80_marker_placed(f: dict, report: str, pos: int,
+                            data: dict | None = None) -> "str | None":
+    """None when a tail marker at `pos` sits where the finding's tail line
+    belongs - its OWN job's Long pole section, or the dedicated Checkout stall
+    tails section - else where it sits instead."""
+    kind, label = _vr_opt80_enclosing(report, pos)
+    if kind == "tails":
+        return None
+    if kind == "pole":
+        poles = _pole_header_sections(label)
+        if poles and _vr_opt80_pole_is_own(f, poles[0][0], poles[0][1], data):
+            return None
+        return f"another job's Long pole section ({label.strip()!r})"
+    return label if kind != "other" else f"the {label.strip()!r} section"
 
 
 def _vr_opt80_slowest_job_can_be_a_pole(f: dict, report: str, data: dict) -> bool:
@@ -6494,13 +6537,13 @@ def _vr_opt80_slowest_job_can_be_a_pole(f: dict, report: str, data: dict) -> boo
 
 
 def _vr_opt80_tail_rendered_off_pole(f: dict, report: str) -> bool:
-    """The finding stamps a tail axis AND its marked tail line sits outside
-    every Long pole section (the renderer's off-pole tail block)."""
+    """The finding stamps a tail axis AND its marked tail line sits in the
+    dedicated Checkout stall tails section (the renderer's off-pole block) -
+    not merely outside every pole, which a Runner saving card also is."""
     if "tail_axis" not in _as_dict(f.get("checkout_stall")):
         return False
-    marker = f"<!-- opt80-tail:{f.get('id')} -->"
-    return marker in report and not any(
-        marker in body for _wf, _check, body in _pole_header_sections(report))
+    pos = report.find(f"<!-- opt80-tail:{f.get('id')} -->")
+    return pos != -1 and _vr_opt80_enclosing(report, pos)[0] == "tails"
 
 
 def _vr_opt80_tail_axis_expected(cs: dict) -> "tuple[dict | None, list[str]]":
@@ -6587,9 +6630,11 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
     stamped finding's re-derived values, and on any sentence still in the legacy
     "loses up to / about X s on checkout to a stalled fetch" wording (X is a
     median whole-checkout excess: not a ceiling, and not all of it the proven
-    pause). TOP-LEVEL: the
-    Tier-2 pass compat-skips a report with no Tier-2 stamps, and the tail line
-    lives at the pole."""
+    pause). Placement: each marker sits in its own job's Long pole section or
+    the dedicated Checkout stall tails section (never above the Contents, in a
+    runner-minute card or in another job's pole), and every tail sentence sits
+    on a marked line. TOP-LEVEL: the Tier-2 pass compat-skips a report with no
+    Tier-2 stamps, and the tail line lives at the pole."""
     name = "OPT80 tail lines re-derive and pair with their stamped blocks"
     data, err = _load_findings_doc(findings_path)
     if err:
@@ -6597,12 +6642,13 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
     tails = [f for f in _as_list(_as_dict(data).get("findings"))
              if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT80"
              and "tail_axis" in _as_dict(f.get("checkout_stall"))]
-    marks = [(m.group(1), m.end()) for m in _VR_OPT80_TAIL_MARKER_RE.finditer(report)]
-    phrases: list[tuple[int, str | None, int, str]] = []
+    marker_hits = list(_VR_OPT80_TAIL_MARKER_RE.finditer(report))
+    marks = [(m.group(1), m.end()) for m in marker_hits]
+    phrases: list[tuple[int, str | None, int, str, int]] = []
     for m in _VR_OPT80_TAIL_SCAN_RE.finditer(report):
         canon = _VR_OPT80_TAIL_PHRASE_RE.match(report, m.start())
         phrases.append((int(m.group(1)), canon.group(2) if canon else None,
-                        int(m.group(2)), m.group(0)))
+                        int(m.group(2)), m.group(0), m.start()))
     if not tails:
         if marks or phrases:
             return Check(name, False,
@@ -6610,18 +6656,38 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
                          "a tail axis")
         return Check(name, True, "no OPT80 tail axis stamped")
     bad: list[str] = []
-    # Never headlined, never summed: no tail sentence (either wording) and no
-    # tail marker above the Contents (title, provenance, Bottom line) or inside
-    # the runner-minute section, even when its numbers re-derive.
-    head = report.split("## 📋 Contents", 1)[0] if "## 📋 Contents" in report else ""
-    tier2 = ""
-    if "## Runner-minute reductions" in report:
-        tier2 = report.split("## Runner-minute reductions", 1)[1].split("\n## ", 1)[0]
-    for where, text in (("the headline / Bottom line (above the Contents)", head),
-                        ("the runner-minute section", tier2)):
-        if _VR_OPT80_TAIL_SCAN_RE.search(text) or _VR_OPT80_TAIL_MARKER_RE.search(text):
-            bad.append(f"an OPT80 tail line sits in {where} - the tail is a "
-                       "separate figure, never headlined or summed")
+    # ONE placement rule. A tail marker sits in its own job's Long pole section or
+    # in the dedicated Checkout stall tails section - never above the Contents
+    # (title, provenance, Bottom line), in a runner-minute card or in another
+    # job's pole. And every tail sentence sits on a marked line, so with one
+    # marker per finding the sentence appears exactly once: the tail is a
+    # separate figure, never headlined or summed, even when its numbers re-derive.
+    by_id = {str(f.get("id") or ""): f for f in tails}
+    spans: list[tuple[int, int]] = []
+    for m in marker_hits:
+        rest = report[m.end():]
+        start = m.end() + len(rest) - len(rest.lstrip("\n"))
+        spans.append((start, start + len(report[start:].split("\n", 1)[0])))
+        f = by_id.get(m.group(1))
+        where = _vr_opt80_marker_placed(f, report, m.start(), _as_dict(data)) if f else None
+        if where:
+            bad.append(f"{m.group(1)}: its tail line sits in {where} - it belongs in its "
+                       "own job's Long pole section or the Checkout stall tails section, "
+                       "never headlined or in a runner-minute card")
+    # The one other place the sentence may stand is the SAME finding's own
+    # Runner saving card, where it is the collector's evidence prose ("... - a
+    # tail figure, never added to the p50 merge wait or to any total"): that
+    # card is the finding's own row, not a headline or a sum.
+    for fid in by_id:
+        body = _tier2_body_for_marker(report, fid)
+        at = report.find(body) if body else -1
+        if at != -1:
+            spans.append((at, at + len(body)))
+    for *_rest, said, pos in phrases:
+        if not any(a <= pos < b for a, b in spans):
+            bad.append(f"a tail sentence {said!r} sits off its marked line, in "
+                       f"{_vr_opt80_enclosing(report, pos)[1]} - it is stated once, "
+                       "on its marked line, never headlined or summed")
     allowed: set[tuple[int, int]] = set()
     want_ids = {str(f.get("id") or "") for f in tails}
     for i in sorted({i for i, _ in marks} - want_ids):
@@ -6644,7 +6710,7 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
         if sentence not in _strip_render_artifacts(line) and sentence not in line:
             bad.append(f"{fid}: the line after its marker does not state the "
                        f"re-derived {sentence!r}")
-    for n, word, x, said in phrases:
+    for n, word, x, said, _pos in phrases:
         if word != _VR_OPT80_TAIL_WORDING:
             bad.append(f"the report says {said!r}, which is not the canonical tail "
                        "sentence (legacy or variant wording) - X is the median proven "

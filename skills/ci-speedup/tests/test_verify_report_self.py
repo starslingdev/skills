@@ -9566,7 +9566,7 @@ def test_opt80_tail_line_renders_at_the_pole_and_pairs_with_its_block(tmp_path: 
     # elsewhere in the report does not pair it. The sentence is lifted from the
     # rendered line itself, so this case tracks whatever wording the renderer uses.
     start = marked_line.index("one run in ")
-    end = marked_line.index("stalled fetch", start) + len("stalled fetch")
+    end = marked_line.index("the fetch stalling", start) + len("the fetch stalling")
     sentence = marked_line[start:end]
     moved = (head + marker + "\n" + tail.lstrip("\n").replace(
         marked_line, "> a checkout line that states no tail figure", 1)
@@ -9586,6 +9586,43 @@ def test_opt80_tail_line_renders_at_the_pole_and_pairs_with_its_block(tmp_path: 
     assert "loses up to 110s" in legacy
     chk = vr.check_opt80_tail_lines(legacy, findings_path)
     assert not chk.ok and "up to" in chk.detail, chk
+
+
+def test_opt80_tail_line_placement_is_its_own_pole_or_the_tails_section(tmp_path: Path):
+    """One placement rule: a tail marker sits inside its own job's Long pole
+    section or the dedicated `## ⏱️ Checkout stall tails` section, never above
+    the Contents, in a Runner saving card or in another job's pole; and the
+    tail sentence appears exactly once, on its marked line."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="other", pole_job="other")
+    report, _report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    marker = "<!-- opt80-tail:f-promoted -->"
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    i = report.index(marker)
+    line = report[i:].split("\n", 2)[1]
+    block = f"{marker}\n{line}\n"
+    assert block in report
+    rest = report.replace(block, "", 1)
+
+    def after_heading(text, heading):
+        j = text.index(heading)
+        k = text.index("\n", j) + 1
+        return text[:k] + "\n" + block + "\n" + text[k:]
+
+    assert "## 🟢 Runner saving" in rest and "Long pole 1" in rest
+    cases = {
+        "above Contents": rest.replace("## 📋 Contents", block + "\n## 📋 Contents", 1),
+        "another job's pole": after_heading(rest, "Long pole 1"),
+        "a Runner saving card": after_heading(rest, "## 🟢 Runner saving"),
+        "a second unmarked copy": report + "\n" + line + "\n",
+    }
+    for what, bad in cases.items():
+        chk = vr.check_opt80_tail_lines(bad, findings_path)
+        assert not chk.ok, (what, chk)
+    # The off-pole exemption in the neutrality check reads the same rule.
+    f = json.loads(findings_path.read_text(encoding="utf-8"))["findings"][0]
+    assert vr._vr_opt80_tail_rendered_off_pole(f, report)
+    assert not vr._vr_opt80_tail_rendered_off_pole(f, cases["a Runner saving card"])
 
 
 def test_opt80_stray_tail_scan_tolerates_spacing_and_wording_variants(tmp_path: Path):
