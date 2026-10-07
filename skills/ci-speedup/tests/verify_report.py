@@ -6697,18 +6697,33 @@ def _opt80_tail_axis_rederived(f: dict) -> list[str]:
     return problems
 
 
-def _vr_opt80_check_names_job(check: str, job_key: str, node: dict) -> bool:
+def _vr_opt80_workflow_prefixes(wf_path: str, workflow_names: object) -> set:
+    """Own copy of `collect_runs._opt80_workflow_prefixes`: the workflow's own
+    `name:`, else its file path or basename."""
+    name = " ".join(str(_as_dict(workflow_names).get(wf_path) or "").split())
+    if name:
+        return {name}
+    return {p for p in (str(wf_path), str(wf_path).rsplit("/", 1)[-1]) if p}
+
+
+def _vr_opt80_check_names_job(check: str, job_key: str, node: dict,
+                              wf_prefixes: "set | None" = None) -> bool:
     """Own copy of `collect_runs._opt80_check_names_job`: is the required check
-    `check` the check-run of YAML job `job_key`?"""
+    `check` the check-run of YAML job `job_key`, whole or behind ONLY this
+    workflow's own name prefix?"""
     c = " ".join(str(check).split())
     name = " ".join(str(node.get("name") or job_key).split())
     pat = ".+?".join(re.escape(x) for x in re.split(r"\$\{\{.*?\}\}", name))
     if node.get("matrix"):
         pat += r"(?: \(.+\))?"
-    for cand in {c, c.rsplit(" / ", 1)[-1]}:
+    cands = {c} | {c[len(p) + 3:] for p in (wf_prefixes or set())
+                   if c.startswith(p + " / ")}
+    for cand in cands:
         if cand == job_key or re.fullmatch(pat, cand):
             return True
-    return bool(node.get("reusable")) and c.startswith(name + " / ")
+        if node.get("reusable") and cand.startswith(name + " / "):
+            return True
+    return False
 
 
 def _vr_opt80_merge_gating_problems(f: dict, data: dict) -> list[str]:
@@ -6732,8 +6747,20 @@ def _vr_opt80_merge_gating_problems(f: dict, data: dict) -> list[str]:
     problems: list[str] = []
     if rc not in req:
         problems.append(f"merge_gating names {rc!r}, which is not a required check")
-    if rj not in jobs or not _vr_opt80_check_names_job(rc, rj, _as_dict(jobs.get(rj))):
+    names = data.get("workflow_names")
+    graph = _as_dict(data.get("workflow_job_graph"))
+    if rj not in jobs or not _vr_opt80_check_names_job(
+            rc, rj, _as_dict(jobs.get(rj)), _vr_opt80_workflow_prefixes(wf, names)):
         problems.append(f"merge_gating's required check {rc!r} is not job {rj!r} of {wf!r}")
+    else:
+        hits = [(str(w), str(k)) for w, wjobs in graph.items()
+                for k, n in _as_dict(wjobs).items()
+                if _vr_opt80_check_names_job(rc, str(k), _as_dict(n),
+                                             _vr_opt80_workflow_prefixes(str(w), names))]
+        if len(hits) > 1:
+            problems.append(
+                f"merge_gating's required check {rc!r} is ambiguous - it names "
+                f"{len(hits)} jobs, so which one the merge waits on is unknown")
     job = str(cs.get("job") or "")
     node = _as_dict(jobs.get(jk))
     if jk not in jobs or " ".join(str(node.get("name") or jk).split()) != job:

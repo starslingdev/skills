@@ -9507,6 +9507,7 @@ def _opt80_tail_eligibility(doc, *, event_scope="pull_request", declared=True,
     doc["declared_pr_workflows"] = [wf] if declared else []
     doc["required_checks"] = ["CI / build"]
     doc["required_checks_complete"] = True
+    doc.setdefault("workflow_names", {})[wf] = "CI"
     doc.setdefault("workflow_job_graph", {})[wf] = {
         "build": {"name": "build", "needs": [], "reusable": False, "matrix": False},
         "bench": {"name": "bench", "needs": [], "reusable": False, "matrix": False}}
@@ -9861,6 +9862,55 @@ def test_opt80_tail_line_is_refused_on_a_job_no_merge_waits_on(tmp_path: Path):
     _really_needed(good)
     findings_path.write_text(json.dumps(good), encoding="utf-8")
     assert vr.check_opt80_tail_lines(report, findings_path).ok
+
+
+def test_opt80_merge_gating_rederives_the_workflow_prefix_and_refuses_ambiguity(
+        tmp_path: Path):
+    """The verifier's copy of the merge-gating predicate strips only THIS
+    workflow's own `name:` prefix (`workflow_names`), and refuses a required
+    context that literally names a job in more than one place - GitHub cannot
+    tell those check-runs apart, so the merge wait is unknown."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    wf = doc["findings"][0]["workflow_file"]
+
+    def _check(mutate):
+        bad = copy.deepcopy(doc)
+        mutate(bad)
+        findings_path.write_text(json.dumps(bad), encoding="utf-8")
+        return vr.check_opt80_tail_lines(report, findings_path)
+
+    def _foreign_prefix(d):
+        d["required_checks"] = ["deploy / build"]
+        d["findings"][0]["checkout_stall"]["tail_axis"]["merge_gating"][
+            "required_check"] = "deploy / build"
+    chk = _check(_foreign_prefix)
+    assert not chk.ok and "is not job" in str(chk.detail), chk
+
+    def _ambiguous(d):
+        d["required_checks"] = ["build"]
+        d["findings"][0]["checkout_stall"]["tail_axis"]["merge_gating"][
+            "required_check"] = "build"
+        d["workflow_job_graph"][".github/workflows/other.yml"] = {
+            "build": {"name": "build", "needs": [], "reusable": False,
+                      "matrix": False}}
+    chk = _check(_ambiguous)
+    assert not chk.ok and "ambiguous" in str(chk.detail), chk
+
+    def _unambiguous(d):
+        d["required_checks"] = ["build"]
+        d["findings"][0]["checkout_stall"]["tail_axis"]["merge_gating"][
+            "required_check"] = "build"
+    assert _check(_unambiguous).ok
+    # Unnamed workflow: GitHub's prefix is its file path.
+    def _unnamed(d):
+        d["workflow_names"] = {}
+        d["required_checks"] = [f"{wf} / build"]
+        d["findings"][0]["checkout_stall"]["tail_axis"]["merge_gating"][
+            "required_check"] = f"{wf} / build"
+    assert _check(_unnamed).ok
 
 
 def test_opt80_on_critical_path_matches_a_workflow_prefixed_pole_check(tmp_path: Path):

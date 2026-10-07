@@ -9788,13 +9788,26 @@ def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]]
             "tail_loss_s": loss, "on_critical_path": True}
 
 
-def _opt80_check_names_job(check: str, job_key: str, node: dict[str, Any]) -> bool:
+def _opt80_workflow_prefixes(wf_path: str,
+                             workflow_names: dict[str, Any] | None) -> set[str]:
+    """The `<workflow>` prefixes a `<workflow> / <job>` check context of
+    `wf_path` can carry: its own `name:` (the scan's `workflow_names`), else -
+    as GitHub names an unnamed workflow - its file path or basename."""
+    name = " ".join(str((workflow_names or {}).get(wf_path) or "").split())
+    if name:
+        return {name}
+    return {p for p in (str(wf_path), str(wf_path).rsplit("/", 1)[-1]) if p}
+
+
+def _opt80_check_names_job(check: str, job_key: str, node: dict[str, Any],
+                           wf_prefixes: set[str] | None = None) -> bool:
     """Whether the required-check context `check` is the check-run of the YAML job
     `job_key` (its job-graph `node`). Deliberately literal, so `verify_report.py`
     re-derives the same answer from the stamped job graph with its own copy:
-    the job's display name or key, whole or as the last ` / ` segment (a plain
-    job's check is `<workflow> / <job>`); a `${{ ... }}` template matched as a
-    wildcard; a matrix job's appended ` (<leg>)`; a reusable caller's
+    the job's display name or key, whole or behind a `<workflow> / ` prefix that
+    is THIS workflow's own name (`wf_prefixes`; another workflow's or a
+    reusable caller's prefix never matches); a `${{ ... }}` template matched as
+    a wildcard; a matrix job's appended ` (<leg>)`; a reusable caller's
     `<caller> / <child>` children."""
     c = " ".join(str(check).split())
     name = " ".join(str(node.get("name") or job_key).split())
@@ -9802,10 +9815,14 @@ def _opt80_check_names_job(check: str, job_key: str, node: dict[str, Any]) -> bo
     pat = ".+?".join(_re.escape(x) for x in parts)
     if node.get("matrix"):
         pat += r"(?: \(.+\))?"
-    for cand in {c, c.rsplit(" / ", 1)[-1]}:
+    cands = {c} | {c[len(p) + 3:] for p in (wf_prefixes or set())
+                   if c.startswith(p + " / ")}
+    for cand in cands:
         if cand == job_key or _re.fullmatch(pat, cand):
             return True
-    return bool(node.get("reusable")) and c.startswith(name + " / ")
+        if node.get("reusable") and cand.startswith(name + " / "):
+            return True
+    return False
 
 
 def _opt80_merge_gating_jobs(
@@ -9813,6 +9830,7 @@ def _opt80_merge_gating_jobs(
     required_checks: "RequiredChecks | None",
     job_graph: dict[str, dict[str, dict[str, Any]]] | None,
     crit_by_wf: dict[str, dict[str, Any]],
+    workflow_names: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]] | None:
     """The YAML jobs of `wf_path` a merge waits on, `{job_key: evidence}`, or None
     when that cannot be known. A job is merge-gating when its check is REQUIRED,
@@ -9834,22 +9852,30 @@ def _opt80_merge_gating_jobs(
     out: dict[str, dict[str, Any]] = {}
     anchors: list[tuple[str, str]] = []
     for r in sorted(required_checks.names):
-        # The shared resolver first; when it pins nothing (a `<workflow> / <job>`
-        # context it does not split), the ONE job of this workflow whose check
-        # the context literally names. Either way the literal predicate must
-        # hold, because that is what the self-check re-derives.
-        node = _check_to_job_node(r, job_graph, crit_by_wf)
-        if node is not None and node[0] == wf_path and node[1] in jobs:
-            jid = node[1]
-        else:
-            hits = [k for k, n in jobs.items()
-                    if _opt80_check_names_job(r, k, n if isinstance(n, dict) else {})]
-            if node is not None or len(hits) != 1:
-                continue
-            jid = hits[0]
-        if not _opt80_check_names_job(r, jid, jobs[jid]):
+        # Every (workflow, job) the context LITERALLY names, across the whole
+        # job graph, each workflow judged by its own name prefix. That literal
+        # set is what the self-check re-derives, so it decides: one hit binds
+        # it; more than one is a context GitHub itself cannot tell apart (the
+        # shared resolver refuses it too), which is UNKNOWN - never a match -
+        # and when it touches this workflow the whole answer is unknown (None).
+        hits = [(w, k) for w, wjobs in job_graph.items()
+                if isinstance(wjobs, dict)
+                for k, n in wjobs.items()
+                if _opt80_check_names_job(r, k, n if isinstance(n, dict) else {},
+                                          _opt80_workflow_prefixes(w, workflow_names))]
+        if len(hits) > 1:
+            if any(w == wf_path for w, _k in hits):
+                return None
             continue
-        anchors.append((r, jid))
+        if not hits or hits[0][0] != wf_path:
+            continue
+        # The shared resolver may not disagree: when it pins a node, it must be
+        # this one (it does not split a `<workflow> / <job>` context, so None
+        # is not a disagreement).
+        node = _check_to_job_node(r, job_graph, crit_by_wf)
+        if node is not None and node != hits[0]:
+            continue
+        anchors.append((r, hits[0][1]))
     for r, jid in anchors:
         out.setdefault(jid, {"basis": "required", "required_check": r,
                              "required_job": jid, "job_key": jid})
@@ -19761,7 +19787,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             # and an unknown merge wait is never claimed.
             merge_gating_jobs=_opt80_merge_gating_jobs(
                 wf_path, required_checks, findings_doc.get("workflow_job_graph"),
-                crit_by_wf))
+                crit_by_wf, workflow_names=findings_doc.get("workflow_names")))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
