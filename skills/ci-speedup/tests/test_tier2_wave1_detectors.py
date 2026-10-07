@@ -4389,6 +4389,27 @@ def test_opt79_below_the_long_pole_needs_a_positive_margin_after_rounding():
     assert w.get("pole_tied_with_next_job") == 1, w
 
 
+def test_opt79_job_a_hair_under_the_floor_falls_through_to_the_long_pole_arm():
+    """A job 0.04s under the cluster floor is below it unrounded, but its floor
+    margin rounds to 0.0, so the below-the-floor proof does not hold. It is still
+    60s shorter than the long pole, so it must be credited on the
+    below-the-long-pole arm (and the verifier must accept that), never dropped
+    as `neutrality_margin_not_positive`."""
+    crit = _opt79_pole_crit(job_p50={_OPT79_JOB: 599.96, "integration": 600.0,
+                                     "e2e": 660.0})
+    out, rows, w = _opt79_pole_run(crit)
+    assert "neutrality_margin_not_positive" not in w, w
+    assert rows == [] and len(out) == 1, (out, rows, w)
+    f = out[0]
+    cert = f["tier2_neutrality"]
+    assert cert["proof"] == "below_long_pole", cert
+    assert cert["margin_s"] == 60.0, cert
+    vr = _load_verify_report_for_opt79()
+    data = {"per_workflow_timing": {"ci.yml": crit}, "findings": [f]}
+    assert vr._tier2_below_long_pole_problems(f, data) == []
+    assert vr._opt79_finding_rederived(f, data) == []
+
+
 def test_opt79_job_tied_with_the_long_pole_stays_uncredited():
     """A job TIED with the long pole is as slow as the job that sets the merge
     wait: neither proof holds. On a pull-request workflow it is stamped like a
@@ -6297,10 +6318,12 @@ def test_opt79_withholds_when_the_restore_step_matched_no_occurrence():
 
 def test_opt79_re_checks_the_neutrality_margin_after_rounding():
     """599.96s is strictly below a 600s floor, but the stamped p50 rounds to
-    600.0 and the certificate's margin to 0 — no certificate to ship."""
+    600.0 and the floor margin to 0 — no below-the-floor certificate. The job
+    is still shorter than the long pole, so it falls through to that arm."""
     out, w = _opt79_withheld(crit=_opt79_crit(job_p50=599.96))
-    assert out == []
-    assert w.get("neutrality_margin_not_positive") == 1, w
+    assert "neutrality_margin_not_positive" not in w, w
+    assert len(out) == 1, (out, w)
+    assert out[0]["tier2_neutrality"]["proof"] == "below_long_pole"
 
 
 def test_opt79_withholds_minutes_that_round_to_zero():

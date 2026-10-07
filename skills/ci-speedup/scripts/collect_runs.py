@@ -17125,9 +17125,14 @@ def _detect_opt79_net_negative_cache(
         # pull-request workflow that is a co-pole, stamped `pole_tied_with_next_job`
         # like a pole tied with the next job). The long pole of a pull-request
         # workflow never reaches here: the wall-clock arm above took it.
-        below_floor = bool(block.get("below_cluster_floor"))
         lp_job = str(block.get("long_pole_job") or "")
         job_p50 = float(block["job_p50_s"])
+        # The below-the-floor arm needs a POSITIVE margin after rounding, not
+        # just an unrounded `p50 < floor`: a job 0.04s under the floor rounds to
+        # a 0.0 margin, carries no below-the-floor proof, and must fall through
+        # to the below-the-long-pole arm it may still qualify for.
+        below_floor = (bool(block.get("below_cluster_floor"))
+                       and round(float(block["floor_p50_s"]) - job_p50, 1) > 0)
         lp50_s = float(block.get("long_pole_p50_s") or 0.0)
         lp_margin = (round(lp50_s - job_p50, 1)
                      if lp_job and not block.get("is_long_pole") else 0.0)
@@ -17183,7 +17188,7 @@ def _detect_opt79_net_negative_cache(
             continue
         if below_floor:
             margin = round(float(block["floor_p50_s"]) - job_p50, 1)
-            if margin <= 0:                  # re-checked after rounding
+            if margin <= 0:   # unreachable: `below_floor` requires margin > 0
                 _drop(name, "neutrality_margin_not_positive")
                 continue
             cert = {
