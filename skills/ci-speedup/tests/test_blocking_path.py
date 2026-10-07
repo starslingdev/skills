@@ -7617,6 +7617,25 @@ def _pole_section(md: str, check: str) -> str:
     return md[i:j if j != -1 else len(md)]
 
 
+def test_opt80_tail_on_an_aggregation_gate_pole_renders_in_that_pole():
+    """An aggregation-gate pole renders its upstream story and stops early. Its
+    OPT80 tail line must still render IN that pole: falling through to the
+    off-pole tails section would place it under a heading that says its job is
+    "not one of the long poles drilled above" - which it is."""
+    tail = _opt80_tail_render_doc()["findings"][0]
+    tail = json.loads(json.dumps(tail))
+    tail.update(workflow_file=_AGG_DEPLOY, affected_jobs=["gate"])
+    tail["checkout_stall"]["job"] = "gate"
+    doc = _agg_gate_doc()
+    doc["findings"] = [tail]
+    md = bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    sec = _pole_section(md, "thank you, build")
+    assert "**Aggregation gate" in sec
+    assert f"<!-- opt80-tail:{tail['id']} -->" in sec, sec
+    assert md.count(f"<!-- opt80-tail:{tail['id']} -->") == 1
+    assert "not one of the long poles drilled above" not in md
+
+
 def test_aggregation_gate_pole_tells_the_upstream_story_not_a_prompt():
     # The whole fix (issue #1): the `needs:`-everything 3s sink renders the honest role line,
     # names its slowest MEASURED upstream member, points the reader there — and carries NO

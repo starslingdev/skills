@@ -10112,6 +10112,10 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                         "its own job timing wasn't sampled), so there is no step-level drill "
                         "for it here - a re-run that samples it will drill it. Attack it "
                         "there; this check follows it down for free.", ""]
+            # An OPT80 tail on the gate's own job still belongs at this pole: left
+            # to the off-pole section it would sit under "not one of the long
+            # poles drilled above", which this job is.
+            out += _opt80_tail_block(_opt80_tail_for(p, all_findings), catalog_url)
             continue
         out += _floor_note(p, floor_pool)
         # OPT80's tail line sits beside the pole's merge-wait figure, as its own
