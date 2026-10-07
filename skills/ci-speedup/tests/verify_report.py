@@ -6786,9 +6786,22 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                     # poles) is on its own merge wait without a pole header. It is
                     # accepted only when its tail line renders OUTSIDE every pole
                     # section, which `check_opt80_tail_lines` pairs and re-derives.
+                    # The claim itself is re-derived for that exemption: the job
+                    # must be `per_workflow_timing[wf].long_pole_job`, the field
+                    # the collector computed on_critical_path from.
                     off_pole_tail = (bool(claimed) and not on_pole
                                      and _vr_opt80_tail_rendered_off_pole(f, report))
-                    if bool(claimed) and not on_pole and not off_pole_tail:
+                    if off_pole_tail:
+                        cs_job = str(_as_dict(f.get("checkout_stall")).get("job") or "")
+                        slowest = str(_as_dict(_as_dict(data.get("per_workflow_timing")).get(
+                            str(f.get("workflow_file") or ""))).get("long_pole_job") or "")
+                        if not cs_job or slowest != cs_job:
+                            bad.append(
+                                f"{fid}: on_critical_path={claimed!r} excuses an "
+                                f"off-pole tail line, but per_workflow_timing names "
+                                f"{slowest or None!r} as this workflow's slowest job, "
+                                f"not {cs_job!r}")
+                    elif bool(claimed) and not on_pole:
                         bad.append(
                             f"{fid}: on_critical_path={claimed!r} but the job is "
                             "not rendered as a Long pole")

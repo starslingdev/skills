@@ -9646,12 +9646,40 @@ def test_opt80_unmapped_pole_strips_only_the_workflow_name_prefix():
                    "affected_jobs": ["build"]}, report("CI / build"), {})
 
 
+def _opt80_pwt(long_pole_job, events=("pull_request",)):
+    return {".github/workflows/ci.yml": {"long_pole_job": long_pole_job,
+                                         "long_pole_p50": 300.0,
+                                         "events": list(events)}}
+
+
+def test_opt80_off_pole_exemption_rederives_the_workflows_slowest_job(tmp_path: Path):
+    """The off-pole tail exemption excuses an on_critical_path job with no pole
+    header. on_critical_path means "this workflow's slowest job", so the
+    exemption holds only when `per_workflow_timing[wf].long_pole_job` IS the
+    finding's job; a bare claim (no timing, or another job is slowest) fails."""
+    vr = _load_verify_report()
+    for pwt in (None, _opt80_pwt("deploy")):
+        doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+        if pwt is not None:
+            doc["per_workflow_timing"] = pwt
+        report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+        assert report.count("<!-- opt80-tail:f-promoted -->") == 1
+        chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+        assert not chk.ok and "slowest job" in str(chk.detail), (pwt, chk)
+    doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    doc["per_workflow_timing"] = _opt80_pwt("build")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert chk.ok, chk
+
+
 def test_opt80_tail_line_off_a_drilled_pole_renders_in_its_own_block(tmp_path: Path):
     """The slowest job of a pull-request workflow that is not drilled: its tail
     line renders once, outside every pole section, and that (only that) excuses
     an on_critical_path job with no pole header."""
     vr = _load_verify_report()
     doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    doc["per_workflow_timing"] = _opt80_pwt("build")
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     assert report.count("<!-- opt80-tail:f-promoted -->") == 1
     assert "Checkout stall tails on a workflow's slowest job" in report
