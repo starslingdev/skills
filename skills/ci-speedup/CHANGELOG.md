@@ -632,13 +632,14 @@ unversioned and updates by reinstall from `main`.
   `needs:`; it never says that job finishes at a time or sets the merge wait.
   The usual cross-check bounds can lower it further, and the block then prints
   each step and its reason. Unless a leaf, structural or data-driven match
-  fired first, the pole's waterfall and agent prompt name OPT79
-  and point at its block, rather than calling the pole a coverage gap.
+  fired first, and when its figure clears the 30s long-pole floor, the pole's
+  waterfall and agent prompt name OPT79 and point at its block, rather than
+  calling the pole a coverage gap (a figure under 30s, such as a 20s one, still
+  renders its block but leaves the pole a coverage gap).
   Runner-minutes are deliberately not stated on it: the runner-minute section
   needs proof that a job sits below the second-slowest
-  job, which the slowest job cannot have. The "not credited" line now covers only
-  workflows no pull request runs and jobs at or above the floor other than an
-  untied slowest job. A slowest job is also kept on that line, with the reason
+  job, which the slowest job cannot have. The "not credited" line now covers
+  workflows no pull request runs and jobs at or above the floor. A slowest job is also kept on that line, with the reason
   stated, when it is tied with the next-tallest job (under 1s apart), when the
   cross-checks find no merge wait it can shorten, when the pull request can merge
   without that workflow, or when the workflow's sampled runs include no pull

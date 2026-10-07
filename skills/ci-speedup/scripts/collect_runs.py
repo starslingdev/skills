@@ -15598,8 +15598,10 @@ _OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
 # The THIRD kind: a net-negative cache on the workflow's LONG POLE, on a
 # workflow that gates pull requests. Its excess sits on the merge wait, so it is
 # a credited WALL-CLOCK finding (capped at the headroom to the next-tallest
-# job) with no runner-minutes — never in the runner-minute section (the `tier`
-# field may still be 2), never an uncredited line.
+# job) with no runner-minutes — never in the runner-minute section
+# (`_opt79_pole_finding` sets tier 1). A pole later zeroed by the cross-checks
+# or found off the merge-gating spine is demoted to an uncredited row
+# (`_opt79_demote_uncredited_poles`), so no surviving pole finding is uncredited.
 # Pinned equal to the verifier's `_VR_OPT79_POLE_KIND` by a coupling test.
 _OPT79_POLE_KIND = "opt79_pole_net_negative_cache"
 # The pole finding's pre-cascade sizing, stamped under
@@ -16711,8 +16713,8 @@ def _detect_opt79_net_negative_cache(
 
     Any OTHER job that measures net-negative but is NOT strictly below the floor
     (a workflow no PR runs; a job at or above the floor that is not the long
-    pole; a long pole TIED with the next job, which has no headroom) is reported
-    UNCREDITED, through `uncredited` rather than the return value: no minutes,
+    pole; a long pole TIED with the next job, which has under a second of
+    headroom) is reported UNCREDITED, through `uncredited` rather than the return value: no minutes,
     no certificate, no Tier-2 row — one line saying the cache was measured and
     that this version cannot size it. It needs no volume, so a missing one
     stamps null rather than dropping the measurement.
@@ -17007,7 +17009,7 @@ def _detect_opt79_net_negative_cache(
         # The saving cannot exceed the gap to the next-tallest job's p50 (a
         # saving larger than that gap is not claimed); the cap is the shared
         # within-workflow bound every other finding uses, not a second formula.
-        # A long pole TIED with the next job has no headroom: shrinking it moves
+        # A long pole TIED with the next job (under a second of headroom): shrinking it moves
         # no merge wait, so it falls through to the uncredited line below.
         # Runner-minutes are not stated: the bill section's admission is a
         # below-the-floor proof, which the slowest job cannot have.
@@ -17246,7 +17248,8 @@ def _opt79_demote_uncredited_poles(
 def _opt79_next_tallest_job(crit: dict[str, Any], pole: str) -> str:
     """The job whose p50 is the workflow's cluster floor: the tallest job other
     than the long pole (`_critical_path` takes the floor from the same p50s;
-    ties are broken by job name here).
+    ties are broken by job name here, while `_critical_path` breaks exact ties
+    by insertion order - the p50 value is identical either way).
     Named on the pole finding so the reader sees WHICH job caps the saving."""
     ranked = sorted(
         ((float(v or 0.0), str(k)) for k, v in (crit.get("job_p50") or {}).items()
@@ -19862,13 +19865,17 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             withheld=_opt79_gates,
             # Measured net-negative caches that cannot be credited, because
             # their job is not below the cluster floor and is not the headroom-
-            # bearing long pole of a PR workflow. Not findings (no minutes, no
+            # bearing long pole of a PR workflow; it also receives poles demoted
+            # later (zeroed by the cross-checks or off the merge-gating spine).
+            # Not findings (no minutes, no
             # certificate) — the renderer states them as one uncredited line
             # each, so a measured excess is never silent.
             uncredited=findings_doc.setdefault(_OPT79_UNCREDITED_DOC_KEY, []),
             # Whether this workflow can gate a PR at all. Decides what an
             # uncredited row says AND whether the credited wall-clock pole
             # arm fires (a long pole on a workflow no PR runs is never credited).
+            # PR status comes from the sampled events first; the declared
+            # trigger is only the fallback.
             is_pr=is_pr,
             # Candidates whose logs were probed and then withheld: rendered as
             # one Data sources line so "could not tell" never reads as clean.

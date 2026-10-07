@@ -649,8 +649,8 @@ excess is credited.
    cascade every wall-clock finding gets (the developer-facing gate, the measured
    critical-path floor and the cross-workflow floor), and any further shrink is
    recorded in `wall_clock_derivation`. A long pole TIED with the next-tallest
-   job (zero headroom) is not credited here: shrinking it moves no merge wait,
-   because the other job still finishes then, so it falls through to outcome 3.
+   job (under 1s of headroom) is not credited here: shrinking it moves no merge
+   wait, because the gap to the next job is under a second, so it falls through to outcome 3.
    The finding renders inside that job's long-pole section of the report, opened
    by an `<!-- opt79-pole:<id> -->` marker, as
    `💾 Measured cache cost - OPT79 · <title> (<id>) - up to **Ns** off the merge wait on the P% of sampled runs where the cache hit (H of R runs read)`
@@ -660,10 +660,12 @@ excess is credited.
    narrow before removing; valid for this runner class only; never narrow what
    the install installs) and a rollout line. It needs that placement because its
    capped figure is often below the 30s long-pole floor, which would otherwise
-   drop it from the "Also noticed" appendix as a valueless pole-job row; it also
-   counts as a catalog match for that pole, so the pole gets no gap-fill, and
-   (unless a leaf, structural or data-driven match fired first) the pole's
-   waterfall and agent prompt name OPT79 and point at its block. When the
+   drop it from the "Also noticed" appendix as a valueless pole-job row; when its
+   figure clears the 30s long-pole floor it also counts as a catalog match for
+   that pole, so the pole gets no gap-fill, and (unless a leaf, structural or
+   data-driven match fired first) the pole's waterfall and agent prompt name
+   OPT79 and point at its block. Under 30s the block still renders and the
+   prompt only adds "ALSO MEASURED ON THIS JOB". When the
    job is not a drilled long pole (for example, the slowest job of another
    pull-request workflow), the same marked block renders in a short section
    before "Also noticed", never as an appendix row. When a cross-check bound
@@ -678,13 +680,18 @@ excess is credited.
 3. **Anything else: measured, reported, not priced.** The audit carries no
    neutrality argument for these, so they are an uncredited row, rendered as one
    numberless line beside the dropped-unprovable note (the nearest precedent: a
-   measured fact deliberately kept out of the numbers and shown anyway). Exactly
-   three cases land here, all of them jobs not strictly below the floor: any
-   such job in a workflow that runs on no pull request (the saving is
-   runner-minutes only, and unpriced here; that workflow's below-the-floor jobs
-   still take outcome 1), a job at or above the floor that
-   is not the long pole, and a long pole tied with the next-tallest job (no
-   headroom, so no merge wait of its own).
+   measured fact deliberately kept out of the numbers and shown anyway). Five
+   ways in, all of them jobs not strictly below the floor: any such job in a
+   workflow that runs on no pull request (the saving is runner-minutes only, and
+   unpriced here; that workflow's below-the-floor jobs still take outcome 1), a
+   job at or above the floor that is not the long pole, a long pole tied with the
+   next-tallest job (under 1s of headroom, so no merge wait of its own), a pole
+   the cross-checks zeroed (`pole_merge_wait_zeroed_by_cross_check`) and a pole
+   off the merge-gating spine (`pole_workflow_off_merge_gating_spine`); the last
+   two are built as pole findings and demoted to uncredited rows in `collect()`.
+   The row's `uncredited_reason` names which, and the renderer has three
+   wordings (a "slowest job, but ..." reason branch, the no-PR branch and the
+   at-or-above-floor branch).
 
 > a cache on `unit` measured net-negative by 19s per cache hit (4 hit / 4 miss
 > run(s) sampled); `unit` is at or above this workflow's second-slowest job
@@ -753,7 +760,7 @@ by that re-derivation:
 
 | key | what it carries |
 |---|---|
-| `kind` | `opt79_net_negative_cache` for a credited runner-minute finding, `opt79_pole_net_negative_cache` for a credited wall-clock finding on the workflow's long pole, `opt79_uncredited_pole_cache` for an uncredited row (the "pole" in that name is historical: the rows are any job at or above the floor other than an untied slowest job) — the tag that routes the block to this re-derivation instead of the generic one |
+| `kind` | `opt79_net_negative_cache` for a credited runner-minute finding, `opt79_pole_net_negative_cache` for a credited wall-clock finding on the workflow's long pole, `opt79_uncredited_pole_cache` for an uncredited row (the "pole" in that name is historical: the rows are any job at or above the floor, including a slowest job demoted for being tied, zeroed by the cross-checks or off the merge-gating spine) — the tag that routes the block to this re-derivation instead of the generic one |
 | `job` | the credited job; must be the finding's only `affected_jobs` entry |
 | `runner_label` / `cache_ref` | the one runner class every credited run ran on, and the cache action the block was built around |
 | `restore_step` / `install_step` / `post_step` | the three steps, as named in the YAML, that both paths measure; `post_step` is null for `actions/cache/restore`, which has no post phase |
@@ -766,8 +773,9 @@ by that re-derivation:
 
 An uncredited row carries every key above plus `workflow_file`, `job_p50_s`,
 `floor_p50_s`, `long_pole_job`, `long_pole_p50_s`,
-`workflow_gates_pull_requests` and `on_critical_path`, which is always `false`
-there. The wall-clock finding for the long pole
+`workflow_gates_pull_requests`, `on_critical_path`, which is always `false`
+there, `uncredited_reason` and, for a zeroed pole, `uncredited_reason_detail`.
+The wall-clock finding for the long pole
 (`opt79_pole_net_negative_cache`) carries the same block and placement keys,
 with `on_critical_path` and `workflow_gates_pull_requests` both `true`, plus
 `cache_net_negative.pole_sizing` (`waste_s`, `long_pole_job`, `long_pole_p50_s`, `next_tallest_job`,
@@ -786,7 +794,7 @@ carry no sizing at all, and every row must carry `on_critical_path` stamped
 credited as a wall-clock finding instead). The wall-clock finding
 (`opt79_pole_net_negative_cache`) is re-derived the same way, plus one arm: the
 headroom is re-derived as `long_pole_p50_s − floor_p50_s` from the stamped block
-(cross-checked against `per_workflow_timing`; zero or negative headroom fails),
+(cross-checked against `per_workflow_timing`; headroom under 1s fails),
 `round(min(waste_s, headroom), 1)` must agree with every `pole_sizing` key and
 equal `wall_clock_uncapped_p50_s` (or `wall_clock_p50_s` when the cascade did
 not shrink it), every `wall_clock_derivation` step must go down, give a reason

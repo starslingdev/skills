@@ -5843,7 +5843,8 @@ def _opt79_pole_block(findings: list[dict[str, Any]], catalog_url: str) -> list[
     """Render OPT79's pole-cache finding(s) inside the pole drill. One block per
     finding, opened by a `<!-- opt79-pole:<id> -->` marker `verify_report` pairs
     with the finding: the title, the id and the credited merge-wait seconds must
-    appear in the block that follows it. Runner-minutes are deliberately absent."""
+    appear in the block that follows it. Runner-minutes are deliberately absent.
+    The block text is shared with `_opt79_off_pole_block`."""
     out: list[str] = []
     for f in findings:
         fid = str(f.get("id") or "")
@@ -5857,6 +5858,7 @@ def _opt79_pole_block(findings: list[dict[str, Any]], catalog_url: str) -> list[
             if share:
                 gain += f" {share}"
         else:
+            # Defensive; demotion removes these before render.
             gain = ("**0s** off the merge wait once the cross-check bounds are "
                     "applied (see the evidence)")
         out += [f"<!-- opt79-pole:{fid} -->",
@@ -6028,19 +6030,29 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
     is as real as a credited one; what is missing is the sizing.
 
     WHY it is missing differs by job. `not below the cluster floor` spans
-    everything from the SECOND-ranked job upwards. The workflow's long pole, on
-    a workflow that can gate a PR, is NOT here unless it is TIED with the next
-    job (no headroom, so a tied long pole IS here): an untied one has its excess
-    on the merge wait, so it is a credited wall-clock finding rendered at its
-    pole (`_opt79_pole_block`) OR in the off-pole block
-    (`_opt79_off_pole_block`), and `verify_report` fails an uncredited row that
-    claims the merge wait. On a workflow no pull request runs
-    (`workflow_gates_pull_requests` false) there is no merge gate at all and the
-    saving is pure runner-minutes. For every other job at or above the floor the
-    saving is runner-minutes too, uncredited because this version cannot prove
-    shrinking it leaves the gate unchanged. The block says only what those
-    stamps support — never a merge wait or a merge gate on a workflow that has
-    none, and never "this workflow's slowest job".
+    everything from the SECOND-ranked job upwards. There are FIVE ways in
+    (`uncredited_reason` names the pole-specific ones):
+      1. a workflow no pull request runs (`workflow_gates_pull_requests` false):
+         no merge gate at all, the saving is pure runner-minutes;
+      2. a job at or above the floor that is not the long pole: runner-minutes
+         too, uncredited because this version cannot prove shrinking it leaves
+         the gate unchanged;
+      3. the PR long pole TIED with the next-tallest job (headroom under 1.0s,
+         `_OPT79_POLE_MIN_HEADROOM_S`): no merge wait moves;
+      4. the pole zeroed by the cross-checks
+         (`pole_merge_wait_zeroed_by_cross_check`, with
+         `uncredited_reason_detail`): `collect()` demotes it via
+         `_opt79_demote_uncredited_poles`;
+      5. the pole off the merge-gating spine
+         (`pole_workflow_off_merge_gating_spine`).
+    So a PR workflow's slowest job IS in this block for cases 3-5 (only an
+    untied, un-zeroed, on-spine pole is a credited wall-clock finding, rendered
+    at its pole by `_opt79_pole_block` or in `_opt79_off_pole_block`), and
+    `verify_report` fails an uncredited row that claims the merge wait. The
+    renderer has three wordings: a reason-phrase branch that reads "`X` is this
+    workflow's slowest job, but ..." (cases 3-5), the no-PR branch, and the
+    at-or-above-floor branch. The block says only what the stamps support -
+    never a merge wait or a merge gate on a workflow that has none.
 
     Rendered beside `_dropped_unprovable_banner`, its nearest precedent: a
     measured fact deliberately kept out of the numbers and shown anyway. [] when

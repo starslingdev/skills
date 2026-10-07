@@ -6018,7 +6018,8 @@ def _opt79_uncredited_rows_rederived(data: dict) -> list[str]:
     """Every uncredited OPT79 row re-derived from its own `per_run`, and
     checked to contribute to no total. ("pole" in the key and kind name,
     `opt79_uncredited_pole_caches` / `opt79_uncredited_pole_cache`, is historical:
-    the rows are any job at or above the floor other than an untied slowest job.)
+    the rows are any job at or above the floor, including a slowest job demoted
+    for being tied, zeroed by the cross-checks or off the merge-gating spine.)
 
     These rows render with their measured excess per cache hit (`waste_s`) and
     their hit/miss populations, but with no runner-minutes and no wall-clock
