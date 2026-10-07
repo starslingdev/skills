@@ -1230,11 +1230,18 @@ or a required job in the same workflow transitively `needs:` it; an unread,
 partial or empty required set is UNKNOWN and claims no merge wait, because a
 workflow's slowest job can be a non-required benchmark), a stalled run sits on that
 run's merge wait, so the finding also stamps a SEPARATE tail axis,
-`checkout_stall.tail_axis` = `{sampled_runs n, tail_runs k (log-proven only),
-one_in_n round(n/k), typical_checkout_p50_s, tail_checkout_p50_s (median of the
-proven runs), tail_loss_s, on_critical_path}`, and `blocking_path.py` renders it
-as "one run in N spends about X s longer on checkout, and that run's log shows
-the fetch stalling": inside the
+`checkout_stall.tail_axis` = `{sampled_runs n, slow_runs m (at or above the
+tail threshold), logs_read L (the fetched `log_probed_job_ids`, at most the
+probe cap), tail_runs k (log-proven), counted_runs m - (L - k), one_in_n
+round(n / counted_runs), typical_checkout_p50_s, tail_checkout_p50_s (median of
+the proven runs), tail_loss_s, on_critical_path, merge_gating}`. A read log with
+no stall is left out of N; an unread slow run stays in, because the probe cap
+bounds cost and is not evidence of a smooth fetch (counting only k let the cap
+set N: 10 slow of 30 with 4 logs read said one in 8, not one in 3). The
+verifier requires every proof to be one of `log_probed_job_ids`, those ids to
+be distinct slow runs, and their count to equal `logs_fetched`. And
+`blocking_path.py` renders it as "one run in N spends about X s longer on
+checkout, and that run's log shows the fetch stalling": inside the
 pole's section beside its merge-wait figure (an `<!-- opt80-tail:<id> -->`
 marked line), or in a short off-pole block when the job is not a drilled pole.
 `tail_loss_s` is the extra checkout time on a stalled run. How much of it

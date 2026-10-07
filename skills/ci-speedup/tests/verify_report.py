@@ -6560,6 +6560,32 @@ def _vr_opt80_tail_axis_expected(cs: dict) -> "tuple[dict | None, list[str]]":
     p50 = round(_vr_percentile(vals, 50), 1)
     threshold = round(max(_VR_OPT80_TAIL_P95_MULTIPLE * p50,
                           p50 + _VR_OPT80_TAIL_P95_ABS_S), 1)
+    # The slow runs, re-derived; the fetched logs, which must be distinct slow
+    # runs, as many as `logs_fetched` says; and every proof must be one of them.
+    slow = [r.get("job_id") for r in per_run
+            if float(durs[r.get("job_id")]) >= threshold]
+    raw_probed = cs.get("log_probed_job_ids")
+    probed = _as_list(raw_probed)
+    fetched_problems: list[str] = []
+    if not isinstance(raw_probed, list):
+        fetched_problems.append(
+            "log_probed_job_ids is missing, so which logs were fetched is unstated")
+    elif (len(set(map(str, probed))) != len(probed)
+          or not set(map(str, probed)) <= set(map(str, slow))):
+        fetched_problems.append(
+            "log_probed_job_ids are not distinct slow runs - a fetched log is "
+            "fetched for a slow run only")
+    elif _num(cs.get("logs_fetched")) != len(probed):
+        fetched_problems.append(
+            f"logs_fetched {cs.get('logs_fetched')!r} != the {len(probed)} "
+            "log_probed_job_ids")
+    for p in _as_list(cs.get("proven_tail_runs")):
+        if isinstance(p, dict) and str(p.get("job_id")) not in set(map(str, probed)):
+            fetched_problems.append(
+                f"proof for {p.get('job_id')!r} is not one of the logs fetched")
+    if fetched_problems:
+        return None, fetched_problems
+    probed_set = set(map(str, probed))
     proven_s: list[float] = []
     seen: set = set()
     for p in _as_list(cs.get("proven_tail_runs")):
@@ -6567,7 +6593,8 @@ def _vr_opt80_tail_axis_expected(cs: dict) -> "tuple[dict | None, list[str]]":
             continue
         jid = p.get("job_id")
         d = durs.get(jid)
-        if jid in seen or d is None or d < threshold - 0.11:
+        if (jid in seen or d is None or d < threshold - 0.11
+                or str(jid) not in probed_set):
             continue
         before, after = _as_dict(p.get("before")), _as_dict(p.get("after"))
         ma = _VR_OPT80_RECEIVING_RE.search(str(before.get("line") or ""))
@@ -6582,8 +6609,12 @@ def _vr_opt80_tail_axis_expected(cs: dict) -> "tuple[dict | None, list[str]]":
     if not proven_s:
         return None, ["no tail run's log proves a stall, so there is no tail to state"]
     n, k = len(per_run), len(proven_s)
+    m, logs_read = len(slow), len(probed)
+    counted = m - (logs_read - k)
     tail_p50 = round(_vr_percentile(proven_s, 50), 1)
-    return {"sampled_runs": n, "tail_runs": k, "one_in_n": int(round(n / k)),
+    return {"sampled_runs": n, "slow_runs": m, "logs_read": logs_read,
+            "tail_runs": k, "counted_runs": counted,
+            "one_in_n": int(round(n / counted)),
             "typical_checkout_p50_s": p50, "tail_checkout_p50_s": tail_p50,
             "tail_loss_s": round(tail_p50 - p50, 1)}, []
 

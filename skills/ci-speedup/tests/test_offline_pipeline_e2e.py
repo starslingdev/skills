@@ -778,7 +778,8 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # so `wall_clock_p50_s` stays 0 — but one run in three spends about 105s longer on
     # the merge wait, and that is stamped as a SEPARATE tail axis, re-derived
     # from the per-run durations and the proven runs alone:
-    #   sampled_runs 6, tail_runs 2 (log-proven), one_in_n round(6/2) = 3,
+    #   sampled_runs 6, slow_runs 2, logs_read 2, tail_runs 2 (log-proven),
+    #   counted_runs 2 - (2 - 2) = 2, one_in_n round(6/2) = 3,
     #   typical p50 5s, tail p50 median(125, 95) = 110s, loss 110 - 5 = 105s.
     o80_pole = [f for f in o80_all if f.get("affected_jobs") == ["test"]]
     cs_pole = o80_pole[0].get("checkout_stall") or {}
@@ -786,7 +787,8 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert cs_pole.get("on_critical_path") is True, cs_pole
     assert o80_pole[0].get("wall_clock_p50_s") in (0, 0.0), o80_pole[0]
     assert cs_pole.get("tail_axis") == {
-        "sampled_runs": 6, "tail_runs": 2, "one_in_n": 3,
+        "sampled_runs": 6, "slow_runs": 2, "logs_read": 2, "tail_runs": 2,
+        "counted_runs": 2, "one_in_n": 3,
         "typical_checkout_p50_s": 5.0, "tail_checkout_p50_s": 110.0,
         "tail_loss_s": 105.0, "on_critical_path": True,
         # `CI / test` is a required check (the corpus's classic branch

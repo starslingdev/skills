@@ -3137,7 +3137,6 @@ def test_opt80_tail_line_states_the_stamped_numbers_as_a_tail_not_a_p50():
     assert bp._opt80_off_pole_tail_block(doc["findings"], "u") == []
 
 
-
 def test_opt80_tail_line_states_every_number_in_its_own_slot():
     """The rendered line carries more than the two numbers the verifier
     re-derives: the job and workflow it is on, how many sampled runs proved a
@@ -3146,8 +3145,8 @@ def test_opt80_tail_line_states_every_number_in_its_own_slot():
     doc = _opt80_tail_render_doc()
     line = bp._opt80_tail_block(doc["findings"], "https://catalog")[1]
     assert "on `build` in `ci.yml`, one run in 5" in line, line
-    assert "2 of 10 sampled runs have a checkout log" in line, line
-    assert "their median checkout is 120s against a typical 10s" in line, line
+    assert "2 of 10 sampled runs had a slow checkout" in line, line
+    assert "The 2 proven runs' median checkout is 120s against a typical 10s" in line, line
     assert "this job" not in line, line
 
 
@@ -3219,6 +3218,22 @@ def test_opt80_off_pole_tail_heading_matches_the_render():
     assert "drilled above" not in "\n".join(static)
     assert "no long pole" in "\n".join(static), static
     assert "<!-- opt80-tail:f-promoted -->" in static
+
+
+def test_opt80_tail_count_sentence_names_slow_runs_logs_read_and_proofs():
+    """The count sentence states what N stands on: how many sampled runs were
+    slow, how many of their logs were read, how many of those show the stall,
+    and that the slow runs whose logs were not read are counted in N."""
+    doc = _opt80_tail_render_doc()
+    axis = doc["findings"][0]["checkout_stall"]["tail_axis"]
+    axis.update(sampled_runs=30, slow_runs=10, logs_read=4, tail_runs=3,
+                counted_runs=9, one_in_n=3)
+    line = bp._opt80_tail_block(doc["findings"], "https://catalog")[1]
+    assert "10 of 30 sampled runs had a slow checkout" in line, line
+    assert "logs were read for 4 of those, and 3 show the fetch standing still" in line, line
+    assert "the 1 read log that does not is left out" in line, line
+    assert "the 6 slow runs whose logs were not read" in line, line
+    assert "sampled runs have a checkout log" not in line, line
 
 
 def test_second_pole_role_names_the_real_slowest_concurrent_check_above_it():

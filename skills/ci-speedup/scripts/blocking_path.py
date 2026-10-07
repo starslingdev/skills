@@ -6211,6 +6211,29 @@ def _opt80_tail_for(pole: dict[str, Any],
     return out
 
 
+def _opt80_tail_count_sentence(axis: dict[str, Any]) -> str:
+    """What "one run in N" stands on, from the stamped counts: m of n sampled
+    runs were slow, L of their logs were read, k of those show the stall. A read
+    log with no stall is left out of N; a slow run whose log was not read is
+    counted (the probe cap bounds cost, it is not a finding)."""
+    n = int(_num(axis.get("sampled_runs")) or 0)
+    k = int(_num(axis.get("tail_runs")) or 0)
+    m = int(_num(axis.get("slow_runs")) or k)
+    read = int(_num(axis.get("logs_read")) or k)
+    out = (f"{m} of {n} sampled runs had a slow checkout; logs were read for "
+           f"{read} of those, and {k} show the fetch standing still. N counts the "
+           f"{k} proven run{'' if k == 1 else 's'}")
+    if m > read:
+        u = m - read
+        out += (f" and the {u} slow run{'' if u == 1 else 's'} whose "
+                f"log{' was' if u == 1 else 's were'} not read")
+    if read > k:
+        d = read - k
+        out += (f"; the {d} read log{'' if d == 1 else 's'} that "
+                f"{'does' if d == 1 else 'do'} not {'is' if d == 1 else 'are'} left out")
+    return out + "."
+
+
 def _opt80_tail_block(findings: list[dict[str, Any]], catalog_url: str) -> list[str]:
     """One marked tail line per finding. The sentence is a hand-copied f-string
     of the collector's `_opt80_tail_phrase` shape, rebuilt here from the stamped
@@ -6234,8 +6257,8 @@ def _opt80_tail_block(findings: list[dict[str, Any]], catalog_url: str) -> list[
                 f"> **⏱️ Checkout stall tail (OPT80, `{fid}`):** on `{job}` in "
                 f"`{_flatten_cell(wf)}`, one run in {n} spends about {loss:.0f}s longer "
                 f"on checkout, and that run's log shows the fetch stalling. "
-                f"{k} of {sampled} sampled runs have a "
-                f"checkout log that shows the fetch standing still; their median "
+                + _opt80_tail_count_sentence(axis)
+                + f" The {k} proven runs' median "
                 f"checkout is {tail_p50:.0f}s against a typical {typ:.0f}s. This is a "
                 "separate tail figure: the typical run never stalls, so it is not part "
                 "of the typical merge wait and is never added to any total. Fix "

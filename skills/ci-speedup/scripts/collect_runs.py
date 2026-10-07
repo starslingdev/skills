@@ -9714,7 +9714,8 @@ _OPT80_VERDICT_GATES = frozenset({
 
 
 def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]],
-                     p50: float) -> dict[str, Any] | None:
+                     p50: float, slow_ids: list[Any] | None = None,
+                     probed_ids: list[Any] | None = None) -> dict[str, Any] | None:
     """The tail axis of an on-pole, pull-request OPT80 finding: how often a run
     stalls, and how much longer its checkout takes when it does.
 
@@ -9722,9 +9723,18 @@ def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]]
     re-derives every number from the same inputs:
 
       sampled_runs            every sampled occurrence of the job (`per_run`)
-      tail_runs               the runs whose LOG proved a stall (`proven`) — a
-                              slow checkout with no proof does not count
-      one_in_n                round(sampled_runs / tail_runs)
+      slow_runs   m           the runs at or above the tail threshold
+                              (`tail_run_job_ids`) - MEASURED
+      logs_read   L           the slow runs whose log was fetched
+                              (`log_probed_job_ids`, at most the probe cap)
+      tail_runs   k           the fetched logs that PROVE a stall (`proven`)
+      counted_runs            m - (L - k): the proven runs plus the slow runs
+                              whose log was never read. A read log that shows no
+                              stall is left out; an unread one is not evidence
+                              of a smooth fetch, so it is not dropped. Counting
+                              only k let the probe cap set N: 10 slow runs of
+                              30 with 4 logs read said "one in 8", not one in 3.
+      one_in_n                round(sampled_runs / counted_runs)
       typical_checkout_p50_s  the checkout step's p50 across the whole sample
       tail_checkout_p50_s     the median checkout of the proven tail runs
       tail_loss_s             tail_checkout_p50_s - typical_checkout_p50_s
@@ -9737,13 +9747,20 @@ def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]]
     it is never a p50 quantity — nothing adds it to a merge-wait or minute total."""
     k = len(proven)
     n = len(per_run)
-    if k <= 0 or n <= 0 or k > n:
+    slow = list(slow_ids) if slow_ids is not None else [p["job_id"] for p in proven]
+    probed = (list(probed_ids) if probed_ids is not None
+              else [p["job_id"] for p in proven])
+    m, logs_read = len(slow), len(probed)
+    if k <= 0 or n <= 0 or k > logs_read or logs_read > m or m > n:
         return None
+    counted = m - (logs_read - k)
     tail_p50 = round(_percentile([float(p["checkout_s"]) for p in proven], 50), 1)
     loss = round(tail_p50 - float(p50), 1)
     if loss <= 0:
         return None
-    return {"sampled_runs": n, "tail_runs": k, "one_in_n": int(round(n / k)),
+    return {"sampled_runs": n, "slow_runs": m, "logs_read": logs_read,
+            "tail_runs": k, "counted_runs": counted,
+            "one_in_n": int(round(n / counted)),
             "typical_checkout_p50_s": float(p50),
             "tail_checkout_p50_s": tail_p50,
             "tail_loss_s": loss, "on_critical_path": True}
@@ -10205,7 +10222,9 @@ def _detect_opt80_checkout_tail_stall(
         # benchmark beside a required fast `test` is not — and with no
         # required-check data (`None`) the merge wait is not claimed at all.
         gating = (merge_gating_jobs or {}).get(key)
-        tail_axis = (_opt80_tail_axis(per_run, proven, p50)
+        tail_axis = (_opt80_tail_axis(per_run, proven, p50,
+                                      slow_ids=[r["job_id"] for r in tail_runs],
+                                      probed_ids=[r["job_id"] for r in probe])
                      if on_pole and is_pr is True
                      and _crit_has_developer_timing(crit)
                      and gating is not None else None)
@@ -10337,6 +10356,10 @@ def _detect_opt80_checkout_tail_stall(
             "min_proven_tail_runs": _OPT80_MIN_PROVEN_TAIL_RUNS,
             "proven_tail_runs": proven,
             "logs_fetched": len(probe),
+            # WHICH slow runs' logs were fetched: every proof must be one of
+            # them, and the tail axis counts the slow runs outside this list as
+            # unread rather than as smooth.
+            "log_probed_job_ids": [r["job_id"] for r in probe],
             "log_probe_max": _OPT80_LOG_PROBE_MAX,
             "tail_excess_s": tail_excess,
             # The longest pause OBSERVED, which is an upper bound on what capping

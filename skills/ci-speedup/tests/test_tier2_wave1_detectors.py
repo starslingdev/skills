@@ -6565,7 +6565,8 @@ def test_opt80_stamps_a_tail_axis_on_the_slowest_job_of_a_pull_request_workflow(
     f = out[0]
     cs = f["checkout_stall"]
     assert cs["tail_axis"] == {
-        "sampled_runs": 10, "tail_runs": 2, "one_in_n": 5,
+        "sampled_runs": 10, "slow_runs": 2, "logs_read": 2, "tail_runs": 2,
+        "counted_runs": 2, "one_in_n": 5,
         "typical_checkout_p50_s": 10.0, "tail_checkout_p50_s": 120.0,
         "tail_loss_s": 110.0, "on_critical_path": True,
         "merge_gating": _OPT80_BUILD_GATES["build"]}
@@ -6597,6 +6598,47 @@ def test_opt80_tail_axis_counts_only_log_proven_tail_runs():
     axis = out[0]["checkout_stall"]["tail_axis"]
     assert axis["tail_runs"] == 2 and axis["one_in_n"] == 5, axis
     assert len(out[0]["checkout_stall"]["tail_run_job_ids"]) == 3
+
+
+def _opt80_capped_probe():
+    """Thirty sampled runs, ten of them slow (120s against a 10s p50), every
+    log a stall. The probe reads only `_OPT80_LOG_PROBE_MAX` (4) of the ten."""
+    runs = _opt80_runs([10.0] * 20 + [120.0] * 10)
+    gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
+    return cr._detect_opt80_checkout_tail_stall(
+        gh, "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(), _opt80_wf(), None,
+        100, 0, is_pr=True, merge_gating_jobs=_OPT80_BUILD_GATES)
+
+
+def test_opt80_tail_axis_counts_the_slow_runs_past_the_log_probe_cap():
+    """The probe cap is a COST bound, not a finding: a slow run whose log was
+    never read did not show a smooth fetch. Counting only the 4 proven runs
+    said "one run in 8" (30 / 4) when ten of thirty runs were slow - one in 3.
+    N is now based on the measured slow runs: the proven ones plus the slow
+    runs whose logs were not read; a slow run whose log WAS read and shows no
+    stall is left out. Every count is stamped separately."""
+    out = _opt80_capped_probe()
+    cs = out[0]["checkout_stall"]
+    axis = cs["tail_axis"]
+    assert cs["logs_fetched"] == 4
+    assert axis["sampled_runs"] == 30 and axis["slow_runs"] == 10, axis
+    assert axis["logs_read"] == 4 and axis["tail_runs"] == 4, axis
+    assert axis["counted_runs"] == 10 and axis["one_in_n"] == 3, axis
+    # The ids of the logs actually fetched are stamped, and every proof is one.
+    probed = cs["log_probed_job_ids"]
+    assert len(probed) == 4 and set(probed) <= set(cs["tail_run_job_ids"])
+    assert {p["job_id"] for p in cs["proven_tail_runs"]} <= set(probed)
+    # A read log that shows no stall is left OUT of N (three slow, one smooth:
+    # 3 - 1 = 2 counted, one in five).
+    runs = _opt80_runs([10.0] * 7 + [120.0, 120.0, 120.0])
+    logs = {run[0]["id"]: _OPT80_STALLED_LOG for run in runs}
+    logs[runs[-1][0]["id"]] = _OPT80_SMOOTH_LOG
+    axis = cr._detect_opt80_checkout_tail_stall(
+        _Opt80Gh(logs), "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(),
+        _opt80_wf(), None, 100, 0, is_pr=True,
+        merge_gating_jobs=_OPT80_BUILD_GATES)[0]["checkout_stall"]["tail_axis"]
+    assert (axis["slow_runs"], axis["logs_read"], axis["tail_runs"],
+            axis["counted_runs"], axis["one_in_n"]) == (3, 3, 2, 2, 5), axis
 
 
 def test_opt80_stamps_no_tail_axis_off_the_pull_request_merge_wait():
@@ -6653,7 +6695,7 @@ def test_opt80_stamps_no_tail_axis_when_merge_gating_is_unknown():
         100, 0, is_pr=True)
     assert len(out) == 1, out
     assert "tail_axis" not in out[0]["checkout_stall"], out[0]["checkout_stall"]
-    assert "loses up to" not in out[0]["evidence"], out[0]["evidence"]
+    assert "one run in" not in out[0]["evidence"], out[0]["evidence"]
 
 
 def test_opt80_stamps_no_tail_axis_on_a_slowest_job_no_merge_waits_on():
@@ -6664,7 +6706,7 @@ def test_opt80_stamps_no_tail_axis_on_a_slowest_job_no_merge_waits_on():
                                  "required_job": "test", "job_key": "test"}}):
         f = _opt80_pr(is_pr=True, merge_gating=gating)[0]
         assert "tail_axis" not in f["checkout_stall"], gating
-        assert "loses up to" not in f["evidence"], gating
+        assert "one run in" not in f["evidence"], gating
     f = _opt80_pr(is_pr=True)[0]
     assert f["checkout_stall"]["tail_axis"]["merge_gating"] == (
         _OPT80_BUILD_GATES["build"])
@@ -6719,7 +6761,7 @@ def test_opt80_stamps_no_tail_axis_when_no_pull_request_run_was_timed():
     assert len(out) == 1, out
     f = out[0]
     assert "tail_axis" not in f["checkout_stall"], f["checkout_stall"].get("tail_axis")
-    assert "loses up to" not in f["evidence"], f["evidence"]
+    assert "one run in" not in f["evidence"], f["evidence"]
     assert "not credited in this version" in f["evidence"], f["evidence"]
 
 

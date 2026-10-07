@@ -9178,6 +9178,7 @@ def _opt80_verifier_finding(**over):
             "min_gap_s": 20.0, "min_proven_tail_runs": 2,
             "proven_tail_runs": proven,
             "logs_fetched": 2, "log_probe_max": 4,
+            "log_probed_job_ids": [r["job_id"] for r in per_run if r["tail"]],
             "tail_excess_s": 22.0, "tail_run_longest_pause_s": 40.0,
             "on_critical_path": True,
             "monthly_volume": 100, "effective_monthly_volume": 100.0,
@@ -9480,7 +9481,8 @@ def _opt80_pole_doc():
 # Every number in the line is re-derived from the per-run checkout durations and
 # the per-run stall proofs; the stamped block is compared, never trusted.
 
-_OPT80_TAIL_AXIS = {"sampled_runs": 10, "tail_runs": 2, "one_in_n": 5,
+_OPT80_TAIL_AXIS = {"sampled_runs": 10, "slow_runs": 2, "logs_read": 2,
+                    "tail_runs": 2, "counted_runs": 2, "one_in_n": 5,
                     "typical_checkout_p50_s": 10.0, "tail_checkout_p50_s": 120.0,
                     "tail_loss_s": 110.0, "on_critical_path": True,
                     "merge_gating": {"basis": "required",
@@ -9533,6 +9535,42 @@ def test_opt80_tail_axis_rederives_from_the_real_detector_output():
         g = copy.deepcopy(f)
         g["checkout_stall"]["tail_axis"][key] = bad
         assert any(f"tail_axis.{key}" in p for p in vr._opt80_tail_axis_rederived(g)), key
+
+
+def test_opt80_tail_axis_counts_slow_runs_and_checks_proofs_against_logs_fetched():
+    """N re-derives from the measured slow runs (proven, plus slow runs whose
+    log was never read), and every proof must be one of the logs the collector
+    says it fetched - a proof for a run outside the probe is not a log that was
+    read. Fed the REAL detector's output for a probe capped at 4 of 10."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    f = t._opt80_capped_probe()[0]
+    cs = f["checkout_stall"]
+    assert cs["tail_axis"]["one_in_n"] == 3
+    assert vr._opt80_tail_axis_rederived(f) == []
+    for key, bad in (("one_in_n", 8), ("slow_runs", 4), ("logs_read", 10),
+                     ("counted_runs", 4)):
+        g = copy.deepcopy(f)
+        g["checkout_stall"]["tail_axis"][key] = bad
+        assert any(f"tail_axis.{key}" in p for p in vr._opt80_tail_axis_rederived(g)), key
+    # A proof for a run whose log was not in the fetched set.
+    g = copy.deepcopy(f)
+    unread = next(i for i in g["checkout_stall"]["tail_run_job_ids"]
+                  if i not in g["checkout_stall"]["log_probed_job_ids"])
+    g["checkout_stall"]["proven_tail_runs"][0]["job_id"] = unread
+    assert any("fetched" in p for p in vr._opt80_tail_axis_rederived(g))
+    # A fetched-log list that is not the slow runs, or disagrees with the count.
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["log_probed_job_ids"][0] = 8001  # a typical 10s run
+    assert any("fetched" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["log_probed_job_ids"].pop()
+    assert any("fetched" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    del g["checkout_stall"]["log_probed_job_ids"]
+    assert any("fetched" in p for p in vr._opt80_tail_axis_rederived(g))
 
 
 def test_opt80_tail_axis_is_refused_off_the_critical_path_and_as_a_p50():
@@ -10046,13 +10084,22 @@ def test_opt80_tail_axis_drops_a_proof_held_at_one_hundred_percent():
 def test_opt80_tail_axis_drops_a_proof_whose_run_is_below_the_tail_threshold():
     """A proof attached to a run whose measured checkout (30s) is under the 40s
     tail threshold is not a tail run, however its quoted lines read."""
-    def fast(cs):
+    # Logs are fetched for slow runs only, so a proof on a run under the
+    # threshold is either a fetched log of a run that was not slow, or a proof
+    # outside the fetched logs. Both refuse the axis rather than count it.
+    vr = _load_verify_report()
+    for unlist in (False, True):
+        f = _opt80_verifier_finding()
+        cs = f["checkout_stall"]
         jid = cs["proven_tail_runs"][1]["job_id"]
         for r in cs["per_run_checkout_s"]:
             if r["job_id"] == jid:
                 r["checkout_s"] = 30.0
-    want = _opt80_tail_expected_after(fast)
-    assert want["tail_runs"] == 1 and want["tail_checkout_p50_s"] == 120.0, want
+        if unlist:
+            cs["log_probed_job_ids"].remove(jid)
+            cs["logs_fetched"] = 1
+        want, why = vr._vr_opt80_tail_axis_expected(cs)
+        assert want is None and any("fetched" in w for w in why), (unlist, why)
 
 
 def test_opt80_tail_axis_counts_a_job_proven_twice_once():

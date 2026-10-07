@@ -2108,14 +2108,19 @@ of the drilled poles):
 
 ```
 one run in N spends about X s longer on checkout, and that run's log shows the fetch stalling
-N = round(sampled runs / log-proven tail runs)
+N = round(sampled runs / counted slow runs)
+counted slow runs = slow runs - (logs read - log-proven runs)
 X = median checkout of the log-proven tail runs - p50 checkout of the sample
 ```
 
-Only a tail run whose own log proves the stall counts; a slow checkout with a
-smooth log does not. X is the median proven run's loss, not an upper bound (a
-proven run can lose more), so it reads "about" and applies to roughly one run
-in N: it is
+A slow run is one at or above the tail threshold. Logs are read for at most
+four of them (a cost bound). A slow run whose log was read and does not show
+the stall is left out of N; a slow run whose log was never read is not
+evidence of a smooth fetch and stays in. The report says how many runs were
+slow, how many of their logs were read and how many of those prove the stall.
+X uses only the proven runs. X is the median proven run's loss, not an upper
+bound (a proven run can lose more), so it reads "about" and applies to roughly
+one run in N: it is
 not a typical-run number, so it is never added to the headline, a pole's
 wall-clock figure, any total or the runner-minute section, and
 `wall_clock_p50_s` stays 0. On a push-only (or unknown-trigger) workflow, the
@@ -2202,6 +2207,7 @@ instead of being silently trusted:
 | `tail_run_job_ids` | **re-derived** — which runs were tail runs, against the threshold, bounded by the sampled occurrences |
 | `proven_tail_runs` | **re-derived** — per proven run the two quoted lines, their log timestamps and the derived gap. The gap is recomputed from the timestamps, and so is the PREDICATE: the arm re-runs its own copy of the `Receiving objects: N%` regex over both quoted lines and fails the claim unless both match, report the same N, and that N is below 100 — otherwise a stamped `5% → 60%` pair would render as proof of a stall. Both lines are re-scanned for credential shapes here too |
 | `logs_fetched` | **re-derived** — against the verifier's PINNED probe cap (never the stamped `log_probe_max`, which is only compared to it), and against the number of tail runs |
+| `log_probed_job_ids` | **re-derived** (tail axis) — must be distinct slow runs, as many as `logs_fetched`; every proven run must be one of them, and the slow runs outside it are the unread ones the tail axis keeps in N |
 | `tail_excess_s` / `runner_min_saving` | **re-derived** — the credited quantity and the minutes it becomes |
 | `tail_run_longest_pause_s` | **re-derived** — must equal the largest gap across the proven runs, because the evidence renders it as the upper bound on what capping the stall recovers |
 | `on_critical_path` | **re-derived** — against the report's own rendered Long-pole sections, since this is the exact fact the pole-rule exemption below turns the blanket check off for |
