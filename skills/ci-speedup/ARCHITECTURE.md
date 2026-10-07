@@ -992,8 +992,8 @@ enumerated in `check_tier2_neutrality_derived` (an unknown one fails):
 `below_cluster_floor` (the job's p50 is strictly below the workflow's cluster
 floor; OPT65, OPT77 — historically, see below — and OPT79, each re-derived by
 its own arm), `below_long_pole` (OPT79 only: the job is at or above the floor
-but strictly shorter than the workflow's long pole and in no `needs:` chain
-with it, margin `long_pole_p50 − job_p50` from `per_workflow_timing`, the
+but strictly shorter than the workflow's long pole and, on a pull-request
+workflow, in no `needs:` chain with it, margin `long_pole_p50 − job_p50` from `per_workflow_timing`, the
 chain re-derived from `workflow_job_graph` when the run recorded one),
 `post_completion_waste` (OPT35/46/57/64), `checkout_tail_excess` (OPT80 only)
 and `non_pr_event` (OPT36). The "affected job is also rendered as a Long pole"

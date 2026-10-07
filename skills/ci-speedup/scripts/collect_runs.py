@@ -17268,6 +17268,11 @@ def _detect_opt79_net_negative_cache(
             waste_floor=waste_floor, hit_share=hit_share,
             job_runs=job_runs, sampled=sampled, monthly_volume=monthly_volume,
             effective=effective, runner_min_saving=credited)
+        # Whether a pull request waits on this workflow: the fact that decided
+        # the `needs:`-chain exclusion above, so `verify_report` re-applies the
+        # same gate (paired against the sampled events) rather than failing
+        # every chained `below_long_pole` credit.
+        f["cache_net_negative"]["workflow_gates_pull_requests"] = bool(gates_pr)
         f["tier2_neutrality"] = cert
         f["guardrail"] = _guardrail
         out.append(f)

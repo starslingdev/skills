@@ -5293,13 +5293,27 @@ def _tier2_below_long_pole_problems(f: dict, data: dict) -> list[str]:
     got = _num(_as_dict(f.get("tier2_neutrality")).get("margin_s"))
     if got is None or want is None or abs(got - want) > 0.11:
         problems = problems + [f"below-long-pole margin {got!r} != re-derived {want!r}"]
-    # The margin compares single-job p50s; a job in a `needs:` chain with the
-    # long pole adds to the merge wait instead, so the proof does not hold for
-    # it. Re-derived from `workflow_job_graph` when the run recorded one.
+    # The margin compares single-job p50s; on a workflow a pull request waits
+    # on, a job in a `needs:` chain with the long pole adds to the merge wait
+    # instead, so the proof does not hold for it. Re-derived from
+    # `workflow_job_graph` when the run recorded one. The collector applies that
+    # exclusion only when the workflow gates pull requests (no PR waits on any
+    # other, so the chain shortens no merge wait); the same gate here reads the
+    # stamped `workflow_gates_pull_requests`, paired against the sampled events
+    # when the run recorded them. A finding without the stamp (pre-stamp
+    # artifact) is read as gating pull requests, so the check fails closed.
     wf = str(f.get("workflow_file") or "")
     crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
     lp_job = str(crit.get("long_pole_job") or "")
+    stamped = _as_dict(f.get("cache_net_negative")).get("workflow_gates_pull_requests")
+    if isinstance(stamped, bool):
+        ev = _opt79_sampled_events_problem(data, wf, stamped)
+        if ev:
+            problems = problems + [ev]
+    gates_pr = stamped is not False
     for job in (str(j) for j in _as_list(f.get("affected_jobs")) if str(j)):
+        if not gates_pr:
+            break
         if _vr_opt79_needs_chain(data, wf, job, lp_job):
             problems = problems + [
                 f"`{job}` is in a `needs:` chain with the long pole `{lp_job}`: "
@@ -7161,8 +7175,8 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                 bad.append(f"{fid}: below-floor margin {got!r} != re-derived {want!r}")
         elif proof == _VR_OPT79_PROOF_BELOW_LONG_POLE:
             # OPT79's second runner-minute proof: at or above the cluster floor,
-            # strictly shorter than the long pole, and in no `needs:` chain with
-            # it. The "rendered as a Long pole" proxy above still applies: it is
+            # strictly shorter than the long pole, and, on a pull-request
+            # workflow, in no `needs:` chain with it. The "rendered as a Long pole" proxy above still applies: it is
             # what catches a chained job when the run recorded no job graph.
             bad.extend(f"{fid}: {msg}"
                        for msg in _tier2_below_long_pole_problems(f, data))

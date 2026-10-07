@@ -4612,6 +4612,47 @@ def test_opt79_verifier_fails_a_credited_below_long_pole_job_in_a_needs_chain():
     assert any("needs:" in p for p in problems), problems
 
 
+def test_opt79_verifier_keeps_a_chained_below_long_pole_credit_off_pull_requests():
+    """The collector excludes a job `needs:`-chained to the long pole only on a
+    pull-request workflow (no PR waits on any other, so the chain shortens no
+    merge wait). The verifier applies the same gate: a chained credited finding
+    on a push-only workflow verifies; the same chain on a pull-request workflow
+    still fails, and a gate stamp the sampled events contradict fails."""
+    import copy
+    vr = _load_verify_report_for_opt79()
+    out, rows, _w = _opt79_chain_run({_OPT79_JOB: ["e2e"]}, is_pr=False)
+    assert rows == [] and len(out) == 1, (out, rows)
+    f = out[0]
+    assert f["cache_net_negative"]["workflow_gates_pull_requests"] is False
+    graph = {"ci.yml": {_OPT79_JOB: {"name": _OPT79_JOB, "needs": ["e2e"]},
+                        "e2e": {"name": "e2e", "needs": []},
+                        "integration": {"name": "integration", "needs": []}}}
+    crit = _opt79_pole_crit()
+    data = {"per_workflow_timing": {"ci.yml": crit}, "findings": [f],
+            "workflow_job_graph": graph}
+    assert vr._tier2_below_long_pole_problems(f, data) == []
+    # sampled push-only events agree with the stamp: still verifies
+    crit["events"] = ["push"]
+    assert vr._tier2_below_long_pole_problems(f, data) == []
+    # a stamp claiming PRs that the sampled events contradict fails
+    lie = copy.deepcopy(f)
+    lie["cache_net_negative"]["workflow_gates_pull_requests"] = True
+    problems = vr._tier2_below_long_pole_problems(lie, data)
+    assert any("workflow_gates_pull_requests" in p for p in problems), problems
+    # the same chain on a pull-request workflow still fails
+    crit["events"] = ["pull_request"]
+    problems = vr._tier2_below_long_pole_problems(lie, data)
+    assert any("needs:" in p for p in problems), problems
+    crit.pop("events")
+    problems = vr._tier2_below_long_pole_problems(lie, data)
+    assert any("needs:" in p for p in problems), problems
+    # a finding without the stamp (pre-stamp artifact) is read as gating PRs
+    old = copy.deepcopy(f)
+    old["cache_net_negative"].pop("workflow_gates_pull_requests")
+    problems = vr._tier2_below_long_pole_problems(old, data)
+    assert any("needs:" in p for p in problems), problems
+
+
 def test_opt79_below_the_floor_note_claims_no_merge_gate():
     """The below-the-floor arm's note and size note say only what the proof
     shows - the job cannot make the workflow take longer - never that no
