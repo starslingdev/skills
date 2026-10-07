@@ -6541,6 +6541,67 @@ def test_opt80_names_the_slowest_job_case_in_plain_words():
     assert other[0]["checkout_stall"]["on_critical_path"] is False
 
 
+def _opt80_pr(is_pr, long_pole="build", durations=None):
+    runs = _opt80_runs(durations)
+    gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
+    return cr._detect_opt80_checkout_tail_stall(
+        gh, "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(long_pole=long_pole),
+        _opt80_wf(), None, 100, 0, is_pr=is_pr)
+
+
+def test_opt80_stamps_a_tail_axis_on_the_slowest_job_of_a_pull_request_workflow():
+    """The owner decision of 2026-10-06: the on-pole pull-request case states the
+    tail on its OWN axis — "one run in N loses up to X s on checkout to a stalled
+    fetch" — and still credits no wall-clock. Ten sampled runs, two of them
+    log-proven 120s stalls against a 10s p50: one in five, 110s."""
+    out = _opt80_pr(is_pr=True)
+    assert len(out) == 1, out
+    f = out[0]
+    cs = f["checkout_stall"]
+    assert cs["tail_axis"] == {
+        "sampled_runs": 10, "tail_runs": 2, "one_in_n": 5,
+        "typical_checkout_p50_s": 10.0, "tail_checkout_p50_s": 120.0,
+        "tail_loss_s": 110.0, "on_critical_path": True}
+    # Never a p50 number, never in the credited minutes or the certificate.
+    assert f["wall_clock_p50_s"] == 0.0
+    assert f["runner_min_saving"] == 36.7 and cs["runner_min_saving"] == 36.7
+    assert f["tier2_neutrality"]["margin_s"] == 22.0
+    assert set(f["tier2_neutrality"]) == {"proof", "margin_s", "ref"}
+    assert "one run in" not in f["tier2_neutrality"]["ref"]
+    assert "one run in" not in f["size_note"]
+    # The evidence reads the tail line instead of "not credited in this version".
+    ev = f["evidence"]
+    assert ("`build` is this workflow's slowest job on pull requests: one run in 5 "
+            "loses up to 110s on checkout to a stalled fetch") in ev, ev
+    assert "not credited in this version" not in ev, ev
+
+
+def test_opt80_tail_axis_counts_only_log_proven_tail_runs():
+    """A slow checkout whose log shows a smooth fetch is not a stall, so it is not
+    one of the N in "one run in N". Three 120s runs, only two proven: the sentence
+    must say one in five (10 / 2), not one in three (10 / 3)."""
+    runs = _opt80_runs([10.0] * 7 + [120.0, 120.0, 120.0])
+    logs = {run[0]["id"]: _OPT80_STALLED_LOG for run in runs}
+    logs[runs[-1][0]["id"]] = _OPT80_SMOOTH_LOG
+    out = cr._detect_opt80_checkout_tail_stall(
+        _Opt80Gh(logs), "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(),
+        _opt80_wf(), None, 100, 0, is_pr=True)
+    axis = out[0]["checkout_stall"]["tail_axis"]
+    assert axis["tail_runs"] == 2 and axis["one_in_n"] == 5, axis
+    assert len(out[0]["checkout_stall"]["tail_run_job_ids"]) == 3
+
+
+def test_opt80_stamps_no_tail_axis_off_the_pull_request_merge_wait():
+    """No pull request waits on a push-only workflow, an unknown trigger is not
+    assumed to be one, and a job that is not the slowest is not on the gate: none
+    of the three gets a tail line, and the pole cases keep the old sentence."""
+    for is_pr, pole in ((False, "build"), (None, "build"), (True, "deploy")):
+        f = _opt80_pr(is_pr=is_pr, long_pole=pole)[0]
+        assert "tail_axis" not in f["checkout_stall"], (is_pr, pole)
+        assert "loses up to" not in f["evidence"], (is_pr, pole)
+        assert ("not credited in this version" in f["evidence"]) is (pole == "build")
+
+
 # ---- the log READER: what a record is, and what a dropped line costs ----------
 #
 # git writes fetch progress with a CARRIAGE RETURN, so one timestamped log RECORD

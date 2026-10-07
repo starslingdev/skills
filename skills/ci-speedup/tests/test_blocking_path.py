@@ -3090,6 +3090,53 @@ def test_every_recordable_withhold_gate_has_a_plain_english_phrase():
         assert phrase and "_" not in phrase and "$" not in phrase, phrase
 
 
+def _opt80_tail_render_doc(**kw):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_verify_report_self as vs  # noqa: E402
+
+    doc = vs._opt80_tail_doc(**kw)
+    vs._ensure_tier2_source_rows(doc)
+    return doc
+
+
+def test_opt80_tail_line_never_moves_the_headline_or_bottom_line():
+    """The tail line is a separate axis. Rendering the same findings with and
+    without `tail_axis` must leave everything above the Contents (title,
+    provenance table, Bottom line) byte-identical, and the line must sit inside
+    the pole section only."""
+    doc = _opt80_tail_render_doc()
+    with_tail = bp.render(doc)
+    plain = json.loads(json.dumps(doc))
+    del plain["findings"][0]["checkout_stall"]["tail_axis"]
+    without = bp.render(plain)
+    head = lambda r: r.split("## 📋 Contents", 1)[0]  # noqa: E731
+    assert head(with_tail) == head(without)
+    assert "stalled fetch" not in head(with_tail)
+    assert "<!-- opt80-tail:" not in without
+    assert with_tail.count("<!-- opt80-tail:f-promoted -->") == 1
+    tier2 = with_tail.split("## Runner-minute reductions", 1)[-1]
+    assert "<!-- opt80-tail:" not in tier2
+
+
+def test_opt80_tail_line_states_the_stamped_numbers_as_a_tail_not_a_p50():
+    doc = _opt80_tail_render_doc()
+    lines = bp._opt80_tail_block(doc["findings"], "https://catalog")
+    assert lines[0] == "<!-- opt80-tail:f-promoted -->"
+    assert ("one run in 5 loses up to 110s on checkout to a stalled fetch"
+            in lines[1]), lines[1]
+    assert "never added to any total" in lines[1]
+    assert "**~" not in lines[1] and "min/mo" not in lines[1]
+    # The collector's own phrase is the same sentence the renderer prints.
+    axis = doc["findings"][0]["checkout_stall"]["tail_axis"]
+    assert cr._opt80_tail_phrase(axis) in lines[1]
+    # A finding with no tail axis renders nothing, at a pole or off it.
+    del doc["findings"][0]["checkout_stall"]["tail_axis"]
+    assert bp._opt80_tail_for({"check": "build", "job": "build",
+                               "workflow_file": ".github/workflows/ci.yml"},
+                              doc["findings"]) == []
+    assert bp._opt80_off_pole_tail_block(doc["findings"], "u") == []
+
+
 def test_second_pole_role_names_the_real_slowest_concurrent_check_above_it():
     # Regression (two-pole): pole 2's "becomes the gate once X drops" must name the
     # ACTUAL slowest concurrent check above it - which may be an intervening check that

@@ -9476,6 +9476,121 @@ def _opt80_pole_doc():
     return doc
 
 
+# ── OPT80's tail axis: "one run in N loses up to X s on checkout" ──
+# Every number in the line is re-derived from the per-run checkout durations and
+# the per-run stall proofs; the stamped block is compared, never trusted.
+
+_OPT80_TAIL_AXIS = {"sampled_runs": 10, "tail_runs": 2, "one_in_n": 5,
+                    "typical_checkout_p50_s": 10.0, "tail_checkout_p50_s": 120.0,
+                    "tail_loss_s": 110.0, "on_critical_path": True}
+
+
+def _opt80_tail_doc(pole_check="build", pole_job="build"):
+    doc = _opt80_pole_doc()
+    doc["findings"][0]["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    pcp = doc["pr_critical_path"]
+    pcp["critical_path_check"] = pole_check
+    pcp["checks"][0]["name"] = pole_check
+    pcp["poles"][0].update(check=pole_check, job=pole_job)
+    return doc
+
+
+def test_opt80_tail_axis_rederives_from_the_real_detector_output():
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    f = t._opt80_pr(is_pr=True)[0]
+    assert f["checkout_stall"]["tail_axis"]["one_in_n"] == 5
+    assert vr._opt80_tail_axis_rederived(f) == []
+    for key, bad in (("one_in_n", 4), ("tail_loss_s", 200.0), ("tail_runs", 3),
+                     ("sampled_runs", 9), ("tail_checkout_p50_s", 60.0),
+                     ("typical_checkout_p50_s", 1.0)):
+        g = copy.deepcopy(f)
+        g["checkout_stall"]["tail_axis"][key] = bad
+        assert any(f"tail_axis.{key}" in p for p in vr._opt80_tail_axis_rederived(g)), key
+
+
+def test_opt80_tail_axis_is_refused_off_the_critical_path_and_as_a_p50():
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    assert vr._opt80_tail_axis_rederived(f) == []
+    f["checkout_stall"]["on_critical_path"] = False
+    assert any("on_critical_path" in p for p in vr._opt80_tail_axis_rederived(f))
+    f["checkout_stall"]["on_critical_path"] = True
+    f["wall_clock_p50_s"] = 110.0
+    assert any("wall_clock_p50_s" in p for p in vr._opt80_tail_axis_rederived(f))
+
+
+def test_opt80_tail_axis_counts_only_tail_runs_whose_log_proves_a_stall():
+    """A proof whose quoted lines show the transfer ADVANCING is no stall, so
+    that run drops out of N: one proven run of ten re-derives to one in ten."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    f["checkout_stall"]["proven_tail_runs"][1]["after"]["line"] = (
+        "Receiving objects:  60% (72000/120000)")
+    probs = vr._opt80_tail_axis_rederived(f)
+    assert any("tail_axis.tail_runs" in p and "1" in p for p in probs), probs
+    assert any("tail_axis.one_in_n" in p and "10" in p for p in probs), probs
+
+
+def test_opt80_tail_line_renders_at_the_pole_and_pairs_with_its_block(tmp_path: Path):
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    line = "one run in 5 loses up to 110s on checkout to a stalled fetch"
+    pole = report.split("Long pole 1", 1)[1].split("\n## ", 1)[0]
+    assert "<!-- opt80-tail:f-promoted -->" in pole and line in pole, pole[:1500]
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    assert vr.check_tier2_neutrality_derived(report, findings_path, report_path).ok
+    # A rendered line with no stamped block fails…
+    plain = copy.deepcopy(doc)
+    del plain["findings"][0]["checkout_stall"]["tail_axis"]
+    findings_path.write_text(json.dumps(plain), encoding="utf-8")
+    assert not vr.check_opt80_tail_lines(report, findings_path).ok
+    # …and so does a stamped block with no rendered line.
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    stripped = report.replace("<!-- opt80-tail:f-promoted -->", "")
+    assert not vr.check_opt80_tail_lines(stripped, findings_path).ok
+    # A tail sentence anywhere whose numbers the block does not re-derive fails.
+    stray = report + "\none run in 2 loses up to 999s on checkout to a stalled fetch\n"
+    assert not vr.check_opt80_tail_lines(stray, findings_path).ok
+
+
+def test_opt80_on_critical_path_matches_a_workflow_prefixed_pole_check(tmp_path: Path):
+    """A plain job's check-run is named `<workflow> / <job>`. The pole header
+    then says `CI / build` while the finding names `build`; the cross-check that
+    on_critical_path agrees with the rendered poles must see that as the same
+    job, or every real on-pole checkout stall fails its own report."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="CI / build", pole_job="build")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "CI / build" in report
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert chk.ok, chk
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+
+
+def test_opt80_tail_line_off_a_drilled_pole_renders_in_its_own_block(tmp_path: Path):
+    """The slowest job of a pull-request workflow that is not drilled: its tail
+    line renders once, outside every pole section, and that (only that) excuses
+    an on_critical_path job with no pole header."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert report.count("<!-- opt80-tail:f-promoted -->") == 1
+    assert "Checkout stall tails on a workflow's slowest job" in report
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    assert vr.check_tier2_neutrality_derived(report, findings_path, report_path).ok
+    # Without the tail axis the exemption does not apply: the old rule stands.
+    del doc["findings"][0]["checkout_stall"]["tail_axis"]
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
+
+
 def test_tier2_accepts_a_checkout_stall_on_the_rendered_long_pole(tmp_path: Path):
     """The pole rule is a PROXY for "the credited work is not on the merge gate".
     `checkout_tail_excess` carries the thing the proxy stands in for: mean - p50

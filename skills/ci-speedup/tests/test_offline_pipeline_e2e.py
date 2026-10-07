@@ -121,7 +121,13 @@ _JOB_ID = 9001
 #            config-era boundary lookup. Both are push-only, so neither pays the
 #            event-scoped `event=pull_request` volume call a PR workflow does, and
 #            OPT77 reads no job logs at all — zero log fetches for either.)
-_GOLDEN_GH_QUERY_COUNT = 68
+#   73  now  (+5 for the ON-POLE OPT80 case: three more successful pull_request runs
+#            of `ci.yml` (5004-5006, reusing head shas aab2/aab3/aaaa so no new
+#            check-runs page is read) cost one `runs/{id}/jobs` page each (+3), and
+#            two of them are checkout tail runs whose logs OPT80 fetches to prove
+#            the stall (+2, one per tail run, inside `_OPT80_LOG_PROBE_MAX`). The
+#            tail line it stamps is derived from data already in hand: +0.)
+_GOLDEN_GH_QUERY_COUNT = 73
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).
@@ -134,7 +140,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -730,10 +737,12 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # reach. Two mutants must redden it: short-circuiting the call
     # (`new = [] if True else _detect_opt80_…`) and discarding its result
     # (dropping the `findings.extend(new)`).
-    o80 = [f for f in data["findings"] if f.get("pattern") == "OPT80"]
-    assert len(o80) == 1, (
-        "build-matrix.yml's `smoke` job must promote exactly one OPT80 finding "
-        f"(got {[f.get('affected_jobs') for f in o80]!r})")
+    o80_all = [f for f in data["findings"] if f.get("pattern") == "OPT80"]
+    assert sorted(str((f.get("affected_jobs") or [""])[0]) for f in o80_all) == [
+        "smoke", "test"], (
+        "build-matrix.yml's `smoke` job and ci.yml's `test` job must each promote "
+        f"exactly one OPT80 finding (got {[f.get('affected_jobs') for f in o80_all]!r})")
+    o80 = [f for f in o80_all if f.get("affected_jobs") == ["smoke"]]
     cs = o80[0].get("checkout_stall") or {}
     assert cs.get("kind") == "opt80_checkout_tail_stall", cs
     assert cs.get("job") == "smoke" and o80[0]["affected_jobs"] == ["smoke"]
@@ -754,6 +763,32 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert cs.get("logs_fetched") == 2, cs
     assert cs.get("logs_fetched") <= cs.get("log_probe_max")
     assert o80[0].get("tier2_neutrality", {}).get("proof") == "checkout_tail_excess"
+    # `smoke` is in a push-only workflow, so nothing waits on it to merge: it is
+    # off the critical path and carries no tail line.
+    assert cs.get("on_critical_path") is False, cs
+    assert "tail_axis" not in cs, cs
+    # The ON-POLE pull-request case. ci.yml's `test` job is the PR critical path's
+    # slowest check (`CI / test`, 197s) and checks out in 5s on four of its six
+    # sampled pull_request runs and 125s / 95s on two (runs 5004 / 5005), whose
+    # logs hold the transfer at 17% for 90s / 60s. The median run never stalls,
+    # so `wall_clock_p50_s` stays 0 — but one run in three loses about 105s on
+    # the merge wait, and that is stamped as a SEPARATE tail axis, re-derived
+    # from the per-run durations and the proven runs alone:
+    #   sampled_runs 6, tail_runs 2 (log-proven), one_in_n round(6/2) = 3,
+    #   typical p50 5s, tail p50 median(125, 95) = 110s, loss 110 - 5 = 105s.
+    o80_pole = [f for f in o80_all if f.get("affected_jobs") == ["test"]]
+    cs_pole = o80_pole[0].get("checkout_stall") or {}
+    assert o80_pole[0]["workflow_file"].endswith("ci.yml"), o80_pole[0]
+    assert cs_pole.get("on_critical_path") is True, cs_pole
+    assert o80_pole[0].get("wall_clock_p50_s") in (0, 0.0), o80_pole[0]
+    assert cs_pole.get("tail_axis") == {
+        "sampled_runs": 6, "tail_runs": 2, "one_in_n": 3,
+        "typical_checkout_p50_s": 5.0, "tail_checkout_p50_s": 110.0,
+        "tail_loss_s": 105.0, "on_critical_path": True}, cs_pole.get("tail_axis")
+    # The tail line replaces the old "measured … but not credited in this
+    # version" sentence for the on-pole pull-request case only.
+    assert "not credited in this version" not in str(o80_pole[0].get("evidence")), (
+        o80_pole[0].get("evidence"))
     assert isinstance(data.get("opt80_withheld_by_gate"), dict), (
         "the per-gate withhold tally must be stamped on every collected run")
     # A candidate OPT80 measured and could NOT decide, end to end. build-matrix.yml's
@@ -918,6 +953,42 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert verify.returncode == 0, (
         "verify_report rejected the offline-replayed report:\n"
         f"{verify.stdout}\n{verify.stderr}")
+
+    # OPT80's tail line reaches the reader AT the pole it sits on, once, beside
+    # the pole's merge-wait figure — and nowhere a p50 number lives. The verifier
+    # above re-derived its numbers from the per-run durations and the proofs.
+    _pole_id = str(o80_pole[0]["id"])
+    _tail = "one run in 3 loses up to 105s on checkout to a stalled fetch"
+    _marker = f"<!-- opt80-tail:{_pole_id} -->"
+    assert report.count(_marker) == 1, _marker
+    _pole1 = report.split('<a id="pole-1"></a>', 1)[1].split('<a id="pole-2"></a>', 1)[0]
+    assert "▸ `CI / test`" in _pole1 and _marker in _pole1, (
+        "the tail line must render inside the `CI / test` long-pole section")
+    assert _tail in _pole1.split(_marker, 1)[1].split("\n\n", 1)[0], _pole1[:1200]
+    # Never in the headline / Bottom line, never in the runner-minute section.
+    _head = report.split("## 📋 Contents", 1)[0]
+    assert "stalled fetch" not in _head and "opt80-tail" not in _head, _head
+    _tier2 = report.split("## Runner-minute reductions", 1)[1].split("## 🧹", 1)[0]
+    assert _marker not in _tier2, "the tail line must never render as a Tier-2 row"
+    assert "not credited in this version" not in report.split(
+        '<a id="pole-2"></a>', 1)[0], "the on-pole PR case reads the tail line now"
+    # The self-check re-derives the tail line rather than reading it back: a
+    # tampered `one_in_n`, and separately a tail axis stamped on a finding that
+    # is off the critical path, must each fail verification.
+    for _tamper80 in (
+            lambda cs: cs["tail_axis"].__setitem__("one_in_n", 2),
+            lambda cs: cs.__setitem__("on_critical_path", False)):
+        _bad80 = json.loads(findings_path.read_text(encoding="utf-8"))
+        _tamper80(next(f for f in _bad80["findings"]
+                       if f.get("id") == _pole_id)["checkout_stall"])
+        _bad80_path = tmp_path / "findings_tampered_opt80.json"
+        _bad80_path.write_text(json.dumps(_bad80), encoding="utf-8")
+        _v80 = subprocess.run(
+            [sys.executable, str(_SKILL_DIR / "tests" / "verify_report.py"),
+             "--report", str(report_path), "--findings", str(_bad80_path)],
+            capture_output=True, text=True, env=env, timeout=60)
+        assert _v80.returncode != 0 and "OPT80 tail lines" in _v80.stdout, (
+            _v80.stdout[-2000:])
 
     # The held-back candidate reaches the reader too, in plain English: the count,
     # the job, and a reason a product manager can read - never the gate name. The
