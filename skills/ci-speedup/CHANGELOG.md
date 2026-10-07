@@ -609,6 +609,54 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-10-06** — **A cache that costs more than it saves on a workflow's slowest
+  job now gets a merge-wait number.** Until now, when the cache check (OPT79)
+  measured a slow cache on the slowest job of a workflow that runs on pull
+  requests — the one place its extra time sits on the merge wait — the report
+  listed it as "measured, not credited" with no number. It is now a finding in
+  that job's long-pole section (or, when the job is not one of the drilled long
+  poles, in its own short block before "Also noticed", never as an appendix
+  row): the measured extra time per cache hit, capped at
+  the gap between its duration and the workflow's next-tallest job's (a
+  cap that is conservative when the next-tallest job runs alongside the
+  slowest one or directly after it; it compares job durations and does not
+  model a longer `needs:` chain of shorter jobs, which a chain-aware cap in a
+  follow-up would), with both jobs and their times
+  named in the evidence ("`prep` is this workflow's slowest job at 120s and its
+  next-tallest job, `verify`, runs 100s; the audit caps the saving at that 20s
+  gap, so up to 20s of the excess comes off the merge wait on the 50% of sampled
+  runs where the cache hit (3 of 6 runs read)"), the figure being per cache hit
+  so the measured hit rate is stated beside it in the evidence and the block
+  header and checked by the report's self-check against the stamped share. The wording holds
+  whether the next job runs alongside the slowest one or after it through
+  `needs:`; it never says that job finishes at a time or sets the merge wait.
+  The usual cross-check bounds can lower it further, and the block then prints
+  each step and its reason. Unless a leaf, structural or data-driven match
+  fired first, and when its figure clears the 30s long-pole floor, the pole's
+  waterfall and agent prompt name OPT79 and point at its block, rather than
+  calling the pole a coverage gap (a figure under 30s, such as a 20s one, still
+  renders its block but leaves the pole a coverage gap).
+  Runner-minutes are deliberately not stated on it: the runner-minute section
+  needs proof that a job sits below the second-slowest
+  job, which the slowest job cannot have. The "not credited" line now covers
+  workflows no pull request runs and jobs at or above the floor. A slowest job is also kept on that line, with the reason
+  stated, when it is tied with the next-tallest job (under 1s apart), when the
+  cross-checks find no merge wait it can shorten, when the pull request can merge
+  without that workflow, or when the workflow's sampled runs include no pull
+  request. The report's self-check re-derives the capped number from the stamped measurements, rejects
+  any OPT79 finding that claims wall-clock under a below-the-floor certificate,
+  checks that the job it names as the cap is the tallest other job the run
+  measured, and fails an uncredited line that claims the merge wait. A figure the cross-checks leave under half a second is demoted too, so no
+  credited line ever prints "0s"; a demoted row carries the cross-check steps
+  that zeroed it, and the self-check re-derives them, and checks an off-spine
+  row against the checks the merge actually dropped. A workflow that declares
+  pull requests but had none in the sample is told so, instead of being called
+  a workflow that does not run on pull requests. The self-check also pairs the
+  gap and the excess the sentence states ("that 10s gap", "the 19s excess") and
+  the note's gap, durations and next-tallest job with the stamped sizing, and
+  fails a "slowest job, but ..." line on a job the run did not measure as that
+  workflow's slowest.
+
 - **2026-09-30** — **Five fix moves the catalog only half-covered are now in the
   advice.** OPT28 gains "delete the checkout step if no step reads a file" and
   the sparse / blobless checkout option (`filter: blob:none`, `sparse-checkout:`)

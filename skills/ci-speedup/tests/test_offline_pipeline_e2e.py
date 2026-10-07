@@ -121,7 +121,14 @@ _JOB_ID = 9001
 #            config-era boundary lookup. Both are push-only, so neither pays the
 #            event-scoped `event=pull_request` volume call a PR workflow does, and
 #            OPT77 reads no job logs at all — zero log fetches for either.)
-_GOLDEN_GH_QUERY_COUNT = 68
+#   77  now  (+9 OPT79's credited wall-clock arm: `chained.yml`'s `prep` — the slowest
+#            job of a workflow that gates pull requests — now restores a cache before
+#            `npm ci`, and the corpus carries three more sampled pull_request runs of
+#            it (7004-7006) so the hit and miss populations each reach the three-run
+#            minimum. +3 `runs/{id}/jobs` pages for those runs, +6 `prep` job logs for
+#            the cache probe (one per sampled occurrence, under the per-job cap of 8).
+#            No new check-runs or PR fetch: the new runs reuse existing head shas.)
+_GOLDEN_GH_QUERY_COUNT = 77
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).
@@ -249,6 +256,17 @@ jobs:
 # ranking/cascade work is PR-N3's (recorded as-built in the plan).
 # Check-runs are named by the plain job name (GitHub's naming for plain jobs),
 # which is what the graph resolver keys on.
+#
+# `prep` also restores a cache before `npm ci`, and the corpus carries SIX
+# sampled pull_request runs (7001-7006, the last three reusing the first
+# three's head shas on later timestamps, so no new check-runs fixture and no
+# new PR population). Three are cache HITS (restore 30s + install 3s + post 0s
+# = 33s) and three are MISSES (1s + 7s + 4s = 12s): a 21s excess per hit on
+# the workflow's SLOWEST job, on a workflow that gates pull requests — OPT79's
+# credited WALL-CLOCK arm, capped at the 20s headroom to `verify`. Every `prep`
+# job is still exactly 120s in total (`Build artifact` absorbs the difference),
+# so prep's p50, the 220s chain, the poles order and every other corpus number
+# are unchanged by the cache steps.
 _WF3_ID = 1003
 _WF3_YAML = """name: Chained
 on:
@@ -259,6 +277,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: prep-deps-${{ hashFiles('**/package-lock.json') }}
+      - run: npm ci
       - name: Build artifact
         run: npm run build
       - uses: actions/upload-artifact@v4
@@ -654,10 +677,15 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # the detector's DISPATCH and the capped log probe that feeds it are only
     # reachable through collect(): short-circuiting the detector call, or
     # discarding its result, leaves every unit test green.
-    o79 = [f for f in data["findings"] if f.get("pattern") == "OPT79"]
-    assert len(o79) == 1, (
-        "the `deps` job in build-matrix.yml must promote one OPT79 net-negative cache "
-        f"(got {[f.get('affected_jobs') for f in o79]!r})")
+    o79_all = [f for f in data["findings"] if f.get("pattern") == "OPT79"]
+    # TWO OPT79 findings now: `deps` (below its workflow's floor — credited
+    # runner-minutes, Tier-2) and `prep` (chained.yml's slowest job, on a
+    # workflow that gates pull requests — credited WALL-CLOCK, no minutes).
+    assert sorted(tuple(f.get("affected_jobs") or []) for f in o79_all) == [
+        ("deps",), ("prep",)], (
+        "expected one credited OPT79 on `deps` and one pole OPT79 on `prep` "
+        f"(got {[f.get('affected_jobs') for f in o79_all]!r})")
+    o79 = [f for f in o79_all if f.get("affected_jobs") == ["deps"]]
     cn = o79[0].get("cache_net_negative") or {}
     assert cn.get("kind") == "opt79_net_negative_cache", cn
     assert cn.get("job") == "deps" and o79[0].get("affected_jobs") == ["deps"], cn
@@ -694,6 +722,8 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # below the cluster floor), so it is reported with no number — and since the
     # workflow runs only on push, never as a merge wait.
     _unc = data.get("opt79_uncredited_pole_caches")
+    # Still exactly one: `prep` is a credited finding now (below), so the only
+    # uncredited row is the push-only workflow's `integration`.
     assert isinstance(_unc, list) and len(_unc) == 1, _unc
     assert _unc[0].get("job") == "integration", _unc[0]
     assert _unc[0].get("waste_s") == 21.0, _unc[0]
@@ -701,7 +731,50 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert _unc[0].get("runner_min_saving") is None, _unc[0]
     assert _unc[0].get("on_critical_path") is False, _unc[0]
     assert _unc[0].get("workflow_gates_pull_requests") is False, _unc[0]
-    # Nothing was probed and withheld on this corpus: both candidates decided.
+    # The credited WALL-CLOCK arm end to end. `chained.yml`'s `prep` is that
+    # workflow's slowest job (120s; `verify` is next at 100s) and the workflow
+    # runs on pull requests, so its net-negative cache — 33s on 3 hit runs vs
+    # 12s on 3 miss runs, a 21s excess per hit — is ON the merge wait. It is
+    # sized as wall-clock, capped at the 20s headroom to `verify` (beyond that,
+    # `verify` gates the run), and states no runner-minutes.
+    pole79 = next(f for f in o79_all if f.get("affected_jobs") == ["prep"])
+    pcn = pole79.get("cache_net_negative") or {}
+    assert pcn.get("kind") == "opt79_pole_net_negative_cache", pcn
+    assert pcn.get("hits") == 3 and pcn.get("misses") == 3, pcn
+    assert pcn.get("hit_path_p50_s") == 33.0 and pcn.get("miss_path_p50_s") == 12.0, pcn
+    assert pcn.get("waste_s") == 21.0, pcn
+    assert pcn.get("on_critical_path") is True, pcn
+    assert pcn.get("workflow_gates_pull_requests") is True, pcn
+    _ps = pcn.get("pole_sizing") or {}
+    assert _ps.get("long_pole_job") == "prep" and _ps.get("next_tallest_job") == "verify", _ps
+    assert _ps.get("long_pole_p50_s") == 120.0 and _ps.get("floor_p50_s") == 100.0, _ps
+    assert _ps.get("headroom_s") == 20.0 and _ps.get("raw_wall_clock_s") == 20.0, _ps
+    assert _ps.get("capped_by_next_tallest_job") is True, _ps
+    # The generic cascade then runs over it; on this corpus nothing shrinks it
+    # further (the chain-aware critical-path bound allows up to the 23s chain
+    # headroom), so the credited number is the capped raw value.
+    assert pole79.get("wall_clock_uncapped_p50_s", pole79.get("wall_clock_p50_s")) == 20.0, pole79
+    assert pole79.get("wall_clock_p50_s") == 20.0, pole79
+    assert pole79.get("runner_min_saving") is None and pcn.get("runner_min_saving") is None
+    assert "tier2_neutrality" not in pole79, pole79
+    assert pole79.get("sizing_basis") == "measured" and pole79.get("tier") == 1, pole79
+    _pev = str(pole79.get("evidence") or "")
+    assert "`prep` is this workflow's slowest job at 120s" in _pev, _pev
+    assert "its next-tallest job, `verify`, runs 100s" in _pev, _pev
+    assert ("the audit caps the saving at that 20s gap, so up to 20s of the excess "
+            "comes off the merge wait on the 50% of sampled runs where the cache hit "
+            "(3 of 6 runs read)") in _pev, _pev
+    assert pcn.get("hit_share") == 0.5 and pcn.get("ambiguous_runs") == 0, pcn
+    # `verify` has `needs: prep` on this corpus, so it neither "finishes at"
+    # 100s nor sets the merge wait on its own: the cap compares job durations,
+    # not the chain. No sentence the pole finding emits may claim otherwise.
+    _pnote = str((pole79.get("measured_evidence") or {}).get("note") or "")
+    for _txt in (_pev, _pnote, str(pole79.get("size_note") or ""),
+                 str(pole79.get("measured_signal") or "")):
+        assert "finishes at" not in _txt, _txt
+        assert "sets the merge wait" not in _txt, _txt
+        assert "gates the merge wait" not in _txt, _txt
+    # Nothing was probed and withheld on this corpus: every candidate decided.
     assert data.get("opt79_withheld_candidates") == [], data.get(
         "opt79_withheld_candidates")
     # …and the run DECLARES those reads in its provenance, as its own row. The
@@ -711,11 +784,12 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # were read is the failure this separate row exists to prevent.
     _probe = (data.get("data_sources") or {}).get("cache_probe_logs")
     assert isinstance(_probe, dict), data.get("data_sources")
-    assert _probe.get("probed") == 16 and _probe.get("returned") == 16, _probe
+    # 8 `deps` + 8 `integration` + 6 `prep` (every sampled occurrence of it).
+    assert _probe.get("probed") == 22 and _probe.get("returned") == 22, _probe
     # PLANNED is stamped beside them: when the repo-wide budget cuts the plan the
     # comparison saw less of the repository than its selector asked for, and the
     # row has to say so. Here nothing was cut, so the two agree.
-    assert _probe.get("planned") == 16, _probe
+    assert _probe.get("planned") == 22, _probe
     # setup-node's automatic cache: no job in this corpus runs setup-node v5+
     # without a `cache:` input (`ci.yml` pins v4), so no cache count depends on
     # package.json and it is NOT read — no gh call, no disk read. The stamp says
@@ -823,11 +897,21 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     member = next((f for f in data["findings"]
                    if f.get("pattern") == "OPT75"
                    and "chained.yml" in str(f.get("workflow_file", ""))), None)
-    if member is not None:
-        chain_win = float((pcp.get("chain_summary") or {}).get("chain_win_p50_s") or 0.0)
-        assert 0.0 < float(member.get("wall_clock_p50_s") or 0.0) <= chain_win + 0.1, (
+    # Stated, not guarded by `if member is not None`: the chain's OPT75 member is
+    # `verify`. `prep` routes to OPT72 (setup-dominated), and the OPT79 pole-cache
+    # finding's 20s wall-clock on `prep` does NOT suppress that structural lever:
+    # a hygiene saving suppresses a pole's structural lever only when it covers at
+    # least half the pole's p50 (60s of prep's 120s), and 20s does not.
+    assert member is not None and member.get("affected_jobs") == ["verify"], member
+    _prep_struct = [f for f in data["findings"]
+                    if "chained.yml" in str(f.get("workflow_file", ""))
+                    and f.get("structural") and f.get("affected_jobs") == ["prep"]]
+    assert [f.get("pattern") for f in _prep_struct] == ["OPT72"], _prep_struct
+    chain_win = float((pcp.get("chain_summary") or {}).get("chain_win_p50_s") or 0.0)
+    for _m in (member, _prep_struct[0]):
+        assert 0.0 < float(_m.get("wall_clock_p50_s") or 0.0) <= chain_win + 0.1, (
             "a chain member's lever must be positive and capped at the chain "
-            f"headroom (~{chain_win}s; got {member.get('wall_clock_p50_s')})")
+            f"headroom (~{chain_win}s; got {_m.get('wall_clock_p50_s')})")
 
     # ENG-1 PR-N1: the per-PR chain TIMING facts are stamped (data-only — the
     # argmax gate above is deliberately unchanged until PR-N2). The chained.yml
@@ -983,7 +1067,8 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
 
     # OPT79 reaches the READER too — the credited finding with the numbers it
     # was measured on, and the uncredited line with its own.
-    o79_rendered = [f for f in data["findings"] if f.get("pattern") == "OPT79"]
+    o79_rendered = [f for f in data["findings"] if f.get("pattern") == "OPT79"
+                    and f.get("affected_jobs") == ["deps"]]
     assert "A Cache That Costs More Than It Saves" in report, (
         "the OPT79 finding is in the findings document but not in the rendered "
         "report — the renderer dropped it")
@@ -1000,17 +1085,43 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
             "measured net-negative by 21s per cache hit (4 hit / 4 miss run(s) "
             "sampled)") in report
     assert "does not run on pull requests" in report
+    # …and the pole finding on `prep` reaches the reader as a finding with its
+    # merge-wait number, while no uncredited line claims a merge wait.
+    assert str(pole79["id"]) in report, pole79["id"]
+    _pole_lines = [ln for ln in report.splitlines()
+                   if "A Cache That Costs More Than It Saves" in ln and "20s" in ln]
+    assert _pole_lines, "the pole OPT79 finding's title and 20s did not render together"
+    assert any("up to **20s** off the merge wait on the 50% of sampled runs where "
+               "the cache hit (3 of 6 runs read)" in ln for ln in _pole_lines), _pole_lines
+    assert "is this workflow's slowest job, so the saving is on the merge wait" \
+        not in report
 
     # The self-check RE-DERIVES the OPT79 numbers, it does not read them back.
     # A findings file with the credited finding's excess tampered must fail
     # the report's own verification, and so must a tampered uncredited row.
     for _tamper, _check in (
             (lambda d: [f for f in d["findings"] if f.get("pattern") == "OPT79"
+                        and f.get("affected_jobs") == ["deps"]
                         ][0]["cache_net_negative"].__setitem__("waste_s", 900.0),
-             "Tier-2"),
+             "Tier-2 waste_s"),
             (lambda d: d["opt79_uncredited_pole_caches"][0].__setitem__(
                 "waste_s", 900.0),
-             "uncredited net-negative caches")):
+             "uncredited waste_s"),
+            # the pole finding's measured excess, and separately its credited
+            # merge-wait number, are both re-derived rather than read back
+            (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
+                            and f.get("affected_jobs") == ["prep"]
+                            )["cache_net_negative"].__setitem__("waste_s", 900.0),
+             "pole waste_s"),
+            (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
+                            and f.get("affected_jobs") == ["prep"]
+                            ).__setitem__("wall_clock_p50_s", 900.0),
+             "pole wall_clock_p50_s"),
+            # a below-the-floor finding claiming merge-wait time it cannot have
+            (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
+                            and f.get("affected_jobs") == ["deps"]
+                            ).__setitem__("wall_clock_p50_s", 5),
+             "below-floor wall_clock_p50_s")):
         _bad = json.loads(findings_path.read_text(encoding="utf-8"))
         _tamper(_bad)
         _bad_path = tmp_path / "findings_tampered.json"
@@ -1020,9 +1131,9 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
              "--report", str(report_path), "--findings", str(_bad_path)],
             capture_output=True, text=True, env=env, timeout=60)
         assert _v.returncode != 0, (
-            f"verify_report accepted a tampered OPT79 waste_s ({_check}):\n"
+            f"verify_report accepted a tampered OPT79 field ({_check}):\n"
             f"{_v.stdout}")
-        assert "waste_s" in _v.stdout, _v.stdout
+        assert _check.split()[-1] in _v.stdout, (_check, _v.stdout)
 
     # ---- PR-H1 (G5): the promoted-path backstop — UNCONDITIONAL. -------------
     # Before this, the replay corpus promoted nothing, so the Tier-2 render
@@ -1102,6 +1213,110 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert (ds.get("cost_deepened_workflow_count") or 0) >= 1, (
         "the bill-pole deepen loop never ran offline "
         f"(cost_deepened_workflow_count={ds.get('cost_deepened_workflow_count')!r})")
+
+
+# ---- OPT79's pole arm through the REAL collect() ----
+#
+# The pole arm's two collect()-level steps were pinned only by unit tests that
+# call the helpers directly: the demotion of a pole finding that no longer
+# carries a merge wait, and the sampled events the detector is handed. These
+# drive the real collect() over the replay corpus in-process, so deleting the
+# demotion call, or handing the detector no events, fails a test.
+
+_CHAINED = ".github/workflows/chained.yml"
+
+
+def _collect_in_process(tmp_path, monkeypatch, edit_fixtures=None):
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    if edit_fixtures is not None:
+        edit_fixtures(fixtures)
+    scan = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO], capture_output=True, text=True, timeout=60)
+    assert scan.returncode == 0, scan.stderr
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    return cr.collect(json.loads(scan.stdout), _REPO, 20, root=repo_root)
+
+
+def _opt79_poles(doc):
+    return [f for f in doc["findings"] if f.get("pattern") == "OPT79"
+            and (f.get("cache_net_negative") or {}).get("kind")
+            == "opt79_pole_net_negative_cache"]
+
+
+def _opt79_rows(doc, wf=_CHAINED):
+    return [r for r in doc.get("opt79_uncredited_pole_caches") or []
+            if r.get("workflow_file") == wf]
+
+
+def test_collect_credits_the_chained_pole_cache_untouched(tmp_path, monkeypatch):
+    """The baseline the two tests below change one thing against."""
+    doc = _collect_in_process(tmp_path, monkeypatch)
+    poles = _opt79_poles(doc)
+    assert [(f["workflow_file"], f["affected_jobs"]) for f in poles] == [
+        (_CHAINED, ["prep"])], poles
+    assert _opt79_rows(doc) == []
+
+
+@pytest.mark.parametrize("how", ["zeroed", "off_spine"])
+def test_collect_demotes_a_pole_finding_with_no_merge_wait_left(
+        tmp_path, monkeypatch, how):
+    """A pole finding the cascade zeroed, or whose job the merge-gating spine
+    dropped, must leave collect() as an uncredited row that says why - never as
+    a credited finding. The cascade's verdict is simulated at the last stamp
+    collect() applies before demoting (the off-spine stamping), so the REAL
+    demotion call is what has to act on it."""
+    real = cr._stamp_off_spine_findings
+
+    def stamp(findings, *a, **k):
+        out = real(findings, *a, **k)
+        for f in findings:
+            if (f.get("cache_net_negative") or {}).get("kind") \
+                    == "opt79_pole_net_negative_cache":
+                if how == "off_spine":
+                    f["off_spine"] = True
+                else:
+                    wc = f["wall_clock_p50_s"]
+                    f.update(wall_clock_uncapped_p50_s=wc, wall_clock_p50_s=0.0,
+                             wall_clock_derivation=[{
+                                 "bound": "measured-critical-path", "from_s": wc,
+                                 "to_s": 0.0, "reason": "a slower check gates the PR"}])
+        return out
+
+    monkeypatch.setattr(cr, "_stamp_off_spine_findings", stamp)
+    doc = _collect_in_process(tmp_path, monkeypatch)
+    assert _opt79_poles(doc) == [], _opt79_poles(doc)
+    rows = _opt79_rows(doc)
+    assert len(rows) == 1, rows
+    want = {"zeroed": "pole_merge_wait_zeroed_by_cross_check",
+            "off_spine": "pole_workflow_off_merge_gating_spine"}[how]
+    assert rows[0]["job"] == "prep" and rows[0]["uncredited_reason"] == want, rows[0]
+    assert rows[0]["on_critical_path"] is False
+
+
+def test_collect_reads_pull_request_status_from_the_sampled_runs(tmp_path, monkeypatch):
+    """`chained.yml` DECLARES `pull_request`; with every sampled run re-labelled a
+    push, no measured pull request waits on it, so its pole cache is an
+    uncredited row (declared, not sampled) - not a merge-wait finding credited
+    off the declared trigger."""
+    def all_push(fixtures):
+        page = fixtures / cr._fixture_name(
+            f"repos/{_REPO}/actions/workflows/1003/runs?per_page=100", "json")
+        doc = json.loads(page.read_text(encoding="utf-8"))
+        for r in doc["workflow_runs"]:
+            r["event"] = "push"
+        page.write_text(json.dumps(doc), encoding="utf-8")
+
+    doc = _collect_in_process(tmp_path, monkeypatch, edit_fixtures=all_push)
+    assert _opt79_poles(doc) == [], _opt79_poles(doc)
+    rows = _opt79_rows(doc)
+    assert len(rows) == 1, rows
+    assert rows[0]["job"] == "prep"
+    assert rows[0]["workflow_gates_pull_requests"] is False
+    assert rows[0]["declares_pull_request"] is True
 
 
 def test_workflow_yaml_reads_the_checkout_not_the_api(tmp_path, monkeypatch):
@@ -1926,7 +2141,10 @@ def test_a_cache_probe_whose_logs_all_fail_is_named_and_disclosed(tmp_path):
                   if e["workflow"] == ".github/workflows/build-matrix.yml"), None)
     assert entry and "OPT79" in entry["detectors"], skipped
     assert "0 of 16 cache-probe job log(s)" in entry["reason"], entry
-    assert not [f for f in data["findings"] if f.get("pattern") == "OPT79"]
+    # Only `build-matrix.yml`'s logs are gone; `chained.yml`'s `prep` probe is
+    # intact, so its pole-cache finding still stands — and nothing else does.
+    assert [f.get("affected_jobs") for f in data["findings"]
+            if f.get("pattern") == "OPT79"] == [["prep"]]
     withheld = data.get("opt79_withheld_candidates")
     assert sorted(w["job"] for w in withheld) == ["deps", "integration"], withheld
     assert {w["gate"] for w in withheld} == {"population_truncated_by_unread_logs"}
