@@ -123,7 +123,7 @@ _JOB_ID = 9001
 #            config-era boundary lookup. Both are push-only, so neither pays the
 #            event-scoped `event=pull_request` volume call a PR workflow does, and
 #            OPT77 reads no job logs at all — zero log fetches for either.)
-#   74  then (+6 for the OPT82 lint workflow added to the corpus, `lint.yml` (1006):
+#   74  then (branch-only state, superseded) (+6 for the OPT82 lint workflow added to the corpus, `lint.yml` (1006):
 #            the same six calls `checks.yml` costs — one all-status run-list page,
 #            three `runs/{id}/jobs` pages, one `per_page=1` monthly-volume count and
 #            one `commits?path=<wf>&per_page=2` config-era lookup. Push-only, so no
@@ -142,7 +142,7 @@ _JOB_ID = 9001
 #            cached `integration` (180s) exercises OPT79's `below_long_pole` arm.
 #            Its jobs ride in the existing `runs/{id}/jobs` pages and it declares
 #            no cache, so it costs no call and no log fetch: measured, +0.)
-#   83  then (main merged into the OPT82 branch: 68 + 6 for `lint.yml` (OPT82)
+#   83  then (branch-only state, superseded) (main merged into the OPT82 branch: 68 + 6 for `lint.yml` (OPT82)
 #            + 9 for OPT79's credited wall-clock arm. The two ledgers are
 #            disjoint (`lint.yml` reads no logs; OPT79's calls are
 #            `chained.yml` runs and `prep` logs), so they add.)
