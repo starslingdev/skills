@@ -6762,6 +6762,22 @@ _VR_OPT82_DISABLE_RULES_RE = re.compile(
     r"\bdisabl\w*\b[^.\n]{0,60}\brules?\b|\brules?\b[^.\n]{0,60}\bdisabl\w*", re.I)
 _VR_OPT82_CARD_RE = re.compile(
     r"<summary><strong>OPT82 - .*?</details>", re.S)
+# A saving claim on an OPT82 card: a runner-minute figure, "saves", a
+# `**Saving:**` label, or a "~N" duration. The card's only legitimate figures
+# are the labelled SIZING ceiling, the evidence's measured p50s ("measures 95s
+# at p50", no tilde) and the benchmark commands, so the SIZING line and the
+# benchmark lines are exempt and nothing else is.
+_VR_OPT82_SAVING_CLAIM_RE = re.compile(
+    r"runner-min|\bsaves\b|\*\*Saving:\*\*|^\s*Saving:|"
+    r"~\s*\d+(?:\.\d+)?\s*(?:s|m|min|h)\b", re.I | re.M)
+_VR_OPT82_SUMMARY_METRIC = "uncredited, benchmark first"
+
+
+def _opt82_card_where_keys(card: str) -> set[tuple[str, str]]:
+    """`{(wf_base, job_base)}` an OPT82 card's `**Where:**` line names."""
+    mw = re.search(r"^\*\*Where:\*\*\s*(.+)$", card, re.MULTILINE)
+    return {_appendix_wf_job_key(wf, job)
+            for wf, job in (_APPENDIX_WHERE_PAIR_RE.findall(mw.group(1)) if mw else [])}
 
 
 def check_opt82_type_aware_lint_uncredited(report: str,
@@ -6804,6 +6820,24 @@ def check_opt82_type_aware_lint_uncredited(report: str,
         if not rules:
             bad.append(f"{fid}: OPT82 names no type-aware rule - 'type-aware is on' "
                        "without a named rule is a shape claim, not a finding")
+        # The card is the only place the rules, benchmark and ledger reach the
+        # reader, and the engine renders one per lint job (never folded, never
+        # capped), so each finding must have its OWN card naming every rule.
+        wfb = Path(str(f.get("workflow_file") or "")).name
+        jobs = _as_list(f.get("affected_jobs")) or ([f.get("job")] if f.get("job") else [])
+        fkeys = {(wfb, _matrix_base(_cmp_name(str(j)))) for j in jobs}
+        own = [c for c in cards if fkeys & _opt82_card_where_keys(c)]
+        if not own:
+            bad.append(f"{fid}: OPT82 finding on `{wfb}` "
+                       f"({', '.join(str(j) for j in jobs)}) has no card of its own - "
+                       "its rules, benchmark and ledger never reach the reader")
+        else:
+            body = _strip_render_artifacts(own[0])
+            missing = [str(_as_dict(r).get("rule")).strip() for r in rules
+                       if f"- {str(_as_dict(r).get('rule')).strip()}" not in body]
+            if missing:
+                bad.append(f"{fid}: its OPT82 card does not list rule(s) "
+                           + ", ".join(missing))
     for card in cards:
         if _strip_render_artifacts(_VR_OPT82_LEDGER_SENTENCE) not in \
                 _strip_render_artifacts(card):
@@ -6812,6 +6846,21 @@ def check_opt82_type_aware_lint_uncredited(report: str,
         if m:
             bad.append(f"an OPT82 card says {m.group(0)!r} - the hand-off must never "
                        "disable the type-aware rules")
+        ms = re.search(r"</strong>\s*·\s*(.*?)\s*·", card)
+        if not ms or ms.group(1).strip() != _VR_OPT82_SUMMARY_METRIC:
+            bad.append(f"an OPT82 card's summary metric is "
+                       f"{(ms.group(1).strip() if ms else '(missing)')!r}, not "
+                       f"{_VR_OPT82_SUMMARY_METRIC!r} - it claims no saving")
+        for line in card.splitlines():
+            st = line.strip()
+            if st.startswith("SIZING:") or st.startswith("(time ") or \
+                    st.startswith("(cd "):
+                continue
+            mc = _VR_OPT82_SAVING_CLAIM_RE.search(line)
+            if mc:
+                bad.append(f"an OPT82 card claims a saving ({mc.group(0)!r} in "
+                           f"{st[:80]!r}) - it is uncredited by design")
+                break
     return Check(name, not bad,
                  f"{len(found)} OPT82 finding(s), {len(cards)} card(s) checked"
                  if not bad else "; ".join(bad[:6]))
@@ -7668,6 +7717,12 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
         pat = str(f.get("pattern", ""))
         if pat not in block_keys:
             continue   # this pattern isn't rendered in the appendix
+        if pat == "OPT82":
+            # Numberless BY DESIGN, not valueless: the engine's `_on_pole_job`
+            # keeps an OPT82 card on a drilled-pole lint job (its card is the only
+            # place the rules and ledger reach the reader), so it is no
+            # contradiction of the pole headline. Mirror that exemption.
+            continue
         rm = f.get("runner_min_saving")
         rm = float(rm) if isinstance(rm, (int, float)) else 0.0
         wc = f.get("wall_clock_p50_s")

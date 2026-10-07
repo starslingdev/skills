@@ -519,3 +519,174 @@ def test_the_cost_bar_is_inclusive_at_sixty_seconds(tmp_path, lint_s, fires):
     assert bool(out) is fires, (out, withheld)
     if not fires:
         assert withheld.get("lint_job_below_cost_threshold") == 1
+
+
+# --- per-job cards, cap exemption, ceiling basis, verifier coverage -------------
+
+def _second_lint_finding(f):
+    """A second, DISTINCT OPT82 lever: another workflow's lint job, its own
+    config, its own rules and its own benchmark (run from its own directory)."""
+    import copy
+    g = copy.deepcopy(f)
+    g["id"] = "f2"
+    g["workflow_file"] = ".github/workflows/web-lint.yml"
+    g["affected_jobs"] = ["web-eslint"]
+    g["evidence"] = g["measured_signal"] = (
+        "`web-eslint` runs ESLint with type-aware parsing on; 1 type-aware rule(s) "
+        "are on: `@typescript-eslint/no-unsafe-assignment`.")
+    tal = g["type_aware_lint"]
+    tal["job"] = "web-eslint"
+    tal["working_directory"] = "apps/web"
+    tal["configs"] = ["apps/web/eslint.config.mjs"]
+    tal["rules"] = [{"rule": "@typescript-eslint/no-unsafe-assignment",
+                     "source": "typescript-eslint",
+                     "config": "apps/web/eslint.config.mjs"}]
+    tal["ceiling_s"] = 140.0
+    tal["benchmark_commands"] = {
+        "as_ci_runs_it": "(cd apps/web && time npx eslint src)",
+        "without_type_information": "(cd apps/web && time npx eslint src "
+                                    "--parser-options project:false "
+                                    "--parser-options projectService:false "
+                                    "--rule '@typescript-eslint/no-unsafe-assignment: off')"}
+    return g
+
+
+def _opt82_cards(text):
+    return _vr()._VR_OPT82_CARD_RE.findall(text)
+
+
+def test_two_distinct_lint_jobs_each_get_their_own_card(tmp_path):
+    """Folded by pattern id, the second lint job's rules, config and benchmark
+    never reached the prompt (it read `members[0]` only). Each lint job is its
+    own lever, so each gets its own card, like OPT73/OPT77/OPT79."""
+    f, _card = _rendered_card(tmp_path)
+    g = _second_lint_finding(f)
+    lines, n, _ = bp._also_noticed_block([f, g], "u")
+    cards = _opt82_cards("\n".join(lines))
+    assert n == 2 and len(cards) == 2, cards
+    first = next(c for c in cards if "(eslint)" in c)
+    second = next(c for c in cards if "(web-eslint)" in c)
+    assert "  - @typescript-eslint/no-floating-promises" in first
+    assert "  - @typescript-eslint/no-unsafe-assignment" in second
+    assert "  - @typescript-eslint/no-unsafe-assignment" not in first
+    assert "Type-aware rules apps/web/eslint.config.mjs turns on" in second
+    assert "(cd apps/web && time npx eslint src)" in second
+    assert "SIZING: uncredited. The lint step measured 140s" in second
+    assert "cd apps/web" not in first
+
+
+def _billed_hygiene(n):
+    return [{"id": f"h{i}", "pattern": f"OPT{i + 1}", "title": f"Hygiene {i}",
+             "severity": "LOW", "workflow_file": ".github/workflows/ci.yml",
+             "line": 10 + i, "affected_jobs": [f"job{i}"], "evidence": "measured",
+             "runner_min_saving": 100.0 - i, "wall_clock_p50_s": 0.0}
+            for i in range(n)]
+
+
+def test_opt82_is_never_cut_by_the_also_noticed_cap(tmp_path):
+    """OPT82 has no bill saving, so it ranks last; past `_ALSO_NOTICED_CAP` it
+    fell into the "+N more" tail, the one place its rules and ledger reach the
+    reader gone. It always renders."""
+    f, _card = _rendered_card(tmp_path)
+    many = _billed_hygiene(bp._ALSO_NOTICED_CAP + 1)
+    lines, _n, _ = bp._also_noticed_block(many + [f], "u")
+    text = "\n".join(lines)
+    assert len(_opt82_cards(text)) == 1, text[-800:]
+    assert bp._OPT82_LEDGER_SENTENCE in text
+    # the billed tail is still capped and disclosed
+    assert "more hygiene pattern(s)" in text
+
+
+def test_job_basis_ceiling_is_never_called_the_lint_step(tmp_path):
+    """When the lint step was not measured, the ceiling is the JOB's p50 and
+    every surface says so."""
+    block = scan._read_type_aware_lint(_tree(tmp_path))
+    runs = _runs(95, 20)
+    for run_jobs in runs:
+        for j in run_jobs:
+            for st in j["steps"]:
+                if st["name"] == "Lint":
+                    st["name"] = "Lint (renamed in the API)"
+    out = cr._detect_opt82_type_aware_lint(
+        ".github/workflows/lint.yml", runs, cr._critical_path(runs), _WF, block, 0,
+        withheld={}, withheld_candidates=[])
+    assert len(out) == 1
+    f = out[0]
+    assert f["type_aware_lint"]["ceiling_basis"] == "lint_job"
+    assert "lint step's measured p50" not in f["size_note"], f["size_note"]
+    assert "lint job's measured p50 (95s)" in f["size_note"], f["size_note"]
+    lines, _n, _ = bp._also_noticed_block([f], "u")
+    card = "\n".join(lines)
+    assert "The whole lint job (its lint step was not separately measured)" in card
+    assert "lint step measured" not in card
+
+
+def test_verifier_fails_a_finding_with_no_card(tmp_path):
+    f, _card = _rendered_card(tmp_path)
+    c = _vr_check(tmp_path, f, "")
+    assert not c.ok and "no card" in c.detail, c.detail
+
+
+def test_verifier_fails_a_card_missing_one_of_its_findings_rules(tmp_path):
+    f, card = _rendered_card(tmp_path)
+    c = _vr_check(tmp_path, f, card.replace("local/no-unsafe-enum-access", "local/x"))
+    assert not c.ok and "local/no-unsafe-enum-access" in c.detail, c.detail
+
+
+def test_verifier_fails_a_second_finding_folded_into_the_first_card(tmp_path):
+    f, card = _rendered_card(tmp_path)
+    g = _second_lint_finding(f)
+    p = tmp_path / "findings.json"
+    p.write_text(json.dumps({"findings": [f, g]}), encoding="utf-8")
+    c = _vr().check_opt82_type_aware_lint_uncredited(card, p)
+    assert not c.ok and "f2" in c.detail, c.detail
+
+
+def test_verifier_passes_two_cards_for_two_lint_jobs(tmp_path):
+    f, _card = _rendered_card(tmp_path)
+    g = _second_lint_finding(f)
+    lines, _n, _ = bp._also_noticed_block([f, g], "u")
+    p = tmp_path / "findings.json"
+    p.write_text(json.dumps({"findings": [f, g]}), encoding="utf-8")
+    c = _vr().check_opt82_type_aware_lint_uncredited("\n".join(lines), p)
+    assert c.ok and not c.skipped, c.detail
+
+
+def test_pole_verifier_accepts_an_opt82_card_on_a_drilled_pole(tmp_path):
+    """The engine keeps OPT82 on a drilled-pole lint job (numberless by design,
+    not valueless); the verifier's pole double-frame check must mirror that."""
+    block = scan._read_type_aware_lint(_tree(tmp_path))
+    f = _detect(block)[0][0]
+    lines, n, _ = bp._also_noticed_block([f], "u", pole_jobs={("lint.yml", "eslint")})
+    assert n == 1
+    report = ("## 🐢 Long pole 1: `lint.yml` ▸ `eslint` - 1m 35s\n\nthe pole body\n\n"
+              + "\n".join(lines) + "\n")
+    p = tmp_path / "findings.json"
+    p.write_text(json.dumps({"findings": [f]}), encoding="utf-8")
+    c = _vr().check_pole_not_reframed_as_hygiene(report, p)
+    assert c.ok and not c.skipped, c.detail
+    # and the check is live on this report shape: a valueless non-OPT82 twin fails
+    twin = dict(f, pattern="OPT24", id="t1")
+    p.write_text(json.dumps({"findings": [twin]}), encoding="utf-8")
+    assert not _vr().check_pole_not_reframed_as_hygiene(
+        report.replace("OPT82 - ", "OPT24 - "), p).ok
+
+
+@pytest.mark.parametrize("edit", [
+    lambda c: c.replace("**Where:**", "**Saving:** ~72s wall-clock per run, "
+                        "120 runner-min/mo\n**Where:**", 1),
+    lambda c: c.replace("uncredited, benchmark first", "saves ~72s", 1),
+    lambda c: c.replace("Fix order:", "Splitting lint saves ~1m 10s per run.\n"
+                        "Fix order:", 1),
+    lambda c: c.replace("Fix order:", "Expected: 120 runner-min/mo back.\n"
+                        "Fix order:", 1),
+])
+def test_verifier_fails_a_card_that_claims_a_saving(tmp_path, edit):
+    """OPT82 is uncredited: the findings fields carry no number, and the card
+    must not either. Its only figures are the labelled SIZING ceiling, the
+    evidence's measured p50s and the benchmark commands."""
+    f, card = _rendered_card(tmp_path)
+    edited = edit(card)
+    assert edited != card
+    c = _vr_check(tmp_path, f, edited)
+    assert not c.ok and "saving" in c.detail.lower(), c.detail

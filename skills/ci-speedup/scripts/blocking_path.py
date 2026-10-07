@@ -6010,8 +6010,8 @@ def _group_by_pattern_ranked(
     (12), which holds today — is never the row suppressed by the cap. The rest are ranked by
     cloud-bill saving desc (then severity, then pattern id). Used by the off-path appendix.
 
-    Grouping is by pattern id EXCEPT for OPT73, OPT77 and OPT79, each of which is keyed
-    by its own identity (pattern + workflow + jobs).
+    Grouping is by pattern id EXCEPT for OPT73, OPT77, OPT79 and OPT82, each of which is
+    keyed by its own identity (pattern + workflow + jobs).
 
     OPT73 (the cross-cluster shared-substep floor lever): each finding is a DISTINCT
     lever — its own shared step, its own cluster of jobs in its own workflow, its own
@@ -6033,6 +6033,12 @@ def _group_by_pattern_ranked(
     class and its own re-key-or-remove edit. Folded by pattern, one job's evidence would
     be advertised beside both jobs' minutes.
 
+    OPT82 (lint builds the whole type graph) is per lint JOB: each carries its own
+    configs, its own named type-aware rules, its own ceiling and its own benchmark
+    command (run from its own working directory). Its prompt is built from ONE
+    finding's evidence block, so folded by pattern a second lint job's rules, config
+    and benchmark never reached the reader.
+
     Distinct levers therefore render as their own rows; identical ones (same workflow +
     same jobs) still fold. The displayed `pat` stays the bare pattern id."""
     groups: dict[Any, list[dict[str, Any]]] = {}
@@ -6040,10 +6046,11 @@ def _group_by_pattern_ranked(
     order: list[Any] = []
     for f in findings:
         pat = str(f.get("pattern", "") or "?")
-        # OPT73, OPT77 and OPT79 levers are distinct per cluster / per consolidated
-        # group / per job, not fungible occurrences of one recipe — see docstring.
+        # OPT73, OPT77, OPT79 and OPT82 levers are distinct per cluster / per
+        # consolidated group / per job, not fungible occurrences of one recipe — see
+        # docstring.
         key: Any = pat
-        if pat in ("OPT73", "OPT77", "OPT79"):
+        if pat in ("OPT73", "OPT77", "OPT79", "OPT82"):
             key = (pat, str(f.get("workflow_file", "")),
                    tuple(f.get("affected_jobs") or ()))
         if key not in groups:
@@ -7216,6 +7223,13 @@ def _also_noticed_block(findings: list[dict[str, Any]],
     # `_group_by_pattern_ranked`, so they survive this slice (they'd only be cut if there
     # were >_ALSO_NOTICED_CAP of them — not a case that arises today; see that docstring).
     shown, rest = ranked[:_ALSO_NOTICED_CAP], ranked[_ALSO_NOTICED_CAP:]
+    # OPT82 is exempt from the cap. It carries no bill saving BY DESIGN, so it ranks
+    # last and would be the first row the cap cuts — but its card is the only place
+    # its named rules, its benchmark and its ledger requirement reach the reader
+    # (the same reason `_on_pole_job` exempts it). The "+N more" tail is for rows
+    # whose substance is a smaller number; OPT82 has no number to be smaller.
+    shown += [g for g in rest if g[0] == "OPT82"]
+    rest = [g for g in rest if g[0] != "OPT82"]
     # A credited wall-clock lever (OPT24) can land in this appendix; it sorts first and
     # carries a per-row correction below. Qualify the blanket "off-path / ~0 wall-clock"
     # blurb when one is present, so the section header doesn't contradict that row.

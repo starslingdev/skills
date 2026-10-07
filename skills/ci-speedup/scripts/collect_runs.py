@@ -5869,11 +5869,14 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
     # neither the per-job cost spine nor an eliminated-runs slice, so the generic
     # `measured` provenance text would misdescribe the number beside it.
     # NOT DERIVABLE — OPT82 credits nothing at all: its finding is uncredited by
-    # design (the lint step's p50 is stamped as a CEILING, and a benchmark is
-    # required before any saving is claimed), so there is no number to derive.
+    # design (the lint step's p50 — or the lint job's when the step was not
+    # separately measured, `ceiling_basis` "lint_job" — is stamped as a CEILING,
+    # and a benchmark is required before any saving is claimed), so there is no
+    # number to derive.
     "OPT82": (_RM_DOOR_NOT_DERIVABLE,
               "uncredited type-aware lint detector — no runner-minute or wall-clock "
-              "saving is credited; the lint step's measured p50 is stamped as a "
+              "saving is credited; the lint step's measured p50 (the lint job's "
+              "when the step was not separately measured) is stamped as a "
               "ceiling and the prompt requires a benchmark first"),
     "OPT80": (_RM_DOOR_NOT_DERIVABLE,
               "measured checkout tail-excess detector — basis is one step's "
@@ -10764,8 +10767,9 @@ def _post_failure_waste_s(legs: list[dict[str, Any]]) -> tuple[float, str, list[
 # SIZING — uncredited by design. Nothing in config or timings says how much
 # of the lint step type information costs; only a benchmark can. The finding
 # carries `wall_clock_p50_s = 0` and no runner-minute saving, stamps the lint
-# step's measured p50 as a CEILING, and its prompt asks for the benchmark
-# first. There is deliberately no `_SIZING` row for OPT82.
+# step's measured p50 as a CEILING (the lint JOB's p50 when the step was not
+# separately measured; `ceiling_basis` says which), and its prompt asks for
+# the benchmark first. There is deliberately no `_SIZING` row for OPT82.
 #
 # Every catalog fact this mirrors lives in `references/optimization-patterns.md`
 # under "### OPT82"; the verifier's check is
@@ -11164,6 +11168,11 @@ def _detect_opt82_type_aware_lint(
         step_p50 = round(_percentile(step_durs, 50), 1) if step_durs else None
         ceiling = step_p50 if step_p50 is not None else round(p50, 1)
         basis = "lint_step" if step_p50 is not None else "lint_job"
+        # Name the basis the ceiling actually rests on: never "the lint step's
+        # p50" when the step went unmeasured and the number is the job's.
+        ceiling_label = "lint step's" if basis == "lint_step" else "lint job's"
+        ceiling_why = ("" if basis == "lint_step"
+                       else " (its lint step was not separately measured)")
         bench = _opt82_benchmark_commands(eslint_cmd, wd, sorted(rules))
         title = "Lint Builds the Whole Type Graph"
         via = (f", via `{' -> '.join(chain)}`" if chain else "")
@@ -11191,8 +11200,8 @@ def _detect_opt82_type_aware_lint(
             "OPT82", "MEDIUM", title, wf_path, job_name, evidence,
             "lint-builds-the-whole-type-graph", _catalog_anchor("OPT82", title),
             start_idx + len(out) + 1, wc_p50=0.0, rm=None,
-            size_note=(f"uncredited. The lint step's measured p50 ({ceiling:.0f}s) is "
-                       "the CEILING; the saving needs a benchmark (same lint, same "
+            size_note=(f"uncredited. The {ceiling_label} measured p50 ({ceiling:.0f}s) is "
+                       f"the CEILING{ceiling_why}; the saving needs a benchmark (same lint, same "
                        "runner, without type information) before any number is "
                        "claimed."),
             realization="none", measured_evidence=me)

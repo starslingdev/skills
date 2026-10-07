@@ -1253,11 +1253,17 @@ The finding it emits has `wall_clock_p50_s = 0`, no runner-minute saving, sizing
 basis `uncredited` and no `_SIZING` entry; `_RM_DOOR_OVERRIDES["OPT82"]` marks it
 not derivable. The reason is that nothing sampled says how much of lint is the
 type graph, so a number would be a guess. What it does carry is a ceiling, the
-lint step's own measured p50, which `blocking_path.py` renders in the "Also
+lint step's own measured p50 (or the lint job's p50 when the step was not
+separately measured; `ceiling_basis` records which, and every surface names
+the one it used), which `blocking_path.py` renders in the "Also
 noticed" section as an upper bound and never as a forecast, under the summary
 metric "uncredited, benchmark first". Being numberless by design, it is exempt
 from the valueless-pole exclusion (`_on_pole_job`), so a lint job that is also a
-drilled pole still gets its card. The card has its own prompt, not the
+drilled pole still gets its card, and from `_ALSO_NOTICED_CAP`, so it never
+falls into the "+N more" tail where its rules and ledger would not reach the
+reader. Cards are keyed per lint job (`_group_by_pattern_ranked` keys OPT82 by
+pattern + workflow + jobs, like OPT73/OPT77/OPT79), because each job has its own
+configs, rules, ceiling and benchmark directory. The card has its own prompt, not the
 generic bill or off-path saving line: it carries the SIZING clause, tells the
 agent to run the two-command benchmark FIRST, lists each enumerated rule with the
 rewrite QUESTION (never the answer), gives the fix order (rewrite, split into a
@@ -1268,8 +1274,11 @@ rule maps to a pass, and the union of the two configs' enabled rules must equal
 the original set. The prompt never tells the agent to disable rules.
 `verify_report.py` closes the loop with a check that fails an OPT82 finding with
 a positive `wall_clock_p50_s` or a truthy runner-minute saving, with no
-enumerated rule, or whose rendered card lacks the ledger sentence or says
-"disable" about rules. The detector's call site in `collect()` is guarded: an
+enumerated rule, with no card of its own (matched by workflow + job on the
+card's `**Where:**` line) or whose card omits one of its enumerated rules, and
+any card that lacks the ledger sentence or says "disable" about rules. Its
+pole double-frame check (`check_pole_not_reframed_as_hygiene`) mirrors the
+engine's OPT82 exemption from the valueless-pole exclusion. The detector's call site in `collect()` is guarded: an
 exception inside it skips OPT82 for that workflow and is disclosed through
 `detectors_skipped`, never a crashed data pass.
 
