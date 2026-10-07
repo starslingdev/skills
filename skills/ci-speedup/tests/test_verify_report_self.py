@@ -10510,6 +10510,109 @@ def test_opt80_pole_is_own_reads_the_mapped_job_of_its_own_workflow_only():
         f, "ci.yml", check, data(".github/workflows/other.yml"))
 
 
+def _opt80_node(name, matrix=False, reusable=False):
+    return {"name": name, "needs": [], "matrix": matrix, "reusable": reusable}
+
+
+# (required check, YAML key, job-graph node, this workflow's name prefixes, names it?)
+_OPT80_CHECK_NAMES_JOB_CASES = [
+    ("build", "build", _opt80_node("build"), {"CI"}, True),
+    # Only THIS workflow's own name prefix is stripped.
+    ("CI / build", "build", _opt80_node("build"), {"CI"}, True),
+    ("Other / build", "build", _opt80_node("build"), {"CI"}, False),
+    ("CI / build", "build", _opt80_node("build"), set(), False),
+    # The YAML key names the job even when its display name differs.
+    ("build", "build", _opt80_node("Build & Test"), {"CI"}, True),
+    ("Build & Test", "build", _opt80_node("Build & Test"), {"CI"}, True),
+    ("Build & Lint", "build", _opt80_node("Build & Test"), {"CI"}, False),
+    # A `${{ ... }}` template is a wildcard.
+    ("test (ubuntu)", "test", _opt80_node("test (${{ matrix.os }})", matrix=True),
+     {"CI"}, True),
+    ("lint (ubuntu)", "test", _opt80_node("test (${{ matrix.os }})", matrix=True),
+     {"CI"}, False),
+    # A matrix job's check carries an appended ` (<leg>)`; a plain job's does not.
+    ("test (ubuntu, 3.12)", "test", _opt80_node("test", matrix=True), {"CI"}, True),
+    ("CI / test (ubuntu)", "test", _opt80_node("test", matrix=True), {"CI"}, True),
+    ("test (ubuntu)", "test", _opt80_node("test"), {"CI"}, False),
+    # A reusable caller's children are `<caller> / <child>`.
+    ("call / build", "call", _opt80_node("call", reusable=True), {"CI"}, True),
+    ("CI / call / build", "call", _opt80_node("call", reusable=True), {"CI"}, True),
+    ("call / build", "call", _opt80_node("call"), {"CI"}, False),
+    # Whitespace runs are one space on both sides.
+    ("Build and  Test", "build", _opt80_node("Build  and\n Test"), {"CI"}, True),
+]
+
+
+def test_opt80_check_names_job_copies_agree_on_every_branch():
+    """The verifier re-derives merge gating with its OWN copy of the
+    collector's literal check-name predicate. Fed the same inputs, both copies
+    give the same answer on every branch - this workflow's prefix only, the
+    YAML key, a template wildcard, a matrix leg, a reusable child, whitespace -
+    and each branch has a case that only it decides."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import collect_runs as cr  # noqa: E402
+
+    for check, key, node, prefixes, want in _OPT80_CHECK_NAMES_JOB_CASES:
+        got_cr = cr._opt80_check_names_job(check, key, dict(node), set(prefixes))
+        got_vr = vr._vr_opt80_check_names_job(check, key, dict(node), set(prefixes))
+        assert (got_cr, got_vr) == (want, want), (check, key, node, prefixes)
+    # The prefix set: the workflow's own `name:`, else its path or basename.
+    path = ".github/workflows/ci.yml"
+    for names, want in (({path: "CI"}, {"CI"}), ({}, {path, "ci.yml"})):
+        assert cr._opt80_workflow_prefixes(path, names) == want, names
+        assert vr._vr_opt80_workflow_prefixes(path, names) == want, names
+
+
+def test_opt80_merge_gating_refuses_a_required_check_that_is_not_the_required_job():
+    """`required_check` must BE `required_job`'s check-run: a required `bench`
+    stamped as the evidence for job `build` is refused."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    f = doc["findings"][0]
+    assert vr._vr_opt80_merge_gating_problems(f, doc) == []
+    doc["required_checks"] = list(doc["required_checks"]) + ["bench"]
+    f["checkout_stall"]["tail_axis"]["merge_gating"] = dict(
+        _OPT80_TAIL_AXIS["merge_gating"], required_check="bench")
+    probs = vr._vr_opt80_merge_gating_problems(f, doc)
+    assert any("is not job 'build'" in p for p in probs), probs
+
+
+def test_opt80_merge_gating_refuses_evidence_naming_a_different_job():
+    """The evidence's `job_key` must be the finding's own job: gating evidence
+    for `build` does not put a stall on `bench` on the merge wait."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    f = doc["findings"][0]
+    assert vr._vr_opt80_merge_gating_problems(f, doc) == []
+    f["checkout_stall"]["job"] = "bench"
+    probs = vr._vr_opt80_merge_gating_problems(f, doc)
+    assert any("is not the finding's job 'bench'" in p for p in probs), probs
+
+
+def test_opt80_log_probe_outcomes_each_gate_names_its_own_fault():
+    """Each guard on `log_probe_outcomes` refuses its own fault by name: a
+    missing list, a list that is not exactly the fetched logs, and an outcome
+    that is neither proven, clean nor unreadable. A later guard catching the
+    same tamper under another reason is not this guard holding."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    assert vr._opt80_tail_axis_rederived(f) == []
+
+    def probs(mutate):
+        g = copy.deepcopy(f)
+        mutate(g["checkout_stall"])
+        return vr._opt80_tail_axis_rederived(g)
+
+    got = probs(lambda cs: cs.update(log_probe_outcomes="proven"))
+    assert any("log_probe_outcomes is missing" in p for p in got), got
+    got = probs(lambda cs: cs["log_probe_outcomes"][0].update(job_id=8001))
+    assert any("do not name exactly the log_probed_job_ids" in p for p in got), got
+    got = probs(lambda cs: cs["log_probe_outcomes"][0].update(outcome="looked_fine"))
+    assert any("neither proven, clean nor unreadable" in p for p in got), got
+
+
 def test_tier2_accepts_a_checkout_stall_on_the_rendered_long_pole(tmp_path: Path):
     """The pole rule is a PROXY for "the credited work is not on the merge gate".
     `checkout_tail_excess` carries the thing the proxy stands in for: mean - p50
