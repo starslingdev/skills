@@ -6098,7 +6098,8 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
                    "runner-minutes only and is **not credited** in this version.")
         else:
             # No stamped reason on a pull-request workflow: not a shape the
-            # collector writes (`verify_report` fails it), so the line claims
+            # collector writes (`verify_report` fails every reason-less row on a
+            # pull-request workflow, whatever its headroom), so the line claims
             # nothing about where the job sits.
             why = (f"`{job}` carries no recorded reason it could not be "
                    "priced; **not credited** in this version.")
