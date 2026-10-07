@@ -644,10 +644,17 @@ unversioned and updates by reinstall from `main`.
   rather than naming the second-slowest job. A job that runs in a
   `needs:` chain with the slowest job, before or after it, is excluded from
   this credit on a workflow pull requests wait on: the wait is then the
-  chain's times added together, so shrinking it does shorten the merge wait. It is listed
-  "measured, not credited" with that reason, and the self-check re-derives the
-  chain from the workflow's job graph and does not exempt this credit from
-  its "also rendered as a Long pole" check. Both runner-minute credits now say
+  chain's times added together, so shrinking it may shorten the merge wait. It is listed
+  "measured, not credited" with that reason (the line says "may shorten", never
+  "shortens", because another chain or an off-spine slowest job can be the real
+  gate). When the workflow's job graph cannot resolve the job or the slowest job
+  on a pull-request workflow, the cache is held back under its own counted,
+  plain-English reason rather than credited on a chain the audit could not see.
+  The self-check re-derives the chain from the job graph, applies the chain rule
+  only where pull requests wait on the workflow, matches rendered long poles by
+  workflow file and job name, and waives its "also rendered as a Long pole"
+  check for this credit only when the graph proves the job is not chained to the
+  slowest job. Both runner-minute credits now say
   only what they prove, that making the job faster cannot make the workflow take
   longer; the below-the-floor note no longer says "no merge-gate time changes",
   which was false for a job in a `needs:` chain and meaningless on a workflow no
