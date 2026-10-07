@@ -159,6 +159,10 @@ def _a1(runs, **kw):
     ("starsling-macos-14", ("starsling", "macos", "x64", "")),
     ("windows-11-8-cores", ("github-larger", "windows", "x64", "8")),
     ("windows-11-arm-4-cores", ("github-larger", "windows", "arm64", "4")),
+    # StarSling's `linux` spelling, an `arm64` spelling, and a mixed-case size
+    ("starsling-linux-24.04-8", ("starsling", "linux", "x64", "8")),
+    ("starsling-ubuntu-24.04-arm64", ("starsling", "linux", "arm64", "")),
+    ("macos-14-XLarge", ("github-larger", "macos", "arm64", "xlarge")),
     # `self-hosted` makes a set unclassifiable unless it carries a StarSling
     # label; label matching ignores case
     ("self-hosted ubuntu-latest", None),
@@ -187,7 +191,9 @@ def test_opt81_taxonomy_is_a_named_table_with_a_verifier_twin():
     assert eng_arch == twin_arch
     for label in ("ubuntu-latest", "ubuntu-latest-8-cores", "starsling-ubuntu-24.04",
                   "self-hosted linux", "macos-14-xlarge", "macos-14-large", "macos-14",
-                  "ubuntu-24.04-arm", "starsling-ubuntu-24.04-arm-8", "ubuntu-slim"):
+                  "ubuntu-24.04-arm", "starsling-ubuntu-24.04-arm-8", "ubuntu-slim",
+                  "starsling-linux-24.04-8", "starsling-ubuntu-24.04-arm64",
+                  "macos-14-XLarge"):
         assert cr._opt81_runner_class(label) == vr._vr_opt81_runner_class(label)
 
 
@@ -754,6 +760,12 @@ def _opt81_texts() -> dict[str, str]:
         "a2 card + prompt": "\n".join(bp._opt81_card(a2, url)),
         "a2 held back": "\n".join(bp._opt81_card(a2, url, held_back_by="x")),
         "unrouted section": "\n".join(bp._opt81_unrouted_block([a1, a2], url)),
+        # The generic pole prompt's OPT81 lead + block, and every pointer to the card.
+        "generic prompt (OPT81)": bp._build_generic_agent_prompt(
+            _pole("bench"), [], None, "o/r", None, 1, 1, None, data_driven=[a1]),
+        "card pointers": "\n".join(bp._dd_where(p, entry=e)
+                                   for p in (["OPT81"], ["OPT24", "OPT81"])
+                                   for e in (False, True)),
         "held-back phrases": json.dumps(bp._OPT81_WITHHOLD_PHRASES),
         "catalog entry": _opt81_catalog_entry(),
     }
@@ -1009,6 +1021,8 @@ def test_opt81_a2_fires_on_a_build_dominant_pole():
     "Run tests and upload", "Fetch and run tests", "Run tests via curl",
     # case-insensitive: the only matching word is capitalised
     "Poll test results", "Run tests, Upload",
+    # deploy / publish on a step the categoriser files under build / test
+    "Build and deploy", "Run tests and publish",
 ])
 def test_opt81_a2_waits_or_moves_bytes_word_list(work):
     out, withheld, _ = _a2(runs=_a2_runs(work=work))
@@ -1439,3 +1453,198 @@ def test_opt81_a2_needs_a_declared_pull_request_trigger_through_collect(monkeypa
     assert [p["job"] for p in doc["pr_critical_path"]["poles"]] == ["test"]
     assert _o81(doc, "A2") == []
     assert doc["opt81_withheld_by_gate"].get("a2_not_a_pull_request_workflow") == 1
+
+
+# ---- Runner matrix: the documented threshold ----------------------------------
+
+def _rows(*run_ids):
+    return [{"run_id": r} for r in run_ids]
+
+
+def test_opt81_runner_matrix_needs_half_the_smaller_population_shared():
+    """A matrix is "at least half of the SMALLER population's runs also ran the
+    other label". One shared run among eight does not make a matrix; exactly half
+    does; the smaller population, not the larger, is the denominator."""
+    m = cr._opt81_is_runner_matrix
+    # partial overlap: 1 of 8 shared
+    assert m(_rows(*range(8)), _rows(7, *range(100, 107))) is False
+    # exactly half of the smaller (2 of 4) is a matrix
+    assert m(_rows(1, 2, 3, 4), _rows(3, 4, 5, 6)) is True
+    # one short of half (1 of 4) is not
+    assert m(_rows(1, 2, 3, 4), _rows(4, 5, 6, 7)) is False
+    # the smaller population is the denominator: 1 of 2 shared, against 8
+    assert m(_rows(*range(8)), _rows(0, 50)) is True
+    # nothing shared is never a matrix, and rows without a run id do not count
+    assert m(_rows(1, 2), _rows(3, 4)) is False
+    assert m(_rows(None, None), _rows(None)) is False
+
+
+def test_opt81_a1_one_shared_run_is_not_a_matrix_and_stays_creditable():
+    """Interleaved single-leg runs where one run happens to carry both labels:
+    still a comparison across runs (not a matrix), so the long-pole credit
+    stands."""
+    runs = _alt_runs(slow=_SLOW + [150, 150])
+    runs[0].append(_job("bench", "ubuntu-latest-8-cores", 90, runs[0][0]["run_id"]))
+    found, withheld, *_ = _a1(runs)
+    assert len(found) == 1, withheld
+    fr = found[0]["faster_runner"]
+    assert fr["runner_matrix"] is False
+    assert found[0]["wall_clock_p50_s"] > 0, fr["credit_reason"]
+
+
+# ---- Interleaving: touching ranges and unreadable run times ---------------------
+
+def test_opt81_spans_touching_at_one_instant_overlap():
+    t = "2026-06-01T00:00:00Z"
+    assert cr._opt81_spans_overlap(("2026-05-01T00:00:00Z", t),
+                                   (t, "2026-07-01T00:00:00Z")) is True
+    assert cr._opt81_spans_overlap(("2026-05-01T00:00:00Z", "2026-05-31T23:59:59Z"),
+                                   (t, "2026-07-01T00:00:00Z")) is False
+
+
+def test_opt81_an_unreadable_run_time_fails_closed():
+    """A population whose run times cannot all be read cannot be shown to
+    overlap the other one: its span is unknown (not narrowed to the readable
+    rows) and an unknown span never overlaps."""
+    ok = {"at": "2026-06-01T00:00:00Z"}
+    assert cr._opt81_time_span([ok, {"at": "not a time"}]) == ("", "")
+    assert cr._opt81_time_span([ok, {"at": ""}]) == ("", "")
+    assert cr._opt81_time_span([]) == ("", "")
+    span = ("2026-05-01T00:00:00Z", "2026-07-01T00:00:00Z")
+    assert cr._opt81_spans_overlap(("", ""), span) is False
+    assert cr._opt81_spans_overlap(span, ("", "")) is False
+    assert cr._opt81_spans_overlap(span, ("bad", "2026-06-01T00:00:00Z")) is False
+
+
+def test_opt81_a1_unreadable_run_time_is_held_back_never_compared():
+    """One fast-label run whose time cannot be read: the pair is held back as
+    not shown to be interleaved and listed, never compared on the rest."""
+    runs = _alt_runs()
+    bad = next(j for run in runs for j in run if j["labels"] == ["ubuntu-latest-8-cores"])
+    bad["_run_created_at"] = "not a time"
+    found, withheld, cands, *_ = _a1(runs)
+    assert found == [], [f["faster_runner"]["fast"] for f in found]
+    assert withheld.get("not_interleaved") == 1, withheld
+    assert cands == [{"workflow_file": _WF, "job": "bench", "gate": "not_interleaved",
+                      "half": "A1"}]
+
+
+def test_opt81_a1_interleaving_reads_the_run_time_before_the_job_time():
+    """The run's created_at (when it was triggered) is the time compared; a job's
+    own created_at is only a fallback. Here the run times interleave while the
+    job times look like a `runs-on` switch: the pair is compared."""
+    runs = _alt_runs()
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    for run in runs:
+        for j in run:
+            j["_run_created_at"] = _iso(base + timedelta(hours=j["run_id"]))
+            fast = j["labels"] == ["ubuntu-latest-8-cores"]
+            j["created_at"] = _iso(base + timedelta(days=400 if fast else 0,
+                                                    hours=j["run_id"]))
+    found, withheld, *_ = _a1(runs)
+    assert len(found) == 1, withheld
+    for r in found[0]["faster_runner"]["rows"]:
+        assert r["at"] == _iso(base + timedelta(hours=r["run_id"])), r
+
+
+# ---- The verifier: matrix flag, time-range stamps, and A2's workflow filter -----
+
+def test_opt81_verifier_rederives_the_runner_matrix_flag():
+    vr = _load_verify_report()
+    f = copy.deepcopy(_a1_credited_finding())
+    f["faster_runner"]["runner_matrix"] = True
+    assert any("runner_matrix" in p and "re-derive" in p
+               for p in vr._opt81_a1_rederived(f)), vr._opt81_a1_rederived(f)
+    g = copy.deepcopy(_a1_finding())
+    assert g["faster_runner"]["runner_matrix"] is True
+    g["faster_runner"]["runner_matrix"] = False
+    assert any("runner_matrix" in p and "re-derive" in p
+               for p in vr._opt81_a1_rederived(g)), vr._opt81_a1_rederived(g)
+
+
+@pytest.mark.parametrize("side,key", [("slow", "first_run_at"), ("fast", "last_run_at")])
+def test_opt81_verifier_rederives_the_time_range_stamps(side, key):
+    vr = _load_verify_report()
+    f = copy.deepcopy(_a1_credited_finding())
+    f["faster_runner"][side][key] = "2020-01-01T00:00:00Z"
+    problems = vr._opt81_a1_rederived(f)
+    assert any(f"{side} first_run_at/last_run_at do not re-derive" in p
+               for p in problems), problems
+
+
+def test_opt81_verifier_a2_reads_cheaper_levers_only_in_its_own_workflow():
+    """A same-named job in ANOTHER workflow carrying a structural, sharding,
+    covering or cache lever does not address this pole: a correct advisory
+    still verifies."""
+    vr = _load_verify_report()
+    a2 = _a2_finding()
+    other = ".github/workflows/nightly.yml"
+    extra = [_f("OPT72", structural=True, wf=other), _f("OPT24", wf=other),
+             _f("OPT17", wc=150.0, wf=other), _f("OPT79", wc=60.0, wf=other)]
+    assert vr._opt81_a2_rederived(a2, _doc(a2, *extra)) == []
+
+
+# ---- Rendering: the lever list, pointers and the generic prompt -----------------
+
+def test_opt81_levers_checked_keeps_the_pattern_ids_literally():
+    rendered = dict(bp._opt81_levers_checked(_a2_finding()["faster_runner"]))
+    assert "sharding (OPT24)" in rendered, rendered
+    assert "a cache that costs more than it saves (OPT79)" in rendered, rendered
+    # a pattern list already spelled out in the lever text is not repeated
+    structural = next(k for k in rendered if k.startswith("structural:"))
+    assert structural.count("OPT72") == 1, structural
+
+
+def test_opt81_pointer_to_a_mixed_match_names_both_places():
+    card = "its **OPT81** runner-class card below this pole's prompt"
+    assert bp._dd_where(["OPT81"]) == card
+    assert bp._dd_where(["OPT24", "OPT81"]) == (
+        f"the **Also noticed** section below (and {card})")
+    assert bp._dd_where(["OPT24", "OPT81"], entry=True) == (
+        f"its entry in the **Also noticed** section below (and {card})")
+    assert bp._dd_where(["OPT24"]) == "the **Also noticed** section below"
+
+
+def test_opt81_generic_prompt_names_the_runner_class_match():
+    a1 = _a1_finding()
+    p = bp._build_generic_agent_prompt(_pole("bench"), [], None, "o/r", None, 1, 1,
+                                       None, data_driven=[a1])
+    assert "RUNNER-CLASS COMPARISON MATCHED" in p, p
+    assert "see its **OPT81** card below this prompt" in p
+    assert "DATA-DRIVEN CATALOG PATTERN MATCHED" not in p
+    assert "NO CATALOG PATTERN MATCHED" not in p
+
+
+# ---- collect(): held-back candidates reach the doc and the report ---------------
+
+def test_opt81_a1_held_back_candidate_reaches_the_doc_through_collect(monkeypatch):
+    """A pull-request pole run on `ubuntu-latest` and on a label no row of the
+    taxonomy sizes: A1 cannot compare them, so collect() writes the held-back
+    candidate onto the findings doc and the report renders its row."""
+    plan = [("ubuntu-latest" if i % 2 else "my-big-box", 150) for i in range(17)]
+    doc = _collect(monkeypatch, plan)
+    assert doc[cr._OPT81_WITHHELD_DOC_KEY] == [
+        {"workflow_file": _CI, "job": "test",
+         "gate": "runner_label_not_classifiable_by_size", "half": "A1"}], (
+        doc.get("opt81_withheld_by_gate"))
+    md = bp.render(doc, {}, {}, {}, "2026-06-08")
+    assert "runner class: held back" in md, md
+
+
+def test_opt81_a2_held_back_candidate_reaches_the_doc_through_collect(monkeypatch):
+    """The advisory cannot resolve the pole's dominant step (no step timings):
+    collect() writes that held-back candidate onto the findings doc."""
+    real = cr._detect_opt81_runner_size_advisory
+
+    def stepless(wf_path, jobs_per_run, *a, **k):
+        bare = [[{**j, "steps": []} for j in run] for run in jobs_per_run]
+        return real(wf_path, bare, *a, **k)
+
+    monkeypatch.setattr(cr, "_detect_opt81_runner_size_advisory", stepless)
+    doc = _collect(monkeypatch, _ONE_LABEL_PLAN)
+    assert _o81(doc, "A2") == []
+    assert doc[cr._OPT81_WITHHELD_DOC_KEY] == [
+        {"workflow_file": _CI, "job": "test", "gate": "a2_dominant_step_unresolved",
+         "half": "A2"}], doc.get("opt81_withheld_by_gate")
+    md = bp.render(doc, {}, {}, {}, "2026-06-08")
+    assert "runner class: held back" in md, md
