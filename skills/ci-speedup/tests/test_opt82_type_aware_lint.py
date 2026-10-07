@@ -508,3 +508,119 @@ def test_the_two_readers_of_the_rule_list_agree():
     """scan.py and collect_runs.py each read the committed list (collect_runs
     must not import scan); pinned equal so neither can drift."""
     assert cr._opt82_rules_catalog() == scan._load_type_aware_rules()
+
+
+# --- the hand-off text: attribution, ledger, PR-pass scoping, disable rail -----
+
+def _card_for(f):
+    lines, _n, _on = bp._also_noticed_block([f], "https://example.invalid/cat.md")
+    return "\n".join(lines)
+
+
+def _flat(card):
+    return " ".join(card.split())
+
+
+def test_linear_result_is_attributed_to_the_rewrite_not_the_split(tmp_path):
+    """Linear's post credits the drop to rewriting their custom type-aware
+    rules over the syntax tree, which let ESLint drop TypeScript: API lint
+    -68%, full-repository lint -55%. It is not a split result."""
+    _f, card = _rendered_card(tmp_path)
+    flat = _flat(card)
+    assert "after splitting" not in flat
+    assert "rewrote their custom type-aware rules" in flat, flat
+    assert "API lint time 68%" in flat and "full-repository lint time 55%" in flat
+    assert "their result, not a forecast" in flat
+
+
+def test_ledger_allows_a_reviewed_replacement_row_never_a_missing_row():
+    s = bp._OPT82_LEDGER_SENTENCE
+    assert "REPLACED BY <rule>" in s
+    assert "no longer checks" in s and "human" in s
+    assert "has a REPLACED row" in s and "A rule with no row" in s
+    # the old by-construction-false union claim is gone
+    assert "equals the original set" not in s
+    assert _vr()._VR_OPT82_LEDGER_SENTENCE == s
+
+
+def test_collector_names_the_workflows_that_declare_a_merge_queue():
+    docs = {
+        ".github/workflows/lint.yml": {"on": {"push": None}},
+        ".github/workflows/queue.yml": {True: ["pull_request", "merge_group"]},
+        ".github/workflows/ci.yml": {"on": {"merge_group": {"types": ["checks_requested"]}}},
+        ".github/workflows/odd.yml": "not a mapping",
+    }
+    assert cr._opt82_merge_group_workflows(docs) == [
+        ".github/workflows/ci.yml", ".github/workflows/queue.yml"]
+    assert cr._opt82_merge_group_workflows({}) == []
+
+
+def test_with_a_merge_queue_the_pr_pass_lists_changed_files_never_cache(tmp_path):
+    f, _ = _rendered_card(tmp_path)
+    f["type_aware_lint"]["merge_group_workflows"] = [".github/workflows/queue.yml"]
+    flat = _flat(_card_for(f))
+    assert "git diff --name-only" in flat, flat
+    assert ".github/workflows/queue.yml" in flat
+    assert "Do NOT use ESLint's `--cache` for the type-aware pass" in flat
+    assert "cross-file type dependencies" in flat
+    assert "(`--cache`, catalog OPT9)" not in flat
+
+
+@pytest.mark.parametrize("mq", [None, []])
+def test_without_a_merge_queue_the_full_type_aware_pass_stays_required(tmp_path, mq):
+    f, _ = _rendered_card(tmp_path)
+    if mq is None:
+        f["type_aware_lint"].pop("merge_group_workflows", None)
+    else:
+        f["type_aware_lint"]["merge_group_workflows"] = mq
+    flat = _flat(_card_for(f))
+    assert "no merge queue" in flat, flat
+    assert "REQUIRED pull-request check over the whole tree" in flat
+    assert "never scoped to changed files" in flat
+    assert "git diff --name-only" not in flat
+    assert "(`--cache`, catalog OPT9)" not in flat
+
+
+_SYNONYMS = [
+    "Then disable the type-aware rules.",
+    "Then turn the type-aware rules off.",
+    "Then turn off the\ntype-aware rules.",                  # across a line wrap
+    "Drop the slow rules from the config.",
+    "Remove the type-aware rules.",
+    "Set those rules to 'off' in the config.",
+    "Set `'@typescript-eslint/no-floating-promises': 'off'` in the config.",
+    "Extend tseslint.configs.disableTypeChecked for every file.",
+    "Move the type-aware rules to a non-blocking job.",
+]
+
+
+@pytest.mark.parametrize("text", _SYNONYMS)
+def test_verifier_fails_every_way_of_switching_rules_off(tmp_path, text):
+    f, card = _rendered_card(tmp_path)
+    inside = card.replace("Do: run the benchmark first",
+                          text + "\nDo: run the benchmark first", 1)
+    assert inside != card
+    c = _vr_check(tmp_path, f, inside)
+    assert not c.ok and "never" in c.detail.lower(), (text, c.detail)
+
+
+def test_verifier_does_not_fail_on_a_lint_command_in_the_evidence(tmp_path):
+    """The evidence quotes the CI's own lint command; a flag such as
+    `--report-unused-disable-directives` or a `--rule '...: off'` there is data,
+    not an instruction, and must not fail the card."""
+    f, card = _rendered_card(tmp_path)
+    cmd = "eslint . --report-unused-disable-directives --rule 'no-console: off'"
+    noisy = card.replace("`eslint . --cache --max-warnings 0`", f"`{cmd}`")
+    assert noisy.count(cmd) == 2, noisy
+    c = _vr_check(tmp_path, f, noisy)
+    assert c.ok, c.detail
+
+
+def test_the_rendered_card_passes_the_widened_rail(tmp_path):
+    """The labelled benchmark-only run (its `--rule '...: off'` command and the
+    sentence that explains it) stays legal under the widened rail, in both the
+    merge-queue and the no-merge-queue wording."""
+    f, card = _rendered_card(tmp_path)
+    assert _vr_check(tmp_path, f, card).ok
+    f["type_aware_lint"]["merge_group_workflows"] = [".github/workflows/queue.yml"]
+    assert _vr_check(tmp_path, f, _card_for(f)).ok

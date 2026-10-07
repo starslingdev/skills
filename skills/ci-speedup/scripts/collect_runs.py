@@ -11011,6 +11011,16 @@ def _opt82_benchmark_commands(eslint_cmd: str, wd: str, rules: list[str]
             "without_type_information": f"({pre}time {base}{off})"}
 
 
+def _opt82_merge_group_workflows(wf_docs: dict[str, Any]) -> list[str]:
+    """The sampled workflows whose `on:` declares `merge_group` (a merge queue),
+    sorted. OPT82's prompt only offers changed-file scoping of the type-aware PR
+    pass when this is non-empty: without a queue the full pass would run only
+    after merge. A queue workflow absent from the sample reads as "none", the
+    conservative side (the full pass stays a required PR check)."""
+    return sorted(str(p) for p, d in (wf_docs or {}).items()
+                  if isinstance(d, dict) and _on_has_event(_wf_on(d), "merge_group"))
+
+
 def _detect_opt82_type_aware_lint(
     wf_path: str,
     jobs_per_run: list[list[dict[str, Any]]],
@@ -11196,10 +11206,11 @@ def _detect_opt82_type_aware_lint(
         f["sizing_basis"] = "uncredited"
         f["risk"] = "MEDIUM"
         f["guardrail"] = (
-            "A rule-by-rule ledger (rule -> pass) and a test that the union of the "
-            "two configs' enabled rules equals the original set. Every rule still "
-            "runs somewhere; the full type-aware pass stays on the merge queue / "
-            "default branch.")
+            "A rule-by-rule ledger (rule -> fast pass, type-aware pass, or REPLACED "
+            "BY a named rule with what it no longer checks, for a human to approve) "
+            "and a test that every original rule is in a pass or has a REPLACED "
+            "row. The full type-aware pass still gates every merge: on the merge "
+            "queue when one exists, otherwise as a required PR check.")
         f["type_aware_lint"] = {
             "kind": "opt82_type_aware_lint",
             "job": job_name,
@@ -20046,6 +20057,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _skip_detectors(wf_path, ["OPT82"],
                             f"the type-aware lint check failed ({type(e).__name__})")
             new = []
+        # Stamped here, not in the detector: the merge-queue fact spans every
+        # sampled workflow, and the detector only sees its own.
+        _mq = _opt82_merge_group_workflows(_wf_docs)
+        for _f in new:
+            if isinstance(_f.get("type_aware_lint"), dict):
+                _f["type_aware_lint"]["merge_group_workflows"] = list(_mq)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 

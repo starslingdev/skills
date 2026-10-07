@@ -19,15 +19,21 @@ unversioned and updates by reinstall from `main`.
   configuration turns on type-aware parsing with at least one rule that needs
   types, the report names that job, the config lines that switch it on and each
   type-aware rule it found, including custom rules that ask for type information
-  (OPT82). Lint in that setup costs roughly as much as a type-check, and the
+  (OPT82). Lint in that setup can cost close to a type-check, and the
   finding says so. It carries no saving number: nothing in the sampled runs says
   how much of lint is the type graph, so the card shows the lint step's measured
   time as a ceiling, not a forecast, and tells the agent to benchmark first. The
   suggested change never turns rules off. The agent is asked to rewrite a rule
   only where a syntax-only form catches the same defects, or to split lint into a
-  fast pass and a type-aware pass limited to exactly those rules, with the full
-  type-aware pass kept on the merge queue and default branch, and to prove with a
-  rule-by-rule ledger and a union test that every rule still runs somewhere. A
+  fast pass and a type-aware pass limited to exactly those rules. The split may
+  narrow the pull-request pass to the changed files only when the repository has
+  a merge queue that still runs the full type-aware pass before code merges (the
+  report checks for one); without a merge queue the full type-aware pass stays a
+  required pull-request check, and the type-aware pass never relies on ESLint's
+  `--cache`, which does not track types across files. The agent must prove with a
+  rule-by-rule ledger that every rule still runs somewhere or was replaced on
+  purpose, each replacement saying what it no longer checks for a human to
+  approve. A
   lint job the audit could not decide on (a script it could not trace, a config
   it could not read, a setting only known at run time, no rule it could name) is
   named in a new `type-aware lint: held back` row of the Data sources table rather

@@ -3612,7 +3612,7 @@ title_template: "Lint Builds the Whole Type Graph"
 
 **TL;DR**: A slow lint job runs ESLint with type-aware rules switched on. Those
 rules make ESLint build a TypeScript program for the files it lints, the whole
-type graph, so lint costs roughly as much as a type-check. The report names the
+type graph, so lint can cost close to a type-check. The report names the
 rules that force that cost and asks for a benchmark before any change. It
 carries no saving number, and it never recommends turning rules off.
 
@@ -3628,8 +3628,9 @@ look at a type.
 ```
 before:  eslint  ->  build TS program (whole type graph)  ->  every rule, every file   (lint ~ a type-check)
 after:   fast pass:  eslint, syntax-only rules, no program        (cheap, every change)
-         type pass:  eslint, ONLY the type-aware rules, scoped    (changed files / touched packages)
-         merge queue / default branch: the full type-aware pass, unchanged
+         type pass:  eslint, ONLY the type-aware rules            (whole tree, a required PR check;
+                                                                   changed files only WITH a merge queue)
+         merge queue (if any) / default branch: the full type-aware pass, unchanged
 ```
 
 **Detection heuristic** (every gate required; every gate fails closed):
@@ -3647,9 +3648,16 @@ after:   fast pass:  eslint, syntax-only rules, no program        (cheap, every 
    below it, which cascade. A nested flat config is not counted: flat-config
    lookup starts at the working directory). ON means a literal
    `parserOptions.project` (`true`, a string or an array), a `projectService`
-   (`true` or an object), or an extended preset ending in `-type-checked` /
-   `TypeChecked` (or `recommended-requiring-type-checking`). The
-   `disable-type-checked` config never counts, and `project: false` is OFF.
+   (`true` or an object), or an extended type-checked preset: `recommended`,
+   `strict` or `stylistic` followed by `-type-checked` / `TypeChecked`, each also
+   in its `-type-checked-only` / `TypeCheckedOnly` form, plus the legacy
+   `recommended-requiring-type-checking` and the `all` config. A preset only
+   turns rules on, so reading it as "the type graph is built" is an INFERENCE,
+   not a read fact: a typed rule with no `parserOptions.project` /
+   `projectService` makes ESLint throw, so a lint run that passes with one of
+   these presets must set type-aware parsing somewhere, possibly in a file this
+   read cannot see. The `disable-type-checked` config never counts, and
+   `project: false` is OFF.
    Comments are stripped before reading. Any other value (an identifier, an
    environment variable, a ternary, a `parserOptions` taken from a variable) is
    unresolvable: the candidate is held back, not read as on or off.
@@ -3719,8 +3727,12 @@ with `--parser-options project:false --parser-options projectService:false` plus
 ONLY and is never committed; both runs are cold (no `--cache`). The difference
 is the real size of the prize, measured, and a small difference ends the work.
 
-For scale, Linear reported lint time falling 55% and 68%
-(https://linear.app/now/ci-bottleneck-reworked); their result, not a forecast.
+For scale, Linear rewrote their custom type-aware rules to work on the syntax
+tree alone (fix (a) below), which let their ESLint run without TypeScript, and
+reported API lint time falling 68% and full-repository lint time falling 55%
+(https://linear.app/now/ci-bottleneck-reworked). That is their result from
+taking type information out of lint, not from a split, and not a forecast for
+any other repository.
 
 **Fix recipe**, in this order. Dropping the type-aware rules is NOT a fix this
 pattern recommends: every rule the repository enforces today must still run
@@ -3732,27 +3744,48 @@ somewhere.
   satisfied by a syntax-only rule in this repository moves to the fast pass; the
   question for each rule is whether the replacement catches the same defects.
 - (b) **SPLIT.** Run two ESLint passes. The fast pass runs every syntax-only rule
-  with type-aware parsing off, on every change. The type-aware pass runs exactly
-  the enumerated rules, scoped to the changed files (`--cache`, see OPT9) or to
-  the touched packages (OPT70). The full type-aware pass over the whole tree stays
-  on the merge queue and the default branch, so every rule still runs somewhere.
+  with type-aware parsing off, on every change (it may use `--cache`, see OPT9).
+  The type-aware pass runs exactly the enumerated rules. Where it runs depends on
+  whether a full pass still gates the merge; the finding records which sampled
+  workflows declare `merge_group` (`merge_group_workflows`):
+  - **With a merge queue** (or another required full pass before merge), the
+    pull-request type-aware pass may lint only the changed files, as an explicit
+    list (`git diff --name-only --diff-filter=ACMR <base>...HEAD` filtered to
+    TypeScript sources and passed to `eslint <files>`), or only the touched
+    packages (OPT70). The full type-aware pass over the whole tree runs as a
+    required check on the merge queue and on the default branch.
+  - **Without one**, the type-aware pass stays a REQUIRED pull-request check over
+    the whole tree. It may move into its own parallel job for wall clock, but it
+    is never scoped to changed files: the full pass would then run only after
+    merge, and a type error a change causes in an unchanged file would stop
+    blocking the pull request, which is the move to a non-blocking job the
+    guardrail forbids. If the split cannot help without that, go to (c) or keep
+    the single full pass.
+  - **Never ESLint's `--cache` on the type-aware pass.** typescript-eslint's FAQ
+    says not to use it with typed linting: the cache does not track cross-file
+    type dependencies, so a cached file can pass after a change elsewhere breaks
+    its types.
 - (c) **NATIVE.** Move the type-aware rules to a native type-aware linter
   (`tsgolint` through oxlint's type-aware mode) only when the remaining rule set
   is one that tool supports, under the migration-cost contract in OPT14's
   tool-swap table.
 
-**Guardrail**: The prompt requires a rule-by-rule ledger (rule, then the pass it
-runs in) and a test that the union of the rules enabled by the two configs equals
-the original set, computed from `eslint --print-config`. A rule with no pass blocks
-the change. The shared no-weakening rail applies: the change may not delete a rule,
+**Guardrail**: The prompt requires a rule-by-rule ledger, one row per rule the
+current config enables (from `eslint --print-config`): the fast pass, the
+type-aware pass, or REPLACED BY `<rule>` with one line on what the replacement no
+longer checks and why that is acceptable. A REPLACED row is a deliberate,
+reviewed reduction in what lint checks (fix (a) can swap, for example,
+`@typescript-eslint/require-await` for the base `require-await`, which cannot see
+types) and is listed for a human to approve before merging. The ledger test
+asserts that every original rule is enabled in one of the two configs or has a
+REPLACED row; a rule with no row blocks the change. The shared no-weakening rail applies: the change may not delete a rule,
 lower a severity, widen an ignore list or move a check to a non-blocking job.
 
 **Risk**: MEDIUM. The split changes what runs on every change, and a rule left out
-of both configs would pass silently. The ledger and the union test make that
-failure loud; the type-aware pass on the merge queue bounds the blast radius to a
-later catch rather than a missed one. A file touched in one package can break a
-type-aware rule in another that the scoped pass does not lint, which is why the
-default-branch pass is not optional.
+of both configs would pass silently. The ledger and its test make that failure
+loud. A file touched in one package can break a type-aware rule in another that
+a scoped pass does not lint, which is why a scoped pull-request pass is offered
+only where the full type-aware pass still gates the merge on a merge queue.
 
 **Why not just oxlint**: oxlint covers most syntax-only rules at a fraction of the
 cost and is the right fast pass. It does not remove the type-aware rules; those
@@ -4067,7 +4100,7 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76, OPT77, OPT79 and OPT80 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80 and OPT82 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. On real repos almost every hygiene hit moves **~0 developer

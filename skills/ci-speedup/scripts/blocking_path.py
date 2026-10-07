@@ -6937,12 +6937,55 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
 # OPT82's guardrail, as the prompt states it. ONE literal: the verifier carries
 # an equal copy (pinned by a test) and fails a rendered OPT82 card without it.
 _OPT82_LEDGER_SENTENCE = (
-    "LEDGER (required before shipping): write a rule-by-rule ledger mapping every "
-    "rule the current config enables (from `eslint --print-config`) to the pass "
-    "that will run it after the change - the fast pass, the type-aware pass, or "
-    "both - and add a test asserting that the union of the two configs' enabled "
-    "rules equals the original set. A rule with no pass is a coverage loss and "
-    "blocks the change.")
+    "LEDGER (required before shipping): write a rule-by-rule ledger with one row "
+    "for every rule the current config enables (from `eslint --print-config`), "
+    "saying where it runs after the change - the fast pass, the type-aware pass, "
+    "or REPLACED BY <rule> with one line on what the replacement no longer checks "
+    "and why that is acceptable here - and add a test asserting that every "
+    "original rule is enabled in one of the two configs or has a REPLACED row. "
+    "A rule with no row is a coverage loss and blocks the change. A REPLACED row "
+    "is a deliberate, reviewed reduction in what lint checks: list each one for "
+    "a human to approve before merging.")
+
+
+def _opt82_split_scope_lines(tal: dict[str, Any]) -> list[str]:
+    """Where the type-aware pass of step (b) may run, from the collector's
+    `merge_group_workflows` stamp. With a merge queue the PR pass may lint an
+    explicit changed-file list because the full pass still gates the merge on
+    the queue. Without one (or with no stamp) a scoped PR pass would leave the
+    full pass running only after merge, so it stays a required whole-tree PR
+    check. Never ESLint's `--cache` on the type-aware pass: typescript-eslint
+    documents that the cache does not track cross-file type dependencies."""
+    mq = [str(p) for p in _as_list(tal.get("merge_group_workflows")) if p]
+    no_cache = [
+        "      Do NOT use ESLint's `--cache` for the type-aware pass: the cache",
+        "      does not track cross-file type dependencies (typescript-eslint's",
+        "      FAQ says not to use it with typed linting), so a cached file can",
+        "      pass after a change elsewhere breaks its types.",
+    ]
+    if mq:
+        return [
+            f"      This repo has a merge queue (`merge_group` in {', '.join(mq)}),",
+            "      so on pull requests the type-aware pass may lint only the",
+            "      changed files, as an explicit list (e.g. `git diff --name-only",
+            "      --diff-filter=ACMR <base>...HEAD -- '*.ts' '*.tsx'` passed to",
+            "      `eslint <files>`), or only touched packages (catalog OPT70).",
+            *no_cache,
+            "      The full type-aware pass over the whole tree must run as a",
+            "      required check on the merge queue (make sure the lint workflow",
+            "      triggers on `merge_group`) and on the default branch. Every",
+            "      rule still runs somewhere before code merges.",
+        ]
+    return [
+        "      This repo shows no merge queue (no sampled workflow declares",
+        "      `merge_group`), so the type-aware pass must stay a REQUIRED",
+        "      pull-request check over the whole tree: it may run as its own",
+        "      parallel job for wall clock, but never scoped to changed files.",
+        "      Scoped on the PR, the whole-tree pass would only run after merge,",
+        "      and a type error a change causes in an unchanged file would merge",
+        "      unchecked.",
+        *no_cache,
+    ]
 
 
 def _opt82_prompt(title: str, members: list[dict[str, Any]], url: str,
@@ -6978,12 +7021,15 @@ def _opt82_prompt(title: str, members: list[dict[str, Any]], url: str,
         "timings before changing anything (both runs cold, no --cache):",
         f"  {bench.get('as_ci_runs_it') or '(the lint command as CI runs it)'}",
         f"  {bench.get('without_type_information') or '(the same command without type information)'}",
-        "The second command turns type information and the rules below off for",
-        "that timing run ONLY; it is a measurement, never a change to commit. If",
-        "the two timings are close, stop: type information is not what makes",
-        "this lint slow, and this finding does not apply.",
-        "Linear reported lint time falling 55% and 68% after splitting type-aware",
-        "lint this way - their result, not a forecast for this repo:",
+        "The second command runs the same lint without type information and",
+        "without the rules below, for that timing run ONLY; it is a measurement,",
+        "never a change to commit. If the two timings are close, stop: type",
+        "information is not what makes this lint slow, and this finding does not",
+        "apply.",
+        "For scale: Linear rewrote their custom type-aware rules to work on the",
+        "syntax tree alone (step (a) below), which let their ESLint run without",
+        "TypeScript, and reported cutting API lint time 68% and full-repository",
+        "lint time 55% - their result, not a forecast for this repo:",
         "  https://linear.app/now/ci-bottleneck-reworked",
         "",
         f"Type-aware rules {configs} turns on (read from the config text; confirm",
@@ -6996,19 +7042,17 @@ def _opt82_prompt(title: str, members: list[dict[str, Any]], url: str,
         "Fix order:",
         "  (a) REWRITE: where a syntax-only rule covers the same check here, move",
         "      the check to it, rule by rule, and say why for each.",
-        "  (b) SPLIT into two passes: a fast syntax-only pass on every run, and a",
-        "      type-aware pass restricted to exactly the type-aware rules left",
-        "      after (a), via a second config, scoped to changed files (`--cache`,",
-        "      catalog OPT9) or touched packages (catalog OPT70). Keep the full",
-        "      type-aware pass on the merge queue / default branch. Every rule",
-        "      still runs somewhere.",
+        "  (b) SPLIT into two passes: a fast syntax-only pass on every run (it",
+        "      may use `--cache`, catalog OPT9), and a type-aware pass restricted",
+        "      to exactly the type-aware rules left after (a), via a second config.",
+        *_opt82_split_scope_lines(tal),
         "  (c) A native type-aware linter (tsgolint via oxlint's type-aware mode)",
         "      only when the remaining rule set is one it supports, under the",
         "      catalog OPT14 migration-cost contract.",
         "Risk: MEDIUM - a rule that ends up in neither pass is a silent coverage",
-        "loss, and a pass scoped to changed files can miss a type error a change",
-        "causes in an unchanged file; the full pass on the merge queue / default",
-        "branch is what catches it.",
+        "loss, and a type-aware pass scoped to changed files can miss a type",
+        "error a change causes in an unchanged file; only a full type-aware pass",
+        "that still gates the merge catches it.",
         _OPT82_LEDGER_SENTENCE,
         "",
         "Read the catalog entry (background, fix recipe, and guardrail):",
