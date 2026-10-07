@@ -9673,6 +9673,28 @@ def test_opt80_off_pole_exemption_rederives_the_workflows_slowest_job(tmp_path: 
     assert chk.ok, chk
 
 
+def test_opt80_slowest_job_of_a_workflow_with_no_rendered_pole_is_no_contradiction(
+        tmp_path: Path):
+    """The collector stamps on_critical_path=True on a workflow's slowest job
+    whether or not that workflow runs on pull requests. A push-only nightly's
+    slowest job can never be a rendered pole, and a pull-request workflow
+    ranked below the drilled poles has none either; neither is a
+    contradiction. Only a workflow that HAS a rendered pole elsewhere is."""
+    vr = _load_verify_report()
+    for events in (("push", "schedule"), ("pull_request",)):
+        doc = _opt80_tail_doc(pole_check="CI / build", pole_job="build")
+        f = doc["findings"][0]
+        del f["checkout_stall"]["tail_axis"]
+        f["workflow_file"] = ".github/workflows/nightly.yml"
+        doc["per_workflow_timing"] = {".github/workflows/nightly.yml": {
+            "long_pole_job": "build", "long_pole_p50": 300.0, "events": list(events)}}
+        sub = tmp_path / events[0]
+        sub.mkdir()
+        report, report_path, findings_path = _tier2_artifacts(sub, doc)
+        chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+        assert chk.ok, (events, chk)
+
+
 def test_opt80_tail_line_off_a_drilled_pole_renders_in_its_own_block(tmp_path: Path):
     """The slowest job of a pull-request workflow that is not drilled: its tail
     line renders once, outside every pole section, and that (only that) excuses

@@ -6459,6 +6459,26 @@ def _vr_opt80_job_rendered_as_pole(f: dict, report: str, data: dict | None = Non
     return False
 
 
+def _vr_opt80_slowest_job_can_be_a_pole(f: dict, report: str, data: dict) -> bool:
+    """Whether a True on_critical_path with no rendered pole for the job is a
+    contradiction. The collector stamps it on a workflow's slowest job whether
+    or not that workflow runs on pull requests, so it is NOT one when the
+    workflow's recorded events hold no pull-request event (a push-only
+    nightly's job is never a pole), or when the workflow has no rendered pole
+    header at all (it ranked below the drilled poles). A header with no
+    workflow, or a finding with no workflow file, counts as the workflow's."""
+    wf_path = str(f.get("workflow_file") or "")
+    events = {str(e) for e in _as_list(_as_dict(data.get("events_by_wf")).get(wf_path)) if str(e)}
+    if not events:
+        events = {str(e) for e in _as_list(_as_dict(_as_dict(
+            data.get("per_workflow_timing")).get(wf_path)).get("events")) if str(e)}
+    if events and not events & _VR_PR_VOLUME_EVENTS:
+        return False
+    wf_f = wf_path.rsplit("/", 1)[-1]
+    return any(not wf_f or not wf or wf == wf_f
+               for wf, _check, _body in _pole_header_sections(report))
+
+
 def _vr_opt80_tail_rendered_off_pole(f: dict, report: str) -> bool:
     """The finding stamps a tail axis AND its marked tail line sits outside
     every Long pole section (the renderer's off-pole tail block)."""
@@ -6801,7 +6821,8 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                                 f"off-pole tail line, but per_workflow_timing names "
                                 f"{slowest or None!r} as this workflow's slowest job, "
                                 f"not {cs_job!r}")
-                    elif bool(claimed) and not on_pole:
+                    elif (bool(claimed) and not on_pole
+                          and _vr_opt80_slowest_job_can_be_a_pole(f, report, data)):
                         bad.append(
                             f"{fid}: on_critical_path={claimed!r} but the job is "
                             "not rendered as a Long pole")
