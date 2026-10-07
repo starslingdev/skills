@@ -113,6 +113,7 @@ TRIAGE_ALLOWLIST = {
     "Tier-2 R-rows use measured sizing basis": AUTO_SEED,                                        # check_tier2_measured_basis
     "uncredited net-negative caches re-derive from their own runs": AUTO_SEED,                   # check_opt79_uncredited_rows_rederived
     "type-aware lint findings are uncredited, name their rules and carry the ledger": AUTO_SEED,  # check_opt82_type_aware_lint_uncredited
+    "OPT79 findings re-derive by their arm, and pole caches render": AUTO_SEED,                  # check_opt79_findings_rederived
     "Tier-2 section-lead totals match de-overlapped findings": AUTO_SEED,                         # check_tier2_total_deoverlapped
     "no claim or prose cites the closing-down /timing endpoints": AUTO_SEED,                     # check_no_timing_endpoint_citation
     "Tier-2 claims carry the jobs-API derivation-basis field": AUTO_SEED,                        # check_tier2_claims_derivation_basis
@@ -210,6 +211,7 @@ CHECK_CLASS = {
     "Tier-2 R-rows use measured sizing basis": "estimated-not-measured",  # exact match: promoted bill rows must be measured, not modeled
     "uncredited net-negative caches re-derive from their own runs": "fabricated-or-unsupported-finding",  # a numberless cache row whose measurements the data does not support
     "type-aware lint findings are uncredited, name their rules and carry the ledger": "fabricated-or-unsupported-finding",  # an uncredited lint finding carrying a number, naming no rule, or missing its ledger
+    "OPT79 findings re-derive by their arm, and pole caches render": "fabricated-or-unsupported-finding",  # a merge-wait figure the measured excess and headroom do not support
     "Tier-2 section-lead totals match de-overlapped findings": "fabricated-or-unsupported-finding",  # rendered totals not backed by findings
     "no claim or prose cites the closing-down /timing endpoints": "fabricated-or-unsupported-finding",  # cites a data source the pipeline does not use
     "Tier-2 claims carry the jobs-API derivation-basis field": "fabricated-or-unsupported-finding",  # a Tier-2 claim without its machine-readable data-source field
