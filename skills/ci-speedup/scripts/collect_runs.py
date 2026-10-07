@@ -10793,13 +10793,37 @@ _OPT82_VERDICT_GATES = frozenset({
 # listed, and renders as the shared held-back row.
 _OPT82_HELD_BACK_GATES = frozenset({
     "lint_script_unresolvable",
+    "lint_step_uses_runtime_expression",
+    "lint_delegated_to_unread_tool",
+    "package_json_unreadable",
+    "type_aware_lint_scan_missing",
     "type_aware_config_reader_failed",
+    "eslint_config_walk_incomplete",
     "no_eslint_config_found",
     "eslint_config_unreadable",
+    "eslint_config_lookup_ambiguous",
     "type_aware_setting_unresolvable",
+    "shared_config_unfollowable",
+    "config_import_unfollowed",
+    "type_aware_rule_without_parser_setting",
     "rule_setting_unresolvable",
     "no_enumerable_type_aware_rule",
 })
+# Exits about the WORKFLOW, not a lint job: there is no job to name, so they
+# are counted only. A workflow whose YAML did not parse is disclosed by the
+# workflow-level parse reporting, not by this pattern's held-back row.
+_OPT82_WORKFLOW_GATES = frozenset({"workflow_yaml_unparsed"})
+# Tools a lint step or script can hand lint to, whose own configuration (not
+# the workflow or package.json) decides whether and how ESLint runs. A
+# lint-named command through one of these is held back, never read as "not a
+# lint step". Linters that are not ESLint (golangci-lint, stylelint, biome,
+# actionlint, ...) are deliberately absent.
+_OPT82_DELEGATORS = frozenset({
+    "turbo", "nx", "lerna", "make", "next", "run-p", "run-s", "npm-run-all",
+    "npm-run-all2", "node", "moon", "rush", "wireit", "tsx", "ts-node", "ultra"})
+# ESLint 10 looks a flat config up from each linted file; earlier majors from
+# the working directory.
+_OPT82_ESLINT_PER_FILE_LOOKUP_MAJOR = 10
 _OPT82_MAX_SCRIPT_DEPTH = 5
 _OPT82_SEGMENT_SPLIT_RE = _re.compile(r"&&|\|\||;|\||\n")
 # `npm`/`pnpm`/`yarn` flags that move a script to ANOTHER package's directory —
@@ -10842,9 +10866,27 @@ def _opt82_eslint_args(toks: list[str]) -> "list[str] | None":
             if t[:1] == ["--"]:
                 t = t[1:]
             break
-    if t and t[0].rsplit("/", 1)[-1] == "eslint":
-        return t[1:]
+    if t and _re.fullmatch(r"eslint(?:@[\w.^~<>=*-]+)?", t[0].rsplit("/", 1)[-1]):
+        return t[1:]                       # `eslint`, `eslint@8`, `node_modules/.bin/eslint`
     return None
+
+
+def _opt82_delegator(toks: list[str]) -> "str | None":
+    """The tool name when `toks` hands work to a `_OPT82_DELEGATORS` tool
+    (directly, or through `npx` / `pnpm` / `yarn` / `bunx`)."""
+    t = list(toks)
+    for prefix in (["npm", "exec", "--"], ["npm", "exec"], ["pnpm", "exec"],
+                   ["pnpm", "dlx"], ["yarn", "exec"], ["yarn", "dlx"], ["bun", "x"],
+                   ["npx"], ["bunx"], ["yarn"], ["pnpm"]):
+        if t[:len(prefix)] == prefix:
+            t = t[len(prefix):]
+            while t and t[0].startswith("-") and t[0] != "--":
+                t = t[1:]
+            if t[:1] == ["--"]:
+                t = t[1:]
+            break
+    name = t[0].rsplit("/", 1)[-1].split("@", 1)[0] if t else ""
+    return name if name in _OPT82_DELEGATORS else None
 
 
 def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None"
@@ -10871,6 +10913,12 @@ def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None"
     args = clean
     if not args:
         return None
+    if pm == "yarn" and args[0] in ("workspace", "workspaces"):
+        # `yarn workspace <pkg> <script>` / `yarn workspaces foreach run <script>`:
+        # a script defined in ANOTHER package's package.json, so scoped.
+        tail = args[2:] if args[0] == "workspace" else args[1:]
+        tail = [a for a in tail if a not in ("run", "foreach")]
+        return (tail[0], True) if tail else None
     if args[0] in ("run", "run-script"):
         return (args[1], scoped) if len(args) > 1 else None
     if pm == "npm" or args[0] in _OPT82_PM_BUILTINS:
@@ -10886,11 +10934,16 @@ def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None"
 
 
 def _opt82_resolve_lint(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
-                        chain: "list[str] | None" = None, depth: int = 0
+                        chain: "list[str] | None" = None, depth: int = 0,
+                        scripts_unreadable: "frozenset[str]" = frozenset(),
                         ) -> "tuple[str, str, list[str]] | None":
     """("eslint", eslint command, script chain) when `cmd` runs ESLint;
-    ("unresolvable", reason, chain) when it runs a lint-named package script
-    this read cannot trace; None when it is not a lint step."""
+    ("unresolvable", kind, chain) when it is a lint step this read cannot
+    trace, `kind` being "expression" (a `${{ }}` in it), "delegated" (handed
+    to turbo / nx / make / a node script ...), "package_json" (the package.json
+    defining the script could not be read) or "script" (a lint-named script
+    not defined here, scoped to another package, or past the depth cap);
+    None when it is not a lint step."""
     chain = list(chain or [])
     unresolvable: "tuple[str, str, list[str]] | None" = None
     for seg in _OPT82_SEGMENT_SPLIT_RE.split(cmd or ""):
@@ -10906,6 +10959,9 @@ def _opt82_resolve_lint(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, s
         args = _opt82_eslint_args(toks)
         if args is not None:
             return "eslint", " ".join(["eslint", *args]), chain
+        if lintish and _opt82_delegator(toks):
+            unresolvable = unresolvable or ("unresolvable", "delegated", chain)
+            continue
         scripts = scripts_by_dir.get(wd)
         ref = _opt82_script_ref(toks, scripts)
         if ref is None:
@@ -10915,10 +10971,14 @@ def _opt82_resolve_lint(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, s
         body = (scripts or {}).get(name)
         if scoped or body is None or depth >= _OPT82_MAX_SCRIPT_DEPTH:
             if lint_named:
-                unresolvable = unresolvable or ("unresolvable", name, chain)
+                kind = ("package_json" if (scripts is None and not scoped
+                                           and wd in scripts_unreadable)
+                        else "script")
+                unresolvable = unresolvable or ("unresolvable", kind, chain)
             continue
         sub = _opt82_resolve_lint(body, wd, scripts_by_dir,
-                                  chain + [f"{toks[0]} run {name}"], depth + 1)
+                                  chain + [f"{toks[0]} run {name}"], depth + 1,
+                                  scripts_unreadable)
         if sub is not None and sub[0] == "eslint":
             return sub
         if sub is not None and lint_named:
@@ -10958,8 +11018,13 @@ def _opt82_applicable_configs(block: dict[str, Any], wd: str, explicit: "str | N
 
     ESLint reads the config passed with `-c` when there is one; otherwise the
     nearest config at or above the working directory. A legacy `.eslintrc`
-    cascades, so nested eslintrc-format configs below the directory count too;
-    a nested flat config does not (flat lookup starts at the cwd)."""
+    cascades both ways: nested eslintrc-format configs below the directory
+    count, and when the nearest config is eslintrc-format so do its ancestors,
+    up to the first one with `root: true` — except where a nearer one sets
+    type-aware parsing literally OFF, which shadows the farther ones. A nested
+    flat config below the directory is NOT picked here; whether it applies
+    depends on the ESLint major (ESLint 10 looks configs up from each file),
+    which `_opt82_nested_flat_ambiguous` decides."""
     configs = [c for c in (block.get("configs") or []) if isinstance(c, dict)]
     unreadable = [str(u) for u in (block.get("unreadable") or [])]
     import posixpath
@@ -10984,10 +11049,79 @@ def _opt82_applicable_configs(block: dict[str, Any], wd: str, explicit: "str | N
               if (near is not None and c.get("dir") == near)
               or (below(str(c.get("dir") or "")) and c.get("format") != "flat"
                   and str(c.get("dir")) != near)]
+    def _udir(u: str) -> str:
+        return u.rsplit("/", 1)[0] if "/" in u else ""
+
+    def _halts(cs: "list[dict[str, Any]]") -> bool:
+        return any(c.get("root") for c in cs) or any(
+            c.get("sets_off") and c.get("type_aware") != "on" for c in cs)
+
+    cascade_dirs: set[str] = set()
+    at_near = [c for c in configs if near is not None and c.get("dir") == near]
+    if at_near and not any(c.get("format") == "flat" for c in at_near):
+        # Legacy upward cascade, nearest first, to `root: true` or a literal OFF.
+        stop = _halts(at_near)
+        d = near or ""
+        while d and not stop:
+            d = d.rsplit("/", 1)[0] if "/" in d else ""
+            here = [c for c in configs if str(c.get("dir") or "") == d
+                    and c.get("format") != "flat"]
+            cascade_dirs.add(d)
+            picked += [c for c in here if c not in picked]
+            stop = _halts(here)
     bad = [u for u in unreadable
-           if (u.rsplit("/", 1)[0] if "/" in u else "") == near
-           or below(u.rsplit("/", 1)[0] if "/" in u else "")]
+           if _udir(u) == near or below(_udir(u))
+           or (_udir(u) in cascade_dirs
+               and not u.rsplit("/", 1)[-1].startswith("eslint.config."))]
     return picked, bad
+
+
+def _opt82_eslint_major(block: dict[str, Any], wd: str) -> "int | None":
+    """The ESLint major the package.json nearest at or above `wd` declares
+    (dependencies / devDependencies), or None when none does or the spec is
+    not a plain version (`workspace:*`, `catalog:`, a tag)."""
+    versions = block.get("eslint_versions") or {}
+    d = wd
+    while True:
+        spec = versions.get(d)
+        if isinstance(spec, str):
+            m = _re.match(r"\s*[\^~>=v ]*(\d+)", spec)
+            return int(m.group(1)) if m else None
+        if not d:
+            return None
+        d = d.rsplit("/", 1)[0] if "/" in d else ""
+
+
+def _opt82_nested_flat_ambiguous(block: dict[str, Any], wd: str,
+                                 picked: "list[dict[str, Any]]") -> bool:
+    """A flat config BELOW the lint directory that is not among `picked`
+    applies under ESLint 10 (config lookup from each linted file) and not
+    under ESLint 9 (lookup from the working directory). Ambiguous unless the
+    declared ESLint major is known to be below 10."""
+    nested = [c for c in (block.get("configs") or []) if isinstance(c, dict)
+              and c.get("format") == "flat" and c not in picked
+              and str(c.get("dir") or "") != ""
+              and (wd == "" or str(c.get("dir")).startswith(wd + "/"))]
+    if not nested:
+        return False
+    major = _opt82_eslint_major(block, wd)
+    return major is None or major >= _OPT82_ESLINT_PER_FILE_LOOKUP_MAJOR
+
+
+def _opt82_walk_missed_dir(block: dict[str, Any], wd: str) -> bool:
+    """The config walk stopped early (`truncated`) and nothing it recorded sits
+    at or below `wd`, so it cannot show the walk reached `wd`: a nearer config
+    there may have been missed. The walk is breadth-first, so any config found
+    at or below `wd` proves `wd` itself was listed."""
+    if not block.get("truncated"):
+        return False
+    dirs = [str(c.get("dir") or "") for c in (block.get("configs") or [])
+            if isinstance(c, dict)]
+    dirs += [(u.rsplit("/", 1)[0] if "/" in u else "")
+             for u in (block.get("unreadable") or []) if isinstance(u, str)]
+    if wd == "":
+        return not any(d == "" for d in dirs)
+    return not any(d == wd or d.startswith(wd + "/") for d in dirs)
 
 
 def _opt82_benchmark_commands(eslint_cmd: str, wd: str, rules: list[str]
@@ -11067,9 +11201,14 @@ def _detect_opt82_type_aware_lint(
     if not isinstance(jobs, dict):
         _no("workflow_yaml_unparsed")
         return []
-    tal = block if isinstance(block, dict) else {"error": "missing"}
+    # No block at all is NOT a reader failure: the scan that wrote this
+    # findings doc carried no ESLint read (an older scan). Its own gate.
+    scan_missing = not isinstance(block, dict)
+    tal: dict[str, Any] = block if isinstance(block, dict) else {}
     scripts_by_dir = {str(k): v for k, v in (tal.get("package_scripts") or {}).items()
                       if isinstance(v, dict)}
+    scripts_unreadable = frozenset(str(d) for d in
+                                   (tal.get("package_scripts_unreadable") or []))
     job_p50: dict[str, float] = dict(crit.get("job_p50") or {})
     long_pole = str(crit.get("long_pole_job") or "")
     wf_defaults = ((doc.get("defaults") or {}).get("run") or {}) \
@@ -11085,17 +11224,30 @@ def _detect_opt82_type_aware_lint(
         lint_step: dict[str, Any] = {}
         wd = ""
         for step in spec["steps"]:
-            if not isinstance(step, dict) or not isinstance(step.get("run"), str):
+            if not isinstance(step, dict):
+                continue
+            if not isinstance(step.get("run"), str):
+                # An action step that lints: one whose name or reference says
+                # ESLint, or a LOCAL action named lint. What it runs lives in
+                # the action, which this read does not open. Marketplace
+                # linters for other languages are not ESLint and stay silent.
+                uses = str(step.get("uses") or "")
+                label = (uses + " " + str(step.get("name") or "")).lower()
+                if uses and ("eslint" in label
+                             or (uses.startswith("./") and "lint" in label)):
+                    if found is None:
+                        found, lint_step, wd = ("unresolvable", "delegated", []), step, ""
                 continue
             raw_wd = step.get("working-directory",
                               job_defaults.get("working-directory",
                                                wf_defaults.get("working-directory")))
             step_wd = _opt82_norm_dir(raw_wd)
-            res = _opt82_resolve_lint(step["run"], step_wd or "", scripts_by_dir)
+            res = _opt82_resolve_lint(step["run"], step_wd or "", scripts_by_dir,
+                                      scripts_unreadable=scripts_unreadable)
             if res is None:
                 continue
             if step_wd is None:
-                res = ("unresolvable", "working-directory expression", res[2])
+                res = ("unresolvable", "expression", res[2])
             if res[0] == "eslint" or found is None:
                 found, lint_step, wd = res, step, step_wd or ""
             if res[0] == "eslint":
@@ -11115,30 +11267,67 @@ def _detect_opt82_type_aware_lint(
             continue
         job_name = display if display in observed else sorted(observed)[0]
         p50 = max(float(job_p50[n]) for n in observed)
-        on_cp = long_pole in observed
+        # The long-pole door waives the 60s bar only where "slowest job" means
+        # something: a one-job workflow's only job is trivially its own pole.
+        on_cp = long_pole in observed and len(job_p50) > 1
         if p50 < _OPT82_MIN_LINT_P50_S and not on_cp:
             _no("lint_job_below_cost_threshold", job=job_name, p50=p50)
+            continue
+        if scan_missing:
+            _no("type_aware_lint_scan_missing", job=job_name)
             continue
         if tal.get("error"):
             _no("type_aware_config_reader_failed", job=job_name)
             continue
         if found[0] != "eslint":
-            _no("lint_script_unresolvable", job=job_name, script=found[1])
+            kind = found[1]
+            if kind == "expression":
+                _no("lint_step_uses_runtime_expression", job=job_name)
+            elif kind == "delegated":
+                _no("lint_delegated_to_unread_tool", job=job_name)
+            elif kind == "package_json":
+                _no("package_json_unreadable", job=job_name, wd=wd)
+            else:
+                _no("lint_script_unresolvable", job=job_name)
             continue
         eslint_cmd, chain = found[1], found[2]
         configs, bad = _opt82_applicable_configs(tal, wd, _opt82_config_flag(eslint_cmd))
         if bad:
             _no("eslint_config_unreadable", job=job_name, files=bad)
             continue
+        if not configs and _opt82_walk_missed_dir(tal, wd) or (
+                configs and _opt82_walk_missed_dir(tal, wd)
+                and not _opt82_config_flag(eslint_cmd)):
+            # The bounded walk stopped before it could show `wd` was visited:
+            # a nearer config there may exist and decide differently.
+            _no("eslint_config_walk_incomplete", job=job_name, wd=wd)
+            continue
         if not configs:
             _no("no_eslint_config_found", job=job_name, wd=wd)
+            continue
+        if not _opt82_config_flag(eslint_cmd) and _opt82_nested_flat_ambiguous(
+                tal, wd, configs):
+            _no("eslint_config_lookup_ambiguous", job=job_name, wd=wd)
             continue
         if any(c.get("type_aware") == "unresolved" for c in configs):
             _no("type_aware_setting_unresolvable", job=job_name)
             continue
         on = [c for c in configs if c.get("type_aware") == "on"]
         if not on:
-            _no("type_aware_parsing_off", job=job_name)
+            # "Off" is a verdict only when the read saw everything that could
+            # turn it on. A shareable config package, an unfollowed local
+            # import, or a type-aware rule switched on with no parser setting
+            # in view (it cannot run without one, so the setting is somewhere
+            # this read did not see) each make it "could not tell".
+            if any(c.get("shared_configs") for c in configs):
+                _no("shared_config_unfollowable", job=job_name,
+                    shared=[s for c in configs for s in c.get("shared_configs") or []])
+            elif any(c.get("unresolved_imports") for c in configs):
+                _no("config_import_unfollowed", job=job_name)
+            elif any(c.get("rules") for c in configs):
+                _no("type_aware_rule_without_parser_setting", job=job_name)
+            else:
+                _no("type_aware_parsing_off", job=job_name)
             continue
         catalog = _opt82_rules_catalog()
         rules: dict[str, dict[str, Any]] = {}

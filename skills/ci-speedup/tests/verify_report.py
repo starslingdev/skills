@@ -988,6 +988,31 @@ _VR_OPT80_WITHHOLD_PHRASES = {
         "were never read",
 }
 _VR_OPT82_WITHHOLD_PHRASES = {
+    "lint_step_uses_runtime_expression":
+        "the lint step's command or working directory is only known when the "
+        "workflow runs",
+    "lint_delegated_to_unread_tool":
+        "the lint step hands lint to another tool or action (such as turbo, nx, "
+        "lerna, make, Next.js or a node script) whose own configuration this "
+        "audit did not read",
+    "package_json_unreadable":
+        "the package.json that defines the lint step's script could not be read",
+    "type_aware_lint_scan_missing":
+        "the repository scan behind this report carries no ESLint config read, "
+        "so whether lint builds the type graph is unknown",
+    "eslint_config_walk_incomplete":
+        "the audit stopped reading the repository's folders before the lint "
+        "job's directory, so a nearer ESLint config may have been missed",
+    "eslint_config_lookup_ambiguous":
+        "a nested ESLint config below the lint job's directory may apply, "
+        "depending on the ESLint version",
+    "shared_config_unfollowable":
+        "the lint config extends a package this audit did not read",
+    "config_import_unfollowed":
+        "the ESLint config imports a local file this audit could not read",
+    "type_aware_rule_without_parser_setting":
+        "the ESLint config turns on a type-aware rule but sets type-aware "
+        "parsing somewhere this audit did not read",
     "lint_script_unresolvable":
         "the lint step runs a package script this audit could not trace to the "
         "command it runs",
@@ -6842,8 +6867,25 @@ def check_opt82_type_aware_lint_uncredited(report: str,
                          "recorded no OPT82 finding")
         return Check(name, True, "no type-aware lint findings")
     bad: list[str] = []
+    # The scan's own ESLint read. A finding stamped from a read that crashed,
+    # or from a walk that stopped before it could show the lint directory was
+    # visited, rests on ground the scan never saw.
+    block = _as_dict(_as_dict(data).get("type_aware_lint"))
     for f in found:
         fid = str(f.get("id") or "?")
+        if block.get("error"):
+            bad.append(f"{fid}: OPT82 finding stamped from an ESLint read that failed "
+                       f"({block.get('error')})")
+        if block.get("truncated") is True:
+            wd = str(_as_dict(f.get("type_aware_lint")).get("working_directory") or "")
+            dirs = [str(_as_dict(c).get("dir") or "") for c in _as_list(block.get("configs"))]
+            dirs += [u.rsplit("/", 1)[0] if "/" in u else ""
+                     for u in _as_list(block.get("unreadable")) if isinstance(u, str)]
+            seen = (any(d == "" for d in dirs) if wd == "" else
+                    any(d == wd or d.startswith(wd + "/") for d in dirs))
+            if not seen:
+                bad.append(f"{fid}: OPT82 finding stamped from a truncated config walk "
+                           f"that never reached its lint directory {wd or '.'!r}")
         wc = _num(f.get("wall_clock_p50_s"))
         if wc is not None and wc > 0:
             bad.append(f"{fid}: OPT82 carries wall_clock_p50_s {wc} - it is uncredited "
