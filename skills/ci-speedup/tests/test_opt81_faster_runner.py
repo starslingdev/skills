@@ -603,6 +603,15 @@ def _a1_finding():
     return f
 
 
+def _a1_credited_finding():
+    """A1 that credits: one leg per run (no matrix), interleaved in time, the job
+    run on the slow label strictly more often (9 vs 8), alone in its workflow."""
+    f = _a1(_alt_runs(slow=_SLOW + [150]))[0][0]
+    f["id"] = "f7"
+    assert f["wall_clock_p50_s"] == 60.0, f["faster_runner"]["credit_reason"]
+    return f
+
+
 def _a2_finding():
     f = _a2([_f("OPT75", structural=True)])[0][0]
     f["id"] = "f9"
@@ -958,7 +967,7 @@ def test_opt81_a2_uncredited_cache_exactly_at_the_bar_suppresses():
 # ---- Card lines -------------------------------------------------------------
 
 def test_opt81_a1_credited_card_states_the_merge_wait():
-    f = _a1_finding()
+    f = _a1_credited_finding()
     assert f["wall_clock_p50_s"] == 60.0
     card = "\n".join(bp._opt81_card(f, "u"))
     assert "- **Merge wait:** this job is on the merge-gating path" in card, card
@@ -969,7 +978,8 @@ def test_opt81_a2_card_lists_the_cheaper_levers_checked():
     a2 = _a2_finding()
     card = "\n".join(bp._opt81_card(a2, "u"))
     line = next((ln for ln in card.splitlines()
-                 if ln.startswith("- **No cheaper lever found:** ")), None)
+                 if ln.startswith("- **Cheaper levers checked (none fired):** ")),
+                None)
     assert line is not None, card
     for c in a2["faster_runner"]["cheaper_levers_checked"]:
         assert c["lever"] in line, c
@@ -1037,7 +1047,7 @@ def test_opt81_held_back_row_reaches_the_coverage_check(tmp_path):
            "data_sources": {},
            bp._OPT81_WITHHELD_DOC_KEY: [
                {"workflow_file": _WF, "job": "bench",
-                "gate": "different_operating_system", "half": "A1"}]}
+                "gate": "not_interleaved", "half": "A1"}]}
     md = bp.render(doc, {}, {}, {}, "2026-06-08")
     assert "runner class: held back" in md, md
     path = tmp_path / "f.json"
@@ -1091,6 +1101,24 @@ def _tamper_gap_below_floor(f):
     _restamp_a1(f)
 
 
+def _tamper_count_tie(f):
+    """Drop one slow-label row so the two labels tie (8 vs 8), keeping the credit."""
+    fr = f["faster_runner"]
+    idx = [i for i, r in enumerate(fr["rows"]) if r["label"] == fr["slow"]["label"]]
+    del fr["rows"][idx[-1]]
+    _restamp_a1(f)
+
+
+def _tamper_matrix(f):
+    """Make every fast-label row share a slow row's run id: a runner matrix that
+    still carries its credit."""
+    fr = f["faster_runner"]
+    slow_ids = [r["run_id"] for r in fr["rows"] if r["label"] == fr["slow"]["label"]]
+    for r, rid in zip([r for r in fr["rows"] if r["label"] == fr["fast"]["label"]],
+                      slow_ids):
+        r["run_id"] = rid
+
+
 @pytest.mark.parametrize("mutate,needle", [
     (_tamper_min_samples, "below the 8"),
     (_tamper_os, "different operating systems"),
@@ -1101,12 +1129,12 @@ def _tamper_gap_below_floor(f):
      "stamped min_samples_per_label"),
     (lambda f: f["faster_runner"].__setitem__("job_is_workflow_long_pole", False),
      "not its workflow's long pole"),
-    (lambda f: f["faster_runner"].__setitem__("dominant_label", "ubuntu-latest-8-cores"),
-     "not its workflow's long pole"),
+    (_tamper_count_tie, "not its workflow's long pole"),
+    (_tamper_matrix, "runner matrix"),
 ])
 def test_opt81_verifier_a1_sub_checks_each_redden(mutate, needle):
     vr = _load_verify_report()
-    f = copy.deepcopy(_a1_finding())
+    f = copy.deepcopy(_a1_credited_finding())
     mutate(f)
     problems = vr._opt81_a1_rederived(f)
     assert any(needle in p for p in problems), problems
@@ -1116,9 +1144,9 @@ def test_opt81_verifier_a1_restamp_helper_is_clean():
     """The tampers above re-stamp derived numbers; untampered, the re-stamp must
     leave a finding the verifier accepts, or the needles above prove nothing."""
     vr = _load_verify_report()
-    f = copy.deepcopy(_a1_finding())
-    _restamp_a1(f)
-    assert vr._opt81_a1_rederived(f) == []
+    for f in (copy.deepcopy(_a1_finding()), copy.deepcopy(_a1_credited_finding())):
+        _restamp_a1(f)
+        assert vr._opt81_a1_rederived(f) == []
 
 
 def test_opt81_verifier_a2_requires_the_advisory_flag():
@@ -1274,8 +1302,12 @@ class _Opt81Client:
         return ""
 
 
-_TWO_LABEL_PLAN = ([("ubuntu-latest", d) for d in _SLOW + [150]]
-                   + [("ubuntu-latest-8-cores", d) for d in _FAST])
+# One leg per run, the two labels alternating in time (the interleaving gate),
+# `ubuntu-latest` run strictly more often (9 vs 8; the credit rule).
+_TWO_LABEL_PLAN = ([leg for pair in zip([("ubuntu-latest", d) for d in _SLOW],
+                                        [("ubuntu-latest-8-cores", d) for d in _FAST])
+                    for leg in pair]
+                   + [("ubuntu-latest", 150)])
 _ONE_LABEL_PLAN = [("ubuntu-latest", 197)] * 10
 
 
