@@ -37,8 +37,10 @@ unversioned and updates by reinstall from `main`.
   directory, a setting only known at run time, a shared config package or a
   local file the config pulls in that it could not read, a nested config whose
   effect depends on the ESLint version, or no rule it could name. Local base
-  configs a config imports or extends are read as part of it, and the legacy
-  `.eslintrc` cascade up to `root: true` is followed. The rule list is the new
+  configs a config imports or extends are read as part of it, the legacy
+  `.eslintrc` cascade up to `root: true` is followed, a flat config beside an old
+  `.eslintrc` is the one that counts, and a rule switched off later, or a custom
+  rule matched only by its file name, is never named. The rule list is the new
   `references/type-aware-lint-rules.tsv`, taken from typescript-eslint's `main`
   branch on 2026-10-07 (UTC), with its source in the file header. Lint run through
   a generic marketplace action that does not say ESLint is not detected.

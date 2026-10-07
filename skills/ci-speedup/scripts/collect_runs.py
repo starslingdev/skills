@@ -11003,20 +11003,25 @@ def _opt82_config_flag(eslint_cmd: str) -> "str | None":
     return None
 
 
-def _opt82_applicable_configs(block: dict[str, Any], wd: str, explicit: "str | None"
+def _opt82_applicable_configs(block: dict[str, Any], wd: str, explicit: "str | None",
+                              eslintrc_forced: bool = False,
                               ) -> "tuple[list[dict[str, Any]], list[str]]":
     """The configs ESLint uses for a lint run in `wd`, and the unreadable
     config files that could be among them.
 
-    ESLint reads the config passed with `-c` when there is one; otherwise the
-    nearest config at or above the working directory. A legacy `.eslintrc`
-    cascades both ways: nested eslintrc-format configs below the directory
-    count, and when the nearest config is eslintrc-format so do its ancestors,
-    up to the first one with `root: true` — except where a nearer one sets
-    type-aware parsing literally OFF, which shadows the farther ones. A nested
-    flat config below the directory is NOT picked here; whether it applies
-    depends on the ESLint major (ESLint 10 looks configs up from each file),
-    which `_opt82_nested_flat_ambiguous` decides."""
+    ESLint reads the config passed with `-c` when there is one. Otherwise it
+    first picks a MODE. A flat config (`eslint.config.*`) at or above the
+    working directory means flat mode, in which every `.eslintrc*` is ignored
+    (ESLint 8.57+ uses a found flat config; ESLint 9 defaults to flat; ESLint 10
+    has no eslintrc at all) unless `ESLINT_USE_FLAT_CONFIG=false` forces the
+    legacy mode. Flat mode uses the nearest flat config at or above the
+    directory. Legacy mode cascades both ways: nested eslintrc-format configs
+    below the directory count, and so do the nearest one's ancestors, up to the
+    first with `root: true`, except where a nearer one sets type-aware parsing
+    literally OFF, which shadows the farther ones. A nested flat config below
+    the directory is NOT picked here; whether it applies depends on the ESLint
+    major (ESLint 10 looks configs up from each file), which
+    `_opt82_nested_flat_ambiguous` decides."""
     configs = [c for c in (block.get("configs") or []) if isinstance(c, dict)]
     unreadable = [str(u) for u in (block.get("unreadable") or [])]
     import posixpath
@@ -11025,46 +11030,56 @@ def _opt82_applicable_configs(block: dict[str, Any], wd: str, explicit: "str | N
             posixpath.normpath(explicit)
         return ([c for c in configs if c.get("path") == p],
                 [u for u in unreadable if u == p])
-    dirs = {str(c.get("dir") or "") for c in configs} | {
-        (u.rsplit("/", 1)[0] if "/" in u else "") for u in unreadable}
-    near = None
-    d = wd
-    while True:
-        if d in dirs:
-            near = d
-            break
-        if not d:
-            break
-        d = d.rsplit("/", 1)[0] if "/" in d else ""
-    below = (lambda x: x != "" and (wd == "" or x.startswith(wd + "/")))
-    picked = [c for c in configs
-              if (near is not None and c.get("dir") == near)
-              or (below(str(c.get("dir") or "")) and c.get("format") != "flat"
-                  and str(c.get("dir")) != near)]
+
     def _udir(u: str) -> str:
         return u.rsplit("/", 1)[0] if "/" in u else ""
+
+    def _is_flat_name(u: str) -> bool:
+        return u.rsplit("/", 1)[-1].startswith("eslint.config.")
+
+    def _nearest(dirs: "set[str]") -> "str | None":
+        d = wd
+        while True:
+            if d in dirs:
+                return d
+            if not d:
+                return None
+            d = d.rsplit("/", 1)[0] if "/" in d else ""
+
+    flat_dirs = {str(c.get("dir") or "") for c in configs if c.get("format") == "flat"} | {
+        _udir(u) for u in unreadable if _is_flat_name(u)}
+    flat_near = None if eslintrc_forced else _nearest(flat_dirs)
+    if flat_near is not None:
+        return ([c for c in configs if c.get("format") == "flat"
+                 and str(c.get("dir") or "") == flat_near],
+                [u for u in unreadable if _is_flat_name(u) and _udir(u) == flat_near])
+
+    rc = [c for c in configs if c.get("format") != "flat"]
+    rc_unreadable = [u for u in unreadable if not _is_flat_name(u)]
+    near = _nearest({str(c.get("dir") or "") for c in rc} | {_udir(u) for u in rc_unreadable})
+    below = (lambda x: x != "" and (wd == "" or x.startswith(wd + "/")))
+    picked = [c for c in rc
+              if (near is not None and c.get("dir") == near)
+              or (below(str(c.get("dir") or "")) and str(c.get("dir")) != near)]
 
     def _halts(cs: "list[dict[str, Any]]") -> bool:
         return any(c.get("root") for c in cs) or any(
             c.get("sets_off") and c.get("type_aware") != "on" for c in cs)
 
     cascade_dirs: set[str] = set()
-    at_near = [c for c in configs if near is not None and c.get("dir") == near]
-    if at_near and not any(c.get("format") == "flat" for c in at_near):
+    at_near = [c for c in rc if near is not None and c.get("dir") == near]
+    if at_near:
         # Legacy upward cascade, nearest first, to `root: true` or a literal OFF.
         stop = _halts(at_near)
         d = near or ""
         while d and not stop:
             d = d.rsplit("/", 1)[0] if "/" in d else ""
-            here = [c for c in configs if str(c.get("dir") or "") == d
-                    and c.get("format") != "flat"]
+            here = [c for c in rc if str(c.get("dir") or "") == d]
             cascade_dirs.add(d)
             picked += [c for c in here if c not in picked]
             stop = _halts(here)
-    bad = [u for u in unreadable
-           if _udir(u) == near or below(_udir(u))
-           or (_udir(u) in cascade_dirs
-               and not u.rsplit("/", 1)[-1].startswith("eslint.config."))]
+    bad = [u for u in rc_unreadable
+           if _udir(u) == near or below(_udir(u)) or _udir(u) in cascade_dirs]
     return picked, bad
 
 
@@ -11273,7 +11288,15 @@ def _detect_opt82_type_aware_lint(
                 _no("lint_script_unresolvable", job=job_name)
             continue
         eslint_cmd, chain = found[1], found[2]
-        configs, bad = _opt82_applicable_configs(tal, wd, _opt82_config_flag(eslint_cmd))
+        # `ESLINT_USE_FLAT_CONFIG=false` (inline, or in the step / job /
+        # workflow env) forces ESLint's legacy eslintrc mode.
+        env_flag = next((str(e.get("ESLINT_USE_FLAT_CONFIG")) for e in (
+            lint_step.get("env"), spec.get("env"), doc.get("env"))
+            if isinstance(e, dict) and "ESLINT_USE_FLAT_CONFIG" in e), "")
+        eslintrc_forced = env_flag.strip().lower() == "false" or bool(_re.search(
+            r"\bESLINT_USE_FLAT_CONFIG=['\"]?false\b", str(lint_step.get("run") or "")))
+        configs, bad = _opt82_applicable_configs(tal, wd, _opt82_config_flag(eslint_cmd),
+                                                 eslintrc_forced)
         if bad:
             _no("eslint_config_unreadable", job=job_name, files=bad)
             continue
