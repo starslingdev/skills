@@ -9598,6 +9598,99 @@ def test_opt80_tail_axis_counts_only_tail_runs_whose_log_proves_a_stall():
     assert any("tail_axis.one_in_n" in p and "10" in p for p in probs), probs
 
 
+# ── OPT80's slowest job WITHOUT a tail line ──
+# The finding stamps `tail_axis_withheld_reason` and renders that reason's own
+# sentence. The self-check pairs the two, re-derives the reason from the
+# stamped facts, and fails any merge-wait claim on a finding with no tail axis.
+
+_OPT80_WITHHELD_CHECK = "OPT80 slowest-job sentence pairs with its withheld reason"
+_OPT80_LEGACY_POLE_SENTENCE = (
+    "`build` is this workflow's slowest job; the stall's effect on the merge wait "
+    "is measured (longest pause 40s) but not credited in this version.")
+
+
+def _opt80_withheld_doc(reason, sentence_reason=None, evidence_tail=None):
+    """An on-pole OPT80 finding with no tail axis, its stamped facts set the way
+    the collector would have seen them for `reason`."""
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    doc = _opt80_pole_doc()
+    _opt80_tail_eligibility(
+        doc, event_scope="all-events" if reason == "all_events_timing" else "pull_request",
+        declared=reason != "not_on_pull_requests")
+    if reason == "merge_gating_unknown":
+        doc["required_checks_complete"] = False
+    if reason == "not_merge_gating":
+        doc["required_checks"] = ["CI / bench"]
+    f = doc["findings"][0]
+    f["checkout_stall"]["tail_axis_withheld_reason"] = reason
+    tail = (evidence_tail if evidence_tail is not None
+            else t._OPT80_WITHHELD_POLE_CASES[sentence_reason or reason][2])
+    f["evidence"] = f["evidence"] + ". " + tail
+    return doc
+
+
+def _opt80_withheld_check(tmp_path: Path, doc):
+    vr = _load_verify_report()
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    checks = {c.name: c for c in vr.run_checks(report, report_path, findings_path,
+                                               skill_repo=None)}
+    assert _OPT80_WITHHELD_CHECK in checks, sorted(checks)
+    return checks[_OPT80_WITHHELD_CHECK]
+
+
+def test_opt80_withheld_tail_sentences_are_the_collectors_own():
+    """Coupling: the verifier's copy of the withheld-reason sentences equals the
+    collector's table, key for key and byte for byte."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+    assert vr._VR_OPT80_TAIL_WITHHELD_SENTENCES == t.cr._OPT80_TAIL_WITHHELD_SENTENCES
+
+
+@pytest.mark.parametrize("reason", ["not_on_pull_requests", "all_events_timing",
+                                    "merge_gating_unknown", "not_merge_gating"])
+def test_opt80_withheld_tail_sentence_pairs_with_its_reason(tmp_path: Path, reason):
+    chk = _opt80_withheld_check(tmp_path, _opt80_withheld_doc(reason))
+    assert chk.ok, chk.detail
+
+
+@pytest.mark.parametrize("reason", ["not_on_pull_requests", "all_events_timing",
+                                    "merge_gating_unknown", "not_merge_gating"])
+def test_opt80_merge_wait_claim_without_a_tail_axis_is_caught(tmp_path: Path, reason):
+    """MUTATION: the pre-fix sentence ("the stall's effect on the merge wait is
+    measured ... but not credited") on a job the merge is not shown to wait on.
+    With gating unknown or not this job, that claim is false and must red."""
+    chk = _opt80_withheld_check(
+        tmp_path, _opt80_withheld_doc(reason, evidence_tail=_OPT80_LEGACY_POLE_SENTENCE))
+    assert not chk.ok
+    assert "merge wait" in chk.detail, chk.detail
+
+
+def test_opt80_withheld_reason_must_match_its_sentence_and_the_facts(tmp_path: Path):
+    # The sentence of another reason: a mismatch.
+    chk = _opt80_withheld_check(
+        tmp_path, _opt80_withheld_doc("merge_gating_unknown",
+                                      sentence_reason="not_merge_gating"))
+    assert not chk.ok and "merge_gating_unknown" in chk.detail, chk.detail
+    # "Branch protection could not be read" on a complete, readable required set.
+    doc = _opt80_withheld_doc("merge_gating_unknown")
+    doc["required_checks_complete"] = True
+    chk = _opt80_withheld_check(tmp_path, doc)
+    assert not chk.ok and "not_merge_gating" in chk.detail, chk.detail
+    # The slowest-job sentence with no stamped reason at all.
+    doc = _opt80_withheld_doc("not_merge_gating")
+    del doc["findings"][0]["checkout_stall"]["tail_axis_withheld_reason"]
+    chk = _opt80_withheld_check(tmp_path, doc)
+    assert not chk.ok, chk.detail
+    # A reason stamped next to a tail axis.
+    doc = _opt80_tail_doc()
+    doc["findings"][0]["checkout_stall"]["tail_axis_withheld_reason"] = "not_merge_gating"
+    chk = _opt80_withheld_check(tmp_path, doc)
+    assert not chk.ok, chk.detail
+
+
 def test_opt80_tail_line_renders_at_the_pole_and_pairs_with_its_block(tmp_path: Path):
     vr = _load_verify_report()
     doc = _opt80_tail_doc()

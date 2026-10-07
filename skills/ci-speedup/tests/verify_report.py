@@ -6845,6 +6845,124 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
                  if not bad else "; ".join(bad[:6]))
 
 
+# ---- OPT80's slowest job WITHOUT a tail line ----------------------------------
+#
+# An on-pole OPT80 finding with no tail axis stamps `tail_axis_withheld_reason`
+# and renders that reason's sentence. Own copy of the collector's
+# `_OPT80_TAIL_WITHHELD_SENTENCES` (pinned equal by a coupling test). None of
+# them claims a merge wait; the pre-fix sentence ("the stall's effect on the
+# merge wait is measured ... but not credited") did, for jobs the merge was not
+# shown to wait on, and any merge-wait claim on a finding with no tail axis fails.
+_VR_OPT80_TAIL_WITHHELD_SENTENCES = {
+    "not_on_pull_requests":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but this workflow is not shown to run on pull requests, "
+        "so no merge-wait claim is made.",
+    "all_events_timing":
+        "`{job}` is this workflow's slowest job; the stall is measured on "
+        "all-events timing (longest pause {pause}s), with no pull-request sample, "
+        "so no tail line is printed.",
+    "merge_gating_unknown":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but whether this job gates a merge could not be read "
+        "from branch protection, so no tail line is printed.",
+    "not_merge_gating":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but the merge does not wait on this job, so no "
+        "merge-wait claim is made.",
+    "tail_not_derivable":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but the proven runs yield no tail figure, so no tail "
+        "line is printed.",
+}
+_VR_OPT80_MERGE_WAIT_CLAIM_RE = re.compile(
+    r"\b(?:effect on|sits on|is on|lands on|reaches) (?:the |a |that run's )?merge wait",
+    re.IGNORECASE)
+_VR_OPT80_SLOWEST_JOB = "is this workflow's slowest job"
+
+
+def _vr_opt80_tail_withheld_expected(f: dict, data: dict) -> "set[str] | None":
+    """The reasons the stamped facts allow, in the collector's gate order, or
+    None when the doc predates the facts (no `declared_pr_workflows`)."""
+    wf = str(f.get("workflow_file") or "")
+    declared = data.get("declared_pr_workflows")
+    if not isinstance(declared, list):
+        return None
+    if wf not in {str(w) for w in declared}:
+        return {"not_on_pull_requests"}
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    if str(crit.get("event_scope") or "") == "all-events":
+        return {"all_events_timing"}
+    if not (data.get("required_checks_complete") is True
+            and _as_list(data.get("required_checks"))
+            and _as_dict(_as_dict(data.get("workflow_job_graph")).get(wf))):
+        return {"merge_gating_unknown"}
+    return {"not_merge_gating", "tail_not_derivable"}
+
+
+def _vr_opt80_tail_withheld_problems(f: dict, data: dict) -> list[str]:
+    cs = _as_dict(f.get("checkout_stall"))
+    ev = str(f.get("evidence") or "")
+    reason = cs.get("tail_axis_withheld_reason")
+    if "tail_axis" in cs:
+        return ([f"stamps a tail axis AND tail_axis_withheld_reason {reason!r}"]
+                if reason is not None else [])
+    problems: list[str] = []
+    claim = _VR_OPT80_MERGE_WAIT_CLAIM_RE.search(ev)
+    if claim:
+        problems.append(
+            f"claims a merge wait ({claim.group(0)!r}) with no tail axis "
+            f"(withheld reason {reason!r}) - the merge is not shown to wait on "
+            "this job")
+    if reason is None:
+        if _VR_OPT80_SLOWEST_JOB in ev:
+            problems.append("renders a slowest-job sentence but stamps no "
+                            "tail_axis_withheld_reason to pair it with")
+        return problems
+    if cs.get("on_critical_path") is not True:
+        problems.append(f"stamps tail_axis_withheld_reason {reason!r} on a job "
+                        "that is not its workflow's slowest")
+    tmpl = _VR_OPT80_TAIL_WITHHELD_SENTENCES.get(str(reason))
+    if tmpl is None:
+        return problems + [f"tail_axis_withheld_reason {reason!r} is not a known reason"]
+    pause = _num(cs.get("tail_run_longest_pause_s"))
+    sentence = tmpl.format(job=str(cs.get("job") or ""),
+                           pause=f"{float(pause or 0):.0f}")
+    if sentence not in ev:
+        problems.append(f"withheld reason {reason!r} but the evidence does not "
+                        f"render its sentence {sentence!r}")
+    allowed = _vr_opt80_tail_withheld_expected(f, data)
+    if allowed is not None and reason not in allowed:
+        problems.append(f"withheld reason {reason!r}, but the stamped facts give "
+                        f"{' or '.join(sorted(allowed))}")
+    return problems
+
+
+def check_opt80_tail_withheld_reasons(report: str, findings_path: Path | None) -> Check:
+    """An OPT80 slowest job with no tail line says WHY, in the sentence of its
+    stamped `tail_axis_withheld_reason`, and that reason re-derives from the
+    stamped facts (pull-request trigger, pull-request timing, a readable
+    required set). Fails any merge-wait claim on a finding with no tail axis,
+    and the pre-fix sentence anywhere in the report."""
+    name = "OPT80 slowest-job sentence pairs with its withheld reason"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    bad: list[str] = []
+    if "effect on the merge wait is measured" in report:
+        bad.append("the report still says \"the stall's effect on the merge wait is "
+                   "measured\" - no stamped fact supports a merge-wait claim there")
+    n = 0
+    for f in _as_list(_as_dict(data).get("findings")):
+        if not (isinstance(f, dict) and str(f.get("pattern") or "") == "OPT80"):
+            continue
+        n += 1
+        bad.extend(f"{f.get('id') or '?'}: {p}"
+                   for p in _vr_opt80_tail_withheld_problems(f, _as_dict(data)))
+    return Check(name, not bad,
+                 f"{n} OPT80 finding(s) checked" if not bad else "; ".join(bad[:6]))
+
+
 def _opt65_suppressions_are_accounted_for(data: dict) -> list[str]:
     """Every OPT65 finding dropped for overlapping an OPT77 consolidation must be
     disclosed, and the consolidation that displaced it must actually be in the
@@ -9951,6 +10069,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_runner_minute_spine_contract(report, findings_path),
         check_no_rate_derived_dollars(report, findings_path),
         check_opt80_tail_lines(report, findings_path),
+        check_opt80_tail_withheld_reasons(report, findings_path),
         check_structural_pole_has_measured_step(findings_path),
         check_structural_step_category_not_payload_binned_as_build(findings_path),
         check_detector_leaf_agrees_with_dominant_category(report, findings_path),

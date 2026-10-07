@@ -6526,15 +6526,18 @@ def test_opt80_withholds_when_the_tail_runs_logs_cannot_be_fetched():
 
 def test_opt80_names_the_slowest_job_case_in_plain_words():
     """When the stalling job IS the workflow's slowest, the reader is told so in
-    one honest line: the effect on the merge wait is measured, and it is not
-    credited in this version. Anything vaguer reads as either a hidden saving or
-    no saving at all."""
+    one honest line. Here the trigger is not known to be a pull request, so the
+    line names the measured pause and says why no merge wait is claimed: no
+    sentence about a merge wait a pull request never waits on."""
     out, _gh = _opt80(crit=_opt80_crit(long_pole="build"))
     ev = out[0]["evidence"]
-    assert ("`build` is this workflow's slowest job; the stall's effect on the "
-            "merge wait is measured (longest pause 40s) but not credited in this "
-            "version.") in ev, ev
+    assert ("`build` is this workflow's slowest job; the stall is measured "
+            "(longest pause 40s), but this workflow is not shown to run on pull "
+            "requests, so no merge-wait claim is made.") in ev, ev
+    assert "merge wait is measured" not in ev, ev
     assert out[0]["checkout_stall"]["on_critical_path"] is True
+    assert out[0]["checkout_stall"]["tail_axis_withheld_reason"] == (
+        "not_on_pull_requests")
     # A job that is NOT the pole says none of it.
     other, _gh2 = _opt80(crit=_opt80_crit(long_pole="deploy"))
     assert "slowest job" not in other[0]["evidence"], other[0]["evidence"]
@@ -6644,12 +6647,78 @@ def test_opt80_tail_axis_counts_the_slow_runs_past_the_log_probe_cap():
 def test_opt80_stamps_no_tail_axis_off_the_pull_request_merge_wait():
     """No pull request waits on a push-only workflow, an unknown trigger is not
     assumed to be one, and a job that is not the slowest is not on the gate: none
-    of the three gets a tail line, and the pole cases keep the old sentence."""
+    of the three gets a tail line. The pole cases say why in their own sentence,
+    and none of the three claims a merge wait."""
     for is_pr, pole in ((False, "build"), (None, "build"), (True, "deploy")):
         f = _opt80_pr(is_pr=is_pr, long_pole=pole)[0]
         assert "tail_axis" not in f["checkout_stall"], (is_pr, pole)
         assert "spends about" not in f["evidence"], (is_pr, pole)
-        assert ("not credited in this version" in f["evidence"]) is (pole == "build")
+        assert "not credited in this version" not in f["evidence"], (is_pr, pole)
+        assert "effect on the merge wait" not in f["evidence"], (is_pr, pole)
+        assert ("no merge-wait claim is made" in f["evidence"]) is (pole == "build")
+        assert f["checkout_stall"].get("tail_axis_withheld_reason") == (
+            "not_on_pull_requests" if pole == "build" else None), (is_pr, pole)
+
+
+_OPT80_WITHHELD_POLE_CASES = {
+    # reason: (detector kwargs, crit overrides, the sentence it must render)
+    "not_on_pull_requests": (
+        {"is_pr": False, "merge_gating_jobs": _OPT80_BUILD_GATES}, {},
+        "`build` is this workflow's slowest job; the stall is measured (longest "
+        "pause 40s), but this workflow is not shown to run on pull requests, so "
+        "no merge-wait claim is made."),
+    "merge_gating_unknown": (
+        {"is_pr": True, "merge_gating_jobs": None}, {},
+        "`build` is this workflow's slowest job; the stall is measured (longest "
+        "pause 40s), but whether this job gates a merge could not be read from "
+        "branch protection, so no tail line is printed."),
+    "not_merge_gating": (
+        {"is_pr": True, "merge_gating_jobs": {}}, {},
+        "`build` is this workflow's slowest job; the stall is measured (longest "
+        "pause 40s), but the merge does not wait on this job, so no merge-wait "
+        "claim is made."),
+    "all_events_timing": (
+        {"is_pr": True, "merge_gating_jobs": _OPT80_BUILD_GATES},
+        {"event_scope": "all-events"},
+        "`build` is this workflow's slowest job; the stall is measured on "
+        "all-events timing (longest pause 40s), with no pull-request sample, so "
+        "no tail line is printed."),
+}
+
+
+@pytest.mark.parametrize("reason", sorted(_OPT80_WITHHELD_POLE_CASES))
+def test_opt80_pole_without_a_tail_line_says_why_and_claims_no_merge_wait(reason):
+    """The slowest job without a tail line used to read "the stall's effect on
+    the merge wait is measured ... but not credited" in EVERY case - including a
+    job the merge does not wait on, one whose branch protection was unreadable
+    and one timed on push runs. Each case now renders its own honest sentence,
+    stamps the reason it was withheld (so the self-check can pair the two), and
+    counts the withheld line in `opt80_notes` (the finding fired, so it is a
+    note, never a suppression in `withheld`)."""
+    kwargs, crit_over, sentence = _OPT80_WITHHELD_POLE_CASES[reason]
+    runs = _opt80_runs()
+    gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
+    crit = {**_opt80_crit(), **crit_over}
+    withheld: dict = {}
+    notes: dict = {}
+    out = cr._detect_opt80_checkout_tail_stall(
+        gh, "acme/app", _OPT80_WF_PATH, runs, crit, _opt80_wf(), None, 100, 0,
+        withheld=withheld, notes=notes, **kwargs)
+    assert len(out) == 1, out
+    f = out[0]
+    assert "tail_axis" not in f["checkout_stall"], f["checkout_stall"]
+    assert f["checkout_stall"]["tail_axis_withheld_reason"] == reason
+    assert sentence in f["evidence"], f["evidence"]
+    assert "merge wait is measured" not in f["evidence"], f["evidence"]
+    assert "not credited in this version" not in f["evidence"], f["evidence"]
+    assert notes == {f"tail_line_withheld_{reason}": 1}, notes
+    assert not any(k.startswith("tail_line") for k in withheld), withheld
+
+
+def test_opt80_pole_with_a_tail_line_stamps_no_withheld_reason():
+    f = _opt80_pr(is_pr=True)[0]
+    assert "tail_axis" in f["checkout_stall"]
+    assert "tail_axis_withheld_reason" not in f["checkout_stall"], f["checkout_stall"]
 
 
 def test_opt80_tail_axis_states_the_median_of_three_proven_runs_not_the_mean():
@@ -6750,7 +6819,7 @@ def test_opt80_stamps_no_tail_axis_when_no_pull_request_run_was_timed():
     `event_scope` is `all-events`). Its slowest job and its checkout durations
     are then push timings, and "the slowest job on pull requests" plus "one run
     in N" would be stated about runs no pull request waited on. No tail axis;
-    the pole keeps the uncredited sentence."""
+    the pole says it was timed on all events, and claims no merge wait."""
     runs = _opt80_runs()
     gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
     crit = _opt80_crit()
@@ -6762,7 +6831,9 @@ def test_opt80_stamps_no_tail_axis_when_no_pull_request_run_was_timed():
     f = out[0]
     assert "tail_axis" not in f["checkout_stall"], f["checkout_stall"].get("tail_axis")
     assert "one run in" not in f["evidence"], f["evidence"]
-    assert "not credited in this version" in f["evidence"], f["evidence"]
+    assert "measured on all-events timing" in f["evidence"], f["evidence"]
+    assert "merge wait is measured" not in f["evidence"], f["evidence"]
+    assert f["checkout_stall"]["tail_axis_withheld_reason"] == "all_events_timing"
 
 
 # ---- the log READER: what a record is, and what a dropped line costs ----------

@@ -1260,9 +1260,15 @@ pull-request event, the job is its `long_pole_job`, and the stamped
 `tail_axis.merge_gating` re-derives from `required_checks`,
 `required_checks_complete` and `workflow_job_graph`), a
 block with no marked line (or a line with no block), and any "one run in N"
-sentence whose numbers no block re-derives to. Only the SLOWEST job of a push-only or
-unknown-trigger workflow keeps the uncredited "not credited in this version"
-sentence; a job that is not the slowest carries no merge-wait sentence at all.
+sentence whose numbers no block re-derives to. A SLOWEST job with no tail line says
+why in one of four sentences, keyed by the stamped `tail_axis_withheld_reason`:
+the workflow is not shown to run on pull requests (push-only or unknown
+trigger), it was timed on all events with no pull-request sample, branch
+protection could not be read, or the merge does not wait on the job. None of
+them claims a merge wait; `check_opt80_tail_withheld_reasons` pairs each
+sentence to its reason, re-derives the reason from the same stamped facts, and
+fails any merge-wait claim on a finding with no tail axis. A job that is not the
+slowest carries no merge-wait sentence at all.
 The self-check also no longer wrongly fails a slowest job whose check is named
 `<workflow> / <job>`. Its certificate carries its own `proof` token,
 `checkout_tail_excess`, and `verify_report.py`'s

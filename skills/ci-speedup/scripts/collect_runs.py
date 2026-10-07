@@ -9858,6 +9858,61 @@ def _opt80_tail_phrase(axis: dict[str, Any]) -> str:
             "log shows the fetch stalling")
 
 
+# Why an on-pole OPT80 finding states no tail line, keyed by the fact that
+# withheld it, and the sentence its evidence renders instead. None of them
+# claims a merge wait: only a stamped tail axis (a required or required-needed
+# job of a pull-request workflow timed on pull-request runs) does that.
+# `verify_report.py` carries an equal copy and pairs the stamped reason to the
+# rendered sentence.
+_OPT80_TAIL_WITHHELD_SENTENCES: dict[str, str] = {
+    "not_on_pull_requests":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but this workflow is not shown to run on pull requests, "
+        "so no merge-wait claim is made.",
+    "all_events_timing":
+        "`{job}` is this workflow's slowest job; the stall is measured on "
+        "all-events timing (longest pause {pause}s), with no pull-request sample, "
+        "so no tail line is printed.",
+    "merge_gating_unknown":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but whether this job gates a merge could not be read "
+        "from branch protection, so no tail line is printed.",
+    "not_merge_gating":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but the merge does not wait on this job, so no "
+        "merge-wait claim is made.",
+    # Every gate held but the proven runs yield no tail figure. Unreachable with
+    # today's tail threshold (a proven run is above the p50); kept honest anyway.
+    "tail_not_derivable":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but the proven runs yield no tail figure, so no tail "
+        "line is printed.",
+}
+
+
+def _opt80_tail_withheld_reason(is_pr: bool | None, crit: dict[str, Any],
+                                merge_gating_jobs: dict[str, Any] | None,
+                                gating: dict[str, Any] | None) -> str:
+    """The first tail-axis gate that failed, in the order the detector tests
+    them: a pull-request trigger, pull-request timing, a readable required set,
+    then this job being on it."""
+    if is_pr is not True:
+        return "not_on_pull_requests"
+    if not _crit_has_developer_timing(crit):
+        return "all_events_timing"
+    if merge_gating_jobs is None:
+        return "merge_gating_unknown"
+    if gating is None:
+        return "not_merge_gating"
+    return "tail_not_derivable"
+
+
+def _opt80_tail_withheld_sentence(reason: str, job: str, pause_s: float) -> str:
+    """The rendered sentence for `reason` (a key of the table above)."""
+    return _OPT80_TAIL_WITHHELD_SENTENCES[reason].format(
+        job=job, pause=f"{pause_s:.0f}")
+
+
 def _detect_opt80_checkout_tail_stall(
     client: "GhClient",
     repo: str,
@@ -9905,6 +9960,10 @@ def _detect_opt80_checkout_tail_stall(
     the LOG-PROVEN tail runs (`_opt80_tail_axis`). It is never summed into
     `wall_clock_p50_s`, any p50 total, the runner-minute saving or the
     neutrality certificate; the renderer shows it as its own line at the pole.
+    A slowest job that gets NO tail line stamps `tail_axis_withheld_reason`,
+    renders that reason's sentence (`_OPT80_TAIL_WITHHELD_SENTENCES`, none of
+    which claims a merge wait) and counts `tail_line_withheld_<reason>` in
+    `notes`: the finding fired, so it is a note, never a `withheld` gate.
 
     Every exit is COUNTED into `withheld` (a `{gate: count}` accumulator the
     caller stamps onto the findings doc) and logged at DEBUG. An empty return is
@@ -10236,10 +10295,21 @@ def _detect_opt80_checkout_tail_stall(
                 f"{_opt80_tail_phrase(tail_axis)} - a tail figure, never added to "
                 "the p50 merge wait or to any total.")
         elif on_pole:
-            pole_sentence = (
-                f"`{job_name}` is this workflow's slowest job; the stall's effect on "
-                f"the merge wait is measured (longest pause {float(worst['gap_s']):.0f}s) "
-                f"but not credited in this version.")
+            # No tail line: say WHICH fact withheld it, and never claim a merge
+            # wait the stamped facts do not show. One reason per case, in the
+            # order the gate above tests them, stamped on the finding so the
+            # self-check pairs the rendered sentence to it.
+            withheld_reason = _opt80_tail_withheld_reason(
+                is_pr, crit, merge_gating_jobs, gating)
+            pole_sentence = _opt80_tail_withheld_sentence(
+                withheld_reason, job_name, float(worst["gap_s"]))
+            # The finding FIRED, so the withheld line is a note, never a
+            # suppression in `withheld` (see the docstring's two tallies).
+            if notes is not None:
+                note_key = f"tail_line_withheld_{withheld_reason}"
+                notes[note_key] = notes.get(note_key, 0) + 1
+            logger.debug("OPT80 %s: tail line for %s withheld by %s", wf_path,
+                         job_name, withheld_reason)
         else:
             pole_sentence = ""
         title = "Checkout Stalls on the Tail"
@@ -10373,6 +10443,8 @@ def _detect_opt80_checkout_tail_stall(
         }
         if tail_axis is not None:
             f["checkout_stall"]["tail_axis"] = tail_axis
+        elif on_pole:
+            f["checkout_stall"]["tail_axis_withheld_reason"] = withheld_reason
         f["tier2_neutrality"] = {
             # OPT80's own token. Nothing about the fix changes what any job runs
             # or what any check is called, and the credited quantity is a tail
