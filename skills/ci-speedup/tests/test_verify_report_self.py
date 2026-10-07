@@ -9718,8 +9718,8 @@ _FEEDS_BY_KEY = {
     "opt79_withheld_candidates": _CACHE_FEEDS,
     "opt80_withheld_candidates": _CHECKOUT_FEEDS,
     "opt81_withheld_candidates":
-        "Why a job that ran on more than one runner label, or a long pole on a "
-        "runner the audit could not size, produced no runner-class finding",
+        "Why a job that ran on more than one runner label, or a long pole "
+        "whose step timings could not be read, produced no runner-class finding",
 }
 
 

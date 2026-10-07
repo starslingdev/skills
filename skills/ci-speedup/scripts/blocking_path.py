@@ -5176,7 +5176,7 @@ _WITHHELD_ROWS: tuple[WithheldRow, ...] = (
     WithheldRow(_OPT81_WITHHELD_DOC_KEY, "runner class: held back",
                 "candidate job(s)",
                 "Why a job that ran on more than one runner label, or a long pole "
-                "on a runner the audit could not size, produced no runner-class "
+                "whose step timings could not be read, produced no runner-class "
                 "finding",
                 "job"),
 )

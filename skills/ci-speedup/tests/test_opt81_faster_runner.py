@@ -155,6 +155,16 @@ def _a1(runs, **kw):
     ("starsling-ubuntu-24.04", ("starsling", "linux", "x64", "")),
     ("starsling-ubuntu-24.04-8", ("starsling", "linux", "x64", "8")),
     ("starsling-ubuntu-24.04-arm", ("starsling", "linux", "arm64", "")),
+    ("starsling-windows-2022", ("starsling", "windows", "x64", "")),
+    ("starsling-macos-14", ("starsling", "macos", "x64", "")),
+    ("windows-11-8-cores", ("github-larger", "windows", "x64", "8")),
+    ("windows-11-arm-4-cores", ("github-larger", "windows", "arm64", "4")),
+    # `self-hosted` makes a set unclassifiable unless it carries a StarSling
+    # label; label matching ignores case
+    ("self-hosted ubuntu-latest", None),
+    ("self-hosted starsling-ubuntu-24.04", ("starsling", "linux", "x64", "")),
+    ("Self-Hosted Ubuntu-Latest", None),
+    ("UBUNTU-LATEST", ("github-standard", "linux", "x64", "")),
     ("linux self-hosted x64", None),
     ("self-hosted", None),
     ("my-big-box", None),
@@ -469,6 +479,9 @@ def test_opt81_a2_fires_on_a_compute_pole_with_no_cheaper_lever():
     ([_f("OPT71", structural=True)], "a2_cheaper_structural_lever_on_the_pole"),
     ([_f("OPT72", structural=True)], "a2_cheaper_structural_lever_on_the_pole"),
     ([_f("OPT73", structural=True)], "a2_cheaper_structural_lever_on_the_pole"),
+    # trust-boundary cold work and per-file test isolation: cheaper than hardware
+    ([_f("OPT74")], "a2_cheaper_structural_lever_on_the_pole"),
+    ([_f("OPT78")], "a2_cheaper_structural_lever_on_the_pole"),
     # a credited lever covering the pole: at least half its 197s median
     ([_f("OPT17", wc=98.5)], "a2_credited_lever_covers_the_pole"),
     ([_f("OPT24", wc=0.5)], "a2_sharding_lever_on_the_pole"),
@@ -504,9 +517,11 @@ def test_opt81_a2_uncredited_opt79_cache_on_the_pole_suppresses():
     ({"poles": []}, "a2_not_on_the_merge_gating_critical_path"),
     ({"multi": {(_CI, "test")}}, "a2_measured_runner_data_exists"),
     ({"runs": _a2_runs(label="ubuntu-latest-8-cores")},
-     "a2_already_on_a_larger_or_custom_label"),
+     "a2_not_on_a_standard_github_hosted_label"),
     ({"runs": _a2_runs(label="starsling-ubuntu-24.04")},
-     "a2_already_on_a_larger_or_custom_label"),
+     "a2_not_on_a_standard_github_hosted_label"),
+    ({"runs": _a2_runs(label="ubuntu-slim")},
+     "a2_not_on_a_standard_github_hosted_label"),
     ({"runs": _a2_runs(work="npm ci")}, "a2_dominant_step_is_not_compute"),
     ({"runs": _a2_runs(work="Wait for deploy tests")},
      "a2_dominant_step_waits_or_moves_bytes"),
@@ -517,11 +532,56 @@ def test_opt81_a2_shape_gates(kw, gate):
     assert cands == []
 
 
-def test_opt81_a2_self_hosted_pole_is_held_back_and_listed():
+def test_opt81_a2_self_hosted_pole_is_a_verdict_not_a_held_back_row():
+    """A2 can never fire on a self-hosted label, so such a pole is a verdict
+    (counted, not listed). And the shape gates run first: a self-hosted pole
+    whose dominant step waits is reported as that, not as a runner question."""
+    out, withheld, cands = _a2(runs=_a2_runs(label=["self-hosted", "linux"],
+                                             work="Wait for deploy tests"))
+    assert out == [] and cands == []
+    assert withheld == {"a2_dominant_step_waits_or_moves_bytes": 1}, withheld
     out, withheld, cands = _a2(runs=_a2_runs(label=["self-hosted", "linux"]))
-    assert out == []
-    assert cands == [{"workflow_file": _CI, "job": "test",
-                      "gate": "runner_label_not_classifiable_by_size", "half": "A2"}]
+    assert out == [] and cands == []
+    assert withheld == {"a2_not_on_a_standard_github_hosted_label": 1}, withheld
+
+
+def test_opt81_a2_evidence_says_exactly_what_was_checked():
+    out, *_ = _a2([_f("OPT75", structural=True)])
+    ev = out[0]["evidence"]
+    assert "A different or larger runner class is the lever left (benchmark required)" in ev, ev
+    assert "no credited fix on this job at half its median or more" in ev, ev
+    assert "A bigger runner" not in ev
+    checked = out[0]["faster_runner"]["cheaper_levers_checked"]
+    assert sorted(checked[0]["patterns"]) == sorted(cr._OPT81_CHEAPER_STRUCTURAL)
+    for pat in sorted(cr._OPT81_CHEAPER_STRUCTURAL):
+        assert pat in checked[0]["lever"], checked[0]
+
+
+def test_opt81_a2_matches_the_pole_and_its_levers_by_workflow_and_job():
+    # the pole match reads the workflow: the same job name in another workflow's
+    # critical path does not put this one on it
+    out, withheld, _ = _a2(poles=[{"workflow_file": ".github/workflows/other.yml",
+                                   "job": "test"}])
+    assert out == [] and withheld == {"a2_not_on_the_merge_gating_critical_path": 1}
+    # a pole job named with different punctuation is the same job (token match)
+    out, *_ = _a2(poles=[{"workflow_file": _CI, "job": "Test"}])
+    assert len(out) == 1
+    out, withheld, _ = _a2([_f("OPT72", job="(test)", structural=True)])
+    assert out == [] and withheld == {"a2_cheaper_structural_lever_on_the_pole": 1}
+    # an uncredited net-negative cache on another workflow or another job does not
+    # hold the advisory back
+    out, *_ = _a2(unc=[{"workflow_file": ".github/workflows/other.yml", "job": "test",
+                        "waste_s": 31.0}])
+    assert len(out) == 1
+    out, *_ = _a2(unc=[{"workflow_file": _CI, "job": "lint", "waste_s": 31.0}])
+    assert len(out) == 1
+
+
+def test_opt81_jobs_match_is_exact_or_same_tokens():
+    assert cr._opt81_jobs_match("test", "test")
+    assert cr._opt81_jobs_match("Build (linux)", "build-linux")
+    assert not cr._opt81_jobs_match("build", "build-linux")
+    assert not cr._opt81_jobs_match("", "")
 
 
 def test_opt81_a2_does_not_fire_when_a_credited_lever_covers_the_pole():
@@ -722,6 +782,8 @@ def test_opt81_verifier_reddens_on_a_cross_architecture_a1():
     (lambda f: f.__setitem__("evidence", f["evidence"] + " Saves ~40s."), [],
      "states a number"),
     (lambda f: None, [_f("OPT72", structural=True)], "OPT72 already addresses"),
+    (lambda f: None, [_f("OPT74")], "OPT74 already addresses"),
+    (lambda f: None, [_f("OPT78")], "OPT78 already addresses"),
     (lambda f: None, [_f("OPT17", wc=150.0)], "at least half its median"),
     (lambda f: None, [_f("OPT24")], "sharding"),
     (lambda f: f["faster_runner"].__setitem__("runner_label", "ubuntu-latest-8-cores"),

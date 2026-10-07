@@ -10790,16 +10790,24 @@ _OPT81_COMPUTE_CATEGORIES = frozenset({"build", "test"})
 _OPT81_NON_COMPUTE_STEP_RE = _re.compile(
     r"\b(sleep|wait|waits|waiting|poll|polling|download|upload|fetch|pull|push|"
     r"deploy|publish|curl|wget)\b", _re.I)
-# A2 (d): a credited hygiene wall-clock saving on the pole at or above this share
-# of the job's p50 is a cheaper lever (the structural router's own suppression rule).
+# A2 (d): any credited wall-clock saving on the pole (pre-start patterns and other
+# advisories aside) at or above this share of the job's p50 is a cheaper lever.
+# This is A2's own rule, not the structural router's suppression (which reads
+# hygiene-only findings keyed on token sets); it applies to every pattern,
+# including the generic decompose lever OPT75 when OPT75 credits that much.
 _OPT81_COVERED_FRAC = 0.5
 # A2 (d): a net-negative cache (OPT79) costing at least this much per run on the
 # pole is a cheaper lever.
 _OPT81_CACHE_LEVER_MIN_S = 30.0
-# A2 (d): structural levers that are cheaper than hardware. OPT75 ("decompose the
-# dominant step") is NOT in the set: it is what the router says when nothing more
-# specific applies, so it renders first and A2 renders after it.
-_OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73"})
+# A2 (d): levers that are cheaper than hardware and suppress A2 by being present
+# on the pole: scope, de-trigger, warm build cache, shared step (OPT70-OPT73),
+# trust-boundary-forced cold work (OPT74) and per-file test isolation (OPT78).
+# OPT75 ("decompose the dominant step") is NOT in the set: it is what the router
+# says when nothing more specific applies, so its presence alone does not
+# suppress A2 (it renders first); an OPT75 credit of half the pole's median or
+# more still does, through the credited-lever rule above.
+_OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "OPT74",
+                                       "OPT78"})
 
 # The one line every OPT81 rendering carries. A STRING CONTRACT: blocking_path and
 # verify_report hold equal copies, pinned by a coupling test.
@@ -10829,7 +10837,7 @@ _OPT81_VERDICT_GATES = frozenset({
     "a2_not_a_pull_request_workflow",
     "a2_not_on_the_merge_gating_critical_path",
     "a2_measured_runner_data_exists",
-    "a2_already_on_a_larger_or_custom_label",
+    "a2_not_on_a_standard_github_hosted_label",
     "a2_dominant_step_is_not_compute",
     "a2_dominant_step_waits_or_moves_bytes",
     "a2_cheaper_structural_lever_on_the_pole",
@@ -10849,14 +10857,15 @@ _OPT81_VERDICT_GATES = frozenset({
 #   github-larger   — a larger GitHub-hosted size (named `<image>-<N>-cores`,
 #                     `<image>-<N>core`, or macOS `-large` / `-xlarge`); the
 #                     size tier is N, `large` or `xlarge`.
-#   starsling       — a StarSling runner label (`starsling-<image>[-<N>]`); the
-#                     size tier is the trailing N when present.
+#   starsling       — a StarSling runner label (`starsling-<os>-<image>[-<N>]`);
+#                     the size tier is a trailing N AFTER the image segment, so
+#                     `starsling-windows-2022` is the 2022 image, not size 2022.
 _OPT81_RUNNER_CLASSES: tuple[tuple["_re.Pattern[str]", str, str], ...] = (
-    (_re.compile(r"^starsling-(ubuntu|linux)[\w.-]*?(-(?P<size>\d+))?$", _re.I),
+    (_re.compile(r"^starsling-(ubuntu|linux)(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", _re.I),
      "starsling", "linux"),
-    (_re.compile(r"^starsling-windows[\w.-]*?(-(?P<size>\d+))?$", _re.I),
+    (_re.compile(r"^starsling-windows(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", _re.I),
      "starsling", "windows"),
-    (_re.compile(r"^starsling-macos[\w.-]*?(-(?P<size>\d+))?$", _re.I),
+    (_re.compile(r"^starsling-macos(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", _re.I),
      "starsling", "macos"),
     (_re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?-(?P<size>\d+)-?cores?$", _re.I),
      "github-larger", "linux"),
@@ -11288,14 +11297,6 @@ def _detect_opt81_runner_size_advisory(
     if (wf_path, name) in multi_label_jobs:
         _no("a2_measured_runner_data_exists")
         return []
-    label = str((crit.get("job_runner") or {}).get(name) or "")
-    rc = _opt81_runner_class(label)
-    if rc is None:
-        _no("runner_label_not_classifiable_by_size", name, label=label)
-        return []
-    if rc[0] != "github-standard":
-        _no("a2_already_on_a_larger_or_custom_label", label=label)
-        return []
     instances = [j for run in jobs_per_run for j in (run or [])
                  if isinstance(j, dict) and str(j.get("name") or "") == name]
     decomp = _decompose_job_steps(instances,
@@ -11310,6 +11311,15 @@ def _detect_opt81_runner_size_advisory(
         return []
     if _OPT81_NON_COMPUTE_STEP_RE.search(dom_step):
         _no("a2_dominant_step_waits_or_moves_bytes", step=dom_step)
+        return []
+    # (c) — after the shape gates, so a pole whose time is not compute is reported
+    # as that. A2 names a larger GitHub-hosted size or StarSling for a STANDARD
+    # GitHub-hosted label only, so any other label (larger, slim, StarSling,
+    # self-hosted or custom) is a verdict, counted and never listed.
+    label = str((crit.get("job_runner") or {}).get(name) or "")
+    rc = _opt81_runner_class(label)
+    if rc is None or rc[0] != "github-standard":
+        _no("a2_not_on_a_standard_github_hosted_label", label=label)
         return []
 
     # (d) — no cheaper lever already addresses this pole.
@@ -11356,10 +11366,11 @@ def _detect_opt81_runner_size_advisory(
 
     has_opt75 = any(str(f.get("pattern")) == "OPT75" for f in others)
     checked = [
-        {"lever": "structural: scope, de-trigger, warm build cache, shared step "
-                  "(OPT70, OPT71, OPT72, OPT73)",
+        {"lever": ("structural: scope, de-trigger, warm build cache, shared step, "
+                   "trust-boundary cold work, per-file test isolation ("
+                   + ", ".join(sorted(_OPT81_CHEAPER_STRUCTURAL)) + ")"),
          "patterns": sorted(_OPT81_CHEAPER_STRUCTURAL), "applies": False,
-         "why": ("the structural router routed none of these to this job"
+         "why": ("no finding of these patterns is on this job"
                  + ("; only the generic decompose lever (OPT75) applies, and it "
                     "renders first" if has_opt75 else ""))},
         {"lever": "a credited fix already on this job", "patterns": [],
@@ -11379,10 +11390,11 @@ def _detect_opt81_runner_size_advisory(
         f"`{name}` is the merge-gating long pole of this pull-request workflow; its "
         f"dominant step `{dom_step}` is compute ({dom_cat}); it runs on the standard "
         f"GitHub-hosted label `{label}`. No cheaper lever found: no structural scope, "
-        "de-trigger, cache-warm or shared-step lever, no sharding finding, no "
-        "net-negative cache, and no credited fix already on this job; the remaining "
-        "cost is compute. A bigger runner is the lever left, and this audit attaches "
-        f"no number to it: benchmark required. {_OPT81_DISCLOSURE}")
+        "de-trigger, cache-warm, shared-step, trust-boundary or test-isolation "
+        "lever, no sharding finding, no net-negative cache, and no credited fix on "
+        "this job at half its median or more; the remaining cost is compute. A "
+        "different or larger runner class is the lever left (benchmark required), "
+        f"and this audit attaches no number to it. {_OPT81_DISCLOSURE}")
     me = _measured_evidence(
         ["Job", "Runner label", "Class", "Dominant step", "Category"],
         [[f"`{name}`", f"`{label}`", _OPT81_CLASS_DISPLAY["github-standard"],

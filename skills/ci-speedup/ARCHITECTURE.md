@@ -1912,10 +1912,13 @@ credit rule from those rows. The detector costs no gh call.
 structural track, because its last gate is about the levers the rest of the
 pipeline produced. It fires only on a merge-gating pole (`pr_critical_path.poles`)
 of a pull-request workflow, whose dominant step category is compute (`build` /
-`test`) and not a wait or a byte move, on a standard GitHub-hosted label, with
-no A1 data for the job, and when no cheaper lever addresses the pole: no OPT70-73
-on it, no finding crediting at least half its p50 (the structural router's own
-suppression rule), no OPT24, no OPT79 of 30s or more (credited or uncredited).
+`test`) and not a wait or a byte move, on a standard GitHub-hosted label (checked
+after the shape gates; any other label, self-hosted included, is a verdict and
+never a held-back row), whose job did not run on two or more runner labels in the
+sample (A1 reports on those), and when no cheaper lever addresses the pole: no
+OPT70-74 or OPT78 on it, no finding (OPT75 included) crediting at least half its
+p50 (A2's own rule, not the structural router's suppression), no OPT24, no OPT79
+of 30s or more (credited or uncredited).
 The facts the gate examined are stamped as `cheaper_levers_checked` and rendered.
 It is `advisory: true`, carries no `wall_clock_p50_s` and no `runner_min_saving`,
 has no `_SIZING` key, and is stamped `risk` / `guardrail` / `rollout`; the
@@ -2677,9 +2680,10 @@ profile; `_STRUCTURAL_META` is its structured form.
 **OPT81's advisory half rides at the END of a pole, not in this track.** It is
 not a structural finding (it carries no OPT70-75 id and joins no
 `_structural_for_pole`), but it is routed off the same measured pole and only
-after this track has run: it fires only when the router produced no cheaper
-lever than OPT75 for the pole, and it renders after the pole's own prompt and
-its OPT75 block. See [§5.4](#54-opt81--a-runner-class-gap-measured-from-the-repos-own-runs-and-the-last-resort-runner-advisory).
+after this track has run: OPT70-74 and OPT78 on the pole suppress it by being
+present; OPT75's presence does not (it renders first), though an OPT75 credit of
+half the pole's median or more does, like any credited finding. It renders after
+the pole's own prompt and its OPT75 block. See [§5.4](#54-opt81--a-runner-class-gap-measured-from-the-repos-own-runs-and-the-last-resort-runner-advisory).
 
 ## 12. The blocking-path report (`blocking_path.py`)
 

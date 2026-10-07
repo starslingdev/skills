@@ -17,22 +17,27 @@ unversioned and updates by reinstall from `main`.
   runner, from the repository's own runs, and names a bigger runner as the last
   option only when nothing cheaper is left.** New catalog pattern OPT81 has two
   halves. **A1 (measured)**: when the repo's own sampled history already ran one
-  job on two runner classes (a standard GitHub-hosted label and a larger
-  GitHub-hosted size, or a GitHub-hosted label and a StarSling one), with at
+  job on two runner classes or sizes (a standard GitHub-hosted label and a
+  larger GitHub-hosted size, two sizes of one vendor, or a GitHub-hosted label
+  and a StarSling one) on the same operating system and processor architecture,
+  at the same time (in the same runs, or in overlapping periods), with at
   least eight successful runs on each, the same steps on both, and a median gap
   of at least the larger of 30 seconds and a quarter of the slower median, the
   report shows both distributions and their run counts. The gap counts toward
-  the merge wait only when the job is its workflow's long pole on the slower
-  runner, and then passes the same critical-path floors as every other saving;
+  the merge wait only when the job is its workflow's long pole, runs on the
+  slower runner strictly more often, and is not a runner matrix (a matrix runs
+  both legs every time, so its gap is stated, never credited), and then passes
+  the same critical-path floors as every other saving;
   the runner-minute effect is stated as unknown, because a different runner class
-  bills differently and the skill carries no rate table. Two labels of the same
-  class (two Ubuntu versions), two operating systems, differing steps, too few
-  runs, or a self-hosted label that cannot be sized are held back and named in
-  plain English on a new `runner class: held back` row. **A2 (advisory)**: on a
+  bills differently and the skill carries no rate table. Two image versions of
+  one class, two operating systems or two processor architectures (ARM against
+  x86) are never compared. A runner switch (two separate periods), differing
+  steps, too few runs, or a self-hosted label that cannot be sized are held back
+  and named in plain English on a new `runner class: held back` row. **A2 (advisory)**: on a
   pull-request long pole whose time is compute, running on a standard
   GitHub-hosted label, and only when no cheaper lever applies (no structural
-  scope, de-trigger, cache-warm or shared-step lever, no credited fix of half the
-  job or more, no sharding finding, no cache costing 30 seconds or more, and no
+  scope, de-trigger, cache-warm, shared-step, trust-boundary or test-isolation
+  lever, no credited fix of half the job or more, no sharding finding, no cache costing 30 seconds or more, and no
   log-level lever on the pole's own log), the report names a bigger runner as the
   last option, after any decomposition lever, with no number attached and the
   levers it checked listed. It names exactly two options: a larger GitHub-hosted

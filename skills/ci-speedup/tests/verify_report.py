@@ -926,7 +926,7 @@ _VR_WITHHELD_ROWS = (
     _VrWithheldRow(_VR_OPT81_WITHHELD_DOC_KEY, "runner class: held back",
                    "candidate job(s)",
                    "Why a job that ran on more than one runner label, or a long pole "
-                   "on a runner the audit could not size, produced no runner-class "
+                   "whose step timings could not be read, produced no runner-class "
                    "finding",
                    "job"),
 )
@@ -9472,17 +9472,18 @@ _VR_OPT81_MIN_GAP_S = 30.0
 _VR_OPT81_MIN_GAP_FRAC = 0.25
 _VR_OPT81_COVERED_FRAC = 0.5
 _VR_OPT81_CACHE_LEVER_MIN_S = 30.0
-_VR_OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73"})
+_VR_OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "OPT74",
+                                           "OPT78"})
 _VR_OPT81_DISCLOSURE = (
     "The publisher of this skill sells CI runners. This finding compares your own "
     "runs on runner classes you already use (A1), or names a class of lever and asks "
     "you to benchmark before believing any number (A2); it never prices a runner.")
 _VR_OPT81_RUNNER_CLASSES = (
-    (re.compile(r"^starsling-(ubuntu|linux)[\w.-]*?(-(?P<size>\d+))?$", re.I),
+    (re.compile(r"^starsling-(ubuntu|linux)(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", re.I),
      "starsling", "linux"),
-    (re.compile(r"^starsling-windows[\w.-]*?(-(?P<size>\d+))?$", re.I),
+    (re.compile(r"^starsling-windows(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", re.I),
      "starsling", "windows"),
-    (re.compile(r"^starsling-macos[\w.-]*?(-(?P<size>\d+))?$", re.I),
+    (re.compile(r"^starsling-macos(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", re.I),
      "starsling", "macos"),
     (re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?-(?P<size>\d+)-?cores?$", re.I),
      "github-larger", "linux"),
