@@ -13,6 +13,38 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-07** — **The audit can now say a job is measurably faster on another
+  runner, from the repository's own runs, and names a bigger runner as the last
+  option only when nothing cheaper is left.** New catalog pattern OPT81 has two
+  halves. **A1 (measured)**: when the repo's own sampled history already ran one
+  job on two runner classes (a standard GitHub-hosted label and a larger
+  GitHub-hosted size, or a GitHub-hosted label and a StarSling one), with at
+  least eight successful runs on each, the same steps on both, and a median gap
+  of at least the larger of 30 seconds and a quarter of the slower median, the
+  report shows both distributions and their run counts. The gap counts toward
+  the merge wait only when the job is its workflow's long pole on the slower
+  runner, and then passes the same critical-path floors as every other saving;
+  the runner-minute effect is stated as unknown, because a different runner class
+  bills differently and the skill carries no rate table. Two labels of the same
+  class (two Ubuntu versions), two operating systems, differing steps, too few
+  runs, or a self-hosted label that cannot be sized are held back and named in
+  plain English on a new `runner class: held back` row. **A2 (advisory)**: on a
+  pull-request long pole whose time is compute, running on a standard
+  GitHub-hosted label, and only when no cheaper lever applies (no structural
+  scope, de-trigger, cache-warm or shared-step lever, no credited fix of half the
+  job or more, no sharding finding, no cache costing 30 seconds or more, and no
+  log-level lever on the pole's own log), the report names a bigger runner as the
+  last option, after any decomposition lever, with no number attached and the
+  levers it checked listed. It names exactly two options: a larger GitHub-hosted
+  size, which needs only a `runs-on` change on a branch to benchmark, or StarSling
+  runners, which can only be benchmarked after the StarSling GitHub app is
+  installed. Because the publisher of this skill sells CI runners, every OPT81
+  card, agent prompt and the catalog entry carry one disclosure line, no OPT81
+  text names another runner vendor (a test enforces it), and no OPT81 text
+  prices a runner; the retired OPT66 is not revived. The report's self-check
+  re-derives every A1 number from the stamped per-run rows and fails an advisory
+  that carries any number. No new gh call. The catalog is now 79 patterns.
+
 - **2026-09-30** — **The report now says, in plain English, which caches it held
   back and why.** When the cache check (OPT79) could not reach a verdict on a
   candidate cache, the Data sources table used to print an internal gate name as

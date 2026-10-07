@@ -9717,7 +9717,45 @@ _FEEDS_BY_KEY = {
         "Why a group of small jobs sharing one setup produced no finding",
     "opt79_withheld_candidates": _CACHE_FEEDS,
     "opt80_withheld_candidates": _CHECKOUT_FEEDS,
+    "opt81_withheld_candidates":
+        "Why a job that ran on more than one runner label, or a long pole on a "
+        "runner the audit could not size, produced no runner-class finding",
 }
+
+
+def test_opt81_held_back_row_the_renderer_writes_passes_the_verifier(tmp_path):
+    """OPT81's held-back row through the shared registry: the renderer's own
+    row satisfies the self-check, and dropping it or swapping in the gate
+    name reddens it."""
+    import json as _json
+    import blocking_path as bp
+    vr = _load_verify_report()
+    rows = [{"workflow_file": ".github/workflows/ci.yml", "job": "bench",
+             "gate": "same_runner_class", "half": "A1"}]
+    doc = {bp._OPT81_WITHHELD_DOC_KEY: rows}
+    path = tmp_path / "f.json"
+    path.write_text(_json.dumps(doc), encoding="utf-8")
+    line = bp._withheld_candidates_line(doc, bp._OPT81_WITHHELD_DOC_KEY,
+                                        "candidate job(s)")
+    head = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    feeds = _FEEDS_BY_KEY["opt81_withheld_candidates"]
+    good = head + f"| runner class: held back | {line} | {feeds} |\n"
+    assert vr.check_coverage_disclosed(good, path).ok
+    assert not vr.check_coverage_disclosed(head, path).ok
+    coded = good.replace(vr._VR_OPT81_WITHHOLD_PHRASES["same_runner_class"],
+                         "same_runner_class")
+    assert not vr.check_coverage_disclosed(coded, path).ok
+
+
+def test_opt81_check_skips_cleanly_with_no_findings_and_fails_an_orphan_card(tmp_path):
+    import json as _json
+    vr = _load_verify_report()
+    path = tmp_path / "f.json"
+    path.write_text(_json.dumps({"findings": []}), encoding="utf-8")
+    assert vr.check_opt81_runner_comparison_rederived("# r\n", path).ok
+    orphan = '# r\n\n<a id="opt81-f1"></a>\n\ncard\n'
+    chk = vr.check_opt81_runner_comparison_rederived(orphan, path)
+    assert not chk.ok and "no OPT81 finding" in chk.detail, chk
 
 
 def _withheld_phrase(vr, key, gate):

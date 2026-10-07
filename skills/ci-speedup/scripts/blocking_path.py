@@ -5141,6 +5141,7 @@ def _coverage_note(ds: dict[str, Any]) -> str:
 _OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 _OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
+_OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 class WithheldRow(NamedTuple):
     """One pattern's whole registration in the held-back disclosure.
 
@@ -5171,6 +5172,12 @@ _WITHHELD_ROWS: tuple[WithheldRow, ...] = (
     WithheldRow(_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back",
                 "candidate checkout(s)",
                 "Why a checkout with a slow tail produced no finding",
+                "job"),
+    WithheldRow(_OPT81_WITHHELD_DOC_KEY, "runner class: held back",
+                "candidate job(s)",
+                "Why a job that ran on more than one runner label, or a long pole "
+                "on a runner the audit could not size, produced no runner-class "
+                "finding",
                 "job"),
 )
 
@@ -5236,12 +5243,36 @@ _OPT80_WITHHOLD_PHRASES: dict[str, str] = {
         "there were more slow runs than the audit reads logs for, and the rest "
         "were never read",
 }
+_OPT81_WITHHOLD_PHRASES: dict[str, str] = {
+    "runner_label_not_classifiable_by_size":
+        "a runner label could not be classified by size (a self-hosted or custom "
+        "label), so no runner-class comparison could be made",
+    "fewer_than_min_samples_on_two_labels":
+        "the job ran on more than one runner label, but not often enough on two "
+        "of them to compare their medians",
+    "more_than_two_qualifying_runner_labels":
+        "the job ran often enough on three or more runner labels, so there is no "
+        "single pair to compare",
+    "different_operating_system":
+        "the two runner labels run different operating systems, so the comparison "
+        "would measure the operating system, not the runner",
+    "same_runner_class":
+        "both runner labels are the same class (for example two Ubuntu versions), "
+        "so the difference is an operating-system version, not a runner class",
+    "step_lists_differ":
+        "the job did not run the same steps on both runner labels, so it is not "
+        "the same job on both",
+    "a2_dominant_step_unresolved":
+        "the long pole's step timings could not be read, so whether its time is "
+        "compute could not be established",
+}
 # Every pattern's gate→phrase table, by doc key. OPT79's table is defined with
 # the rest of its code further down and registers itself there, so this one dict
 # is the single place the renderer looks a reason up.
 _WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
     _OPT77_WITHHELD_DOC_KEY: _OPT77_WITHHOLD_PHRASES,
     _OPT80_WITHHELD_DOC_KEY: _OPT80_WITHHOLD_PHRASES,
+    _OPT81_WITHHELD_DOC_KEY: _OPT81_WITHHOLD_PHRASES,
 }
 # What the row says for a gate with no phrase. Never the code; `verify_report`
 # fails on the same gate, so this text cannot reach a verified report.
@@ -6970,6 +7001,183 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
     return lines
 
 
+# =============================================================================
+# OPT81 — The Same Job Is Measurably Faster on Another Runner
+# =============================================================================
+# Every OPT81 finding renders exactly ONCE, as an anchored card
+# (`<a id="opt81-<id>"></a>`): at its pole when its job is a rendered long pole
+# (after that pole's own prompt and any OPT75 decomposition — the last option),
+# otherwise in the "Runner class comparisons" section below the spine. It never
+# reaches the headline, the Tier-2 section, the Also-noticed appendix or any total.
+# `verify_report.check_opt81_runner_comparison_rederived` re-derives every number
+# A1 states and pairs the disclosure line with every card.
+
+# A STRING CONTRACT with collect_runs and verify_report (coupling test).
+_OPT81_DISCLOSURE = (
+    "The publisher of this skill sells CI runners. This finding compares your own "
+    "runs on runner classes you already use (A1), or names a class of lever and asks "
+    "you to benchmark before believing any number (A2); it never prices a runner.")
+_OPT81_RUNNER_MIN_UNKNOWN = (
+    "unknown: a different runner class bills differently and this audit carries no "
+    "rate table")
+# The advisory's recipe: exactly two options, and nothing else. A StarSling number
+# cannot be measured before the app is installed, and the recipe says so.
+_OPT81_A2_OPTION_LARGER = (
+    "Option 1, a larger GitHub-hosted runner size (same vendor): change only the "
+    "job's `runs-on` to a larger size label on a branch (for example "
+    "`runs-on: ubuntu-latest-8-cores`, a size your organisation enables in its "
+    "GitHub settings) and run the benchmark there. Nothing else needs to change.")
+_OPT81_A2_OPTION_STARSLING = (
+    "Option 2, StarSling runners: a repository cannot run a job on StarSling runners "
+    "without installing the StarSling GitHub app first, so the benchmark can only be "
+    "run after installing the StarSling GitHub app; no StarSling number exists for "
+    "this job until then.")
+_OPT81_A2_BENCHMARK = (
+    "Benchmark required: run the job on the candidate runner beside its current label "
+    "for several runs on a branch, compare the medians, and switch only if the "
+    "measured result says so. This audit attaches no number to either option.")
+
+
+def _opt81_half(f: dict[str, Any]) -> str:
+    fr = f.get("faster_runner") if isinstance(f.get("faster_runner"), dict) else {}
+    return str(fr.get("half") or "")
+
+
+def _opt81_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [f for f in findings if str(f.get("pattern", "")) == "OPT81"
+            and _opt81_half(f) in ("A1", "A2")]
+
+
+def _opt81_for_pole(pole: dict[str, Any],
+                    findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The OPT81 findings whose job IS this pole (same workflow file; the job or
+    check name exact, or the unexpanded matrix base of this pole's leg)."""
+    targets = [t for t in (str(pole.get("check", "")), str(pole.get("job", ""))) if t]
+    pole_wf = str(pole.get("workflow_file") or "")
+    out = []
+    for f in _opt81_findings(findings):
+        if not pole_wf or _wf_conflict(pole_wf, str(f.get("workflow_file") or "")):
+            continue
+        jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
+        if any(j == t or _matrix_base(t) == j or _matrix_base(j) == t
+               for j in jobs for t in targets):
+            out.append(f)
+    return out
+
+
+def _opt81_evidence(f: dict[str, Any]) -> str:
+    """The finding's evidence without its trailing disclosure: every card and
+    prompt states the disclosure once, on its own line, so it is not repeated."""
+    return _fence_safe(str(f.get("evidence") or "").replace(_OPT81_DISCLOSURE, "")
+                       .strip())
+
+
+def _opt81_prompt(f: dict[str, Any], url: str) -> list[str]:
+    half = _opt81_half(f)
+    fr = f["faster_runner"]
+    job = str(fr.get("job") or "")
+    wf = _wf_base(str(f.get("workflow_file") or ""))
+    body = ["ci-speedup measured the pattern below but does NOT prescribe the fix -",
+            "investigate it in the repo and apply a safe change.", "",
+            f"Pattern: OPT81 - {_flatten_cell(str(f.get('title') or 'OPT81'))}"
+            f" ({'measured' if half == 'A1' else 'advisory, benchmark required'}).",
+            f"Where: {wf} ({job}).",
+            f"What ci-speedup saw: {_opt81_evidence(f)}"]
+    if half == "A1":
+        body += ["", "Do: find out why some runs of this job use the slower label (a fork "
+                 "pull request, an event or a matrix condition can select it on "
+                 "purpose); if nothing requires it, move the job to the faster label it "
+                 "already uses, keeping every step it runs today."]
+    else:
+        body += ["", "This is the last option for this job: no cheaper lever was found "
+                 "(not cacheable, not shardable, no redundant setup).",
+                 _OPT81_A2_OPTION_LARGER, _OPT81_A2_OPTION_STARSLING,
+                 _OPT81_A2_BENCHMARK]
+    body += ["", "Read the catalog entry (background, fix recipe, and guardrail):",
+             f"  {url}", "", *_NO_WEAKENING_LINES, "", _OPT81_DISCLOSURE]
+    return ["#### 🤖 Prompt for your coding agent", "", "```text",
+            *[_fence_safe(l) for l in body], "```"]
+
+
+def _opt81_card(f: dict[str, Any], catalog_url: str,
+                held_back_by: str | None = None) -> list[str]:
+    """One OPT81 finding as an anchored card. `held_back_by` (a matched log-leaf
+    kind) turns an A2 advisory into a one-line held-back note: a cheaper lever
+    matched the pole's own log, so a bigger runner is not the next move."""
+    half = _opt81_half(f)
+    fr = f["faster_runner"]
+    fid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(f.get("id") or "x"))
+    anchor = f'<a id="opt81-{fid}"></a>'
+    title = _flatten_cell(str(f.get("title") or "OPT81"))
+    url = f"{catalog_url}#{f.get('fix_recipe_anchor')}" if f.get(
+        "fix_recipe_anchor") else catalog_url
+    job = _flatten_cell(str(fr.get("job") or ""))
+    if half == "A2" and held_back_by:
+        return [anchor, "",
+                f"**🏎️ OPT81 runner-size advisory held back** for `{job}`: a log-level "
+                f"lever (`{_flatten_cell(held_back_by)}`) matched this pole's own log, "
+                "and acting on it is cheaper than a bigger runner. Act on that first.",
+                "", f"_{_OPT81_DISCLOSURE}_", ""]
+    out = [anchor, ""]
+    if half == "A1":
+        out += [f"**🏎️ OPT81 · {title}** - measured from runs this repository already "
+                "made", ""]
+        s, q = fr.get("slow") or {}, fr.get("fast") or {}
+        out += [f"- **Measured:** `{job}` ran {s.get('n')} time(s) on "
+                f"`{_flatten_cell(str(s.get('label')))}` at p50 "
+                f"{_num(s.get('p50_s')) or 0:.0f}s and {q.get('n')} time(s) on "
+                f"`{_flatten_cell(str(q.get('label')))}` at p50 "
+                f"{_num(q.get('p50_s')) or 0:.0f}s, with the same steps on both: "
+                f"{_num(fr.get('gap_s')) or 0:.0f}s faster at the median on "
+                f"`{_flatten_cell(str(q.get('label')))}`.",
+                f"- **Runner-minute effect:** {_OPT81_RUNNER_MIN_UNKNOWN}."]
+        wc = _num(f.get("wall_clock_p50_s")) or 0.0
+        if wc > 0:
+            out.append(f"- **Merge wait:** this job is on the merge-gating path; the "
+                       f"credited wall-clock is {_clock(wc)} after the critical-path "
+                       "floors.")
+        else:
+            derivation = [d for d in (f.get("wall_clock_derivation") or [])
+                          if isinstance(d, dict) and d.get("reason")]
+            why = (str(derivation[-1]["reason"]) if derivation
+                   else str(fr.get("credit_reason") or ""))
+            out.append(f"- **Merge wait:** not credited ({_flatten_cell(why)}).")
+    else:
+        out += [f"**🏎️ OPT81 · bigger runner, the last option for this pole** - "
+                "advisory, benchmark required, no number attached", ""]
+        out += [f"- **What ci-speedup saw:** {_flatten_cell(_opt81_evidence(f))}"]
+        checked = [c for c in (fr.get("cheaper_levers_checked") or [])
+                   if isinstance(c, dict)]
+        if checked:
+            out.append("- **No cheaper lever found:** " + "; ".join(
+                f"{_flatten_cell(str(c.get('lever')))}: "
+                f"{_flatten_cell(str(c.get('why')))}" for c in checked) + ".")
+        out += [f"- **{_OPT81_A2_OPTION_LARGER}**",
+                f"- **{_OPT81_A2_OPTION_STARSLING}**",
+                f"- {_OPT81_A2_BENCHMARK}"]
+        if f.get("guardrail"):
+            out.append(f"- **Guardrail:** {_flatten_cell(str(f['guardrail']))}")
+        if f.get("rollout"):
+            out.append(f"- **Rollout:** {_flatten_cell(str(f['rollout']))}")
+    out += [f"- **Catalog (background + fix recipe):** {url}", "",
+            f"_{_OPT81_DISCLOSURE}_", "", *_opt81_prompt(f, url), ""]
+    return out
+
+
+def _opt81_unrouted_block(findings: list[dict[str, Any]], catalog_url: str) -> list[str]:
+    """OPT81 findings whose job is not a rendered pole. Their own section, so a
+    measured runner-class gap is never dropped and never dressed as hygiene."""
+    if not findings:
+        return []
+    out = ['<a id="runner-class"></a>', "",
+           "## 🏎️ Runner class comparisons", "",
+           "> The same job measured on two runner classes in runs this repository "
+           "already made (OPT81). Not part of any total above.", ""]
+    for f in findings:
+        out += _opt81_card(f, catalog_url)
+    return out
+
+
 def _also_noticed_block(findings: list[dict[str, Any]],
                         catalog_url: str,
                         shallow_note: str = "",
@@ -7061,6 +7269,7 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             and not _is_tier2_superseded(f)
             and not _tier2_owned_here(f)                          # Tier-2-owned → own section
             and str(f.get("pattern", "")) not in _WAIT_PATTERNS  # → its own §
+            and str(f.get("pattern", "")) != "OPT81"             # → its pole / own §
             and not _on_pole_job(f)]                              # valueless + all-pole-job → already AS a pole (#5)
     if not elig:
         return [], 0, False
@@ -8332,6 +8541,9 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *tier2_lines]
     if also_lines:
         out += ["---", "", *also_lines]
+    _o81_lines = _opt81_unrouted_block(_opt81_findings(all_findings), catalog_url)
+    if _o81_lines:
+        out += ["---", "", *_o81_lines]
     # Measured net-negative caches that could not be PRICED (their job is not
     # below the cluster floor). Beside the dropped-unprovable banner, its nearest
     # precedent: a measured fact kept out of the numbers and shown anyway.
@@ -9533,6 +9745,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # out of the critical-path list (e.g. a turbo-cache-dependent job fast on cache hits).
     out += _bimodal_note(src, _num(blocker.get("p50_s")))
 
+    opt81_rendered: set[int] = set()
     for i, p in enumerate(pole_wfs, 1):
         check = _clean_label(str(p.get("check", "")))
         wf_base = _wf_base(p.get("workflow_file", ""))
@@ -10095,6 +10308,19 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # observation below the prompt — never a silent drop of a real (if minority) finding.
         if offcat_leaf is not None:
             out += _offcategory_note_block(offcat_leaf, p)
+        # OPT81 on THIS pole: the measured runner-class gap, or the runner-size
+        # advisory as the LAST option — after the pole's own prompt and any OPT75
+        # decomposition, never above a credited lever. A log-level leaf that
+        # matched this pole is a cheaper lever, so it holds the advisory back.
+        for _o81 in _opt81_for_pole(p, all_findings):
+            if id(_o81) in opt81_rendered:
+                continue
+            opt81_rendered.add(id(_o81))
+            out += _opt81_card(
+                _o81, catalog_url,
+                held_back_by=(str(leaf.get("kind") or leaf.get("pattern") or "log leaf")
+                              if (leaf is not None and _opt81_half(_o81) == "A2")
+                              else None))
 
     # Disclose per-pole structural levers (OPT70/71/72/74/75) on checks ranked below the
     # top-N spine: collect_runs analyses the top 5 critical-path checks but the spine shows
@@ -10129,6 +10355,11 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # the spine doesn't capture, NOT hygiene), then the promoted runner-minute tier, then
     # the off-path / set-aside material — the residual hygiene appendix, advisory signals, and the
     # judgment-needed checklist.
+    _o81_lines = _opt81_unrouted_block(
+        [f for f in _opt81_findings(all_findings) if id(f) not in opt81_rendered],
+        catalog_url)
+    if _o81_lines:
+        out += ["---", "", *_o81_lines]
     if queue_lines:
         out += ["---", "", *queue_lines]
     if tier2_lines:

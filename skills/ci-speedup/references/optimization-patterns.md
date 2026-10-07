@@ -43,7 +43,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 7 — Trigger and Scope**: missing path filters, no `--filter` on PR turbo, cron frequency.
 - **Category 8 — Release Workflow**: release-path caching + redundancy.
 - **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups.
-- **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory).
+- **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`).
 - **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys.
 - **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds.
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
@@ -3220,6 +3220,63 @@ title_template: "Install-to-Test Ratio >50%"
 
 ---
 
+### OPT81 — The Same Job Is Measurably Faster on Another Runner
+
+<!-- METADATA
+pattern: OPT81
+impact: MEDIUM
+class: data-driven
+detector: actions-job-runner-class-comparison
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: same-job-faster-on-another-runner
+title_template: "The Same Job Is Measurably Faster on Another Runner"
+-->
+
+> **Disclosure (rendered on every OPT81 card, prompt and this entry).** The publisher of this skill sells CI runners. This finding compares your own runs on runner classes you already use (A1), or names a class of lever and asks you to benchmark before believing any number (A2); it never prices a runner.
+
+**TL;DR**: Your own run history already shows one job running on two kinds of runner, and it is clearly faster on one of them (A1). Or, when nothing cheaper is left for a slow compute job on a standard runner, the report names a bigger runner as the last option and asks you to benchmark it (A2).
+
+**Anti-pattern**: A job that sets the merge wait runs on a runner class slower than one the repository already uses for the same job, or a compute-bound long pole has no cheaper lever left and nobody has measured it on a bigger machine.
+
+**Two halves, kept apart.**
+
+**A1 — measured, from runs the repository already made.** The same job (same display name, same workflow) ran on two runner **classes** inside the sample window. Detection heuristic, every clause read from the jobs API, nothing inferred:
+
+1. Runner labels are classified by a small named table in `collect_runs.py` (`_OPT81_RUNNER_CLASSES`): **standard GitHub-hosted** (`ubuntu-latest`, `ubuntu-24.04`, `windows-2022`, `macos-14`, …), **larger GitHub-hosted size** (`ubuntu-latest-8-cores`, `ubuntu-24.04-16core`, `macos-14-xlarge`, …), and **StarSling** (`starsling-ubuntu-24.04`, …). A label the table cannot classify by size (a self-hosted or custom label) is excluded from the comparison and counted, never guessed.
+2. At least **8 successful samples on each** of the two labels (`_OPT81_MIN_SAMPLES_PER_LABEL`). Exactly two labels qualify; three or more is held back.
+3. The two labels are **different classes on the same operating system**. Two labels of the same class (`ubuntu-22.04` vs `ubuntu-24.04`) are an operating-system comparison, not this lever, and are held back.
+4. Both populations **executed the same step list** (step names in order, skipped steps excluded). A job that skips steps on one label is not the same job, and is held back.
+5. `p50(slow) − p50(fast) ≥ max(30s, 25% of p50(slow))` (`_OPT81_MIN_GAP_S`, `_OPT81_MIN_GAP_FRAC`).
+
+Credit: the measured gap counts as wall-clock **only** when the job is its workflow's long pole and the slower label is the one it runs on most (the population the long pole's p50 describes). It is pre-capped at the workflow's critical-path headroom and then passes through the same cross-workflow cascade as every other credited saving. **Runner-minutes are never credited**: the finding says "unknown: a different runner class bills differently and this audit carries no rate table". The evidence shows both distributions and their sample counts, and `tests/verify_report.py` re-derives every number from the stamped per-run rows (label, duration, step-list hash): both medians, both counts, the class decision, the step-list equality, the gap and the floor.
+
+**A2 — advisory, the lever of last resort.** No number anywhere: no wall-clock, no runner-minutes, no estimate. It fires only when all of the following hold:
+
+1. The job is the long pole of a pull-request workflow and a pole of the measured merge-gating critical path.
+2. Its dominant step is compute (`build` or `test` by the shared step classifier), and the step's name does not say it waits, sleeps, polls or moves bytes.
+3. It runs on a **standard** GitHub-hosted label. A job already on a larger or custom label is left alone.
+4. **No cheaper lever already addresses it**: the structural router produced no scope, de-trigger, cache-warm or shared-step lever (OPT70, OPT71, OPT72, OPT73) for it; no finding credits wall-clock on it at half its median or more (the structural router's own suppression rule); no sharding finding (OPT24); no net-negative cache of 30s or more (OPT79); and, at render time, no log-level leaf matched the drilled pole. A matched leaf turns the advisory into a one-line "held back" note. The generic decompose lever (OPT75) does not suppress it, and renders first.
+5. A1 data does not exist for the job (A1 supersedes).
+
+The finding stamps `cheaper_levers_checked` — what was examined and why none applied — and the card shows it, so the reader sees why hardware is the next move rather than a reflex. It renders inside the pole's section, after the pole's own prompt and any OPT75 decomposition, never in the headline or any total.
+
+**Fix recipe (A1)**: Find out why some runs of the job use the slower label — a fork pull request, an event or a matrix condition can select it on purpose (larger and third-party runners are often unavailable to fork pull requests). If nothing requires it, move the job to the faster label it already uses, keeping every step it runs today. Check the cost with whoever pays for CI: the two classes bill differently, and this skill does not know your rates.
+
+**Fix recipe (A2)** — exactly two options, and nothing else:
+
+1. **A larger GitHub-hosted runner size (same vendor).** Change only the job's `runs-on` to a larger size label on a branch (for example `runs-on: ubuntu-latest-8-cores`, a size your organisation enables in its GitHub settings) and benchmark there. Nothing else needs to change.
+2. **StarSling runners.** A repository cannot run a job on StarSling runners without installing the StarSling GitHub app first, so the benchmark can only be run after installing the StarSling GitHub app. No StarSling number exists for the job until then.
+
+Benchmark required either way: run the job on the candidate runner beside its current label for several runs on a branch, compare the medians, and switch only if the measured result says so.
+
+**Guardrail**: keep every step the job runs today; the comparison is meaningless if the work changes. Never buy the speed-up by verifying less. A different runner class bills differently: confirm the cost before switching.
+
+**Withheld, not silent**: every gate is tallied per run on the findings document (`opt81_withheld_by_gate`). A candidate the audit measured and could not decide — an unclassifiable label, too few samples on two labels, three or more qualifying labels, two operating systems, two labels of the same class, differing step lists, or a pole whose step timings could not be read — is listed under `opt81_withheld_candidates` and stated in plain English on the report's `runner class: held back` row.
+
+**Pricing**: this entry never prices a runner and states no price. It is not a revival of the retired OPT66 (the removed published-rate ceiling); OPT81 compares measured durations only.
+
+---
+
 ## Category 11: Stack-Specific
 
 > The patterns below apply only when the repo uses the listed tools.
@@ -3903,7 +3960,7 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76, OPT77, OPT79 and OPT80 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80 and OPT81 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. On real repos almost every hygiene hit moves **~0 developer

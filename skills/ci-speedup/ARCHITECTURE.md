@@ -14,7 +14,7 @@ developer's wait. It gets its own prominent section below.
 2. Pipeline overview (scan → collect_runs → render → gap-fill → verify) — incl. §2.1 adaptive run sampling, §2.1a config-era boundary, §2.2 fetch orchestration
 3. Data model — findings.json
 4. The two metric axes
-5. The wall-clock lever model — a cascade of physical bounds
+5. The wall-clock lever model — a cascade of physical bounds — incl. §5.4 OPT81, a runner-class gap and the last-resort runner advisory
 6. Admission gate & advisory routing
 7. Evidence, provenance & verification
 8. Reproducibility & determinism — incl. §8.1 what the data pass does NOT re-fetch
@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 78-pattern
-catalog — 71 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79 and OPT80) plus 7 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against a 79-pattern
+catalog — 72 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80 and OPT81) plus 7 **structural /
 critical-path** patterns (OPT70–OPT75 and OPT78, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -1115,10 +1115,10 @@ undecided tail runs could still have supplied the missing proof, named by their
 commonest reason). The per-gate tallies (`opt77_withheld_by_gate`,
 `opt80_withheld_by_gate`) are for maintainers; these lists reach the reader.
 
-The held-back disclosure is ONE mechanism shared by OPT77, OPT79 and OPT80.
+The held-back disclosure is ONE mechanism shared by OPT77, OPT79, OPT80 and OPT81.
 `blocking_path._WITHHELD_ROWS` is a `WithheldRow` per pattern — findings-doc
 key, Data sources row label, counted noun, "Used for" cell, and `entry_shape`
-(`"job"` for OPT79 / OPT80, `"group"` for OPT77). The shape is registered
+(`"job"` for OPT79 / OPT80 / OPT81, `"group"` for OPT77). The shape is registered
 rather than inferred: both twins used to decide it by comparing the key against
 OPT77's, so a fourth group-shaped pattern would have rendered `(unnamed job)`
 for every candidate in the renderer AND been re-derived the same wrong way in
@@ -1864,6 +1864,64 @@ addable: the stamped artifact carries no run event / queue-branch provenance to 
 from, precisely because the fix removes the signature before stamping.) Red-proofed by
 `tests/test_mergequeue_presence_dedup.py`.
 
+### 5.4 OPT81 — a runner-class gap measured from the repo's own runs, and the last-resort runner advisory
+
+`_critical_path` used to keep only each job's DOMINANT runner population (the
+p50 the long pole is ranked on). It now also keeps the whole split,
+`job_runner_p50: name → runner label → {p50, n}`. The ranking, the long pole and
+the floor still read only the dominant population, so nothing that consumed
+`crit` before changes; the split is read by OPT81.
+
+**A1 (measured).** `_detect_opt81_measured_runner_gap` runs in the per-workflow
+detector loop beside OPT77/79/80. It groups each job's successful occurrences by
+runner label, classifies each label through the named table
+`_OPT81_RUNNER_CLASSES` (standard GitHub-hosted, larger GitHub-hosted size,
+StarSling; anything else, including a generic self-hosted label, is
+unclassifiable and dropped from the comparison with a count), and compares two
+labels only when: each has at least `_OPT81_MIN_SAMPLES_PER_LABEL` (8) samples,
+they are different classes on the same operating system, every compared run
+executed the same step list (a 16-hex digest of the executed step names, skipped
+steps excluded), and the median gap reaches `max(30s, 25% of the slower median)`.
+The credit is the measured gap only when the job is its workflow's long pole AND
+the slower label is the dominant one; it is pre-capped with `bound_within_workflow`
+(CAP 1) inside the detector and then flows through the generic cascade like any
+credited saving. `runner_min_saving` is always `None`: a different runner class
+bills differently and the skill carries no rate table (the 2026-07-20 pricing
+punt; OPT66 stays retired). Every number is stamped with the per-run rows it
+came from (`faster_runner.rows`: label, duration, step-list digest), and
+`verify_report.check_opt81_runner_comparison_rederived` re-derives both medians,
+both counts, the class decision, the step-list equality, the gap and the floor
+from those rows. The detector costs no gh call.
+
+**A2 (advisory).** `_detect_opt81_runner_size_advisory` runs once, AFTER the
+structural track, because its last gate is about the levers the rest of the
+pipeline produced. It fires only on a merge-gating pole (`pr_critical_path.poles`)
+of a pull-request workflow, whose dominant step category is compute (`build` /
+`test`) and not a wait or a byte move, on a standard GitHub-hosted label, with
+no A1 data for the job, and when no cheaper lever addresses the pole: no OPT70-73
+on it, no finding crediting at least half its p50 (the structural router's own
+suppression rule), no OPT24, no OPT79 of 30s or more (credited or uncredited).
+The facts the gate examined are stamped as `cheaper_levers_checked` and rendered.
+It is `advisory: true`, carries no `wall_clock_p50_s` and no `runner_min_saving`,
+has no `_SIZING` key, and is stamped `risk` / `guardrail` / `rollout`; the
+verifier fails it if it ever carries a number or if gate (d) does not hold on the
+findings doc. The log-level leaves are only known at render time, so the
+renderer applies the last sub-gate: a pole whose own log matched a leaf renders
+the advisory as a one-line "held back" note instead of a recipe.
+
+**Rendering and the conflict, stated plainly.** The publisher of this skill sells
+CI runners. Every OPT81 finding renders exactly once as an anchored card
+(`<a id="opt81-<id>">`): at its pole, after the pole's own prompt and any OPT75
+decomposition, when its job is a rendered pole; otherwise in a "Runner class
+comparisons" section. It is excluded from the Also-noticed appendix, the Tier-2
+section, the headline and every total. Each card and each prompt carries the
+same one-line disclosure (`_OPT81_DISCLOSURE`, three equal copies pinned by a
+test). The advisory names exactly two options, a larger GitHub-hosted size or
+StarSling runners, and says plainly that the StarSling benchmark can only run
+after the StarSling GitHub app is installed; a string-level test fails if any
+OPT81 text names another runner vendor or a domain other than github.com /
+starsling.dev.
+
 ## 6. Admission gate & advisory routing
 
 A finding is emitted ONLY when all three of `SKILL.md`'s admission criteria
@@ -2346,7 +2404,7 @@ wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -2400,7 +2458,7 @@ reported by `scan.py` as having no critical-path router.
   (dominant step/category, redundancy ratio, required-status, shared substep)
   annotate the pole they came from; the catalog OPT70–OPT75 findings are
   therefore **excluded** from the off-path "Also noticed" appendix
-  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76/OPT77/OPT79/OPT80 only) since the pole already
+  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76/OPT77/OPT79/OPT80 only; OPT81 renders at its pole or in its own section) since the pole already
   represents them. Like every pole, a structural lever carries an agent prompt
   rather than a prescribed fix; for a HIGH-risk lever (e.g. OPT70 scope-to-
   changed) the prompt's failure-mode/guard section tells the agent to state the
@@ -2600,6 +2658,13 @@ HIGH-risk lever (e.g. OPT70 scope-to-changed) is never handed over as a safe
 quick win. (The pole's 🔴/🟠/🟡 dot is a wall-clock duration tier, not the risk
 rating.) The catalog body for each structural pattern is the long-form risk
 profile; `_STRUCTURAL_META` is its structured form.
+
+**OPT81's advisory half rides at the END of a pole, not in this track.** It is
+not a structural finding (it carries no OPT70-75 id and joins no
+`_structural_for_pole`), but it is routed off the same measured pole and only
+after this track has run: it fires only when the router produced no cheaper
+lever than OPT75 for the pole, and it renders after the pole's own prompt and
+its OPT75 block. See [§5.4](#54-opt81--a-runner-class-gap-measured-from-the-repos-own-runs-and-the-last-resort-runner-advisory).
 
 ## 12. The blocking-path report (`blocking_path.py`)
 
@@ -3288,7 +3353,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 78-pattern catalog (METADATA + body per pattern); the source of truth for
+  the 79-pattern catalog (METADATA + body per pattern); the source of truth for
   detection and the report's TL;DR / pattern background.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.
