@@ -6288,8 +6288,10 @@ def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
         # re-derived from `workflow_job_graph` when the run recorded it; without
         # it, only the shape the collector can stamp is accepted (strictly
         # shorter than its long pole, on a pull-request workflow).
-        if not (lp_job and job and job != lp_job and lead is not None and lead > 0
-                and gates is True):
+        # The collector reaches this reason only at a lead of at least the tie
+        # cutoff; under it the job is a co-pole, never a chained job.
+        if not (lp_job and job and job != lp_job and lead is not None
+                and lead >= _VR_OPT79_POLE_MIN_HEADROOM_S and gates is True):
             out.append(
                 f"uncredited_reason {reason!r} needs a job strictly shorter than "
                 f"its long pole on a pull-request workflow: job {job!r} ({jp}s), "

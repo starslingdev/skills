@@ -4640,6 +4640,23 @@ def test_opt79_verifier_fails_a_below_long_pole_credit_the_job_graph_cannot_reso
     assert any("cannot resolve" in p for p in problems), problems
 
 
+def test_opt79_needs_chain_reason_needs_the_full_tie_cutoff_of_headroom():
+    """The collector reaches the chain reason only for a job at least
+    `_OPT79_POLE_MIN_HEADROOM_S` (1s) shorter than its long pole; under that it
+    is a co-pole, tied. So the verifier accepts the reason only at that lead,
+    not at any positive one."""
+    vr = _load_verify_report_for_opt79()
+    _out, rows, _w = _opt79_chain_run({_OPT79_JOB: ["e2e"]})
+    graph = {"ci.yml": {_OPT79_JOB: {"name": _OPT79_JOB, "needs": ["e2e"]},
+                        "e2e": {"name": "e2e", "needs": []},
+                        "integration": {"name": "integration", "needs": []}}}
+    doc = {"opt79_uncredited_pole_caches": rows, "workflow_job_graph": graph}
+    assert vr._opt79_uncredited_rows_rederived(doc) == []
+    rows[0]["job_p50_s"] = round(float(rows[0]["long_pole_p50_s"]) - 0.5, 1)
+    problems = vr._opt79_uncredited_rows_rederived(doc)
+    assert any("strictly shorter" in p for p in problems), problems
+
+
 def test_opt79_verifier_checks_the_needs_chain_reason_against_the_job_graph():
     """The stamped chain reason is re-derived from `workflow_job_graph` when the
     run recorded it; without the graph it is accepted only for a job strictly
