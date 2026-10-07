@@ -64,6 +64,7 @@ _FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "gh_replay"
 
 sys.path.insert(0, str(_SCRIPTS))
 import collect_runs as cr  # noqa: E402
+import blocking_path as bp  # noqa: E402
 
 # The synthetic repo/workflow the committed fixture corpus was recorded
 # against. `_REPO` must match the `owner/name` baked into every fixture
@@ -1125,13 +1126,40 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # job is not a rendered pole) and the A2 advisory inside the `CI / test`
     # pole's section, after its OPT75 block, each carrying the disclosure line.
     assert report.count(cr._OPT81_DISCLOSURE) >= 2, report.count(cr._OPT81_DISCLOSURE)
-    assert "installing the StarSling GitHub app" in report
     _ci_pole = next(sec for sec in report.split("\n## ")
                     if "Long pole" in sec.splitlines()[0]
                     and "CI / test" in sec.splitlines()[0])
     assert "OPT81" in _ci_pole, _ci_pole[:600]
     assert _ci_pole.index("OPT75") < _ci_pole.index("OPT81"), (
         "the advisory must render AFTER the pole's OPT75 decomposition")
+    # This render reads no job log, so the advisory's render-time log-level check
+    # cannot run: it fails closed to a held-back line, never a full recipe.
+    assert bp._OPT81_A2_HELD_NO_LOG in _ci_pole, _ci_pole[-1500:]
+    assert "installing the StarSling GitHub app" not in report
+    # With the pole's log read (and matching no log-level lever), the full
+    # advisory renders, states that the check passed, and still verifies.
+    _o81_log = tmp_path / "ci_test.log"
+    _o81_log.write_text("##[group]Run tests\nall tests passed\n##[endgroup]\n",
+                        encoding="utf-8")
+    _o81_report = tmp_path / "report_opt81_with_log.md"
+    _r = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "blocking_path.py"), "--in", str(findings_path),
+         "--out", str(_o81_report), "--log", f"ci.yml={_o81_log}"],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert _r.returncode == 0, _r.stderr
+    _logged = _o81_report.read_text(encoding="utf-8")
+    _ci_pole_logged = next(sec for sec in _logged.split("\n## ")
+                           if "Long pole" in sec.splitlines()[0]
+                           and "CI / test" in sec.splitlines()[0])
+    assert "installing the StarSling GitHub app" in _ci_pole_logged
+    assert bp._OPT81_A2_LOG_CHECKED in _ci_pole_logged
+    _v = subprocess.run(
+        [sys.executable, str(_SKILL_DIR / "tests" / "verify_report.py"),
+         "--report", str(_o81_report), "--findings", str(findings_path)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert "OPT81 runner-class comparisons" in _v.stdout, _v.stdout
+    assert not [l for l in _v.stdout.splitlines()
+                if "OPT81" in l and "FAIL" in l], _v.stdout
     # A tampered A1 median must redden the report's own self-check.
     _bad = json.loads(findings_path.read_text(encoding="utf-8"))
     [f for f in _bad["findings"] if f.get("pattern") == "OPT81"

@@ -9512,6 +9512,9 @@ _VR_OPT81_NUMBER_RE = re.compile(
     r"(?<![\w-])\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds|m|min|mins|minutes|h|hours|%)"
     r"(?![\w-])|runner-min|~\s*\d|\$\s*\d", re.I)
 _VR_OPT81_INSTALL_SENTENCE = "installing the StarSling GitHub app"
+# A full A2 card renders only after its render-time log-level sub-gate passed,
+# and says so; a card without this phrase skipped the check (fail-open).
+_VR_OPT81_LOG_CHECKED = "no log-level lever matched this pole's log"
 # Inline-code spans hold repo-controlled names (a job, a step, a label). A step
 # called `Run tests (30s timeout)` is a name, not a promised saving, so the
 # number ban reads only the advisory's own prose.
@@ -9813,6 +9816,9 @@ def check_opt81_runner_comparison_rederived(report: str,
         elif not held:
             if _VR_OPT81_INSTALL_SENTENCE not in block:
                 bad.append(f"OPT81 {fid}: the A2 recipe omits the app-install prerequisite")
+            if _VR_OPT81_LOG_CHECKED not in block:
+                bad.append(f"OPT81 {fid}: the A2 card renders without its log-level "
+                           "check having passed")
             m = _vr_opt81_number_in(block)
             if m:
                 bad.append(f"OPT81 {fid}: the A2 card states a number (`{m.group(0)}`)")
