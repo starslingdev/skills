@@ -22,7 +22,11 @@ unversioned and updates by reinstall from `main`.
   (OPT82). Lint in that setup can cost close to a type-check, and the
   finding says so. It carries no saving number: nothing in the sampled runs says
   how much of lint is the type graph, so the card shows the lint step's measured
-  time as a ceiling, not a forecast, and tells the agent to benchmark first. The
+  time (or the whole job's, labelled as such, when the step was not measured
+  separately) as a ceiling, not a forecast, and tells the agent to benchmark
+  first, after listing every type-aware rule actually in effect. Each slow lint
+  job gets its own card with its own rules and benchmark, and the card is never
+  cut from a long "Also noticed" list. The
   suggested change never turns rules off. The agent is asked to rewrite a rule
   only where a syntax-only form catches the same defects, or to split lint into a
   fast pass and a type-aware pass limited to exactly those rules. The split may
