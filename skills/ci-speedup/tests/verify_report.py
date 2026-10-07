@@ -6432,6 +6432,13 @@ _VR_OPT80_TAIL_PHRASE_RE = re.compile(
     r"(?:longer on checkout, and that run's log shows the fetch stalling"
     r"|on checkout to a stalled fetch)")
 _VR_OPT80_TAIL_WORDING = "spends about"
+# The stray-sentence scan: the core "one run in N ... X s ... checkout" shape,
+# tolerant of a spaced unit, any verb, and a sentence that ends early. Every hit
+# must be the canonical sentence above (matched at the same offset) with numbers
+# a stamped axis re-derives to. "one run in" appears nowhere else in a report.
+_VR_OPT80_TAIL_SCAN_RE = re.compile(
+    r"one run in (\d+)\b[^\n]{0,80}?\b(\d+)\s*s(?:ec(?:onds?)?)?\b[^\n]{0,80}?checkout",
+    re.IGNORECASE)
 
 
 def _vr_opt80_job_rendered_as_pole(f: dict, report: str, data: dict | None = None) -> bool:
@@ -6591,8 +6598,11 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
              if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT80"
              and "tail_axis" in _as_dict(f.get("checkout_stall"))]
     marks = [(m.group(1), m.end()) for m in _VR_OPT80_TAIL_MARKER_RE.finditer(report)]
-    phrases = [(int(m.group(1)), m.group(2), int(m.group(3)))
-               for m in _VR_OPT80_TAIL_PHRASE_RE.finditer(report)]
+    phrases: list[tuple[int, str | None, int, str]] = []
+    for m in _VR_OPT80_TAIL_SCAN_RE.finditer(report):
+        canon = _VR_OPT80_TAIL_PHRASE_RE.match(report, m.start())
+        phrases.append((int(m.group(1)), canon.group(2) if canon else None,
+                        int(m.group(2)), m.group(0)))
     if not tails:
         if marks or phrases:
             return Check(name, False,
@@ -6609,7 +6619,7 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
         tier2 = report.split("## Runner-minute reductions", 1)[1].split("\n## ", 1)[0]
     for where, text in (("the headline / Bottom line (above the Contents)", head),
                         ("the runner-minute section", tier2)):
-        if _VR_OPT80_TAIL_PHRASE_RE.search(text) or _VR_OPT80_TAIL_MARKER_RE.search(text):
+        if _VR_OPT80_TAIL_SCAN_RE.search(text) or _VR_OPT80_TAIL_MARKER_RE.search(text):
             bad.append(f"an OPT80 tail line sits in {where} - the tail is a "
                        "separate figure, never headlined or summed")
     allowed: set[tuple[int, int]] = set()
@@ -6634,10 +6644,10 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
         if sentence not in _strip_render_artifacts(line) and sentence not in line:
             bad.append(f"{fid}: the line after its marker does not state the "
                        f"re-derived {sentence!r}")
-    for n, word, x in phrases:
+    for n, word, x, said in phrases:
         if word != _VR_OPT80_TAIL_WORDING:
-            bad.append(f"the report says 'one run in {n} {word} {x}s on checkout to a "
-                       "stalled fetch' (legacy wording), but X is the median proven "
+            bad.append(f"the report says {said!r}, which is not the canonical tail "
+                       "sentence (legacy or variant wording) - X is the median proven "
                        "run's whole checkout excess - not an upper bound, and not all "
                        "of it the proven pause; it must say 'spends about X s longer "
                        "on checkout, and that run's log shows the fetch stalling'")

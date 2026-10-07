@@ -9588,6 +9588,25 @@ def test_opt80_tail_line_renders_at_the_pole_and_pairs_with_its_block(tmp_path: 
     assert not chk.ok and "up to" in chk.detail, chk
 
 
+def test_opt80_stray_tail_scan_tolerates_spacing_and_wording_variants(tmp_path: Path):
+    """The stray-sentence scan keys on the core "one run in N ... X s ...
+    checkout" shape, not the exact canonical suffix: a spaced unit, a sentence
+    that ends early, or another verb must not slip past it."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    for stray in (
+            "one run in 2 loses 80 s on checkout",
+            "one run in 2 loses up to 80s on checkout.",
+            "one run in 2 spends about 80 s longer on checkout, and that run's "
+            "log shows the fetch stalling",
+            # Even the RIGHT numbers in a non-canonical wording are refused.
+            "one run in 5 loses about 110 s on checkout"):
+        chk = vr.check_opt80_tail_lines(report + "\n" + stray + "\n", findings_path)
+        assert not chk.ok, (stray, chk)
+
+
 def test_opt80_tail_line_is_refused_in_the_headline_or_runner_minute_section(
         tmp_path: Path):
     """The tail is never headlined or summed: a CORRECT tail sentence (or a
