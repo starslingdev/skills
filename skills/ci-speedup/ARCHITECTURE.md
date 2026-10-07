@@ -1350,9 +1350,9 @@ first withholds the occurrence, the second withholds the job, and
 `actions/cache/restore` — which has no post phase — stamps `post_step: null`
 rather than inventing a label (that reading holds only because a separate
 `actions/cache/save` step withholds earlier, so no unmeasured save can exist). And the
-RUNNER-MINUTE credit gate requires the job's p50 to be strictly shorter than a
-job that still sets the merge gate, which is what makes `wall_clock_p50_s=0`
-literally true on that finding. Below the workflow's cluster floor that proof is
+RUNNER-MINUTE credit gate requires the job's p50 to be strictly shorter than
+another job of the same workflow, so shrinking it cannot make the workflow take
+longer, which is what makes `wall_clock_p50_s=0` literally true on that finding. Below the workflow's cluster floor that proof is
 `below_cluster_floor` — unlike OPT77, the token is not historical for OPT79, it
 is the proof; at or above the floor but below the long pole it is
 `below_long_pole`, measured against the long pole itself. The floor does NOT gate `_opt79_candidates` (which is

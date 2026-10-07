@@ -4403,11 +4403,16 @@ def test_opt79_job_tied_with_the_long_pole_stays_uncredited():
     assert w.get("pole_tied_with_next_job") == 1, w
     md = "\n".join(bp._opt79_uncredited_block(
         {"opt79_uncredited_pole_caches": rows}))
-    assert "tied with the next-tallest job" in md, md
+    co_pole = "is tied with `e2e`, this workflow's slowest job (660s)"
+    assert co_pole in md, md
+    assert "tied with the next-tallest job" not in md, md
     assert "second-slowest" not in md, md
     vr = _load_verify_report_for_opt79()
     assert vr._opt79_uncredited_rows_rederived(
         {"opt79_uncredited_pole_caches": rows}) == []
+    # the verifier pairs the co-pole line with its own clause, not the pole one
+    assert vr._opt79_uncredited_rows_rendered(md, rows) == []
+    assert vr._opt79_uncredited_rows_rendered(md.replace(co_pole, "x"), rows)
 
     out, rows, w = _opt79_pole_run(tied, is_pr=False)
     assert out == [] and len(rows) == 1

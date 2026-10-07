@@ -6078,11 +6078,20 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
                 floor=(f" ({float(floor):.0f}s)"
                        if isinstance(floor, (int, float)) else ""),
                 detail=detail or "no reason was recorded")
-            lead = ("is this workflow's slowest job"
-                    if str(r.get("long_pole_job") or "") in ("", job)
-                    else "is tied for this workflow's slowest job")
-            why = (f"`{job}` {lead}, but {clause}; "
-                   "**not credited** in this version.")
+            lp_job = str(r.get("long_pole_job") or "")
+            lp_p50 = r.get("long_pole_p50_s")
+            if (lp_job not in ("", job)
+                    and r.get("uncredited_reason") == "pole_tied_with_next_job"):
+                # A co-pole: tied with the job the run named slowest. Name that
+                # job and its time; "the next-tallest job" would be this job.
+                lp_txt = (f" ({float(lp_p50):.0f}s)"
+                          if isinstance(lp_p50, (int, float)) else "")
+                why = (f"`{job}` is tied with `{lp_job}`, this workflow's slowest "
+                       f"job{lp_txt}, so neither job alone sets the merge wait; "
+                       "**not credited** in this version.")
+            else:
+                why = (f"`{job}` is this workflow's slowest job, but {clause}; "
+                       "**not credited** in this version.")
         elif r.get("workflow_gates_pull_requests") is False:
             why = (f"`{job}` runs in a workflow that does not run on pull "
                    "requests, so no pull request waits on it; the saving is "
@@ -6341,11 +6350,13 @@ def _tier2_cert_summary(f: dict[str, Any]) -> str:
         msg = f"`below_cluster_floor` with {_clock(margin)} margin"
     elif proof == "below_long_pole" and margin is not None:
         # OPT79's second runner-minute proof: the job sits at or above the
-        # cluster floor but is strictly shorter than the workflow's slowest job,
-        # which therefore still sets the merge gate. The margin is the slowest
-        # job's lead over it; the `ref` below names that job and both p50s.
+        # cluster floor but is strictly shorter than the workflow's slowest job.
+        # Only "cannot lengthen" is provable: the slowest job may not gate a
+        # merge at all (an off-spine or push-only workflow). The margin is the
+        # slowest job's lead over it; the `ref` below names that job and both p50s.
         msg = (f"`below_long_pole` with {_clock(margin)} margin - shorter than "
-               "the workflow's slowest job, which still sets the merge gate")
+               "the workflow's slowest job, so shrinking it cannot make the "
+               "workflow take longer")
     elif proof == "post_completion_waste":
         msg = "`post_completion_waste` - compute burned after the run signal is already decided"
     elif proof == "checkout_tail_excess" and margin is not None:

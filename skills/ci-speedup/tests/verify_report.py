@@ -7226,6 +7226,13 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
                  and cn.get("workflow_gates_pull_requests") is False)
         frag = _VR_OPT79_UNCREDITED_REASON_PHRASES.get(
             str(cn.get("uncredited_reason") or ""))
+        lp_job = str(cn.get("long_pole_job") or "")
+        if (frag and lp_job not in ("", job)
+                and cn.get("uncredited_reason") == "pole_tied_with_next_job"):
+            # A co-pole's line names the slowest job it is tied with (the
+            # renderer's twin), not "the next-tallest job", which is itself.
+            frag = _strip_render_artifacts(
+                f"is tied with `{lp_job}`, this workflow's slowest job")
         if frag and frag not in why:
             out.append(f"{tag}: `{job}` line does not state its reason "
                        f"({cn.get('uncredited_reason')!r}: {frag!r})")

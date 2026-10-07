@@ -8228,7 +8228,11 @@ def test_tier2_cert_summary_names_the_below_long_pole_proof():
                 "the workflow long pole `e2e` at 240.0s")}}
     msg = bp._tier2_cert_summary(f)
     assert msg.startswith("`below_long_pole` with 1m 00s margin"), msg
-    assert "still sets the merge gate" in msg, msg
+    # only "cannot lengthen" is provable: the slowest job can be off the merge
+    # gate (or the workflow can gate no PR), and a shorter job in a `needs:`
+    # chain DOES move the gate when it shrinks
+    assert "shrinking it cannot make the workflow take longer" in msg, msg
+    assert "sets the merge gate" not in msg, msg
     assert "`e2e` at 240.0s" in msg, msg
     assert "below_cluster_floor" not in msg, msg
 
@@ -8243,9 +8247,10 @@ def test_uncredited_co_pole_is_not_called_the_slowest_job():
             long_pole_p50_s=660.0, floor_p50_s=660.0,
             workflow_gates_pull_requests=True,
             uncredited_reason="pole_tied_with_next_job")]}))
-    assert "`unit` is tied for this workflow's slowest job, but it is tied with " \
-        "the next-tallest job (660s)" in md, md
-    assert "merge wait" in md and "not credited" in md, md
+    assert "`unit` is tied with `e2e`, this workflow's slowest job (660s), so " \
+        "neither job alone sets the merge wait" in md, md
+    assert "tied for this workflow's slowest job, but it is tied" not in md, md
+    assert "not credited" in md, md
 
 
 def _uncredited_row(**kw):

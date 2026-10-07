@@ -734,11 +734,10 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert (_o79_gates.get("job_declares_no_cache_restore_step") or 0) > 0, _o79_gates
     # The at-or-above-the-floor, below-the-long-pole arm end to end.
     # `build-matrix.yml`'s `integration` job (180s) restores a cache before
-    # `npm ci`: 33s on its hit runs against 12s on its miss runs. It sits ABOVE
+    # `npm ci`: 33s on its hit runs against 12s on its miss runs. It sits AT
     # the workflow's cluster floor (the second-slowest job's p50 — itself), so the
     # below-the-floor proof does not apply, but it is shorter than the slowest job
-    # `e2e` (240s): shrinking it cannot lengthen the merge gate, because `e2e`
-    # still sets it. Credited runner-minutes, with its own proof token and a margin
+    # `e2e` (240s): shrinking it cannot make the workflow take longer. Credited runner-minutes, with its own proof token and a margin
     # measured against the slowest job, never against the floor.
     o79_lp = next(f for f in o79_all if f.get("affected_jobs") == ["integration"])
     lcn = o79_lp.get("cache_net_negative") or {}
