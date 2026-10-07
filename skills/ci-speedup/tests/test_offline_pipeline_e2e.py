@@ -448,9 +448,10 @@ export default tseslint.config(
   },
 );
 """
-# The WITHHOLD twin: the same rules block, no type-aware parsing and no
-# type-checked preset. The detector must return the `type_aware_parsing_off`
-# verdict for the lint job and emit nothing.
+# The syntax-only twin: its rules block holds only `no-explicit-any`, with no
+# type-aware parsing and no type-checked preset. This pins the
+# `type_aware_parsing_off` VERDICT (a measured "no", not a held-back withhold)
+# for the lint job, and the detector emits nothing.
 _ESLINT_CONFIG_SYNTAX_ONLY = """import tseslint from 'typescript-eslint';
 
 export default tseslint.config(

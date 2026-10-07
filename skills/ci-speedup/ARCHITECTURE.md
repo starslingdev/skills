@@ -1147,7 +1147,7 @@ the names and the "and K more" overflow come from; counted over raw rows it
 disagreed with its own job list whenever two rows deduplicated into one. A pattern contributes only its key, its
 row text and its gate→phrase table (registered in `_WITHHELD_PHRASES_BY_KEY`),
 never its own row builder. The phrase tables (`_OPT77_WITHHOLD_PHRASES`,
-`_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`, and OPT82's phrase table) map EVERY withhold gate
+`_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`, and `_OPT82_WITHHOLD_PHRASES`) map EVERY withhold gate
 their collector can record. What a test actually guarantees is narrower than
 "a new gate cannot ship without a phrase": it enumerates the gates it can READ
 from FOUR sources in the detectors' own code — the literals handed to
@@ -1259,7 +1259,7 @@ metric "uncredited, benchmark first". Being numberless by design, it is exempt
 from the valueless-pole exclusion (`_on_pole_job`), so a lint job that is also a
 drilled pole still gets its card. The card has its own prompt, not the
 generic bill or off-path saving line: it carries the SIZING clause, tells the
-agent to run the one-command benchmark FIRST, lists each enumerated rule with the
+agent to run the two-command benchmark FIRST, lists each enumerated rule with the
 rewrite QUESTION (never the answer), gives the fix order (rewrite, split into a
 fast syntax-only pass and a type-aware pass limited to exactly those rules with
 the full pass kept on the merge queue and default branch, native type-aware
@@ -1280,6 +1280,9 @@ and are also listed in `findings_doc["opt82_withheld_candidates"]`, which feeds 
 shared held-back registry row `type-aware lint: held back` (noun "candidate lint
 job(s)", shape `"job"`), so a lint job this pattern could not decide is named in
 the Data sources table rather than reading as "measured, nothing found".
+A tenth gate, `workflow_yaml_unparsed` (the workflow file could not be parsed), is in
+neither group: it is counted in `opt82_withheld_by_gate`, never listed, and the
+skip is disclosed through `detectors_skipped`.
 
 OPT79 (a cache that costs more than it saves) is a measured Tier-2 bill lever
 (alongside OPT64, OPT65, OPT77 and OPT80). It reads job LOGS during collection

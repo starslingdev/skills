@@ -10777,7 +10777,9 @@ _OPT82_MIN_LINT_P50_S = 60.0
 _OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
 # Exits that are a VERDICT about the job: it did not run, it is cheap and off
 # the critical path, or its lint builds no type information. Counted, never
-# listed as held back.
+# listed as held back. Neither this set nor `_OPT82_HELD_BACK_GATES` holds
+# `workflow_yaml_unparsed` (the workflow file could not be parsed): it is counted
+# in `opt82_withheld_by_gate` and disclosed through `detectors_skipped`.
 _OPT82_VERDICT_GATES = frozenset({
     "lint_job_never_ran_in_sample",
     "lint_job_below_cost_threshold",
@@ -10869,7 +10871,9 @@ def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None"
         return (args[1], scoped) if len(args) > 1 else None
     if pm == "npm" or args[0] in _OPT82_PM_BUILTINS:
         return None
-    # `pnpm lint` / `yarn lint`: a script only when the package declares one.
+    # `pnpm lint` / `yarn lint`: a script when the package declares one; the
+    # next branch also treats any UNDECLARED lint-named name as a script
+    # reference (it may be defined where this read cannot see).
     if scripts is not None and args[0] in scripts:
         return args[0], scoped
     if "lint" in args[0].lower():
@@ -10984,7 +10988,7 @@ def _opt82_applicable_configs(block: dict[str, Any], wd: str, explicit: "str | N
 
 def _opt82_benchmark_commands(eslint_cmd: str, wd: str, rules: list[str]
                               ) -> dict[str, str]:
-    """The one-command benchmark: the lint as CI runs it, and the same lint
+    """The two-command benchmark: the lint as CI runs it, and the same lint
     with type information unset and the enumerated rules off FOR THE TIMING
     RUN ONLY. Both cold: `--cache` is removed from both."""
     toks = _opt82_tokens(eslint_cmd)[1:]
@@ -19950,9 +19954,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         findings.extend(new)
 
         # OPT77, OPT79, OPT80 and OPT82 all answer a safety gate from the workflow
-        # file (`needs:` independence, the cache step, the checkout step). When
-        # it could not be parsed — malformed YAML, or a run without PyYAML —
-        # all three return nothing, which reads exactly like "we looked and
+        # file (`needs:` independence, the cache step, the checkout step, the
+        # lint step). When it could not be parsed — malformed YAML, or a run
+        # without PyYAML — all four return nothing, which reads exactly like "we looked and
         # found nothing". Disclosed through the same channel a fetch failure
         # uses, so the report NAMES the workflow instead.
         if not isinstance((_wf_docs.get(wf_path) or {}).get("jobs"), dict):
