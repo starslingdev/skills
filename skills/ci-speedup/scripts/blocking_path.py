@@ -7155,6 +7155,10 @@ def _opt81_card(f: dict[str, Any], catalog_url: str,
                           if isinstance(d, dict) and d.get("reason")]
             why = (str(derivation[-1]["reason"]) if derivation
                    else str(fr.get("credit_reason") or ""))
+            # The generic developer-facing bound ends its reason with a bill-saving
+            # clause; OPT81's runner-minute effect is unknown (stated above), so
+            # that clause would contradict the card.
+            why = re.sub(r";\s*runner-minute \(bill\) saving only\s*$", "", why)
             out.append(f"- **Merge wait:** not credited ({_flatten_cell(why)}).")
     else:
         out += [f"**🏎️ OPT81 · bigger runner, the last option for this pole** - "

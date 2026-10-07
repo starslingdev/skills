@@ -679,3 +679,21 @@ def test_opt81_report_check_pairs_the_disclosure_with_every_card(tmp_path):
                             "benchmark required, about 40s")
     r = vr.check_opt81_runner_comparison_rederived(numbered, path)
     assert not r.ok and "states a number" in r.detail, r.detail
+
+
+def test_opt81_a1_floored_card_never_claims_a_runner_minute_saving():
+    """A push-only A1 is floored to 0 by the generic developer-facing bound, whose
+    reason ends "runner-minute (bill) saving only". OPT81 states its runner-minute
+    effect as unknown (a different class bills differently), so the card must not
+    also tell the reader the finding is a bill saving."""
+    import wall_clock as wcm
+    f = _a1_finding()
+    res = wcm.bound_developer_facing(60.0, wcm.WallClockContext(events=("push",)))
+    assert res.value == 0.0 and "runner-minute (bill) saving only" in res.reason
+    f["wall_clock_p50_s"] = 0.0
+    f["wall_clock_derivation"] = [{"bound": "developer_facing", "reason": res.reason}]
+    card = "\n".join(bp._opt81_card(f, "u"))
+    assert "Merge wait:** not credited" in card
+    assert "post-merge/scheduled time" in card
+    assert "saving only" not in card, card
+    assert "rate table" in card
