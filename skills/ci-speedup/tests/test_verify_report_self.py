@@ -9598,6 +9598,132 @@ def test_opt80_tail_line_off_a_drilled_pole_renders_in_its_own_block(tmp_path: P
     assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
 
 
+
+def test_opt80_tail_axis_rederives_the_median_of_a_skewed_proven_tail():
+    """Real detector output with three proven tail runs at 95s / 110s / 200s:
+    the verifier re-derives the tail median, 110s, and agrees with the stamp. A
+    verifier (or collector) that took the mean, 135s, disagrees with the other."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    f = t._opt80_pr(is_pr=True, durations=[10.0] * 7 + [95.0, 110.0, 200.0])[0]
+    want, why = vr._vr_opt80_tail_axis_expected(f["checkout_stall"])
+    assert want is not None, why
+    assert want["tail_runs"] == 3 and want["tail_checkout_p50_s"] == 110.0, want
+    assert vr._opt80_tail_axis_rederived(f) == []
+
+
+def test_opt80_one_in_n_rounds_half_to_even_in_both_collector_and_verifier():
+    """7 sampled / 2 proven = 3.5 -> 4 and 5 / 2 = 2.5 -> 2 (Python's
+    round-half-to-even). Floor says 3 for the first; ceil says 3 for the second.
+    The collector and the verifier must state the same N for both."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import collect_runs as cr  # noqa: E402
+
+    for n, want_n in ((7, 4), (5, 2)):
+        f = _opt80_verifier_finding()
+        cs = f["checkout_stall"]
+        proofs = cs["proven_tail_runs"][:2]
+        quiet = [{"job_id": 7000 + i, "run_url": f"https://x/runs/{7000 + i}",
+                  "checkout_s": 10.0, "tail": False} for i in range(n - 2)]
+        tail = [r for r in cs["per_run_checkout_s"] if r["tail"]]
+        cs["per_run_checkout_s"] = quiet + tail
+        cs["proven_tail_runs"] = proofs
+        got, why = vr._vr_opt80_tail_axis_expected(cs)
+        assert got is not None, why
+        assert got["one_in_n"] == want_n, (n, got)
+        coll = cr._opt80_tail_axis(cs["per_run_checkout_s"], proofs, got["typical_checkout_p50_s"])
+        assert coll["one_in_n"] == got["one_in_n"] == want_n, (n, coll, got)
+
+
+def _opt80_tail_expected_after(mutate):
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    mutate(f["checkout_stall"])
+    want, _why = vr._vr_opt80_tail_axis_expected(f["checkout_stall"])
+    return want
+
+
+def test_opt80_tail_axis_drops_a_proof_whose_pause_is_below_the_minimum_gap():
+    def short_gap(cs):
+        cs["proven_tail_runs"][1]["after"]["ts"] = "2026-06-01T00:00:24Z"  # 10s < 20s
+    want = _opt80_tail_expected_after(short_gap)
+    assert want["tail_runs"] == 1 and want["one_in_n"] == 10, want
+
+
+def test_opt80_tail_axis_drops_a_proof_held_at_one_hundred_percent():
+    def done(cs):
+        for side in ("before", "after"):
+            cs["proven_tail_runs"][1][side]["line"] = (
+                "Receiving objects: 100% (120000/120000)")
+    want = _opt80_tail_expected_after(done)
+    assert want["tail_runs"] == 1 and want["one_in_n"] == 10, want
+
+
+def test_opt80_tail_axis_drops_a_proof_whose_run_is_below_the_tail_threshold():
+    """A proof attached to a run whose measured checkout (30s) is under the 40s
+    tail threshold is not a tail run, however its quoted lines read."""
+    def fast(cs):
+        jid = cs["proven_tail_runs"][1]["job_id"]
+        for r in cs["per_run_checkout_s"]:
+            if r["job_id"] == jid:
+                r["checkout_s"] = 30.0
+    want = _opt80_tail_expected_after(fast)
+    assert want["tail_runs"] == 1 and want["tail_checkout_p50_s"] == 120.0, want
+
+
+def test_opt80_tail_axis_counts_a_job_proven_twice_once():
+    def dup(cs):
+        cs["proven_tail_runs"].append(copy.deepcopy(cs["proven_tail_runs"][1]))
+    want = _opt80_tail_expected_after(dup)
+    assert want["tail_runs"] == 2 and want["one_in_n"] == 5, want
+
+
+def test_opt80_tail_line_marker_must_be_followed_by_its_own_sentence(tmp_path: Path):
+    """The marker pairs with the line right after it. A marker followed by some
+    other line, with the true sentence moved elsewhere, is not a pairing."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    marker = "<!-- opt80-tail:f-promoted -->"
+    i = report.index(marker)
+    end = report.index("\n\n", i)
+    block = report[i:end]
+    line = block.split("\n", 1)[1]
+    moved = report.replace(block, marker + "\n> something else\n\n" + line, 1)
+    chk = vr.check_opt80_tail_lines(moved, findings_path)
+    assert not chk.ok and "line after its marker" in str(chk.detail), chk
+
+
+def test_opt80_tail_line_rendered_twice_for_one_block_fails(tmp_path: Path):
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    marker = "<!-- opt80-tail:f-promoted -->"
+    i = report.index(marker)
+    end = report.index("\n\n", i)
+    twice = report[:end] + "\n\n" + report[i:end] + report[end:]
+    chk = vr.check_opt80_tail_lines(twice, findings_path)
+    assert not chk.ok and "rendered 2 time(s)" in str(chk.detail), chk
+
+
+def test_opt80_tail_marker_for_an_id_with_no_tail_axis_fails_beside_real_tails(
+        tmp_path: Path):
+    """Another finding's tail line is real and paired; a marker for an id that
+    stamps no tail axis must still fail, even when its sentence's numbers happen
+    to match the real one."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    ghost = ("\n<!-- opt80-tail:f-ghost -->\n> one run in 5 loses up to 110s on "
+             "checkout to a stalled fetch.\n")
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    chk = vr.check_opt80_tail_lines(report + ghost, findings_path)
+    assert not chk.ok and "f-ghost" in str(chk.detail), chk
+
+
 def test_tier2_accepts_a_checkout_stall_on_the_rendered_long_pole(tmp_path: Path):
     """The pole rule is a PROXY for "the credited work is not on the merge gate".
     `checkout_tail_excess` carries the thing the proxy stands in for: mean - p50

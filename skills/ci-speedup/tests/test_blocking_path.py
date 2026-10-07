@@ -3137,6 +3137,54 @@ def test_opt80_tail_line_states_the_stamped_numbers_as_a_tail_not_a_p50():
     assert bp._opt80_off_pole_tail_block(doc["findings"], "u") == []
 
 
+
+def test_opt80_tail_line_states_every_number_in_its_own_slot():
+    """The rendered line carries more than the two numbers the verifier
+    re-derives: the job and workflow it is on, how many sampled runs proved a
+    stall, and the tail vs typical checkout. Each must sit in its own slot - a
+    swap reads as a different (wrong) claim with the same digits."""
+    doc = _opt80_tail_render_doc()
+    line = bp._opt80_tail_block(doc["findings"], "https://catalog")[1]
+    assert "on `build` in `ci.yml`, one run in 5" in line, line
+    assert "2 of 10 sampled runs have a checkout log" in line, line
+    assert "their median checkout is 120s against a typical 10s" in line, line
+    assert "this job" not in line, line
+
+
+def test_opt80_tail_line_off_a_drilled_pole_never_moves_the_headline():
+    """The off-pole case of the headline-identity rule: the stalling job is not
+    a drilled pole, so its line renders in its own block - and the headline and
+    Bottom line stay byte-identical with and without the tail axis."""
+    doc = _opt80_tail_render_doc(pole_check="deploy", pole_job="deploy")
+    with_tail = bp.render(doc)
+    plain = json.loads(json.dumps(doc))
+    del plain["findings"][0]["checkout_stall"]["tail_axis"]
+    without = bp.render(plain)
+    head = lambda r: r.split("## 📋 Contents", 1)[0]  # noqa: E731
+    assert head(with_tail) == head(without)
+    bottom = lambda r: [ln for ln in r.splitlines() if "Bottom line" in ln]  # noqa: E731
+    assert bottom(with_tail) and bottom(with_tail) == bottom(without)
+    assert "stalled fetch" not in head(with_tail)
+    assert with_tail.count("<!-- opt80-tail:f-promoted -->") == 1
+    assert "Checkout stall tails on a workflow's slowest job" in with_tail
+    assert "<!-- opt80-tail:" not in without
+
+
+def test_opt80_tail_line_renders_in_a_static_only_report():
+    """No pole is measured, so the static-only body is the only place the tail
+    line can reach the reader; it renders there once, in the off-pole block."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_verify_report_self as vs  # noqa: E402
+
+    f = vs._opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(vs._OPT80_TAIL_AXIS)
+    doc = {"repo": "o/r", "findings": [f], "pr_critical_path": {"poles": []},
+           "data_sources": {}}
+    static = bp._render_static_only(doc)
+    assert static.count("<!-- opt80-tail:f1 -->") == 1, static
+    assert "one run in 5 loses up to 110s on checkout to a stalled fetch" in static
+
+
 def test_second_pole_role_names_the_real_slowest_concurrent_check_above_it():
     # Regression (two-pole): pole 2's "becomes the gate once X drops" must name the
     # ACTUAL slowest concurrent check above it - which may be an intervening check that

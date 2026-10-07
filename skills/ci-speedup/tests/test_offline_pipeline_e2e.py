@@ -970,6 +970,15 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert "stalled fetch" not in _head and "opt80-tail" not in _head, _head
     _tier2 = report.split("## Runner-minute reductions", 1)[1].split("## 🧹", 1)[0]
     assert _marker not in _tier2, "the tail line must never render as a Tier-2 row"
+    # The tail is never summed into a total: the replay corpus's runner-minute
+    # total and its sample size are pinned to the exact figures, so a tail that
+    # leaks into the credited minutes (or the sample count) moves a number here.
+    assert "| **Runs analyzed** | 26 runs / 141 jobs across 5 workflows |" in report, (
+        _head)
+    assert ("415 min/mo of wall-clock-neutral runner minutes is recoverable "
+            "(7 neutral findings; none can slow a merge)") in _head, _head
+    assert ("**415 min/mo credited after de-overlap** (naive sum 415 min/mo; "
+            "7 neutral findings;") in report
     assert "not credited in this version" not in report.split(
         '<a id="pole-2"></a>', 1)[0], "the on-pole PR case reads the tail line now"
     # The self-check re-derives the tail line rather than reading it back: a
