@@ -4760,12 +4760,10 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         "job_p50": job_p50,
         "job_bimodal": job_bimodal,
         # Per-job dominant runner label string (job name -> sorted labels, e.g.
-        # "ubuntu-latest"). Kept so OPT65's same-runner rounding check can resolve
-        # a finding's runner from its affected job; additive, read only there.
+        # "ubuntu-latest"): the population each job's p50 above describes. Read by
+        # OPT65's same-runner rounding check, the billed-runner lookup, and OPT81
+        # (A1's credit requires its slow label to be this one; A2's label gate).
         "job_runner": job_runner,
-        # name -> runner label -> {p50, n}: every runner population, not just the
-        # dominant one. Stamped for the findings doc, the verifier and tests; no
-        # engine code reads it (A1 builds its own success-only split).
         # The long-pole job's runner — the population that gates the wait.
         "runner_scope": lp_runner if lp_runner and lp_runner != "?" else "all-runners",
     }
@@ -11098,29 +11096,42 @@ def _post_failure_waste_s(legs: list[dict[str, Any]]) -> tuple[float, str, list[
 # Two halves, kept apart on purpose.
 #
 # A1 (MEASURED). The repository's OWN sampled history already ran one job on two
-# runner CLASSES — a standard GitHub-hosted label and a larger GitHub-hosted size,
-# or a GitHub-hosted label and a StarSling one — enough times on each, with the
-# same steps, for the two medians to be compared. The gap is a fact about runs the
-# repo already made; nothing is projected. It is credited as wall-clock only when
-# the job is its workflow's long pole AND the slow label is the one the job runs on
-# most (the population the long pole's p50 describes); the generic cascade then
-# floors it like any other credited saving. Runner-minutes are NEVER credited: a
-# different runner class bills differently and this audit carries no rate table.
+# runner CLASSES or size tiers — a standard GitHub-hosted label and a larger
+# GitHub-hosted size, GitHub's slim image and a standard one, two sizes of one
+# vendor, or a GitHub-hosted label and a StarSling one — enough times on each, with
+# the same steps, for the two medians to be compared. The gap is a fact about runs
+# the repo already made; nothing is projected. It is credited as wall-clock only
+# when the job is its workflow's long pole, the two labels are not a runner matrix,
+# the job ran on the slow label STRICTLY more often than on the fast one over the
+# two compared (successful) populations, AND the slow label is `_critical_path`'s
+# dominant label for the job (the population the long pole's p50 describes, counted
+# over every run and outcome); the generic cascade then floors it like any other
+# credited saving. Runner-minutes are NEVER credited: a different runner class
+# bills differently and this audit carries no rate table.
 #
 # A2 (ADVISORY). The lever of LAST RESORT on a merge-gating long pole that runs on
-# a standard GitHub-hosted label, whose dominant step is compute, and for which no
-# cheaper lever exists (no structural OPT70–73, no credited hygiene wall-clock of at
-# least half the job, no sharding finding, no net-negative cache of 30s or more).
-# It carries no number at all: it names a class of lever and asks for a benchmark.
+# a standard GitHub-hosted label, whose dominant step is compute, whose job did not
+# run on two or more labels (A1 data), and for which no cheaper lever exists: no
+# OPT70–OPT74 or OPT78 on the pole; no credited non-advisory, non-pre-start finding
+# (any pattern, OPT75 included) of at least half the job's p50; no sharding finding
+# (OPT24); no net-negative cache (OPT79) of 30s or more; and, at render time, no
+# log-level leaf on the pole's log. It carries no number at all: it names a class
+# of lever and asks for a benchmark.
 #
 # The publisher of this skill sells CI runners. That is why the disclosure below is
 # stamped onto every OPT81 finding and rendered on every OPT81 surface, why the
 # advisory names exactly two options (a larger GitHub-hosted size, or StarSling
 # runners) and nothing else, and why no OPT81 text ever prices a runner.
 #
-# Every constant below has a `_VR_OPT81_*` twin in `tests/verify_report.py`, pinned
-# equal by `test_opt81_verifier_constants_stay_coupled_to_the_engine`, and is
-# written out in the catalog's "### OPT81" entry.
+# The constants the verifier re-derives with have a `_VR_OPT81_*` twin in
+# `tests/verify_report.py`, pinned in tests/test_opt81_faster_runner.py:
+# `test_opt81_verifier_constants_stay_coupled_to_the_engine` pins MIN_SAMPLES_PER_LABEL,
+# MIN_GAP_S, MIN_GAP_FRAC, COVERED_FRAC, CACHE_LEVER_MIN_S, CHEAPER_STRUCTURAL,
+# DISCLOSURE, RUNNER_MIN_UNKNOWN and WITHHELD_DOC_KEY (and `_PRESTART_AXIS_PATTERNS`);
+# `test_opt81_taxonomy_is_a_named_table_with_a_verifier_twin` pins RUNNER_CLASSES and
+# RUNNER_ARCH. COMPUTE_CATEGORIES, NON_COMPUTE_STEP_RE, VERDICT_GATES,
+# CLASS_DISPLAY, TITLE and FIX_STRATEGY are engine-only. The thresholds are written
+# out in the catalog's "### OPT81" entry.
 
 # Successful samples required on EACH of the two labels compared. Below this the
 # median of the smaller population is too easily one unusual run.
@@ -11231,8 +11242,11 @@ _OPT81_RUNNER_CLASSES: tuple[tuple["_re.Pattern[str]", str, str], ...] = (
 # Intel and the `-xlarge` sizes Apple silicon; `-intel` names an Intel image. An
 # `-arm` / `arm64` label part is arm64 on every vendor. Two labels on one
 # operating system but two architectures are never compared (`different_architecture`):
-# the gap would measure the architecture, not the runner.
-_OPT81_RUNNER_ARCH: tuple[tuple["_re.Pattern[str]", str], ...] = (
+# the gap would measure the architecture, not the runner. The macOS rules are
+# derived from GitHub's image names and are anchored on `^macos-`, so they apply
+# to GitHub images only: a StarSling macOS label (`starsling-macos-14`) falls
+# through to x64 and is treated as x64 until the product documents otherwise.
+_OPT81_RUNNER_ARCH:tuple[tuple["_re.Pattern[str]", str], ...] = (
     (_re.compile(r"(^|-)arm(64)?(-|$)", _re.I), "arm64"),
     (_re.compile(r"^macos-(latest|\d+)-xlarge$", _re.I), "arm64"),
     (_re.compile(r"^macos-(latest|\d+)-(large|intel)$", _re.I), "x64"),
@@ -11631,12 +11645,15 @@ def _detect_opt81_runner_size_advisory(
     """OPT81 A2: the lever of last resort on a merge-gating long pole.
 
     Fires only when (a) the job is the long pole of a pull-request workflow and a
-    pole of the measured merge-gating critical path, (b) its dominant step is
-    compute, (c) it runs on a standard GitHub-hosted label, and (d) no cheaper
-    lever already addresses it. Uncredited: no wall-clock, no runner-minutes, no
-    number anywhere. `cheaper_levers_checked` stamps what (d) examined: any matched
-    leaf holds the advisory back, and the three it names are examples, not the
-    whole list."""
+    pole of the measured merge-gating critical path, and the job did not run on two
+    or more runner labels in the sample (`a2_measured_runner_data_exists`: A1
+    reports on those), (b) its dominant step is compute, (c) it runs on a standard
+    GitHub-hosted label, and (d) no cheaper lever already addresses it.
+    Uncredited: no wall-clock, no runner-minutes, no number anywhere.
+    `cheaper_levers_checked` stamps what (d) examined. Its last entry, the
+    log-level leaves, is decided at render time: any leaf matched on the pole's
+    log holds the advisory back, and the three leaf kinds that entry names (cache
+    miss, isolation, shard imbalance) are examples, not the whole list."""
     def _no(gate: str, job: str | None = None, **ctx: Any) -> None:
         if withheld is not None:
             withheld[gate] = withheld.get(gate, 0) + 1

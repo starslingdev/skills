@@ -11252,9 +11252,17 @@ _BACKTICK_SPAN_RE = re.compile(r"`[^`]*`")
 # OPT81 — the same job, measurably faster on another runner class
 # =============================================================================
 # This file's OWN copies of the engine's constants and runner-class taxonomy
-# (`collect_runs._OPT81_*`), pinned equal by
-# `test_opt81_verifier_constants_stay_coupled_to_the_engine`. Every A1 number is
-# re-derived from the stamped per-run rows, never read back.
+# (`collect_runs._OPT81_*`, `blocking_path._OPT81_*`), all pinned in
+# tests/test_opt81_faster_runner.py:
+# `test_opt81_verifier_constants_stay_coupled_to_the_engine` pins the thresholds
+# (MIN_SAMPLES_PER_LABEL, MIN_GAP_S, MIN_GAP_FRAC, COVERED_FRAC,
+# CACHE_LEVER_MIN_S), CHEAPER_STRUCTURAL, PRESTART_PATTERNS, DISCLOSURE,
+# RUNNER_MIN_UNKNOWN, LOG_CHECKED, WITHHELD_DOC_KEY and INSTALL_SENTENCE (a
+# substring of the rendered StarSling option);
+# `test_opt81_taxonomy_is_a_named_table_with_a_verifier_twin` pins RUNNER_CLASSES
+# and RUNNER_ARCH. NUMBER_RE, RUNNER_MIN_LINE and CODE_SPAN_RE are the verifier's
+# own and have no engine twin. Every A1 number is re-derived from the stamped
+# per-run rows, never read back.
 _VR_OPT81_MIN_SAMPLES_PER_LABEL = 8
 _VR_OPT81_MIN_GAP_S = 30.0
 _VR_OPT81_MIN_GAP_FRAC = 0.25
@@ -11580,7 +11588,8 @@ def check_opt81_runner_comparison_rederived(report: str,
     """OPT81: every A1 number re-derives from its stamped per-run rows; every A2
     advisory carries no number and its last-resort gate holds on the findings doc;
     every OPT81 finding renders exactly one anchored card that carries the
-    publisher disclosure, and an A2 card names the app-install prerequisite."""
+    publisher disclosure, and a full A2 card names the app-install prerequisite (a
+    held-back A2 note renders no recipe, so it carries no install sentence)."""
     name = "OPT81 runner-class comparisons re-derive and carry the publisher disclosure"
     data, err = _load_findings_doc(findings_path)
     if err:

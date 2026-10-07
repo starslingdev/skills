@@ -7735,9 +7735,6 @@ _OPT81_A2_HELD_NO_LOG = ("advisory held back: this pole's log was not read, so t
                          "log-level check did not run")
 _OPT81_A2_HELD_UNROUTED = ("advisory held back: its pole is not one of the long poles "
                            "this report renders")
-_OPT81_A2_LAST_OPTION_FALLBACK = (
-    "structural scope or de-trigger, a credited fix, a sharding finding, a cache "
-    "that costs more than it saves")
 _OPT81_A2_BENCHMARK = (
     "Benchmark required: run the job on the candidate runner beside its current label "
     "for several runs on a branch, compare the medians, and switch only if the "
@@ -7775,7 +7772,8 @@ def _opt81_holding_leaf(leaf: "dict[str, Any] | None",
                         offcat_leaf: "dict[str, Any] | None") -> "dict[str, Any] | None":
     """The log leaf that holds the A2 advisory back, if any. A leaf demoted
     off-category (issue #16) still matched the pole's own log, so it is a
-    cheaper lever than a bigger runner even though it is not the dominant work."""
+    cheaper lever than a different or larger runner class even though it is not
+    the dominant work."""
     return leaf if leaf is not None else offcat_leaf
 
 
@@ -7842,8 +7840,8 @@ def _opt81_prompt(f: dict[str, Any], url: str) -> list[str]:
                  "is a matrix whose legs differ in more than their runner (an include: "
                  "leg, a tool version), the gap is not the runner's alone."]
     else:
-        names = "; ".join(lv for lv, _why in _opt81_levers_checked(fr)) \
-            or _OPT81_A2_LAST_OPTION_FALLBACK
+        # Never empty: `_opt81_levers_checked` always carries the log-level entry.
+        names = "; ".join(lv for lv, _why in _opt81_levers_checked(fr))
         body += ["", "This is the last option the audit can name for this job: none of "
                  f"the cheaper levers it checks for fired here ({names}). Before "
                  "benchmarking a different or larger runner class, check whether the dominant step can be "

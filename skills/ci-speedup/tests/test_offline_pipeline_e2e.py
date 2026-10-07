@@ -116,7 +116,7 @@ _JOB_ID = 9001
 #            pins `setup-node@v4`, so the read never happens here (asserted via
 #            `data_sources.setup_node_package_json.needed`), and on a repo that
 #            needs it the cost is +0 with a checkout, +1 without.)
-#   68  now  (+12 for the two OPT77 whole-workflow workflows added to the corpus,
+#   68  then (+12 for the two OPT77 whole-workflow workflows added to the corpus,
 #            `checks.yml` (1004) and `gates.yml` (1005) — SIX calls each, and the
 #            same six any workflow costs: one all-status run-list page, three
 #            `runs/{id}/jobs` pages (three sampled runs each), one `per_page=1`
@@ -572,8 +572,8 @@ export default {
 """
 
 
-# OPT81 A1 (wf id 1007, runs 8301-8308; renumbered from 1006 / 8201-8208 so it
-# never collides with OPT82's `lint.yml`, which holds 1006 / 8201-8203).
+# OPT81 A1 (wf id 1007, runs 8301-8308; these never collide with OPT82's
+# `lint.yml`, which holds 1006 / 8201-8203).
 # A runner-comparison matrix: one job, `bench`, with a
 # STATIC display name, run on a standard GitHub-hosted label and on a larger
 # GitHub-hosted size in every one of eight push runs (the workflow is

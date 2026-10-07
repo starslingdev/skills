@@ -201,9 +201,12 @@ def test_opt81_verifier_constants_stay_coupled_to_the_engine():
     assert vr._VR_OPT81_CHEAPER_STRUCTURAL == cr._OPT81_CHEAPER_STRUCTURAL
     assert vr._VR_OPT81_PRESTART_PATTERNS == cr._PRESTART_AXIS_PATTERNS
     assert (vr._VR_OPT81_DISCLOSURE == cr._OPT81_DISCLOSURE == bp._OPT81_DISCLOSURE)
-    assert bp._OPT81_RUNNER_MIN_UNKNOWN == cr._OPT81_RUNNER_MIN_UNKNOWN
+    assert (vr._VR_OPT81_RUNNER_MIN_UNKNOWN == bp._OPT81_RUNNER_MIN_UNKNOWN
+            == cr._OPT81_RUNNER_MIN_UNKNOWN)
     assert vr._VR_OPT81_INSTALL_SENTENCE in bp._OPT81_A2_OPTION_STARSLING
-    assert cr._OPT81_WITHHELD_DOC_KEY == bp._OPT81_WITHHELD_DOC_KEY
+    assert vr._VR_OPT81_LOG_CHECKED == bp._OPT81_A2_LOG_CHECKED
+    assert (vr._VR_OPT81_WITHHELD_DOC_KEY == cr._OPT81_WITHHELD_DOC_KEY
+            == bp._OPT81_WITHHELD_DOC_KEY)
 
 
 def test_opt81_larger_runner_option_does_not_deny_the_naming_the_taxonomy_reads():

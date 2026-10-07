@@ -1178,7 +1178,14 @@ in the test: listed, a renamed accumulator silently took its gates out of the
 scan's reach while the scan went on reporting the ones it still saw. A gate
 recorded in some other shape is still invisible: assembled at runtime, passed
 to `_drop_group` by keyword instead of positionally, or recorded in a helper
-other than the four functions the scan reads. The
+other than the four functions the scan reads. OPT81's two detectors record a
+listable gate only through `_no(gate, job)`, a shape the four-source scan does
+not read, so a separate AST scan
+(`test_opt81_every_recordable_withhold_gate_has_a_plain_english_phrase` in
+`tests/test_blocking_path.py`) reads every `_no(...)` call that passes a job in
+`_detect_opt81_measured_runner_gap` and `_detect_opt81_runner_size_advisory`,
+drops the verdict gates, and requires the rest to equal
+`_OPT81_WITHHOLD_PHRASES` exactly. The
 backstop for that one is `verify_report`, which fails the report closed rather
 than printing a code. `verify_report.py`'s `check_coverage_disclosed` carries
 its own copy of the tables (pinned equal by a coupling test) and re-derives the
