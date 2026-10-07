@@ -6069,7 +6069,7 @@ def _opt79_uncredited_rows_rederived(data: dict) -> list[str]:
     """Every uncredited OPT79 row re-derived from its own `per_run`, and
     checked to contribute to no total. ("pole" in the key and kind name,
     `opt79_uncredited_pole_caches` / `opt79_uncredited_pole_cache`, is historical:
-    the rows are any job at or above the floor other than an untied slowest job.)
+    every such row is a long pole, or a job tied with one.)
 
     These rows render with their measured excess per cache hit (`waste_s`) and
     their hit/miss populations, but with no runner-minutes and no wall-clock
@@ -6111,7 +6111,11 @@ def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
 
     The long pole of a workflow a pull request waits on, with at least 1s of
     headroom, IS the credited pole finding; as an uncredited row it must name
-    one of the known reasons, and each reason must fit the row's own stamps."""
+    one of the known reasons, and each reason must fit the row's own stamps.
+    A co-pole (a job tied with the long pole, lead <= 0) reads as a pole here.
+    The converse rule also applies: a job strictly shorter than its workflow's
+    long pole is the credited `below_long_pole` finding, so listing it as an
+    uncredited row is rejected."""
     out: list[str] = []
     job = str(cn.get("job") or "")
     gates = cn.get("workflow_gates_pull_requests")
@@ -6268,7 +6272,8 @@ def _opt79_net_negative_cache_rederived(f: dict, data: dict) -> tuple[float | No
     The margin is the same quantity the generic `below_cluster_floor` arm
     computes — the job's own p50 below the workflow's cluster floor — re-derived
     from `per_workflow_timing`, because that is what makes `wall_clock_p50_s=0`
-    true for this finding."""
+    a conservative lower bound for this finding. For a `below_long_pole`
+    certificate the margin is instead long_pole_p50 - job_p50."""
     cn = _as_dict(f.get("cache_net_negative"))
     if cn.get("kind") != _VR_OPT79_CREDITED_KIND:
         return None, ["missing opt79_net_negative_cache evidence"]
@@ -6370,10 +6375,10 @@ def _opt79_pole_finding_rederived(f: dict, data: dict) -> list[str]:
     (`wall_clock_uncapped_p50_s` when that cascade shrank it, else
     `wall_clock_p50_s`), and any cascade derivation must only ever go down, give
     a reason for every step and end on the credited figure. No runner-minutes on
-    the finding or the block: there is no below-the-floor proof to carry them."""
+    the finding or the block: there is no runner-minute certificate to carry them."""
     cn = _as_dict(f.get("cache_net_negative"))
     if cn.get("kind") != _VR_OPT79_POLE_KIND:
-        return [f"an OPT79 finding with no below-the-floor certificate must be kind "
+        return [f"an OPT79 finding with no runner-minute certificate must be kind "
                 f"{_VR_OPT79_POLE_KIND!r}, not {cn.get('kind')!r}"]
     problems: list[str] = []
     job = str(cn.get("job") or "")
@@ -6399,8 +6404,8 @@ def _opt79_pole_finding_rederived(f: dict, data: dict) -> list[str]:
         problems.append(ev)
     if f.get("runner_min_saving") is not None:
         problems.append(f"the pole finding states runner-minutes "
-                        f"{f.get('runner_min_saving')!r}; it has no below-the-floor "
-                        "proof to carry them")
+                        f"{f.get('runner_min_saving')!r}; it has no runner-minute "
+                        "certificate to carry them")
 
     ps = _as_dict(cn.get("pole_sizing"))
     missing = [k for k in _VR_OPT79_POLE_SIZING_KEYS if k not in ps]
@@ -6524,11 +6529,11 @@ def _opt79_finding_rederived(f: dict, data: dict) -> list[str]:
                        f"{_VR_OPT79_CREDITED_KIND!r}, not {kind!r}")
         wc = f.get("wall_clock_p50_s")
         if _num(wc) != 0:
-            out.append(f"a below-the-floor OPT79 finding claims wall_clock_p50_s="
+            out.append(f"a runner-minute-certified OPT79 finding claims wall_clock_p50_s="
                        f"{wc!r}; its certificate says the job cannot set the merge "
                        "wait, so it is runner-minutes only")
         if f.get("wall_clock_uncapped_p50_s") is not None:
-            out.append("a below-the-floor OPT79 finding carries a wall-clock sizing")
+            out.append("a runner-minute-certified OPT79 finding carries a wall-clock sizing")
         return out
     out = _opt79_pole_finding_rederived(f, data)
     return out
@@ -7059,8 +7064,9 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
         elif proof == _VR_OPT79_PROOF_BELOW_LONG_POLE:
             # OPT79's second runner-minute proof: at or above the cluster floor,
             # strictly shorter than the long pole. The "rendered as a Long pole"
-            # proxy above needs no exemption here: the margin re-derivation
-            # fails a job that IS its workflow's long pole or ties it.
+            # proxy is waived above because this arm re-derives the same fact:
+            # the margin re-derivation fails a job that IS its workflow's long
+            # pole or ties it.
             bad.extend(f"{fid}: {msg}"
                        for msg in _tier2_below_long_pole_problems(f, data))
         elif proof == "post_completion_waste":

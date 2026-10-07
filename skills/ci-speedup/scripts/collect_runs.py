@@ -16266,8 +16266,12 @@ def _opt79_candidates(
     sampled jobs' own timings), so a job whose SHAPE rules it out — no cache, two
     caches, no install after the cache — costs no log fetch. The cluster-floor
     test is NOT one of these gates: a job at or above the floor is probed like
-    any other, and what it can produce is a credited wall-clock pole finding
-    or an uncredited line rather than a credited runner-minute finding.
+    any other. What it can produce depends on where it sits: a job below the
+    long pole (including the second-ranked job) is a credited runner-minute
+    finding; the long pole of a PR workflow is a credited wall-clock pole
+    finding; only the long pole of a workflow no PR runs (or a job tied with
+    it), or a PR workflow's long pole the pole arm declined, is an uncredited
+    line.
 
     Deliberately NOT gated on the monthly volume: the plan pass has only the
     unscoped volume in hand while the detector uses the event-scoped one, and a
@@ -16371,7 +16375,8 @@ def _opt79_candidates(
         # measured like any other; on a workflow that gates pull requests it is
         # a credited WALL-CLOCK finding (capped at the headroom to the next job,
         # no minutes, no certificate), otherwise an UNCREDITED row — see the
-        # detector.
+        # detector. A job at or above the floor that is NOT the long pole is
+        # credited runner-minutes (`below_long_pole`), not an uncredited row.
         below = bool(p50 < floor)
         block = dict(block)
         block["yaml_key"] = str(key)
@@ -16381,11 +16386,12 @@ def _opt79_candidates(
         block["below_cluster_floor"] = below
         # WHICH job is at or above the floor matters to what the report may say.
         # `not below` covers everything from the SECOND-ranked job upwards, and
-        # only an untied long pole sets the merge wait (a slowest job tied with
-        # the next one has no headroom). Stamped so the renderer
-        # can tell the two apart instead of calling both of them "the slowest
-        # job" (the second-slowest job's saving is pure runner-minutes, and
-        # telling its owner the time is on the merge wait is simply false).
+        # only an untied long pole carries the merge-wait wall-clock claim (a
+        # slowest job tied with the next one has no headroom). Stamped so the
+        # renderer can tell the two apart instead of calling both of them "the
+        # slowest job" (the second-slowest job's saving is credited as
+        # runner-minutes under `below_long_pole`, and telling its owner the time
+        # is on the merge wait is simply false).
         block["long_pole_job"] = lp_job
         block["long_pole_p50_s"] = round(lp_p50, 1)
         block["is_long_pole"] = bool(lp_job) and name == lp_job
@@ -16702,10 +16708,13 @@ def _detect_opt79_net_negative_cache(
     how often this job actually ran in the sample (`_effective_volume`), so a
     conditional job is not billed at the whole workflow's frequency.
 
-    A CREDITED finding stamps `wall_clock_p50_s = 0` and a `below_cluster_floor`
-    certificate: its job's p50 sits strictly below the workflow's cluster floor,
-    so shrinking it cannot lengthen the merge gate. It needs the monthly volume;
-    without one the job is withheld (`no_monthly_volume`) AFTER it is measured.
+    A CREDITED runner-minute finding stamps `wall_clock_p50_s = 0` and one of
+    two certificates, `below_cluster_floor` (the job's p50 is strictly below the
+    workflow's cluster floor, the second-slowest job's p50) or `below_long_pole`
+    (at or above the floor but strictly shorter than the slowest job, margin =
+    long_pole_p50 - job_p50). Either way shrinking it cannot lengthen the merge
+    gate. It needs the monthly volume; without one the job is withheld
+    (`no_monthly_volume`) AFTER it is measured.
 
     The workflow's LONG POLE, on a workflow that can gate a PR, is the one job
     whose excess sits on the merge wait. It is returned as a credited WALL-CLOCK
@@ -16718,12 +16727,16 @@ def _detect_opt79_net_negative_cache(
     `collect()` may shrink it further and rewrite the derivation. It carries no
     runner-minutes and no certificate, and needs no monthly volume.
 
-    Any OTHER job that measures net-negative but is NOT strictly below the floor
-    (a workflow no PR runs; a job at or above the floor that is not the long
-    pole; a long pole TIED with the next job, which has no headroom) is reported
-    UNCREDITED, through `uncredited` rather than the return value: no minutes,
-    no certificate, no Tier-2 row — one line saying the cache was measured and
-    that this version cannot size it. It needs no volume, so a missing one
+    Any OTHER job that measures net-negative is reported UNCREDITED, through
+    `uncredited` rather than the return value, in exactly two cases: the
+    slowest job (or one tied with it) of a workflow no PR runs (tallied under
+    `long_pole_of_a_workflow_no_pull_request_runs`), and a PR workflow's slowest
+    job the pole arm declined (tied under 1s, zeroed by a cross-check, or
+    off the merge-gating spine; the reason is stamped). A job at or above the
+    floor that is merely not the long pole is credited (`below_long_pole`), not
+    uncredited. Uncredited rows carry no minutes, no certificate, no Tier-2 row
+    — one line saying the cache was measured and that this version cannot size
+    it. It needs no volume, so a missing one
     stamps null rather than dropping the measurement.
     `workflow_gates_pull_requests` is stamped on the row, and `on_critical_path`
     is always False there (the verifier fails a row stamped True).
@@ -17017,7 +17030,7 @@ def _detect_opt79_net_negative_cache(
         # saving larger than that gap is not claimed); the cap is the shared
         # within-workflow bound every other finding uses, not a second formula.
         # A long pole TIED with the next job has no headroom: shrinking it moves
-        # no merge wait, so it falls through to the uncredited line below.
+        # no merge wait, so it is appended to the uncredited list below.
         # Runner-minutes are not stated: the bill section's admission is proof
         # that the job is shorter than the workflow's slowest job (below the
         # floor, or below the long pole), which the slowest job cannot have.
@@ -17084,8 +17097,8 @@ def _detect_opt79_net_negative_cache(
         #     floor - job p50): the job is not even the second-slowest;
         #   - at or above the floor but strictly shorter than the workflow's long
         #     pole (`below_long_pole`, margin long_pole_p50 - job p50): the long
-        #     pole still sets the merge gate, so shrinking this job cannot
-        #     lengthen it. The comparison is against the ACTUAL slowest job's p50,
+        #     pole is longer than this job, so shrinking this job cannot
+        #     lengthen the merge gate. The comparison is against the ACTUAL slowest job's p50,
         #     not the second-slowest - the move OPT77's whole-workflow arm makes
         #     against its slowest member.
         # Both hold on a workflow no pull request runs too: the bill does not
@@ -17105,8 +17118,8 @@ def _detect_opt79_net_negative_cache(
             if not lp_job:
                 _no("long_pole_job_not_recorded", job=name)
             elif block.get("is_long_pole") or not gates_pr:
-                # The slowest job (or one tied with it) of a workflow no pull
-                # request waits on: no merge gate to be neutral against, and
+                # The slowest job (or a co-pole TIED with it) of a workflow no
+                # pull request waits on; this gate is tallied for both: no merge gate to be neutral against, and
                 # this version prices no long pole as runner-minutes.
                 _no("long_pole_of_a_workflow_no_pull_request_runs", job=name,
                     job_p50=block.get("job_p50_s"), long_pole=lp_job)
