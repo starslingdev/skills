@@ -113,6 +113,7 @@ TRIAGE_ALLOWLIST = {
     "Tier-2 R-rows use measured sizing basis": AUTO_SEED,                                        # check_tier2_measured_basis
     "uncredited net-negative caches re-derive from their own runs": AUTO_SEED,                   # check_opt79_uncredited_rows_rederived
     "OPT80 tail lines re-derive and pair with their stamped blocks": AUTO_SEED,                  # check_opt80_tail_lines
+    "OPT80 slowest-job sentence pairs with its withheld reason": AUTO_SEED,                      # check_opt80_tail_withheld_reasons
     "Tier-2 section-lead totals match de-overlapped findings": AUTO_SEED,                         # check_tier2_total_deoverlapped
     "no claim or prose cites the closing-down /timing endpoints": AUTO_SEED,                     # check_no_timing_endpoint_citation
     "Tier-2 claims carry the jobs-API derivation-basis field": AUTO_SEED,                        # check_tier2_claims_derivation_basis
@@ -210,6 +211,7 @@ CHECK_CLASS = {
     "Tier-2 R-rows use measured sizing basis": "estimated-not-measured",  # exact match: promoted bill rows must be measured, not modeled
     "uncredited net-negative caches re-derive from their own runs": "fabricated-or-unsupported-finding",  # a numberless cache row whose measurements the data does not support
     "OPT80 tail lines re-derive and pair with their stamped blocks": "fabricated-or-unsupported-finding",  # a tail line whose N or X the per-run checkout rows and stall proofs do not re-derive
+    "OPT80 slowest-job sentence pairs with its withheld reason": "fabricated-or-unsupported-finding",  # a merge-wait claim, or a no-tail-line reason, the stamped facts do not support
     "Tier-2 section-lead totals match de-overlapped findings": "fabricated-or-unsupported-finding",  # rendered totals not backed by findings
     "no claim or prose cites the closing-down /timing endpoints": "fabricated-or-unsupported-finding",  # cites a data source the pipeline does not use
     "Tier-2 claims carry the jobs-API derivation-basis field": "fabricated-or-unsupported-finding",  # a Tier-2 claim without its machine-readable data-source field

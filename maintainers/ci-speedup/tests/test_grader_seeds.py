@@ -38,7 +38,8 @@ def test_every_check_is_classified():
 
 def test_classification_counts_match_spec():
     counts = Counter(gs.TRIAGE_ALLOWLIST.values())
-    assert counts[gs.AUTO_SEED] == 64   # +1 (pre-flip audit: static-only banner matches CI shape — no dormant-repo hedge at a live no-PR-gating repo, no "no run timing" beside priced timed runs);
+    assert counts[gs.AUTO_SEED] == 65   # +1 (OPT80 slowest job without a tail line: its sentence pairs with its stamped withheld reason, and no merge wait is claimed without a tail axis);
+    # +1 (pre-flip audit: static-only banner matches CI shape — no dormant-repo hedge at a live no-PR-gating repo, no "no run timing" beside priced timed runs);
     # +2 (issue #114: crowned cluster lever is on the merge-gating spine — no off-spine crown; issue #115: headline leads with the observed wall when the chain sum diverges from the makespan);
     # +1 (issue #106: every 🤖 gap-fill evidence line is verbatim from the captured job log — the injection-residual grounding backstop);
     # +1 (fence-escaping: code fences are balanced — no stray ``` breaks out of a fence / desyncs the verifier's fence split);
