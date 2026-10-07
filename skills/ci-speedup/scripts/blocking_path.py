@@ -7720,7 +7720,8 @@ _OPT81_A2_OPTION_LARGER_PARTS = (
     "runners are free; on macOS the larger sizes are GitHub-defined labels such as "
     "`macos-14-xlarge`). Then change only the job's `runs-on` to that runner's name "
     "on a branch and run the benchmark there. A runner name the organisation "
-    "chooses cannot be classified by size by this audit.")
+    "chooses cannot be classified by size by this audit unless it follows GitHub's "
+    "`<image>-<N>core(s)` naming.")
 _OPT81_A2_OPTION_STARSLING_PARTS = (
     "Option 2, StarSling runners:",
     "the benchmark can only be run after installing the StarSling GitHub app on the "

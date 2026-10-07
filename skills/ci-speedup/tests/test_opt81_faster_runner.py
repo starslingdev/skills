@@ -206,6 +206,18 @@ def test_opt81_verifier_constants_stay_coupled_to_the_engine():
     assert cr._OPT81_WITHHELD_DOC_KEY == bp._OPT81_WITHHELD_DOC_KEY
 
 
+def test_opt81_larger_runner_option_does_not_deny_the_naming_the_taxonomy_reads():
+    """The advisory's larger-runner option must not say an organisation-chosen
+    name can never be sized: the taxonomy classifies GitHub's documented
+    `<image>-<N>core(s)` naming. The card and the catalog say the same."""
+    assert cr._opt81_runner_class("ubuntu-24.04-16core")[0] == "github-larger"
+    assert cr._opt81_runner_class("windows-2022-16-cores")[0] == "github-larger"
+    sentence = ("A runner name the organisation chooses cannot be classified by size "
+                "by this audit unless it follows GitHub's `<image>-<N>core(s)` naming.")
+    assert bp._OPT81_A2_OPTION_LARGER.endswith(sentence), bp._OPT81_A2_OPTION_LARGER
+    assert sentence in _CATALOG.read_text(encoding="utf-8")
+
+
 # =============================================================================
 # A1 — measured
 # =============================================================================
