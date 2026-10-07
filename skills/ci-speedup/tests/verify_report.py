@@ -5273,8 +5273,8 @@ def _below_long_pole_margin(f: dict, data: dict) -> tuple[float | None, list[str
             and round(round(floor, 1) - round(max(vals), 1), 1) > 0):
         return None, [f"the credited job ({max(vals)}s) is below the workflow cluster "
                       f"floor ({floor}s): its proof is below_cluster_floor, and the "
-                      "below-the-long-pole wording (at or above the second-slowest "
-                      "job) would be false"]
+                      "below_long_pole certificate would be false: the check keeps "
+                      "the two certificates apart"]
     # The collector's rounding order: each p50 stamped to 0.1s, then subtracted.
     margin = round(round(lp, 1) - round(max(vals), 1), 1)
     if margin < _VR_OPT79_POLE_MIN_HEADROOM_S:
@@ -6188,7 +6188,8 @@ def _opt79_uncredited_rows_rederived(data: dict) -> list[str]:
     """Every uncredited OPT79 row re-derived from its own `per_run`, and
     checked to contribute to no total. ("pole" in the key and kind name,
     `opt79_uncredited_pole_caches` / `opt79_uncredited_pole_cache`, is historical:
-    every such row is a long pole, or a job tied with one.)
+    every such row is a long pole, a job tied with one, or a pull-request-workflow
+    job `needs:`-chained to the long pole.)
 
     These rows render with their measured excess per cache hit (`waste_s`) and
     their hit/miss populations, but with no runner-minutes and no wall-clock
@@ -6231,7 +6232,7 @@ def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
     The long pole of a workflow a pull request waits on, with at least 1s of
     headroom, IS the credited pole finding; as an uncredited row it must name
     one of the known reasons, and each reason must fit the row's own stamps.
-    A co-pole (a job tied with the long pole, lead <= 0) reads as a pole here.
+    A co-pole (a job tied with the long pole, lead under 1s) reads as a pole here.
     The converse rule also applies: a job strictly shorter than its workflow's
     long pole is the credited `below_long_pole` finding, so listing it as an
     uncredited row is rejected."""
@@ -6670,7 +6671,7 @@ def _opt79_finding_rederived(f: dict, data: dict) -> list[str]:
     A finding WITH a `tier2_neutrality` certificate is a runner-minute arm
     (below the cluster floor, or at/above it and below the long pole): it must
     be kind `opt79_net_negative_cache` and claim no wall-clock (its certificate
-    says the job cannot set the merge wait; the full re-derivation, margin
+    says the job cannot make the workflow take longer; the full re-derivation, margin
     included, runs in the Tier-2 pass). A finding WITHOUT one must be the
     pole arm, re-derived by `_opt79_pole_finding_rederived`. There is no third
     shape: an OPT79 finding that is neither is a contract violation."""
@@ -6684,8 +6685,8 @@ def _opt79_finding_rederived(f: dict, data: dict) -> list[str]:
         wc = f.get("wall_clock_p50_s")
         if _num(wc) != 0:
             out.append(f"a runner-minute-certified OPT79 finding claims wall_clock_p50_s="
-                       f"{wc!r}; its certificate says the job cannot set the merge "
-                       "wait, so it is runner-minutes only")
+                       f"{wc!r}; its certificate says the job cannot make the "
+                       "workflow take longer, so it is runner-minutes only")
         if f.get("wall_clock_uncapped_p50_s") is not None:
             out.append("a runner-minute-certified OPT79 finding carries a wall-clock sizing")
         return out

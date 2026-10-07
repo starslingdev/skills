@@ -614,25 +614,26 @@ unversioned and updates by reinstall from `main`.
   that costs more than it saves on a job at or above the workflow's
   second-slowest job but still shorter than its slowest job, the report listed it
   as "measured, not credited", saying the audit could not prove that shrinking it
-  leaves the merge gate unchanged. It can: shrinking it cannot lengthen the merge gate,
+  leaves the merge gate unchanged. It can: shrinking it cannot make the workflow take longer,
   because the slowest job is longer than it. Such a cache is now a
   credited runner-minute finding with its own neutrality proof,
   `below_long_pole`, whose margin is the slowest job's lead over this job
   (compared against the slowest job's measured p50, not the second-slowest's),
   and its evidence says so in plain words. It applies on any workflow, pull
   requests or not, like the existing below-the-floor credit. The "measured, not
-  credited" list now holds only the slowest job of a workflow no pull request
-  runs and a slowest job the merge-wait arm declined (tied, zeroed by a
+  credited" list now holds three cases: the slowest job of a workflow no pull
+  request runs, a slowest job the merge-wait arm declined (tied, zeroed by a
   cross-check, or off the merge-gating spine; a job tied with the slowest job is
   treated as one of those; within 1s of the slowest job counts as tied, the
-  same cutoff the slowest-job arm uses). A job a hair under the second-slowest
+  same cutoff the slowest-job arm uses), and a job in a `needs:` chain with the
+  slowest job on a workflow pull requests run (below). A job a hair under the second-slowest
   job, whose below-the-floor margin rounds to zero, now gets this credit instead
   of being held back. Like the below-the-floor credit, a job whose monthly run
   count is unknown is measured and then held back for that reason, not listed
   as "measured, not credited". The report's self-check re-derives the new margin
   from the run's own job timings, fails a job that is or ties the slowest job,
   fails a job below the second-slowest job claiming it (that job's proof is the
-  below-the-floor one, and the new wording would be false for it),
+  below-the-floor one, and the check keeps the two certificates apart),
   fails any other pattern claiming the token, and fails a "not credited" row
   that should have been this finding. It also fails any "not credited" row on a
   workflow pull requests run that names no reason, whatever the headroom; and a
@@ -645,7 +646,7 @@ unversioned and updates by reinstall from `main`.
   this credit on a workflow pull requests wait on: the wait is then the
   chain's times added together, so shrinking it does shorten the merge wait. It is listed
   "measured, not credited" with that reason, and the self-check re-derives the
-  chain from the workflow's job graph and no longer exempts this credit from
+  chain from the workflow's job graph and does not exempt this credit from
   its "also rendered as a Long pole" check. Both runner-minute credits now say
   only what they prove, that making the job faster cannot make the workflow take
   longer; the below-the-floor note no longer says "no merge-gate time changes",
@@ -681,8 +682,9 @@ unversioned and updates by reinstall from `main`.
   needs a neutrality proof (the job sits below the second-slowest job, or below
   the slowest job), which the slowest job cannot have. (Superseded for the
   other jobs by the entry above: a job shorter than the slowest job is now a
-  credited runner-minute finding, and the "not credited" line holds only the
-  slowest job, or a job tied with it.) A slowest job is kept on that line, with the reason
+  credited runner-minute finding, and the "not credited" line holds three
+  cases: the slowest job or a job tied with it, and a job in a `needs:` chain
+  with the slowest job on a pull-request workflow.) A slowest job is kept on that line, with the reason
   stated, when it is tied with the next-tallest job (under 1s apart), when the
   cross-checks find no merge wait it can shorten, when the pull request can merge
   without that workflow, or when the workflow's sampled runs include no pull

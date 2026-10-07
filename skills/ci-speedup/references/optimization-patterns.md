@@ -606,8 +606,11 @@ answered from data already in hand, so those jobs cost no log fetch. That is
 not the same as "no log is fetched for a job that could not produce a finding":
 the workflow's slowest job is probed too, and what it produces is a credited
 wall-clock finding (on a workflow that runs on pull requests) or the uncredited
-line below; every job shorter than it is a credited runner-minute finding, given
-a measured net-negative cache and a known monthly volume.
+line below; every job at least 1s shorter than it (a job within 1s of it counts
+as tied and is uncredited) is a credited runner-minute finding, given a measured
+net-negative cache and a known monthly volume, except a job at or above the floor
+that is `needs:`-chained to the long pole of a pull-request workflow, which is
+uncredited too.
 
 **Sizing (measured)**:
 
@@ -639,7 +642,7 @@ they gate how the measured excess is credited.
 1. **Strictly shorter than the long pole: runner-minutes only**, on any
    workflow (the bill does not depend on pull requests). `wall_clock_p50_s` is
    0, the conservative lower bound: shrinking a job that is shorter
-   than the slowest one cannot lengthen the merge gate (the slowest job is
+   than the slowest one cannot make the workflow take longer (the slowest job is
    longer than it); a saving there may still
    shorten the gate through a `needs:` chain, which is not claimed. The finding carries one of two neutrality certificates:
    - **strictly below the cluster floor** → `below_cluster_floor`, margin
@@ -655,7 +658,8 @@ they gate how the measured excess is credited.
      "runner-minutes only; this job (Ns) is shorter than the workflow's
      slowest job (`<pole>`, Ms), so making it faster cannot make the workflow
      take longer". It claims no merge gate: the workflow may gate no pull
-     request, and a job chained to the slowest one is not credited at all. (Owner
+     request, and on a pull-request workflow a job chained to the slowest one is not
+     credited at all. (Owner
      decision 2026-10-06; the same move OPT77's whole-workflow arm makes against
      its slowest member.)
 
@@ -678,9 +682,10 @@ they gate how the measured excess is credited.
    recorded in `wall_clock_derivation`. A long pole TIED with the next-tallest
    job (zero headroom) is not credited here: shrinking it moves no merge wait,
    because the other job still finishes then, so it falls through to outcome 3
-   (so does a job TIED with the long pole, which is a co-pole). The two tie
-   thresholds differ: the pole arm declines headroom under 1.0s, while a job
-   counts as tied with the long pole only at 0.0s lead after rounding to 0.1s.
+   (so does a job TIED with the long pole, which is a co-pole). There is one tie
+   constant, 1.0s, for both arms: the pole arm declines headroom under 1.0s, and
+   a job counts as tied with the long pole when its lead over it is under 1.0s
+   (each p50 rounded to 0.1s first).
    The finding renders inside that job's long-pole section of the report, opened
    by an `<!-- opt79-pole:<id> -->` marker, as
    `💾 Measured cache cost - OPT79 · <title> (<id>) - up to **Ns** off the merge wait on the P% of sampled runs where the cache hit (H of R runs read)`
@@ -708,15 +713,20 @@ they gate how the measured excess is credited.
 3. **What is left: measured, reported, not priced.** The audit carries no
    sizing for these, so they are an uncredited row, rendered as one numberless
    line beside the dropped-unprovable note (the nearest precedent: a measured
-   fact deliberately kept out of the numbers and shown anyway). Exactly two
+   fact deliberately kept out of the numbers and shown anyway). Exactly three
    cases land here:
    - the long pole of a workflow that runs on no pull request (or a job tied
-     with it) — runner-minutes only, unpriced in this version; that workflow's
-     shorter jobs still take outcome 1;
+     with it, under 1s) — runner-minutes only, unpriced in this version; that
+     workflow's shorter jobs still take outcome 1;
    - the long pole of a pull-request workflow that outcome 2 declined, with its
      stamped reason: tied with the next-tallest job (a job tied with the long
      pole is stamped the same way), its merge wait zeroed by a cross-check, or
-     off the merge-gating spine.
+     off the merge-gating spine;
+   - a job of a pull-request workflow at or above the floor that is
+     `needs:`-chained to the long pole
+     (`job_in_a_needs_chain_with_the_long_pole`): the chain's sum is the merge
+     wait, so shrinking it can shorten that wait, which this version does not
+     size. On a push-only workflow such a job is credited by outcome 1.
 
 > a cache on `nightly` in `.github/workflows/nightly.yml` measured net-negative
 > by 19s per cache hit (4 hit / 4 miss run(s) sampled); `nightly` runs in a
@@ -793,7 +803,7 @@ by that re-derivation:
 
 | key | what it carries |
 |---|---|
-| `kind` | `opt79_net_negative_cache` for a credited runner-minute finding, `opt79_pole_net_negative_cache` for a credited wall-clock finding on the workflow's long pole, `opt79_uncredited_pole_cache` for an uncredited row (every such row is now a long pole, or a job tied with one, that no other outcome credits) — the tag that routes the block to this re-derivation instead of the generic one |
+| `kind` | `opt79_net_negative_cache` for a credited runner-minute finding, `opt79_pole_net_negative_cache` for a credited wall-clock finding on the workflow's long pole, `opt79_uncredited_pole_cache` for an uncredited row (a long pole, or a job tied with one, that no other outcome credits, or a pull-request-workflow job `needs:`-chained to the long pole) — the tag that routes the block to this re-derivation instead of the generic one |
 | `job` | the credited job; must be the finding's only `affected_jobs` entry |
 | `runner_label` / `cache_ref` | the one runner class every credited run ran on, and the cache action the block was built around |
 | `restore_step` / `install_step` / `post_step` | the three steps, as named in the YAML, that both paths measure; `post_step` is null for `actions/cache/restore`, which has no post phase |
