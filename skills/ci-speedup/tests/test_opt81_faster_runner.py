@@ -454,14 +454,9 @@ def test_opt81_a1_card_states_both_distributions_and_the_disclosure():
     assert "rate table" in card
 
 
-# A small deny-list of CI runner vendors other than GitHub-hosted and StarSling,
-# plus the generic rule below. Lower-case, matched as whole words.
-_OTHER_RUNNER_VENDORS = (
-    "blacksmith", "buildjet", "warpbuild", "ubicloud", "depot", "namespace.so",
-    "namespacelabs", "runs-on.com", "runson", "cirun", "actuated", "cirrus",
-    "buildkite", "circleci", "gitlab", "jenkins", "codebuild", "semaphore",
-    "bitrise", "travis", "harness", "earthly",
-)
+# The vendor-name deny-list lives in maintainers/ci-speedup/tests/
+# test_opt81_vendor_guard.py so it never ships in the installed skill; the
+# shipped half is the vendor-neutral domain rule below.
 _DOMAIN_RE = re.compile(
     r"\b((?:[a-z0-9-]+\.)+(?:com|io|dev|net|org|app|cloud|sh|so|co|ai|run|build|tech))\b",
     re.I)
@@ -490,31 +485,19 @@ def _opt81_texts() -> dict[str, str]:
     }
 
 
-def test_opt81_text_names_no_other_runner_vendor():
-    """Owner decision 2: the advisory names exactly two options — a larger
-    GitHub-hosted size, or StarSling runners — and no OPT81 text, anywhere it
-    renders, names any other runner vendor or any domain but github.com and
-    starsling.dev."""
+def test_opt81_text_names_no_domain_but_github_and_starsling():
+    """Owner rule: no OPT81 text, anywhere it renders, names any domain but
+    github.com and starsling.dev."""
     for where, text in _opt81_texts().items():
-        low = text.lower()
-        for vendor in _OTHER_RUNNER_VENDORS:
-            assert not re.search(r"(?<![\w.-])" + re.escape(vendor) + r"(?![\w-])", low), (
-                f"{where} names another runner vendor: {vendor}")
         for dom in _DOMAIN_RE.findall(text):
             d = dom.lower()
             assert d in _ALLOWED_DOMAINS or any(d.endswith("." + a) for a in _ALLOWED_DOMAINS), (
                 f"{where} names a domain other than github.com / starsling.dev: {dom}")
 
 
-def test_opt81_vendor_guard_is_not_vacuous():
-    """The guard must be able to fail: the same scan over a doctored text
-    reddens on a vendor name and on a foreign domain."""
-    for doctored in ("try Buildjet runners", "see https://example.org/x"):
-        low = doctored.lower()
-        hit = any(re.search(r"(?<![\w.-])" + re.escape(v) + r"(?![\w-])", low)
-                  for v in _OTHER_RUNNER_VENDORS)
-        hit = hit or any(d.lower() not in _ALLOWED_DOMAINS for d in _DOMAIN_RE.findall(doctored))
-        assert hit, doctored
+def test_opt81_domain_guard_is_not_vacuous():
+    doctored = "see https://example.org/x"
+    assert any(d.lower() not in _ALLOWED_DOMAINS for d in _DOMAIN_RE.findall(doctored))
 
 
 def test_opt81_catalog_entry_carries_the_disclosure_and_no_dollars():
