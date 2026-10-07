@@ -17104,6 +17104,14 @@ def _detect_opt79_net_negative_cache(
             row = _uncredited_row() if uncredited is not None else None
             if not lp_job:
                 _no("long_pole_job_not_recorded", job=name)
+                if gates_pr:
+                    # No long pole recorded: the row cannot be placed against
+                    # the merge wait and no stamped reason fits it, so on a
+                    # pull-request workflow it is tallied, never listed (it
+                    # would render the "no recorded reason" fallback, which
+                    # verify_report fails). Off pull requests its claim - no PR
+                    # waits on it - holds without a pole, so it stays.
+                    row = None
             elif block.get("is_long_pole") or not gates_pr:
                 # The slowest job (or one tied with it) of a workflow no pull
                 # request waits on: no merge gate to be neutral against, and

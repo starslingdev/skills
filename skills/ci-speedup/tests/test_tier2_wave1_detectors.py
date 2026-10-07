@@ -4675,6 +4675,63 @@ def test_opt79_pole_tied_with_the_next_job_has_no_headroom_and_stays_uncredited(
     assert len(rows) == 1 and rows[0]["on_critical_path"] is False
 
 
+def _opt79_reasonless_pr_row(shape):
+    """A real uncredited row from the detector on a pull-request workflow, with
+    its stamped reason removed - the three shapes F2 found passing silently."""
+    if shape == "co_pole":
+        # tied with the long pole `e2e` (not the pole itself): headroom 0
+        crit = _opt79_pole_crit(job_p50={_OPT79_JOB: 660.0, "integration": 600.0,
+                                         "e2e": 660.0}, floor_p50=660.0)
+    else:
+        # the long pole itself, tied with the next job: headroom 0
+        crit = _opt79_pole_of(600.0, 600.0)
+    out, rows, _w = _opt79_pole_run(crit)
+    assert out == [] and len(rows) == 1, (out, rows)
+    row = rows[0]
+    assert row["workflow_gates_pull_requests"] is True
+    assert row["uncredited_reason"] == "pole_tied_with_next_job", row
+    row.pop("uncredited_reason")
+    if shape == "no_long_pole":
+        row["long_pole_job"] = ""
+    return row
+
+
+@pytest.mark.parametrize("shape", ["co_pole", "tied_pole", "no_long_pole"])
+def test_opt79_verifier_fails_a_reasonless_row_on_a_pull_request_workflow(shape):
+    """F2. A row on a workflow pull requests wait on, with no stamped
+    uncredited_reason, renders the "carries no recorded reason" fallback - a
+    shape the collector must never write. The verifier fails it ALWAYS, whatever
+    the headroom (a tie used to pass) and whether or not a long pole was
+    recorded."""
+    vr = _load_verify_report_for_opt79()
+    row = _opt79_reasonless_pr_row(shape)
+    problems = vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": [row]})
+    assert any("no uncredited_reason" in p for p in problems), problems
+    # ...and this is the shape the renderer's fallback line exists for.
+    md = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": [row]}))
+    assert "carries no recorded reason it could not be priced" in md, md
+
+
+def test_opt79_collector_never_writes_a_reasonless_pull_request_row():
+    """F2 (c), the collector side. With no long pole recorded for a pull-request
+    workflow the row cannot be placed against the merge wait and no reason fits
+    it, so it is tallied and NOT listed (it would render the no-reason
+    fallback). On a workflow no pull request runs the row stays: its claim (no
+    pull request waits on it) does not depend on the pole."""
+    crit = _opt79_pole_crit(long_pole_job="",
+                            job_p50={_OPT79_JOB: 660.0, "integration": 600.0,
+                                     "e2e": 600.0})
+    out, rows, w = _opt79_pole_run(crit)
+    assert out == [] and rows == [], rows
+    assert w.get("long_pole_job_not_recorded") == 1, w
+    out, rows, w = _opt79_pole_run(crit, is_pr=False)
+    assert out == [] and len(rows) == 1, rows
+    assert rows[0]["workflow_gates_pull_requests"] is False
+    assert "uncredited_reason" not in rows[0]
+
+
 def test_opt79_pole_sizing_uses_the_shared_within_workflow_bound(monkeypatch):
     """The cap is the SAME code every other finding's within-workflow cap runs,
     not a second hand-rolled formula."""
