@@ -500,14 +500,8 @@ def test_verifier_fails_a_card_that_says_disable_about_rules(tmp_path):
     assert not c.ok and "disable" in c.detail.lower(), c.detail
 
 
-def test_collect_crash_tripwire_never_takes_the_pass_down(monkeypatch):
-    """CRASH TRIPWIRE (collect half): the call site guards the detector, so a
-    bug in it skips OPT82 for that workflow (disclosed) instead of crashing the
-    data pass. Pinned at the source: the guarded call and its disclosure."""
-    src = (_SKILL_DIR / "scripts" / "collect_runs.py").read_text(encoding="utf-8")
-    call = src.index("new = _detect_opt82_type_aware_lint(\n")
-    window = src[max(0, call - 1500):call + 1500]
-    assert "except Exception" in window and '["OPT82"]' in window
+# The collect-half crash tripwire runs through the real collector:
+# test_offline_pipeline_e2e.py::test_opt82_detector_crash_skips_and_discloses_through_collect
 
 
 def test_the_two_readers_of_the_rule_list_agree():

@@ -64,6 +64,7 @@ _FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "gh_replay"
 
 sys.path.insert(0, str(_SCRIPTS))
 import collect_runs as cr  # noqa: E402
+import run as _run_py  # noqa: E402
 
 # The synthetic repo/workflow the committed fixture corpus was recorded
 # against. `_REPO` must match the `owner/name` baked into every fixture
@@ -2275,3 +2276,54 @@ def test_opt82_type_aware_off_withholds_end_to_end(tmp_path):
     report = _render(_SCRIPTS, findings_path, report_path, env)
     assert "OPT82" not in report
     assert _verify(report_path, findings_path, env).returncode == 0
+
+
+def test_opt82_detector_crash_skips_and_discloses_through_collect(tmp_path, monkeypatch):
+    """CRASH TRIPWIRE (collect half), driven through the real collector: a bug in
+    the OPT82 detector must skip OPT82 for that workflow — named in the report as
+    a detector that did not run — and never take the data pass down. The detector
+    is replaced with one that raises; `collect_runs.main` runs in-process over the
+    replayed corpus, then the artifact is rendered and verified. Remove the
+    call-site guard and this test fails with the RuntimeError itself."""
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    env = _replay_env(fixtures)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    scanned = subprocess.run(
+        # The provenance run.py would stamp, so the verifier's provenance check
+        # sees what a real run records.
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO, "--skill-commit-sha", _run_py._git_short_sha(_SCRIPTS)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert scanned.returncode == 0, scanned.stderr
+    findings_path.write_text(scanned.stdout, encoding="utf-8")
+    assert json.loads(scanned.stdout)["type_aware_lint"]["configs"], (
+        "the corpus must reach the detector, or the crash below is never exercised")
+
+    calls: list[str] = []
+
+    def _boom(wf_path, *a, **k):
+        calls.append(wf_path)
+        raise RuntimeError("injected OPT82 detector failure")
+
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    monkeypatch.setattr(cr, "_detect_opt82_type_aware_lint", _boom)
+    rc = cr.main(["--in", str(findings_path), "--out", str(findings_path),
+                  "--root", str(repo_root), "--repo", _REPO])
+    assert rc == 0
+    assert ".github/workflows/lint.yml" in calls, calls
+
+    data = json.loads(findings_path.read_text(encoding="utf-8"))
+    assert not [f for f in data["findings"] if f.get("pattern") == "OPT82"]
+    skipped = data["data_sources"].get("detectors_skipped") or []
+    entry = next(e for e in skipped if e["workflow"] == ".github/workflows/lint.yml")
+    assert "OPT82" in entry["detectors"]
+    assert "type-aware lint check failed (RuntimeError)" in entry["reason"], entry
+
+    report = _render(_SCRIPTS, findings_path, report_path, env)
+    assert "OPT82" in report and "lint.yml" in report
+    ok = _verify(report_path, findings_path, env)
+    assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"
