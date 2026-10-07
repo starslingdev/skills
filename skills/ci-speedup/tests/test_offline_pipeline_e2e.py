@@ -64,6 +64,7 @@ _FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "gh_replay"
 
 sys.path.insert(0, str(_SCRIPTS))
 import collect_runs as cr  # noqa: E402
+import run as _run_py  # noqa: E402
 
 # The synthetic repo/workflow the committed fixture corpus was recorded
 # against. `_REPO` must match the `owner/name` baked into every fixture
@@ -122,7 +123,14 @@ _JOB_ID = 9001
 #            config-era boundary lookup. Both are push-only, so neither pays the
 #            event-scoped `event=pull_request` volume call a PR workflow does, and
 #            OPT77 reads no job logs at all — zero log fetches for either.)
-#   77  now  (+9 OPT79's credited wall-clock arm: `chained.yml`'s `prep` — the slowest
+#   74  then (+6 for the OPT82 lint workflow added to the corpus, `lint.yml` (1006):
+#            the same six calls `checks.yml` costs — one all-status run-list page,
+#            three `runs/{id}/jobs` pages, one `per_page=1` monthly-volume count and
+#            one `commits?path=<wf>&per_page=2` config-era lookup. Push-only, so no
+#            event-scoped volume call. The OPT82 detector ITSELF makes zero gh calls:
+#            its config fact is read from the `--root` checkout by scan.py and its
+#            timings are the jobs already sampled.)
+#   77  then (+9, on main before the OPT82 merge: OPT79's credited wall-clock arm: `chained.yml`'s `prep` — the slowest
 #            job of a workflow that gates pull requests — now restores a cache before
 #            `npm ci`, and the corpus carries three more sampled pull_request runs of
 #            it (7004-7006) so the hit and miss populations each reach the three-run
@@ -134,7 +142,11 @@ _JOB_ID = 9001
 #            cached `integration` (180s) exercises OPT79's `below_long_pole` arm.
 #            Its jobs ride in the existing `runs/{id}/jobs` pages and it declares
 #            no cache, so it costs no call and no log fetch: measured, +0.)
-#   82  now  (+5 for the ON-POLE OPT80 case: three more successful pull_request runs
+#   83  then (main merged into the OPT82 branch: 68 + 6 for `lint.yml` (OPT82)
+#            + 9 for OPT79's credited wall-clock arm. The two ledgers are
+#            disjoint (`lint.yml` reads no logs; OPT79's calls are
+#            `chained.yml` runs and `prep` logs), so they add.)
+#   82  then (on main before the OPT82 merge: +5 for the ON-POLE OPT80 case: three more successful pull_request runs
 #            of `ci.yml` (5004-5006, reusing head shas aab2/aab3/aaaa so no new
 #            check-runs page is read) cost one `runs/{id}/jobs` page each (+3), and
 #            two of them are checkout tail runs whose logs OPT80 fetches to prove
@@ -144,7 +156,10 @@ _JOB_ID = 9001
 #            replay fixture costs +0 as well: the required-checks endpoint it
 #            answers was already called, so the fixture only supplies the
 #            response for an existing call.)
-_GOLDEN_GH_QUERY_COUNT = 82
+#   88  now  (main merged into the OPT82 branch again, after #114: 82 + 6 for
+#            `lint.yml` (OPT82). OPT80's five calls are `ci.yml` runs and
+#            their checkout logs; `lint.yml` reads no logs, so they add.)
+_GOLDEN_GH_QUERY_COUNT = 88
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).
@@ -428,7 +443,128 @@ jobs:
 """
 
 
-def _init_repo(root: Path, origin: str | None = _REPO) -> None:
+# OPT82 (lint builds the whole type graph), wf id 1006. One push-only job that
+# runs `npm run lint`, which resolves through the repo-tree package.json
+# (`lint` -> `lint:eslint` -> `eslint .`) to ESLint. It measures 93s at p50
+# (lint step 72s): above OPT82's 60s bar, and far below the 220s chain and the
+# 197s `CI / test` headline, so no pole, chain or headline assertion moves.
+# `build-matrix.yml`'s `lint (eslint)` job runs `npm run lint:eslint` too, at
+# 20s off that workflow's critical path: the below-threshold VERDICT, counted
+# and never listed as held back.
+# A second job, `eslint-web`, runs `npx eslint .` in `packages/web` (its
+# `defaults.run.working-directory`), whose own flat config sets
+# `projectService: process.env.CI` - a value this read cannot evaluate. At 75s
+# p50 it is over the bar, so it is HELD BACK and listed, never a verdict. It
+# rides on the same three sampled runs (`runs/820{1,2,3}/jobs` pages), so it
+# costs no gh call, and it is shorter than `eslint`, so lint.yml's long pole
+# does not move.
+_WF6_ID = 1006
+_WF6_YAML = """name: Lint
+on:
+  push:
+
+jobs:
+  eslint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+  eslint-web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Lint web
+        run: npx eslint .
+"""
+# `packages/web`'s own flat config: type-aware parsing hangs on an environment
+# variable, so whether the lint builds type information cannot be read offline.
+_ESLINT_CONFIG_WEB_UNRESOLVED = """export default [
+  {
+    languageOptions: { parserOptions: { projectService: process.env.CI } },
+    rules: { '@typescript-eslint/no-floating-promises': 'error' },
+  },
+];
+"""
+
+# The repo-tree side of OPT82: an ESLint flat config with type-aware parsing
+# on (`projectService: true`), two enumerable typescript-eslint rules, and one
+# CUSTOM rule whose source asks the parser for type information.
+_PACKAGE_JSON = """{
+  "name": "synthetic-repo",
+  "private": true,
+  "scripts": {
+    "lint": "npm run lint:eslint",
+    "lint:eslint": "eslint . --cache --max-warnings 0",
+    "lint:biome": "biome lint .",
+    "lint:stylelint": "stylelint 'src/**/*.css'",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "eslint": "^9.12.0"
+  }
+}
+"""
+# ESLint 9 is declared so the nested `packages/web` flat config does not apply
+# to the root `eslint` job (ESLint 9 looks the config up from the working
+# directory); without a version the root job is held back as ambiguous.
+_ESLINT_CONFIG_TYPE_AWARE = """import tseslint from 'typescript-eslint';
+import local from './eslint-rules/index.mjs';
+
+export default tseslint.config(
+  {
+    languageOptions: {
+      parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname },
+    },
+  },
+  {
+    plugins: { local },
+    rules: {
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
+      '@typescript-eslint/no-explicit-any': 'warn',
+      'local/no-unsafe-enum-access': 'error',
+    },
+  },
+);
+"""
+# The syntax-only twin: its rules block holds only `no-explicit-any`, with no
+# type-aware parsing and no type-checked preset. This pins the
+# `type_aware_parsing_off` VERDICT (a measured "no", not a held-back withhold)
+# for the lint job, and the detector emits nothing.
+_ESLINT_CONFIG_SYNTAX_ONLY = """import tseslint from 'typescript-eslint';
+
+export default tseslint.config(
+  { rules: { '@typescript-eslint/no-explicit-any': 'warn' } },
+);
+"""
+_ESLINT_RULES_INDEX = """import noUnsafeEnumAccess from './no-unsafe-enum-access.mjs';
+export default { rules: { 'no-unsafe-enum-access': noUnsafeEnumAccess } };
+"""
+_ESLINT_TYPED_RULE = """import { ESLintUtils } from '@typescript-eslint/utils';
+export default {
+  meta: { type: 'problem', schema: [] },
+  create(context) {
+    const checker = ESLintUtils.getParserServices(context).program.getTypeChecker();
+    return { MemberExpression(node) { void checker; void node; } };
+  },
+};
+"""
+
+
+def _init_repo(root: Path, origin: str | None = _REPO,
+               eslint_config: str = _ESLINT_CONFIG_TYPE_AWARE) -> None:
     """A one-commit git checkout carrying just the workflows the fixture corpus
     was recorded against. Committer identity travels via env vars (not global
     git config), so this works on a bare runner with no configured identity.
@@ -444,6 +580,16 @@ def _init_repo(root: Path, origin: str | None = _REPO) -> None:
     (root / ".github" / "workflows" / "chained.yml").write_text(_WF3_YAML, encoding="utf-8")
     (root / ".github" / "workflows" / "checks.yml").write_text(_WF4_YAML, encoding="utf-8")
     (root / ".github" / "workflows" / "gates.yml").write_text(_WF5_YAML, encoding="utf-8")
+    (root / ".github" / "workflows" / "lint.yml").write_text(_WF6_YAML, encoding="utf-8")
+    (root / "package.json").write_text(_PACKAGE_JSON, encoding="utf-8")
+    (root / "eslint.config.mjs").write_text(eslint_config, encoding="utf-8")
+    (root / "eslint-rules").mkdir()
+    (root / "eslint-rules" / "index.mjs").write_text(_ESLINT_RULES_INDEX, encoding="utf-8")
+    (root / "eslint-rules" / "no-unsafe-enum-access.mjs").write_text(
+        _ESLINT_TYPED_RULE, encoding="utf-8")
+    (root / "packages" / "web").mkdir(parents=True)
+    (root / "packages" / "web" / "eslint.config.mjs").write_text(
+        _ESLINT_CONFIG_WEB_UNRESOLVED, encoding="utf-8")
     env = {**os.environ,
            "GIT_AUTHOR_NAME": "ci-speedup-test", "GIT_AUTHOR_EMAIL": "test@example.com",
            "GIT_COMMITTER_NAME": "ci-speedup-test", "GIT_COMMITTER_EMAIL": "test@example.com"}
@@ -460,7 +606,8 @@ def _init_repo(root: Path, origin: str | None = _REPO) -> None:
         subprocess.run(["git", "remote", "add", "origin",
                         f"https://github.com/{origin}.git"],
                        cwd=root, check=True, env=env)
-    subprocess.run(["git", "add", ".github"], cwd=root, check=True, env=env)
+    subprocess.run(["git", "add", ".github", "package.json", "eslint.config.mjs",
+                    "eslint-rules", "packages"], cwd=root, check=True, env=env)
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True, env=env)
 
 
@@ -484,7 +631,7 @@ def _monthly_volume_endpoints_bracket() -> list[str]:
     for off in range(-1, 31):
         since = ((now + _dt.timedelta(seconds=off)) - _dt.timedelta(days=30)
                  ).strftime("%Y-%m-%dT%H:%M:%SZ")
-        for wf_id in (_WF_ID, _WF2_ID, _WF3_ID, _WF4_ID, _WF5_ID):
+        for wf_id in (_WF_ID, _WF2_ID, _WF3_ID, _WF4_ID, _WF5_ID, _WF6_ID):
             out.append(f"repos/{_REPO}/actions/workflows/{wf_id}/runs"
                        f"?per_page=1&created=>={since}")
             out.append(f"repos/{_REPO}/actions/workflows/{wf_id}/runs"
@@ -578,6 +725,39 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
         f"{sorted(f for f in consumed if '_status_success' in f)}")
 
     data = json.loads(findings_path.read_text(encoding="utf-8"))
+
+    # OPT82 end to end: scan read the type-aware config off the checkout, and
+    # the collector joined it to `lint.yml`'s 93s lint job through two package
+    # scripts. The finding carries NO number and names every enumerable rule,
+    # the custom one included.
+    o82 = [f for f in data["findings"] if f.get("pattern") == "OPT82"]
+    assert len(o82) == 1, [f.get("workflow_file") for f in o82]
+    tal = o82[0]["type_aware_lint"]
+    assert o82[0]["workflow_file"] == ".github/workflows/lint.yml"
+    assert o82[0]["affected_jobs"] == ["eslint"]
+    assert not (o82[0].get("wall_clock_p50_s") or 0) > 0
+    assert not o82[0].get("runner_min_saving")
+    assert [r["rule"] for r in tal["rules"]] == [
+        "@typescript-eslint/no-floating-promises",
+        "@typescript-eslint/no-misused-promises",
+        "local/no-unsafe-enum-access"], tal["rules"]
+    assert tal["lint_command"] == "eslint . --cache --max-warnings 0", tal
+    assert tal["ceiling_basis"] == "lint_step" and tal["ceiling_s"] == 72.0, tal
+    assert tal["lint_job_p50_s"] == 93.0, tal
+    # No sampled workflow declares `merge_group`: the collector stamps that, so
+    # the prompt keeps the full type-aware pass a required PR check.
+    assert tal.get("merge_group_workflows") == [], tal
+    # `build-matrix.yml`'s 20s `lint (eslint)` resolves to ESLint too, and is the
+    # below-threshold VERDICT — counted, never held back.
+    assert (data.get("opt82_withheld_by_gate") or {}).get(
+        "lint_job_below_cost_threshold") == 1, data.get("opt82_withheld_by_gate")
+    # `lint.yml`'s `eslint-web` (75s, `packages/web`) is the HELD-BACK case: its
+    # config's type-aware setting is an expression, so it is listed by name.
+    assert data.get("opt82_withheld_candidates") == [
+        {"workflow_file": ".github/workflows/lint.yml", "job": "eslint-web",
+         "gate": "type_aware_setting_unresolvable"}], data.get("opt82_withheld_candidates")
+    assert (data.get("opt82_withheld_by_gate") or {}).get(
+        "type_aware_setting_unresolvable") == 1, data.get("opt82_withheld_by_gate")
 
     # OPT77 end to end. `build-matrix.yml` carries three plain same-runner lint checks
     # that each re-pay one 14s setup prefix before 6s of work, beside the 240s
@@ -1058,7 +1238,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # Which YAML source fed the detectors is a fact ABOUT the report, so it is stamped.
     # `--root` is a real checkout of the synthetic repo here, so every workflow is read
     # off disk and none over the API.
-    assert ds.get("workflow_yaml_source") == {"checkout": 5, "api": 0}, (
+    assert ds.get("workflow_yaml_source") == {"checkout": 6, "api": 0}, (
         f"workflow YAML provenance not stamped as expected: {ds.get('workflow_yaml_source')!r}")
 
     render = subprocess.run(
@@ -1084,6 +1264,27 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
         "verify_report rejected the offline-replayed report:\n"
         f"{verify.stdout}\n{verify.stderr}")
 
+    # OPT82 reaches the READER as its own card: the ledger requirement, the
+    # SIZING ceiling, the benchmark, and never "disable" about rules.
+    _o82_card = re.search(r"<summary><strong>OPT82 - .*?</details>", report, re.S)
+    assert _o82_card, "the OPT82 finding did not reach the rendered report"
+    _card = _o82_card.group(0)
+    assert "uncredited, benchmark first" in _card
+    assert "LEDGER (required before shipping)" in _card
+    assert "SIZING: uncredited." in _card and "measured 72s at p50" in _card, _card
+    assert "projectService:false" in _card
+    assert "local/no-unsafe-enum-access" in _card
+    assert not re.search(r"\bdisabl\w*\b[^.\n]{0,60}\brules?\b", _card, re.I)
+    assert "no merge queue" in " ".join(_card.split()), _card
+    # ...and the held-back lint job reaches the reader as the shared row: the
+    # job by name and the plain reason, never the gate code.
+    held82 = [ln for ln in report.splitlines()
+              if ln.startswith("| type-aware lint: held back |")]
+    assert len(held82) == 1, held82
+    assert "eslint-web" in held82[0], held82[0]
+    assert ("the ESLint config sets type-aware parsing from a value only known "
+            "when it runs") in held82[0], held82[0]
+    assert "type_aware_setting_unresolvable" not in report
     # OPT80's tail line reaches the reader AT the pole it sits on, once, beside
     # the pole's merge-wait figure — and nowhere a p50 number lives. The verifier
     # above re-derived its numbers from the per-run durations and the proofs.
@@ -1112,7 +1313,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # The tail is never summed into a total: the replay corpus's runner-minute
     # total and its sample size are pinned to the exact figures, so a tail that
     # leaks into the credited minutes (or the sample count) moves a number here.
-    assert "| **Runs analyzed** | 29 runs / 157 jobs across 5 workflows |" in report, (
+    assert "| **Runs analyzed** | 32 runs / 163 jobs across 6 workflows |" in report, (
         _head)
     assert ("423 min/mo of wall-clock-neutral runner minutes is recoverable "
             "(8 neutral findings; none can slow a merge)") in _head, _head
@@ -2478,3 +2679,141 @@ def test_local_workflow_read_survives_a_path_the_os_rejects(tmp_path):
     root = tmp_path / "repo"
     (root / ".github" / "workflows").mkdir(parents=True)
     assert cr._read_local_workflow(root, ".github/workflows/x\0.yml") is None
+
+
+
+def test_opt82_type_aware_off_withholds_end_to_end(tmp_path):
+    """The WITHHOLD half of OPT82, through the real pipeline: the same corpus
+    and lint job, but an ESLint config with no type-aware parsing. No finding,
+    the `type_aware_parsing_off` verdict counted and never listed (only the
+    separate `eslint-web` job, whose own config cannot be read offline, is held
+    back), and the report still verifies."""
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root, eslint_config=_ESLINT_CONFIG_SYNTAX_ONLY)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    env = _replay_env(_replay_dir(tmp_path))
+    run = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "run.py"),
+         "--root", str(repo_root), "--out", str(findings_path), "--repo", _REPO],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert run.returncode == 0, run.stderr
+    data = json.loads(findings_path.read_text(encoding="utf-8"))
+    assert not [f for f in data["findings"] if f.get("pattern") == "OPT82"]
+    gates = data.get("opt82_withheld_by_gate") or {}
+    assert gates.get("type_aware_parsing_off") == 1, gates
+    assert [c["job"] for c in data.get("opt82_withheld_candidates")] == ["eslint-web"]
+    cfg = data["type_aware_lint"]["configs"][0]
+    assert cfg["path"] == "eslint.config.mjs" and cfg["type_aware"] == "off", cfg
+    report = _render(_SCRIPTS, findings_path, report_path, env)
+    assert "OPT82" not in report
+    assert _verify(report_path, findings_path, env).returncode == 0
+
+
+def test_opt82_detector_crash_skips_and_discloses_through_collect(tmp_path, monkeypatch):
+    """CRASH TRIPWIRE (collect half), driven through the real collector: a bug in
+    the OPT82 detector must skip OPT82 for that workflow — named in the report as
+    a detector that did not run — and never take the data pass down. The detector
+    is replaced with one that raises; `collect_runs.main` runs in-process over the
+    replayed corpus, then the artifact is rendered and verified. Remove the
+    call-site guard and this test fails with the RuntimeError itself."""
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    env = _replay_env(fixtures)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    scanned = subprocess.run(
+        # The provenance run.py would stamp, so the verifier's provenance check
+        # sees what a real run records.
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO, "--skill-commit-sha", _run_py._git_short_sha(_SCRIPTS)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert scanned.returncode == 0, scanned.stderr
+    findings_path.write_text(scanned.stdout, encoding="utf-8")
+    assert json.loads(scanned.stdout)["type_aware_lint"]["configs"], (
+        "the corpus must reach the detector, or the crash below is never exercised")
+
+    calls: list[str] = []
+
+    def _boom(wf_path, *a, **k):
+        calls.append(wf_path)
+        raise RuntimeError("injected OPT82 detector failure")
+
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    monkeypatch.setattr(cr, "_detect_opt82_type_aware_lint", _boom)
+    rc = cr.main(["--in", str(findings_path), "--out", str(findings_path),
+                  "--root", str(repo_root), "--repo", _REPO])
+    assert rc == 0
+    assert ".github/workflows/lint.yml" in calls, calls
+
+    data = json.loads(findings_path.read_text(encoding="utf-8"))
+    assert not [f for f in data["findings"] if f.get("pattern") == "OPT82"]
+    skipped = data["data_sources"].get("detectors_skipped") or []
+    entry = next(e for e in skipped if e["workflow"] == ".github/workflows/lint.yml")
+    assert "OPT82" in entry["detectors"]
+    assert "type-aware lint check failed (RuntimeError)" in entry["reason"], entry
+
+    # The pass survived the crash: a detector dispatched after OPT82 still ran.
+    assert [f for f in data["findings"] if f.get("pattern") == "OPT77"]
+
+    report = _render(_SCRIPTS, findings_path, report_path, env)
+    line = next(ln for ln in report.splitlines()
+                if "`lint.yml`: OPT82 did not run." in ln)
+    assert "UNKNOWN, not clean" in line
+    # The run-list family's unmeasured quantities are not what a skipped lint
+    # check leaves unmeasured; the disclosure must not claim them.
+    assert "re-run waste" not in line and "schedule burn" not in line, line
+    ok = _verify(report_path, findings_path, env)
+    assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"
+
+
+def test_opt82_unparsable_workflow_yaml_is_disclosed_as_skipped(tmp_path, monkeypatch):
+    """A lint workflow whose YAML the collector can parse from NEITHER source
+    (the checkout nor the default branch's copy) leaves OPT82 nothing to read
+    its lint step from. That must reach the reader as "OPT82 did not run" for
+    that workflow, never as an absent finding that reads as clean.
+
+    scan.py drops a workflow it cannot parse from the audit altogether, so the
+    scan runs over the intact corpus; the local file and the replayed contents
+    API are then broken before `collect_runs.main` runs in-process."""
+    import base64
+    broken = "name: Lint\non:\n  push:\n jobs:\n\t- bad indent\n"
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    env = _replay_env(fixtures)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    scanned = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO, "--skill-commit-sha", _run_py._git_short_sha(_SCRIPTS)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert scanned.returncode == 0, scanned.stderr
+    findings_path.write_text(scanned.stdout, encoding="utf-8")
+
+    (repo_root / ".github" / "workflows" / "lint.yml").write_text(broken, encoding="utf-8")
+    (fixtures / "repos_synthetic_repo_contents_.github_workflows_lint.yml.json").write_text(
+        json.dumps({"encoding": "base64",
+                    "content": base64.b64encode(broken.encode()).decode()}),
+        encoding="utf-8")
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    rc = cr.main(["--in", str(findings_path), "--out", str(findings_path),
+                  "--root", str(repo_root), "--repo", _REPO])
+    assert rc == 0
+
+    data = json.loads(findings_path.read_text(encoding="utf-8"))
+    assert not [f for f in data["findings"] if f.get("pattern") == "OPT82"]
+    assert (data.get("opt82_withheld_by_gate") or {}).get("workflow_yaml_unparsed") == 1
+    skipped = data["data_sources"].get("detectors_skipped") or []
+    entry = next(e for e in skipped if e["workflow"] == ".github/workflows/lint.yml")
+    assert "OPT82" in entry["detectors"], entry
+    assert "could not be parsed" in entry["reason"], entry
+    report = _render(_SCRIPTS, findings_path, report_path, env)
+    line = next(ln for ln in report.splitlines()
+                if "`lint.yml`:" in ln and "did not run" in ln)
+    assert "OPT82" in line, line
+    ok = _verify(report_path, findings_path, env)
+    assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"

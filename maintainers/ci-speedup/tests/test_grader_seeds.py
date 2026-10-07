@@ -38,7 +38,7 @@ def test_every_check_is_classified():
 
 def test_classification_counts_match_spec():
     counts = Counter(gs.TRIAGE_ALLOWLIST.values())
-    assert counts[gs.AUTO_SEED] == 66   # +1 (OPT79 pole cache, below); +1 (OPT80 slowest job without a tail line: its sentence pairs with its stamped withheld reason, and no merge wait is claimed without a tail axis);
+    assert counts[gs.AUTO_SEED] == 67   # +1 (OPT82 type-aware lint, below); +1 (OPT79 pole cache, below); +1 (OPT80 slowest job without a tail line: its sentence pairs with its stamped withheld reason, and no merge wait is claimed without a tail axis);
     # +1 (pre-flip audit: static-only banner matches CI shape — no dormant-repo hedge at a live no-PR-gating repo, no "no run timing" beside priced timed runs);
     # +2 (issue #114: crowned cluster lever is on the merge-gating spine — no off-spine crown; issue #115: headline leads with the observed wall when the chain sum diverges from the makespan);
     # +1 (issue #106: every 🤖 gap-fill evidence line is verbatim from the captured job log — the injection-residual grounding backstop);
@@ -68,6 +68,8 @@ def test_classification_counts_match_spec():
     # +1 (#1: aggregation-gate poles tell the upstream story, never an optimize-this prompt).
     # +1 (OPT79 (PR #106): uncredited net-negative caches re-derive from their own runs — a numberless
     #     row carries measurements no total contradicts, so it needs its own re-derivation).
+    # +1 (OPT82: type-aware lint findings carry no number, name >= 1 rule, and their card carries
+    #     the ledger sentence and never says "disable" about rules).
     # +1 (OPT79 pole cache: OPT79 findings re-derive by their arm, and the pole cache's
     #     merge-wait figure renders — a capped wall-clock number with no Tier-2 certificate).
     # +1 (OPT80 tail line: every "one run in N spends about X s longer on checkout" sentence re-derives from the stamped

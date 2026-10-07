@@ -10936,6 +10936,8 @@ _FEEDS_BY_KEY = {
         "Why a group of small jobs sharing one setup produced no finding",
     "opt79_withheld_candidates": _CACHE_FEEDS,
     "opt80_withheld_candidates": _CHECKOUT_FEEDS,
+    "opt82_withheld_candidates":
+        "Why a slow lint job with type-aware ESLint produced no finding",
 }
 
 
@@ -11186,3 +11188,38 @@ def test_withheld_setup_and_checkout_rows_fail_on_an_unreadable_findings_file(tm
     p.write_text("{not json", encoding="utf-8")
     chk = vr._withheld_disclosure_violation("## 🗄️ Data sources\n", p)
     assert chk[0] and "unreadable" in chk[0], chk
+
+
+def test_opt82_held_back_lint_job_must_be_disclosed_and_rederived(tmp_path):
+    """OPT82 (type-aware lint) joins the shared held-back registry: a slow lint
+    job whose ESLint config could not be decided must reach the Data sources
+    table, re-derived in full, or "could not tell" reads as clean."""
+    vr = _load_verify_report()
+    key = "opt82_withheld_candidates"
+    gate = "type_aware_setting_unresolvable"
+    path = tmp_path / "findings.json"
+    path.write_text(json.dumps({key: [
+        {"workflow_file": ".github/workflows/lint.yml", "job": "eslint",
+         "gate": gate}]}), encoding="utf-8")
+    silent = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    chk = vr.check_coverage_disclosed(silent, path)
+    assert not chk.ok and "held back" in chk.detail, chk
+    feeds = "Why a slow lint job with type-aware ESLint produced no finding"
+    cell = (f"1 candidate lint job(s) held back (eslint): "
+            f"{vr._VR_OPT82_WITHHOLD_PHRASES[gate]}.")
+    honest = silent + f"| type-aware lint: held back | {cell} | {feeds} |\n"
+    assert vr.check_coverage_disclosed(honest, path).ok
+    # the raw gate code is never a reason
+    coded = silent + (f"| type-aware lint: held back | 1 candidate lint job(s) held "
+                      f"back (eslint): {gate}. | {feeds} |\n")
+    assert not vr.check_coverage_disclosed(coded, path).ok
+
+
+def test_opt82_check_is_registered_and_skips_cleanly_without_findings():
+    vr = _load_verify_report()
+    names = {c.name for c in vr.run_checks("# x\n", None, None, skill_repo=None)}
+    assert ("type-aware lint findings are uncredited, name their rules and carry "
+            "the ledger") in names
+    bp = _load_blocking_path()
+    assert vr._VR_OPT82_LEDGER_SENTENCE == bp._OPT82_LEDGER_SENTENCE
+    assert vr._VR_OPT82_WITHHOLD_PHRASES == bp._OPT82_WITHHOLD_PHRASES

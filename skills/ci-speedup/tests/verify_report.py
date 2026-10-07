@@ -893,6 +893,7 @@ def _detectors_skipped_violation(report: str,
 # coupling test pins all three equal).
 _VR_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _VR_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
+_VR_OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
 # (doc key, Data sources row label, counted noun, "Used for" cell) — as
 # blocking_path renders them. ONE re-derivation serves all three patterns.
 # The fourth field is carried HERE, not just pinned: it is the column that tells
@@ -925,6 +926,10 @@ _VR_WITHHELD_ROWS = (
     _VrWithheldRow(_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back",
                    "candidate checkout(s)",
                    "Why a checkout with a slow tail produced no finding",
+                   "job"),
+    _VrWithheldRow(_VR_OPT82_WITHHELD_DOC_KEY, "type-aware lint: held back",
+                   "candidate lint job(s)",
+                   "Why a slow lint job with type-aware ESLint produced no finding",
                    "job"),
 )
 _VR_WITHHELD_SHAPE_BY_KEY = {r.doc_key: r.entry_shape for r in _VR_WITHHELD_ROWS}
@@ -986,10 +991,61 @@ _VR_OPT80_WITHHOLD_PHRASES = {
         "there were more slow runs than the audit reads logs for, and the rest "
         "were never read",
 }
+_VR_OPT82_WITHHOLD_PHRASES = {
+    "lint_step_uses_runtime_expression":
+        "the lint step's command or working directory is only known when the "
+        "workflow runs",
+    "lint_delegated_to_unread_tool":
+        "the lint step hands lint to another tool or action (such as turbo, nx, "
+        "lerna, make, Next.js or a node script) whose own configuration this "
+        "audit did not read",
+    "package_json_unreadable":
+        "the package.json that defines the lint step's script could not be read",
+    "type_aware_lint_scan_missing":
+        "the repository scan behind this report carries no ESLint config read, "
+        "so whether lint builds the type graph is unknown",
+    "eslint_config_walk_incomplete":
+        "the audit stopped reading the repository's folders before the lint "
+        "job's directory, so a nearer ESLint config may have been missed",
+    "eslint_config_lookup_ambiguous":
+        "a nested ESLint config below the lint job's directory may apply, "
+        "depending on the ESLint version",
+    "shared_config_unfollowable":
+        "the lint config extends a package this audit did not read",
+    "config_import_unfollowed":
+        "the ESLint config imports a local file this audit could not read",
+    "type_aware_rule_without_parser_setting":
+        "the ESLint config turns on a type-aware rule but sets type-aware "
+        "parsing somewhere this audit did not read",
+    "lint_script_unresolvable":
+        "the lint step runs a package script this audit could not trace to the "
+        "command it runs",
+    "lint_step_cd_untraceable":
+        "the lint step changes directory (`cd`) to a place this audit could not "
+        "follow, so which ESLint config applies is unknown",
+    "type_aware_config_reader_failed":
+        "the ESLint config reader failed, so whether lint builds the type graph "
+        "is unknown",
+    "no_eslint_config_found":
+        "no ESLint config was found for the lint job's directory, so whether it "
+        "builds the type graph is unknown",
+    "eslint_config_unreadable":
+        "an ESLint config the lint job uses could not be read",
+    "type_aware_setting_unresolvable":
+        "the ESLint config sets type-aware parsing from a value only known when "
+        "it runs",
+    "rule_setting_unresolvable":
+        "the ESLint config sets a type-aware rule from a value only known when "
+        "it runs",
+    "no_enumerable_type_aware_rule":
+        "type-aware parsing is on, but no type-aware rule could be named from "
+        "the config",
+}
 _VR_WITHHELD_PHRASES_BY_KEY = {
     _VR_OPT77_WITHHELD_DOC_KEY: _VR_OPT77_WITHHOLD_PHRASES,
     _VR_OPT79_WITHHELD_DOC_KEY: _VR_OPT79_HELD_BACK_REASONS,
     _VR_OPT80_WITHHELD_DOC_KEY: _VR_OPT80_WITHHOLD_PHRASES,
+    _VR_OPT82_WITHHELD_DOC_KEY: _VR_OPT82_WITHHOLD_PHRASES,
 }
 _VR_WITHHELD_JOBS_SHOWN = 5
 # Prefixed to the reason when more than one gate held candidates back, and the
@@ -8270,6 +8326,181 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
     return out
 
 
+# OPT82's ledger sentence — this verifier's own copy of
+# `blocking_path._OPT82_LEDGER_SENTENCE` (a test pins the two equal).
+_VR_OPT82_LEDGER_SENTENCE = (
+    "LEDGER (required before shipping): write a rule-by-rule ledger with one row "
+    "for every rule the current config enables (from `eslint --print-config`), "
+    "saying where it runs after the change - the fast pass, the type-aware pass, "
+    "or REPLACED BY <rule> with one line on what the replacement no longer checks "
+    "and why that is acceptable here - and add a test asserting that every "
+    "original rule is enabled in one of the two configs or has a REPLACED row. "
+    "A rule with no row is a coverage loss and blocks the change. A REPLACED row "
+    "is a deliberate, reviewed reduction in what lint checks: list each one for "
+    "a human to approve before merging.")
+# Every way of saying "switch the rules off", within one sentence, in either
+# order. The fix this pattern hands off must never be "turn the type-aware
+# rules off". Matched against `_vr_opt82_instruction_text`, which joins line
+# wraps and drops the measured evidence and the commands (a CI lint command
+# such as `eslint --report-unused-disable-directives --rule 'x: off'` is data,
+# and the benchmark's timing-only `--rule '<rule>: off'` run is labelled).
+_VR_OPT82_TARGET = r"(?:rules?|type[- ]aware|type[- ]checked|type information)"
+_VR_OPT82_DISABLE_RULES_RE = re.compile(
+    r"\bdisabl\w*\b[^.]{0,60}\brules?\b|\brules?\b[^.]{0,60}\bdisabl\w*"
+    r"|\bdisable-?type-?checked\b"
+    rf"|\bturn\w*\s+off\b[^.]{{0,60}}\b{_VR_OPT82_TARGET}"
+    rf"|\bturn\w*\b[^.]{{0,60}}\b{_VR_OPT82_TARGET}\b[^.]{{0,40}}\boff\b"
+    r"|\b(?:drop|dropp\w*|remov\w*|delet\w*)\b[^.]{0,60}\brules?\b"
+    r"|\brules?\b[^.]{0,40}\b(?:dropped|removed|deleted)\b"
+    r"|\brules?\b[^.]{0,60}\bto\s+['\"`]?off\b"
+    r"|\bset\w*\b[^.]{0,60}\b['\"`]?off['\"`]?(?=[\s.,;:)]|$)"
+    r"|:\s*['\"]off['\"]"
+    rf"|\bmov\w*\b[^.]{{0,60}}\b{_VR_OPT82_TARGET}\b[^.]{{0,60}}"
+    r"\b(?:non-?blocking|optional|advisory|informational|allowed to fail)\b",
+    re.I)
+# A command-line flag, with a quoted or `=` value: `--rule 'x: off'`,
+# `--report-unused-disable-directives`, `--parser-options project:false`.
+_VR_OPT82_FLAG_RE = re.compile(
+    r"--[\w-]+(?:=\S+|\s+'[^']*'|\s+\"[^\"]*\")?")
+
+
+def _vr_opt82_instruction_text(card: str) -> str:
+    """The card's instruction text: the measured evidence (`**Evidence:**` and
+    the prompt's `What ci-speedup saw:` line) and the benchmark command lines
+    are dropped, command flags are stripped, and line wraps are joined so a
+    phrase split across two lines still matches."""
+    kept: list[str] = []
+    for ln in card.splitlines():
+        s = ln.strip()
+        if s.startswith(("**Evidence:**", "What ci-speedup saw:")):
+            continue
+        if s.startswith("(") and "eslint" in s:      # a benchmark command line
+            continue
+        kept.append(_VR_OPT82_FLAG_RE.sub(" ", s))
+    return " ".join(" ".join(kept).split())
+_VR_OPT82_CARD_RE = re.compile(
+    r"<summary><strong>OPT82 - .*?</details>", re.S)
+# A saving claim on an OPT82 card: a runner-minute figure, "saves", a
+# `**Saving:**` label, or a "~N" duration. The card's only legitimate figures
+# are the labelled SIZING ceiling, the evidence's measured p50s ("measures 95s
+# at p50", no tilde) and the benchmark commands, so the SIZING line and the
+# benchmark lines are exempt and nothing else is.
+_VR_OPT82_SAVING_CLAIM_RE = re.compile(
+    r"runner-min|\bsaves\b|\*\*Saving:\*\*|^\s*Saving:|"
+    r"~\s*\d+(?:\.\d+)?\s*(?:s|m|min|h)\b", re.I | re.M)
+_VR_OPT82_SUMMARY_METRIC = "uncredited, benchmark first"
+
+
+def _opt82_card_where_keys(card: str) -> set[tuple[str, str]]:
+    """`{(wf_base, job_base)}` an OPT82 card's `**Where:**` line names."""
+    mw = re.search(r"^\*\*Where:\*\*\s*(.+)$", card, re.MULTILINE)
+    return {_appendix_wf_job_key(wf, job)
+            for wf, job in (_APPENDIX_WHERE_PAIR_RE.findall(mw.group(1)) if mw else [])}
+
+
+def check_opt82_type_aware_lint_uncredited(report: str,
+                                           findings_path: Path | None) -> Check:
+    """Every OPT82 finding is UNCREDITED and names its rules, and every OPT82
+    card carries the ledger requirement and never says "disable" about rules.
+
+    OPT82 claims a config fact and a measured ceiling, never a saving: a
+    `wall_clock_p50_s > 0` or a runner-minute saving on it is a number the
+    detector cannot have measured. "Type-aware is on" without a named rule is
+    a shape claim. And the card is the hand-off: without the ledger sentence
+    the agent is free to buy speed by dropping rules."""
+    name = "type-aware lint findings are uncredited, name their rules and carry the ledger"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    found = [f for f in _as_list(_as_dict(data).get("findings"))
+             if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT82"]
+    cards = _VR_OPT82_CARD_RE.findall(report)
+    if not found:
+        if cards:
+            return Check(name, False, "the report renders an OPT82 card, but the run "
+                         "recorded no OPT82 finding")
+        return Check(name, True, "no type-aware lint findings")
+    bad: list[str] = []
+    # The scan's own ESLint read. A finding stamped from a read that crashed,
+    # or from a walk that stopped before it could show the lint directory was
+    # visited, rests on ground the scan never saw.
+    block = _as_dict(_as_dict(data).get("type_aware_lint"))
+    for f in found:
+        fid = str(f.get("id") or "?")
+        if block.get("error"):
+            bad.append(f"{fid}: OPT82 finding stamped from an ESLint read that failed "
+                       f"({block.get('error')})")
+        if block.get("truncated") is True:
+            wd = str(_as_dict(f.get("type_aware_lint")).get("working_directory") or "")
+            dirs = [str(_as_dict(c).get("dir") or "") for c in _as_list(block.get("configs"))]
+            dirs += [u.rsplit("/", 1)[0] if "/" in u else ""
+                     for u in _as_list(block.get("unreadable")) if isinstance(u, str)]
+            seen = (any(d == "" for d in dirs) if wd == "" else
+                    any(d == wd or d.startswith(wd + "/") for d in dirs))
+            if not seen:
+                bad.append(f"{fid}: OPT82 finding stamped from a truncated config walk "
+                           f"that never reached its lint directory {wd or '.'!r}")
+        wc = _num(f.get("wall_clock_p50_s"))
+        if wc is not None and wc > 0:
+            bad.append(f"{fid}: OPT82 carries wall_clock_p50_s {wc} - it is uncredited "
+                       "by design and must carry no saving")
+        if f.get("runner_min_saving"):
+            bad.append(f"{fid}: OPT82 carries runner_min_saving "
+                       f"{f.get('runner_min_saving')!r} - it is uncredited by design")
+        tal = _as_dict(f.get("type_aware_lint"))
+        if tal.get("kind") != "opt82_type_aware_lint":
+            bad.append(f"{fid}: missing its opt82_type_aware_lint evidence block")
+        rules = [r for r in _as_list(tal.get("rules"))
+                 if str(_as_dict(r).get("rule") or "").strip()]
+        if not rules:
+            bad.append(f"{fid}: OPT82 names no type-aware rule - 'type-aware is on' "
+                       "without a named rule is a shape claim, not a finding")
+        # The card is the only place the rules, benchmark and ledger reach the
+        # reader, and the engine renders one per lint job (never folded, never
+        # capped), so each finding must have its OWN card naming every rule.
+        wfb = Path(str(f.get("workflow_file") or "")).name
+        jobs = _as_list(f.get("affected_jobs")) or ([f.get("job")] if f.get("job") else [])
+        fkeys = {(wfb, _matrix_base(_cmp_name(str(j)))) for j in jobs}
+        own = [c for c in cards if fkeys & _opt82_card_where_keys(c)]
+        if not own:
+            bad.append(f"{fid}: OPT82 finding on `{wfb}` "
+                       f"({', '.join(str(j) for j in jobs)}) has no card of its own - "
+                       "its rules, benchmark and ledger never reach the reader")
+        else:
+            body = _strip_render_artifacts(own[0])
+            missing = [str(_as_dict(r).get("rule")).strip() for r in rules
+                       if f"- {str(_as_dict(r).get('rule')).strip()}" not in body]
+            if missing:
+                bad.append(f"{fid}: its OPT82 card does not list rule(s) "
+                           + ", ".join(missing))
+    for card in cards:
+        if _strip_render_artifacts(_VR_OPT82_LEDGER_SENTENCE) not in \
+                _strip_render_artifacts(card):
+            bad.append("an OPT82 card is missing the ledger requirement sentence")
+        m = _VR_OPT82_DISABLE_RULES_RE.search(_vr_opt82_instruction_text(card))
+        if m:
+            bad.append(f"an OPT82 card says {m.group(0)!r} - the hand-off must never "
+                       "disable the type-aware rules or switch them off")
+        ms = re.search(r"</strong>\s*·\s*(.*?)\s*·", card)
+        if not ms or ms.group(1).strip() != _VR_OPT82_SUMMARY_METRIC:
+            bad.append(f"an OPT82 card's summary metric is "
+                       f"{(ms.group(1).strip() if ms else '(missing)')!r}, not "
+                       f"{_VR_OPT82_SUMMARY_METRIC!r} - it claims no saving")
+        for line in card.splitlines():
+            st = line.strip()
+            if st.startswith("SIZING:") or st.startswith("(time ") or \
+                    st.startswith("(cd "):
+                continue
+            mc = _VR_OPT82_SAVING_CLAIM_RE.search(line)
+            if mc:
+                bad.append(f"an OPT82 card claims a saving ({mc.group(0)!r} in "
+                           f"{st[:80]!r}) - it is uncredited by design")
+                break
+    return Check(name, not bad,
+                 f"{len(found)} OPT82 finding(s), {len(cards)} card(s) checked"
+                 if not bad else "; ".join(bad[:6]))
+
+
 def check_tier2_measured_basis(report: str, findings_path: Path | None) -> Check:
     name = "Tier-2 R-rows use measured sizing basis"
     early, data = _tier2_skip_or_data(findings_path, name, report)
@@ -9121,6 +9352,12 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
         pat = str(f.get("pattern", ""))
         if pat not in block_keys:
             continue   # this pattern isn't rendered in the appendix
+        if pat == "OPT82":
+            # Numberless BY DESIGN, not valueless: the engine's `_on_pole_job`
+            # keeps an OPT82 card on a drilled-pole lint job (its card is the only
+            # place the rules and ledger reach the reader), so it is no
+            # contradiction of the pole headline. Mirror that exemption.
+            continue
         rm = f.get("runner_min_saving")
         rm = float(rm) if isinstance(rm, (int, float)) else 0.0
         wc = f.get("wall_clock_p50_s")
@@ -11038,6 +11275,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_neutrality_derived(report, findings_path, report_path),
         check_tier2_measured_basis(report, findings_path),
         check_opt79_uncredited_rows_rederived(report, findings_path),
+        check_opt82_type_aware_lint_uncredited(report, findings_path),
         check_opt79_findings_rederived(report, findings_path),
         check_tier2_total_deoverlapped(report, findings_path, report_path),
         check_no_timing_endpoint_citation(report, report_path),

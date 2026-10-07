@@ -13,6 +13,48 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-07** — **The report now flags a slow lint job whose type-aware ESLint
+  rules force it to build the whole type graph.** When a lint job takes a minute
+  or more (or is the slowest job in its workflow) and the repository's ESLint
+  configuration turns on type-aware parsing with at least one rule that needs
+  types, the report names that job, the config lines that switch it on and each
+  type-aware rule it found, including custom rules that ask for type information
+  (OPT82). Lint in that setup can cost close to a type-check, and the
+  finding says so. It carries no saving number: nothing in the sampled runs says
+  how much of lint is the type graph, so the card shows the lint step's measured
+  time (or the whole job's, labelled as such, when the step was not measured
+  separately) as a ceiling, not a forecast, and tells the agent to benchmark
+  first, after listing every type-aware rule actually in effect. Each slow lint
+  job gets its own card with its own rules and benchmark, and the card is never
+  cut from a long "Also noticed" list. The
+  suggested change never turns rules off. The agent is asked to rewrite a rule
+  only where a syntax-only form catches the same defects, or to split lint into a
+  fast pass and a type-aware pass limited to exactly those rules. The split may
+  narrow the pull-request pass to the changed files only when the repository has
+  a merge queue that still runs the full type-aware pass before code merges (the
+  report checks for one); without a merge queue the full type-aware pass stays a
+  required pull-request check, and the type-aware pass never relies on ESLint's
+  `--cache`, which does not track types across files. The agent must prove with a
+  rule-by-rule ledger that every rule still runs somewhere or was replaced on
+  purpose, each replacement saying what it no longer checks for a human to
+  approve. A
+  lint job the audit could not decide on is named in a new `type-aware lint: held
+  back` row of the Data sources table, with the reason in plain English, rather
+  than passing as "nothing found": a script it could not trace or a package.json
+  it could not read, lint handed to turbo, nx, lerna, make, Next.js, a node script
+  or an action, a step whose command is only known when the workflow runs, a
+  config it could not read or a folder walk that stopped before the lint job's
+  directory, a setting only known at run time, a shared config package or a
+  local file the config pulls in that it could not read, a nested config whose
+  effect depends on the ESLint version, or no rule it could name. Local base
+  configs a config imports or extends are read as part of it, the legacy
+  `.eslintrc` cascade up to `root: true` is followed, a flat config beside an old
+  `.eslintrc` is the one that counts, and a rule switched off later, or a custom
+  rule matched only by its file name, is never named. The rule list is the new
+  `references/type-aware-lint-rules.tsv`, taken from typescript-eslint's `main`
+  branch on 2026-10-07 (UTC), with its source in the file header. Lint run through
+  a generic marketplace action that does not say ESLint is not detected.
+
 - **2026-10-06** — **A checkout that stalls on the slowest job of a pull-request
   workflow now says how often, and how much, it costs the runs it hits.** The
   checkout-stall pattern (OPT80) used to end that case with "measured but not
