@@ -388,16 +388,17 @@ jobs:
 
 # OPT81 A1 (wf id 1006). A runner-comparison matrix: one job, `bench`, with a
 # STATIC display name, run on a standard GitHub-hosted label and on a larger
-# GitHub-hosted size in every one of eight pull-request runs — the same steps on
+# GitHub-hosted size in every one of eight push runs (the workflow is `on: push`) — the same steps on
 # both, 150s at the median on `ubuntu-latest` and 90s on `ubuntu-latest-8-cores`.
 # The repo's own history therefore already holds both distributions, eight
 # successful samples each, which is exactly what A1 compares; nothing is
 # projected.
 #
 # Blast radius, chosen deliberately: `bench` is this workflow's long pole and
-# runs on the slower class as often as the faster one, so A1 pre-credits the 60s
-# gap — but at 150s it sits below `CI / test` (197s) and the 220s chain, so the
-# cross-workflow cascade floors the credit to 0 and the headline, the chain and
+# runs on both labels 8/8, so `ubuntu-latest` is the dominant label only via the
+# alphabetical tie-break in `max(sorted(...))`; A1 pre-credits the 60s gap, but
+# `bound_developer_facing` floors the credit to 0 because the workflow is
+# push-only (not a pull-request wait), not the cross-workflow cascade. The headline, the chain and
 # every pole assertion above stay exactly as they were. Making it the pole would
 # have rewritten the headline to prove nothing A1's own unit tests do not.
 # `timeout-minutes` is declared so OPT57 plans no extra event-scoped run list.

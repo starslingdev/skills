@@ -40,7 +40,7 @@ unversioned and updates by reinstall from `main`.
   runners, which can only be benchmarked after the StarSling GitHub app is
   installed. Because the publisher of this skill sells CI runners, every OPT81
   card, agent prompt and the catalog entry carry one disclosure line, no OPT81
-  text names another runner vendor (a test enforces it), and no OPT81 text
+  text names a vendor from a deny-list of common runner vendor names or a domain other than github.com or starsling.dev (a test enforces both), and no OPT81 text
   prices a runner; the retired OPT66 is not revived. The report's self-check
   re-derives every A1 number from the stamped per-run rows and fails an advisory
   that carries any number. No new gh call. The catalog is now 79 patterns.

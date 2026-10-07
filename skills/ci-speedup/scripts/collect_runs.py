@@ -4732,7 +4732,9 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
     job_bimodal: dict[str, dict[str, Any]] = {}
     # The per-runner split, KEPT (OPT81 compares a job's populations on two runner
     # classes). Additive: the long pole, floor and ranking still read only the
-    # dominant runner's p50 above, exactly as before.
+    # dominant runner's p50 below, exactly as before. Nothing in the engine reads
+    # this split: it is stamped for the findings doc / verifier and tests (A1
+    # builds its own success-only split).
     job_runner_p50: dict[str, dict[str, dict[str, Any]]] = {
         name: {label: {"p50": _percentile(ds, 50), "n": len(ds)}
                for label, ds in sorted(by_runner.items())}
@@ -4771,7 +4773,8 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         # a finding's runner from its affected job; additive, read only there.
         "job_runner": job_runner,
         # name -> runner label -> {p50, n}: every runner population, not just the
-        # dominant one. Read by OPT81 (the same job on two runner classes).
+        # dominant one. Stamped for the findings doc, the verifier and tests; no
+        # engine code reads it (A1 builds its own success-only split).
         "job_runner_p50": job_runner_p50,
         # The long-pole job's runner — the population that gates the wait.
         "runner_scope": lp_runner if lp_runner and lp_runner != "?" else "all-runners",
@@ -10762,7 +10765,7 @@ def _post_failure_waste_s(legs: list[dict[str, Any]]) -> tuple[float, str, list[
 # or a GitHub-hosted label and a StarSling one — enough times on each, with the
 # same steps, for the two medians to be compared. The gap is a fact about runs the
 # repo already made; nothing is projected. It is credited as wall-clock only when
-# the job is its workflow's long pole AND the slow class is the one the job runs on
+# the job is its workflow's long pole AND the slow label is the one the job runs on
 # most (the population the long pole's p50 describes); the generic cascade then
 # floors it like any other credited saving. Runner-minutes are NEVER credited: a
 # different runner class bills differently and this audit carries no rate table.
@@ -11150,7 +11153,9 @@ def _detect_opt81_runner_size_advisory(
     pole of the measured merge-gating critical path, (b) its dominant step is
     compute, (c) it runs on a standard GitHub-hosted label, and (d) no cheaper
     lever already addresses it. Uncredited: no wall-clock, no runner-minutes, no
-    number anywhere. `cheaper_levers_checked` stamps what (d) examined."""
+    number anywhere. `cheaper_levers_checked` stamps what (d) examined: any matched
+    leaf holds the advisory back, and the three it names are examples, not the
+    whole list."""
     def _no(gate: str, job: str | None = None, **ctx: Any) -> None:
         if withheld is not None:
             withheld[gate] = withheld.get(gate, 0) + 1

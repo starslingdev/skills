@@ -3244,7 +3244,7 @@ title_template: "The Same Job Is Measurably Faster on Another Runner"
 
 1. Runner labels are classified by a small named table in `collect_runs.py` (`_OPT81_RUNNER_CLASSES`): **standard GitHub-hosted** (`ubuntu-latest`, `ubuntu-24.04`, `windows-2022`, `macos-14`, …), **larger GitHub-hosted size** (`ubuntu-latest-8-cores`, `ubuntu-24.04-16core`, `macos-14-xlarge`, …), and **StarSling** (`starsling-ubuntu-24.04`, …). A label the table cannot classify by size (a self-hosted or custom label) is excluded from the comparison and counted, never guessed.
 2. At least **8 successful samples on each** of the two labels (`_OPT81_MIN_SAMPLES_PER_LABEL`). Exactly two labels qualify; three or more is held back.
-3. The two labels are **different classes on the same operating system**. Two labels of the same class (`ubuntu-22.04` vs `ubuntu-24.04`) are an operating-system comparison, not this lever, and are held back.
+3. The two labels are **different classes on the same operating system**. Two labels of the same class (`ubuntu-22.04` vs `ubuntu-24.04`) are an operating-system comparison, not this lever, and are held back. The "same operating system" rule does not control CPU architecture (`macos-14` is arm, `macos-14-large` is Intel), so a gap across those can partly be an architecture difference.
 4. Both populations **executed the same step list** (step names in order, skipped steps excluded). A job that skips steps on one label is not the same job, and is held back.
 5. `p50(slow) − p50(fast) ≥ max(30s, 25% of p50(slow))` (`_OPT81_MIN_GAP_S`, `_OPT81_MIN_GAP_FRAC`).
 
@@ -3254,7 +3254,7 @@ Credit: the measured gap counts as wall-clock **only** when the job is its workf
 
 1. The job is the long pole of a pull-request workflow and a pole of the measured merge-gating critical path.
 2. Its dominant step is compute (`build` or `test` by the shared step classifier), and the step's name does not say it waits, sleeps, polls or moves bytes.
-3. It runs on a **standard** GitHub-hosted label. A job already on a larger or custom label is left alone.
+3. It runs on a **standard** GitHub-hosted label. A job already on a larger label is left alone; a custom or self-hosted label is listed on the held-back row.
 4. **No cheaper lever already addresses it**: the structural router produced no scope, de-trigger, cache-warm or shared-step lever (OPT70, OPT71, OPT72, OPT73) for it; no finding credits wall-clock on it at half its median or more (the structural router's own suppression rule); no sharding finding (OPT24); no net-negative cache of 30s or more (OPT79); and, at render time, no log-level leaf matched the drilled pole. A matched leaf turns the advisory into a one-line "held back" note. The generic decompose lever (OPT75) does not suppress it, and renders first.
 5. A1 data does not exist for the job (A1 supersedes).
 
@@ -3960,10 +3960,10 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80 and OPT81 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77, OPT79, and OPT80 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
-catalog. On real repos almost every hygiene hit moves **~0 developer
+catalog. OPT81 is the exception: it is derived from run history, and its A2 advisory is risk MEDIUM. On real repos almost every hygiene hit moves **~0 developer
 wall-clock** — the true bottleneck is usually a check that is *working as
 intended* but is simply the slowest thing on the critical path, with no catalog
 match.

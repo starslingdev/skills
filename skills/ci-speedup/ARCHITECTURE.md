@@ -1870,7 +1870,9 @@ from, precisely because the fix removes the signature before stamping.) Red-proo
 p50 the long pole is ranked on). It now also keeps the whole split,
 `job_runner_p50: name → runner label → {p50, n}`. The ranking, the long pole and
 the floor still read only the dominant population, so nothing that consumed
-`crit` before changes; the split is read by OPT81.
+`crit` before changes. Nothing in the engine reads the split either: it is
+stamped for the findings doc, the verifier and tests (A1 builds its own
+success-only split).
 
 **A1 (measured).** `_detect_opt81_measured_runner_gap` runs in the per-workflow
 detector loop beside OPT77/79/80. It groups each job's successful occurrences by
@@ -1879,7 +1881,7 @@ runner label, classifies each label through the named table
 StarSling; anything else, including a generic self-hosted label, is
 unclassifiable and dropped from the comparison with a count), and compares two
 labels only when: each has at least `_OPT81_MIN_SAMPLES_PER_LABEL` (8) samples,
-they are different classes on the same operating system, every compared run
+they are different classes on the same operating system (the rule does not control CPU architecture: `macos-14` is arm and `macos-14-large` is Intel, so a gap there can partly be an architecture difference), every compared run
 executed the same step list (a 16-hex digest of the executed step names, skipped
 steps excluded), and the median gap reaches `max(30s, 25% of the slower median)`.
 The credit is the measured gap only when the job is its workflow's long pole AND
@@ -1919,8 +1921,8 @@ same one-line disclosure (`_OPT81_DISCLOSURE`, three equal copies pinned by a
 test). The advisory names exactly two options, a larger GitHub-hosted size or
 StarSling runners, and says plainly that the StarSling benchmark can only run
 after the StarSling GitHub app is installed; a string-level test fails if any
-OPT81 text names another runner vendor or a domain other than github.com /
-starsling.dev.
+OPT81 text contains a name from a deny-list of common runner vendors (22 names) or
+a domain other than github.com / starsling.dev.
 
 ## 6. Admission gate & advisory routing
 

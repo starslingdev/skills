@@ -7136,6 +7136,7 @@ def _opt81_card(f: dict[str, Any], catalog_url: str,
     if half == "A1":
         out += [f"**🏎️ OPT81 · {title}** - measured from runs this repository already "
                 "made", ""]
+        # `n` counts SUCCESSFUL runs only (A1 compares success-only populations).
         s, q = fr.get("slow") or {}, fr.get("fast") or {}
         out += [f"- **Measured:** `{job}` ran {s.get('n')} time(s) on "
                 f"`{_flatten_cell(str(s.get('label')))}` at p50 "
