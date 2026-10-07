@@ -519,3 +519,148 @@ def test_the_cost_bar_is_inclusive_at_sixty_seconds(tmp_path, lint_s, fires):
     assert bool(out) is fires, (out, withheld)
     if not fires:
         assert withheld.get("lint_job_below_cost_threshold") == 1
+
+
+# --- which config a lint run uses ---------------------------------------------
+#
+# ESLint reads the config passed with `-c`/`--config`; otherwise the nearest
+# config at or above the directory the lint runs in, and that directory comes
+# from the step, the job's `defaults.run` or the workflow's `defaults.run`. A
+# legacy `.eslintrc` below the directory cascades into the run too. Each test
+# puts a type-aware config where ESLint WOULD look and a syntax-only one where
+# a wrong read would land, so picking the wrong file flips the outcome.
+
+_FLAT_TA_ON = ("export default [{ languageOptions: { parserOptions: "
+               "{ projectService: true } }, rules: "
+               "{ '@typescript-eslint/no-floating-promises': 'error' } }];\n")
+_FLAT_TA_OFF = "export default [{ rules: { 'no-console': 'warn' } }];\n"
+
+
+def _cfg_block(tmp_path: Path, files: dict[str, str]) -> dict:
+    root = tmp_path / "cfgrepo"
+    for rel, text in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+    return scan._read_type_aware_lint(root)
+
+
+def _lint_wf(run: str, step_wd: "str | None" = None, job_wd: "str | None" = None,
+             wf_wd: "str | None" = None) -> dict:
+    wf = json.loads(json.dumps(_WF))
+    step = wf["jobs"]["eslint"]["steps"][2]
+    step["run"] = run
+    if step_wd is not None:
+        step["working-directory"] = step_wd
+    if job_wd is not None:
+        wf["jobs"]["eslint"]["defaults"] = {"run": {"working-directory": job_wd}}
+    if wf_wd is not None:
+        wf["defaults"] = {"run": {"working-directory": wf_wd}}
+    return wf
+
+
+def _fired_configs(out: list[dict]) -> set[str]:
+    assert len(out) == 1, out
+    return {r["config"] for r in out[0]["type_aware_lint"]["rules"]}
+
+
+@pytest.mark.parametrize("run", [
+    "npx eslint -c ../lint/eslint.config.mjs .",
+    "npx eslint --config=../lint/eslint.config.mjs .",
+])
+def test_an_explicit_config_flag_is_the_config_the_run_uses(tmp_path, run):
+    """`-c`/`--config` (resolved against the step's working directory) beats
+    the nearest config: the root config here is syntax-only, the named one is
+    type-aware."""
+    block = _cfg_block(tmp_path, {"eslint.config.mjs": _FLAT_TA_OFF,
+                                  "lint/eslint.config.mjs": _FLAT_TA_ON})
+    out, withheld, _c = _detect(block, wf=_lint_wf(run, step_wd="app"))
+    assert _fired_configs(out) == {"lint/eslint.config.mjs"}, withheld
+
+
+@pytest.mark.parametrize("step_wd,norm_wd", [("./packages/web", "packages/web"),
+                                             ("packages/web/src/", "packages/web/src")])
+def test_the_nearest_config_at_or_above_the_working_dir_wins(tmp_path, step_wd, norm_wd):
+    """A package's own flat config, not the repo root's, governs a lint run
+    inside that package (from the package dir or a dir under it). The
+    benchmark commands `cd` into the same directory the lint ran in."""
+    block = _cfg_block(tmp_path, {"eslint.config.mjs": _FLAT_TA_OFF,
+                                  "packages/web/eslint.config.mjs": _FLAT_TA_ON})
+    out, withheld, _c = _detect(block, wf=_lint_wf("npx eslint .", step_wd=step_wd))
+    assert _fired_configs(out) == {"packages/web/eslint.config.mjs"}, withheld
+    for cmd in out[0]["type_aware_lint"]["benchmark_commands"].values():
+        assert cmd.startswith(f"(cd {norm_wd} && time npx eslint"), cmd
+
+
+@pytest.mark.parametrize("level", ["job_wd", "wf_wd"])
+def test_defaults_run_working_directory_places_the_lint_run(tmp_path, level):
+    """A step with no `working-directory` of its own runs in the job's
+    `defaults.run.working-directory`, else the workflow's."""
+    block = _cfg_block(tmp_path, {"eslint.config.mjs": _FLAT_TA_OFF,
+                                  "packages/web/eslint.config.mjs": _FLAT_TA_ON})
+    out, withheld, _c = _detect(
+        block, wf=_lint_wf("npx eslint .", **{level: "packages/web"}))
+    assert _fired_configs(out) == {"packages/web/eslint.config.mjs"}, withheld
+
+
+def test_a_working_directory_expression_is_held_back_not_read_as_root(tmp_path):
+    """`working-directory: ${{ matrix.pkg }}` cannot be evaluated offline, so
+    which config applies is unknown: held back and named, never answered from
+    the root config (which here would fire)."""
+    block = _cfg_block(tmp_path, {"eslint.config.mjs": _FLAT_TA_ON})
+    out, _w, cands = _detect(
+        block, wf=_lint_wf("npx eslint .", step_wd="${{ matrix.pkg }}"))
+    assert out == [], out
+    assert len(cands) == 1 and cands[0]["job"] == "eslint", cands
+    assert cands[0]["gate"] in cr._OPT82_HELD_BACK_GATES, cands
+
+
+def test_a_legacy_eslintrc_below_the_working_dir_cascades_into_the_run(tmp_path):
+    """Legacy `.eslintrc` files cascade: a lint run from the repo root also
+    applies a nested package's `.eslintrc.json`, so its type-aware setting
+    counts even though the root one is syntax-only."""
+    off = json.dumps({"root": True, "rules": {"no-console": "warn"}})
+    on = json.dumps({"parser": "@typescript-eslint/parser",
+                     "parserOptions": {"project": "./tsconfig.json"},
+                     "rules": {"@typescript-eslint/no-floating-promises": "error"}})
+    block = _cfg_block(tmp_path, {".eslintrc.json": off,
+                                  "packages/web/.eslintrc.json": on})
+    out, withheld, _c = _detect(block, wf=_lint_wf("npx eslint ."))
+    assert _fired_configs(out) == {"packages/web/.eslintrc.json"}, withheld
+
+
+# --- which commands run ESLint --------------------------------------------------
+
+@pytest.mark.parametrize("cmd,scripts,lint_command", [
+    ("npx eslint . --max-warnings 0", {}, "eslint . --max-warnings 0"),
+    ("npx --no-install eslint src", {}, "eslint src"),
+    ("pnpm exec eslint .", {}, "eslint ."),
+    ("./node_modules/.bin/eslint src --ext .ts", {}, "eslint src --ext .ts"),
+    # a package script that runs ESLint is followed whatever it is called
+    ("pnpm run check", {"check": "eslint ."}, "eslint ."),
+    ("pnpm check", {"check": "eslint ."}, "eslint ."),
+    # four hops of scripts, inside the depth cap
+    ("npm run lint", {"lint": "npm run lint:1", "lint:1": "npm run lint:2",
+                      "lint:2": "npm run lint:3", "lint:3": "eslint ."}, "eslint ."),
+])
+def test_eslint_invocation_forms_resolve_to_eslint(cmd, scripts, lint_command):
+    res = cr._opt82_resolve_lint(cmd, "", {"": scripts})
+    assert res is not None and res[0] == "eslint" and res[1] == lint_command, res
+
+
+@pytest.mark.parametrize("cmd,scripts", [
+    # a `${{ }}` expression in a lint-named segment: what runs is unknown
+    ("npm run ${{ matrix.lint-script }}", {"lint": "eslint ."}),
+    # `pnpm lint` naming a script this read cannot see
+    ("pnpm lint", {}),
+    # a script that calls itself: the depth cap stops it
+    ("npm run lint", {"lint": "npm run lint"}),
+    # scoped to ANOTHER package: never answered from the root's own `lint`
+    ("pnpm --filter web lint", {"lint": "eslint ."}),
+    ("pnpm --filter=web run lint", {"lint": "eslint ."}),
+    ("npm run lint --workspace=packages/web", {"lint": "eslint ."}),
+    ("npm run lint --workspace packages/web", {"lint": "eslint ."}),
+])
+def test_untraceable_lint_commands_are_unresolvable_never_eslint(cmd, scripts):
+    res = cr._opt82_resolve_lint(cmd, "", {"": scripts})
+    assert res is not None and res[0] == "unresolvable", res
