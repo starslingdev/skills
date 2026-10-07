@@ -5322,6 +5322,21 @@ def _tier2_below_long_pole_problems(f: dict, data: dict) -> list[str]:
     return problems
 
 
+def _vr_opt79_below_long_pole_off_merge_gate(f: dict, data: dict) -> bool:
+    """True when a `below_long_pole` finding's jobs provably add nothing to the
+    merge wait through a `needs:` chain: the workflow gates no pull request
+    (stamped False), or `workflow_job_graph` resolves every job and proves it
+    in no chain with the long pole. Unresolved or chained -> False."""
+    if _as_dict(f.get("cache_net_negative")).get("workflow_gates_pull_requests") is False:
+        return True
+    wf = str(f.get("workflow_file") or "")
+    lp_job = str(_as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+                 .get("long_pole_job") or "")
+    jobs = [str(j) for j in _as_list(f.get("affected_jobs")) if str(j)]
+    return bool(jobs) and all(
+        _vr_opt79_needs_chain(data, wf, j, lp_job) is False for j in jobs)
+
+
 def _rounding_waste_min(durations: list[float]) -> int:
     vals = [float(d) for d in durations if isinstance(d, (int, float)) and d > 0]
     if len(vals) < 2:
@@ -7110,7 +7125,10 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
         cert_claims = [c for c in _as_list(manifest.get("claims"))
                        if isinstance(c, dict) and c.get("kind") == "tier2_neutrality_line"]
     claim_by_subject = {str(c.get("subject")): c for c in cert_claims}
-    rendered_poles = {_cmp_name(check) for _wf, check, _body in _pole_header_sections(report)}
+    # Keyed by workflow FILE as well as job name: a `test` job in nightly.yml is
+    # not the `test` pole rendered for ci.yml.
+    rendered_poles = {(_wf_base(wf), _cmp_name(check))
+                      for wf, check, _body in _pole_header_sections(report)}
     bad: list[str] = []
     for idx, f in enumerate(ranked, 1):
         fid = _tier2_id(f, idx)
@@ -7148,8 +7166,22 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
             str(f.get("pattern") or "") == "OPT77"
             and _as_dict(f.get("setup_consolidation")).get(
                 "group_is_the_whole_workflow") is True)
-        if (rendered_poles and jobs & rendered_poles
-                and proof != "checkout_tail_excess" and not whole_workflow_opt77):
+        # OPT79's `below_long_pole` is the THIRD exemption, and only where the
+        # proxy's inference has been replaced: a drilled secondary pole that
+        # `workflow_job_graph` PROVES is in no `needs:` chain with its workflow's
+        # long pole (the arm below re-derives that it is strictly shorter than
+        # it), or one on a workflow no pull request waits on (no merge wait; the
+        # arm pairs that stamp with the sampled events). With no graph, or the
+        # chain present on a pull-request workflow, the proxy still applies.
+        unchained_below_long_pole = (
+            proof == _VR_OPT79_PROOF_BELOW_LONG_POLE
+            and str(f.get("pattern") or "") == "OPT79"
+            and _vr_opt79_below_long_pole_off_merge_gate(f, data))
+        wf_key = _wf_base(str(f.get("workflow_file") or ""))
+        on_pole = bool({(wf_key, j) for j in jobs} & rendered_poles)
+        if (rendered_poles and on_pole
+                and proof != "checkout_tail_excess" and not whole_workflow_opt77
+                and not unchained_below_long_pole):
             bad.append(f"{fid}: affected job is also rendered as a Long pole")
         if proof == "below_cluster_floor":
             got = _num(cert.get("margin_s"))
@@ -7213,10 +7245,10 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                 # poles the rule itself reads.
                 if rendered_poles:
                     claimed = _as_dict(f.get("checkout_stall")).get("on_critical_path")
-                    if bool(claimed) != bool(jobs & rendered_poles):
+                    if bool(claimed) != on_pole:
                         bad.append(
                             f"{fid}: on_critical_path={claimed!r} but the job is "
-                            f"{'' if jobs & rendered_poles else 'not '}rendered as "
+                            f"{'' if on_pole else 'not '}rendered as "
                             "a Long pole")
         elif proof == "non_pr_event":
             if not _non_pr_event_corroborated(f, data):

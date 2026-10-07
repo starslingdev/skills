@@ -9548,6 +9548,49 @@ def test_tier2_rejects_a_below_long_pole_cache_on_a_rendered_secondary_pole(
     assert not chk.ok and "Long pole" in str(chk.detail), chk
 
 
+def test_tier2_below_long_pole_on_an_unchained_secondary_pole_skips_the_pole_proxy(
+        tmp_path: Path):
+    """A drilled SECONDARY pole (rendered as Long pole N, but not the workflow's
+    slowest job) that `workflow_job_graph` proves is in no `needs:` chain with
+    the long pole is exactly the job the collector credits `below_long_pole`:
+    the arm re-derives what the proxy stands in for, so the proxy must not red
+    it. With the chain present (on a pull-request workflow) it still fails. And
+    the proxy compares poles per WORKFLOW: a same-named job in another workflow
+    is not the rendered pole."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    f = doc["findings"][0]
+    f["pattern"] = "OPT79"
+    f.pop("checkout_stall", None)
+    f["affected_jobs"] = ["build"]
+    f["tier2_neutrality"] = {"proof": "below_long_pole", "margin_s": 10.0}
+    wf = str(f["workflow_file"])
+    doc.setdefault("per_workflow_timing", {}).setdefault(wf, {})["long_pole_job"] = "test"
+    doc["workflow_job_graph"] = {wf: {"build": {"name": "build", "needs": []},
+                                      "test": {"name": "test", "needs": []}}}
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "Long pole" in report and "build" in report, report[:400]
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert "also rendered as a Long pole" not in str(chk.detail), chk
+    # chained to the long pole on a pull-request workflow: the proxy still fails
+    doc["workflow_job_graph"][wf]["test"]["needs"] = ["build"]
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "also rendered as a Long pole" in str(chk.detail), chk
+    # no graph: the relation is unproved, so the proxy applies
+    doc.pop("workflow_job_graph")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "also rendered as a Long pole" in str(chk.detail), chk
+    # a same-named job in ANOTHER workflow is not the rendered pole
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    other = copy.deepcopy(doc)
+    other["findings"][0]["workflow_file"] = ".github/workflows/nightly.yml"
+    findings_path.write_text(json.dumps(other, indent=2) + "\n", encoding="utf-8")
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert "also rendered as a Long pole" not in str(chk.detail), chk
+
+
 def test_tier2_still_rejects_a_non_checkout_stall_finding_on_the_rendered_long_pole(
         tmp_path: Path):
     """The RULE the OPT80 exemption is carved out of, pinned. Without this, the
