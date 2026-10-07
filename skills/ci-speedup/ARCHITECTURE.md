@@ -1258,6 +1258,12 @@ need: per config `shared_configs`, `unresolved_imports`, `sets_off` and `root`
 (for the legacy upward cascade), plus `truncated`,
 `package_scripts_unreadable` and `eslint_versions`. Local base configs the
 config imports or extends by relative path are followed and read as part of it.
+Config selection picks ESLint's mode first (a flat config at or above the lint
+directory means every `.eslintrc*` is ignored unless `ESLINT_USE_FLAT_CONFIG=false`).
+A custom rule is named only when the plugin's rule mapping and the config's
+`plugins` binding prove which typed source it is; settings whose final value
+depends on config order (on and unscoped off, an unscoped `disableTypeChecked`)
+are unresolved, never named.
 
 The finding it emits has `wall_clock_p50_s = 0`, no runner-minute saving, sizing
 basis `uncredited` and no `_SIZING` entry; `_RM_DOOR_OVERRIDES["OPT82"]` marks it

@@ -3656,7 +3656,11 @@ the read could not see is a held-back "could not tell", never a verdict):
    workflow with more than one job (a one-job workflow's only job is trivially
    its own pole and does not waive the bar).
 3. Type-aware parsing is ON in the ESLint config that applies to the lint job's
-   directory: the file passed with `-c` / `--config`; otherwise the nearest
+   directory: the file passed with `-c` / `--config`; otherwise ESLint's mode
+   first: a flat `eslint.config.*` at or above the directory means flat mode,
+   where every `.eslintrc*` is ignored (unless `ESLINT_USE_FLAT_CONFIG=false`
+   inline or in the step, job or workflow env) and the nearest flat config
+   applies; with no flat config there, the legacy mode uses the nearest
    config at or above that directory, plus nested legacy `.eslintrc*` configs
    below it, and, when the nearest is a legacy `.eslintrc*`, its ancestors up to
    the first with `root: true` (a nearer config that sets `project: false` /
@@ -3705,8 +3709,15 @@ that the config turns on, either explicitly (an entry not set to `off` / `0`) or
 through a type-checked preset and not explicitly off, PLUS custom rules. A custom
 rule counts when its key `<namespace>/<name>` is turned on in the config and its
 source file, reached by following the config's RELATIVE imports (bounded), calls
-`getParserServices` or `getTypeChecker`. A rule whose severity is only known at
-run time (a computed value) is never named; when that leaves no rule to name,
+`getParserServices` or `getTypeChecker`, AND the match is proven: the plugin
+module that imports the source maps `<name>` to it, and the config binds that
+module under `<namespace>` (`plugins: { local }`). A file-name match alone is
+unproven and the rule is unresolved, never named. Settings are read without
+their order, so a rule that is on and also turned off for every file, or a
+type-checked preset with an unscoped `disableTypeChecked`, is unresolved; an
+`off` or `disableTypeChecked` scoped by `files:` leaves the rest on. A rule
+whose severity is only known at run time (a computed value) is never named;
+when that leaves no rule to name,
 the candidate is held back (`rule_setting_unresolvable`) rather than read as
 having none. The prompt's `eslint --print-config` ledger covers any rule the
 static read could not name.

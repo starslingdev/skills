@@ -1404,12 +1404,15 @@ def test_a_rule_severity_only_known_at_run_time_is_held_back(tmp_path, value):
     _held(withheld, cands, "rule_setting_unresolvable")
 
 
-@pytest.mark.parametrize("text", [b"[]\n", b"\xff\xfe{\x00}\x00"])
-def test_an_unreadable_config_is_held_back_never_dropped(tmp_path, text):
+@pytest.mark.parametrize("name,text", [(".eslintrc.json", b"[]\n"),
+                                       (".eslintrc.json", b"\xff\xfe{\x00}\x00"),
+                                       ("eslint.config.mjs", b"\xff\xfe{\x00}\x00")])
+def test_an_unreadable_config_is_held_back_never_dropped(tmp_path, name, text):
     root = _tree(tmp_path)
-    (root / ".eslintrc.json").write_bytes(text)
+    (root / "eslint.config.mjs").unlink()    # the unreadable file is the only config
+    (root / name).write_bytes(text)
     block = scan._read_type_aware_lint(root)
-    assert ".eslintrc.json" in block["unreadable"]
+    assert name in block["unreadable"]
     out, withheld, cands = _detect(block)
     assert out == []
     _held(withheld, cands, "eslint_config_unreadable")
@@ -1436,6 +1439,115 @@ def test_one_on_and_one_unresolved_applicable_config_is_held_back(tmp_path):
                                    wf=_wf_with("npx eslint .", wd="packages/a"))
     assert out == []
     _held(withheld, cands, "type_aware_setting_unresolvable")
+
+
+# --- order and scope of settings (greptile) -------------------------------------
+
+_PO_ON = "{ languageOptions: { parserOptions: { projectService: true } } }"
+
+
+def test_a_typed_rule_turned_off_later_unscoped_is_never_named(tmp_path):
+    cfg = ("export default [" + _PO_ON + ",\n"
+           "  { rules: { '@typescript-eslint/no-floating-promises': 'error' } },\n"
+           "  { rules: { '@typescript-eslint/no-floating-promises': 'off' } }];\n")
+    block = scan._read_type_aware_lint(_tree(tmp_path, cfg))
+    assert "@typescript-eslint/no-floating-promises" not in block["configs"][0]["rules"]
+    out, withheld, cands = _detect(block)
+    assert out == []
+    _held(withheld, cands, "rule_setting_unresolvable")
+
+
+def test_a_typed_rule_turned_off_only_for_some_files_is_still_named(tmp_path):
+    cfg = ("export default [" + _PO_ON + ",\n"
+           "  { rules: { '@typescript-eslint/no-floating-promises': 'error' } },\n"
+           "  { files: ['**/*.test.ts'],\n"
+           "    rules: { '@typescript-eslint/no-floating-promises': 'off' } }];\n")
+    out, withheld, _c = _detect(scan._read_type_aware_lint(_tree(tmp_path, cfg)))
+    assert len(out) == 1, withheld
+
+
+def test_an_unscoped_disable_type_checked_after_a_preset_is_held_back(tmp_path):
+    cfg = ("import tseslint from 'typescript-eslint';\n"
+           "export default tseslint.config(...tseslint.configs.recommendedTypeChecked,\n"
+           "  tseslint.configs.disableTypeChecked);\n")
+    block = scan._read_type_aware_lint(_tree(tmp_path, cfg))
+    assert block["configs"][0]["type_aware"] == "unresolved", block["configs"][0]
+    out, withheld, cands = _detect(block)
+    assert out == []
+    _held(withheld, cands, "type_aware_setting_unresolvable")
+
+
+def test_disable_type_checked_scoped_to_js_files_keeps_the_preset_on(tmp_path):
+    cfg = ("import tseslint from 'typescript-eslint';\n"
+           "export default tseslint.config(...tseslint.configs.recommendedTypeChecked,\n"
+           "  { files: ['**/*.js'], extends: [tseslint.configs.disableTypeChecked] });\n")
+    block = scan._read_type_aware_lint(_tree(tmp_path, cfg))
+    assert block["configs"][0]["type_aware"] == "on"
+    assert len(_detect(block)[0]) == 1
+
+
+def _rc_typed() -> str:
+    return json.dumps({"parserOptions": {"project": True},
+                       "rules": {"@typescript-eslint/no-floating-promises": "error"}})
+
+
+def test_a_flat_config_wins_over_an_old_eslintrc_beside_it(tmp_path):
+    root = _tree(tmp_path, _OFF_CONFIG)
+    (root / ".eslintrc.json").write_text(_rc_typed(), encoding="utf-8")
+    out, withheld, cands = _detect(scan._read_type_aware_lint(root))
+    assert out == [] and withheld.get("type_aware_parsing_off") == 1 and cands == []
+
+
+def test_eslint_use_flat_config_false_selects_the_eslintrc(tmp_path):
+    root = _tree(tmp_path, _OFF_CONFIG)
+    (root / ".eslintrc.json").write_text(_rc_typed(), encoding="utf-8")
+    wf = _wf_with("ESLINT_USE_FLAT_CONFIG=false npx eslint .")
+    out, withheld, _c = _detect(scan._read_type_aware_lint(root), wf=wf)
+    assert len(out) == 1, withheld
+    wf = _wf_with("npx eslint .")
+    wf["jobs"]["eslint"]["env"] = {"ESLINT_USE_FLAT_CONFIG": "false"}
+    out, withheld, _c = _detect(scan._read_type_aware_lint(root), wf=wf)
+    assert len(out) == 1, withheld
+
+
+def test_a_flat_config_above_beats_a_nearer_eslintrc(tmp_path):
+    root = _tree(tmp_path)                               # flat config, type-aware ON
+    (root / "packages" / "a").mkdir(parents=True)
+    (root / "packages" / "a" / ".eslintrc.json").write_text(
+        json.dumps({"rules": {"no-console": "warn"}}), encoding="utf-8")
+    out, withheld, _c = _detect(scan._read_type_aware_lint(root),
+                                wf=_wf_with("npx eslint .", wd="packages/a"))
+    assert len(out) == 1, withheld
+
+
+def _custom_rule_tree(tmp_path, index: str, rule_key: str):
+    cfg = ("import local from './eslint-rules/index.mjs';\n"
+           "export default [" + _PO_ON + ",\n"
+           "  { plugins: { local }, rules: { '" + rule_key + "': 'error' } }];\n")
+    root = _tree(tmp_path, cfg)
+    (root / "eslint-rules" / "index.mjs").write_text(index, encoding="utf-8")
+    return scan._read_type_aware_lint(root)
+
+
+def test_a_custom_rule_in_another_namespace_is_not_proven_typed(tmp_path):
+    block = _custom_rule_tree(tmp_path, _RULES_INDEX, "other/no-unsafe-enum-access")
+    c = block["configs"][0]
+    assert c["custom_rules"] == [] and c["rule_unresolved"] == [
+        "other/no-unsafe-enum-access"], c
+    out, withheld, cands = _detect(block)
+    assert out == []
+    _held(withheld, cands, "rule_setting_unresolvable")
+
+
+def test_a_custom_rule_is_matched_by_the_plugins_key_not_the_file_name(tmp_path):
+    index = ("import noUnsafeEnumAccess from './no-unsafe-enum-access.mjs';\n"
+             "export default { rules: { 'enum-safety': noUnsafeEnumAccess } };\n")
+    by_file = _custom_rule_tree(tmp_path / "a", index, "local/no-unsafe-enum-access")
+    assert by_file["configs"][0]["custom_rules"] == []
+    assert by_file["configs"][0]["rule_unresolved"] == ["local/no-unsafe-enum-access"]
+    by_key = _custom_rule_tree(tmp_path / "b", index, "local/enum-safety")
+    assert [c["rule"] for c in by_key["configs"][0]["custom_rules"]] == ["local/enum-safety"]
+    assert len(_detect(by_key)[0]) == 1
 
 
 def test_verifier_fails_a_finding_stamped_from_a_walk_that_missed_its_dir(tmp_path):
