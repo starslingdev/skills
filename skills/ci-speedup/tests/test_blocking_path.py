@@ -3242,6 +3242,69 @@ def test_opt80_off_pole_tail_renders_in_its_own_section_in_both_renders():
             assert "(#checkout-stall-tails)" in toc, toc
 
 
+def _opt79_and_opt80_off_pole_doc():
+    """A job that is not a drilled pole carrying both an OPT80 tail and an
+    OPT79 pole cache, so the tails section renders right before the cache
+    block."""
+    doc = _opt80_tail_render_doc(pole_check="other", pole_job="other")
+    tail = doc["findings"][0]
+    job = tail["affected_jobs"][0]
+    f79 = _opt79_pole_finding(workflow_file=tail["workflow_file"],
+                              affected_jobs=[job], wall_clock_p50_s=45.0, id="f79")
+    f79["cache_net_negative"]["job"] = job
+    doc["findings"].append(f79)
+    return doc
+
+
+def test_opt79_off_pole_block_has_its_own_section_never_the_tails_one():
+    """The off-pole cache block opens with a bold line, not a heading, so after
+    the checkout stall tails section it read as part of that section. It gets
+    its own `##` heading and anchor (and a Contents entry on the full render),
+    in both renders."""
+    marker = "<!-- opt79-pole:f79 -->"
+    for static in (False, True):
+        doc = _opt79_and_opt80_off_pole_doc()
+        if static:
+            doc["pr_critical_path"]["poles"] = []
+        md = bp.render(doc)
+        assert md.count(marker) == 1 and "<!-- opt80-tail:" in md, static
+        assert md.index("<!-- opt80-tail:") < md.index(marker), static
+        enclosing = re.findall(r"(?m)^## .*$", md[:md.index(marker)])[-1]
+        assert enclosing == "## 💾 Measured cache cost on a workflow's slowest job", \
+            (static, enclosing)
+        assert f'<a id="{bp._OPT79_OFF_POLE_ANCHOR}"></a>' in md, static
+        if not static:
+            toc = md.split("## 📋 Contents", 1)[1].split("\n## ", 1)[0]
+            assert f"(#{bp._OPT79_OFF_POLE_ANCHOR})" in toc, toc
+            order = [toc.find(s) for s in ("(#checkout-stall-tails)",
+                                           f"(#{bp._OPT79_OFF_POLE_ANCHOR})",
+                                           "**🧹 Also noticed**") if s in toc]
+            assert len(order) >= 2 and order == sorted(order), toc
+
+
+def test_verifier_fails_an_opt79_off_pole_block_under_another_section():
+    """The placement rule: a pole-cache marker sits under a long pole or under
+    its own off-pole heading - never under the tails heading or a runner-minute
+    card."""
+    vr = _load_vr()
+    f = _opt79_pole_finding()
+    own = "\n".join(bp._opt79_off_pole_block([f], "https://x/c.md"))
+    assert vr._VR_OPT79_OFF_POLE_HEADING in own.splitlines()   # one heading, two copies
+    at_pole = ("## 🟠 Long pole 1: `ci.yml` ▸ `build` - 5m 00s\n\n"
+               + "\n".join(bp._opt79_pole_block([f], "https://x/c.md")))
+    for good in (own, at_pole):
+        assert vr._opt79_pole_findings_rendered(good, [f]) == [], good
+    # The pre-fix shape: the bold-line block straight after another section.
+    for heading in ("## ⏱️ Checkout stall tails on a workflow's slowest job",
+                    "## 💸 Runner-minute reductions"):
+        bad = (f"{heading}\n\nsome body\n\n---\n\n"
+               "**💾 Measured cache cost on a workflow's slowest job** - text.\n\n"
+               + "\n".join(bp._opt79_pole_block([f], "https://x/c.md")))
+        problems = vr._opt79_pole_findings_rendered(bad, [f])
+        assert any("not under a long pole or its own" in p for p in problems), \
+            (heading, problems)
+
+
 def test_opt80_off_pole_tail_heading_matches_the_render():
     """The off-pole block says "not one of the long poles drilled above" only
     when poles were drilled; a static-only report drills none."""

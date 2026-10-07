@@ -1587,7 +1587,9 @@ JOB". The appendix
 never takes a pole-cache finding: one whose job is not a drilled pole (the
 slowest job of another pull-request workflow, or any in a static-only report)
 renders the same marked block in `_opt79_off_pole_block`, a short section
-before "Also noticed", so every pole-cache finding renders exactly once with
+with its own `##` heading, anchor and Contents entry before "Also noticed"
+(never under the checkout stall tails heading before it; the verifier fails a
+marker placed under any heading but a long pole or its own), so every pole-cache finding renders exactly once with
 its merge-wait seconds and the appendix never summarizes it as "no bill
 saving". Unless a leaf, structural or data-driven match fired first, and only
 when the figure clears the 30s long-pole floor, the pole's waterfall and agent

@@ -6030,10 +6030,27 @@ def _opt79_off_pole_block(findings: list[dict[str, Any]], catalog_url: str,
             and str(f.get("id") or "") not in done]
     if not rest:
         return []
-    return ["**💾 Measured cache cost on a workflow's slowest job** - each job below "
-            "is the slowest job of a workflow that runs on pull requests; its cache "
-            "cost is not shown at a long pole above.", "",
+    # Its own `##` section (anchor `_OPT79_OFF_POLE_ANCHOR`): opened by a bold
+    # line instead, the block read as the tail of whatever section precedes it -
+    # the checkout stall tails section, or the last Runner saving card.
+    return [f'<a id="{_OPT79_OFF_POLE_ANCHOR}"></a>', "",
+            "## 💾 Measured cache cost on a workflow's slowest job", "",
+            "Each job below is the slowest job of a workflow that runs on pull "
+            "requests; its cache cost is not shown at a long pole above.", "",
             *_opt79_pole_block(rest, catalog_url)]
+
+
+_OPT79_OFF_POLE_ANCHOR = "cache-cost-off-poles"
+
+
+def _opt79_off_pole_toc_entry(count: int) -> list[str]:
+    """The Contents pointer to the off-pole cache section ([] for none)."""
+    if count <= 0:
+        return []
+    plural = "s" if count != 1 else ""
+    return [f"**💾 Measured cache cost** - {count} job{plural} whose cache measured "
+            "slower on the runs where it hit than on the runs where it missed: "
+            f"[see below](#{_OPT79_OFF_POLE_ANCHOR}).", ""]
 
 
 def _opt79_uncredited_row_is_renderable(r: Any) -> bool:
@@ -10912,17 +10929,22 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         all_findings, catalog_url,
         set(re.findall(r"<!-- opt80-tail:([^ ]+) -->", "\n".join(out))))
     out += _tails_lines
+    _also_at = next((k for k, ln in enumerate(_toc_lines)
+                     if ln.startswith("**🧹 Also noticed**")), len(_toc_lines))
     if _tails_lines and _toc_lines:
         # The Contents is rendered before the poles decide which tails they
         # carry, so its pointer is spliced in now, ahead of the Also noticed one.
         _entry = _opt80_tails_toc_entry(
             sum(1 for ln in _tails_lines if ln.startswith("<!-- opt80-tail:")))
-        _also_at = next((k for k, ln in enumerate(_toc_lines)
-                         if ln.startswith("**🧹 Also noticed**")), len(_toc_lines))
         out[_toc_at + _also_at:_toc_at + _also_at] = _entry
+        _also_at += len(_entry)
     opt79_off_pole = _opt79_off_pole_block(all_findings, catalog_url, opt79_at_pole)
     if opt79_off_pole:
         out += ["---", "", *opt79_off_pole]
+        if _toc_lines:
+            # Same splice as the tails pointer, after it (the sections' order).
+            out[_toc_at + _also_at:_toc_at + _also_at] = _opt79_off_pole_toc_entry(
+                sum(1 for ln in opt79_off_pole if ln.startswith("<!-- opt79-pole:")))
     if also_lines:
         out += ["---", "", *also_lines]
     if shallow_note and not queue_lines and not also_lines:

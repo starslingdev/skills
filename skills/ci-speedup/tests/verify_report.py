@@ -6975,7 +6975,21 @@ def _opt79_pole_findings_rendered(report: str, poles: list[dict]) -> list[str]:
                            f"with its stamped hit rate: {want!r}")
         if "min/mo" in plain or "runner-min" in plain:
             out.append(f"{fid}: its block states runner-minutes it does not carry")
+        # Placement: the block sits under its long pole or under the off-pole
+        # section's own heading - never under the heading before it (the
+        # checkout stall tails, a Runner saving card), where it would read as
+        # part of that section. A fragment with no `##` heading is not placed.
+        heads = re.findall(r"(?m)^## .*$", report[:hits[0]])
+        if heads and not (re.search(r"Long pole \d+:", heads[-1])
+                          or heads[-1].strip() == _VR_OPT79_OFF_POLE_HEADING):
+            out.append(f"{fid}: its block is not under a long pole or its own "
+                       f"off-pole heading, but under {heads[-1].strip()!r}")
     return out
+
+
+# The off-pole cache section's heading - a copy of the one
+# `blocking_path._opt79_off_pole_block` renders (a test pins the two equal).
+_VR_OPT79_OFF_POLE_HEADING = "## 💾 Measured cache cost on a workflow's slowest job"
 
 
 def check_opt79_findings_rederived(report: str, findings_path: Path | None) -> Check:
