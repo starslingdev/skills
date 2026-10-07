@@ -650,6 +650,9 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert tal["lint_command"] == "eslint . --cache --max-warnings 0", tal
     assert tal["ceiling_basis"] == "lint_step" and tal["ceiling_s"] == 72.0, tal
     assert tal["lint_job_p50_s"] == 93.0, tal
+    # No sampled workflow declares `merge_group`: the collector stamps that, so
+    # the prompt keeps the full type-aware pass a required PR check.
+    assert tal.get("merge_group_workflows") == [], tal
     # `build-matrix.yml`'s 20s `lint (eslint)` resolves to ESLint too, and is the
     # below-threshold VERDICT — counted, never held back.
     assert (data.get("opt82_withheld_by_gate") or {}).get(
@@ -1056,6 +1059,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert "projectService:false" in _card
     assert "local/no-unsafe-enum-access" in _card
     assert not re.search(r"\bdisabl\w*\b[^.\n]{0,60}\brules?\b", _card, re.I)
+    assert "no merge queue" in " ".join(_card.split()), _card
     assert "type-aware lint: held back" not in report
 
     # The held-back candidate reaches the reader too, in plain English: the count,

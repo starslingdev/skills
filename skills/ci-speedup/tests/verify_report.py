@@ -6750,16 +6750,55 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
 # OPT82's ledger sentence — this verifier's own copy of
 # `blocking_path._OPT82_LEDGER_SENTENCE` (a test pins the two equal).
 _VR_OPT82_LEDGER_SENTENCE = (
-    "LEDGER (required before shipping): write a rule-by-rule ledger mapping every "
-    "rule the current config enables (from `eslint --print-config`) to the pass "
-    "that will run it after the change - the fast pass, the type-aware pass, or "
-    "both - and add a test asserting that the union of the two configs' enabled "
-    "rules equals the original set. A rule with no pass is a coverage loss and "
-    "blocks the change.")
-# "disable" applied to rules, in either order, within one sentence. The fix
-# this pattern hands off must never be "turn the type-aware rules off".
+    "LEDGER (required before shipping): write a rule-by-rule ledger with one row "
+    "for every rule the current config enables (from `eslint --print-config`), "
+    "saying where it runs after the change - the fast pass, the type-aware pass, "
+    "or REPLACED BY <rule> with one line on what the replacement no longer checks "
+    "and why that is acceptable here - and add a test asserting that every "
+    "original rule is enabled in one of the two configs or has a REPLACED row. "
+    "A rule with no row is a coverage loss and blocks the change. A REPLACED row "
+    "is a deliberate, reviewed reduction in what lint checks: list each one for "
+    "a human to approve before merging.")
+# Every way of saying "switch the rules off", within one sentence, in either
+# order. The fix this pattern hands off must never be "turn the type-aware
+# rules off". Matched against `_vr_opt82_instruction_text`, which joins line
+# wraps and drops the measured evidence and the commands (a CI lint command
+# such as `eslint --report-unused-disable-directives --rule 'x: off'` is data,
+# and the benchmark's timing-only `--rule '<rule>: off'` run is labelled).
+_VR_OPT82_TARGET = r"(?:rules?|type[- ]aware|type[- ]checked|type information)"
 _VR_OPT82_DISABLE_RULES_RE = re.compile(
-    r"\bdisabl\w*\b[^.\n]{0,60}\brules?\b|\brules?\b[^.\n]{0,60}\bdisabl\w*", re.I)
+    r"\bdisabl\w*\b[^.]{0,60}\brules?\b|\brules?\b[^.]{0,60}\bdisabl\w*"
+    r"|\bdisable-?type-?checked\b"
+    rf"|\bturn\w*\s+off\b[^.]{{0,60}}\b{_VR_OPT82_TARGET}"
+    rf"|\bturn\w*\b[^.]{{0,60}}\b{_VR_OPT82_TARGET}\b[^.]{{0,40}}\boff\b"
+    r"|\b(?:drop|dropp\w*|remov\w*|delet\w*)\b[^.]{0,60}\brules?\b"
+    r"|\brules?\b[^.]{0,40}\b(?:dropped|removed|deleted)\b"
+    r"|\brules?\b[^.]{0,60}\bto\s+['\"`]?off\b"
+    r"|\bset\w*\b[^.]{0,60}\b['\"`]?off['\"`]?(?=[\s.,;:)]|$)"
+    r"|:\s*['\"]off['\"]"
+    rf"|\bmov\w*\b[^.]{{0,60}}\b{_VR_OPT82_TARGET}\b[^.]{{0,60}}"
+    r"\b(?:non-?blocking|optional|advisory|informational|allowed to fail)\b",
+    re.I)
+# A command-line flag, with a quoted or `=` value: `--rule 'x: off'`,
+# `--report-unused-disable-directives`, `--parser-options project:false`.
+_VR_OPT82_FLAG_RE = re.compile(
+    r"--[\w-]+(?:=\S+|\s+'[^']*'|\s+\"[^\"]*\")?")
+
+
+def _vr_opt82_instruction_text(card: str) -> str:
+    """The card's instruction text: the measured evidence (`**Evidence:**` and
+    the prompt's `What ci-speedup saw:` line) and the benchmark command lines
+    are dropped, command flags are stripped, and line wraps are joined so a
+    phrase split across two lines still matches."""
+    kept: list[str] = []
+    for ln in card.splitlines():
+        s = ln.strip()
+        if s.startswith(("**Evidence:**", "What ci-speedup saw:")):
+            continue
+        if s.startswith("(") and "eslint" in s:      # a benchmark command line
+            continue
+        kept.append(_VR_OPT82_FLAG_RE.sub(" ", s))
+    return " ".join(" ".join(kept).split())
 _VR_OPT82_CARD_RE = re.compile(
     r"<summary><strong>OPT82 - .*?</details>", re.S)
 # A saving claim on an OPT82 card: a runner-minute figure, "saves", a
@@ -6842,10 +6881,10 @@ def check_opt82_type_aware_lint_uncredited(report: str,
         if _strip_render_artifacts(_VR_OPT82_LEDGER_SENTENCE) not in \
                 _strip_render_artifacts(card):
             bad.append("an OPT82 card is missing the ledger requirement sentence")
-        m = _VR_OPT82_DISABLE_RULES_RE.search(card)
+        m = _VR_OPT82_DISABLE_RULES_RE.search(_vr_opt82_instruction_text(card))
         if m:
             bad.append(f"an OPT82 card says {m.group(0)!r} - the hand-off must never "
-                       "disable the type-aware rules")
+                       "disable the type-aware rules or switch them off")
         ms = re.search(r"</strong>\s*·\s*(.*?)\s*·", card)
         if not ms or ms.group(1).strip() != _VR_OPT82_SUMMARY_METRIC:
             bad.append(f"an OPT82 card's summary metric is "

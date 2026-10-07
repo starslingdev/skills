@@ -1267,18 +1267,29 @@ configs, rules, ceiling and benchmark directory. The card has its own prompt, no
 generic bill or off-path saving line: it carries the SIZING clause, tells the
 agent to run the two-command benchmark FIRST, lists each enumerated rule with the
 rewrite QUESTION (never the answer), gives the fix order (rewrite, split into a
-fast syntax-only pass and a type-aware pass limited to exactly those rules with
-the full pass kept on the merge queue and default branch, native type-aware
-linter only if the remaining rules are supported) and requires the ledger: every
-rule maps to a pass, and the union of the two configs' enabled rules must equal
-the original set. The prompt never tells the agent to disable rules.
-`verify_report.py` closes the loop with a check that fails an OPT82 finding with
-a positive `wall_clock_p50_s` or a truthy runner-minute saving, with no
-enumerated rule, with no card of its own (matched by workflow + job on the
-card's `**Where:**` line) or whose card omits one of its enumerated rules, and
-any card that lacks the ledger sentence or says "disable" about rules. Its
-pole double-frame check (`check_pole_not_reframed_as_hygiene`) mirrors the
-engine's OPT82 exemption from the valueless-pole exclusion. The detector's call site in `collect()` is guarded: an
+fast syntax-only pass and a type-aware pass limited to exactly those rules,
+native type-aware linter only if the remaining rules are supported) and requires
+the ledger: every rule maps to a pass or to a REPLACED BY row naming what the
+replacement no longer checks, for a human to approve, and a test proves no rule
+is left without a row. Where the type-aware pass may run comes from the
+collector's `merge_group_workflows` stamp (the sampled workflows declaring
+`merge_group`, stamped at the call site because the detector sees one workflow):
+with a merge queue the PR pass may lint an explicit changed-file list while the
+full pass gates the queue; without one (or no stamp) the full type-aware pass
+stays a required whole-tree PR check. ESLint's `--cache` is never offered for the
+type-aware pass (it does not track cross-file type dependencies). The prompt
+never tells the agent to disable rules. `verify_report.py` closes the loop with a
+check that fails an OPT82 finding with a positive `wall_clock_p50_s` or a truthy
+runner-minute saving, with no enumerated rule, with no card of its own (matched
+by workflow + job on the card's `**Where:**` line) or whose card omits one of its
+enumerated rules or claims a saving, or whose rendered card lacks the
+ledger sentence or says, in any wording, to switch the rules off (disable, turn
+off, drop / remove, set to `off`, `disableTypeChecked`, move to a non-blocking
+job). That rail reads the card's instruction text only: the measured evidence
+and the command lines (the CI's own lint command, the benchmark's labelled
+timing-only run) are data and are skipped. Its pole double-frame check
+(`check_pole_not_reframed_as_hygiene`) mirrors the engine's OPT82 exemption from
+the valueless-pole exclusion. The detector's call site in `collect()` is guarded: an
 exception inside it skips OPT82 for that workflow and is disclosed through
 `detectors_skipped`, never a crashed data pass.
 
