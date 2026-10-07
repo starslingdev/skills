@@ -1222,7 +1222,9 @@ runs' own improvement is bounded above by the longest observed pause, stamped
 (`tail_run_longest_pause_s`, with `on_critical_path`), named in the rendered
 evidence and deliberately left uncredited rather than rendered as a p50 saving.
 When the job is the workflow's slowest AND the workflow runs on pull requests
-(the detector's `is_pr`; unknown counts as not), a stalled run sits on that
+(the detector's `is_pr`; unknown counts as not) AND its timing came from sampled
+pull-request runs (`_crit_has_developer_timing`: `event_scope` is not the
+`all-events` fallback, which would make every number a push timing), a stalled run sits on that
 run's merge wait, so the finding also stamps a SEPARATE tail axis,
 `checkout_stall.tail_axis` = `{sampled_runs n, tail_runs k (log-proven only),
 one_in_n round(n/k), typical_checkout_p50_s, tail_checkout_p50_s (median of the
@@ -1240,7 +1242,10 @@ sentence still worded "up to". It is never summed into
 `wall_clock_p50_s`, the headline, a pole's buy line, the Tier-2 section, the
 runner-minutes or the certificate. `verify_report.py`'s
 `check_opt80_tail_lines` re-derives N and X from `per_run_checkout_s` and the
-proofs' own quoted lines, fails a block on a finding off the critical path, a
+proofs' own quoted lines, fails a block on a finding off the critical path or
+outside the detector's own gate (`_opt80_tail_axis_eligible`: the workflow is in
+the stamped `declared_pr_workflows`, its `per_workflow_timing` `event_scope` is a
+pull-request event, and the job is its `long_pole_job`), a
 block with no marked line (or a line with no block), and any "one run in N"
 sentence whose numbers no block re-derives to. Only the SLOWEST job of a push-only or
 unknown-trigger workflow keeps the uncredited "not credited in this version"

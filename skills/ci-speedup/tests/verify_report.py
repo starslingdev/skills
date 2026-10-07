@@ -6620,6 +6620,38 @@ def _opt80_tail_axis_rederived(f: dict) -> list[str]:
     return problems
 
 
+def _opt80_tail_axis_eligible(f: dict, data: dict) -> list[str]:
+    """[] when a stamped tail axis meets the collector's own gate; otherwise why
+    not. Mirrors `_detect_opt80_checkout_tail_stall`: the workflow DECLARES a
+    pull-request trigger (`declared_pr_workflows`), it was TIMED on sampled
+    pull-request runs (`per_workflow_timing[wf].event_scope` is a developer
+    event, never the `all-events` fallback), and the finding's job is that
+    workflow's slowest (`long_pole_job`). Fail-closed: a missing stamp is a
+    condition not shown to hold."""
+    cs = _as_dict(f.get("checkout_stall"))
+    if "tail_axis" not in cs:
+        return []
+    wf = str(f.get("workflow_file") or "")
+    job = str(cs.get("job") or (_as_list(f.get("affected_jobs")) or [""])[0])
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    problems: list[str] = []
+    if wf not in {str(w) for w in _as_list(data.get("declared_pr_workflows"))}:
+        problems.append(
+            f"a tail axis is stamped on {wf!r}, which does not declare a pull-request "
+            "trigger - nothing waits on it to merge")
+    scope = str(crit.get("event_scope") or "")
+    if scope not in _VR_DEVELOPER_EVENTS:
+        problems.append(
+            f"a tail axis is stamped on {wf!r}, whose timing was not taken from pull "
+            f"request runs (event_scope {scope or 'unstated'!r}) - its slowest job and "
+            "checkout durations are not what a pull request waits on")
+    if str(crit.get("long_pole_job") or "") != job:
+        problems.append(
+            f"a tail axis is stamped on {job!r}, which is not {wf!r}'s slowest job "
+            f"({crit.get('long_pole_job')!r})")
+    return problems
+
+
 def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
     """OPT80's tail line: stamped block, rendered line and numbers agree.
 
@@ -6695,6 +6727,7 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
     for f in tails:
         fid = str(f.get("id") or "?")
         bad.extend(f"{fid}: {msg}" for msg in _opt80_tail_axis_rederived(f))
+        bad.extend(f"{fid}: {msg}" for msg in _opt80_tail_axis_eligible(f, _as_dict(data)))
         want, _why = _vr_opt80_tail_axis_expected(_as_dict(f.get("checkout_stall")))
         if want is None:
             continue

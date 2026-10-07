@@ -9485,9 +9485,25 @@ _OPT80_TAIL_AXIS = {"sampled_runs": 10, "tail_runs": 2, "one_in_n": 5,
                     "tail_loss_s": 110.0, "on_critical_path": True}
 
 
+def _opt80_tail_eligibility(doc, *, event_scope="pull_request", declared=True,
+                            long_pole="build"):
+    """Stamp what the collector requires before it states a tail line: the
+    workflow declares a pull-request trigger, was TIMED on pull-request runs
+    (`event_scope`), and the finding's job is its slowest job."""
+    wf = doc["findings"][0]["workflow_file"]
+    events = ["pull_request"] if event_scope != "all-events" else ["push"]
+    doc.setdefault("per_workflow_timing", {})[wf] = {
+        "event_scope": event_scope, "events": events,
+        "long_pole_job": long_pole, "long_pole_p50": 121.0,
+        "job_p50": {long_pole: 121.0}}
+    doc["declared_pr_workflows"] = [wf] if declared else []
+    return doc
+
+
 def _opt80_tail_doc(pole_check="build", pole_job="build"):
     doc = _opt80_pole_doc()
     doc["findings"][0]["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    _opt80_tail_eligibility(doc)
     pcp = doc["pr_critical_path"]
     pcp["critical_path_check"] = pole_check
     pcp["checks"][0]["name"] = pole_check
@@ -9670,6 +9686,33 @@ def test_opt80_tail_line_is_refused_in_the_headline_or_runner_minute_section(
         assert not chk.ok and "runner-minute" in chk.detail, chk
 
 
+def test_opt80_tail_line_is_refused_off_the_pull_request_merge_wait(tmp_path: Path):
+    """The verifier holds a stamped tail axis to the collector's own gate: the
+    workflow declares a pull-request trigger, its timing came from sampled
+    pull-request runs, and the job is that workflow's slowest. A tail axis on a
+    push-only `smoke`-style job (timed on push, declared push-only) with
+    `on_critical_path: true` renders off-pole and used to pass; each missing
+    condition on its own must fail the check too."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    _report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    report = _report
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    for kw, why in (({"event_scope": "all-events", "declared": False}, "push-only"),
+                    ({"event_scope": "all-events"}, "pull request"),
+                    ({"declared": False}, "pull request"),
+                    ({"long_pole": "deploy"}, "slowest job")):
+        bad = _opt80_tail_eligibility(copy.deepcopy(doc), **kw)
+        findings_path.write_text(json.dumps(bad), encoding="utf-8")
+        chk = vr.check_opt80_tail_lines(report, findings_path)
+        assert not chk.ok, (kw, chk)
+    # Fail closed: a tail axis with no per-workflow timing at all is not earned.
+    bare = copy.deepcopy(doc)
+    del bare["per_workflow_timing"]
+    findings_path.write_text(json.dumps(bare), encoding="utf-8")
+    assert not vr.check_opt80_tail_lines(report, findings_path).ok
+
+
 def test_opt80_on_critical_path_matches_a_workflow_prefixed_pole_check(tmp_path: Path):
     """A plain job's check-run is named `<workflow> / <job>`. The pole header
     then says `CI / build` while the finding names `build`; the cross-check that
@@ -9740,7 +9783,12 @@ def test_opt80_unmapped_pole_strips_only_the_workflow_name_prefix():
 def _opt80_pwt(long_pole_job, events=("pull_request",)):
     return {".github/workflows/ci.yml": {"long_pole_job": long_pole_job,
                                          "long_pole_p50": 300.0,
-                                         "events": list(events)}}
+                                         "events": list(events),
+                                         "event_scope": next(
+                                             (e for e in events if e in (
+                                                 "pull_request", "merge_group",
+                                                 "pull_request_target")),
+                                             "all-events")}}
 
 
 def test_opt80_off_pole_exemption_rederives_the_workflows_slowest_job(tmp_path: Path):
@@ -9753,6 +9801,8 @@ def test_opt80_off_pole_exemption_rederives_the_workflows_slowest_job(tmp_path: 
         doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
         if pwt is not None:
             doc["per_workflow_timing"] = pwt
+        else:
+            doc.pop("per_workflow_timing", None)
         report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
         assert report.count("<!-- opt80-tail:f-promoted -->") == 1
         chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)

@@ -10116,8 +10116,13 @@ def _detect_opt80_checkout_tail_stall(
         on_pole = str(crit.get("long_pole_job") or "") == job_name
         # The slowest job of a workflow that runs on pull requests: a stalled run
         # is on that run's merge wait, so the tail is stated on its own axis.
+        # BOTH halves of "on pull requests" are required: the declared trigger
+        # (`is_pr`) AND pull-request timing. Without a sampled pull-request run,
+        # `_crit_for` falls back to all events, so `long_pole_job` and every
+        # per-run checkout above are push timings that no pull request waited on.
         tail_axis = (_opt80_tail_axis(per_run, proven, p50)
-                     if on_pole and is_pr is True else None)
+                     if on_pole and is_pr is True
+                     and _crit_has_developer_timing(crit) else None)
         if tail_axis is not None:
             pole_sentence = (
                 f"`{job_name}` is this workflow's slowest job on pull requests: "
@@ -18791,6 +18796,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _crit["declared_job_keys"] = sorted(str(k) for k in _declared)
     _pr_workflows = _declared_pr_workflows(
         client, repo, set(crit_by_wf) | set(jobs_per_run_by_wf), wf_docs=_wf_docs)
+    # Stamped so the self-check can hold OPT80's tail line to the same
+    # "declares a pull-request trigger" condition the detector used.
+    findings_doc["declared_pr_workflows"] = sorted(_pr_workflows)
     _dropped_non_pr = [n for n in pr_check_p50
                        if not _is_pr_gate_check(n, crit_by_wf, events_by_wf,
                                                 _pr_workflows, req_names)]

@@ -6602,7 +6602,6 @@ def test_opt80_stamps_no_tail_axis_off_the_pull_request_merge_wait():
         assert ("not credited in this version" in f["evidence"]) is (pole == "build")
 
 
-
 def test_opt80_tail_axis_states_the_median_of_three_proven_runs_not_the_mean():
     """Three log-proven tail runs whose checkouts spread 95s / 110s / 200s: the
     tail figure is their MEDIAN, 110s, not their mean, 135s. Two proven runs
@@ -6631,6 +6630,27 @@ def test_opt80_tail_axis_one_in_n_rounds_half_to_even_7_of_2_is_4_and_5_of_2_is_
     assert axis(7, 2)["one_in_n"] == 4
     assert axis(5, 2)["one_in_n"] == 2
     assert axis(7, 2)["sampled_runs"] == 7 and axis(5, 2)["tail_runs"] == 2
+
+
+def test_opt80_stamps_no_tail_axis_when_no_pull_request_run_was_timed():
+    """A workflow that DECLARES pull_request but had no sampled pull-request run
+    is timed on whatever ran instead (`_crit_for` falls back to all events, so
+    `event_scope` is `all-events`). Its slowest job and its checkout durations
+    are then push timings, and "the slowest job on pull requests" plus "one run
+    in N" would be stated about runs no pull request waited on. No tail axis;
+    the pole keeps the uncredited sentence."""
+    runs = _opt80_runs()
+    gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
+    crit = _opt80_crit()
+    crit["event_scope"] = "all-events"
+    out = cr._detect_opt80_checkout_tail_stall(
+        gh, "acme/app", _OPT80_WF_PATH, runs, crit, _opt80_wf(), None, 100, 0,
+        is_pr=True)
+    assert len(out) == 1, out
+    f = out[0]
+    assert "tail_axis" not in f["checkout_stall"], f["checkout_stall"].get("tail_axis")
+    assert "loses up to" not in f["evidence"], f["evidence"]
+    assert "not credited in this version" in f["evidence"], f["evidence"]
 
 
 # ---- the log READER: what a record is, and what a dropped line costs ----------
