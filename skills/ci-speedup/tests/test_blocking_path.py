@@ -3254,6 +3254,74 @@ def test_opt80_tail_count_sentence_states_unreadable_logs_separately():
     assert "read log that does not" not in line, line
 
 
+def _opt80_tail_finding(fid="f-promoted", job="build",
+                        wf=".github/workflows/ci.yml"):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_verify_report_self as vs  # noqa: E402
+
+    f = vs._opt80_verifier_finding(id=fid, affected_jobs=[job], workflow_file=wf)
+    f["checkout_stall"]["tail_axis"] = dict(vs._OPT80_TAIL_AXIS)
+    return f
+
+
+def test_opt80_tail_never_joins_a_pole_in_another_workflow_file():
+    """GitHub gives same-named jobs in different workflows the same check
+    name, so `build` in other.yml must not ride a `ci.yml` pole named `build`."""
+    pole = {"check": "build", "job": "build", "workflow_file": ".github/workflows/ci.yml"}
+    assert len(bp._opt80_tail_for(pole, [_opt80_tail_finding()])) == 1
+    other = _opt80_tail_finding(wf=".github/workflows/other.yml")
+    assert bp._opt80_tail_for(pole, [other]) == []
+
+
+def test_opt80_tail_joins_on_the_poles_stamped_job_over_the_check_name():
+    """A workflow NAME can hold ` / ` (`CI / main`): the prefix strip of check
+    `CI / main / build` gives `main / build`. The pole's stamped job, `build`,
+    is the job, and the tail joins on it."""
+    pole = {"check": "CI / main / build", "job": "build",
+            "workflow_file": ".github/workflows/ci.yml"}
+    assert len(bp._opt80_tail_for(pole, [_opt80_tail_finding()])) == 1
+
+
+def test_opt80_static_only_report_tail_heading_does_not_say_drilled_above():
+    """The static-only render drills no pole, so its tails section must not
+    point at "the long poles drilled above"."""
+    doc = {"repo": "o/r", "findings": [_opt80_tail_finding()],
+           "pr_critical_path": {"poles": []}, "data_sources": {}}
+    static = bp._render_static_only(doc)
+    assert "<!-- opt80-tail:f-promoted -->" in static
+    assert "drilled above" not in static, static
+    assert "drilled no long pole" in static, static
+
+
+def _opt80_toc_doc(tails):
+    doc = _opt80_tail_render_doc(pole_check="other", pole_job="other")
+    for i in range(1, tails):
+        g = json.loads(json.dumps(doc["findings"][0]))
+        g.update(id=f"f-tail-{i}", affected_jobs=[f"lint{i}"], line=40 + i)
+        g["checkout_stall"]["job"] = f"lint{i}"
+        doc["findings"].append(g)
+    doc["findings"].append({"id": "f-hyg", "pattern": "OPT5",
+                            "title": "pnpm Store Not Cached", "severity": "MEDIUM",
+                            "runner_min_saving": 68.0,
+                            "workflow_file": ".github/workflows/ci.yml", "line": 20})
+    return doc
+
+
+def test_opt80_tails_contents_entry_counts_jobs_and_sits_before_also_noticed():
+    """The Contents pointer to the tails section is spliced in after the poles
+    render: it must land inside the Contents, directly ahead of the Also
+    noticed pointer, and count the tail lines with the right plural."""
+    for tails, phrase in ((1, "1 job whose"), (2, "2 jobs whose")):
+        md = bp.render(_opt80_toc_doc(tails))
+        assert md.count("<!-- opt80-tail:") == tails, tails
+        toc = md.split("## 📋 Contents", 1)[1].split("\n## ", 1)[0].split("\n")
+        entry = next(i for i, ln in enumerate(toc)
+                     if ln.startswith("**⏱️ Checkout stall tails**"))
+        assert phrase in toc[entry], (tails, toc[entry])
+        assert toc[entry + 1] == "", toc
+        assert toc[entry + 2].startswith("**🧹 Also noticed**"), toc
+
+
 def test_second_pole_role_names_the_real_slowest_concurrent_check_above_it():
     # Regression (two-pole): pole 2's "becomes the gate once X drops" must name the
     # ACTUAL slowest concurrent check above it - which may be an intervening check that

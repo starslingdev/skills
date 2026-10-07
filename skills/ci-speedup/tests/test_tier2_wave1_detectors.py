@@ -6840,6 +6840,28 @@ def test_opt80_stamps_no_tail_axis_on_a_slowest_job_no_merge_waits_on():
         _OPT80_BUILD_GATES["build"])
 
 
+def test_opt80_merge_gating_is_looked_up_by_yaml_key_not_display_name():
+    """`merge_gating_jobs` is keyed by YAML job key. A job whose display name
+    differs from its key (`name: Build & Test` under `build`) must still find
+    its gating evidence: looking it up by the runtime name finds nothing and
+    silently drops a tail line the merge does wait on."""
+    name = "Build & Test"
+    runs = _opt80_runs(name=name)
+    gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
+    crit = _opt80_crit(long_pole=name)
+    crit["job_p50"] = {name: 121.0}
+    crit["job_runner"] = {name: "ubuntu-latest"}
+    wf = _opt80_wf()
+    wf["jobs"]["build"]["name"] = name
+    gates = {"build": dict(_OPT80_BUILD_GATES["build"])}
+    out = cr._detect_opt80_checkout_tail_stall(
+        gh, "acme/app", _OPT80_WF_PATH, runs, crit, wf, None, 100, 0,
+        is_pr=True, merge_gating_jobs=gates)
+    assert len(out) == 1, out
+    cs = out[0]["checkout_stall"]
+    assert cs.get("tail_axis", {}).get("merge_gating") == gates["build"], cs
+
+
 def _opt80_gating_graph():
     return {"ci.yml": {
         "test": {"name": "test", "needs": [], "reusable": False, "matrix": False},

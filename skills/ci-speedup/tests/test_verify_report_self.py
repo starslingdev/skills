@@ -10376,6 +10376,140 @@ def test_opt80_tail_marker_for_an_id_with_no_tail_axis_fails_beside_real_tails(
     assert not chk.ok and "f-ghost" in str(chk.detail), chk
 
 
+def _opt80_with_also_noticed(doc):
+    """Add one residual hygiene finding so the report renders an Also noticed
+    section (and its Contents pointer) beside the tail line."""
+    doc["findings"].append({"id": "f-hyg", "pattern": "OPT5",
+                            "title": "pnpm Store Not Cached", "severity": "MEDIUM",
+                            "runner_min_saving": 68.0,
+                            "workflow_file": ".github/workflows/ci.yml", "line": 20})
+    return doc
+
+
+def test_opt80_tail_marker_under_contents_also_noticed_or_data_sources_fails(
+        tmp_path: Path):
+    """The placement rule names two homes: the finding's own Long pole section
+    and the Checkout stall tails section. Any OTHER `##` section - the Contents,
+    Also noticed, Data sources - is not one of them, even though none of those
+    is the headline or a runner-minute card."""
+    vr = _load_verify_report()
+    doc = _opt80_with_also_noticed(_opt80_tail_doc(pole_check="other", pole_job="other"))
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    marker = "<!-- opt80-tail:f-promoted -->"
+    i = report.index(marker)
+    block = f"{marker}\n{report[i:].split(chr(10), 2)[1]}\n"
+    rest = report.replace(block, "", 1)
+    for heading in ("## 📋 Contents", "## 🧹 Also noticed", "## 🗄️ Data sources"):
+        assert heading in rest, heading
+        j = rest.index(heading)
+        k = rest.index("\n", j) + 1
+        moved = rest[:k] + "\n" + block + "\n" + rest[k:]
+        chk = vr.check_opt80_tail_lines(moved, findings_path)
+        assert not chk.ok and "section" in chk.detail, (heading, chk)
+
+
+def test_opt80_stray_tail_scan_is_case_insensitive(tmp_path: Path):
+    """A tail sentence that opens a sentence ("One run in 2 ...") is the same
+    claim; the scan must not let it through on its capital letter."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    stray = ("One run in 2 spends about 80s longer on checkout, and that run's "
+             "log shows the fetch stalling.")
+    chk = vr.check_opt80_tail_lines(report + "\n" + stray + "\n", findings_path)
+    assert not chk.ok and "One run in 2" in chk.detail, chk
+
+
+def test_opt80_tail_numbers_in_the_findings_own_card_must_rederive(tmp_path: Path):
+    """The finding's own Runner saving card may carry the tail sentence (its
+    evidence prose), but only with numbers a stamped axis re-derives: the card
+    is an allowed PLACE, never an exemption from the numbers."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="other", pole_job="other")
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    anchor = "**The largest merge-safe runner-minute saving measured on this repo.**"
+    assert anchor in report
+    good = ("one run in 5 spends about 110s longer on checkout, and that run's log "
+            "shows the fetch stalling")
+    ok = report.replace(anchor, f"{anchor}\n\n{good}.", 1)
+    assert vr.check_opt80_tail_lines(ok, findings_path).ok
+    wrong = report.replace(anchor, f"{anchor}\n\n{good.replace('110s', '999s')}.", 1)
+    chk = vr.check_opt80_tail_lines(wrong, findings_path)
+    assert not chk.ok and "no stamped tail axis re-derives" in chk.detail, chk
+
+
+def test_opt80_tail_axis_refuses_duplicate_fetched_log_ids():
+    """A fetched log is one distinct slow run: listing the same id twice
+    inflates `logs_read` and so moves N."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    assert vr._opt80_tail_axis_rederived(f) == []
+    cs = f["checkout_stall"]
+    cs["log_probed_job_ids"] = cs["log_probed_job_ids"] + cs["log_probed_job_ids"][-1:]
+    cs["logs_fetched"] = len(cs["log_probed_job_ids"])
+    probs = vr._opt80_tail_axis_rederived(f)
+    assert any("not distinct" in p for p in probs), probs
+
+
+def test_opt80_tail_axis_refuses_a_logs_fetched_count_that_disagrees_alone():
+    """`logs_fetched` must equal the fetched-log ids, checked on its own: the
+    ids, proofs and axis numbers all still agree here."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    assert vr._opt80_tail_axis_rederived(f) == []
+    f["checkout_stall"]["logs_fetched"] = 3
+    probs = vr._opt80_tail_axis_rederived(f)
+    assert any(p.startswith("logs_fetched 3 != the 2") for p in probs), probs
+
+
+def test_opt80_tail_axis_refuses_its_own_on_critical_path_tampered_alone():
+    """The axis carries its own `on_critical_path`; a False there is refused
+    even when the finding's stamp still says True."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS, on_critical_path=False)
+    assert f["checkout_stall"]["on_critical_path"] is True
+    probs = vr._opt80_tail_axis_rederived(f)
+    assert any("on_critical_path" in p for p in probs), probs
+
+
+def test_opt80_merge_gating_basis_label_rederives():
+    """`basis` says whether the job IS the required job or is needed by it;
+    a job that is the required job labelled `needed_by_required` is refused."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    f = doc["findings"][0]
+    assert vr._vr_opt80_merge_gating_problems(f, doc) == []
+    f["checkout_stall"]["tail_axis"]["merge_gating"] = dict(
+        _OPT80_TAIL_AXIS["merge_gating"], basis="needed_by_required")
+    probs = vr._vr_opt80_merge_gating_problems(f, doc)
+    assert any("basis" in p for p in probs), probs
+
+
+def test_opt80_pole_is_own_reads_the_mapped_job_of_its_own_workflow_only():
+    """A workflow NAME can itself hold ` / ` (`CI / main`), so the fallback
+    prefix strip of `CI / main / build` gives `main / build`, not `build`. The
+    stamped pole entry is what resolves it - and only an entry of the SAME
+    workflow file: another file's entry for the same check name never maps."""
+    vr = _load_verify_report()
+    f = {"workflow_file": ".github/workflows/ci.yml", "affected_jobs": ["build"]}
+    check = "CI / main / build"
+
+    def data(wf):
+        return {"pr_critical_path": {"poles": [
+            {"check": check, "job": "build", "workflow_file": wf}]}}
+
+    assert vr._vr_opt80_pole_is_own(f, "ci.yml", check, data(".github/workflows/ci.yml"))
+    assert not vr._vr_opt80_pole_is_own(f, "ci.yml", check, {})
+    assert not vr._vr_opt80_pole_is_own(
+        f, "ci.yml", check, data(".github/workflows/other.yml"))
+
+
 def test_tier2_accepts_a_checkout_stall_on_the_rendered_long_pole(tmp_path: Path):
     """The pole rule is a PROXY for "the credited work is not on the merge gate".
     `checkout_tail_excess` carries the thing the proxy stands in for: mean - p50
