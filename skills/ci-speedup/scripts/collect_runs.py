@@ -10829,6 +10829,12 @@ _OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 # tallied but never listed as held back.
 _OPT81_VERDICT_GATES = frozenset({
     "gap_below_floor",
+    # Not this lever by design: two operating systems or two processor
+    # architectures would measure the platform, and one runner class (an image
+    # version change) is not a runner-class comparison.
+    "different_operating_system",
+    "different_architecture",
+    "same_runner_class",
     # A2 verdicts: a cheaper lever exists, or the shape is not this lever's.
     "a2_not_a_pull_request_workflow",
     "a2_not_on_the_merge_gating_critical_path",
@@ -10845,50 +10851,91 @@ _OPT81_VERDICT_GATES = frozenset({
 # The runner-class taxonomy. Each row: (label regex, class, operating system).
 # Matched against each individual runner label (the jobs API `labels[]`), first
 # match wins. A label no row matches cannot be classified by size and is EXCLUDED
-# from both halves (owner decision 4), counted, never guessed.
+# from both halves (owner decision 4), counted, never guessed. A row's optional
+# `size` group is the label's size tier, so two sizes of one vendor are two
+# tiers (an A1 comparison), not one class:
 #   github-standard — a GitHub-hosted default image label.
+#   github-slim     — GitHub's single-CPU `ubuntu-slim` image.
 #   github-larger   — a larger GitHub-hosted size (named `<image>-<N>-cores`,
-#                     `<image>-<N>core`, or macOS `-large` / `-xlarge`).
-#   starsling       — a StarSling runner label (`starsling-<image>[-<N>]`).
+#                     `<image>-<N>core`, or macOS `-large` / `-xlarge`); the
+#                     size tier is N, `large` or `xlarge`.
+#   starsling       — a StarSling runner label (`starsling-<image>[-<N>]`); the
+#                     size tier is the trailing N when present.
 _OPT81_RUNNER_CLASSES: tuple[tuple["_re.Pattern[str]", str, str], ...] = (
-    (_re.compile(r"^starsling-(ubuntu|linux)[\w.-]*$", _re.I), "starsling", "linux"),
-    (_re.compile(r"^starsling-windows[\w.-]*$", _re.I), "starsling", "windows"),
-    (_re.compile(r"^starsling-macos[\w.-]*$", _re.I), "starsling", "macos"),
-    (_re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?-\d+-?cores?$", _re.I),
+    (_re.compile(r"^starsling-(ubuntu|linux)[\w.-]*?(-(?P<size>\d+))?$", _re.I),
+     "starsling", "linux"),
+    (_re.compile(r"^starsling-windows[\w.-]*?(-(?P<size>\d+))?$", _re.I),
+     "starsling", "windows"),
+    (_re.compile(r"^starsling-macos[\w.-]*?(-(?P<size>\d+))?$", _re.I),
+     "starsling", "macos"),
+    (_re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?-(?P<size>\d+)-?cores?$", _re.I),
      "github-larger", "linux"),
-    (_re.compile(r"^windows-(latest|\d{4}|11)(-arm)?-\d+-?cores?$", _re.I),
+    (_re.compile(r"^windows-(latest|\d{4}|11)(-arm)?-(?P<size>\d+)-?cores?$", _re.I),
      "github-larger", "windows"),
-    (_re.compile(r"^macos-(latest|\d+)-x?large$", _re.I), "github-larger", "macos"),
-    (_re.compile(r"^ubuntu-(latest|slim|\d{2}\.\d{2})(-arm)?$", _re.I),
+    (_re.compile(r"^macos-(latest|\d+)-(?P<size>x?large)$", _re.I), "github-larger", "macos"),
+    (_re.compile(r"^ubuntu-slim$", _re.I), "github-slim", "linux"),
+    (_re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?$", _re.I),
      "github-standard", "linux"),
     (_re.compile(r"^windows-(latest|\d{4}|11-arm)$", _re.I), "github-standard", "windows"),
     (_re.compile(r"^macos-(latest|\d+)(-intel)?$", _re.I), "github-standard", "macos"),
 )
+# The processor architecture of a runner label, first match wins, else x64.
+# GitHub's macOS images: plain `macos-14` and later (and `macos-latest`) are
+# Apple silicon (arm64), `macos-13` and earlier are Intel; the `-large` sizes are
+# Intel and the `-xlarge` sizes Apple silicon; `-intel` names an Intel image. An
+# `-arm` / `arm64` label part is arm64 on every vendor. Two labels on one
+# operating system but two architectures are never compared (`different_architecture`):
+# the gap would measure the architecture, not the runner.
+_OPT81_RUNNER_ARCH: tuple[tuple["_re.Pattern[str]", str], ...] = (
+    (_re.compile(r"(^|-)arm(64)?(-|$)", _re.I), "arm64"),
+    (_re.compile(r"^macos-(latest|\d+)-xlarge$", _re.I), "arm64"),
+    (_re.compile(r"^macos-(latest|\d+)-(large|intel)$", _re.I), "x64"),
+    (_re.compile(r"^macos-([0-9]|1[0-3])$", _re.I), "x64"),
+    (_re.compile(r"^macos-(latest|\d+)$", _re.I), "arm64"),
+)
 # Human-readable class names, for evidence prose.
 _OPT81_CLASS_DISPLAY = {
     "github-standard": "standard GitHub-hosted",
+    "github-slim": "GitHub-hosted slim",
     "github-larger": "larger GitHub-hosted size",
     "starsling": "StarSling",
 }
 
 
-def _opt81_runner_class(label: str | None) -> "tuple[str, str] | None":
-    """(class, os) for a job's runner label string (the space-joined, sorted
-    `labels[]` `_job_runner_label` returns), or None when it cannot be classified
-    by size. A `self-hosted` label set is unclassifiable unless it carries a
-    StarSling label; a set whose labels classify to two different answers is
-    unclassifiable rather than resolved by picking one."""
+def _opt81_label_arch(tok: str) -> str:
+    for rx, arch in _OPT81_RUNNER_ARCH:
+        if rx.search(tok):
+            return arch
+    return "x64"
+
+
+def _opt81_class_display(cls: str, size: str) -> str:
+    base = _OPT81_CLASS_DISPLAY.get(cls, cls)
+    if not size:
+        return base
+    return f"{base}, {size}" + (" cores" if size.isdigit() and cls == "github-larger"
+                                else "")
+
+
+def _opt81_runner_class(label: str | None) -> "tuple[str, str, str, str] | None":
+    """(class, os, arch, size) for a job's runner label string (the space-joined,
+    sorted `labels[]` `_job_runner_label` returns), or None when it cannot be
+    classified by size. A `self-hosted` label set is unclassifiable unless it
+    carries a StarSling label; a set whose labels classify to two different
+    answers is unclassifiable rather than resolved by picking one."""
     toks = [t for t in str(label or "").split() if t]
     if not toks:
         return None
-    found: set[tuple[str, str]] = set()
+    found: set[tuple[str, str, str, str]] = set()
     for tok in toks:
         for rx, cls, os_ in _OPT81_RUNNER_CLASSES:
-            if rx.match(tok):
-                found.add((cls, os_))
+            m = rx.match(tok)
+            if m:
+                size = str(m.groupdict().get("size") or "").lower()
+                found.add((cls, os_, _opt81_label_arch(tok), size))
                 break
     if "self-hosted" in {t.lower() for t in toks} and not any(
-            c == "starsling" for c, _o in found):
+            f[0] == "starsling" for f in found):
         return None
     if len(found) != 1:
         return None
@@ -10989,7 +11036,7 @@ def _detect_opt81_measured_runner_gap(
             continue
         if multi_label_jobs is not None:
             multi_label_jobs.add((wf_path, name))
-        classified: dict[str, tuple[str, str]] = {}
+        classified: dict[str, tuple[str, str, str, str]] = {}
         excluded: dict[str, int] = {}
         for label, rows in labels.items():
             rc = _opt81_runner_class(label)
@@ -11015,11 +11062,15 @@ def _detect_opt81_measured_runner_gap(
             _no("more_than_two_qualifying_runner_labels", name, labels=qualifying)
             continue
         a, b = qualifying
-        (cls_a, os_a), (cls_b, os_b) = classified[a], classified[b]
+        (cls_a, os_a, arch_a, size_a) = classified[a]
+        (cls_b, os_b, arch_b, size_b) = classified[b]
         if os_a != os_b:
             _no("different_operating_system", name, a=a, b=b)
             continue
-        if cls_a == cls_b:
+        if arch_a != arch_b:
+            _no("different_architecture", name, a=a, b=b)
+            continue
+        if (cls_a, size_a) == (cls_b, size_b):
             _no("same_runner_class", name, a=a, b=b, cls=cls_a)
             continue
         shas = {r["step_list_sha"] for lb in (a, b) for r in labels[lb]}
@@ -11068,18 +11119,18 @@ def _detect_opt81_measured_runner_gap(
         n_slow, n_fast = len(labels[slow]), len(labels[fast])
         evidence = (
             f"`{name}` ran on two runner classes in runs this repository already made: "
-            f"{n_fast} successful run(s) on `{fast}` ({_OPT81_CLASS_DISPLAY[cf[0]]}) "
+            f"{n_fast} successful run(s) on `{fast}` ({_opt81_class_display(cf[0], cf[3])}) "
             f"at p50 {p50[fast]:.0f}s, and {n_slow} on `{slow}` "
-            f"({_OPT81_CLASS_DISPLAY[cs[0]]}) at p50 {p50[slow]:.0f}s, executing the "
+            f"({_opt81_class_display(cs[0], cs[3])}) at p50 {p50[slow]:.0f}s, executing the "
             f"same {len(steps)} step(s) on both. The `{fast}` runs are {gap:.0f}s "
             f"faster at the median (floor: the larger of {_OPT81_MIN_GAP_S:.0f}s and "
             f"{_OPT81_MIN_GAP_FRAC:.0%} of the slower median). Runner-minute effect: "
             f"{_OPT81_RUNNER_MIN_UNKNOWN}. {_OPT81_DISCLOSURE}")
         me = _measured_evidence(
             ["Runner label", "Class", "Successful runs (n)", "p50", "Steps executed"],
-            [[f"`{slow}`", _OPT81_CLASS_DISPLAY[cs[0]], str(n_slow),
+            [[f"`{slow}`", _opt81_class_display(cs[0], cs[3]), str(n_slow),
               f"{p50[slow]:.0f}s", str(len(steps))],
-             [f"`{fast}`", _OPT81_CLASS_DISPLAY[cf[0]], str(n_fast),
+             [f"`{fast}`", _opt81_class_display(cf[0], cf[3]), str(n_fast),
               f"{p50[fast]:.0f}s", str(len(steps))]],
             summary=evidence,
             note=("Both distributions come from this repository's own sampled "
@@ -11105,10 +11156,10 @@ def _detect_opt81_measured_runner_gap(
             "half": "A1",
             "job": name,
             "workflow_file": wf_path,
-            "slow": {"label": slow, "class": cs[0], "os": cs[1],
-                     "p50_s": _opt81_round(p50[slow]), "n": n_slow},
-            "fast": {"label": fast, "class": cf[0], "os": cf[1],
-                     "p50_s": _opt81_round(p50[fast]), "n": n_fast},
+            "slow": {"label": slow, "class": cs[0], "os": cs[1], "arch": cs[2],
+                     "size": cs[3], "p50_s": _opt81_round(p50[slow]), "n": n_slow},
+            "fast": {"label": fast, "class": cf[0], "os": cf[1], "arch": cf[2],
+                     "size": cf[3], "p50_s": _opt81_round(p50[fast]), "n": n_fast},
             "gap_s": _opt81_round(gap),
             "floor_s": _opt81_round(floor),
             "min_gap_s": _OPT81_MIN_GAP_S,

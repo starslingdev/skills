@@ -9731,7 +9731,7 @@ def test_opt81_held_back_row_the_renderer_writes_passes_the_verifier(tmp_path):
     import blocking_path as bp
     vr = _load_verify_report()
     rows = [{"workflow_file": ".github/workflows/ci.yml", "job": "bench",
-             "gate": "same_runner_class", "half": "A1"}]
+             "gate": "step_lists_differ", "half": "A1"}]
     doc = {bp._OPT81_WITHHELD_DOC_KEY: rows}
     path = tmp_path / "f.json"
     path.write_text(_json.dumps(doc), encoding="utf-8")
@@ -9742,8 +9742,8 @@ def test_opt81_held_back_row_the_renderer_writes_passes_the_verifier(tmp_path):
     good = head + f"| runner class: held back | {line} | {feeds} |\n"
     assert vr.check_coverage_disclosed(good, path).ok
     assert not vr.check_coverage_disclosed(head, path).ok
-    coded = good.replace(vr._VR_OPT81_WITHHOLD_PHRASES["same_runner_class"],
-                         "same_runner_class")
+    coded = good.replace(vr._VR_OPT81_WITHHOLD_PHRASES["step_lists_differ"],
+                         "step_lists_differ")
     assert not vr.check_coverage_disclosed(coded, path).ok
 
 

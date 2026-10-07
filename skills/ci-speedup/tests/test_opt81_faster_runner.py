@@ -111,21 +111,32 @@ def _a1(runs, **kw):
 # =============================================================================
 
 @pytest.mark.parametrize("label,want", [
-    ("ubuntu-latest", ("github-standard", "linux")),
-    ("ubuntu-24.04", ("github-standard", "linux")),
-    ("ubuntu-22.04", ("github-standard", "linux")),
-    ("ubuntu-24.04-arm", ("github-standard", "linux")),
-    ("windows-latest", ("github-standard", "windows")),
-    ("windows-2022", ("github-standard", "windows")),
-    ("macos-latest", ("github-standard", "macos")),
-    ("macos-14", ("github-standard", "macos")),
-    ("ubuntu-latest-8-cores", ("github-larger", "linux")),
-    ("ubuntu-24.04-16core", ("github-larger", "linux")),
-    ("windows-latest-8-cores", ("github-larger", "windows")),
-    ("macos-14-xlarge", ("github-larger", "macos")),
-    ("macos-latest-large", ("github-larger", "macos")),
-    ("starsling-ubuntu-24.04", ("starsling", "linux")),
-    ("starsling-ubuntu-24.04-8", ("starsling", "linux")),
+    # (class, operating system, processor architecture, size tier)
+    ("ubuntu-latest", ("github-standard", "linux", "x64", "")),
+    ("ubuntu-24.04", ("github-standard", "linux", "x64", "")),
+    ("ubuntu-22.04", ("github-standard", "linux", "x64", "")),
+    ("ubuntu-24.04-arm", ("github-standard", "linux", "arm64", "")),
+    ("ubuntu-slim", ("github-slim", "linux", "x64", "")),
+    ("windows-latest", ("github-standard", "windows", "x64", "")),
+    ("windows-2022", ("github-standard", "windows", "x64", "")),
+    ("windows-11-arm", ("github-standard", "windows", "arm64", "")),
+    # macOS: plain 14/15/26/latest images are Apple silicon, 13 and older Intel
+    ("macos-latest", ("github-standard", "macos", "arm64", "")),
+    ("macos-14", ("github-standard", "macos", "arm64", "")),
+    ("macos-15", ("github-standard", "macos", "arm64", "")),
+    ("macos-13", ("github-standard", "macos", "x64", "")),
+    ("macos-15-intel", ("github-standard", "macos", "x64", "")),
+    ("ubuntu-latest-8-cores", ("github-larger", "linux", "x64", "8")),
+    ("ubuntu-24.04-16core", ("github-larger", "linux", "x64", "16")),
+    ("ubuntu-24.04-arm-4-cores", ("github-larger", "linux", "arm64", "4")),
+    ("windows-latest-8-cores", ("github-larger", "windows", "x64", "8")),
+    # macOS `-large` sizes are Intel, `-xlarge` sizes are Apple silicon
+    ("macos-14-xlarge", ("github-larger", "macos", "arm64", "xlarge")),
+    ("macos-14-large", ("github-larger", "macos", "x64", "large")),
+    ("macos-latest-large", ("github-larger", "macos", "x64", "large")),
+    ("starsling-ubuntu-24.04", ("starsling", "linux", "x64", "")),
+    ("starsling-ubuntu-24.04-8", ("starsling", "linux", "x64", "8")),
+    ("starsling-ubuntu-24.04-arm", ("starsling", "linux", "arm64", "")),
     ("linux self-hosted x64", None),
     ("self-hosted", None),
     ("my-big-box", None),
@@ -143,8 +154,12 @@ def test_opt81_taxonomy_is_a_named_table_with_a_verifier_twin():
     eng = [(rx.pattern, rx.flags, c, o) for rx, c, o in cr._OPT81_RUNNER_CLASSES]
     twin = [(rx.pattern, rx.flags, c, o) for rx, c, o in vr._VR_OPT81_RUNNER_CLASSES]
     assert eng == twin
+    eng_arch = [(rx.pattern, rx.flags, a) for rx, a in cr._OPT81_RUNNER_ARCH]
+    twin_arch = [(rx.pattern, rx.flags, a) for rx, a in vr._VR_OPT81_RUNNER_ARCH]
+    assert eng_arch == twin_arch
     for label in ("ubuntu-latest", "ubuntu-latest-8-cores", "starsling-ubuntu-24.04",
-                  "self-hosted linux", "macos-14-xlarge"):
+                  "self-hosted linux", "macos-14-xlarge", "macos-14-large", "macos-14",
+                  "ubuntu-24.04-arm", "starsling-ubuntu-24.04-arm-8", "ubuntu-slim"):
         assert cr._opt81_runner_class(label) == vr._vr_opt81_runner_class(label)
 
 
@@ -182,9 +197,9 @@ def test_opt81_a1_fires_on_the_same_job_on_two_classes():
     fr = f["faster_runner"]
     assert f["pattern"] == "OPT81" and fr["half"] == "A1"
     assert fr["slow"] == {"label": "ubuntu-latest", "class": "github-standard",
-                          "os": "linux", "p50_s": 150.0, "n": 8}
+                          "os": "linux", "arch": "x64", "size": "", "p50_s": 150.0, "n": 8}
     assert fr["fast"] == {"label": "ubuntu-latest-8-cores", "class": "github-larger",
-                          "os": "linux", "p50_s": 90.0, "n": 8}
+                          "os": "linux", "arch": "x64", "size": "8", "p50_s": 90.0, "n": 8}
     assert fr["gap_s"] == 60.0 and fr["floor_s"] == 37.5
     assert fr["step_names"] == _STEPS and len(fr["rows"]) == 16
     assert f["runner_min_saving"] is None
@@ -217,9 +232,6 @@ def test_opt81_a1_credits_the_gap_only_on_the_slow_long_pole():
 
 @pytest.mark.parametrize("kw,gate", [
     ({"slow": _SLOW[:7]}, "fewer_than_min_samples_on_two_labels"),
-    ({"slow_label": "ubuntu-22.04", "fast_label": "ubuntu-24.04"}, "same_runner_class"),
-    ({"slow_label": "windows-latest", "fast_label": "ubuntu-latest-8-cores"},
-     "different_operating_system"),
     ({"slow_label": ["self-hosted", "linux"]}, "runner_label_not_classifiable_by_size"),
     ({"fast_kw": {"skipped": ("Run actions/checkout@v4",)}}, "step_lists_differ"),
     ({"fast_kw": {"steps": _STEPS[:2] + ["Warm cache"] + _STEPS[2:]}},
@@ -231,6 +243,43 @@ def test_opt81_a1_withholds_and_lists_the_candidate(kw, gate):
     assert withheld.get(gate) == 1, withheld
     assert cands == [{"workflow_file": _WF, "job": "bench", "gate": gate, "half": "A1"}]
     assert (_WF, "bench") in multi
+
+
+@pytest.mark.parametrize("kw,gate", [
+    ({"slow_label": "ubuntu-22.04", "fast_label": "ubuntu-24.04"}, "same_runner_class"),
+    ({"slow_label": "windows-latest", "fast_label": "ubuntu-latest-8-cores"},
+     "different_operating_system"),
+    # Same OS, different processor architecture: the gap would measure ARM vs x86.
+    ({"slow_label": "ubuntu-24.04-arm", "fast_label": "ubuntu-latest-8-cores"},
+     "different_architecture"),
+    ({"slow_label": "ubuntu-latest", "fast_label": "starsling-ubuntu-24.04-arm"},
+     "different_architecture"),
+    # GitHub's macOS `-large` is Intel; plain `macos-14` is Apple silicon.
+    ({"slow_label": "macos-14", "fast_label": "macos-14-large"}, "different_architecture"),
+])
+def test_opt81_a1_design_exclusions_are_verdicts_not_held_back(kw, gate):
+    """Two operating systems, two architectures, or one runner class are not this
+    lever by design: counted, never listed on the held-back row."""
+    found, withheld, cands, multi, _ = _a1(_runs(**kw))
+    assert found == []
+    assert withheld.get(gate) == 1, withheld
+    assert gate in cr._OPT81_VERDICT_GATES
+    assert cands == []
+
+
+@pytest.mark.parametrize("slow_label,fast_label", [
+    ("ubuntu-latest-4-cores", "ubuntu-latest-16-cores"),
+    ("ubuntu-slim", "ubuntu-latest"),
+    ("starsling-ubuntu-24.04", "starsling-ubuntu-24.04-8"),
+    ("macos-14", "macos-14-xlarge"),
+])
+def test_opt81_a1_two_size_tiers_of_one_vendor_are_compared(slow_label, fast_label):
+    found, withheld, cands, *_ = _a1(_runs(slow_label=slow_label, fast_label=fast_label))
+    assert len(found) == 1, withheld
+    fr = found[0]["faster_runner"]
+    assert fr["slow"]["arch"] == fr["fast"]["arch"]
+    assert (fr["slow"]["class"], fr["slow"]["size"]) != (fr["fast"]["class"],
+                                                         fr["fast"]["size"])
 
 
 def test_opt81_a1_gap_below_floor_is_a_verdict_not_a_held_back_candidate():
@@ -571,7 +620,7 @@ def test_opt81_verifier_reddens_on_a_same_class_or_sub_floor_a1():
     for r in f["faster_runner"]["rows"]:
         if r["label"] == "ubuntu-latest-8-cores":
             r["label"] = "ubuntu-24.04"
-    f["faster_runner"]["fast"].update(label="ubuntu-24.04", **{"class": "github-standard"})
+    f["faster_runner"]["fast"].update(label="ubuntu-24.04", size="", **{"class": "github-standard"})
     assert any("same runner class" in p for p in vr._opt81_a1_rederived(f))
     f = copy.deepcopy(_a1_finding())
     for r in f["faster_runner"]["rows"]:
@@ -579,6 +628,17 @@ def test_opt81_verifier_reddens_on_a_same_class_or_sub_floor_a1():
             r["duration_s"] = r["duration_s"] + 40
     problems = vr._opt81_a1_rederived(f)
     assert any("p50_s" in p for p in problems), problems
+
+
+def test_opt81_verifier_reddens_on_a_cross_architecture_a1():
+    vr = _load_verify_report()
+    f = copy.deepcopy(_a1_finding())
+    for r in f["faster_runner"]["rows"]:
+        if r["label"] == "ubuntu-latest":
+            r["label"] = "ubuntu-24.04-arm"
+    f["faster_runner"]["slow"].update(label="ubuntu-24.04-arm", arch="arm64")
+    problems = vr._opt81_a1_rederived(f)
+    assert any("processor architectures" in p for p in problems), problems
 
 
 @pytest.mark.parametrize("mutate,extra,needle", [

@@ -3107,7 +3107,7 @@ def test_opt81_every_recordable_withhold_gate_has_a_plain_english_phrase():
                     and isinstance(c.args[0], ast.Constant)):
                 found.add(c.args[0].value)
     found -= set(cr._OPT81_VERDICT_GATES)
-    assert {"step_lists_differ", "same_runner_class",
+    assert {"step_lists_differ", "fewer_than_min_samples_on_two_labels",
             "runner_label_not_classifiable_by_size"} <= found, found
     assert found == set(bp._OPT81_WITHHOLD_PHRASES), (
         sorted(found ^ set(bp._OPT81_WITHHOLD_PHRASES)))

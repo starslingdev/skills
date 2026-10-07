@@ -5253,12 +5253,6 @@ _OPT81_WITHHOLD_PHRASES: dict[str, str] = {
     "more_than_two_qualifying_runner_labels":
         "the job ran often enough on three or more runner labels, so there is no "
         "single pair to compare",
-    "different_operating_system":
-        "the two runner labels run different operating systems, so the comparison "
-        "would measure the operating system, not the runner",
-    "same_runner_class":
-        "both runner labels are the same class (for example two Ubuntu versions), "
-        "so the difference is an operating-system version, not a runner class",
     "step_lists_differ":
         "the job did not run the same steps on both runner labels, so it is not "
         "the same job on both",

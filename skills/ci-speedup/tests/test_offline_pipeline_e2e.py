@@ -1083,9 +1083,11 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert o81_a1[0]["workflow_file"] == ".github/workflows/bench.yml", o81_a1[0]
     assert o81_a1[0]["affected_jobs"] == ["bench"], o81_a1[0]
     assert fr["slow"] == {"label": "ubuntu-latest", "class": "github-standard",
-                          "os": "linux", "p50_s": 150.0, "n": 8}, fr["slow"]
+                          "os": "linux", "arch": "x64", "size": "",
+                          "p50_s": 150.0, "n": 8}, fr["slow"]
     assert fr["fast"] == {"label": "ubuntu-latest-8-cores", "class": "github-larger",
-                          "os": "linux", "p50_s": 90.0, "n": 8}, fr["fast"]
+                          "os": "linux", "arch": "x64", "size": "8",
+                          "p50_s": 90.0, "n": 8}, fr["fast"]
     assert fr["gap_s"] == 60.0 and fr["floor_s"] == 37.5, fr
     assert len(fr["rows"]) == 16, fr["rows"]
     assert fr["job_is_workflow_long_pole"] is True, fr

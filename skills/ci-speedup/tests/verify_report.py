@@ -999,12 +999,6 @@ _VR_OPT81_WITHHOLD_PHRASES = {
     "more_than_two_qualifying_runner_labels":
         "the job ran often enough on three or more runner labels, so there is no "
         "single pair to compare",
-    "different_operating_system":
-        "the two runner labels run different operating systems, so the comparison "
-        "would measure the operating system, not the runner",
-    "same_runner_class":
-        "both runner labels are the same class (for example two Ubuntu versions), "
-        "so the difference is an operating-system version, not a runner class",
     "step_lists_differ":
         "the job did not run the same steps on both runner labels, so it is not "
         "the same job on both",
@@ -9481,18 +9475,29 @@ _VR_OPT81_DISCLOSURE = (
     "runs on runner classes you already use (A1), or names a class of lever and asks "
     "you to benchmark before believing any number (A2); it never prices a runner.")
 _VR_OPT81_RUNNER_CLASSES = (
-    (re.compile(r"^starsling-(ubuntu|linux)[\w.-]*$", re.I), "starsling", "linux"),
-    (re.compile(r"^starsling-windows[\w.-]*$", re.I), "starsling", "windows"),
-    (re.compile(r"^starsling-macos[\w.-]*$", re.I), "starsling", "macos"),
-    (re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?-\d+-?cores?$", re.I),
+    (re.compile(r"^starsling-(ubuntu|linux)[\w.-]*?(-(?P<size>\d+))?$", re.I),
+     "starsling", "linux"),
+    (re.compile(r"^starsling-windows[\w.-]*?(-(?P<size>\d+))?$", re.I),
+     "starsling", "windows"),
+    (re.compile(r"^starsling-macos[\w.-]*?(-(?P<size>\d+))?$", re.I),
+     "starsling", "macos"),
+    (re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?-(?P<size>\d+)-?cores?$", re.I),
      "github-larger", "linux"),
-    (re.compile(r"^windows-(latest|\d{4}|11)(-arm)?-\d+-?cores?$", re.I),
+    (re.compile(r"^windows-(latest|\d{4}|11)(-arm)?-(?P<size>\d+)-?cores?$", re.I),
      "github-larger", "windows"),
-    (re.compile(r"^macos-(latest|\d+)-x?large$", re.I), "github-larger", "macos"),
-    (re.compile(r"^ubuntu-(latest|slim|\d{2}\.\d{2})(-arm)?$", re.I),
+    (re.compile(r"^macos-(latest|\d+)-(?P<size>x?large)$", re.I), "github-larger", "macos"),
+    (re.compile(r"^ubuntu-slim$", re.I), "github-slim", "linux"),
+    (re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?$", re.I),
      "github-standard", "linux"),
     (re.compile(r"^windows-(latest|\d{4}|11-arm)$", re.I), "github-standard", "windows"),
     (re.compile(r"^macos-(latest|\d+)(-intel)?$", re.I), "github-standard", "macos"),
+)
+_VR_OPT81_RUNNER_ARCH = (
+    (re.compile(r"(^|-)arm(64)?(-|$)", re.I), "arm64"),
+    (re.compile(r"^macos-(latest|\d+)-xlarge$", re.I), "arm64"),
+    (re.compile(r"^macos-(latest|\d+)-(large|intel)$", re.I), "x64"),
+    (re.compile(r"^macos-([0-9]|1[0-3])$", re.I), "x64"),
+    (re.compile(r"^macos-(latest|\d+)$", re.I), "arm64"),
 )
 # Duration / saving / money tokens an A2 rendering must never carry. A label such
 # as `ubuntu-latest-8-cores` or the id OPT81 is not a number in this sense.
@@ -9510,18 +9515,27 @@ def _vr_opt81_number_in(text: str) -> "re.Match[str] | None":
     return _VR_OPT81_NUMBER_RE.search(_VR_OPT81_CODE_SPAN_RE.sub("``", text or ""))
 
 
-def _vr_opt81_runner_class(label: object) -> "tuple[str, str] | None":
+def _vr_opt81_label_arch(tok: str) -> str:
+    for rx, arch in _VR_OPT81_RUNNER_ARCH:
+        if rx.search(tok):
+            return arch
+    return "x64"
+
+
+def _vr_opt81_runner_class(label: object) -> "tuple[str, str, str, str] | None":
     toks = [t for t in str(label or "").split() if t]
     if not toks:
         return None
     found: set = set()
     for tok in toks:
         for rx, cls, os_ in _VR_OPT81_RUNNER_CLASSES:
-            if rx.match(tok):
-                found.add((cls, os_))
+            m = rx.match(tok)
+            if m:
+                size = str(m.groupdict().get("size") or "").lower()
+                found.add((cls, os_, _vr_opt81_label_arch(tok), size))
                 break
     if "self-hosted" in {t.lower() for t in toks} and not any(
-            c == "starsling" for c, _o in found):
+            f[0] == "starsling" for f in found):
         return None
     if len(found) != 1:
         return None
@@ -9573,17 +9587,22 @@ def _opt81_a1_rederived(f: dict) -> list[str]:
         if rc is None:
             out.append(f"OPT81 {fid}: `{lb}` cannot be classified by size, so it "
                        "cannot be compared")
-        elif (st.get("class"), st.get("os")) != rc:
-            out.append(f"OPT81 {fid}: `{lb}` is stamped {st.get('class')}/{st.get('os')} "
-                       f"but classifies as {rc[0]}/{rc[1]}")
+        elif (st.get("class"), st.get("os"), st.get("arch"), st.get("size")) != rc:
+            out.append(f"OPT81 {fid}: `{lb}` is stamped {st.get('class')}/{st.get('os')}/"
+                       f"{st.get('arch')}/{st.get('size')!r} but classifies as "
+                       f"{rc[0]}/{rc[1]}/{rc[2]}/{rc[3]!r}")
     if out:
         return out
     cs, cf = _vr_opt81_runner_class(ls), _vr_opt81_runner_class(lf)
     if cs[1] != cf[1]:
         out.append(f"OPT81 {fid}: `{ls}` and `{lf}` run different operating systems")
-    if cs[0] == cf[0]:
+    if cs[2] != cf[2]:
+        out.append(f"OPT81 {fid}: `{ls}` and `{lf}` use different processor "
+                   f"architectures ({cs[2]}, {cf[2]}); the gap would measure the "
+                   "architecture, not the runner")
+    if (cs[0], cs[3]) == (cf[0], cf[3]):
         out.append(f"OPT81 {fid}: `{ls}` and `{lf}` are the same runner class "
-                   f"({cs[0]}); that is an operating-system comparison")
+                   f"({cs[0]}); that is an image-version comparison")
     names = [str(n) for n in _as_list(fr.get("step_names"))]
     sha = _vr_opt81_step_sha(names)
     if fr.get("step_list_sha") != sha:
