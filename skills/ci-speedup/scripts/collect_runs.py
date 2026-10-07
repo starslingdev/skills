@@ -17026,7 +17026,7 @@ def _detect_opt79_net_negative_cache(
                     effective=(_effective_volume(monthly_volume, job_runs, sampled)
                                if has_volume else None),
                     runner_min_saving=None),
-                wf_path=wf_path, gates_pr=gates_pr,
+                wf_path=wf_path, gates_pr=gates_pr, declares_pr=bool(is_pr),
                 long_pole_job=str(block.get("long_pole_job") or ""),
                 long_pole_p50_s=block.get("long_pole_p50_s"),
                 job_p50_s=block.get("job_p50_s"),
@@ -17057,6 +17057,8 @@ def _detect_opt79_net_negative_cache(
                     note_head=_note_head, note_guardrail=_note_guardrail,
                     guardrail=_guardrail, title=title,
                     idx=start_idx + len(out) + 1))
+                # Carried so a later demotion to an uncredited row keeps it.
+                out[-1]["cache_net_negative"]["declares_pull_request"] = bool(is_pr)
                 continue
             # TIED with the next-tallest job: under a second of headroom moves
             # no merge wait, so it is an uncredited row that says so, tallied
@@ -17158,6 +17160,7 @@ def _opt79_uncredited_row(
     long_pole_p50_s: Any,
     job_p50_s: Any,
     floor_p50_s: Any,
+    declares_pr: bool | None = None,
 ) -> dict[str, Any]:
     """One uncredited OPT79 row: the stamped measurement block plus WHERE the
     job sits, stated rather than implied, so the renderer can tell the
@@ -17176,6 +17179,11 @@ def _opt79_uncredited_row(
     row["job_p50_s"] = job_p50_s
     row["floor_p50_s"] = floor_p50_s
     row["workflow_gates_pull_requests"] = bool(gates_pr)
+    # Whether the YAML DECLARES a pull_request trigger, beside whether a pull
+    # request was SAMPLED: a workflow that declares one but had no PR run in the
+    # sample is not "a workflow that does not run on pull requests".
+    if declares_pr is not None:
+        row["declares_pull_request"] = bool(declares_pr)
     row["on_critical_path"] = False
     return row
 
@@ -17190,8 +17198,14 @@ _OPT79_ASCII_SPELLINGS = (("\u2014", " - "), ("\u2013", "-"), ("\u2192", "->"),
 def _opt79_ascii(text: str) -> str:
     for a, b in _OPT79_ASCII_SPELLINGS:
         text = text.replace(a, b)
-    text = text.encode("ascii", "ignore").decode("ascii")
+    # Escaped, never dropped: a job name such as `tests (café)` must survive.
+    text = text.encode("ascii", "backslashreplace").decode("ascii")
     return " ".join(text.split())
+
+
+def _opt79_secs(v: Any) -> str:
+    """A cascade step's value as the demotion detail states it: `19s`, `0.4s`."""
+    return f"{float(v):g}s" if isinstance(v, (int, float)) else "?s"
 
 
 def _opt79_demote_uncredited_poles(
@@ -17203,7 +17217,7 @@ def _opt79_demote_uncredited_poles(
     says why.
 
     Run in `collect()` AFTER the generic wall-clock cascade and the off-spine
-    stamping. A pole finding the cascade zeroed (`wall_clock_p50_s <= 0`) is
+    stamping. A pole finding the cascade left at a figure that rounds to 0s is
     `pole_merge_wait_zeroed_by_cross_check`, with the cascade's own reason(s) as
     `uncredited_reason_detail`; one whose job the merge-gating spine dropped
     (`off_spine`) is `pole_workflow_off_merge_gating_spine`. Either way a
@@ -17218,7 +17232,10 @@ def _opt79_demote_uncredited_poles(
             kept.append(f)
             continue
         wc = f.get("wall_clock_p50_s")
-        zeroed = not isinstance(wc, (int, float)) or wc <= 0
+        # Decided on the ROUNDED figure, the one the report renders: the pole
+        # arm credits only `round(raw_wc) > 0`, and the cascade can leave
+        # 0 < wc <= 0.5, which would render "up to 0s off the merge wait".
+        zeroed = not isinstance(wc, (int, float)) or round(wc) <= 0
         if not zeroed and not f.get("off_spine"):
             kept.append(f)
             continue
@@ -17228,15 +17245,24 @@ def _opt79_demote_uncredited_poles(
             gates_pr=bool(cn.get("workflow_gates_pull_requests")),
             long_pole_job=str(cn.get("long_pole_job") or ""),
             long_pole_p50_s=cn.get("long_pole_p50_s"),
-            job_p50_s=cn.get("job_p50_s"), floor_p50_s=cn.get("floor_p50_s"))
+            job_p50_s=cn.get("job_p50_s"), floor_p50_s=cn.get("floor_p50_s"),
+            declares_pr=cn.get("declares_pull_request"))
         if zeroed:
             row["uncredited_reason"] = _OPT79_REASON_ZEROED
-            reasons = [_opt79_ascii(str(d.get("reason") or ""))
-                       for d in (f.get("wall_clock_derivation") or [])
-                       if isinstance(d, dict)]
+            reasons = [
+                f"{_opt79_secs(d.get('from_s'))} to {_opt79_secs(d.get('to_s'))}: "
+                f"{_opt79_ascii(str(d.get('reason') or ''))}"
+                for d in (f.get("wall_clock_derivation") or [])
+                if isinstance(d, dict) and str(d.get("reason") or "").strip()]
             row["uncredited_reason_detail"] = (
                 "; ".join(r for r in reasons if r)
                 or "the cross-checks left no merge wait for it to shorten")
+            # The cascade's own steps, copied as they stood at demotion, so
+            # `verify_report` can re-derive "zeroed" (down to a figure that
+            # rounds to 0s) instead of taking the reason on trust.
+            row["uncredited_derivation"] = [
+                dict(d) for d in (f.get("wall_clock_derivation") or [])
+                if isinstance(d, dict)]
         else:
             row["uncredited_reason"] = _OPT79_REASON_OFF_SPINE
         logger.debug("OPT79 %s: pole finding %s demoted to uncredited (%s)",

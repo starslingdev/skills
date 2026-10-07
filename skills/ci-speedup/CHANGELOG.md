@@ -646,7 +646,12 @@ unversioned and updates by reinstall from `main`.
   request. The report's self-check re-derives the capped number from the stamped measurements, rejects
   any OPT79 finding that claims wall-clock under a below-the-floor certificate,
   checks that the job it names as the cap is the tallest other job the run
-  measured, and fails an uncredited line that claims the merge wait.
+  measured, and fails an uncredited line that claims the merge wait. A figure the cross-checks leave under half a second is demoted too, so no
+  credited line ever prints "0s"; a demoted row carries the cross-check steps
+  that zeroed it, and the self-check re-derives them, and checks an off-spine
+  row against the checks the merge actually dropped. A workflow that declares
+  pull requests but had none in the sample is told so, instead of being called
+  a workflow that does not run on pull requests.
 
 - **2026-09-30** — **Five fix moves the catalog only half-covered are now in the
   advice.** OPT28 gains "delete the checkout step if no step reads a file" and
