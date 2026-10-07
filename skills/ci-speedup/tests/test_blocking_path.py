@@ -7925,15 +7925,15 @@ def test_data_sources_cache_probe_row_states_what_the_budget_cut():
 
 
 def test_uncredited_pole_cache_is_reported_even_though_it_is_not_sized():
-    """A net-negative cache on a job at or above its workflow's cluster floor
-    that is NOT the long pole of a pull-request workflow cannot be priced: the
-    audit cannot prove shrinking it leaves the merge gate unchanged. The old
-    behaviour skipped such jobs in the candidate selector, so the report was
-    byte-identical to one for a repository with no such cache.
+    """A net-negative cache on the slowest job of a workflow no pull request
+    runs cannot be priced in this version. The old behaviour skipped such jobs
+    in the candidate selector, so the report was byte-identical to one for a
+    repository with no such cache.
 
     It is measured like any other and stated with NO number: the reader
     learns the cache exists and that the saving is not credited here. (The
-    long pole of a PR workflow is a credited wall-clock finding instead.)"""
+    long pole of a PR workflow is a credited wall-clock finding instead, and a
+    job shorter than its workflow's long pole is credited runner-minutes.)"""
     doc = _doc_one_pole()
     doc["opt79_uncredited_pole_caches"] = [{
         "kind": "opt79_uncredited_pole_cache",
@@ -7944,9 +7944,9 @@ def test_uncredited_pole_cache_is_reported_even_though_it_is_not_sized():
         "install_step": "Run npm ci",
         "waste_s": 19.0, "hits": 5, "misses": 4,
         "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
-        "job_p50_s": 300.0, "floor_p50_s": 300.0,
-        "long_pole_job": "e2e", "long_pole_p50_s": 600.0,
-        "workflow_gates_pull_requests": True,
+        "job_p50_s": 600.0, "floor_p50_s": 300.0,
+        "long_pole_job": "build", "long_pole_p50_s": 600.0,
+        "workflow_gates_pull_requests": False,
         "on_critical_path": False,
     }]
     lines = bp._opt79_uncredited_block(doc)
@@ -7954,13 +7954,14 @@ def test_uncredited_pole_cache_is_reported_even_though_it_is_not_sized():
     assert "build" in md
     assert "19s" in md                      # the measured excess, per hit
     assert "5 hit" in md and "4 miss" in md  # the sample it came from
-    assert "second-slowest job (300s)" in md
-    assert "this workflow's slowest job" not in md
+    assert "does not run on pull requests" in md
+    # the retired wording: a job between the floor and the pole is credited now
+    assert "second-slowest" not in md
     assert "merge wait" not in md
     assert "not credited" in md
     # It must NOT read as a sized saving: no runner-minutes, no wall-clock claim.
     assert "min/mo" not in md
-    assert "runner-min" not in md
+    assert "runner-min/mo" not in md     # "runner-minutes only" is a statement, not a size
 
     # Nothing measured -> nothing said.
     assert bp._opt79_uncredited_block(_doc_one_pole()) == []
@@ -7983,8 +7984,8 @@ def test_uncredited_pole_cache_reaches_the_rendered_report():
         "waste_s": 19.0, "hits": 5, "misses": 4,
         "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
         "job_p50_s": 600.0, "floor_p50_s": 300.0,
-        "long_pole_job": "e2e", "long_pole_p50_s": 700.0,
-        "workflow_gates_pull_requests": True,
+        "long_pole_job": "build", "long_pole_p50_s": 600.0,
+        "workflow_gates_pull_requests": False,
         "on_critical_path": False,
     }]
     md = bp.render(doc, "o/r")
@@ -8253,6 +8254,41 @@ def test_static_only_keeps_the_withheld_cache_disclosure():
     assert static, "the static-only body must not be empty with a withheld cache"
     md = bp.render(doc, "o/r")
     assert "held back" in md, md
+
+
+def test_tier2_cert_summary_names_the_below_long_pole_proof():
+    """OPT79's second runner-minute proof renders as its own token, with the
+    slowest job's lead as the margin and the certificate's `ref` naming that
+    job - never as `below_cluster_floor`, whose margin means something else."""
+    f = {"tier2_neutrality": {
+        "proof": "below_long_pole", "margin_s": 60.0,
+        "ref": ("per_workflow_timing[wf]: `integration` at 180.0s is 60.0s below "
+                "the workflow long pole `e2e` at 240.0s")}}
+    msg = bp._tier2_cert_summary(f)
+    assert msg.startswith("`below_long_pole` with 1m 00s margin"), msg
+    # only "cannot lengthen" is provable: the slowest job can be off the merge
+    # gate (or the workflow can gate no PR), and a shorter job in a `needs:`
+    # chain DOES move the gate when it shrinks
+    assert "shrinking it cannot make the workflow take longer" in msg, msg
+    assert "sets the merge gate" not in msg, msg
+    assert "`e2e` at 240.0s" in msg, msg
+    assert "below_cluster_floor" not in msg, msg
+
+
+def test_uncredited_co_pole_is_not_called_the_slowest_job():
+    """A job TIED with the long pole of a pull-request workflow is stamped
+    `pole_tied_with_next_job`; its line says it is tied for the slowest job
+    rather than claiming to be the one the run named."""
+    md = "\n".join(bp._opt79_uncredited_block({
+        "opt79_uncredited_pole_caches": [_uncredited_row(
+            job="unit", long_pole_job="e2e", job_p50_s=660.0,
+            long_pole_p50_s=660.0, floor_p50_s=660.0,
+            workflow_gates_pull_requests=True,
+            uncredited_reason="pole_tied_with_next_job")]}))
+    assert "`unit` is tied with `e2e`, this workflow's slowest job (660s), so " \
+        "neither job alone sets the merge wait" in md, md
+    assert "tied for this workflow's slowest job, but it is tied" not in md, md
+    assert "not credited" in md, md
 
 
 def _uncredited_row(**kw):

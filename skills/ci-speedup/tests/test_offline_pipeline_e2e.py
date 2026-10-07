@@ -101,10 +101,11 @@ _JOB_ID = 9001
 #            so it costs exactly the per-job cap once. Every other OPT79 gate is
 #            answered from data already in hand, so no log is fetched for a job that
 #            could not produce a finding.)
-#   56  now  (+8 OPT79: `build-matrix.yml`'s `integration` job — that workflow's slowest —
-#            now also restores a cache before its install, so the uncredited path
-#            runs end to end: its second candidate job costs the per-job cap once
-#            more.)
+#   56  now  (+8 OPT79: `build-matrix.yml`'s `integration` job — then that workflow's
+#            slowest — now also restores a cache before its install: its second
+#            candidate job costs the per-job cap once more. Since the `e2e` job was
+#            added it is the credited below-the-long-pole finding instead, so the
+#            uncredited path no longer runs end to end; unit tests cover it.)
 #   56  still (OPT79 now reads the repo-root `package.json` to decide whether
 #            setup-node v5+'s AUTOMATIC cache is on. At most ONE read per repo, and
 #            only when a sampled job runs setup-node v5+ with no `cache:` input;
@@ -128,6 +129,11 @@ _JOB_ID = 9001
 #            minimum. +3 `runs/{id}/jobs` pages for those runs, +6 `prep` job logs for
 #            the cache probe (one per sampled occurrence, under the per-job cap of 8).
 #            No new check-runs or PR fetch: the new runs reuse existing head shas.)
+#   77  still (`build-matrix.yml` gains an `e2e` job, 240s and cacheless, on all
+#            12 sampled runs, so it becomes that workflow's long pole and the
+#            cached `integration` (180s) exercises OPT79's `below_long_pole` arm.
+#            Its jobs ride in the existing `runs/{id}/jobs` pages and it declares
+#            no cache, so it costs no call and no log fetch: measured, +0.)
 _GOLDEN_GH_QUERY_COUNT = 77
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
@@ -153,8 +159,8 @@ jobs:
 
 # PR-H1: the second workflow (wf id 1002). Three tiny same-SKU matrix legs
 # (20/21/22s — each under OPT65's 60s tiny-job bar and under the workflow's own
-# floor, which is its SECOND-slowest job: build at 90s under integration at
-# 180s) drive the promotable OPT65 below-floor case, and its >10-run success
+# floor, which is its SECOND-slowest job: integration at 180s under the
+# cacheless e2e long pole at 240s) drive the promotable OPT65 below-floor case, and its >10-run success
 # sample makes the bill-pole fetch loop deepen a workflow OFFLINE (the shallow
 # depth is 10). Push-only, so it never joins the PR spine or the close's poles.
 _WF2_ID = 1002
@@ -189,6 +195,12 @@ jobs:
       - run: npm ci
       - name: Integration suite
         run: npm run integration
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: End-to-end suite
+        run: npm run e2e
   lint-eslint:
     name: lint (eslint)
     runs-on: ubuntu-latest
@@ -554,8 +566,9 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     data = json.loads(findings_path.read_text(encoding="utf-8"))
 
     # OPT77 end to end. `build-matrix.yml` carries three plain same-runner lint checks
-    # that each re-pay one 14s setup prefix before 6s of work, beside a 180s
-    # `integration` job that survives the consolidation. Both the detector's
+    # that each re-pay one 14s setup prefix before 6s of work, beside the 240s
+    # `e2e` job (the workflow's slowest; `integration` is next at 180s) that
+    # survives the consolidation. Both the detector's
     # DISPATCH and the supersede step that follows it were pinned only by reading
     # collect()'s source: `new = [] if True else _detect_opt77(...)` and deleting
     # the supersede line each left the whole suite green. This executes them.
@@ -575,7 +588,9 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
         "lint (biome)", "lint (eslint)", "lint (stylelint)"], sc.get("credited_jobs")
     assert o77[0].get("wall_clock_p50_s") in (0, 0.0)
     assert float(sc.get("setup_p50_s") or 0.0) > 0.0
-    assert sc.get("remaining_tallest_job") == "integration", sc
+    # `e2e` (240s) is the tallest job left outside the group since it joined the
+    # corpus as build-matrix.yml's long pole; it was `integration` (180s) before.
+    assert sc.get("remaining_tallest_job") == "e2e", sc
     # ...and the round-up lever must not ALSO claim those three jobs: they are named
     # like matrix legs, so OPT65 groups them too, and one edit rendering as two
     # levers is exactly what the supersede step exists to stop.
@@ -678,13 +693,15 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # reachable through collect(): short-circuiting the detector call, or
     # discarding its result, leaves every unit test green.
     o79_all = [f for f in data["findings"] if f.get("pattern") == "OPT79"]
-    # TWO OPT79 findings now: `deps` (below its workflow's floor — credited
-    # runner-minutes, Tier-2) and `prep` (chained.yml's slowest job, on a
-    # workflow that gates pull requests — credited WALL-CLOCK, no minutes).
+    # THREE OPT79 findings now: `deps` (below its workflow's floor — credited
+    # runner-minutes, Tier-2, `below_cluster_floor`), `integration` (AT or above
+    # build-matrix.yml's floor but below its slowest job `e2e` — credited
+    # runner-minutes, Tier-2, `below_long_pole`) and `prep` (chained.yml's slowest
+    # job, on a workflow that gates pull requests — credited WALL-CLOCK, no minutes).
     assert sorted(tuple(f.get("affected_jobs") or []) for f in o79_all) == [
-        ("deps",), ("prep",)], (
-        "expected one credited OPT79 on `deps` and one pole OPT79 on `prep` "
-        f"(got {[f.get('affected_jobs') for f in o79_all]!r})")
+        ("deps",), ("integration",), ("prep",)], (
+        "expected credited OPT79s on `deps` and `integration` and one pole OPT79 "
+        f"on `prep` (got {[f.get('affected_jobs') for f in o79_all]!r})")
     o79 = [f for f in o79_all if f.get("affected_jobs") == ["deps"]]
     cn = o79[0].get("cache_net_negative") or {}
     assert cn.get("kind") == "opt79_net_negative_cache", cn
@@ -716,21 +733,31 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # counted. An empty tally is what a collect() that stopped passing the
     # accumulator to the detector produces.
     assert (_o79_gates.get("job_declares_no_cache_restore_step") or 0) > 0, _o79_gates
-    # The uncredited path end to end. `build-matrix.yml`'s `integration` job is that
-    # workflow's slowest job and also restores a cache before `npm ci`: 33s on
-    # its hit runs against 12s on its miss runs. It cannot be priced (it is not
-    # below the cluster floor), so it is reported with no number — and since the
-    # workflow runs only on push, never as a merge wait.
+    # The at-or-above-the-floor, below-the-long-pole arm end to end.
+    # `build-matrix.yml`'s `integration` job (180s) restores a cache before
+    # `npm ci`: 33s on its hit runs against 12s on its miss runs. It sits AT
+    # the workflow's cluster floor (the second-slowest job's p50 — itself), so the
+    # below-the-floor proof does not apply, but it is shorter than the slowest job
+    # `e2e` (240s): shrinking it cannot make the workflow take longer. Credited runner-minutes, with its own proof token and a margin
+    # measured against the slowest job, never against the floor.
+    o79_lp = next(f for f in o79_all if f.get("affected_jobs") == ["integration"])
+    lcn = o79_lp.get("cache_net_negative") or {}
+    assert lcn.get("kind") == "opt79_net_negative_cache", lcn
+    assert lcn.get("waste_s") == 21.0, lcn
+    assert lcn.get("hits") == 4 and lcn.get("misses") == 4, lcn
+    assert o79_lp.get("wall_clock_p50_s") in (0, 0.0), o79_lp
+    assert (o79_lp.get("runner_min_saving") or 0) > 0, o79_lp
+    _lcert = o79_lp.get("tier2_neutrality") or {}
+    assert _lcert.get("proof") == "below_long_pole", _lcert
+    assert _lcert.get("margin_s") == 60.0, _lcert            # 240s - 180s
+    assert "`e2e`" in str(_lcert.get("ref") or ""), _lcert
+    assert "shorter than the workflow's slowest job (`e2e`, 240s)" in str(o79_lp.get("size_note") or ""), o79_lp
+    # …and the uncredited list is EMPTY on this corpus: the only case it used to
+    # hold here was this job, and the long poles (`e2e`, `prep`) are either
+    # cacheless or credited.
     _unc = data.get("opt79_uncredited_pole_caches")
-    # Still exactly one: `prep` is a credited finding now (below), so the only
-    # uncredited row is the push-only workflow's `integration`.
-    assert isinstance(_unc, list) and len(_unc) == 1, _unc
-    assert _unc[0].get("job") == "integration", _unc[0]
-    assert _unc[0].get("waste_s") == 21.0, _unc[0]
-    assert _unc[0].get("hits") == 4 and _unc[0].get("misses") == 4, _unc[0]
-    assert _unc[0].get("runner_min_saving") is None, _unc[0]
-    assert _unc[0].get("on_critical_path") is False, _unc[0]
-    assert _unc[0].get("workflow_gates_pull_requests") is False, _unc[0]
+    assert _unc == [], _unc
+    assert "job_not_strictly_below_the_workflow_cluster_floor" not in _o79_gates, _o79_gates
     # The credited WALL-CLOCK arm end to end. `chained.yml`'s `prep` is that
     # workflow's slowest job (120s; `verify` is next at 100s) and the workflow
     # runs on pull requests, so its net-negative cache — 33s on 3 hit runs vs
@@ -1079,12 +1106,14 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
             and "the hit path is 19s SLOWER" in _o79_ev), _o79_ev
     assert (f"~{o79_rendered[0]['runner_min_saving']:.0f} runner-min/mo"
             in _o79_ev), _o79_ev
-    assert "1 cache(s) measured net-negative on a job this audit cannot price" \
-        in report, "the uncredited OPT79 line did not reach the report"
-    assert ("a cache on `integration` in `.github/workflows/build-matrix.yml` "
-            "measured net-negative by 21s per cache hit (4 hit / 4 miss run(s) "
-            "sampled)") in report
-    assert "does not run on pull requests" in report
+    # The below-the-long-pole finding on `integration` reaches the reader as a
+    # credited runner-minute row with its own proof named, and the numberless
+    # "cannot price" line is gone: this corpus has no uncredited cache left.
+    assert str(o79_lp["id"]) in report, o79_lp["id"]
+    assert "`below_long_pole`" in report, (
+        "the below-the-long-pole certificate must be described to the reader")
+    assert "measured net-negative on a job this audit cannot price" not in report
+    assert "cannot prove that shrinking it leaves the merge gate unchanged" not in report
     # …and the pole finding on `prep` reaches the reader as a finding with its
     # merge-wait number, while no uncredited line claims a merge wait.
     assert str(pole79["id"]) in report, pole79["id"]
@@ -1103,25 +1132,32 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
             (lambda d: [f for f in d["findings"] if f.get("pattern") == "OPT79"
                         and f.get("affected_jobs") == ["deps"]
                         ][0]["cache_net_negative"].__setitem__("waste_s", 900.0),
-             "Tier-2 waste_s"),
-            (lambda d: d["opt79_uncredited_pole_caches"][0].__setitem__(
-                "waste_s", 900.0),
-             "uncredited waste_s"),
+             "waste_s 900.0 != 19.0"),
+            # the below-the-long-pole finding's excess, and separately its
+            # margin, are re-derived (the margin from the slowest job's p50)
+            (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
+                            and f.get("affected_jobs") == ["integration"]
+                            )["cache_net_negative"].__setitem__("waste_s", 900.0),
+             "waste_s 900.0 != 21.0"),
+            (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
+                            and f.get("affected_jobs") == ["integration"]
+                            )["tier2_neutrality"].__setitem__("margin_s", 61.0),
+             "below-long-pole margin 61.0 != re-derived 60.0"),
             # the pole finding's measured excess, and separately its credited
             # merge-wait number, are both re-derived rather than read back
             (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
                             and f.get("affected_jobs") == ["prep"]
                             )["cache_net_negative"].__setitem__("waste_s", 900.0),
-             "pole waste_s"),
+             "pole_sizing.waste_s 21.0 != re-derived 900.0"),
             (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
                             and f.get("affected_jobs") == ["prep"]
                             ).__setitem__("wall_clock_p50_s", 900.0),
-             "pole wall_clock_p50_s"),
+             "wall_clock_p50_s 900.0 != min(waste_s 21.0, headroom 20.0)"),
             # a below-the-floor finding claiming merge-wait time it cannot have
             (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
                             and f.get("affected_jobs") == ["deps"]
                             ).__setitem__("wall_clock_p50_s", 5),
-             "below-floor wall_clock_p50_s")):
+             "a runner-minute-certified OPT79 finding claims wall_clock_p50_s=5")):
         _bad = json.loads(findings_path.read_text(encoding="utf-8"))
         _tamper(_bad)
         _bad_path = tmp_path / "findings_tampered.json"
@@ -1133,7 +1169,9 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
         assert _v.returncode != 0, (
             f"verify_report accepted a tampered OPT79 field ({_check}):\n"
             f"{_v.stdout}")
-        assert _check.split()[-1] in _v.stdout, (_check, _v.stdout)
+        # the FULL problem phrase, not just its last word: a different check
+        # failing on an unrelated field would otherwise satisfy this
+        assert _check in _v.stdout, (_check, _v.stdout)
 
     # ---- PR-H1 (G5): the promoted-path backstop — UNCONDITIONAL. -------------
     # Before this, the replay corpus promoted nothing, so the Tier-2 render

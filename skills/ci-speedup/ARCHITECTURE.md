@@ -987,6 +987,23 @@ is regenerated; if top-level Tier-2 stamps are present with positive
 runner-minute candidates but the per-finding stamp surface is missing, they fail
 closed instead of treating the artifact as pre-stamp.
 
+The certificate's `proof` token picks the re-derivation, and every token is
+enumerated in `check_tier2_neutrality_derived` (an unknown one fails):
+`below_cluster_floor` (the job's p50 is strictly below the workflow's cluster
+floor; OPT65, OPT77 — historically, see below — and OPT79, each re-derived by
+its own arm), `below_long_pole` (OPT79 only: the job is at or above the floor
+but strictly shorter than the workflow's long pole and, on a pull-request
+workflow, in no `needs:` chain with it, margin `long_pole_p50 − job_p50` from `per_workflow_timing`, the
+chain re-derived from `workflow_job_graph` when the run recorded one),
+`post_completion_waste` (OPT35/46/57/64), `checkout_tail_excess` (OPT80 only)
+and `non_pr_event` (OPT36). The "affected job is also rendered as a Long pole"
+proxy is waived for exactly two shapes whose arm re-derives the neutrality it
+stands in for: `checkout_tail_excess` and OPT77's whole-workflow group. It is
+NOT waived for `below_long_pole`: a job in a `needs:` chain with the long pole
+adds to the merge wait (the chain's sum), which the single-job margin cannot
+see, and a rendered pole is how such a job shows up. The renderer's
+`_tier2_cert_summary` names each token in the R-row's proof line.
+
 Whole-run Tier-2 detectors can stamp `tier2_sample_run_ids`, the sampled
 workflow-run IDs behind their credited count. `_reconcile_tier2_overlap` uses
 those IDs to move duplicate sampled-run credit into `runner_min_overlap_s`
@@ -1335,19 +1352,42 @@ first withholds the occurrence, the second withholds the job, and
 `actions/cache/restore` — which has no post phase — stamps `post_step: null`
 rather than inventing a label (that reading holds only because a separate
 `actions/cache/save` step withholds earlier, so no unmeasured save can exist). And the
-RUNNER-MINUTE credit gate requires the job's p50 to sit strictly BELOW the
-workflow's cluster floor, which is what makes `wall_clock_p50_s=0` literally true
-on that finding — unlike OPT77, the `below_cluster_floor` token is not historical
-for OPT79, it is the proof. The floor does NOT gate `_opt79_candidates` (which is
+RUNNER-MINUTE credit gate requires either a still-positive floor margin after
+rounding to 0.1s (`below_cluster_floor`) or a lead of at least 1s over the
+workflow's long pole (`below_long_pole`), so shrinking the job cannot make the
+workflow take longer;
+`wall_clock_p50_s=0` is the conservative lower bound on that finding (below the
+floor the saving may still shorten the gate through a `needs:` chain, which this
+audit does not claim; at or above the floor a job chained to the long pole of a
+pull-request workflow is not credited at all, while on a push-only workflow it
+is). Below the workflow's cluster floor that proof is
+`below_cluster_floor` — unlike OPT77, the token is not historical for OPT79, it
+is the proof; at or above the floor but below the long pole it is
+`below_long_pole`, measured against the long pole itself. The floor does NOT gate `_opt79_candidates` (which is
 also what `_opt79_log_plan` selects from): gating there meant a slow job's logs
 were never fetched and its cache never classified: not a suppressed measurement,
 an absent one, and one no reader could distinguish from a repository with no such
 cache. The candidate merely records `below_cluster_floor`; the floor decides HOW
 the measurement is credited, in `_detect_opt79_net_negative_cache`. The detector
-measures both populations as usual and then splits three ways:
+measures both populations as usual and then splits three ways. (Counted by
+`cache_net_negative.kind` there are three tags, and four emitting arms: the two
+runner-minute certificates share `opt79_net_negative_cache`; the credited pole
+finding is `opt79_pole_net_negative_cache`; the uncredited row is
+`opt79_uncredited_pole_cache`, with its sub-reasons below.)
 
-- strictly below the floor → the credited runner-minute finding described above
-  (`opt79_net_negative_cache`, Tier-2, `wall_clock_p50_s=0`);
+- strictly shorter than the workflow's long pole → the credited runner-minute
+  finding described above (`opt79_net_negative_cache`, Tier-2,
+  `wall_clock_p50_s=0`), on any workflow, with one of two certificates:
+  `below_cluster_floor` (margin `floor_p50 − job_p50`) when the job is strictly
+  below the floor with a floor margin still positive after rounding, else
+  `below_long_pole` (margin `long_pole_p50 − job_p50` from the 0.1s-stamped
+  p50s, at least 1s: within 1s of the slowest job counts as tied, the same
+  cutoff the slowest-job arm uses; `ref` naming the long pole and both p50s).
+  The second arm is the owner decision of 2026-10-06: shrinking a job shorter
+  than the long pole cannot lengthen the gate, because the long pole is longer
+  than it — the same move OPT77's whole-workflow arm makes against its slowest
+  member. The comparison is against the ACTUAL long pole's p50, never the
+  second-slowest job's;
 - the workflow's long pole, on a workflow that runs on pull requests → a credited
   WALL-CLOCK finding (`opt79_pole_net_negative_cache`), described below;
 - anything else → a row on `findings_doc[_OPT79_UNCREDITED_DOC_KEY]`, which
@@ -1356,8 +1396,9 @@ measures both populations as usual and then splits three ways:
 
 The long-pole finding is where the merge wait lives. The floor is the SECOND-ranked
 job's p50, so "not strictly below it" spans everything from second place upwards,
-and only the workflow's long pole — on a workflow that can gate a PR — actually
-carries the merge wait. That job's raw wall-clock is the measured excess
+and only the workflow's long pole — on a workflow that can gate a PR — carries
+the merge-wait claim this audit makes (a job in a `needs:` chain can also carry
+merge wait, and a long pole can be off the merge-gating spine). That job's raw wall-clock is the measured excess
 `waste_s`, pre-capped by CAP 1 (§5) through `bound_within_workflow`:
 `min(waste_s, long_pole_p50 − floor_p50)`, i.e. credit the pole only as far as
 the next-tallest job's duration. The cap compares job DURATIONS and does not
@@ -1404,7 +1445,8 @@ block (`opt79_present` / `opt79=`) instead of the data-driven "see Also
 noticed" pointer or the coverage-gap wording, and when the generic cascade
 lowered the figure the block prints each `wall_clock_derivation` step and its
 reason. Runner-minutes are deliberately NOT stated: the
-runner-minute section requires the below-the-floor neutrality proof, which the
+runner-minute section requires proof that the job is shorter than the
+workflow's slowest job (`below_cluster_floor` or `below_long_pole`), which the
 slowest job cannot have. The neutrality certificate is only required to promote a
 finding into the runner-minute section; a finding that saves merge-wait time does
 not need one, because the wall-clock bound cascade already handles "shorten only
@@ -1413,30 +1455,49 @@ the stamped block and fails any mismatch, any such finding carrying
 `tier2_neutrality` or a non-null `runner_min_saving`, and any uncredited row whose
 `on_critical_path` is missing or not `false`.
 
-The uncredited line therefore has five ways in, all of them jobs not strictly
-below the floor: any such job in a workflow that runs on no pull request
-(runner-minutes only, unpriced here; that workflow's below-the-floor jobs still
-take the credited runner-minute arm), a job at or above the floor that is not
-the long pole, a long pole tied with the next-tallest job (under 1s of headroom,
-`_OPT79_POLE_MIN_HEADROOM_S`), a pole the cross-checks zeroed
-(`pole_merge_wait_zeroed_by_cross_check`), and a pole off the merge-gating
-spine (`pole_workflow_off_merge_gating_spine`). The zeroed and off-spine poles
-are first built as pole findings and then demoted to uncredited rows in
-`collect()` by `_opt79_demote_uncredited_poles`, after the cascade and after
-`_stamp_off_spine_findings`. Each row carries `uncredited_reason` (plus
-`uncredited_reason_detail` for the zeroed case), and `verify_report.py` checks
-both. The row stamps `long_pole_job`, `long_pole_p50_s`, `job_p50_s`,
-`floor_p50_s`, `workflow_gates_pull_requests` and `on_critical_path`, which is
-always `false` there, so the renderer has no merge-wait branch. It has three
-wordings: a reason-phrase branch ("`X` is this workflow's slowest job, but ...")
-for the tied, zeroed and off-spine poles; for a workflow no pull request runs it
-says the workflow "does not run on pull requests"; otherwise it says the job is
-"at or above the second-slowest job", so this audit cannot prove that shrinking
-it leaves the merge gate unchanged.
-A schedule-only workflow is never told it has a merge wait at all. The docs take
-that same conservative framing: at or above the floor and below the pole is
-uncredited because no neutrality argument for the merge gate exists, not merely
-because it has not been sized.
+There is ONE tie constant, 1.0s (`_OPT79_POLE_MIN_HEADROOM_S`), shared by both
+arms: the pole arm declines a pole whose headroom to the next-tallest job is
+under 1.0s, and a job counts as tied with the long pole (a co-pole) when its
+lead over the pole is under 1.0s (each p50 rounded to 0.1s first).
+The uncredited line therefore has five ways in: (1) the long pole of a
+workflow that runs on no pull request, or a job tied with it (runner-minutes
+only, unpriced here; tallied under `long_pole_of_a_workflow_no_pull_request_runs`);
+(2) a long pole of a pull-request workflow tied with the next-tallest job
+(under 1s of headroom; a job TIED with the long pole is a co-pole and is
+stamped the same way), `pole_tied_with_next_job`; (3) a pole the cross-checks
+zeroed to a figure that rounds to 0s (`pole_merge_wait_zeroed_by_cross_check`);
+(4) a pole off the merge-gating spine (`pole_workflow_off_merge_gating_spine`);
+and (5) a job of a pull-request workflow at or above the floor that is
+`needs:`-chained to the long pole (`job_in_a_needs_chain_with_the_long_pole`;
+the chain's sum is the merge wait, so shrinking it may shorten that wait, and
+on a push-only workflow such a job IS credited). A chain the workflow's job
+graph cannot resolve is held back (`needs_chain_with_the_long_pole_unresolved`),
+never credited as unchained. The zeroed and off-spine poles are first built as
+pole findings and then demoted to uncredited rows in `collect()` by
+`_opt79_demote_uncredited_poles`, after the cascade and after
+`_stamp_off_spine_findings`. Each of cases 2-5 carries `uncredited_reason` (plus
+`uncredited_reason_detail` and the cascade's own steps as
+`uncredited_derivation` for the zeroed case), and `verify_report.py`
+re-derives each reason rather than taking it on trust: the zeroing from
+`uncredited_derivation`, the off-spine demotion against the dropped checks,
+and the chain from `workflow_job_graph` (failing closed when the graph cannot
+resolve the job). The row stamps `long_pole_job`, `long_pole_p50_s`,
+`job_p50_s`, `floor_p50_s`, `workflow_gates_pull_requests`,
+`declares_pull_request` and `on_critical_path`, which is always `false` there
+(the job is not the credited pole), so the renderer has no merge-wait branch.
+For a workflow no pull request runs it says the workflow "does not run on pull
+requests", unless the YAML declares a pull-request trigger and none was
+sampled, when it says "none of its N sampled runs was a pull request"; for a
+declined pole it states the stamped reason ("`X` is this workflow's slowest
+job, but ..."; a co-pole reads "`{job}` is tied with `{lp_job}`, this
+workflow's slowest job (Ns), so neither job alone sets the merge wait"); for
+a chained job it says "`X` is not this workflow's slowest job". A
+schedule-only workflow is never told it has a merge wait at all. The retired
+"at or above the second-slowest job, so this audit cannot prove that shrinking
+it leaves the merge gate unchanged" wording is gone with the case it
+described, and `verify_report.py`'s converse rule fails an uncredited row with
+no reason whose job is at least 1s shorter than its long pole: that job is the
+`below_long_pole` finding.
 
 Uncredited rows are not findings — no `runner_min_saving`, no
 `wall_clock_p50_s`, no certificate, no Tier-2 row, no contribution to any total.
@@ -1447,10 +1508,6 @@ re-derives them row by row with only the credited-minutes and neutrality branche
 skipped. That check is top-level rather than part of the Tier-2 pass, because a
 repository whose only OPT79 result is an uncredited row has no Tier-2 stamps for
 that pass to run on.
-
-The at-or-above-the-floor-but-below-the-pole case is the remaining follow-up: it
-still needs a neutrality argument for the merge gate before it can be credited;
-this version proves none.
 
 Its gh cost is a capped log probe plus at most one `contents/package.json` read
 per repo (only when a setup-node v5+ automatic cache decides a job's cache count

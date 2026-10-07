@@ -609,6 +609,62 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-10-07** — **A slow cache on a job that is not the workflow's slowest is
+  now priced in runner-minutes.** When the cache check (OPT79) measured a cache
+  that costs more than it saves on a job at or above the workflow's
+  second-slowest job but still shorter than its slowest job, the report listed it
+  as "measured, not credited", saying the audit could not prove that shrinking it
+  leaves the merge gate unchanged. It can: shrinking it cannot make the workflow take longer,
+  because the slowest job is longer than it. Such a cache is now a
+  credited runner-minute finding with its own neutrality proof,
+  `below_long_pole`, whose margin is the slowest job's lead over this job
+  (compared against the slowest job's measured p50, not the second-slowest's),
+  and its evidence says so in plain words. It applies on any workflow, pull
+  requests or not, like the existing below-the-floor credit. The "measured, not
+  credited" list now holds three cases: the slowest job of a workflow no pull
+  request runs, a slowest job the merge-wait arm declined (tied, zeroed by a
+  cross-check to a figure that rounds to 0s, or off the merge-gating spine; a job tied with the slowest job is
+  treated as one of those; within 1s of the slowest job counts as tied, the
+  same cutoff the slowest-job arm uses), and a job in a `needs:` chain with the
+  slowest job on a workflow pull requests run (below). A job a hair under the second-slowest
+  job, whose below-the-floor margin rounds to zero, now gets this credit instead
+  of being held back. Like the below-the-floor credit, a job whose monthly run
+  count is unknown is measured and then held back for that reason, not listed
+  as "measured, not credited". The report's self-check re-derives the new margin
+  from the run's own job timings, fails a job that is or ties the slowest job,
+  fails a job below the second-slowest job claiming it (that job's proof is the
+  below-the-floor one, and the check keeps the two certificates apart),
+  fails any other pattern claiming the token, and fails a "not credited" row
+  that should have been this finding. It also fails any "not credited" row on a
+  workflow pull requests run that names no reason, whatever the headroom; and a
+  job whose workflow has no slowest job recorded is no longer listed there on a
+  pull-request workflow (it is only counted in the run's withheld-gate tally),
+  since no reason fits it. A slowest job's merge-wait finding now
+  says the bill section needs proof the job is shorter than the slowest job,
+  rather than naming the second-slowest job. A job that runs in a
+  `needs:` chain with the slowest job, before or after it, is excluded from
+  this credit on a workflow pull requests wait on: the wait is then the
+  chain's times added together, so shrinking it may shorten the merge wait. It is listed
+  "measured, not credited" with that reason (the line says "may shorten", never
+  "shortens", because another chain or an off-spine slowest job can be the real
+  gate). When the workflow's job graph cannot resolve the job or the slowest job
+  on a pull-request workflow, the cache is held back under its own counted,
+  plain-English reason rather than credited on a chain the audit could not see.
+  The self-check re-derives the chain from the job graph, applies the chain rule
+  only where pull requests wait on the workflow, matches rendered long poles by
+  workflow file and job name, and waives its "also rendered as a Long pole"
+  check for this credit only when the graph proves the job is not chained to the
+  slowest job. The self-check also fails a "not credited" row that is not the
+  slowest job (a chained job, or a job tied with the slowest one) when its line
+  tells it it is the slowest job, and its chain check fails closed: when the
+  workflow's recorded job graph cannot resolve the job or the slowest job, a
+  "not credited" chain row is reported as a problem, never skipped. Both
+  runner-minute credits now say
+  only what they prove, that making the job faster cannot make the workflow take
+  longer; the below-the-floor note no longer says "no merge-gate time changes",
+  which was false for a job in a `needs:` chain and meaningless on a workflow no
+  pull request runs.
+
 - **2026-10-06** — **A cache that costs more than it saves on a workflow's slowest
   job now gets a merge-wait number.** Until now, when the cache check (OPT79)
   measured a slow cache on the slowest job of a workflow that runs on pull
@@ -637,14 +693,19 @@ unversioned and updates by reinstall from `main`.
   calling the pole a coverage gap (a figure under 30s, such as a 20s one, still
   renders its block but leaves the pole a coverage gap).
   Runner-minutes are deliberately not stated on it: the runner-minute section
-  needs proof that a job sits below the second-slowest
-  job, which the slowest job cannot have. The "not credited" line now covers
-  workflows no pull request runs and jobs at or above the floor. A slowest job is also kept on that line, with the reason
+  needs a neutrality proof (the job sits below the second-slowest job, or below
+  the slowest job), which the slowest job cannot have. (Superseded for the
+  other jobs by the entry above: a job shorter than the slowest job is now a
+  credited runner-minute finding, and the "not credited" line now covers the
+  slowest job of a workflow no pull request runs or a job tied with it, a
+  slowest job declined or demoted as listed below, and a job in a `needs:`
+  chain with the slowest job on a pull-request workflow.) A slowest job is kept on that line, with the reason
   stated, when it is tied with the next-tallest job (under 1s apart), when the
   cross-checks find no merge wait it can shorten, when the pull request can merge
   without that workflow, or when the workflow's sampled runs include no pull
   request. The report's self-check re-derives the capped number from the stamped measurements, rejects
-  any OPT79 finding that claims wall-clock under a below-the-floor certificate,
+  any OPT79 finding that claims wall-clock under a runner-minute certificate
+  (`below_cluster_floor` or `below_long_pole`),
   checks that the job it names as the cap is the tallest other job the run
   measured, and fails an uncredited line that claims the merge wait. A figure the cross-checks leave under half a second is demoted too, so no
   credited line ever prints "0s"; a demoted row carries the cross-check steps
