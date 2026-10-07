@@ -4389,6 +4389,36 @@ def test_opt79_below_the_long_pole_needs_a_positive_margin_after_rounding():
     assert w.get("pole_tied_with_next_job") == 1, w
 
 
+@pytest.mark.parametrize("lp, jp, credited", [
+    # 660.06 -> 660.1 and 659.14 -> 659.1: a 1.0s margin from the stamped p50s,
+    # though the raw difference (0.92s) would round to 0.9
+    (660.06, 659.14, True),
+    # 660.04 -> 660.0 and 659.06 -> 659.1: 0.9s from the stamped p50s (a tie),
+    # though the raw difference (0.98s) would round to 1.0
+    (660.04, 659.06, False),
+])
+def test_opt79_below_long_pole_margin_rounds_the_stamped_p50s(lp, jp, credited):
+    """The detector gets UNROUNDED p50s, stamps each to 0.1s, and takes the
+    margin from the stamped values. The verifier must round in the same order,
+    or a finding the collector credits fails verification (or the converse)."""
+    crit = _opt79_pole_crit(long_pole_p50=lp, floor_p50=jp,
+                            job_p50={_OPT79_JOB: jp, "integration": 600.0, "e2e": lp})
+    out, rows, w = _opt79_pole_run(crit)
+    vr = _load_verify_report_for_opt79()
+    if credited:
+        assert rows == [] and len(out) == 1, (out, rows, w)
+        f = out[0]
+        assert f["tier2_neutrality"]["proof"] == "below_long_pole"
+        assert f["tier2_neutrality"]["margin_s"] == 1.0
+        data = {"per_workflow_timing": {"ci.yml": crit}, "findings": [f]}
+        assert vr._tier2_below_long_pole_problems(f, data) == []
+    else:
+        assert out == [] and len(rows) == 1, (out, rows, w)
+        assert rows[0]["uncredited_reason"] == "pole_tied_with_next_job", rows[0]
+        assert vr._opt79_uncredited_rows_rederived(
+            {"opt79_uncredited_pole_caches": rows}) == []
+
+
 def test_opt79_job_a_hair_under_the_floor_falls_through_to_the_long_pole_arm():
     """A job 0.04s under the cluster floor is below it unrounded, but its floor
     margin rounds to 0.0, so the below-the-floor proof does not hold. It is still
