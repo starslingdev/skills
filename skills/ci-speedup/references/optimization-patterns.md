@@ -652,10 +652,10 @@ they gate how the measured excess is credited.
      `ref` naming the long-pole job and both p50s. The comparison is against the
      actual slowest job's p50, not the second-slowest job's, against which such
      a job's margin is not positive. The finding says so in plain words:
-     "runner-minutes only; this job (Ns) is not the workflow's slowest
-     (`<pole>`, Ms), so shrinking it cannot lengthen the merge gate — it is at
-     or above the second-slowest job, so the usual below-the-floor proof does
-     not apply and the comparison is against the slowest job instead". (Owner
+     "runner-minutes only; this job (Ns) is shorter than the workflow's
+     slowest job (`<pole>`, Ms), so making it faster cannot make the workflow
+     take longer". It claims no merge gate: the workflow may gate no pull
+     request, and a job chained to the slowest one is not credited at all. (Owner
      decision 2026-10-06; the same move OPT77's whole-workflow arm makes against
      its slowest member.)
 

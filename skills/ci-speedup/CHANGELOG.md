@@ -646,7 +646,11 @@ unversioned and updates by reinstall from `main`.
   chain's times added together, so shrinking it does shorten the merge wait. It is listed
   "measured, not credited" with that reason, and the self-check re-derives the
   chain from the workflow's job graph and no longer exempts this credit from
-  its "also rendered as a Long pole" check.
+  its "also rendered as a Long pole" check. Both runner-minute credits now say
+  only what they prove, that making the job faster cannot make the workflow take
+  longer; the below-the-floor note no longer says "no merge-gate time changes",
+  which was false for a job in a `needs:` chain and meaningless on a workflow no
+  pull request runs.
 
 - **2026-10-06** — **A cache that costs more than it saves on a workflow's slowest
   job now gets a merge-wait number.** Until now, when the cache check (OPT79)

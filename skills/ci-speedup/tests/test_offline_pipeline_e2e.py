@@ -751,7 +751,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert _lcert.get("proof") == "below_long_pole", _lcert
     assert _lcert.get("margin_s") == 60.0, _lcert            # 240s - 180s
     assert "`e2e`" in str(_lcert.get("ref") or ""), _lcert
-    assert "not the workflow's slowest" in str(o79_lp.get("size_note") or ""), o79_lp
+    assert "shorter than the workflow's slowest job (`e2e`, 240s)" in str(o79_lp.get("size_note") or ""), o79_lp
     # …and the uncredited list is EMPTY on this corpus: the only case it used to
     # hold here was this job, and the long poles (`e2e`, `prep`) are either
     # cacheless or credited.

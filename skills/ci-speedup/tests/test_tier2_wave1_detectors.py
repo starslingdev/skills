@@ -4367,11 +4367,11 @@ def test_opt79_job_at_the_floor_below_the_long_pole_is_credited_runner_minutes(i
     assert cert["proof"] == "below_long_pole", cert
     assert cert["margin_s"] == 60.0, cert          # 660s long pole - 600s job
     assert cert["ref"] == _OPT79_BLP_REF, cert
-    want = ("runner-minutes only; this job (600s) is not the workflow's slowest "
-            "(`e2e`, 660s), so shrinking it cannot lengthen the merge gate \u2014 it is "
-            "at or above the second-slowest job, so the usual below-the-floor "
-            "proof does not apply and the comparison is against the slowest job "
-            "instead")
+    # plain words, no "floor"/"proof" jargon, and no merge gate claimed: the
+    # workflow may gate no pull request at all
+    want = ("runner-minutes only; this job (600s) is shorter than the workflow's "
+            "slowest job (`e2e`, 660s), so making it faster cannot make the "
+            "workflow take longer")
     assert f["size_note"].startswith(want), f["size_note"]
     assert want[1:] in f["evidence"], f["evidence"]
     assert want[1:] in f["measured_evidence"]["note"]
@@ -4610,6 +4610,23 @@ def test_opt79_verifier_fails_a_credited_below_long_pole_job_in_a_needs_chain():
     data["workflow_job_graph"]["ci.yml"]["e2e"]["needs"] = [_OPT79_JOB]
     problems = vr._tier2_below_long_pole_problems(f, data)
     assert any("needs:" in p for p in problems), problems
+
+
+def test_opt79_below_the_floor_note_claims_no_merge_gate():
+    """The below-the-floor arm's note and size note say only what the proof
+    shows - the job cannot make the workflow take longer - never that no
+    merge-gate time changes (false for a job in a `needs:` chain, and a
+    workflow no PR runs has no merge gate at all)."""
+    crit = _opt79_pole_crit(floor_p50=650.0,
+                            job_p50={_OPT79_JOB: 600.0, "integration": 650.0,
+                                     "e2e": 660.0})
+    out, _rows, _w = _opt79_pole_run(crit)
+    assert len(out) == 1, out
+    f = out[0]
+    assert f["tier2_neutrality"]["proof"] == "below_cluster_floor", f
+    for text in (f["measured_evidence"]["note"], f["size_note"]):
+        assert "cannot make the workflow take longer" in text, text
+        assert "merge-gate" not in text and "merge gate" not in text, text
 
 
 def test_opt79_below_long_pole_token_is_one_contract():

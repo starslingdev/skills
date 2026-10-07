@@ -17203,12 +17203,13 @@ def _detect_opt79_net_negative_cache(
             where_note = (
                 "Runner-minutes only \u2014 this job's p50 "
                 f"({job_p50:.0f}s) is below the workflow's cluster floor "
-                f"({block['floor_p50_s']:.0f}s), so no merge-gate time changes. ")
+                f"({block['floor_p50_s']:.0f}s), so making it faster cannot make "
+                "the workflow take longer. ")
             where_ev = ""
             size_head = (
                 "runner-minutes only. The job's measured p50 sits below the "
-                "workflow's cluster floor, so the time this removes is off the merge "
-                "gate. ")
+                "workflow's cluster floor, so making it faster cannot make the "
+                "workflow take longer. ")
         else:
             margin = lp_margin               # >= the 1s tie cutoff: the gate above
             cert = {
@@ -17219,11 +17220,9 @@ def _detect_opt79_net_negative_cache(
                         f"{lp50_s:.1f}s"),
             }
             where_txt = (
-                f"runner-minutes only; this job ({job_p50:.0f}s) is not the "
-                f"workflow's slowest (`{lp_job}`, {lp50_s:.0f}s), so shrinking it "
-                "cannot lengthen the merge gate \u2014 it is at or above the "
-                "second-slowest job, so the usual below-the-floor proof does not "
-                "apply and the comparison is against the slowest job instead")
+                f"runner-minutes only; this job ({job_p50:.0f}s) is shorter than "
+                f"the workflow's slowest job (`{lp_job}`, {lp50_s:.0f}s), so making "
+                "it faster cannot make the workflow take longer")
             where_note = where_txt[0].upper() + where_txt[1:] + ". "
             where_ev = " " + where_note.strip()
             size_head = where_txt + ". "
