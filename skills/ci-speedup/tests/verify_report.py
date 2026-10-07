@@ -9474,6 +9474,9 @@ _VR_OPT81_COVERED_FRAC = 0.5
 _VR_OPT81_CACHE_LEVER_MIN_S = 30.0
 _VR_OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "OPT74",
                                            "OPT78"})
+# Pre-start findings (queue wait) shorten no step of the job, so they never count
+# as a credited lever covering it (`collect_runs._PRESTART_AXIS_PATTERNS`).
+_VR_OPT81_PRESTART_PATTERNS = frozenset({"OPT43"})
 _VR_OPT81_DISCLOSURE = (
     "The publisher of this skill sells CI runners. This finding compares your own "
     "runs on runner classes you already use (A1), or names a class of lever and asks "
@@ -9724,7 +9727,8 @@ def _opt81_a2_rederived(f: dict, data: dict) -> list[str]:
         if pat == "OPT24":
             out.append(f"OPT81 {fid}: a sharding finding already addresses `{job}`")
         wc = _num(g.get("wall_clock_p50_s")) or 0.0
-        if (pat != "OPT43" and not g.get("advisory") and job_p50 > 0
+        if (pat not in _VR_OPT81_PRESTART_PATTERNS and not g.get("advisory")
+                and job_p50 > 0
                 and wc >= _VR_OPT81_COVERED_FRAC * job_p50):
             out.append(f"OPT81 {fid}: {pat} already credits {wc}s on `{job}`, at least "
                        "half its median")

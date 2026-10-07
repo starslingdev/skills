@@ -199,6 +199,7 @@ def test_opt81_verifier_constants_stay_coupled_to_the_engine():
     assert vr._VR_OPT81_COVERED_FRAC == cr._OPT81_COVERED_FRAC
     assert vr._VR_OPT81_CACHE_LEVER_MIN_S == cr._OPT81_CACHE_LEVER_MIN_S
     assert vr._VR_OPT81_CHEAPER_STRUCTURAL == cr._OPT81_CHEAPER_STRUCTURAL
+    assert vr._VR_OPT81_PRESTART_PATTERNS == cr._PRESTART_AXIS_PATTERNS
     assert (vr._VR_OPT81_DISCLOSURE == cr._OPT81_DISCLOSURE == bp._OPT81_DISCLOSURE)
     assert bp._OPT81_RUNNER_MIN_UNKNOWN == cr._OPT81_RUNNER_MIN_UNKNOWN
     assert vr._VR_OPT81_INSTALL_SENTENCE in bp._OPT81_A2_OPTION_STARSLING
@@ -779,6 +780,7 @@ def test_opt81_verifier_reddens_on_a_cross_architecture_a1():
 @pytest.mark.parametrize("mutate,extra,needle", [
     (lambda f: f.__setitem__("wall_clock_p50_s", 30.0), [], "wall_clock_p50_s > 0"),
     (lambda f: f.__setitem__("runner_min_saving", 5.0), [], "runner_min_saving"),
+    (lambda f: f.__setitem__("advisory", False), [], "not marked advisory"),
     (lambda f: f.__setitem__("evidence", f["evidence"] + " Saves ~40s."), [],
      "states a number"),
     (lambda f: None, [_f("OPT72", structural=True)], "OPT72 already addresses"),
