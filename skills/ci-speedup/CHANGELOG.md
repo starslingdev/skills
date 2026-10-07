@@ -609,6 +609,28 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-10-06** — **A slow cache on a job that is not the workflow's slowest is
+  now priced in runner-minutes.** When the cache check (OPT79) measured a cache
+  that costs more than it saves on a job at or above the workflow's
+  second-slowest job but still shorter than its slowest job, the report listed it
+  as "measured, not credited", saying the audit could not prove that shrinking it
+  leaves the merge gate unchanged. It can: the slowest job still sets the gate,
+  so a shorter job getting faster cannot lengthen it. Such a cache is now a
+  credited runner-minute finding with its own neutrality proof,
+  `below_long_pole`, whose margin is the slowest job's lead over this job
+  (compared against the slowest job's measured p50, not the second-slowest's),
+  and its evidence says so in plain words. It applies on any workflow, pull
+  requests or not, like the existing below-the-floor credit. The "measured, not
+  credited" list now holds only the slowest job of a workflow no pull request
+  runs and a slowest job the merge-wait arm declined (tied, zeroed by a
+  cross-check, or off the merge-gating spine; a job tied with the slowest job is
+  treated as one of those). The report's self-check re-derives the new margin
+  from the run's own job timings, fails a job that is or ties the slowest job,
+  fails any other pattern claiming the token, and fails a "not credited" row
+  that should have been this finding. A slowest job's merge-wait finding now
+  says the bill section needs proof the job is shorter than the slowest job,
+  rather than naming the second-slowest job.
+
 - **2026-10-06** — **A cache that costs more than it saves on a workflow's slowest
   job now gets a merge-wait number.** Until now, when the cache check (OPT79)
   measured a slow cache on the slowest job of a workflow that runs on pull

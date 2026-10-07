@@ -9520,6 +9520,39 @@ def test_tier2_accepts_a_whole_workflow_consolidation_on_the_rendered_long_pole(
     assert not chk.ok and "Long pole" in str(chk.detail), chk
 
 
+def test_tier2_accepts_a_below_long_pole_cache_on_a_rendered_secondary_pole(
+        tmp_path: Path):
+    """The report drills more than one pole, and the pole rule matches rendered
+    pole headers by JOB NAME: a workflow's SECOND-slowest job can be rendered
+    as a Long pole (on this skill's own e2e corpus `chained.yml`'s `verify` is
+    "Long pole 3"), and that is exactly the job OPT79's `below_long_pole` arm
+    credits. The proxy would then reject a finding whose neutrality the OPT79
+    arm re-derives directly: the margin is long_pole_p50 - job_p50 from
+    `per_workflow_timing`, and the arm fails a job that IS its workflow's long
+    pole or ties it. Exempted on the argument #112 used for OPT77's
+    whole-workflow arm, and only for this token."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    f = doc["findings"][0]
+    f["pattern"] = "OPT79"
+    f.pop("checkout_stall", None)
+    f["affected_jobs"] = ["build"]
+    f["tier2_neutrality"] = {"proof": "below_long_pole", "margin_s": 10.0}
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "Long pole" in report and "build" in report, report[:400]
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert "Long pole" not in str(chk.detail), chk
+    # ...the arm still runs: this hand-built finding has no measured cache block,
+    # so it fails there rather than passing on the exemption.
+    assert not chk.ok and "opt79_net_negative_cache" in str(chk.detail), chk
+    # ...and the exemption is the token, not OPT79: a below-the-floor claim on a
+    # rendered pole still trips the proxy.
+    f["tier2_neutrality"] = {"proof": "below_cluster_floor", "margin_s": 10.0}
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "Long pole" in str(chk.detail), chk
+
+
 def test_tier2_still_rejects_a_non_checkout_stall_finding_on_the_rendered_long_pole(
         tmp_path: Path):
     """The RULE the OPT80 exemption is carved out of, pinned. Without this, the

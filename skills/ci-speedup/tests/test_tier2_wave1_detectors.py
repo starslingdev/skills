@@ -3635,10 +3635,15 @@ def _opt79_sample(hits=4, misses=4, *, runner="ubuntu-latest",
 
 def _opt79_crit(*, floor=600.0, job_p50=42.0, runner="ubuntu-latest",
                 name=_OPT79_JOB):
+    # The long pole is NAMED, as `_critical_path` always names it: the slowest
+    # job in `job_p50` (the cached job itself when it is passed the largest p50).
+    p50 = {name: job_p50, "integration": floor, "e2e": floor + 60.0}
+    pole = max(p50, key=lambda k: (p50[k], k))
     return {
         "floor_p50": floor,
-        "long_pole_p50": floor + 60.0,
-        "job_p50": {name: job_p50, "integration": floor, "e2e": floor + 60.0},
+        "long_pole_p50": p50[pole],
+        "long_pole_job": pole,
+        "job_p50": p50,
         "job_runner": {name: runner, "integration": runner, "e2e": runner},
         "runner_scope": runner,
     }
@@ -3878,14 +3883,15 @@ def test_opt79_withholds_a_run_whose_log_has_no_cache_line():
     assert out == []
 
 
-def test_opt79_withholds_a_job_at_or_above_the_cluster_floor():
-    """The deliberate v1 scope limit, and the reason wall_clock is 0: a job that
-    can set the merge gate is withheld rather than credited with a wall-clock
-    saving this lever cannot yet size. The withhold is COUNTED so the coverage
-    hole is visible."""
-    out, w = _opt79_withheld(crit=_opt79_crit(job_p50=600.0))
+def test_opt79_withholds_the_long_pole_of_a_workflow_no_pr_runs():
+    """The slowest job of a workflow no pull request runs is the one place left
+    where a measured cache is not credited (its row is the uncredited line). The
+    exit is COUNTED under a gate that says what happened, so the coverage hole
+    is visible and never reads as "below the floor"."""
+    out, w = _opt79_withheld(crit=_opt79_crit(floor=300.0, job_p50=600.0))
     assert out == []
-    assert w.get("job_not_strictly_below_the_workflow_cluster_floor") == 1, w
+    assert w.get("long_pole_of_a_workflow_no_pull_request_runs") == 1, w
+    assert "job_not_strictly_below_the_workflow_cluster_floor" not in w, w
 
 
 def test_opt79_withholds_a_setup_action_with_caching_switched_off():
@@ -4013,10 +4019,11 @@ def test_opt79_log_plan_does_not_count_withholds():
     numbers would be fiction."""
     w = {}
     jpr, logs = _opt79_sample()
-    cr._opt79_log_plan("ci.yml", jpr, _opt79_crit(job_p50=600.0), _opt79_wf())
+    crit = _opt79_crit(floor=300.0, job_p50=600.0)
+    cr._opt79_log_plan("ci.yml", jpr, crit, _opt79_wf())
     assert w == {}
-    _opt79(jpr, logs, crit=_opt79_crit(job_p50=600.0), withheld=w)
-    assert w.get("job_not_strictly_below_the_workflow_cluster_floor") == 1, w
+    _opt79(jpr, logs, crit=crit, withheld=w)
+    assert w.get("long_pole_of_a_workflow_no_pull_request_runs") == 1, w
 
 
 def test_opt79_install_classifier_is_a_subset_of_the_shared_setup_classifier():
@@ -4252,7 +4259,7 @@ def test_opt79_measures_a_pole_cache_and_reports_it_uncredited():
 
     # NOT credited: no finding, so no minutes, no certificate, no Tier-2 row.
     assert out == []
-    assert withheld.get("job_not_strictly_below_the_workflow_cluster_floor") == 1
+    assert withheld.get("long_pole_of_a_workflow_no_pull_request_runs") == 1
 
     # …but measured, and reported.
     assert len(uncredited) == 1, uncredited
@@ -4323,26 +4330,151 @@ def _opt79_uncredited(crit, *, is_pr=True):
     return rows[0]
 
 
-def test_opt79_does_not_call_the_second_slowest_job_this_workflow_s_slowest():
-    """The uncredited branch fires on `not (p50 < floor)`, and the floor is the
-    SECOND-ranked job's p50 — so every job from second place upwards took it. The
-    report told all of them they were this workflow's slowest job and that the
-    saving was on the merge wait. For the second-slowest job neither is true: its
-    saving is pure runner-minutes, and the only reason it is uncredited is that
-    this version has not sized the neutrality argument for it."""
-    row = _opt79_uncredited(_opt79_pole_crit())
-    assert row["job"] == _OPT79_JOB              # "unit", tied AT the floor
-    assert row["long_pole_job"] == "e2e"
-    assert row["job_p50_s"] == 600.0 and row["floor_p50_s"] == 600.0
-    assert row["long_pole_p50_s"] == 660.0
-    assert row["on_critical_path"] is False
+def _opt79_no_pr_pole_row():
+    """An uncredited row as the detector builds one: the cached job is the long
+    pole of a workflow no pull request runs (one of the two cases that stay
+    uncredited once a job below the long pole is credited)."""
+    return _opt79_uncredited(_opt79_pole_of(660.0, 600.0), is_pr=False)
 
-    rendered = "\n".join(bp._opt79_uncredited_block(
-        {"opt79_uncredited_pole_caches": [row]}))
-    assert "this workflow's slowest job" not in rendered, rendered
-    assert "merge wait" not in rendered, rendered
-    assert "second-slowest job" in rendered, rendered
-    assert "not credited" in rendered
+
+_OPT79_BLP_REF = ("per_workflow_timing[wf]: `unit` at 600.0s is 60.0s below the "
+                  "workflow long pole `e2e` at 660.0s")
+
+
+@pytest.mark.parametrize("is_pr", [True, False])
+def test_opt79_job_at_the_floor_below_the_long_pole_is_credited_runner_minutes(is_pr):
+    """OWNER DECISION 2026-10-06. A job AT or above the cluster floor (the
+    second-slowest job's p50) that is still strictly shorter than the long pole
+    cannot lengthen the merge gate when it shrinks - the long pole still sets
+    it. So its net-negative cache is a CREDITED runner-minute finding, with its
+    own proof token and a margin measured against the ACTUAL long pole's p50
+    (not the floor, against which its margin is not positive). The same holds on
+    a workflow no pull request runs: the bill does not depend on PRs, exactly
+    like the below-the-floor arm."""
+    out, rows, w = _opt79_pole_run(_opt79_pole_crit(), is_pr=is_pr)
+    assert rows == [], rows
+    assert len(out) == 1, (out, w)
+    f = out[0]
+    assert f["affected_jobs"] == [_OPT79_JOB]
+    assert f["wall_clock_p50_s"] == 0.0 and f["realization"] == "none"
+    assert f["sizing_basis"] == "measured"
+    cn = f["cache_net_negative"]
+    assert cn["kind"] == "opt79_net_negative_cache"
+    # the same runner-minute formula as the below-the-floor arm:
+    # 19s x 0.5 x 100 / 60 = 15.8
+    assert f["runner_min_saving"] == 15.8 == cn["runner_min_saving"]
+    cert = f["tier2_neutrality"]
+    assert cert["proof"] == "below_long_pole", cert
+    assert cert["margin_s"] == 60.0, cert          # 660s long pole - 600s job
+    assert cert["ref"] == _OPT79_BLP_REF, cert
+    want = ("runner-minutes only; this job (600s) is not the workflow's slowest "
+            "(`e2e`, 660s), so shrinking it cannot lengthen the merge gate \u2014 it is "
+            "at or above the second-slowest job, so the usual below-the-floor "
+            "proof does not apply and the comparison is against the slowest job "
+            "instead")
+    assert f["size_note"].startswith(want), f["size_note"]
+    assert want[1:] in f["evidence"], f["evidence"]
+    assert want[1:] in f["measured_evidence"]["note"]
+    assert "below the workflow's cluster floor" not in f["measured_evidence"]["note"]
+    assert "job_not_strictly_below_the_workflow_cluster_floor" not in w, w
+
+
+def test_opt79_below_the_long_pole_needs_a_positive_margin_after_rounding():
+    """A job 0.04s under the long pole rounds to a tie: no margin, no credit."""
+    crit = _opt79_pole_crit(job_p50={_OPT79_JOB: 659.96, "integration": 600.0,
+                                     "e2e": 660.0})
+    out, rows, w = _opt79_pole_run(crit)
+    assert out == [] and len(rows) == 1, (out, rows)
+    assert rows[0]["uncredited_reason"] == "pole_tied_with_next_job", rows[0]
+    assert w.get("pole_tied_with_next_job") == 1, w
+
+
+def test_opt79_job_tied_with_the_long_pole_stays_uncredited():
+    """A job TIED with the long pole is as slow as the job that sets the merge
+    wait: neither proof holds. On a pull-request workflow it is stamped like a
+    pole tied with the next job (it is one); on a workflow no PR runs it is the
+    no-pull-request row. Neither is ever the old "second-slowest" wording."""
+    tied = _opt79_pole_crit(job_p50={_OPT79_JOB: 660.0, "integration": 600.0,
+                                     "e2e": 660.0}, floor_p50=660.0)
+    out, rows, w = _opt79_pole_run(tied)
+    assert out == [] and len(rows) == 1, (out, rows)
+    assert rows[0]["uncredited_reason"] == "pole_tied_with_next_job"
+    assert rows[0]["on_critical_path"] is False
+    assert w.get("pole_tied_with_next_job") == 1, w
+    md = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": rows}))
+    assert "tied with the next-tallest job" in md, md
+    assert "second-slowest" not in md, md
+    vr = _load_verify_report_for_opt79()
+    assert vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": rows}) == []
+
+    out, rows, w = _opt79_pole_run(tied, is_pr=False)
+    assert out == [] and len(rows) == 1
+    assert "uncredited_reason" not in rows[0], rows[0]
+    assert w.get("long_pole_of_a_workflow_no_pull_request_runs") == 1, w
+
+
+def test_opt79_below_long_pole_token_is_one_contract():
+    vr = _load_verify_report_for_opt79()
+    assert cr._OPT79_PROOF_BELOW_LONG_POLE == "below_long_pole"
+    assert vr._VR_OPT79_PROOF_BELOW_LONG_POLE == cr._OPT79_PROOF_BELOW_LONG_POLE
+
+
+def _opt79_blp_finding():
+    import copy
+    crit = copy.deepcopy(_opt79_pole_crit())
+    f = copy.deepcopy(_opt79_pole_run(crit)[0][0])
+    return f, {"per_workflow_timing": {"ci.yml": crit}, "findings": [f]}
+
+
+def test_opt79_verifier_rederives_a_below_long_pole_finding():
+    """Routed to the OPT79 arm, with the margin re-derived as
+    long_pole_p50 - job_p50 from `per_workflow_timing` - never read back."""
+    vr = _load_verify_report_for_opt79()
+    f, data = _opt79_blp_finding()
+    assert vr._tier2_below_long_pole_problems(f, data) == []
+    margin, problems = vr._opt79_net_negative_cache_rederived(f, data)
+    assert problems == [] and margin == 60.0, (margin, problems)
+    assert vr._opt79_finding_rederived(f, data) == []
+
+
+@pytest.mark.parametrize("edit, needle", [
+    # the stamped margin is not the long pole's lead over the job
+    (lambda f, d: f["tier2_neutrality"].__setitem__("margin_s", 61.0), "margin"),
+    # the job IS the long pole the run measured
+    (lambda f, d: d["per_workflow_timing"]["ci.yml"].__setitem__(
+        "long_pole_job", _OPT79_JOB), "long pole"),
+    # the job TIES the long pole
+    (lambda f, d: d["per_workflow_timing"]["ci.yml"]["job_p50"].__setitem__(
+        _OPT79_JOB, 660.0), "long pole"),
+    # another pattern claims OPT79's token
+    (lambda f, d: f.__setitem__("pattern", "OPT65"), "OPT79's certificate"),
+    # the measurement behind it is still re-derived, not taken on faith
+    (lambda f, d: f["cache_net_negative"].__setitem__("waste_s", 900.0), "waste_s"),
+])
+def test_opt79_verifier_rejects_a_tampered_below_long_pole_finding(edit, needle):
+    vr = _load_verify_report_for_opt79()
+    f, data = _opt79_blp_finding()
+    edit(f, data)
+    problems = vr._tier2_below_long_pole_problems(f, data)
+    assert any(needle in p for p in problems), (needle, problems)
+
+
+def test_opt79_verifier_flags_a_below_long_pole_job_left_uncredited():
+    """The converse rule (#113's T10): an uncredited row that should have been
+    credited. A job shorter than its workflow's long pole, with no stamped
+    reason, is the `below_long_pole` finding now - listing it uncredited
+    under-reports a priced saving."""
+    vr = _load_verify_report_for_opt79()
+    row = _opt79_no_pr_pole_row()
+    assert vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": [row]}) == []
+    row["long_pole_job"] = "e2e"
+    row["long_pole_p50_s"] = 700.0
+    problems = vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": [row]})
+    assert any("below_long_pole" in p for p in problems), problems
 
 
 def test_opt79_pole_cache_on_a_workflow_no_pr_runs_stays_uncredited():
@@ -4366,7 +4498,8 @@ def test_opt79_pole_cache_on_a_workflow_no_pr_runs_stays_uncredited():
 # merge wait. It is now a credited WALL-CLOCK finding: the measured excess per
 # hit run, capped at the gap to the next-tallest job's duration (a conservative
 # cap: it compares durations and does not follow `needs:` chains). Runner-minutes are NOT stated on it — the bill section
-# needs a below-the-floor proof a long pole cannot have.
+# needs proof the job is shorter than the workflow's slowest job, which a long
+# pole cannot have.
 
 _OPT79_POLE_KIND = "opt79_pole_net_negative_cache"
 
@@ -4533,12 +4666,6 @@ def test_opt79_pole_tied_with_the_next_job_has_no_headroom_and_stays_uncredited(
     assert len(rows) == 1 and rows[0]["on_critical_path"] is False
 
 
-def test_opt79_second_slowest_job_on_a_pr_workflow_stays_uncredited():
-    out, rows, _w = _opt79_pole_run(_opt79_pole_crit())
-    assert out == []
-    assert len(rows) == 1 and rows[0]["on_critical_path"] is False
-
-
 def test_opt79_pole_sizing_uses_the_shared_within_workflow_bound(monkeypatch):
     """The cap is the SAME code every other finding's within-workflow cap runs,
     not a second hand-rolled formula."""
@@ -4670,7 +4797,7 @@ def test_opt79_verifier_rejects_an_uncredited_row_claiming_the_merge_wait():
     pull-request workflow is a credited finding. A row stamped otherwise is a
     contract violation, whatever else it says."""
     vr = _load_verify_report_for_opt79()
-    row = _opt79_uncredited(_opt79_pole_crit())
+    row = _opt79_no_pr_pole_row()
     assert vr._opt79_uncredited_rows_rederived(
         {"opt79_uncredited_pole_caches": [row]}) == []
     row["on_critical_path"] = True
@@ -4684,7 +4811,7 @@ def test_opt79_uncredited_rows_are_re_derived_by_the_report_self_check():
     """The uncredited row ships numbers no total contradicts, so without its own
     re-derivation an edited `waste_s` reached the page unchallenged."""
     vr = _load_verify_report_for_opt79()
-    row = _opt79_uncredited(_opt79_pole_crit())
+    row = _opt79_no_pr_pole_row()
     data = {"opt79_uncredited_pole_caches": [row]}
     assert vr._opt79_uncredited_rows_rederived(data) == []
     assert vr.check_opt79_uncredited_rows_rederived("", None).skipped
@@ -5111,7 +5238,7 @@ def test_opt79_uncredited_rows_must_all_reach_the_page():
     import json as _json
     import tempfile
     vr = _load_verify_report_for_opt79()
-    row = _opt79_uncredited(_opt79_pole_crit())
+    row = _opt79_no_pr_pole_row()
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "findings.json"
         p.write_text(_json.dumps({"opt79_uncredited_pole_caches": [row]}),
@@ -5555,7 +5682,9 @@ def test_opt79_uncredited_lines_are_matched_per_workflow_not_per_job_name():
     row with the first row's line and failed an honest report."""
     vr = _load_verify_report_for_opt79()
     base = {"hits": 4, "misses": 4, "on_critical_path": False,
-            "workflow_gates_pull_requests": True, "floor_p50_s": 600.0}
+            "workflow_gates_pull_requests": True, "floor_p50_s": 600.0,
+            "long_pole_job": "build", "long_pole_p50_s": 600.0,
+            "job_p50_s": 600.0, "uncredited_reason": "pole_tied_with_next_job"}
     rows = [dict(base, job="build", workflow_file="ci.yml", waste_s=19.0),
             dict(base, job="build", workflow_file="release.yml", waste_s=40.0)]
     report = "\n".join(bp._opt79_uncredited_block({cr._OPT79_UNCREDITED_DOC_KEY: rows}))
@@ -5566,15 +5695,15 @@ def test_opt79_uncredited_lines_are_matched_per_workflow_not_per_job_name():
     # …and so is a line whose REASON is false: a job that is not the long pole
     # told its saving is on the merge wait, or a PR workflow told no PR runs it.
     merge_lie = report.replace(
-        "is at or above this workflow's second-slowest job (600s), so this audit "
-        "cannot prove that shrinking it leaves the merge gate unchanged",
-        "is this workflow's slowest job, so the saving is on the merge wait", 1)
+        "it is tied with the next-tallest job (600s), so shrinking it moves no "
+        "merge wait",
+        "so the saving is on the merge wait", 1)
     assert merge_lie != report
     assert any("merge wait" in p for p in
                vr._opt79_uncredited_rows_rendered(merge_lie, rows)), merge_lie
     no_pr_lie = report.replace(
-        "is at or above this workflow's second-slowest job (600s)",
-        "runs in a workflow that does not run on pull requests (600s)", 1)
+        "is this workflow's slowest job",
+        "runs in a workflow that does not run on pull requests", 1)
     assert any("no pull request" in p for p in
                vr._opt79_uncredited_rows_rendered(no_pr_lie, rows)), no_pr_lie
 
@@ -5690,8 +5819,8 @@ def test_opt79_measures_an_uncredited_cache_with_no_monthly_volume():
     rows: list = []
     w: dict = {}
     out = cr._detect_opt79_net_negative_cache(
-        "ci.yml", jpr, _opt79_pole_crit(), _opt79_wf(), None, 0,
-        logs_by_job_id=logs, uncredited=rows, withheld=w, is_pr=True)
+        "ci.yml", jpr, _opt79_pole_of(660.0, 600.0), _opt79_wf(), None, 0,
+        logs_by_job_id=logs, uncredited=rows, withheld=w, is_pr=False)
     assert out == []
     assert len(rows) == 1, w
     assert rows[0]["monthly_volume"] is None
@@ -5880,7 +6009,7 @@ def test_opt79_verifier_re_checks_the_gates_on_a_consistent_block(hits, misses, 
 ])
 def test_opt79_verifier_checks_the_uncredited_row_envelope(edit, needle):
     vr = _load_verify_report_for_opt79()
-    row = _opt79_uncredited(_opt79_pole_crit())
+    row = _opt79_no_pr_pole_row()
     edit(row)
     problems = vr._opt79_uncredited_rows_rederived(
         {"opt79_uncredited_pole_caches": [row]})
@@ -5893,7 +6022,7 @@ def test_opt79_uncredited_check_runs_in_the_report_self_check(tmp_path):
     indistinguishable from a clean result."""
     import json as _json
     vr = _load_verify_report_for_opt79()
-    row = _opt79_uncredited(_opt79_pole_crit())
+    row = _opt79_no_pr_pole_row()
     rendered = "\n".join(bp._opt79_uncredited_block(
         {"opt79_uncredited_pole_caches": [row]}))
     p = tmp_path / "findings.json"
@@ -5908,7 +6037,7 @@ def test_opt79_uncredited_check_runs_in_the_report_self_check(tmp_path):
 
 def test_opt79_verifier_rejects_a_volume_on_a_row_with_no_monthly_volume():
     vr = _load_verify_report_for_opt79()
-    row = _opt79_uncredited(_opt79_pole_crit())
+    row = _opt79_no_pr_pole_row()
     row["monthly_volume"] = None
     row["effective_monthly_volume"] = None
     assert vr._opt79_uncredited_rows_rederived(
@@ -5925,7 +6054,7 @@ def test_opt79_verifier_rejects_a_phantom_or_miscounted_uncredited_block(tmp_pat
     rows is a miscounted one. Both must redden the self-check."""
     import json as _json
     vr = _load_verify_report_for_opt79()
-    row = _opt79_uncredited(_opt79_pole_crit())
+    row = _opt79_no_pr_pole_row()
     rendered = "\n".join(bp._opt79_uncredited_block(
         {"opt79_uncredited_pole_caches": [row]}))
     empty = tmp_path / "empty.json"
@@ -8102,7 +8231,7 @@ def test_opt79_verifier_checks_the_pull_request_claim_against_the_sampled_events
     problems = vr._opt79_finding_rederived(f, data)
     assert any("sampled events" in p for p in problems), problems
     # the same rule on an uncredited row
-    row = _opt79_uncredited(_opt79_pole_crit(), is_pr=False)
+    row = _opt79_uncredited(_opt79_pole_of(660.0, 600.0), is_pr=False)
     assert row["workflow_gates_pull_requests"] is False
     udata = {"per_workflow_timing": {"ci.yml": {"events": ["pull_request"]}},
              "opt79_uncredited_pole_caches": [row]}
@@ -8142,7 +8271,7 @@ def test_opt79_verifier_rejects_an_uncredited_pole_row_with_no_reason_built_by_h
     full minute of headroom, and no reason - the row a detector that dropped
     the credited finding would leave behind."""
     vr = _load_verify_report_for_opt79()
-    row = _opt79_uncredited(_opt79_pole_crit())
+    row = _opt79_no_pr_pole_row()
     row["long_pole_job"] = row["job"]
     row["long_pole_p50_s"] = 660.0
     row["floor_p50_s"] = 600.0

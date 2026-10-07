@@ -6027,20 +6027,24 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
     wall-clock claim, no neutrality certificate, no Tier-2 row. The measurement
     is as real as a credited one; what is missing is the sizing.
 
-    WHY it is missing differs by job. `not below the cluster floor` spans
-    everything from the SECOND-ranked job upwards. The workflow's long pole, on
-    a workflow that can gate a PR, is NOT here unless it is TIED with the next
-    job (no headroom, so a tied long pole IS here): an untied one has its excess
-    on the merge wait, so it is a credited wall-clock finding rendered at its
-    pole (`_opt79_pole_block`) OR in the off-pole block
-    (`_opt79_off_pole_block`), and `verify_report` fails an uncredited row that
-    claims the merge wait. On a workflow no pull request runs
-    (`workflow_gates_pull_requests` false) there is no merge gate at all and the
-    saving is pure runner-minutes. For every other job at or above the floor the
-    saving is runner-minutes too, uncredited because this version cannot prove
-    shrinking it leaves the gate unchanged. The block says only what those
-    stamps support — never a merge wait or a merge gate on a workflow that has
-    none, and never "this workflow's slowest job".
+    Exactly two cases reach it. Every job strictly shorter than its
+    workflow's long pole is credited runner-minutes (below the cluster floor,
+    or at/above it and below the long pole), on any workflow; the untied long
+    pole of a pull-request workflow is a credited wall-clock finding rendered
+    at its pole (`_opt79_pole_block`) or in the off-pole block
+    (`_opt79_off_pole_block`). What is left:
+
+    - the long pole (or a job tied with it) of a workflow no pull request runs
+      (`workflow_gates_pull_requests` false): no merge gate at all, so the line
+      says the workflow does not run on pull requests;
+    - the long pole of a pull-request workflow that the wall-clock arm declined,
+      with its stamped `uncredited_reason` (tied with the next job - a job tied
+      with the long pole is stamped the same way - zeroed by a cross-check, or
+      off the merge-gating spine), stated in plain English.
+
+    `verify_report` fails a row that claims the merge wait, and a row with no
+    reason that should have been credited. The block says only what the stamps
+    support: never a merge wait or a merge gate on a workflow that has none.
 
     Rendered beside `_dropped_unprovable_banner`, its nearest precedent: a
     measured fact deliberately kept out of the numbers and shown anyway. [] when
@@ -6074,20 +6078,21 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
                 floor=(f" ({float(floor):.0f}s)"
                        if isinstance(floor, (int, float)) else ""),
                 detail=detail or "no reason was recorded")
-            why = (f"`{job}` is this workflow's slowest job, but {clause}; "
+            lead = ("is this workflow's slowest job"
+                    if str(r.get("long_pole_job") or "") in ("", job)
+                    else "is tied for this workflow's slowest job")
+            why = (f"`{job}` {lead}, but {clause}; "
                    "**not credited** in this version.")
         elif r.get("workflow_gates_pull_requests") is False:
             why = (f"`{job}` runs in a workflow that does not run on pull "
                    "requests, so no pull request waits on it; the saving is "
                    "runner-minutes only and is **not credited** in this version.")
         else:
-            floor = r.get("floor_p50_s")
-            floor_txt = (f" ({float(floor):.0f}s)"
-                         if isinstance(floor, (int, float)) else "")
-            why = (f"`{job}` is at or above this workflow's second-slowest job"
-                   f"{floor_txt}, so this audit cannot prove that shrinking it "
-                   "leaves the merge gate unchanged; **not credited** in this "
-                   "version.")
+            # No stamped reason on a pull-request workflow: not a shape the
+            # collector writes (`verify_report` fails it), so the line claims
+            # nothing about where the job sits.
+            why = (f"`{job}` carries no recorded reason it could not be "
+                   "priced; **not credited** in this version.")
         lines.append(
             f"> - a cache on `{job}`{where} measured net-negative by {waste_txt} "
             f"per cache hit ({hits} hit / {misses} miss run(s) sampled); {why}")
@@ -6334,6 +6339,13 @@ def _tier2_cert_summary(f: dict[str, Any]) -> str:
         # certificate's own `ref` (appended below) names what each one was
         # actually compared against.
         msg = f"`below_cluster_floor` with {_clock(margin)} margin"
+    elif proof == "below_long_pole" and margin is not None:
+        # OPT79's second runner-minute proof: the job sits at or above the
+        # cluster floor but is strictly shorter than the workflow's slowest job,
+        # which therefore still sets the merge gate. The margin is the slowest
+        # job's lead over it; the `ref` below names that job and both p50s.
+        msg = (f"`below_long_pole` with {_clock(margin)} margin - shorter than "
+               "the workflow's slowest job, which still sets the merge gate")
     elif proof == "post_completion_waste":
         msg = "`post_completion_waste` - compute burned after the run signal is already decided"
     elif proof == "checkout_tail_excess" and margin is not None:

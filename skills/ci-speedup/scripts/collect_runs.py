@@ -15602,6 +15602,13 @@ _OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
 # field may still be 2), never an uncredited line.
 # Pinned equal to the verifier's `_VR_OPT79_POLE_KIND` by a coupling test.
 _OPT79_POLE_KIND = "opt79_pole_net_negative_cache"
+# The neutrality proof of OPT79's SECOND runner-minute arm: a job at or above
+# the workflow's cluster floor that is still strictly shorter than its long
+# pole. Its margin is long_pole_p50 - job_p50 (floor - job_p50 is not positive
+# for such a job), so it is its own token rather than a reuse of
+# `below_cluster_floor`, whose margin means something else. Pinned equal to
+# `verify_report._VR_OPT79_PROOF_BELOW_LONG_POLE` by a coupling test.
+_OPT79_PROOF_BELOW_LONG_POLE = "below_long_pole"
 # The pole finding's pre-cascade sizing, stamped under
 # `cache_net_negative.pole_sizing`. The generic cascade in `collect()` rewrites
 # `wall_clock_derivation` whenever a LATER bound shrinks the value, which would
@@ -16351,10 +16358,12 @@ def _opt79_candidates(
         if not declared:
             _no("runner_label_not_one_known_billed_label", job=name)
             continue
-        # THE NEUTRALITY TEST, and the reason runner-minutes are credited only
-        # to jobs below the floor. A job strictly below the workflow's cluster floor cannot set the
-        # merge gate, so making it faster provably cannot make the gate longer —
-        # which is the certificate a credited finding ships.
+        # THE NEUTRALITY TEST. A job strictly below the workflow's cluster floor
+        # cannot set the merge gate, and neither can a job strictly shorter than
+        # the long pole (the long pole still sets it), so making either faster
+        # provably cannot make the gate longer — which is the certificate a
+        # credited runner-minute finding ships (`below_cluster_floor` /
+        # `below_long_pole`; the detector picks which).
         #
         # It is recorded here and NOT gated on. A cache on the slowest job is the
         # case where this waste sits on the merge wait, so it is worth the most;
@@ -17009,8 +17018,9 @@ def _detect_opt79_net_negative_cache(
         # within-workflow bound every other finding uses, not a second formula.
         # A long pole TIED with the next job has no headroom: shrinking it moves
         # no merge wait, so it falls through to the uncredited line below.
-        # Runner-minutes are not stated: the bill section's admission is a
-        # below-the-floor proof, which the slowest job cannot have.
+        # Runner-minutes are not stated: the bill section's admission is proof
+        # that the job is shorter than the workflow's slowest job (below the
+        # floor, or below the long pole), which the slowest job cannot have.
         def _uncredited_row() -> dict[str, Any]:
             return _opt79_uncredited_row(
                 _opt79_stamp(
@@ -17058,7 +17068,7 @@ def _detect_opt79_net_negative_cache(
                 continue
             # TIED with the next-tallest job: under a second of headroom moves
             # no merge wait, so it is an uncredited row that says so, tallied
-            # under its own gate rather than the below-the-floor one.
+            # under its own gate.
             _no(_OPT79_REASON_TIED, job=name, headroom=headroom, raw_wc=raw_wc)
             if uncredited is not None:
                 row = _uncredited_row()
@@ -17066,16 +17076,49 @@ def _detect_opt79_net_negative_cache(
                 uncredited.append(row)
             continue
 
-        # MEASURED net-negative. Everything above is the measurement; the floor
-        # decides only whether it can be PRICED. A job that is not strictly below
-        # the workflow's cluster floor, and is not the credited pole above, is
-        # reported with no number rather than dropped, and takes no part in any
-        # total.
-        if not block.get("below_cluster_floor"):
-            _no("job_not_strictly_below_the_workflow_cluster_floor", job=name,
-                job_p50=block.get("job_p50_s"), floor_p50=block.get("floor_p50_s"))
-            if uncredited is not None:
-                uncredited.append(_uncredited_row())
+        # MEASURED net-negative. Everything above is the measurement; where the
+        # job sits decides only whether it can be PRICED, and against WHAT.
+        #
+        # Two runner-minute arms, each with its own neutrality proof:
+        #   - strictly below the cluster floor (`below_cluster_floor`, margin
+        #     floor - job p50): the job is not even the second-slowest;
+        #   - at or above the floor but strictly shorter than the workflow's long
+        #     pole (`below_long_pole`, margin long_pole_p50 - job p50): the long
+        #     pole still sets the merge gate, so shrinking this job cannot
+        #     lengthen it. The comparison is against the ACTUAL slowest job's p50,
+        #     not the second-slowest - the move OPT77's whole-workflow arm makes
+        #     against its slowest member.
+        # Both hold on a workflow no pull request runs too: the bill does not
+        # depend on PRs. What is left is uncredited: the long pole of a workflow
+        # no pull request runs, and a job TIED with the long pole (on a
+        # pull-request workflow that is a co-pole, stamped `pole_tied_with_next_job`
+        # like a pole tied with the next job). The long pole of a pull-request
+        # workflow never reaches here: the wall-clock arm above took it.
+        below_floor = bool(block.get("below_cluster_floor"))
+        lp_job = str(block.get("long_pole_job") or "")
+        job_p50 = float(block["job_p50_s"])
+        lp50_s = float(block.get("long_pole_p50_s") or 0.0)
+        lp_margin = (round(lp50_s - job_p50, 1)
+                     if lp_job and not block.get("is_long_pole") else 0.0)
+        if not below_floor and lp_margin <= 0:
+            row = _uncredited_row() if uncredited is not None else None
+            if not lp_job:
+                _no("long_pole_job_not_recorded", job=name)
+            elif block.get("is_long_pole") or not gates_pr:
+                # The slowest job (or one tied with it) of a workflow no pull
+                # request waits on: no merge gate to be neutral against, and
+                # this version prices no long pole as runner-minutes.
+                _no("long_pole_of_a_workflow_no_pull_request_runs", job=name,
+                    job_p50=block.get("job_p50_s"), long_pole=lp_job)
+            else:
+                # Tied with the long pole on a pull-request workflow: as slow as
+                # the job that sets the merge wait, so neither proof holds.
+                _no(_OPT79_REASON_TIED, job=name, job_p50=block.get("job_p50_s"),
+                    long_pole=lp_job, long_pole_p50=block.get("long_pole_p50_s"))
+                if row is not None:
+                    row["uncredited_reason"] = _OPT79_REASON_TIED
+            if row is not None:
+                uncredited.append(row)
             continue
         if not has_volume:
             _drop(name, "no_monthly_volume", monthly_volume=monthly_volume)
@@ -17085,17 +17128,51 @@ def _detect_opt79_net_negative_cache(
         if credited <= 0:
             _drop(name, "credited_runner_minutes_round_to_zero")
             continue
-        job_p50 = float(block["job_p50_s"])
-        margin = round(float(block["floor_p50_s"]) - job_p50, 1)
-        if margin <= 0:                      # re-checked after rounding
-            _drop(name, "neutrality_margin_not_positive")
-            continue
+        if below_floor:
+            margin = round(float(block["floor_p50_s"]) - job_p50, 1)
+            if margin <= 0:                  # re-checked after rounding
+                _drop(name, "neutrality_margin_not_positive")
+                continue
+            cert = {
+                "proof": "below_cluster_floor",
+                "margin_s": margin,
+                "ref": (f"per_workflow_timing[wf]: `{name}` at {job_p50:.1f}s is "
+                        f"{margin:.1f}s below the workflow cluster floor "
+                        f"{float(block['floor_p50_s']):.1f}s"),
+            }
+            where_note = (
+                "Runner-minutes only \u2014 this job's p50 "
+                f"({job_p50:.0f}s) is below the workflow's cluster floor "
+                f"({block['floor_p50_s']:.0f}s), so no merge-gate time changes. ")
+            where_ev = ""
+            size_head = (
+                "runner-minutes only. The job's measured p50 sits below the "
+                "workflow's cluster floor, so the time this removes is off the merge "
+                "gate. ")
+        else:
+            margin = lp_margin               # > 0 after rounding: the gate above
+            cert = {
+                "proof": _OPT79_PROOF_BELOW_LONG_POLE,
+                "margin_s": margin,
+                "ref": (f"per_workflow_timing[wf]: `{name}` at {job_p50:.1f}s is "
+                        f"{margin:.1f}s below the workflow long pole `{lp_job}` at "
+                        f"{lp50_s:.1f}s"),
+            }
+            where_txt = (
+                f"runner-minutes only; this job ({job_p50:.0f}s) is not the "
+                f"workflow's slowest (`{lp_job}`, {lp50_s:.0f}s), so shrinking it "
+                "cannot lengthen the merge gate \u2014 it is at or above the "
+                "second-slowest job, so the usual below-the-floor proof does not "
+                "apply and the comparison is against the slowest job instead")
+            where_note = where_txt[0].upper() + where_txt[1:] + ". "
+            where_ev = " " + where_note.strip()
+            size_head = where_txt + ". "
 
         evidence = (
             f"{_measured_txt} The cache hit on "
             f"{hit_share * 100:.0f}% of the {classified + ambiguous} run(s) read; over "
             f"{effective:.0f} run(s)/30d of this job that is ~{credited:.0f} "
-            f"runner-min/mo. Comparison measured on `{declared}` only.")
+            f"runner-min/mo. Comparison measured on `{declared}` only.{where_ev}")
         me = _measured_evidence(
             ["Cache", "Restore", "Install", "Post", "Block total", "Log line"],
             rows_render,
@@ -17104,9 +17181,7 @@ def _detect_opt79_net_negative_cache(
                 _note_head
                 + "The credited figure is a "
                 "LOWER BOUND: removing the cache also removes the restore and the "
-                "save from the miss path. Runner-minutes only — this job's p50 "
-                f"({job_p50:.0f}s) is below the workflow's cluster floor "
-                f"({block['floor_p50_s']:.0f}s), so no merge-gate time changes. "
+                "save from the miss path. " + where_note
                 + _note_guardrail))
         f = _new_finding(
             "OPT79", "MEDIUM", title, wf_path, name, evidence,
@@ -17114,9 +17189,8 @@ def _detect_opt79_net_negative_cache(
             _catalog_anchor("OPT79", title), start_idx + len(out) + 1,
             wc_p50=0.0, rm=credited,
             size_note=(
-                "runner-minutes only. The job's measured p50 sits below the "
-                "workflow's cluster floor, so the time this removes is off the merge "
-                "gate. The figure is the measured excess of the hit path over the "
+                size_head
+                + "The figure is the measured excess of the hit path over the "
                 "miss path, charged only to the share of runs that actually hit; the "
                 "saving from removing the cache outright is larger, because the miss "
                 "path still pays the restore and the save today."),
@@ -17135,13 +17209,7 @@ def _detect_opt79_net_negative_cache(
             waste_floor=waste_floor, hit_share=hit_share,
             job_runs=job_runs, sampled=sampled, monthly_volume=monthly_volume,
             effective=effective, runner_min_saving=credited)
-        f["tier2_neutrality"] = {
-            "proof": "below_cluster_floor",
-            "margin_s": margin,
-            "ref": (f"per_workflow_timing[wf]: `{name}` at {job_p50:.1f}s is "
-                    f"{margin:.1f}s below the workflow cluster floor "
-                    f"{float(block['floor_p50_s']):.1f}s"),
-        }
+        f["tier2_neutrality"] = cert
         f["guardrail"] = _guardrail
         out.append(f)
     return out
@@ -17158,8 +17226,8 @@ def _opt79_uncredited_row(
     floor_p50_s: Any,
 ) -> dict[str, Any]:
     """One uncredited OPT79 row: the stamped measurement block plus WHERE the
-    job sits, stated rather than implied, so the renderer can tell the
-    second-slowest job from a tied pole from a workflow no PR runs. Shared by
+    job sits, stated rather than implied, so the renderer can tell a tied
+    pole from a workflow no PR runs. Shared by
     the detector and by `_opt79_demote_uncredited_poles`, so a demoted pole
     finding has exactly the shape the detector builds.
 
@@ -17299,8 +17367,9 @@ def _opt79_pole_finding(
     that derivation would otherwise overwrite.
 
     No runner-minutes, and no `tier2_neutrality`: the bill section admits a
-    cache like this only with a below-the-floor proof, which the slowest job
-    cannot have. It is therefore a hygiene finding with a merge-wait number and
+    cache like this only with proof that its job is shorter than the
+    workflow's slowest job (`below_cluster_floor` or `below_long_pole`), which
+    the slowest job cannot have. It is therefore a hygiene finding with a merge-wait number and
     nothing else."""
     lp_job = str(block.get("long_pole_job") or name)
     lp50 = round(float(crit.get("long_pole_p50") or 0.0), 1)
@@ -17334,8 +17403,8 @@ def _opt79_pole_finding(
         f"and {nxt_ref} runs {fl50:.0f}s; {cap_txt}. This workflow runs on "
         "pull requests, so that time is part of the merge wait. Runner-minutes "
         "are not stated on this finding: the bill section credits a cache like "
-        "this only with proof that its job sits below the workflow's "
-        "second-slowest job, which the slowest job cannot have (see the OPT79 "
+        "this only with proof that its job is shorter than the workflow's "
+        "slowest job, which the slowest job cannot have (see the OPT79 "
         f"catalog entry). Comparison measured on `{declared}` only.")
     me = _measured_evidence(
         ["Cache", "Restore", "Install", "Post", "Block total", "Log line"],
@@ -17361,7 +17430,8 @@ def _opt79_pole_finding(
             "wall-clock: the measured excess of the hit path over the miss path on "
             "this workflow's slowest job, capped at the gap to the next-tallest "
             "job's duration. Runner-minutes are not stated: the bill section "
-            "needs a below-the-floor proof this job cannot have."),
+            "needs proof the job is shorter than the workflow's slowest job, "
+            "which this job cannot have."),
         realization="direct", measured_evidence=me)
     f["tier"] = 1
     f["sizing_basis"] = "measured"

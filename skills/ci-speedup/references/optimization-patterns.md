@@ -559,11 +559,13 @@ family reads, so retuning it there moves this gate too.
    partial-restore and two-verdict runs included — must be at least **0.25**. A
    cache that almost never hits has a key-entropy problem, which OPT6 and OPT8
    own; route there rather than report the same cache twice.
-7. How the measured excess is **credited** depends on the job's p50 against the
-   workflow's cluster floor: strictly below it is a runner-minute finding, the
-   workflow's long pole on a pull-request workflow is a wall-clock finding, and
-   anything else is reported uncredited. This is a crediting gate, not a candidate
-   gate: a job at or above the floor is still measured by steps 1-6.
+7. How the measured excess is **credited** depends on where the job's p50
+   sits: strictly shorter than the workflow's long pole is a runner-minute
+   finding (against the cluster floor when it is below it, else against the long
+   pole), the workflow's long pole on a pull-request workflow is a wall-clock
+   finding, and what is left is reported uncredited. This is a crediting gate,
+   not a candidate gate: a job at or above the floor is still measured by steps
+   1-6.
    See *Three outcomes* below.
 
 Job logs are the expensive call in this engine, so the probe is capped three
@@ -601,7 +603,7 @@ answered from data already in hand, so those jobs cost no log fetch. That is
 not the same as "no log is fetched for a job that could not produce a finding":
 the workflow's slowest job is probed too, and what it produces is a credited
 wall-clock finding (on a workflow that runs on pull requests) or the uncredited
-line below.
+line below; every job shorter than it is a credited runner-minute finding.
 
 **Sizing (measured)**:
 
@@ -614,8 +616,9 @@ runner_min  = waste_s × hit_share × effective_monthly / 60
 `effective_monthly` is the workflow's 30-day volume for the sampled event scope,
 scaled by how often this job actually ran in the sample, so a conditional job is
 not billed at the whole workflow's frequency. `sizing_basis = "measured"`. A
-below-the-floor job on a workflow with no measured 30-day volume cannot be
-credited and is withheld as `no_monthly_volume`, after it is measured (the
+runner-minute job (below the floor or below the long pole) on a workflow with no
+measured 30-day volume cannot be credited and is withheld as
+`no_monthly_volume`, after it is measured (the
 uncredited row and the wall-clock pole finding below need no volume and may stamp
 it, and the effective volume, as null; the pole finding's `runner_min_saving`
 is null too).
@@ -625,14 +628,31 @@ the miss path it is measured against still pays the restore step and the post
 save today, and both disappear with the cache.
 
 **Three outcomes, by which job it is.** The floor is the *second-ranked* job's
-p50 in the workflow, so a job's place relative to it decides what the audit may
-claim. The floor does not gate which jobs are measured; it gates how the measured
-excess is credited.
+p50 in the workflow and the long pole is the *first*, so a job's place relative
+to them decides what the audit may claim. Neither gates which jobs are measured;
+they gate how the measured excess is credited.
 
-1. **Strictly below the floor: runner-minutes only.** `wall_clock_p50_s` is 0,
-   which is literally true and re-derivable, and is the finding's
-   `below_cluster_floor` neutrality certificate. This is the credited Tier-2
-   finding described above.
+1. **Strictly shorter than the long pole: runner-minutes only**, on any
+   workflow (the bill does not depend on pull requests). `wall_clock_p50_s` is
+   0, which is literally true and re-derivable: shrinking a job that is shorter
+   than the slowest one cannot lengthen the merge gate, because the slowest job
+   still sets it. The finding carries one of two neutrality certificates:
+   - **strictly below the cluster floor** → `below_cluster_floor`, margin
+     `floor_p50 − job_p50`;
+   - **at or above the floor, strictly below the long pole** →
+     `below_long_pole`, margin `long_pole_p50 − job_p50` (strictly positive
+     after rounding; a job tied with the long pole is not credited), with a
+     `ref` naming the long-pole job and both p50s. The comparison is against the
+     actual slowest job's p50, not the second-slowest job's, against which such
+     a job's margin is not positive. The finding says so in plain words:
+     "runner-minutes only; this job (Ns) is not the workflow's slowest
+     (`<pole>`, Ms), so shrinking it cannot lengthen the merge gate — it is at
+     or above the second-slowest job, so the usual below-the-floor proof does
+     not apply and the comparison is against the slowest job instead". (Owner
+     decision 2026-10-06; the same move OPT77's whole-workflow arm makes against
+     its slowest member.)
+
+   This is the credited Tier-2 finding described above.
 2. **The workflow's long pole, on a workflow that runs on pull requests: a
    credited wall-clock finding** (`kind: opt79_pole_net_negative_cache`). Shrinking
    the slowest job shortens the merge wait, so the finding is sized in
@@ -650,7 +670,8 @@ excess is credited.
    critical-path floor and the cross-workflow floor), and any further shrink is
    recorded in `wall_clock_derivation`. A long pole TIED with the next-tallest
    job (zero headroom) is not credited here: shrinking it moves no merge wait,
-   because the other job still finishes then, so it falls through to outcome 3.
+   because the other job still finishes then, so it falls through to outcome 3
+   (so does a job TIED with the long pole, which is a co-pole).
    The finding renders inside that job's long-pole section of the report, opened
    by an `<!-- opt79-pole:<id> -->` marker, as
    `💾 Measured cache cost - OPT79 · <title> (<id>) - up to **Ns** off the merge wait on the P% of sampled runs where the cache hit (H of R runs read)`
@@ -670,32 +691,33 @@ excess is credited.
    lowered the figure, the block prints each step and its reason. Every number
    is from the audited
    repository's own p50s and runs. Runner-minutes are deliberately not stated: the
-   runner-minute section requires the below-the-floor neutrality proof, which the
-   slowest job cannot have. The neutrality certificate is only required to promote
+   runner-minute section requires proof that the job is shorter than the
+   workflow's slowest job, which the slowest job cannot have. The neutrality certificate is only required to promote
    a finding into the runner-minute section; a finding that saves merge-wait time
    does not need one, because the wall-clock bound cascade already handles
    "shorten only as far as the next job".
-3. **Anything else: measured, reported, not priced.** The audit carries no
-   neutrality argument for these, so they are an uncredited row, rendered as one
-   numberless line beside the dropped-unprovable note (the nearest precedent: a
-   measured fact deliberately kept out of the numbers and shown anyway). Exactly
-   three cases land here, all of them jobs not strictly below the floor: any
-   such job in a workflow that runs on no pull request (the saving is
-   runner-minutes only, and unpriced here; that workflow's below-the-floor jobs
-   still take outcome 1), a job at or above the floor that
-   is not the long pole, and a long pole tied with the next-tallest job (no
-   headroom, so no merge wait of its own).
+3. **What is left: measured, reported, not priced.** The audit carries no
+   sizing for these, so they are an uncredited row, rendered as one numberless
+   line beside the dropped-unprovable note (the nearest precedent: a measured
+   fact deliberately kept out of the numbers and shown anyway). Exactly two
+   cases land here:
+   - the long pole of a workflow that runs on no pull request (or a job tied
+     with it) — runner-minutes only, unpriced in this version; that workflow's
+     shorter jobs still take outcome 1;
+   - the long pole of a pull-request workflow that outcome 2 declined, with its
+     stamped reason: tied with the next-tallest job (a job tied with the long
+     pole is stamped the same way), its merge wait zeroed by a cross-check, or
+     off the merge-gating spine.
 
-> a cache on `unit` measured net-negative by 19s per cache hit (4 hit / 4 miss
-> run(s) sampled); `unit` is at or above this workflow's second-slowest job
-> (600s), so this audit cannot prove that shrinking it leaves the merge gate
-> unchanged; **not credited** in this version.
+> a cache on `nightly` in `.github/workflows/nightly.yml` measured net-negative
+> by 19s per cache hit (4 hit / 4 miss run(s) sampled); `nightly` runs in a
+> workflow that does not run on pull requests, so no pull request waits on it;
+> the saving is runner-minutes only and is **not credited** in this version.
 
-For a job that is not the long pole the saving may be pure runner-minutes, but
-this audit cannot prove that shrinking it leaves the merge gate unchanged, so it
-is not credited. That job, between the floor and the pole, is still the open
-follow-up: it needs a neutrality argument for the merge gate before it can be
-credited. A workflow that cannot gate a PR is never told it has a merge wait.
+A workflow that cannot gate a PR is never told it has a merge wait. The report's
+self-check fails an uncredited row with no stated reason whose job is strictly
+shorter than its long pole: that job is outcome 1's `below_long_pole` finding,
+and listing it here would under-report a priced saving.
 
 An uncredited row carries no runner-minutes, no wall-clock claim, no certificate,
 no Tier-2 row, and no contribution to any total. It carries the same stamped block
@@ -737,11 +759,17 @@ measurement lives here, in the ci-speedup report, and reconciling the two is an
 open owner decision rather than an engine behaviour either skill implements
 today.
 
-**Tier-2 render note**: the runner-minute finding (a job strictly below the
-workflow's cluster floor) promotes only with measured evidence and a
-neutrality certificate whose `proof` token is `below_cluster_floor` — which for
-this pattern is **literal**: the credited job's own p50 is below the workflow's
-cluster floor, and the margin is that difference. That finding must stamp
+**Tier-2 render note**: the runner-minute finding promotes only with measured
+evidence and a neutrality certificate whose `proof` token is
+`below_cluster_floor` or `below_long_pole` — each **literal** for this pattern:
+the credited job's own p50 is below the workflow's cluster floor (margin: that
+difference), or below the workflow's long pole (margin: the long pole's p50
+minus the job's, re-derived from `per_workflow_timing`; the self-check fails a
+job that is or ties the long pole, and any other pattern claiming the token).
+A `below_long_pole` job can be the second-slowest job of a pull-request workflow
+that the report drills as a secondary Long pole; the self-check's "also rendered
+as a Long pole" proxy is waived for this token because its re-derivation checks
+the fact the proxy stands in for. That finding must stamp
 `wall_clock_p50_s=0`, `sizing_basis=measured`, the two-path model in
 `measured_signal`, and a structured `cache_net_negative` block that lets
 `verify_report.py` re-derive the credited minutes and the margin without reading
@@ -753,7 +781,7 @@ by that re-derivation:
 
 | key | what it carries |
 |---|---|
-| `kind` | `opt79_net_negative_cache` for a credited runner-minute finding, `opt79_pole_net_negative_cache` for a credited wall-clock finding on the workflow's long pole, `opt79_uncredited_pole_cache` for an uncredited row (the "pole" in that name is historical: the rows are any job at or above the floor other than an untied slowest job) — the tag that routes the block to this re-derivation instead of the generic one |
+| `kind` | `opt79_net_negative_cache` for a credited runner-minute finding, `opt79_pole_net_negative_cache` for a credited wall-clock finding on the workflow's long pole, `opt79_uncredited_pole_cache` for an uncredited row (every such row is now a long pole, or a job tied with one, that no other outcome credits) — the tag that routes the block to this re-derivation instead of the generic one |
 | `job` | the credited job; must be the finding's only `affected_jobs` entry |
 | `runner_label` / `cache_ref` | the one runner class every credited run ran on, and the cache action the block was built around |
 | `restore_step` / `install_step` / `post_step` | the three steps, as named in the YAML, that both paths measure; `post_step` is null for `actions/cache/restore`, which has no post phase |

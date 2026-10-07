@@ -5235,6 +5235,53 @@ def _below_floor_margin(f: dict, data: dict) -> float | None:
     return round(floor - own, 1)
 
 
+def _below_long_pole_margin(f: dict, data: dict) -> tuple[float | None, list[str]]:
+    """The `below_long_pole` margin re-derived from `per_workflow_timing`:
+    long_pole_p50 - job_p50, for a job that is NOT the workflow's long pole.
+
+    None (with the reason) when the run measured no long pole for the workflow,
+    when the credited job IS that long pole, or when it is not strictly shorter
+    than it after rounding: a job tied with the slowest job is as slow as the
+    job that sets the merge gate, and the proof says the opposite."""
+    wf = str(f.get("workflow_file") or "")
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    lp_job = str(crit.get("long_pole_job") or "")
+    lp = _num(crit.get("long_pole_p50"))
+    job_p50 = _as_dict(crit.get("job_p50"))
+    jobs = [str(j) for j in _as_list(f.get("affected_jobs")) if str(j)]
+    if not lp_job or lp is None or lp <= 0 or not jobs:
+        return None, [f"per_workflow_timing records no long pole for {wf!r}, so "
+                      "the below-the-long-pole margin cannot be re-derived"]
+    if lp_job in jobs:
+        return None, [f"`{lp_job}` IS the workflow's long pole: a below-the-long-pole "
+                      "proof cannot be claimed for the job that sets the merge gate"]
+    vals = [_strict_job_p50(j, job_p50) for j in jobs]
+    vals = [v for v in vals if v is not None and v > 0]
+    if not vals:
+        return None, ["per_workflow_timing records no p50 for the credited job"]
+    margin = round(lp - max(vals), 1)
+    if margin <= 0:
+        return None, [f"the credited job ({max(vals)}s) is not strictly shorter than "
+                      f"the long pole `{lp_job}` ({lp}s): a job tied with the slowest "
+                      "job carries no below-the-long-pole proof"]
+    return margin, []
+
+
+def _tier2_below_long_pole_problems(f: dict, data: dict) -> list[str]:
+    """The Tier-2 arm for the `below_long_pole` token: OPT79's own (any other
+    pattern claiming it fails), re-derived by OPT79's full arm, with the margin
+    compared against long_pole_p50 - job_p50 from `per_workflow_timing`."""
+    pat = str(f.get("pattern") or "")
+    if pat != "OPT79":
+        return [f"{_VR_OPT79_PROOF_BELOW_LONG_POLE} is OPT79's certificate, claimed "
+                f"by {pat!r}"]
+    want, problems = _opt79_net_negative_cache_rederived(f, data)
+    got = _num(_as_dict(f.get("tier2_neutrality")).get("margin_s"))
+    if got is None or want is None or abs(got - want) > 0.11:
+        problems = problems + [f"below-long-pole margin {got!r} != re-derived {want!r}"]
+    return problems
+
+
 def _rounding_waste_min(durations: list[float]) -> int:
     vals = [float(d) for d in durations if isinstance(d, (int, float)) and d > 0]
     if len(vals) < 2:
@@ -5747,6 +5794,10 @@ _VR_OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
 # workflow that gates pull requests) and its pre-cascade sizing block — both
 # pinned identical to collect_runs' `_OPT79_POLE_KIND` / `_OPT79_POLE_SIZING_KEYS`.
 _VR_OPT79_POLE_KIND = "opt79_pole_net_negative_cache"
+# OPT79's second runner-minute proof: a job at or above the cluster floor that
+# is strictly shorter than the workflow's long pole, margin long_pole_p50 -
+# job_p50. Pinned identical to collect_runs' `_OPT79_PROOF_BELOW_LONG_POLE`.
+_VR_OPT79_PROOF_BELOW_LONG_POLE = "below_long_pole"
 _VR_OPT79_POLE_SIZING_KEYS = (
     "waste_s",
     "long_pole_job", "long_pole_p50_s",
@@ -6068,8 +6119,14 @@ def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
     if ev:
         out.append(ev)
     lp, fl = _num(cn.get("long_pole_p50_s")), _num(cn.get("floor_p50_s"))
+    jp = _num(cn.get("job_p50_s"))
     headroom = round(lp - fl, 1) if lp is not None and fl is not None else None
-    is_pole = bool(job) and job == str(cn.get("long_pole_job") or "") and gates is True
+    lp_job = str(cn.get("long_pole_job") or "")
+    # A job TIED with the long pole is a co-pole: as slow as the job that sets
+    # the merge wait, so it reads as a pole here.
+    lead = round(lp - jp, 1) if lp is not None and jp is not None else None
+    co_pole = bool(job) and job != lp_job and lead is not None and lead <= 0
+    is_pole = bool(job) and (job == lp_job or co_pole) and gates is True
     reason = cn.get("uncredited_reason")
     if reason is None:
         if is_pole and (headroom is None or headroom >= _VR_OPT79_POLE_MIN_HEADROOM_S):
@@ -6077,6 +6134,15 @@ def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
                 f"`{job}` is the long pole of a workflow pull requests wait on, with "
                 f"{headroom!r}s of headroom and no uncredited_reason: it should have "
                 "been the credited pole finding")
+        # The converse of the below-the-long-pole arm: a job strictly shorter
+        # than its workflow's long pole IS that credited runner-minute finding,
+        # on any workflow, so listing it here under-reports a priced saving.
+        if lp_job and job and job != lp_job and lead is not None and lead > 0:
+            out.append(
+                f"`{job}` ({jp}s) is {lead}s shorter than its workflow's long pole "
+                f"`{lp_job}` ({lp}s) and names no uncredited_reason: it should have "
+                f"been the credited `{_VR_OPT79_PROOF_BELOW_LONG_POLE}` "
+                "runner-minute finding")
         return out
     if reason not in _VR_OPT79_UNCREDITED_REASON_PHRASES:
         return out + [f"uncredited_reason {reason!r} is not one of "
@@ -6216,6 +6282,14 @@ def _opt79_net_negative_cache_rederived(f: dict, data: dict) -> tuple[float | No
         cn, credited=True, finding_rm=_num(f.get("runner_min_saving"))))
     problems.extend(_opt79_prose_rederived(f, cn))
 
+    # Two proofs make wall_clock_p50_s=0 true for this finding, each with its
+    # own margin: below the cluster floor (floor - job p50), or at/above it but
+    # strictly shorter than the long pole (long_pole_p50 - job p50).
+    proof = str(_as_dict(f.get("tier2_neutrality")).get("proof") or "")
+    if proof == _VR_OPT79_PROOF_BELOW_LONG_POLE:
+        margin, why = _below_long_pole_margin(f, data)
+        problems.extend(why)
+        return margin, problems
     margin = _below_floor_margin(f, data)
     if margin is None:
         problems.append(
@@ -6434,10 +6508,11 @@ def _opt79_pole_finding_rederived(f: dict, data: dict) -> list[str]:
 def _opt79_finding_rederived(f: dict, data: dict) -> list[str]:
     """Every OPT79 finding, routed by the arm it claims.
 
-    A finding WITH a `tier2_neutrality` certificate is the below-the-floor
-    runner-minute arm: it must be kind `opt79_net_negative_cache` and claim no
-    wall-clock (its certificate says the job cannot set the merge wait; the full
-    re-derivation runs in the Tier-2 pass). A finding WITHOUT one must be the
+    A finding WITH a `tier2_neutrality` certificate is a runner-minute arm
+    (below the cluster floor, or at/above it and below the long pole): it must
+    be kind `opt79_net_negative_cache` and claim no wall-clock (its certificate
+    says the job cannot set the merge wait; the full re-derivation, margin
+    included, runs in the Tier-2 pass). A finding WITHOUT one must be the
     pole arm, re-derived by `_opt79_pole_finding_rederived`. There is no third
     shape: an OPT79 finding that is neither is a contract violation."""
     cert = f.get("tier2_neutrality")
@@ -6945,8 +7020,19 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
             str(f.get("pattern") or "") == "OPT77"
             and _as_dict(f.get("setup_consolidation")).get(
                 "group_is_the_whole_workflow") is True)
+        # OPT79's `below_long_pole` is the THIRD, on the same argument. The
+        # report drills more than one pole and this rule matches pole headers by
+        # job name, so a workflow's second-slowest job can be rendered as a Long
+        # pole (a secondary pole) - and that is exactly the job this token
+        # credits. Its arm re-derives the neutrality the proxy stands in for:
+        # long_pole_p50 - job_p50 > 0 from `per_workflow_timing`, failing a job
+        # that IS its workflow's long pole or ties it. Narrow by construction:
+        # only that token, only OPT79 (any other pattern claiming it fails below).
+        below_long_pole = (proof == _VR_OPT79_PROOF_BELOW_LONG_POLE
+                           and str(f.get("pattern") or "") == "OPT79")
         if (rendered_poles and jobs & rendered_poles
-                and proof != "checkout_tail_excess" and not whole_workflow_opt77):
+                and proof != "checkout_tail_excess" and not whole_workflow_opt77
+                and not below_long_pole):
             bad.append(f"{fid}: affected job is also rendered as a Long pole")
         if proof == "below_cluster_floor":
             got = _num(cert.get("margin_s"))
@@ -6970,6 +7056,13 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                 want = _below_floor_margin(f, data)
             if got is None or want is None or abs(got - want) > 0.11:
                 bad.append(f"{fid}: below-floor margin {got!r} != re-derived {want!r}")
+        elif proof == _VR_OPT79_PROOF_BELOW_LONG_POLE:
+            # OPT79's second runner-minute proof: at or above the cluster floor,
+            # strictly shorter than the long pole. The "rendered as a Long pole"
+            # proxy above needs no exemption here: the margin re-derivation
+            # fails a job that IS its workflow's long pole or ties it.
+            bad.extend(f"{fid}: {msg}"
+                       for msg in _tier2_below_long_pole_problems(f, data))
         elif proof == "post_completion_waste":
             if str(f.get("pattern") or "") not in {"OPT35", "OPT46", "OPT57", "OPT64"}:
                 bad.append(
