@@ -3449,8 +3449,8 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 "cost** block above for the measured comparison + its fix recipe).")
     elif opt82:
         lead = ("starslingdev/ci-speedup measured where the time goes below but does NOT "
-                "prescribe the fix - a measured catalog pattern (OPT82, lint builds the "
-                "whole type graph) matched this pole (see its card in the **Also "
+                "prescribe the fix - a catalog pattern (OPT82, lint builds the "
+                "whole type graph; uncredited) matched this pole's lint step (see its card in the **Also "
                 "noticed** section below for the rules, the benchmark and the ledger).")
     else:
         lead = ("starslingdev/ci-speedup measured where the time goes below but does NOT "
@@ -3517,8 +3517,9 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 "missed. Re-key or narrow it first and re-measure; never narrow what "
                 "the install installs.", ""]
     if opt82:
-        out += ["MEASURED LINT PATTERN MATCHED",
-                "- OPT82 (lint builds the whole type graph) matched this pole - see its "
+        out += ["CATALOG PATTERN MATCHED (UNCREDITED)",
+                "- OPT82 (lint builds the whole type graph) matched this pole's lint "
+                "step, its slowest step - see its "
                 "card in the **Also noticed** section below: it names the type-aware "
                 "rules, the benchmark to run first and the rule ledger to keep. It is "
                 "uncredited, so no saving is stated for it; benchmark before changing "
@@ -3814,9 +3815,9 @@ def _emit_gantt(out: list[str], steps: list[dict[str, Any]], total: float,
 
 
 # The waterfall's pointer for a pole whose lint job carries OPT82 (`_opt82_pole_for`).
-_OPT82_POLE_POINTER = ("(no log-level detector fired, but a measured **catalog pattern** "
-                       "(OPT82, lint builds the whole type graph) matched this pole - see "
-                       "its card in the **Also noticed** section below.)")
+_OPT82_POLE_POINTER = ("(no log-level detector fired, but a **catalog pattern** (OPT82, "
+                       "lint builds the whole type graph; uncredited) matched this pole's "
+                       "lint step - see its card in the **Also noticed** section below.)")
 
 
 def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
@@ -5922,12 +5923,26 @@ def _opt79_pole_covers(findings: list[dict[str, Any]] | None) -> list[dict[str, 
     return [f for f in (findings or []) if _saves_wall_clock(f)]
 
 
+def _opt82_lint_is_dominant(pole: dict[str, Any], f: dict[str, Any]) -> bool:
+    """True when the OPT82 finding's lint step is the pole's dominant step (names
+    compared stripped and case-folded). A missing name on either side is False:
+    unproven cover keeps the pole's gap analysis rather than hiding it."""
+    lint = str((f.get("type_aware_lint") or {}).get("lint_step") or "").strip().casefold()
+    dom = str(pole.get("dominant_step") or "").strip().casefold()
+    return bool(lint) and lint == dom
+
+
 def _opt82_pole_for(pole: dict[str, Any],
                     findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """OPT82 (lint builds the whole type graph) finding(s) on THIS drilled pole's
-    job. Each one is catalog COVER for the pole: OPT82 names the job's cause and
-    targets poles directly (a lint job at 60s or more, or a workflow's slowest
-    job), so the pole must not read as a coverage gap or feed the gap loop.
+    job whose lint step IS the pole's dominant step. Each one is catalog COVER
+    for the pole: it names the cause of the step the pole's time goes to, so
+    the pole must not read as a coverage gap or feed the gap loop.
+    The dominant-step gate is load-bearing: OPT82 fires on a lint job at 60s or
+    more, or on a workflow's slowest job, whatever share of the job lint takes,
+    so a slow test job with a 5s lint step carries it too. There it names
+    nothing about the slow step, and treating it as cover would hide a real
+    gap behind a lint card (`_opt82_lint_is_dominant`).
     Unlike OPT79 (`_opt79_pole_covers`) no magnitude gates the cover: OPT82 is
     uncredited BY DESIGN (it carries no saving to clear a floor with), and its
     claim is the named cause, not a number. Its card stays in Also noticed
@@ -5941,6 +5956,8 @@ def _opt82_pole_for(pole: dict[str, Any],
     out: list[dict[str, Any]] = []
     for f in findings:
         if f.get("advisory") or str(f.get("pattern") or "") != "OPT82":
+            continue
+        if not _opt82_lint_is_dominant(pole, f):
             continue
         if _wf_conflict(pole_wf, str(f.get("workflow_file") or "")):
             continue
@@ -6017,7 +6034,8 @@ def _opt79_pole_block(findings: list[dict[str, Any]], catalog_url: str) -> list[
 
 
 def _opt79_off_pole_block(findings: list[dict[str, Any]], catalog_url: str,
-                          rendered: set[str] | None = None) -> list[str]:
+                          rendered: set[str] | None = None,
+                          drilled: bool = True) -> list[str]:
     """OPT79 pole-cache findings whose job is NOT a drilled pole (e.g. the slowest
     job of a second pull-request workflow, or any in a static-only report). They
     render the same marked block as at a pole, never as an appendix row: the
@@ -6036,7 +6054,10 @@ def _opt79_off_pole_block(findings: list[dict[str, Any]], catalog_url: str,
     return [f'<a id="{_OPT79_OFF_POLE_ANCHOR}"></a>', "",
             "## 💾 Measured cache cost on a workflow's slowest job", "",
             "Each job below is the slowest job of a workflow that runs on pull "
-            "requests; its cache cost is not shown at a long pole above.", "",
+            "requests; "
+            + ("its cache cost is not shown at a long pole above." if drilled else
+               "this report drilled no long pole, so its cache cost is stated here."),
+            "",
             *_opt79_pole_block(rest, catalog_url)]
 
 
@@ -8919,7 +8940,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # report collapsed to the one-line no-critical-path note, which is exactly
     # the silence this block exists to break.
     uncredited_lines = _opt79_uncredited_block(doc)
-    opt79_off_pole = _opt79_off_pole_block(all_findings, catalog_url)
+    opt79_off_pole = _opt79_off_pole_block(all_findings, catalog_url, drilled=False)
     # A candidate any pattern held back is disclosed in the Data sources footer;
     # collapsing to the one-line note would drop the footer with it and let
     # "measured, could not tell" read as "nothing found".

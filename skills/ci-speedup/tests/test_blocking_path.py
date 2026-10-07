@@ -3305,6 +3305,31 @@ def test_verifier_fails_an_opt79_off_pole_block_under_another_section():
             (heading, problems)
 
 
+def test_opt79_off_pole_intro_matches_the_render():
+    """Like the tails section: "not shown at a long pole above" only when poles
+    were drilled; a static-only report drills none."""
+    f = _opt79_pole_finding()
+    drilled = "\n".join(bp._opt79_off_pole_block([f], "u"))
+    static = "\n".join(bp._opt79_off_pole_block([f], "u", drilled=False))
+    assert "not shown at a long pole above" in drilled
+    assert "long pole above" not in static and "drilled no long pole" in static
+    doc = _opt79_and_opt80_off_pole_doc()
+    doc["pr_critical_path"]["poles"] = []
+    md = bp.render(doc)
+    assert "not shown at a long pole above" not in md
+
+
+def test_verifier_fails_a_contents_link_to_an_off_pole_section_that_is_missing():
+    """The two off-pole sections' Contents links must land on their anchors."""
+    vr = _load_vr()
+    md = bp.render(_opt79_and_opt80_off_pole_doc())
+    assert vr.check_pole_anchors_resolve(md).ok
+    for anchor in ("checkout-stall-tails", bp._OPT79_OFF_POLE_ANCHOR):
+        bad = md.replace(f'<a id="{anchor}"></a>', "")
+        c = vr.check_pole_anchors_resolve(bad)
+        assert not c.ok and anchor in c.detail, (anchor, c.detail)
+
+
 def test_opt80_off_pole_tail_heading_matches_the_render():
     """The off-pole block says "not one of the long poles drilled above" only
     when poles were drilled; a static-only report drills none."""

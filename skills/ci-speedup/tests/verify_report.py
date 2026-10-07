@@ -344,7 +344,8 @@ def check_pole_anchors_resolve(report: str) -> Check:
     an emitted `<a id=…>` anchor - a TOC / headline link that lands nowhere is a silent
     break (e.g. a queue-section pointer whose section didn't render)."""
     name = "every #pole-N / #also-noticed / #pre-start-wait / #runner-minute-reductions reference resolves to an anchor"
-    targets = r"pole-\d+|r-\d+|also-noticed|pre-start-wait|runner-minute-reductions"
+    targets = (r"pole-\d+|r-\d+|also-noticed|pre-start-wait|runner-minute-reductions"
+               r"|checkout-stall-tails|cache-cost-off-poles")
     refs = set(re.findall(rf"\]\(#({targets})\)", report))
     anchors = set(re.findall(rf'<a\s+id="({targets})"', report))
     missing = sorted(refs - anchors)
@@ -8490,9 +8491,20 @@ def check_opt82_type_aware_lint_uncredited(report: str,
         # A drilled pole whose job carries this finding is CATALOG-COVERED
         # (`blocking_path._opt82_pole_for`, at any size: OPT82 is uncredited by
         # design), so its section must never call it a coverage gap.
-        if not f.get("advisory"):
+        # Cover holds only when the finding's lint step IS the pole's dominant
+        # step (`blocking_path._opt82_lint_is_dominant`); a slow test job with a
+        # minor lint step is an honest gap, never failed here.
+        lint = str(tal.get("lint_step") or "").strip().casefold()
+        doms = {
+            (Path(str(_as_dict(p).get("workflow_file") or "")).name,
+             _matrix_base(_cmp_name(str(_as_dict(p).get(k) or ""))))
+            for p in _as_list(_as_dict(_as_dict(data).get("pr_critical_path")).get("poles"))
+            if lint and str(_as_dict(p).get("dominant_step") or "").strip().casefold() == lint
+            for k in ("check", "job") if _as_dict(p).get(k)}
+        if not f.get("advisory") and lint:
             for pwf, pcheck, body in _pole_header_sections(report):
-                if (Path(pwf).name, _matrix_base(_cmp_name(pcheck))) not in fkeys:
+                key = (Path(pwf).name, _matrix_base(_cmp_name(pcheck)))
+                if key not in fkeys or key not in doms:
                     continue
                 plain = _strip_render_artifacts(body)
                 if ("NO CATALOG PATTERN MATCHED" in plain

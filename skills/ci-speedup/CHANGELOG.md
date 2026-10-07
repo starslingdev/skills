@@ -890,16 +890,21 @@ unversioned and updates by reinstall from `main`.
 
 - **2026-10-07** — **A slow lint job flagged by OPT82 no longer reads as a
   coverage gap, and a cache cost off the long poles no longer lands inside the
-  checkout stall section.** When the slow lint job (OPT82) is itself one of the
-  drilled long poles, that pole used to say "no catalog pattern matched" and
-  call itself a coverage gap, and the maintainer loop was asked to draft a new
-  detector for it. The lint finding now counts as the pole's match at any size
+  checkout stall section (#118).** When the slow lint job (OPT82) is itself one
+  of the drilled long poles, that pole used to say "no catalog pattern matched"
+  and call itself a coverage gap, and the maintainer loop was asked to draft a
+  new detector for it. When the pole's slowest step is the lint step the
+  finding names, the lint finding now counts as the pole's match at any size
   (it carries no saving by design), and the pole's breakdown and agent prompt
-  point at its card in "Also noticed". Separately, the block listing a cache
-  that costs more than it saves on a job that is not a drilled pole had no
-  heading of its own, so after the checkout stall tails section it read as part
-  of that section; it now has its own section and a Contents entry. The
-  report's self-check fails either shape.
+  point at its card in "Also noticed". A pole whose slowest step is something
+  else (a test run beside a short lint step) stays a coverage gap, because the
+  lint finding says nothing about that step. Separately, the block listing a
+  cache that costs more than it saves on a job that is not a drilled pole had
+  no heading of its own, so after the checkout stall tails section it read as
+  part of that section; it now has its own section and a Contents entry, and
+  in a report that drilled no pole its intro no longer points at "a long pole
+  above". The report's self-check fails either shape, and also fails a
+  Contents link to either off-pole section that lands on no anchor.
 
 - **2026-09-30** — **A held-back row can no longer break its own table, link
   out of the report, or overstate its reason (#112).** Job names are controlled

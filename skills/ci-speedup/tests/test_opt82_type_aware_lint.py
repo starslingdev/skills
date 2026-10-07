@@ -1803,6 +1803,11 @@ def _opt82_on_the_drilled_pole(tmp_path):
     doc = tb._doc_one_pole()
     pole = doc["pr_critical_path"]["poles"][0]
     f = dict(f, workflow_file=pole["workflow_file"], affected_jobs=[pole["job"]])
+    # The pole's slow step IS the lint step OPT82 names (the cover gate).
+    lint = f["type_aware_lint"]["lint_step"]
+    pole["dominant_step"] = lint
+    pole["steps"] = [{"step": lint, "category": "lint", "p50_s": 91.0},
+                     *pole["steps"][1:]]
     doc["findings"] = [f]
     return doc, f
 
@@ -1825,9 +1830,9 @@ def test_opt82_on_a_drilled_pole_is_its_catalog_cover_not_a_coverage_gap(tmp_pat
     pole = md.split('<a id="pole-1"></a>', 1)[1].split("\n## ", 2)[1]
     assert "NO CATALOG PATTERN MATCHED" not in pole, pole
     assert "coverage gap" not in pole, pole
-    assert ("a measured **catalog pattern** (OPT82, lint builds the whole type graph) "
-            "matched this pole - see its card in the **Also noticed** section below"
-            in pole), pole
+    assert ("a **catalog pattern** (OPT82, lint builds the whole type graph; "
+            "uncredited) matched this pole's lint step - see its card in the **Also "
+            "noticed** section below" in pole), pole
     prompt = pole.split("Prompt for your coding agent", 1)[1]
     assert "OPT82" in prompt and "Also noticed" in prompt, prompt
     assert "uncredited, benchmark first" in md          # the card it points at renders
@@ -1836,6 +1841,30 @@ def test_opt82_on_a_drilled_pole_is_its_catalog_cover_not_a_coverage_gap(tmp_pat
     adv = json.loads(json.dumps(doc))
     adv["findings"][0]["advisory"] = True
     assert len(bp._gap_poles(adv, dict(_UNKNOWN_LOG))) == 1
+
+
+def test_opt82_on_a_pole_whose_slow_step_is_not_lint_stays_a_coverage_gap(tmp_path):
+    """OPT82 fires on a lint job at 60s or more, or on a workflow's slowest
+    job, whatever share of it lint takes. When the pole's slow step is
+    something else (a test run, with a 5s lint step beside it), OPT82 names
+    nothing about that step: the pole keeps its coverage-gap wording, its
+    gap-fill analysis and its place in the gap loop, and the verifier does
+    not fail that honest gap."""
+    doc, f = _opt82_on_the_drilled_pole(tmp_path)
+    pole = doc["pr_critical_path"]["poles"][0]
+    pole["dominant_step"] = "run tests"
+    pole["steps"] = [{"step": "run tests", "category": "test", "p50_s": 206.0},
+                     {"step": f["type_aware_lint"]["lint_step"], "category": "lint",
+                      "p50_s": 5.0}]
+    md = _render_pole(doc)
+    sect = md.split('<a id="pole-1"></a>', 1)[1].split("\n## ", 2)[1]
+    assert "NO CATALOG PATTERN MATCHED" in sect, sect
+    assert "matched this pole's lint step" not in sect
+    assert len(bp._gap_poles(doc, dict(_UNKNOWN_LOG))) == 1
+    p = tmp_path / "findings.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    c = _vr().check_opt82_type_aware_lint_uncredited(md, p)
+    assert c.ok, c.detail
 
 
 def test_verifier_fails_an_opt82_pole_that_renders_the_coverage_gap(tmp_path):

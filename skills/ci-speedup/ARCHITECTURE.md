@@ -1346,8 +1346,11 @@ metric "uncredited, benchmark first". Being numberless by design, it is exempt
 from the valueless-pole exclusion (`_on_pole_job`), so a lint job that is also a
 drilled pole still gets its card, and from `_ALSO_NOTICED_CAP`, so it never
 falls into the "+N more" tail where its rules and ledger would not reach the
-reader. A drilled pole whose job carries a non-advisory OPT82 finding
-(`_opt82_pole_for`) counts it as that pole's catalog match at any size, unlike
+reader. A drilled pole whose job carries a non-advisory OPT82 finding whose
+lint step is the pole's dominant step (`_opt82_pole_for`,
+`_opt82_lint_is_dominant`; OPT82 itself fires whatever share of the job lint
+takes, so without that gate a slow test job with a short lint step would lose
+its gap analysis) counts it as that pole's catalog match at any size, unlike
 OPT79, which covers a pole only from 30s: OPT82 is uncredited by design and its
 claim is the named cause, so the pole never reads as a coverage gap, takes no
 gap-fill or gap capture, and its waterfall and prompt point at the card in Also
