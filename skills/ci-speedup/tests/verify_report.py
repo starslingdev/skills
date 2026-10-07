@@ -6096,9 +6096,121 @@ def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
         if not str(cn.get("uncredited_reason_detail") or "").strip():
             out.append("uncredited_reason_detail is empty: the cross-check that "
                        "zeroed the merge wait must be named")
-    elif cn.get("uncredited_reason_detail") is not None:
-        out.append(f"uncredited_reason_detail on a {reason!r} row")
+        out.extend(_opt79_zeroed_derivation_problems(cn, lp, fl))
+    else:
+        if cn.get("uncredited_reason_detail") is not None:
+            out.append(f"uncredited_reason_detail on a {reason!r} row")
+        if cn.get("uncredited_derivation") is not None:
+            out.append(f"uncredited_derivation on a {reason!r} row")
+    if reason == "pole_workflow_off_merge_gating_spine":
+        out.extend(_opt79_off_spine_problems(job, data))
     return out
+
+
+# Mirrors collect_runs' `_OPT79_ASCII_SPELLINGS` / `_opt79_ascii` /
+# `_opt79_secs`: the demotion detail states each cascade step in ASCII.
+_VR_OPT79_ASCII_SPELLINGS = (("\u2014", " - "), ("\u2013", "-"), ("\u2192", "->"),
+                             ("\u2265", ">="), ("\u2264", "<="), ("\u00d7", "x"),
+                             ("\u2026", "..."), ("\u2018", "'"), ("\u2019", "'"),
+                             ("\u201c", '"'), ("\u201d", '"'))
+
+
+def _vr_opt79_ascii(text: str) -> str:
+    for a, b in _VR_OPT79_ASCII_SPELLINGS:
+        text = text.replace(a, b)
+    text = text.encode("ascii", "backslashreplace").decode("ascii")
+    return " ".join(text.split())
+
+
+def _vr_opt79_secs(v: object) -> str:
+    return f"{float(v):g}s" if isinstance(v, (int, float)) and not isinstance(
+        v, bool) else "?s"
+
+
+def _opt79_zeroed_derivation_problems(cn: dict, lp: float | None,
+                                      fl: float | None) -> list[str]:
+    """`pole_merge_wait_zeroed_by_cross_check`, re-derived from the cascade
+    steps the row carries (`uncredited_derivation`): each step goes down from
+    where the last one ended, starting at the pole's own sizing
+    min(waste_s, long pole - floor), and the last one ends at a figure that
+    ROUNDS to 0s - the one the report would have rendered. The detail must end
+    by stating that last step. A pole demoted with merge wait left fails here."""
+    steps = cn.get("uncredited_derivation")
+    if not isinstance(steps, list) or not steps or not all(
+            isinstance(d, dict) for d in steps):
+        return ["uncredited_derivation is missing or empty: a zeroed merge wait "
+                "must carry the cascade steps that zeroed it"]
+    out: list[str] = []
+    waste = _num(cn.get("waste_s"))
+    prev = (round(min(waste, lp - fl), 1)
+            if waste is not None and lp is not None and fl is not None else None)
+    for i, d in enumerate(steps):
+        a, b = _num(d.get("from_s")), _num(d.get("to_s"))
+        if a is None or b is None or b > a + 1e-9:
+            out.append(f"uncredited_derivation[{i}] does not go down "
+                       f"({d.get('from_s')!r} -> {d.get('to_s')!r})")
+        elif prev is not None and abs(a - prev) > 0.11:
+            out.append(f"uncredited_derivation[{i}] starts at {a}, not at "
+                       f"{prev} (the pole's sizing or the previous step)")
+        if not str(d.get("reason") or "").strip():
+            out.append(f"uncredited_derivation[{i}] has no reason")
+        prev = b
+    last = steps[-1]
+    end = _num(last.get("to_s"))
+    if end is None or round(end) > 0:
+        out.append(f"uncredited_derivation ends at {last.get('to_s')!r}, which "
+                   "rounds to a second or more: the merge wait was not zeroed")
+    want = (f"{_vr_opt79_secs(last.get('from_s'))} to "
+            f"{_vr_opt79_secs(last.get('to_s'))}: "
+            f"{_vr_opt79_ascii(str(last.get('reason') or ''))}")
+    detail = str(cn.get("uncredited_reason_detail") or "")
+    if not detail.endswith(want):
+        out.append(f"uncredited_reason_detail {detail!r} does not end with the "
+                   f"last cascade step {want!r}")
+    return out
+
+
+def _vr_opt79_toks(s: str) -> frozenset:
+    return frozenset(t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t)
+
+
+def _vr_opt79_scope_prefixed(check: str, job: str) -> bool:
+    """Mirror of collect_runs' `_job_name_scope_prefixed`: the job's name
+    appears INTACT in the check name, never fused into a compound."""
+    c, j = check.lower(), job.lower().strip()
+    if not j:
+        return False
+    start = 0
+    while True:
+        i = c.find(j, start)
+        if i < 0:
+            return False
+        before = c[i - 1] if i > 0 else ""
+        after = c[i + len(j)] if i + len(j) < len(c) else ""
+        if not (before and (before.isalnum() or before in "-_")) and not (
+                after and (after.isalnum() or after in "-_")):
+            return True
+        start = i + 1
+
+
+def _opt79_off_spine_problems(job: str, data: dict) -> list[str]:
+    """`pole_workflow_off_merge_gating_spine`, cross-checked: the job must be one
+    the run DROPPED from the merge-gating spine
+    (`pr_critical_path.dropped_non_required_checks` / `dropped_non_pr_checks`),
+    matched as `_stamp_off_spine_findings` matches it (exact tokens, or the
+    job's name intact inside a scope/matrix-prefixed check name)."""
+    cp = _as_dict(data.get("pr_critical_path"))
+    dropped = [str(n) for n in (_as_list(cp.get("dropped_non_required_checks"))
+                                + _as_list(cp.get("dropped_non_pr_checks")))]
+    jt = _vr_opt79_toks(job)
+    for n in dropped:
+        ct = _vr_opt79_toks(n)
+        if jt and (ct == jt or (jt < ct and _vr_opt79_scope_prefixed(n, job))):
+            return []
+    return [f"uncredited_reason 'pole_workflow_off_merge_gating_spine' but `{job}` "
+            f"is not among the checks the merge-gating spine dropped "
+            f"(pr_critical_path dropped_non_required_checks / dropped_non_pr_checks: "
+            f"{dropped[:8]})"]
 
 
 _VR_OPT79_EVIDENCE_RE = re.compile(

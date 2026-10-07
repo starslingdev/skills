@@ -8007,6 +8007,7 @@ def test_opt79_a_pole_finding_off_the_merge_gating_spine_is_demoted():
     assert row["uncredited_reason"] == "pole_workflow_off_merge_gating_spine"
     assert "uncredited_reason_detail" not in row
     data = {"per_workflow_timing": {"ci.yml": _opt79_pole_of(660.0, 600.0)},
+            "pr_critical_path": {"dropped_non_required_checks": [_OPT79_JOB]},
             "opt79_uncredited_pole_caches": rows}
     assert vr._opt79_uncredited_rows_rederived(data) == []
     rendered = "\n".join(bp._opt79_uncredited_block(data))
@@ -8122,7 +8123,8 @@ def test_opt79_verifier_rejects_an_uncredited_pole_row_with_no_reason():
     f["off_spine"] = True
     cr._opt79_demote_uncredited_poles([f], rows)
     row = rows[0]
-    data = {"opt79_uncredited_pole_caches": [row]}
+    data = {"opt79_uncredited_pole_caches": [row],
+            "pr_critical_path": {"dropped_non_required_checks": [_OPT79_JOB]}}
     assert vr._opt79_uncredited_rows_rederived(data) == []
     del row["uncredited_reason"]
     assert any("should have been the credited pole finding" in p
@@ -8196,3 +8198,119 @@ def test_opt79_verifier_rejects_a_pole_finding_whose_merge_wait_rounds_to_zero(t
             "findings": [f]}
     problems = vr._opt79_finding_rederived(f, data)
     assert any("must be an uncredited row" in p for p in problems), (to_s, problems)
+
+
+# ---- OPT79 demotion reasons are re-derived, not taken on trust ----
+#
+# A demoted pole row names WHY it is not the credited finding. Each reason is
+# now checked against the run's own record: an off-spine row's job must be one
+# the merge-gating spine dropped, and a zeroed row carries the cascade's steps
+# (`uncredited_derivation`) going down to a figure that rounds to 0s, ending in
+# the reason its detail states.
+
+def _opt79_spine(dropped_non_required=(), dropped_non_pr=()):
+    return {"dropped_non_required_checks": list(dropped_non_required),
+            "dropped_non_pr_checks": list(dropped_non_pr)}
+
+
+def test_opt79_off_spine_row_must_name_a_job_the_spine_dropped():
+    vr = _load_verify_report_for_opt79()
+    f = _opt79_zeroed_pole(off_spine=True, zero=False)
+    rows: list = []
+    cr._opt79_demote_uncredited_poles([f], rows)
+    base = {"per_workflow_timing": {"ci.yml": _opt79_pole_of(660.0, 600.0)},
+            "opt79_uncredited_pole_caches": rows}
+    for spine in (_opt79_spine(dropped_non_required=[_OPT79_JOB]),
+                  _opt79_spine(dropped_non_pr=[_OPT79_JOB]),
+                  _opt79_spine(dropped_non_required=[f"@scope/pkg {_OPT79_JOB}"])):
+        assert vr._opt79_uncredited_rows_rederived(
+            {**base, "pr_critical_path": spine}) == [], spine
+    for spine in (_opt79_spine(), _opt79_spine(dropped_non_required=["lint"]),
+                  _opt79_spine(dropped_non_required=[f"macos-{_OPT79_JOB}"]), None):
+        data = dict(base)
+        if spine is not None:
+            data["pr_critical_path"] = spine
+        problems = vr._opt79_uncredited_rows_rederived(data)
+        assert any("dropped" in p for p in problems), (spine, problems)
+
+
+def test_opt79_zeroed_row_carries_a_re_derivable_cascade():
+    vr = _load_verify_report_for_opt79()
+    f = _opt79_zeroed_pole(to_s=0.4)
+    rows: list = []
+    cr._opt79_demote_uncredited_poles([f], rows)
+    row = rows[0]
+    assert row["uncredited_derivation"] == f["wall_clock_derivation"]
+    data = {"per_workflow_timing": {"ci.yml": _opt79_pole_of(660.0, 600.0)},
+            "opt79_uncredited_pole_caches": rows}
+    assert vr._opt79_uncredited_rows_rederived(data) == []
+
+    import copy
+
+    def broken(mut):
+        d = copy.deepcopy(data)
+        mut(d["opt79_uncredited_pole_caches"][0])
+        return vr._opt79_uncredited_rows_rederived(d)
+
+    # no derivation at all
+    assert any("uncredited_derivation" in p for p in broken(
+        lambda r: r.pop("uncredited_derivation")))
+    # a cascade that ends at a figure that still renders as a second or more
+    assert any("rounds to" in p for p in broken(
+        lambda r: r["uncredited_derivation"][0].update(to_s=3.0)))
+    # a step that goes UP
+    assert any("does not go down" in p for p in broken(
+        lambda r: r["uncredited_derivation"][0].update(from_s=0.1)))
+    # a cascade that does not start at the pole's own sizing
+    assert any("starts at" in p for p in broken(
+        lambda r: r["uncredited_derivation"][0].update(from_s=40.0)))
+    # a detail that does not state the last step's reason
+    assert any("uncredited_reason_detail" in p for p in broken(
+        lambda r: r.update(uncredited_reason_detail="something else entirely")))
+
+
+def test_opt79_a_collector_that_demotes_every_pole_finding_is_caught(monkeypatch):
+    """Mutation test: a live pole finding (merge wait left, on the spine)
+    demoted anyway must fail the verifier, under either reason."""
+    vr = _load_verify_report_for_opt79()
+    timing = {"ci.yml": _opt79_pole_of(660.0, 600.0)}
+    spine = _opt79_spine(dropped_non_required=["lint"])
+    # mutant 1: the zeroed test always true
+    live = _opt79_zeroed_pole(zero=False)
+    rows: list = []
+    with monkeypatch.context() as m:
+        m.setattr(cr, "round", lambda *a, **k: 0, raising=False)
+        assert cr._opt79_demote_uncredited_poles([live], rows) == []
+    assert rows[0]["uncredited_reason"] == "pole_merge_wait_zeroed_by_cross_check"
+    problems = vr._opt79_uncredited_rows_rederived(
+        {"per_workflow_timing": timing, "pr_critical_path": spine,
+         "opt79_uncredited_pole_caches": rows})
+    assert problems, "a demoted live pole (zeroed mutant) passed the verifier"
+    # mutant 2: every pole finding stamped off the spine
+    live = _opt79_zeroed_pole(zero=False)
+    live["off_spine"] = True
+    rows = []
+    cr._opt79_demote_uncredited_poles([live], rows)
+    assert rows[0]["uncredited_reason"] == "pole_workflow_off_merge_gating_spine"
+    problems = vr._opt79_uncredited_rows_rederived(
+        {"per_workflow_timing": timing, "pr_critical_path": spine,
+         "opt79_uncredited_pole_caches": rows})
+    assert problems, "a demoted live pole (off-spine mutant) passed the verifier"
+
+
+def test_opt79_zeroed_detail_keeps_a_non_ascii_job_name_and_the_verifier_agrees():
+    """`_opt79_ascii` used to DROP characters it had no spelling for, so a
+    reason naming `tests (caf\u00e9)` lost the name it was about. It now escapes
+    them, and the verifier's mirror re-derives the same detail."""
+    vr = _load_verify_report_for_opt79()
+    f = _opt79_zeroed_pole()
+    f["wall_clock_derivation"][0]["reason"] = (
+        "not on the critical path \u2014 `tests (caf\u00e9 \u6d4b\u8bd5)` gates the PR")
+    rows: list = []
+    cr._opt79_demote_uncredited_poles([f], rows)
+    detail = rows[0]["uncredited_reason_detail"]
+    assert detail.isascii(), detail
+    assert "caf\\xe9" in detail and "\\u6d4b\\u8bd5" in detail, detail
+    data = {"per_workflow_timing": {"ci.yml": _opt79_pole_of(660.0, 600.0)},
+            "opt79_uncredited_pole_caches": rows}
+    assert vr._opt79_uncredited_rows_rederived(data) == []

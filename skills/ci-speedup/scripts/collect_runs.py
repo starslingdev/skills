@@ -17188,7 +17188,8 @@ _OPT79_ASCII_SPELLINGS = (("\u2014", " - "), ("\u2013", "-"), ("\u2192", "->"),
 def _opt79_ascii(text: str) -> str:
     for a, b in _OPT79_ASCII_SPELLINGS:
         text = text.replace(a, b)
-    text = text.encode("ascii", "ignore").decode("ascii")
+    # Escaped, never dropped: a job name such as `tests (café)` must survive.
+    text = text.encode("ascii", "backslashreplace").decode("ascii")
     return " ".join(text.split())
 
 
@@ -17245,6 +17246,12 @@ def _opt79_demote_uncredited_poles(
             row["uncredited_reason_detail"] = (
                 "; ".join(r for r in reasons if r)
                 or "the cross-checks left no merge wait for it to shorten")
+            # The cascade's own steps, copied as they stood at demotion, so
+            # `verify_report` can re-derive "zeroed" (down to a figure that
+            # rounds to 0s) instead of taking the reason on trust.
+            row["uncredited_derivation"] = [
+                dict(d) for d in (f.get("wall_clock_derivation") or [])
+                if isinstance(d, dict)]
         else:
             row["uncredited_reason"] = _OPT79_REASON_OFF_SPINE
         logger.debug("OPT79 %s: pole finding %s demoted to uncredited (%s)",
