@@ -4579,6 +4579,24 @@ def test_opt79_needs_chain_exclusion_is_for_pull_request_workflows_only():
     assert out[0]["tier2_neutrality"]["proof"] == "below_long_pole"
 
 
+def test_opt79_needs_chain_row_does_not_assert_it_shortens_the_merge_wait():
+    """The chain row sits on no measured merge wait (`on_critical_path` is
+    False; the long pole may itself be off the spine, or another chain may be
+    the gate), so its line says shrinking it MAY shorten the merge wait. A line
+    stating flatly that it shortens the merge wait is the same overclaim the
+    "on the merge wait" guard catches, and fails the same way."""
+    vr = _load_verify_report_for_opt79()
+    _out, rows, _w = _opt79_chain_run({_OPT79_JOB: ["e2e"]})
+    assert len(rows) == 1 and rows[0]["on_critical_path"] is False, rows
+    md = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": rows}))
+    assert "may shorten the merge wait" in md, md
+    assert vr._opt79_uncredited_rows_rendered(md, rows) == []
+    flat = md.replace("may shorten the merge wait", "shortens the merge wait")
+    problems = vr._opt79_uncredited_rows_rendered(flat, rows)
+    assert any("merge wait" in p for p in problems), problems
+
+
 def test_opt79_verifier_checks_the_needs_chain_reason_against_the_job_graph():
     """The stamped chain reason is re-derived from `workflow_job_graph` when the
     run recorded it; without the graph it is accepted only for a job strictly

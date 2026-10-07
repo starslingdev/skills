@@ -5317,7 +5317,7 @@ def _tier2_below_long_pole_problems(f: dict, data: dict) -> list[str]:
         if _vr_opt79_needs_chain(data, wf, job, lp_job):
             problems = problems + [
                 f"`{job}` is in a `needs:` chain with the long pole `{lp_job}`: "
-                "shrinking it shortens the merge wait, so it is not "
+                "shrinking it may shorten the merge wait, so it is not "
                 f"{_VR_OPT79_PROOF_BELOW_LONG_POLE}"]
     return problems
 
@@ -7359,7 +7359,11 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
         # WHY it is uncredited is a claim too: only the long pole of a
         # workflow that gates a PR may be told its saving is on the merge wait,
         # and only a workflow no PR runs may be told no PR waits on it.
-        says_merge_wait = "on the merge wait" in why
+        # A flat "shortens the merge wait" is the same claim; the needs-chain
+        # row may say only that shrinking it MAY shorten it.
+        says_merge_wait = ("on the merge wait" in why
+                           or re.search(r"(?<!may )\bshortens the merge wait", why)
+                           is not None)
         says_no_pr = "does not run on pull requests" in why
         if says_merge_wait != bool(cn.get("on_critical_path")):
             out.append(f"{tag}: `{job}` line {'claims' if says_merge_wait else 'omits'}"
@@ -7376,7 +7380,10 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
             # renderer's twin), not "the next-tallest job", which is itself.
             frag = _strip_render_artifacts(
                 f"is tied with `{lp_job}`, this workflow's slowest job")
-        if frag and frag not in why:
+        # The line is read with its render artifacts stripped (backticks
+        # included), so the fragment is too: the chain reason's `needs:` would
+        # otherwise never match its own rendered line.
+        if frag and _strip_render_artifacts(frag) not in why:
             out.append(f"{tag}: `{job}` line does not state its reason "
                        f"({cn.get('uncredited_reason')!r}: {frag!r})")
         if says_no_pr != no_pr:

@@ -6018,7 +6018,7 @@ _OPT79_UNCREDITED_REASON_PHRASES: dict[str, str] = {
         "is not part of the merge wait",
     "job_in_a_needs_chain_with_the_long_pole":
         "it runs in a `needs:` chain with the slowest job, so shrinking it "
-        "shortens the merge wait, which this version does not size",
+        "may shorten the merge wait, which this version does not size",
 }
 
 
