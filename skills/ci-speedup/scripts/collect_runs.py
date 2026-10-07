@@ -11483,14 +11483,18 @@ def _detect_opt81_measured_runner_gap(
             _no("gap_below_floor", name, gap=round(gap, 1), floor=round(floor, 1))
             continue
 
-        # Credit. Only the workflow's long pole carries a merge wait, and only the
-        # slow population is what its p50 describes when the job runs on the slow
-        # label STRICTLY more often than on the fast one (counted on the same
-        # successful populations compared here; an exact tie is not dominant). A
-        # runner matrix runs both legs in every run, so it is never credited.
-        # Pre-capped at the within-workflow headroom here; the generic cascade in
-        # `collect()` then applies the cross-workflow floors.
+        # Credit. Only the workflow's long pole carries a merge wait, and the pole's
+        # p50 is `_critical_path`'s, measured on the job's DOMINANT label counted
+        # over every conclusion and every label (unclassifiable ones included). So
+        # the gap credits only when the slow label IS that dominant label (the
+        # population the pole's p50 describes) AND, on the successful populations
+        # compared here, the job runs on the slow label STRICTLY more often than on
+        # the fast one (an exact tie is not dominant). A runner matrix runs both
+        # legs in every run, so it is never credited. Pre-capped at the
+        # within-workflow headroom here; the generic cascade in `collect()` then
+        # applies the cross-workflow floors.
         is_pole = name == long_pole_job
+        pole_label = str((crit.get("job_runner") or {}).get(name) or "")
         n_slow, n_fast = len(labels[slow]), len(labels[fast])
         if matrix:
             credited = 0.0
@@ -11500,7 +11504,30 @@ def _detect_opt81_measured_runner_gap(
         elif not is_pole:
             credited = 0.0
             credit_reason = "the job is not this workflow's long pole"
-        elif n_slow > n_fast:
+        elif n_slow == n_fast:
+            credited = 0.0
+            credit_reason = ("the job is this workflow's long pole, but neither label "
+                             "runs it more often (an exact tie), so its median is not "
+                             "the slower label's")
+        elif n_slow < n_fast:
+            credited = 0.0
+            credit_reason = ("the job is this workflow's long pole, but it already runs "
+                             "on the faster label more often, so its median does not "
+                             "move")
+        elif slow != pole_label:
+            # More successful slow runs than fast ones, yet the pole's p50 is
+            # measured elsewhere: an unclassifiable label, or failed runs, make
+            # another label the job's dominant one. The gap is stated, not credited.
+            credited = 0.0
+            credit_reason = (
+                f"the job is this workflow's long pole, but its median is measured on "
+                f"`{pole_label or '?'}`, the label it runs on most across every run "
+                f"and outcome; `{slow}` is not the population the pole's median "
+                "describes, so moving its runs does not move the wait")
+            if withheld is not None:
+                withheld["slow_label_is_not_the_poles_population"] = (
+                    withheld.get("slow_label_is_not_the_poles_population", 0) + 1)
+        else:
             pre = bound_within_workflow(
                 gap, WallClockContext(workflow=wf_path, crit=crit,
                                       affected_jobs=(name,)))
@@ -11508,16 +11535,6 @@ def _detect_opt81_measured_runner_gap(
             credit_reason = (pre.reason or
                              "the job is this workflow's long pole and runs on the "
                              "slower label more often than on the faster one")
-        elif n_slow == n_fast:
-            credited = 0.0
-            credit_reason = ("the job is this workflow's long pole, but neither label "
-                             "runs it more often (an exact tie), so its median is not "
-                             "the slower label's")
-        else:
-            credited = 0.0
-            credit_reason = ("the job is this workflow's long pole, but it already runs "
-                             "on the faster label more often, so its median does not "
-                             "move")
         credited = round(max(credited, 0.0), 1)
 
         steps = labels[slow][0]["_steps"]
@@ -11579,6 +11596,10 @@ def _detect_opt81_measured_runner_gap(
             "rows": rows,
             "excluded_labels": dict(sorted(excluded.items())),
             "job_is_workflow_long_pole": is_pole,
+            # The label the pole's p50 is measured on (`_critical_path`'s dominant
+            # label, `per_workflow_timing[wf].job_runner[job]`); credit requires
+            # it to be the slow label.
+            "pole_runner_label": pole_label,
             "runner_matrix": matrix,
             "credited_pre_cascade_s": credited,
             "credit_reason": credit_reason,

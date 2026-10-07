@@ -266,6 +266,58 @@ def test_opt81_a1_an_exact_count_tie_is_not_dominant():
         assert "neither label" in found[0]["faster_runner"]["credit_reason"], kw
 
 
+def _pole_population_cases():
+    """Two shapes where the success-only, classified-only A1 split names the slow
+    label as the one the job runs on most, but the pole's p50 (`_critical_path`'s
+    dominant label, counted over every conclusion and every label) is not it."""
+    base = _SLOW + [150]  # 9 slow successes vs 8 fast: n_slow > n_fast
+    # (1) 20 runs on an unclassifiable self-hosted set at 60s set the pole's p50.
+    self_hosted = _alt_runs(slow=base) + [
+        [_job("bench", ["self-hosted", "linux"], 60, 300 + i)] for i in range(20)]
+    # (2) 5 FAILED fast runs make the fast label the pole's population (13 vs 9).
+    failed_fast = _alt_runs(slow=base) + [
+        [_job("bench", "ubuntu-latest-8-cores", 90, 400 + i, conclusion="failure")]
+        for i in range(5)]
+    return [("linux self-hosted", self_hosted),
+            ("ubuntu-latest-8-cores", failed_fast)]
+
+
+@pytest.mark.parametrize("dominant,runs", _pole_population_cases(),
+                         ids=["unclassified-self-hosted-dominant",
+                              "failed-fast-runs-dominant"])
+def test_opt81_a1_credits_only_when_the_slow_label_is_the_poles_population(dominant, runs):
+    found, withheld, _cands, _multi, crit = _a1(runs)
+    assert crit["job_runner"]["bench"] == dominant, crit["job_runner"]
+    assert len(found) == 1, withheld
+    f = found[0]
+    fr = f["faster_runner"]
+    assert fr["slow"]["label"] == "ubuntu-latest" and fr["job_is_workflow_long_pole"]
+    # The pole's p50 describes `dominant`, not the slow label: moving the slow
+    # label's runs does not move it, so nothing is credited.
+    assert f["wall_clock_p50_s"] == 0.0, fr
+    assert fr["credited_pre_cascade_s"] == 0.0, fr
+    assert fr["pole_runner_label"] == dominant
+    assert "not the population the pole's median describes" in fr["credit_reason"]
+    assert withheld.get("slow_label_is_not_the_poles_population") == 1, withheld
+
+
+def test_opt81_verifier_rederives_the_poles_population_from_timing():
+    vr = _load_verify_report()
+    found, *_ = _a1(_alt_runs(slow=_SLOW + [150]))
+    f = copy.deepcopy(found[0])
+    f["id"] = "f9"
+    assert f["faster_runner"]["pole_runner_label"] == "ubuntu-latest"
+    doc = {"per_workflow_timing": {_WF: {"job_runner": {"bench": "ubuntu-latest"}}}}
+    assert vr._opt81_a1_rederived(f, doc) == []
+    # The timing says the pole runs on another label: the credit cannot stand.
+    other = {"per_workflow_timing": {_WF: {"job_runner": {"bench": "linux self-hosted"}}}}
+    assert any("population" in p for p in vr._opt81_a1_rederived(f, other))
+    # A stamped pole label that is not the slow label reddens on its own.
+    g = copy.deepcopy(f)
+    g["faster_runner"]["pole_runner_label"] = "ubuntu-latest-8-cores"
+    assert any("population" in p for p in vr._opt81_a1_rederived(g))
+
+
 def test_opt81_a1_runner_matrix_is_measured_but_never_credited():
     """Both labels in every run (a runner matrix under one display name), the
     slow label sorting AFTER the fast one. Every run executes both legs, so the

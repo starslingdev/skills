@@ -2140,8 +2140,11 @@ from, precisely because the fix removes the signature before stamping.) Red-proo
 
 `_critical_path` is unchanged: it keeps each job's DOMINANT runner population
 (the p50 the long pole is ranked on) and nothing else. A1 builds its own
-success-only split per label and decides everything, including the credit, from
-that one population.
+success-only split per label and decides the comparison (gates, medians, gap)
+from it. The credit reads both: it needs the slower label to be the one the job
+runs on most in that split AND to be `_critical_path`'s dominant label for the job
+(counted over every conclusion and every label, unclassifiable ones included),
+because that label's population is what the pole's p50 describes.
 
 **A1 (measured).** `_detect_opt81_measured_runner_gap` runs in the per-workflow
 detector loop beside OPT77/79/80. It groups each job's successful occurrences by
@@ -2168,7 +2171,11 @@ steps excluded); and the median gap reaches `max(30s, 25% of the slower median)`
 The credit is the measured gap only when the job is its workflow's long pole, the
 two labels are not a runner matrix (a matrix runs both legs in every run, so it
 is stated, never credited), and the job ran on the slower label strictly more
-often than on the faster one (an exact tie is not dominant). It is pre-capped
+often than on the faster one (an exact tie is not dominant), and the slower label
+is the pole's own population: `_critical_path`'s dominant label for the job
+(stamped as `faster_runner.pole_runner_label`). When an unclassifiable label or
+failed runs make another label dominant, the gap is stated and the credit held,
+counted as `slow_label_is_not_the_poles_population`. It is pre-capped
 with `bound_within_workflow` (CAP 1) inside the detector and then flows through
 the generic cascade like any credited saving. `runner_min_saving` is always
 `None`: a different runner class bills differently and the skill carries no rate
@@ -2178,7 +2185,8 @@ time, duration, step-list digest), and
 `verify_report.check_opt81_runner_comparison_rederived` re-derives both medians,
 both counts, the class / operating-system / architecture / size decision, the
 matrix-or-overlap decision, the step-list equality, the gap, the floor and the
-credit rule from those rows. The detector costs no gh call.
+credit rule from those rows, and re-reads the pole's population from
+`per_workflow_timing[wf].job_runner`. The detector costs no gh call.
 
 **A2 (advisory).** `_detect_opt81_runner_size_advisory` runs once, AFTER the
 structural track, because its last gate is about the levers the rest of the
@@ -2209,7 +2217,7 @@ same one-line disclosure (`_OPT81_DISCLOSURE`, three equal copies pinned by a
 test). The advisory names exactly two options, a larger GitHub-hosted size or
 StarSling runners, and says plainly that the StarSling benchmark can only run
 after the StarSling GitHub app is installed; a string-level test fails if any
-OPT81 text contains a name from a deny-list of common runner vendors (22 names) or
+OPT81 text contains a name from a deny-list of common runner vendors and hosted CI systems or
 a domain other than github.com / starsling.dev.
 
 ## 6. Admission gate & advisory routing

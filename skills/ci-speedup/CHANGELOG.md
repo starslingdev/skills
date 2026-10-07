@@ -25,7 +25,9 @@ unversioned and updates by reinstall from `main`.
   of at least the larger of 30 seconds and a quarter of the slower median, the
   report shows both distributions and their run counts. The gap counts toward
   the merge wait only when the job is its workflow's long pole, runs on the
-  slower runner strictly more often, and is not a runner matrix (a matrix runs
+  slower runner strictly more often, that runner is the one the pole's median
+  is measured on (not a self-hosted label or failed runs that set it instead),
+  and is not a runner matrix (a matrix runs
   both legs every time, so its gap is stated, never credited), and then passes
   the same critical-path floors as every other saving;
   the runner-minute effect is stated as unknown, because a different runner class

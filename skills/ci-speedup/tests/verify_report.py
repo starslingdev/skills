@@ -11366,8 +11366,11 @@ def _vr_opt81_toks(s: str) -> frozenset:
     return frozenset(t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t)
 
 
-def _opt81_a1_rederived(f: dict) -> list[str]:
-    """Every number an A1 finding states, re-derived from its own stamped rows."""
+def _opt81_a1_rederived(f: dict, data: "dict | None" = None) -> list[str]:
+    """Every number an A1 finding states, re-derived from its own stamped rows.
+    A credit additionally needs the slow label to be the population the pole's
+    p50 describes: the stamped `pole_runner_label`, and (when the findings doc is
+    given and carries it) `per_workflow_timing[wf].job_runner[job]`."""
     fid = str(f.get("id") or "?")
     fr = _as_dict(f.get("faster_runner"))
     out: list[str] = []
@@ -11477,6 +11480,21 @@ def _opt81_a1_rederived(f: dict) -> list[str]:
         out.append(f"OPT81 {fid}: wall-clock pre-credited on a job that is not its "
                    "workflow's long pole on the slower label (strictly more runs on "
                    "the slower label)")
+    elif pre > 0:
+        pole_label = str(fr.get("pole_runner_label") or "")
+        timing = _as_dict(_as_dict(_as_dict(_as_dict(data).get("per_workflow_timing"))
+                                   .get(str(f.get("workflow_file") or "")))
+                          .get("job_runner"))
+        job = str(fr.get("job") or "")
+        if pole_label != ls:
+            out.append(f"OPT81 {fid}: wall-clock pre-credited, but the stamped pole "
+                       f"label `{pole_label}` is not the slower label `{ls}`; the gap "
+                       "does not describe the population the pole's median is "
+                       "measured on")
+        elif job in timing and str(timing[job]) != ls:
+            out.append(f"OPT81 {fid}: wall-clock pre-credited, but per_workflow_timing "
+                       f"measures the pole on `{timing[job]}`, not the slower label "
+                       f"`{ls}`; the gap does not describe that population")
     wc = _num(f.get("wall_clock_p50_s")) or 0.0
     if wc > (pre or 0.0) + 0.05:
         out.append(f"OPT81 {fid}: wall_clock_p50_s {wc} exceeds its pre-cascade credit")
@@ -11582,7 +11600,7 @@ def check_opt81_runner_comparison_rederived(report: str,
         if fr.get("disclosure") != _VR_OPT81_DISCLOSURE:
             bad.append(f"OPT81 {fid}: the stamped disclosure is missing or altered")
         if half == "A1":
-            bad.extend(_opt81_a1_rederived(f))
+            bad.extend(_opt81_a1_rederived(f, data))
             if _VR_OPT81_DISCLOSURE not in str(f.get("evidence") or ""):
                 bad.append(f"OPT81 {fid}: the evidence does not carry the disclosure")
         elif half == "A2":
