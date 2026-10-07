@@ -609,7 +609,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
-- **2026-10-06** — **A slow cache on a job that is not the workflow's slowest is
+- **2026-10-07** — **A slow cache on a job that is not the workflow's slowest is
   now priced in runner-minutes.** When the cache check (OPT79) measured a cache
   that costs more than it saves on a job at or above the workflow's
   second-slowest job but still shorter than its slowest job, the report listed it
@@ -637,13 +637,13 @@ unversioned and updates by reinstall from `main`.
   that should have been this finding. It also fails any "not credited" row on a
   workflow pull requests run that names no reason, whatever the headroom; and a
   job whose workflow has no slowest job recorded is no longer listed there on a
-  pull-request workflow (it is counted among the held-back candidates instead),
+  pull-request workflow (it is only counted in the run's withheld-gate tally),
   since no reason fits it. A slowest job's merge-wait finding now
   says the bill section needs proof the job is shorter than the slowest job,
-  rather than naming the second-slowest job. (2026-10-07) A job that runs in a
+  rather than naming the second-slowest job. A job that runs in a
   `needs:` chain with the slowest job, before or after it, is excluded from
-  this credit on a workflow pull requests wait on: the wait is then the two
-  jobs added together, so shrinking it does shorten the merge wait. It is listed
+  this credit on a workflow pull requests wait on: the wait is then the
+  chain's times added together, so shrinking it does shorten the merge wait. It is listed
   "measured, not credited" with that reason, and the self-check re-derives the
   chain from the workflow's job graph and no longer exempts this credit from
   its "also rendered as a Long pole" check.
