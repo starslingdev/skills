@@ -3660,7 +3660,11 @@ def _opt79_wf(*, steps=None, name=_OPT79_JOB):
                                 {"run": "npm test"},
                             ]},
                      "integration": {"runs-on": "ubuntu-latest",
-                                     "steps": [{"run": "npm run integration"}]}}}
+                                     "steps": [{"run": "npm run integration"}]},
+                     # The fixtures' long pole: declared so the `needs:` graph
+                     # resolves it (an unresolvable long pole is held back).
+                     "e2e": {"runs-on": "ubuntu-latest",
+                             "steps": [{"run": "npm run e2e"}]}}}
 
 
 def _opt79(jpr=None, logs=None, crit=None, wf=None, monthly=100, withheld=None):
@@ -4595,6 +4599,45 @@ def test_opt79_needs_chain_row_does_not_assert_it_shortens_the_merge_wait():
     flat = md.replace("may shorten the merge wait", "shortens the merge wait")
     problems = vr._opt79_uncredited_rows_rendered(flat, rows)
     assert any("merge wait" in p for p in problems), problems
+
+
+def test_opt79_unresolvable_needs_chain_on_a_pull_request_workflow_is_withheld():
+    """Whether the job is chained to the long pole is the below-long-pole
+    proof's other half. When the workflow's `needs:` graph cannot resolve the
+    long pole (a reusable-workflow `caller / child` name, a templated name, a
+    job absent from the YAML), "no chain" is unproved, so the credit is held
+    back under a counted, listed reason - never credited as if unchained."""
+    jpr, logs = _opt79_sample()
+    crit = _opt79_pole_crit(long_pole_job="deploy / e2e",
+                            job_p50={_OPT79_JOB: 600.0, "integration": 600.0,
+                                     "deploy / e2e": 660.0})
+    w: dict = {}
+    held: list = []
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, crit, _opt79_chain_wf({}), 100, 0,
+        logs_by_job_id=logs, uncredited=[], is_pr=True, withheld=w,
+        withheld_candidates=held)
+    gate = "needs_chain_with_the_long_pole_unresolved"
+    assert out == [], out
+    assert w.get(gate) == 1, w
+    assert [c["gate"] for c in held] == [gate], held
+    # Off pull requests the chain does not matter: the credit stands.
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, crit, _opt79_chain_wf({}), 100, 0,
+        logs_by_job_id=logs, uncredited=[], is_pr=False)
+    assert len(out) == 1 and out[0]["tier2_neutrality"]["proof"] == "below_long_pole"
+
+
+def test_opt79_verifier_fails_a_below_long_pole_credit_the_job_graph_cannot_resolve():
+    """The verifier's twin: with a job graph recorded, a pull-request-workflow
+    credit whose long pole (or job) the graph cannot resolve is unproved."""
+    vr = _load_verify_report_for_opt79()
+    f, data = _opt79_blp_finding()
+    data["workflow_job_graph"] = {"ci.yml": {
+        _OPT79_JOB: {"name": _OPT79_JOB, "needs": []},
+        "integration": {"name": "integration", "needs": []}}}
+    problems = vr._tier2_below_long_pole_problems(f, data)
+    assert any("cannot resolve" in p for p in problems), problems
 
 
 def test_opt79_verifier_checks_the_needs_chain_reason_against_the_job_graph():

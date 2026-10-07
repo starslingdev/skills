@@ -821,6 +821,10 @@ _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
     "neutrality_margin_not_positive":
         "the job is about as slow as its workflow's slowest jobs, so removing "
         "the cache could not be shown to leave the pull-request wait unchanged",
+    "needs_chain_with_the_long_pole_unresolved":
+        "the workflow file could not show whether this job waits on, or is "
+        "waited on by, its slowest job, so removing the cache could not be "
+        "shown to leave the pull-request wait unchanged",
 }
 
 
@@ -5311,10 +5315,20 @@ def _tier2_below_long_pole_problems(f: dict, data: dict) -> list[str]:
         if ev:
             problems = problems + [ev]
     gates_pr = stamped is not False
+    graph_recorded = bool(_as_dict(_as_dict(data.get("workflow_job_graph")).get(wf)))
     for job in (str(j) for j in _as_list(f.get("affected_jobs")) if str(j)):
         if not gates_pr:
             break
-        if _vr_opt79_needs_chain(data, wf, job, lp_job):
+        chained = _vr_opt79_needs_chain(data, wf, job, lp_job)
+        if chained is None and graph_recorded:
+            # The collector holds such a job back: with the graph recorded but
+            # unable to resolve the job or the long pole, "in no chain" is
+            # unproved.
+            problems = problems + [
+                f"the recorded job graph for {wf!r} cannot resolve `{job}` or the "
+                f"long pole `{lp_job}`, so no `needs:` chain is unproved and "
+                f"{_VR_OPT79_PROOF_BELOW_LONG_POLE} cannot be credited"]
+        if chained:
             problems = problems + [
                 f"`{job}` is in a `needs:` chain with the long pole `{lp_job}`: "
                 "shrinking it may shorten the merge wait, so it is not "

@@ -15646,15 +15646,23 @@ _OPT79_UNCREDITED_REASONS = frozenset({
 
 
 def _opt79_in_needs_chain_with(wf_doc: dict[str, Any] | None, job: str,
-                               long_pole_job: str) -> bool:
+                               long_pole_job: str) -> bool | None:
     """True when `job` transitively `needs:` the long pole, or the long pole
     transitively `needs:` it, per the workflow's own `needs:` graph
-    (`_job_needs_relations`). An unreadable graph or an unresolvable name reads
-    as no relation - the same parallel default that helper documents."""
+    (`_job_needs_relations`); False when the graph resolves both names and
+    proves no chain (two legs of one matrix are never chained). None when
+    either name does not resolve to a job in the graph (a reusable-workflow
+    `caller / child` name, a templated `name:`, a job absent from the YAML):
+    "no chain" is then unproved, and the caller must not read it as False."""
     if not job or not long_pole_job:
+        return None
+    jb, lb = _matrix_base_name(job), _matrix_base_name(long_pole_job)
+    rel = _job_needs_relations(wf_doc or {}, lb)
+    if jb == lb and rel:
         return False
-    rel = _job_needs_relations(wf_doc or {}, _matrix_base_name(long_pole_job))
-    return rel.get(_matrix_base_name(job)) in ("before", "after")
+    if jb not in rel:
+        return None
+    return rel[jb] in ("before", "after")
 # The events on which a pull request waits for a workflow: the same set the
 # cascade's `bound_developer_facing` reads (`wall_clock._DEVELOPER_FACING_EVENTS`).
 _OPT79_PR_EVENTS = frozenset({"pull_request", "merge_group"})
@@ -15705,6 +15713,7 @@ _OPT79_LATE_HELD_BACK_GATES = frozenset({
     "no_monthly_volume",
     "credited_runner_minutes_round_to_zero",
     "neutrality_margin_not_positive",
+    "needs_chain_with_the_long_pole_unresolved",
 })
 # Every gate that can land in `opt79_withheld_candidates`. The report maps each
 # to a plain-English phrase (blocking_path / verify_report); a test enumerates it.
@@ -17172,13 +17181,21 @@ def _detect_opt79_net_negative_cache(
         # the merge wait, and it is not wall-clock-neutral. This version does
         # not size that, so it is an uncredited row that says why. (On a
         # workflow no PR runs there is no merge wait; the bill credit stands.)
-        if (not below_floor and gates_pr
-                and _opt79_in_needs_chain_with(wf_doc, name, lp_job)):
+        chained = (_opt79_in_needs_chain_with(wf_doc, name, lp_job)
+                   if not below_floor and gates_pr else False)
+        if chained:
             _no(_OPT79_REASON_NEEDS_CHAIN, job=name, long_pole=lp_job)
             if uncredited is not None:
                 row = _uncredited_row()
                 row["uncredited_reason"] = _OPT79_REASON_NEEDS_CHAIN
                 uncredited.append(row)
+            continue
+        if chained is None:
+            # The graph cannot resolve the job or the long pole, so "in no
+            # chain with it" is unproved: held back, counted and listed, never
+            # credited as if unchained.
+            _drop(name, "needs_chain_with_the_long_pole_unresolved",
+                  long_pole=lp_job)
             continue
         if not has_volume:
             _drop(name, "no_monthly_volume", monthly_volume=monthly_volume)
