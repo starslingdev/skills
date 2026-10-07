@@ -114,6 +114,8 @@ TRIAGE_ALLOWLIST = {
     "uncredited net-negative caches re-derive from their own runs": AUTO_SEED,                   # check_opt79_uncredited_rows_rederived
     "type-aware lint findings are uncredited, name their rules and carry the ledger": AUTO_SEED,  # check_opt82_type_aware_lint_uncredited
     "OPT79 findings re-derive by their arm, and pole caches render": AUTO_SEED,                  # check_opt79_findings_rederived
+    "OPT80 tail lines re-derive and pair with their stamped blocks": AUTO_SEED,                  # check_opt80_tail_lines
+    "OPT80 slowest-job sentence pairs with its withheld reason": AUTO_SEED,                      # check_opt80_tail_withheld_reasons
     "Tier-2 section-lead totals match de-overlapped findings": AUTO_SEED,                         # check_tier2_total_deoverlapped
     "no claim or prose cites the closing-down /timing endpoints": AUTO_SEED,                     # check_no_timing_endpoint_citation
     "Tier-2 claims carry the jobs-API derivation-basis field": AUTO_SEED,                        # check_tier2_claims_derivation_basis
@@ -212,6 +214,8 @@ CHECK_CLASS = {
     "uncredited net-negative caches re-derive from their own runs": "fabricated-or-unsupported-finding",  # a numberless cache row whose measurements the data does not support
     "type-aware lint findings are uncredited, name their rules and carry the ledger": "fabricated-or-unsupported-finding",  # an uncredited lint finding carrying a number, naming no rule, or missing its ledger
     "OPT79 findings re-derive by their arm, and pole caches render": "fabricated-or-unsupported-finding",  # a merge-wait figure the measured excess and headroom do not support
+    "OPT80 tail lines re-derive and pair with their stamped blocks": "fabricated-or-unsupported-finding",  # a tail line whose N or X the per-run checkout rows and stall proofs do not re-derive, or that is misplaced, unpaired, in legacy wording, or on a job the collector's gate would not stamp
+    "OPT80 slowest-job sentence pairs with its withheld reason": "fabricated-or-unsupported-finding",  # a merge-wait claim, or a no-tail-line reason, the stamped facts do not support
     "Tier-2 section-lead totals match de-overlapped findings": "fabricated-or-unsupported-finding",  # rendered totals not backed by findings
     "no claim or prose cites the closing-down /timing endpoints": "fabricated-or-unsupported-finding",  # cites a data source the pipeline does not use
     "Tier-2 claims carry the jobs-API derivation-basis field": "fabricated-or-unsupported-finding",  # a Tier-2 claim without its machine-readable data-source field

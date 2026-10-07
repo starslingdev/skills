@@ -142,11 +142,24 @@ _JOB_ID = 9001
 #            cached `integration` (180s) exercises OPT79's `below_long_pole` arm.
 #            Its jobs ride in the existing `runs/{id}/jobs` pages and it declares
 #            no cache, so it costs no call and no log fetch: measured, +0.)
-#   83  now  (main merged into the OPT82 branch: 68 + 6 for `lint.yml` (OPT82)
+#   83  then (main merged into the OPT82 branch: 68 + 6 for `lint.yml` (OPT82)
 #            + 9 for OPT79's credited wall-clock arm. The two ledgers are
 #            disjoint (`lint.yml` reads no logs; OPT79's calls are
 #            `chained.yml` runs and `prep` logs), so they add.)
-_GOLDEN_GH_QUERY_COUNT = 83
+#   82  then (on main before the OPT82 merge: +5 for the ON-POLE OPT80 case: three more successful pull_request runs
+#            of `ci.yml` (5004-5006, reusing head shas aab2/aab3/aaaa so no new
+#            check-runs page is read) cost one `runs/{id}/jobs` page each (+3), and
+#            two of them are checkout tail runs whose logs OPT80 fetches to prove
+#            the stall (+2, one per tail run, inside `_OPT80_LOG_PROBE_MAX`). The
+#            tail line it stamps is derived from data already in hand: +0.
+#            The `..._branches_main_protection_required_status_checks.json`
+#            replay fixture costs +0 as well: the required-checks endpoint it
+#            answers was already called, so the fixture only supplies the
+#            response for an existing call.)
+#   88  now  (main merged into the OPT82 branch again, after #114: 82 + 6 for
+#            `lint.yml` (OPT82). OPT80's five calls are `ci.yml` runs and
+#            their checkout logs; `lint.yml` reads no logs, so they add.)
+_GOLDEN_GH_QUERY_COUNT = 88
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).
@@ -159,7 +172,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # The name must equal the replayed `steps[].name` in the jobs fixtures
+      # ("Checkout"); the unnamed form folds to the same identity in production,
+      # so this is fixture consistency, not a detector fix.
+      - name: Checkout
+        uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -1008,10 +1025,12 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # reach. Two mutants must redden it: short-circuiting the call
     # (`new = [] if True else _detect_opt80_…`) and discarding its result
     # (dropping the `findings.extend(new)`).
-    o80 = [f for f in data["findings"] if f.get("pattern") == "OPT80"]
-    assert len(o80) == 1, (
-        "build-matrix.yml's `smoke` job must promote exactly one OPT80 finding "
-        f"(got {[f.get('affected_jobs') for f in o80]!r})")
+    o80_all = [f for f in data["findings"] if f.get("pattern") == "OPT80"]
+    assert sorted(str((f.get("affected_jobs") or [""])[0]) for f in o80_all) == [
+        "smoke", "test"], (
+        "build-matrix.yml's `smoke` job and ci.yml's `test` job must each promote "
+        f"exactly one OPT80 finding (got {[f.get('affected_jobs') for f in o80_all]!r})")
+    o80 = [f for f in o80_all if f.get("affected_jobs") == ["smoke"]]
     cs = o80[0].get("checkout_stall") or {}
     assert cs.get("kind") == "opt80_checkout_tail_stall", cs
     assert cs.get("job") == "smoke" and o80[0]["affected_jobs"] == ["smoke"]
@@ -1032,6 +1051,44 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert cs.get("logs_fetched") == 2, cs
     assert cs.get("logs_fetched") <= cs.get("log_probe_max")
     assert o80[0].get("tier2_neutrality", {}).get("proof") == "checkout_tail_excess"
+    # `smoke` is not build-matrix's slowest job (`integration` is), so it is off
+    # the critical path and carries no tail line. Its workflow being push-only
+    # would block the tail axis independently of that.
+    assert cs.get("on_critical_path") is False, cs
+    assert "tail_axis" not in cs, cs
+    # The ON-POLE pull-request case. ci.yml's `test` job is the PR critical path's
+    # slowest check (`CI / test`, 197s) and checks out in 5s on four of its six
+    # sampled pull_request runs and 125s / 95s on two (runs 5004 / 5005), whose
+    # logs hold the transfer at 17% for 90s / 60s. The median run never stalls,
+    # so `wall_clock_p50_s` stays 0 — but one run in three spends about 105s longer on
+    # checkout, and that is stamped as a SEPARATE tail axis, re-derived
+    # from the per-run durations and the proven runs alone:
+    #   sampled_runs 6, slow_runs 2, logs_read 2, tail_runs 2 (log-proven),
+    #   logs_clean 0, logs_unreadable 0 (both read logs prove the stall),
+    #   counted_runs 2 - 0 clean = 2, one_in_n round(6/2) = 3,
+    #   typical p50 5s, tail p50 median(125, 95) = 110s, loss 110 - 5 = 105s.
+    o80_pole = [f for f in o80_all if f.get("affected_jobs") == ["test"]]
+    cs_pole = o80_pole[0].get("checkout_stall") or {}
+    assert o80_pole[0]["workflow_file"].endswith("ci.yml"), o80_pole[0]
+    assert cs_pole.get("on_critical_path") is True, cs_pole
+    assert o80_pole[0].get("wall_clock_p50_s") in (0, 0.0), o80_pole[0]
+    assert cs_pole.get("tail_axis") == {
+        "sampled_runs": 6, "slow_runs": 2, "logs_read": 2, "tail_runs": 2,
+        "logs_clean": 0, "logs_unreadable": 0,
+        "counted_runs": 2, "one_in_n": 3,
+        "typical_checkout_p50_s": 5.0, "tail_checkout_p50_s": 110.0,
+        "tail_loss_s": 105.0, "on_critical_path": True,
+        # `CI / test` is a required check (the corpus's classic branch
+        # protection), so the merge waits on it: the tail line is earned. With
+        # no readable required set, or a slow job nothing requires, there is
+        # no tail line at all.
+        "merge_gating": {"basis": "required", "required_check": "CI / test",
+                         "required_job": "test", "job_key": "test"},
+    }, cs_pole.get("tail_axis")
+    # The tail line replaces the old "measured … but not credited in this
+    # version" sentence for the on-pole pull-request case only.
+    assert "not credited in this version" not in str(o80_pole[0].get("evidence")), (
+        o80_pole[0].get("evidence"))
     assert isinstance(data.get("opt80_withheld_by_gate"), dict), (
         "the per-gate withhold tally must be stamped on every collected run")
     # A candidate OPT80 measured and could NOT decide, end to end. build-matrix.yml's
@@ -1228,6 +1285,63 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert ("the ESLint config sets type-aware parsing from a value only known "
             "when it runs") in held82[0], held82[0]
     assert "type_aware_setting_unresolvable" not in report
+    # OPT80's tail line reaches the reader AT the pole it sits on, once, beside
+    # the pole's merge-wait figure — and nowhere a p50 number lives. The verifier
+    # above re-derived its numbers from the per-run durations and the proofs.
+    _pole_id = str(o80_pole[0]["id"])
+    _tail = "one run in 3 spends about 105s longer on checkout, and that run's log shows the fetch stalling"
+    # X is the median proven run's loss, not a ceiling: run 5004 lost 125 - 5 =
+    # 120s, more than the 105s stated. So the line never says "up to" X.
+    _proven_ids = {p.get("job_id") for p in cs_pole.get("proven_tail_runs") or []}
+    _losses = [float(r["checkout_s"]) - 5.0
+               for r in cs_pole.get("per_run_checkout_s") or []
+               if r.get("job_id") in _proven_ids]
+    assert max(_losses) == 120.0 > 105.0, _losses
+    assert "loses up to" not in report, "a median is not an upper bound"
+    _marker = f"<!-- opt80-tail:{_pole_id} -->"
+    assert report.count(_marker) == 1, _marker
+    _pole1 = report.split('<a id="pole-1"></a>', 1)[1].split('<a id="pole-2"></a>', 1)[0]
+    assert "▸ `CI / test`" in _pole1 and _marker in _pole1, (
+        "the tail line must render inside the `CI / test` long-pole section")
+    assert _tail in _pole1.split(_marker, 1)[1].split("\n\n", 1)[0], _pole1[:1200]
+    # Never in the headline / Bottom line, and never summed into any total (the
+    # sentence may be restated inside the finding's own runner-saving card).
+    _head = report.split("## 📋 Contents", 1)[0]
+    assert "longer on checkout" not in _head and "opt80-tail" not in _head, _head
+    _tier2 = report.split("## Runner-minute reductions", 1)[1].split("## 🧹", 1)[0]
+    assert _marker not in _tier2, "the tail line must never render as a Tier-2 row"
+    # The tail is never summed into a total: the replay corpus's runner-minute
+    # total and its sample size are pinned to the exact figures, so a tail that
+    # leaks into the credited minutes (or the sample count) moves a number here.
+    assert "| **Runs analyzed** | 32 runs / 163 jobs across 6 workflows |" in report, (
+        _head)
+    assert ("423 min/mo of wall-clock-neutral runner minutes is recoverable "
+            "(8 neutral findings; none can slow a merge)") in _head, _head
+    assert ("**423 min/mo credited after de-overlap** (naive sum 423 min/mo; "
+            "8 neutral findings;") in report
+    assert "not credited in this version" not in report.split(
+        '<a id="pole-2"></a>', 1)[0], "the on-pole PR case reads the tail line now"
+    # The self-check re-derives the tail line rather than reading it back: a
+    # tampered `one_in_n`, and separately a tail axis stamped on a finding that
+    # is off the critical path, must each fail verification.
+    # So must a tail axis on a job the required set does not name.
+    for _tamper80 in (
+            lambda cs, d: cs["tail_axis"].__setitem__("one_in_n", 2),
+            lambda cs, d: cs.__setitem__("on_critical_path", False),
+            lambda cs, d: d.__setitem__("required_checks", ["prep", "verify"])):
+        _bad80 = json.loads(findings_path.read_text(encoding="utf-8"))
+        _tamper80(next(f for f in _bad80["findings"]
+                       if f.get("id") == _pole_id)["checkout_stall"], _bad80)
+        _bad80_path = tmp_path / "findings_tampered_opt80.json"
+        _bad80_path.write_text(json.dumps(_bad80), encoding="utf-8")
+        _v80 = subprocess.run(
+            [sys.executable, str(_SKILL_DIR / "tests" / "verify_report.py"),
+             "--report", str(report_path), "--findings", str(_bad80_path)],
+            capture_output=True, text=True, env=env, timeout=60)
+        # Every check's name is printed, PASS or FAIL: assert the FAIL line itself.
+        assert _v80.returncode != 0 and (
+            "\nFAIL  OPT80 tail lines re-derive" in "\n" + _v80.stdout), (
+            _v80.stdout[-2000:])
 
     # The held-back candidate reaches the reader too, in plain English: the count,
     # the job, and a reason a product manager can read - never the gate name. The

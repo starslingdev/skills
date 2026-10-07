@@ -1237,7 +1237,59 @@ and never the whole step. `wall_clock_p50_s` is 0 by construction: the median
 run has no stall, so capping the tail cannot move the p50 merge gate; the tail
 runs' own improvement is bounded above by the longest observed pause, stamped
 (`tail_run_longest_pause_s`, with `on_critical_path`), named in the rendered
-evidence and deliberately left uncredited rather than rendered as a p50 saving. Its certificate carries its own `proof` token,
+evidence and deliberately left uncredited rather than rendered as a p50 saving.
+When the job is the workflow's slowest AND the workflow runs on pull requests
+(the detector's `is_pr`; unknown counts as not) AND its timing came from sampled
+pull-request runs (`_crit_has_developer_timing`: `event_scope` is not the
+`all-events` fallback, which would make every number a push timing) AND the job
+is on the merge-gating path (`_opt80_merge_gating_jobs`: its check is required,
+or a required job in the same workflow transitively `needs:` it; an unread,
+partial or empty required set is UNKNOWN and claims no merge wait, because a
+workflow's slowest job can be a non-required benchmark), a stalled run sits on that
+run's merge wait, so the finding also stamps a SEPARATE tail axis,
+`checkout_stall.tail_axis` = `{sampled_runs n, slow_runs m (at or above the
+tail threshold), logs_read L (the fetched `log_probed_job_ids`, at most the
+probe cap), tail_runs k (log-proven), counted_runs m - (L - k), one_in_n
+round(n / counted_runs), typical_checkout_p50_s, tail_checkout_p50_s (median of
+the proven runs), tail_loss_s, on_critical_path, merge_gating}`. A read log with
+no stall is left out of N; an unread slow run stays in, because the probe cap
+bounds cost and is not evidence of a smooth fetch (counting only k let the cap
+set N: 10 slow of 30 with 4 logs read said one in 8, not one in 3). The
+verifier requires every proof to be one of `log_probed_job_ids`, those ids to
+be distinct slow runs, and their count to equal `logs_fetched`. And
+`blocking_path.py` renders it as "one run in N spends about X s longer on
+checkout, and that run's log shows the fetch stalling": inside the
+pole's section beside its merge-wait figure (an `<!-- opt80-tail:<id> -->`
+marked line), or in a short off-pole block when the job is not a drilled pole.
+`tail_loss_s` is the extra checkout time on a stalled run. How much of it
+reaches the merge wait depends on what else gates that run, which this line does
+not model, so it is stated as the checkout loss, not a merge-wait saving, for
+"one run in N". It is the median proven run's loss, not a ceiling (a proven run
+can lose more), so it reads "about", never "up to"; the self-check fails a
+sentence still worded "up to". It is never summed into
+`wall_clock_p50_s`, the headline, a pole's buy line, the Tier-2 section, the
+runner-minutes or the certificate. `verify_report.py`'s
+`check_opt80_tail_lines` re-derives N and X from `per_run_checkout_s` and the
+proofs' own quoted lines, fails a block on a finding off the critical path or
+outside the detector's own gate (`_opt80_tail_axis_eligible`: the workflow is in
+the stamped `declared_pr_workflows`, its `per_workflow_timing` `event_scope` is a
+developer event (`pull_request`, `pull_request_target`, `merge_group`; the
+verifier fails a missing `event_scope`, while the collector treats a missing one
+as developer-timed), the job is its `long_pole_job`, and the stamped
+`tail_axis.merge_gating` re-derives from `required_checks`,
+`required_checks_complete` and `workflow_job_graph`), a
+block with no marked line (or a line with no block), and any "one run in N"
+sentence whose numbers no block re-derives to. A SLOWEST job with no tail line says
+why in one of four sentences, keyed by the stamped `tail_axis_withheld_reason`:
+the workflow is not shown to run on pull requests (push-only or unknown
+trigger), it was timed on all events with no pull-request sample, branch
+protection could not be read, or the merge does not wait on the job. None of
+them claims a merge wait; `check_opt80_tail_withheld_reasons` pairs each
+sentence to its reason, re-derives the reason from the same stamped facts, and
+fails any merge-wait claim on a finding with no tail axis. A job that is not the
+slowest carries no merge-wait sentence at all.
+The self-check also no longer wrongly fails a slowest job whose check is named
+`<workflow> / <job>`. Its certificate carries its own `proof` token,
 `checkout_tail_excess`, and `verify_report.py`'s
 `_opt80_checkout_stall_rederived` arm recomputes the distribution, the tail
 threshold, which runs were tail runs, each pause's seconds from the quoted

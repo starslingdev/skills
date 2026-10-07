@@ -55,6 +55,32 @@ unversioned and updates by reinstall from `main`.
   branch on 2026-10-07 (UTC), with its source in the file header. Lint run through
   a generic marketplace action that does not say ESLint is not detected.
 
+- **2026-10-06** — **A checkout that stalls on the slowest job of a pull-request
+  workflow now says how often, and how much, it costs the runs it hits.** The
+  checkout-stall pattern (OPT80) used to end that case with "measured but not
+  credited in this version", which gave the reader no number to weigh. The
+  report now prints a separate tail line in that job's long-pole section, beside
+  its merge-wait figure — "one run in N spends about X s longer on checkout, and
+  that run's log shows the fetch stalling" — or in a short block of its own when the job is not one of the drilled
+  poles. The line appears only when the job is on the merge-gating path (a
+  required check, or needed by one) and the workflow has sampled pull-request
+  runs. N counts the runs with
+  a slow checkout, leaving out only those whose log was read and shows no stall
+  (a log the probe cap never read is not evidence of a smooth fetch); X comes
+  only from runs whose own log proves the stall. The line is
+  never added to the headline and never summed into any total, and the finding still credits 0s of typical merge wait. A slowest
+  job with no tail line now says why, without claiming a merge wait: the
+  workflow is not shown to run on pull requests, it was timed on all events
+  with no pull-request sample, branch protection could not be read, or the
+  merge does not wait on that job; the self-check pairs each sentence to its
+  stamped reason. A job that is not the slowest carries no merge-wait sentence
+  at all. The report's self-check re-derives both numbers from the per-run
+  checkout times and the quoted log lines, fails a tail line with no stamped
+  figure behind it (or the reverse), and no longer
+  wrongly fails a slowest job whose check is named `<workflow> / <job>`. X is
+  the median proven run's loss, not a ceiling (a stalled run can lose more), so
+  the line says "about", and the self-check fails a sentence still worded "up to".
+
 - **2026-09-30** — **The report now says, in plain English, which caches it held
   back and why.** When the cache check (OPT79) could not reach a verdict on a
   candidate cache, the Data sources table used to print an internal gate name as
@@ -853,6 +879,21 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-10-07** — **The checkout-stall tail line (OPT80) no longer overstates
+  how rare a stall is, or which job a merge waits on.** A slow run whose log
+  could not be read (gone, unparseable, or its stall dropped because the quoted
+  line looked like a credential) is no longer left out of "one run in N" as if
+  its fetch had been smooth; only a log read and shown clean is left out, and the
+  line now says how many logs were read, how many were unreadable and how many
+  were clean. A required check named `<workflow> / <job>` now counts only when
+  the prefix is that job's own workflow name, so another workflow's `deploy /
+  bench` no longer marks this workflow's `bench` as merge-gating, and a required
+  name that matches jobs in two workflows marks neither. A tail line on an
+  aggregation-gate pole now renders in that pole instead of under the "not one of
+  the long poles drilled above" heading. The report's self-check re-derives the
+  unreadable/clean split, the workflow-name prefix and the ambiguity, and checks
+  the "slowest job" claim in both directions.
 
 - **2026-09-30** — **A held-back row can no longer break its own table, link
   out of the report, or overstate its reason (#112).** Job names are controlled

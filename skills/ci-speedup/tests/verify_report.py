@@ -7019,6 +7019,23 @@ _VR_OPT80_MIN_PROVEN_TAIL_RUNS = 2
 _VR_OPT80_MIN_GAP_S = 20.0
 _VR_OPT80_LOG_PROBE_MAX = 4
 _VR_OPT80_MIN_SAMPLED_OCCURRENCES = 6
+# A fetched log's outcome (`log_probe_outcomes`): `proven`, read-and-CLEAN (the
+# only outcomes the tail axis's N leaves out; coupled to the collector's
+# `_OPT80_CLEAN_LOG_OUTCOMES`), or a log that showed nothing about the fetch.
+_VR_OPT80_CLEAN_LOG_OUTCOMES = frozenset({
+    "tail_without_log_gap",
+    "tail_pause_was_advancing_or_pre_transfer",
+    "tail_pause_was_after_the_transfer_completed",
+})
+_VR_OPT80_UNREADABLE_LOG_OUTCOMES = frozenset({
+    "tail_run_log_unavailable",
+    "tail_run_step_window_unreadable",
+    "log_carries_no_parseable_timestamps",
+    "log_lines_without_timestamps",
+    "log_carries_no_progress_vocabulary",
+    "progress_lines_all_outside_step_window",
+    "quoted_progress_line_is_credential_shaped",
+})
 # The arm's own copy of the detector's transfer-progress regex. The stamped
 # `stalled_at_pct` and the "same N on both sides" predicate are what make a gap a
 # STALL rather than a slow fetch; re-reading the quoted lines here is the only
@@ -7302,6 +7319,619 @@ def _opt80_checkout_stall_rederived(f: dict) -> list[str]:
     return problems
 
 
+# ---- OPT80's tail axis ---------------------------------------------------------
+#
+# A slowest-job, pull-request OPT80 finding stamps `checkout_stall.tail_axis` and the
+# report renders it as "one run in N spends about X s longer on checkout, and
+# that run's log shows the fetch stalling" — a separate tail figure, never a p50
+# one. Every number in that sentence is re-derived here from the per-run checkout
+# durations and the per-run stall proofs; the stamped summary values are
+# compared, never trusted. X is the MEDIAN proven run's whole checkout excess:
+# not an upper bound, and not all of it is the proven pause. So the legacy
+# "loses up to X s on checkout to a stalled fetch" wording is matched too. It
+# always fails for the "loses" forms; the pattern below also accepts "spends
+# about X s on checkout to a stalled fetch", which is not rejected on wording
+# alone and is still held to the re-derived N and X.
+_VR_OPT80_TAIL_MARKER_RE = re.compile(r"<!-- opt80-tail:([^ ]+) -->")
+_VR_OPT80_TAIL_PHRASE_RE = re.compile(
+    r"one run in (\d+) (spends about|loses about|loses up to) (\d+)s "
+    r"(?:longer on checkout, and that run's log shows the fetch stalling"
+    r"|on checkout to a stalled fetch)")
+_VR_OPT80_TAIL_WORDING = "spends about"
+# The stray-sentence scan: the core "one run in N ... X s ... checkout" shape,
+# tolerant of a spaced unit, any verb, and a sentence that ends early. Every hit
+# must be the canonical sentence above (matched at the same offset) with numbers
+# a stamped axis re-derives to. "one run in" appears nowhere else in a report.
+_VR_OPT80_TAIL_SCAN_RE = re.compile(
+    r"one run in (\d+)\b[^\n]{0,80}?\b(\d+)\s*s(?:ec(?:onds?)?)?\b[^\n]{0,80}?checkout",
+    re.IGNORECASE)
+
+
+def _vr_opt80_job_rendered_as_pole(f: dict, report: str, data: dict | None = None) -> bool:
+    """Whether the finding's job is rendered as a Long pole of its OWN workflow.
+    A rendered pole header is resolved to the job the collector mapped it to
+    (`pr_critical_path.poles[].job`), so `CI / e2e / build` (a reusable-workflow
+    call whose job is `e2e / build`) never matches a plain `build` in the same
+    caller file. Only a header with no stamped pole entry falls back to the
+    check-run name `<workflow name> / <job>`, matched whole or with ONLY the
+    workflow-name prefix (the FIRST ` / ` segment) stripped: `CI / call-a /
+    test` is job `call-a / test`, never a plain `test`. A header in another
+    workflow file never matches."""
+    return any(_vr_opt80_pole_is_own(f, wf, check, data)
+               for wf, check, _body in _pole_header_sections(report))
+
+
+def _vr_opt80_pole_is_own(f: dict, wf: str, check: str, data: dict | None = None) -> bool:
+    """Whether ONE Long pole header (`wf` ▸ `check`) is the finding's own job,
+    by the rule `_vr_opt80_job_rendered_as_pole` documents."""
+    jobs = {_cmp_name(str(j)) for j in _as_list(f.get("affected_jobs")) if str(j)}
+    wf_f = str(f.get("workflow_file") or "").rsplit("/", 1)[-1]
+    if wf_f and wf and wf != wf_f:
+        return False
+    c = _cmp_name(check)
+    mapped = []
+    for p in _as_list(_as_dict(_as_dict(data).get("pr_critical_path")).get("poles")):
+        if (isinstance(p, dict) and p.get("check") and p.get("job")
+                and _cmp_name(str(p["check"])) == c):
+            p_wf = str(p.get("workflow_file") or "").rsplit("/", 1)[-1]
+            if not (wf_f and p_wf and p_wf != wf_f):
+                mapped.append(_cmp_name(str(p["job"])))
+    if mapped:
+        return any(job in jobs for job in mapped)
+    return c in jobs or (" / " in c and c.split(" / ", 1)[1] in jobs)
+
+
+# The dedicated off-pole section the renderer gives tail lines whose job is not
+# a drilled pole (`## ⏱️ Checkout stall tails on a workflow's slowest job`).
+_VR_OPT80_TAILS_HEADING = "Checkout stall tails"
+_VR_OPT80_HEADING_RE = re.compile(r"(?m)^##\s.*$")
+
+
+def _vr_opt80_enclosing(report: str, pos: int) -> "tuple[str, str]":
+    """(kind, label) of the report section holding offset `pos`: 'head' (above
+    the Contents: title, provenance, Bottom line), 'pole' (label = the Long
+    pole heading), 'tails' (the dedicated off-pole section), 'tier2' (the
+    runner-minute section or a Runner saving card) or 'other'."""
+    contents = report.find("## 📋 Contents")
+    heads = list(_VR_OPT80_HEADING_RE.finditer(report, 0, pos))
+    if (contents != -1 and pos < contents) or not heads:
+        return "head", "the headline / Bottom line (above the Contents)"
+    h = heads[-1].group(0)
+    if "Long pole" in h:
+        return "pole", h
+    if _VR_OPT80_TAILS_HEADING in h:
+        return "tails", h
+    if "Runner saving" in h or "Runner-minute reductions" in h:
+        return "tier2", "the runner-minute section"
+    return "other", h
+
+
+def _vr_opt80_marker_placed(f: dict, report: str, pos: int,
+                            data: dict | None = None) -> "str | None":
+    """None when a tail marker at `pos` sits where the finding's tail line
+    belongs - its OWN job's Long pole section, or the dedicated Checkout stall
+    tails section - else where it sits instead."""
+    kind, label = _vr_opt80_enclosing(report, pos)
+    if kind == "tails":
+        return None
+    if kind == "pole":
+        poles = _pole_header_sections(label)
+        if poles and _vr_opt80_pole_is_own(f, poles[0][0], poles[0][1], data):
+            return None
+        return f"another job's Long pole section ({label.strip()!r})"
+    return label if kind != "other" else f"the {label.strip()!r} section"
+
+
+def _vr_opt80_slowest_job_can_be_a_pole(f: dict, report: str, data: dict) -> bool:
+    """Whether a True on_critical_path with no rendered pole for the job is a
+    contradiction. The collector stamps it on a workflow's slowest job whether
+    or not that workflow runs on pull requests, so it is NOT one when the
+    workflow's recorded events hold no pull-request event (a push-only
+    nightly's job is never a pole), or when the workflow has no rendered pole
+    header at all (it ranked below the drilled poles). A header with no
+    workflow, or a finding with no workflow file, counts as the workflow's."""
+    wf_path = str(f.get("workflow_file") or "")
+    events = {str(e) for e in _as_list(_as_dict(data.get("events_by_wf")).get(wf_path)) if str(e)}
+    if not events:
+        events = {str(e) for e in _as_list(_as_dict(_as_dict(
+            data.get("per_workflow_timing")).get(wf_path)).get("events")) if str(e)}
+    if events and not events & _VR_PR_VOLUME_EVENTS:
+        return False
+    wf_f = wf_path.rsplit("/", 1)[-1]
+    return any(not wf_f or not wf or wf == wf_f
+               for wf, _check, _body in _pole_header_sections(report))
+
+
+def _vr_opt80_tail_rendered_off_pole(f: dict, report: str) -> bool:
+    """The finding stamps a tail axis AND its marked tail line sits in the
+    dedicated Checkout stall tails section (the renderer's off-pole block) -
+    not merely outside every pole, which a Runner saving card also is."""
+    if "tail_axis" not in _as_dict(f.get("checkout_stall")):
+        return False
+    pos = report.find(f"<!-- opt80-tail:{f.get('id')} -->")
+    return pos != -1 and _vr_opt80_enclosing(report, pos)[0] == "tails"
+
+
+def _vr_opt80_tail_axis_expected(cs: dict) -> "tuple[dict | None, list[str]]":
+    """The tail axis re-derived from the stamped per-run inputs, or None with
+    the reasons it cannot be. Only a tail run whose quoted log lines PROVE a
+    stall (same `Receiving objects: N%` below 100 on both sides, timestamps at
+    least `_VR_OPT80_MIN_GAP_S` apart) counts; its checkout seconds come from
+    `per_run_checkout_s`, not from the proof's own copy."""
+    per_run = [r for r in _as_list(cs.get("per_run_checkout_s")) if isinstance(r, dict)]
+    durs = {r.get("job_id"): _num(r.get("checkout_s")) for r in per_run}
+    vals = [float(d) for d in durs.values() if d is not None]
+    if not per_run or len(vals) != len(per_run):
+        return None, ["per_run_checkout_s is missing or carries a non-numeric duration"]
+    p50 = round(_vr_percentile(vals, 50), 1)
+    threshold = round(max(_VR_OPT80_TAIL_P95_MULTIPLE * p50,
+                          p50 + _VR_OPT80_TAIL_P95_ABS_S), 1)
+    # The slow runs, re-derived; the fetched logs, which must be distinct slow
+    # runs, as many as `logs_fetched` says; and every proof must be one of them.
+    slow = [r.get("job_id") for r in per_run
+            if float(durs[r.get("job_id")]) >= threshold]
+    raw_probed = cs.get("log_probed_job_ids")
+    probed = _as_list(raw_probed)
+    fetched_problems: list[str] = []
+    if not isinstance(raw_probed, list):
+        fetched_problems.append(
+            "log_probed_job_ids is missing, so which logs were fetched is unstated")
+    elif (len(set(map(str, probed))) != len(probed)
+          or not set(map(str, probed)) <= set(map(str, slow))):
+        fetched_problems.append(
+            "log_probed_job_ids are not distinct slow runs - a fetched log is "
+            "fetched for a slow run only")
+    elif _num(cs.get("logs_fetched")) != len(probed):
+        fetched_problems.append(
+            f"logs_fetched {cs.get('logs_fetched')!r} != the {len(probed)} "
+            "log_probed_job_ids")
+    for p in _as_list(cs.get("proven_tail_runs")):
+        if isinstance(p, dict) and str(p.get("job_id")) not in set(map(str, probed)):
+            fetched_problems.append(
+                f"proof for {p.get('job_id')!r} is not one of the logs fetched")
+    # What each fetched log showed. N leaves out ONLY a log read and shown
+    # clean; an unavailable or unparseable log, or a stall dropped as
+    # credential-shaped, showed nothing, so its slow run stays in N.
+    raw_outcomes = cs.get("log_probe_outcomes")
+    outcomes = [o for o in _as_list(raw_outcomes) if isinstance(o, dict)]
+    known = ({"proven"} | _VR_OPT80_CLEAN_LOG_OUTCOMES
+             | _VR_OPT80_UNREADABLE_LOG_OUTCOMES)
+    if not isinstance(raw_outcomes, list) or len(outcomes) != len(raw_outcomes):
+        fetched_problems.append(
+            "log_probe_outcomes is missing, so which fetched logs were read and "
+            "clean is unstated")
+    elif sorted(str(o.get("job_id")) for o in outcomes) != sorted(map(str, probed)):
+        fetched_problems.append(
+            "log_probe_outcomes do not name exactly the log_probed_job_ids")
+    elif any(str(o.get("outcome")) not in known for o in outcomes):
+        fetched_problems.append(
+            "log_probe_outcomes carry an outcome that is neither proven, clean "
+            "nor unreadable")
+    elif ({str(o.get("job_id")) for o in outcomes if o.get("outcome") == "proven"}
+          != {str(p.get("job_id")) for p in _as_list(cs.get("proven_tail_runs"))
+              if isinstance(p, dict)}):
+        fetched_problems.append(
+            "log_probe_outcomes' proven logs are not the proven_tail_runs")
+    if fetched_problems:
+        return None, fetched_problems
+    clean = sum(1 for o in outcomes
+                if str(o.get("outcome")) in _VR_OPT80_CLEAN_LOG_OUTCOMES)
+    probed_set = set(map(str, probed))
+    proven_s: list[float] = []
+    seen: set = set()
+    for p in _as_list(cs.get("proven_tail_runs")):
+        if not isinstance(p, dict):
+            continue
+        jid = p.get("job_id")
+        d = durs.get(jid)
+        if (jid in seen or d is None or d < threshold - 0.11
+                or str(jid) not in probed_set):
+            continue
+        before, after = _as_dict(p.get("before")), _as_dict(p.get("after"))
+        ma = _VR_OPT80_RECEIVING_RE.search(str(before.get("line") or ""))
+        mb = _VR_OPT80_RECEIVING_RE.search(str(after.get("line") or ""))
+        t0, t1 = _vr_opt80_ts(before.get("ts")), _vr_opt80_ts(after.get("ts"))
+        if (not ma or not mb or ma.groups() != mb.groups()
+                or int(ma.group(1)) >= 100 or t0 is None or t1 is None
+                or round(t1 - t0, 1) + 0.11 < _VR_OPT80_MIN_GAP_S):
+            continue
+        seen.add(jid)
+        proven_s.append(float(d))
+    if not proven_s:
+        return None, ["no tail run's log proves a stall, so there is no tail to state"]
+    n, k = len(per_run), len(proven_s)
+    m, logs_read = len(slow), len(probed)
+    # A log labelled `proven` whose quoted lines do not re-derive a stall is
+    # left out of N like a clean one: the smaller claim, never the larger.
+    clean += sum(1 for o in outcomes if o.get("outcome") == "proven") - k
+    counted = m - clean
+    tail_p50 = round(_vr_percentile(proven_s, 50), 1)
+    return {"sampled_runs": n, "slow_runs": m, "logs_read": logs_read,
+            "tail_runs": k, "logs_clean": clean,
+            "logs_unreadable": logs_read - k - clean, "counted_runs": counted,
+            "one_in_n": int(round(n / counted)),
+            "typical_checkout_p50_s": p50, "tail_checkout_p50_s": tail_p50,
+            "tail_loss_s": round(tail_p50 - p50, 1)}, []
+
+
+def _opt80_tail_axis_rederived(f: dict) -> list[str]:
+    """[] when the finding carries no tail axis, or carries one every number of
+    which re-derives; otherwise the reasons it does not."""
+    cs = _as_dict(f.get("checkout_stall"))
+    if "tail_axis" not in cs:
+        return []
+    axis = cs.get("tail_axis")
+    if not isinstance(axis, dict):
+        return [f"tail_axis is {type(axis).__name__}, not a block"]
+    problems: list[str] = []
+    if cs.get("on_critical_path") is not True or axis.get("on_critical_path") is not True:
+        problems.append(
+            f"a tail axis is stamped on a finding whose on_critical_path is "
+            f"{cs.get('on_critical_path')!r} - a stall off the merge wait has no "
+            "tail line to state")
+    if _num(f.get("wall_clock_p50_s")) != 0:
+        problems.append(
+            f"wall_clock_p50_s={f.get('wall_clock_p50_s')!r} - the tail is never a "
+            "p50 quantity, so an OPT80 finding credits no wall-clock")
+    want, why = _vr_opt80_tail_axis_expected(cs)
+    if want is None:
+        return problems + why
+    for key, val in want.items():
+        got = _num(axis.get(key))
+        tol = 0.11 if key.endswith("_s") else 0.0
+        if got is None or abs(got - float(val)) > tol:
+            problems.append(f"tail_axis.{key} {axis.get(key)!r} != re-derived {val}")
+    if want["tail_loss_s"] <= 0:
+        problems.append("the proven tail runs' checkout is not above the typical one")
+    return problems
+
+
+def _vr_opt80_workflow_prefixes(wf_path: str, workflow_names: object) -> set:
+    """Own copy of `collect_runs._opt80_workflow_prefixes`: the workflow's own
+    `name:`, else its file path or basename."""
+    name = " ".join(str(_as_dict(workflow_names).get(wf_path) or "").split())
+    if name:
+        return {name}
+    return {p for p in (str(wf_path), str(wf_path).rsplit("/", 1)[-1]) if p}
+
+
+def _vr_opt80_check_names_job(check: str, job_key: str, node: dict,
+                              wf_prefixes: "set | None" = None) -> bool:
+    """Own copy of `collect_runs._opt80_check_names_job`: is the required check
+    `check` the check-run of YAML job `job_key`, whole or behind ONLY this
+    workflow's own name prefix?"""
+    c = " ".join(str(check).split())
+    name = " ".join(str(node.get("name") or job_key).split())
+    pat = ".+?".join(re.escape(x) for x in re.split(r"\$\{\{.*?\}\}", name))
+    if node.get("matrix"):
+        pat += r"(?: \(.+\))?"
+    cands = {c} | {c[len(p) + 3:] for p in (wf_prefixes or set())
+                   if c.startswith(p + " / ")}
+    for cand in cands:
+        if cand == job_key or re.fullmatch(pat, cand):
+            return True
+        if node.get("reusable") and cand.startswith(name + " / "):
+            return True
+    return False
+
+
+def _vr_opt80_merge_gating_problems(f: dict, data: dict) -> list[str]:
+    """Re-derive the tail axis's `merge_gating` evidence from the stamped
+    required set and job graph: the required read was complete, the named
+    check is required and is the named required job's check, the finding's job
+    is that YAML job, and it is the required job or in its `needs:` closure."""
+    cs = _as_dict(f.get("checkout_stall"))
+    mg = _as_dict(_as_dict(cs.get("tail_axis")).get("merge_gating"))
+    wf = str(f.get("workflow_file") or "")
+    if not mg:
+        return ["the tail axis names no required check its job gates - the merge "
+                "wait is not shown to include this job"]
+    if data.get("required_checks_complete") is not True:
+        return ["the required-check read was not complete, so no job is shown to "
+                "be on the merge-gating path"]
+    req = {str(r) for r in _as_list(data.get("required_checks"))}
+    rc, rj, jk = (str(mg.get("required_check") or ""), str(mg.get("required_job") or ""),
+                  str(mg.get("job_key") or ""))
+    jobs = _as_dict(_as_dict(data.get("workflow_job_graph")).get(wf))
+    problems: list[str] = []
+    if rc not in req:
+        problems.append(f"merge_gating names {rc!r}, which is not a required check")
+    names = data.get("workflow_names")
+    graph = _as_dict(data.get("workflow_job_graph"))
+    if rj not in jobs or not _vr_opt80_check_names_job(
+            rc, rj, _as_dict(jobs.get(rj)), _vr_opt80_workflow_prefixes(wf, names)):
+        problems.append(f"merge_gating's required check {rc!r} is not job {rj!r} of {wf!r}")
+    else:
+        hits = [(str(w), str(k)) for w, wjobs in graph.items()
+                for k, n in _as_dict(wjobs).items()
+                if _vr_opt80_check_names_job(rc, str(k), _as_dict(n),
+                                             _vr_opt80_workflow_prefixes(str(w), names))]
+        if len(hits) > 1:
+            problems.append(
+                f"merge_gating's required check {rc!r} is ambiguous - it names "
+                f"{len(hits)} jobs, so which one the merge waits on is unknown")
+    job = str(cs.get("job") or "")
+    node = _as_dict(jobs.get(jk))
+    if jk not in jobs or " ".join(str(node.get("name") or jk).split()) != job:
+        problems.append(f"merge_gating's job {jk!r} is not the finding's job {job!r}")
+    closure, stack = {rj}, [rj]
+    while stack:
+        for dep in _as_list(_as_dict(jobs.get(stack.pop())).get("needs")):
+            if str(dep) in jobs and str(dep) not in closure:
+                closure.add(str(dep))
+                stack.append(str(dep))
+    if jk not in closure:
+        problems.append(f"{jk!r} is neither the required job {rj!r} nor needed by it")
+    want_basis = "required" if jk == rj else "needed_by_required"
+    if str(mg.get("basis") or "") != want_basis:
+        problems.append(f"merge_gating basis {mg.get('basis')!r} != {want_basis!r}")
+    return problems
+
+
+def _opt80_tail_axis_eligible(f: dict, data: dict) -> list[str]:
+    """[] when a stamped tail axis meets the collector's own gate; otherwise why
+    not. Mirrors `_detect_opt80_checkout_tail_stall`: the workflow DECLARES a
+    pull-request trigger (`declared_pr_workflows`), it was TIMED on sampled
+    pull-request runs (`per_workflow_timing[wf].event_scope` is a developer
+    event, never the `all-events` fallback), and the finding's job is that
+    workflow's slowest (`long_pole_job`). Fail-closed: a missing stamp is a
+    condition not shown to hold."""
+    cs = _as_dict(f.get("checkout_stall"))
+    if "tail_axis" not in cs:
+        return []
+    wf = str(f.get("workflow_file") or "")
+    job = str(cs.get("job") or (_as_list(f.get("affected_jobs")) or [""])[0])
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    problems: list[str] = []
+    if wf not in {str(w) for w in _as_list(data.get("declared_pr_workflows"))}:
+        problems.append(
+            f"a tail axis is stamped on {wf!r}, which does not declare a pull-request "
+            "trigger - nothing waits on it to merge")
+    scope = str(crit.get("event_scope") or "")
+    if scope not in _VR_DEVELOPER_EVENTS:
+        problems.append(
+            f"a tail axis is stamped on {wf!r}, whose timing was not taken from pull "
+            f"request runs (event_scope {scope or 'unstated'!r}) - its slowest job and "
+            "checkout durations are not what a pull request waits on")
+    if str(crit.get("long_pole_job") or "") != job:
+        problems.append(
+            f"a tail axis is stamped on {job!r}, which is not {wf!r}'s slowest job "
+            f"({crit.get('long_pole_job')!r})")
+    problems.extend(_vr_opt80_merge_gating_problems(f, data))
+    return problems
+
+
+def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
+    """OPT80's tail line: stamped block, rendered line and numbers agree.
+
+    Fails on a tail axis whose numbers do not re-derive, on one stamped on a
+    finding off the critical path, on a stamped block with no marked line (or
+    two), on a marked line with no stamped block, on ANY "one run in N spends
+    about X s longer on checkout" sentence in the report whose N and X are not a
+    stamped finding's re-derived values, and on any sentence still in the legacy
+    "loses up to / about X s on checkout to a stalled fetch" wording (X is a
+    median whole-checkout excess: not a ceiling, and not all of it the proven
+    pause). Also fails a stamped axis that does not meet the collector's own
+    gate (`_opt80_tail_axis_eligible`: a declared pull-request workflow, a
+    developer `event_scope`, the job is `long_pole_job`, and the merge-gating
+    block re-derives from the required checks and job graph) and one stamped
+    with a non-zero `wall_clock_p50_s` (the tail is never a p50 quantity).
+    Placement: each marker sits in its own job's Long pole section or
+    the dedicated Checkout stall tails section (never above the Contents, in a
+    runner-minute card or in another job's pole), and every tail sentence sits
+    on a marked line or inside the same finding's own runner-saving card.
+    TOP-LEVEL: the Tier-2 pass compat-skips a report with no
+    Tier-2 stamps, and the tail line lives at the pole."""
+    name = "OPT80 tail lines re-derive and pair with their stamped blocks"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    tails = [f for f in _as_list(_as_dict(data).get("findings"))
+             if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT80"
+             and "tail_axis" in _as_dict(f.get("checkout_stall"))]
+    marker_hits = list(_VR_OPT80_TAIL_MARKER_RE.finditer(report))
+    marks = [(m.group(1), m.end()) for m in marker_hits]
+    phrases: list[tuple[int, str | None, int, str, int]] = []
+    for m in _VR_OPT80_TAIL_SCAN_RE.finditer(report):
+        canon = _VR_OPT80_TAIL_PHRASE_RE.match(report, m.start())
+        phrases.append((int(m.group(1)), canon.group(2) if canon else None,
+                        int(m.group(2)), m.group(0), m.start()))
+    if not tails:
+        if marks or phrases:
+            return Check(name, False,
+                         "the report renders an OPT80 tail line but no finding stamps "
+                         "a tail axis")
+        return Check(name, True, "no OPT80 tail axis stamped")
+    bad: list[str] = []
+    # ONE placement rule. A tail marker sits in its own job's Long pole section or
+    # in the dedicated Checkout stall tails section - never above the Contents
+    # (title, provenance, Bottom line), in a runner-minute card or in another
+    # job's pole. And every tail sentence sits on a marked line or inside the
+    # SAME finding's own runner-saving card (allowed just below): the tail is a
+    # separate figure, never headlined or summed, even when its numbers re-derive.
+    by_id = {str(f.get("id") or ""): f for f in tails}
+    spans: list[tuple[int, int]] = []
+    for m in marker_hits:
+        rest = report[m.end():]
+        start = m.end() + len(rest) - len(rest.lstrip("\n"))
+        spans.append((start, start + len(report[start:].split("\n", 1)[0])))
+        f = by_id.get(m.group(1))
+        where = _vr_opt80_marker_placed(f, report, m.start(), _as_dict(data)) if f else None
+        if where:
+            bad.append(f"{m.group(1)}: its tail line sits in {where} - it belongs in its "
+                       "own job's Long pole section or the Checkout stall tails section, "
+                       "never headlined or in a runner-minute card")
+    # The one other place the sentence may stand is the SAME finding's own
+    # Runner saving card, where it is the collector's evidence prose ("... - a
+    # tail figure, never added to the p50 merge wait or to any total"): that
+    # card is the finding's own row, not a headline or a sum.
+    for fid in by_id:
+        body = _tier2_body_for_marker(report, fid)
+        at = report.find(body) if body else -1
+        if at != -1:
+            spans.append((at, at + len(body)))
+    for *_rest, said, pos in phrases:
+        if not any(a <= pos < b for a, b in spans):
+            bad.append(f"a tail sentence {said!r} sits off its marked line, in "
+                       f"{_vr_opt80_enclosing(report, pos)[1]} - it belongs on its "
+                       "marked line (or inside the same finding's runner-saving "
+                       "card), never headlined or summed")
+    allowed: set[tuple[int, int]] = set()
+    want_ids = {str(f.get("id") or "") for f in tails}
+    for i in sorted({i for i, _ in marks} - want_ids):
+        bad.append(f"the report renders a tail line for {i!r}, which stamps no tail axis")
+    for f in tails:
+        fid = str(f.get("id") or "?")
+        bad.extend(f"{fid}: {msg}" for msg in _opt80_tail_axis_rederived(f))
+        bad.extend(f"{fid}: {msg}" for msg in _opt80_tail_axis_eligible(f, _as_dict(data)))
+        want, _why = _vr_opt80_tail_axis_expected(_as_dict(f.get("checkout_stall")))
+        if want is None:
+            continue
+        sentence = (f"one run in {want['one_in_n']} spends about "
+                    f"{want['tail_loss_s']:.0f}s longer on checkout, and that run's "
+                    "log shows the fetch stalling")
+        allowed.add((int(want["one_in_n"]), int(f"{want['tail_loss_s']:.0f}")))
+        hits = [end for i, end in marks if i == fid]
+        if len(hits) != 1:
+            bad.append(f"{fid}: its tail line is rendered {len(hits)} time(s), not once")
+            continue
+        line = report[hits[0]:].lstrip("\n").split("\n", 1)[0]
+        if sentence not in _strip_render_artifacts(line) and sentence not in line:
+            bad.append(f"{fid}: the line after its marker does not state the "
+                       f"re-derived {sentence!r}")
+    for n, word, x, said, _pos in phrases:
+        if word != _VR_OPT80_TAIL_WORDING:
+            bad.append(f"the report says {said!r}, which is not the canonical tail "
+                       "sentence (legacy or variant wording) - X is the median proven "
+                       "run's whole checkout excess - not an upper bound, and not all "
+                       "of it the proven pause; it must say 'spends about X s longer "
+                       "on checkout, and that run's log shows the fetch stalling'")
+        elif (n, x) not in allowed:
+            bad.append(f"the report says 'one run in {n} spends about {x}s longer on "
+                       "checkout', which no stamped tail axis re-derives to")
+    return Check(name, not bad,
+                 f"{len(tails)} tail line(s) re-derived and paired"
+                 if not bad else "; ".join(bad[:6]))
+
+
+# ---- OPT80's slowest job WITHOUT a tail line ----------------------------------
+#
+# An on-pole OPT80 finding with no tail axis stamps `tail_axis_withheld_reason`
+# and renders that reason's sentence. Own copy of the collector's
+# `_OPT80_TAIL_WITHHELD_SENTENCES` (pinned equal by a coupling test). None of
+# them claims a merge wait; the pre-fix sentence ("the stall's effect on the
+# merge wait is measured ... but not credited") did, for jobs the merge was not
+# shown to wait on, and any merge-wait claim on a finding with no tail axis fails.
+_VR_OPT80_TAIL_WITHHELD_SENTENCES = {
+    "not_on_pull_requests":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but this workflow is not shown to run on pull requests, "
+        "so no merge-wait claim is made.",
+    "all_events_timing":
+        "`{job}` is this workflow's slowest job; the stall is measured on "
+        "all-events timing (longest pause {pause}s), with no pull-request sample, "
+        "so no tail line is printed.",
+    "merge_gating_unknown":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but whether this job gates a merge could not be read "
+        "from branch protection, so no tail line is printed.",
+    "not_merge_gating":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but the merge does not wait on this job, so no "
+        "merge-wait claim is made.",
+    "tail_not_derivable":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but the proven runs yield no tail figure, so no tail "
+        "line is printed.",
+}
+_VR_OPT80_MERGE_WAIT_CLAIM_RE = re.compile(
+    r"\b(?:effect on|sits on|is on|lands on|reaches) (?:the |a |that run's )?merge wait",
+    re.IGNORECASE)
+_VR_OPT80_SLOWEST_JOB = "is this workflow's slowest job"
+
+
+def _vr_opt80_tail_withheld_expected(f: dict, data: dict) -> "set[str] | None":
+    """The reasons the stamped facts allow, in the collector's gate order, or
+    None when the doc predates the facts (no `declared_pr_workflows`)."""
+    wf = str(f.get("workflow_file") or "")
+    declared = data.get("declared_pr_workflows")
+    if not isinstance(declared, list):
+        return None
+    if wf not in {str(w) for w in declared}:
+        return {"not_on_pull_requests"}
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    if str(crit.get("event_scope") or "") == "all-events":
+        return {"all_events_timing"}
+    if not (data.get("required_checks_complete") is True
+            and _as_list(data.get("required_checks"))
+            and _as_dict(_as_dict(data.get("workflow_job_graph")).get(wf))):
+        return {"merge_gating_unknown"}
+    return {"not_merge_gating", "tail_not_derivable"}
+
+
+def _vr_opt80_tail_withheld_problems(f: dict, data: dict) -> list[str]:
+    cs = _as_dict(f.get("checkout_stall"))
+    ev = str(f.get("evidence") or "")
+    reason = cs.get("tail_axis_withheld_reason")
+    if "tail_axis" in cs:
+        return ([f"stamps a tail axis AND tail_axis_withheld_reason {reason!r}"]
+                if reason is not None else [])
+    problems: list[str] = []
+    claim = _VR_OPT80_MERGE_WAIT_CLAIM_RE.search(ev)
+    if claim:
+        problems.append(
+            f"claims a merge wait ({claim.group(0)!r}) with no tail axis "
+            f"(withheld reason {reason!r}) - the merge is not shown to wait on "
+            "this job")
+    if reason is None:
+        if _VR_OPT80_SLOWEST_JOB in ev:
+            problems.append("renders a slowest-job sentence but stamps no "
+                            "tail_axis_withheld_reason to pair it with")
+        return problems
+    if cs.get("on_critical_path") is not True:
+        problems.append(f"stamps tail_axis_withheld_reason {reason!r} on a job "
+                        "that is not its workflow's slowest")
+    tmpl = _VR_OPT80_TAIL_WITHHELD_SENTENCES.get(str(reason))
+    if tmpl is None:
+        return problems + [f"tail_axis_withheld_reason {reason!r} is not a known reason"]
+    pause = _num(cs.get("tail_run_longest_pause_s"))
+    sentence = tmpl.format(job=str(cs.get("job") or ""),
+                           pause=f"{float(pause or 0):.0f}")
+    if sentence not in ev:
+        problems.append(f"withheld reason {reason!r} but the evidence does not "
+                        f"render its sentence {sentence!r}")
+    allowed = _vr_opt80_tail_withheld_expected(f, data)
+    if allowed is not None and reason not in allowed:
+        problems.append(f"withheld reason {reason!r}, but the stamped facts give "
+                        f"{' or '.join(sorted(allowed))}")
+    return problems
+
+
+def check_opt80_tail_withheld_reasons(report: str, findings_path: Path | None) -> Check:
+    """An OPT80 slowest job with no tail line says WHY, in the sentence of its
+    stamped `tail_axis_withheld_reason`, and that reason re-derives from the
+    stamped facts (pull-request trigger, pull-request timing, a readable
+    required set). Fails any merge-wait claim on a finding with no tail axis,
+    and the pre-fix sentence anywhere in the report."""
+    name = "OPT80 slowest-job sentence pairs with its withheld reason"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    bad: list[str] = []
+    if "effect on the merge wait is measured" in report:
+        bad.append("the report still says \"the stall's effect on the merge wait is "
+                   "measured\" - no stamped fact supports a merge-wait claim there")
+    n = 0
+    for f in _as_list(_as_dict(data).get("findings")):
+        if not (isinstance(f, dict) and str(f.get("pattern") or "") == "OPT80"):
+            continue
+        n += 1
+        bad.extend(f"{f.get('id') or '?'}: {p}"
+                   for p in _vr_opt80_tail_withheld_problems(f, _as_dict(data)))
+    return Check(name, not bad,
+                 f"{n} OPT80 finding(s) checked" if not bad else "; ".join(bad[:6]))
+
+
 def _opt65_suppressions_are_accounted_for(data: dict) -> list[str]:
     """Every OPT65 finding dropped for overlapping an OPT77 consolidation must be
     disclosed, and the consolidation that displaced it must actually be in the
@@ -7496,17 +8126,43 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                 bad.extend(f"{fid}: {msg}"
                            for msg in _opt80_checkout_stall_rederived(f))
                 # `on_critical_path` is what the evidence's "this workflow's
-                # slowest job" sentence is rendered from, and it is exactly the
-                # fact the exemption above turns off the blanket check for. It is
-                # re-derived here rather than trusted, from the same rendered
-                # poles the rule itself reads.
+                # slowest job" sentence is rendered from. It is re-derived, both
+                # ways and unconditionally, from the field the collector computes
+                # it from: the job is `per_workflow_timing[wf].long_pole_job`. A
+                # drilled chain pole that is not its workflow's slowest job (a
+                # `prep -> verify` chain) stamps False and matches.
+                claimed = _as_dict(f.get("checkout_stall")).get("on_critical_path")
+                cs_job = str(_as_dict(f.get("checkout_stall")).get("job") or "")
+                slowest = str(_as_dict(_as_dict(data.get("per_workflow_timing")).get(
+                    str(f.get("workflow_file") or ""))).get("long_pole_job") or "")
+                if claimed is not (bool(cs_job) and slowest == cs_job):
+                    bad.append(
+                        f"{fid}: on_critical_path={claimed!r}, but per_workflow_timing "
+                        f"names {slowest or None!r} as this workflow's slowest job "
+                        f"and the finding's job is {cs_job or None!r}")
                 if rendered_poles:
-                    claimed = _as_dict(f.get("checkout_stall")).get("on_critical_path")
-                    if bool(claimed) != on_pole:
+                    on_pole = _vr_opt80_job_rendered_as_pole(f, report, data)
+                    # The on_critical_path claim itself is re-derived above, both
+                    # ways, against per_workflow_timing[wf].long_pole_job. What is
+                    # governed here is only "True needs a rendered pole", with three
+                    # exemptions:
+                    #  1. A slowest job whose workflow runs on pull requests but
+                    #     was not drilled (it ranks below the rendered poles) is on
+                    #     its own merge wait without a pole header. It is accepted
+                    #     only when its tail line renders in the dedicated Checkout
+                    #     stall tails section, not merely outside every pole
+                    #     (which a Runner saving card also is);
+                    #     `check_opt80_tail_lines` pairs and re-derives that line.
+                    #  2. A workflow whose recorded events hold no pull-request
+                    #     event (a push-only nightly's job is never a pole).
+                    #  3. A workflow with no rendered pole header at all.
+                    #  (2 and 3 live in `_vr_opt80_slowest_job_can_be_a_pole`.)
+                    if (bool(claimed) and not on_pole
+                            and not _vr_opt80_tail_rendered_off_pole(f, report)
+                            and _vr_opt80_slowest_job_can_be_a_pole(f, report, data)):
                         bad.append(
                             f"{fid}: on_critical_path={claimed!r} but the job is "
-                            f"{'' if on_pole else 'not '}rendered as "
-                            "a Long pole")
+                            "not rendered as a Long pole")
         elif proof == "non_pr_event":
             if not _non_pr_event_corroborated(f, data):
                 bad.append(f"{fid}: non_pr_event lacks stamped event-subset evidence")
@@ -10628,6 +11284,8 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_savings_rows_backed_by_cost_spine(report, findings_path),
         check_runner_minute_spine_contract(report, findings_path),
         check_no_rate_derived_dollars(report, findings_path),
+        check_opt80_tail_lines(report, findings_path),
+        check_opt80_tail_withheld_reasons(report, findings_path),
         check_structural_pole_has_measured_step(findings_path),
         check_structural_step_category_not_payload_binned_as_build(findings_path),
         check_detector_leaf_agrees_with_dominant_category(report, findings_path),
