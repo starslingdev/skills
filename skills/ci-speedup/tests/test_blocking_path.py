@@ -3164,7 +3164,7 @@ def test_opt80_tail_line_off_a_drilled_pole_never_moves_the_headline():
     assert head(with_tail) == head(without)
     bottom = lambda r: [ln for ln in r.splitlines() if "Bottom line" in ln]  # noqa: E731
     assert bottom(with_tail) and bottom(with_tail) == bottom(without)
-    assert "stalled fetch" not in head(with_tail)
+    assert "the fetch stalling" not in head(with_tail)
     assert with_tail.count("<!-- opt80-tail:f-promoted -->") == 1
     assert "Checkout stall tails on a workflow's slowest job" in with_tail
     assert "<!-- opt80-tail:" not in without
@@ -3182,7 +3182,7 @@ def test_opt80_tail_line_renders_in_a_static_only_report():
            "data_sources": {}}
     static = bp._render_static_only(doc)
     assert static.count("<!-- opt80-tail:f1 -->") == 1, static
-    assert "one run in 5 loses up to 110s on checkout to a stalled fetch" in static
+    assert "one run in 5 spends about 110s longer on checkout, and that run's log shows the fetch stalling" in static
 
 def test_opt80_off_pole_tail_renders_in_its_own_section_in_both_renders():
     """A tail on a job that is not a drilled pole gets its own `##` section -

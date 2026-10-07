@@ -6614,7 +6614,7 @@ def test_opt80_tail_axis_states_the_median_of_three_proven_runs_not_the_mean():
     assert axis["tail_runs"] == 3, axis
     assert axis["tail_checkout_p50_s"] == 110.0, axis
     assert axis["tail_loss_s"] == 100.0, axis
-    assert "loses up to 100s on checkout" in out[0]["evidence"], out[0]["evidence"]
+    assert "spends about 100s longer on checkout" in out[0]["evidence"], out[0]["evidence"]
 
 
 def test_opt80_tail_axis_one_in_n_rounds_half_to_even_7_of_2_is_4_and_5_of_2_is_2():
