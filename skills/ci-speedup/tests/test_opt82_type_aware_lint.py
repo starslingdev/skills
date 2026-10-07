@@ -806,3 +806,243 @@ def test_the_rendered_card_passes_the_widened_rail(tmp_path):
     assert _vr_check(tmp_path, f, card).ok
     f["type_aware_lint"]["merge_group_workflows"] = [".github/workflows/queue.yml"]
     assert _vr_check(tmp_path, f, _card_for(f)).ok
+
+
+# --- reader forms: comments, config formats, preset and option spellings ------
+
+def _eslintrc_tree(tmp_path: Path, name: str, text: str) -> Path:
+    root = _tree(tmp_path)
+    (root / "eslint.config.mjs").unlink()
+    (root / name).write_text(text, encoding="utf-8")
+    return root
+
+
+def test_a_block_commented_project_option_reads_off(tmp_path):
+    cfg_text = ("/*\n"
+                "export default [{ languageOptions: { parserOptions: { project: true } } }];\n"
+                "*/\n"
+                "export default [{ rules: { 'no-console': 'warn' } }];\n")
+    cfg = scan._read_type_aware_lint(_tree(tmp_path, cfg_text))["configs"][0]
+    assert cfg["type_aware"] == "off", cfg["type_aware_evidence"]
+    assert cfg["type_aware_evidence"] == []
+
+
+def test_a_url_inside_a_string_does_not_comment_out_the_rest_of_the_line(tmp_path):
+    cfg_text = ("const docs = 'https://typescript-eslint.io/getting-started'; "
+                "export default [{ languageOptions: { parserOptions: "
+                "{ projectService: true } }, rules: "
+                "{ '@typescript-eslint/no-floating-promises': 'error' } }];\n")
+    cfg = scan._read_type_aware_lint(_tree(tmp_path, cfg_text))["configs"][0]
+    assert cfg["type_aware"] == "on"
+    assert cfg["rules"] == ["@typescript-eslint/no-floating-promises"]
+
+
+def test_eslintrc_overrides_enabling_type_aware_rules_read_on(tmp_path):
+    rc = json.dumps({
+        "root": True,
+        "rules": {"no-console": "warn"},
+        "overrides": [{
+            "files": ["*.ts"],
+            "parser": "@typescript-eslint/parser",
+            "parserOptions": {"project": "./tsconfig.json"},
+            "rules": {"@typescript-eslint/no-floating-promises": "error"},
+        }],
+    })
+    cfg = scan._read_type_aware_lint(_eslintrc_tree(tmp_path, ".eslintrc.json", rc))["configs"][0]
+    assert cfg["type_aware"] == "on"
+    assert cfg["rules"] == ["@typescript-eslint/no-floating-promises"]
+
+
+def test_package_json_eslint_config_is_read(tmp_path):
+    root = _tree(tmp_path)
+    (root / "eslint.config.mjs").unlink()
+    pkg = json.loads(_PACKAGE_JSON)
+    pkg["eslintConfig"] = {
+        "parserOptions": {"project": "./tsconfig.json"},
+        "rules": {"@typescript-eslint/no-misused-promises": "error"},
+    }
+    (root / "package.json").write_text(json.dumps(pkg), encoding="utf-8")
+    block = scan._read_type_aware_lint(root)
+    cfg = next(c for c in block["configs"] if c["path"] == "package.json")
+    assert cfg["format"] == "package.json" and cfg["type_aware"] == "on"
+    assert cfg["rules"] == ["@typescript-eslint/no-misused-promises"]
+
+
+def test_yaml_eslintrc_is_read(tmp_path):
+    rc = ("parser: '@typescript-eslint/parser'\n"
+          "parserOptions:\n"
+          "  project: true\n"
+          "rules:\n"
+          "  '@typescript-eslint/no-floating-promises': error\n")
+    block = scan._read_type_aware_lint(_eslintrc_tree(tmp_path, ".eslintrc.yml", rc))
+    assert block["unreadable"] == []
+    cfg = block["configs"][0]
+    assert cfg["path"] == ".eslintrc.yml" and cfg["type_aware"] == "on"
+    assert cfg["rules"] == ["@typescript-eslint/no-floating-promises"]
+
+
+def test_kebab_type_checked_preset_reads_on_and_expands(tmp_path):
+    rc = json.dumps({
+        "parser": "@typescript-eslint/parser",
+        "extends": ["plugin:@typescript-eslint/recommended-type-checked"],
+    })
+    cfg = scan._read_type_aware_lint(_eslintrc_tree(tmp_path, ".eslintrc.json", rc))["configs"][0]
+    assert cfg["type_aware"] == "on" and cfg["presets"] == ["recommended"]
+    assert "@typescript-eslint/no-floating-promises" in cfg["rules"]
+
+
+@pytest.mark.parametrize("name,text", [
+    ("eslint.config.mjs", "import tseslint, { configs } from 'typescript-eslint';\n"
+                          "export default tseslint.config(configs.all);\n"),
+    (".eslintrc.json", json.dumps({"extends": ["plugin:@typescript-eslint/all"]})),
+])
+def test_the_all_preset_reads_on_and_expands_to_every_rule(tmp_path, name, text):
+    root = _eslintrc_tree(tmp_path, name, text) if name != "eslint.config.mjs" \
+        else _tree(tmp_path, text)
+    cfg = scan._read_type_aware_lint(root)["configs"][0]
+    assert cfg["type_aware"] == "on" and cfg["presets"] == ["all"]
+    assert cfg["rules"] == sorted(scan._load_type_aware_rules())
+
+
+@pytest.mark.parametrize("option", [
+    "projectService: { allowDefaultProject: ['*.js'] }",
+    "project: ['./tsconfig.json']",
+])
+def test_object_project_service_and_array_project_read_on(tmp_path, option):
+    cfg_text = ("export default [{ languageOptions: { parserOptions: { " + option
+                + " } }, rules: { '@typescript-eslint/no-floating-promises': 'error' } }];\n")
+    cfg = scan._read_type_aware_lint(_tree(tmp_path, cfg_text))["configs"][0]
+    assert cfg["type_aware"] == "on", cfg
+    assert cfg["unresolved"] == []
+
+
+def test_project_false_reads_off(tmp_path):
+    cfg_text = ("export default [{ languageOptions: { parserOptions: { project: false } },"
+                " rules: { '@typescript-eslint/no-floating-promises': 'error' } }];\n")
+    cfg = scan._read_type_aware_lint(_tree(tmp_path, cfg_text))["configs"][0]
+    assert cfg["type_aware"] == "off"
+    assert cfg["type_aware_evidence"] == [] and cfg["unresolved"] == []
+
+
+@pytest.mark.parametrize("call", [
+    "ESLintUtils.getParserServices(context)",
+    "context.parserServices.program.getTypeChecker()",
+])
+def test_each_type_information_entry_point_alone_marks_a_custom_rule_typed(tmp_path, call):
+    root = _tree(tmp_path)
+    (root / "eslint-rules" / "no-unsafe-enum-access.mjs").write_text(
+        "export default { meta: { type: 'problem', schema: [] },\n"
+        f"  create(context) {{ const x = {call}; return {{ Program() {{ void x; }} }}; }} }};\n",
+        encoding="utf-8")
+    cfg = scan._read_type_aware_lint(root)["configs"][0]
+    assert [c["rule"] for c in cfg["custom_rules"]] == ["local/no-unsafe-enum-access"]
+    assert "local/no-unsafe-enum-access" in cfg["rules"]
+
+
+# --- collect: sample matching, cost bar, step fallback, benchmark ---------------
+
+def _detect_with(block, crit, runs=None, wf=None):
+    runs = runs if runs is not None else _runs(95, 20)
+    withheld: dict[str, int] = {}
+    cands: list[dict] = []
+    out = cr._detect_opt82_type_aware_lint(
+        ".github/workflows/lint.yml", runs, crit, wf or _WF, block, 0,
+        withheld=withheld, withheld_candidates=cands)
+    return out, withheld, cands
+
+
+def test_a_lint_job_that_never_ran_in_the_sample_is_tallied_as_a_verdict(tmp_path):
+    block = scan._read_type_aware_lint(_tree(tmp_path))
+    out, withheld, cands = _detect_with(
+        block, {"job_p50": {"unit": 20.0}, "long_pole_job": "unit"})
+    assert out == []
+    assert withheld == {"lint_job_never_ran_in_sample": 1}
+    assert cands == []
+
+
+@pytest.mark.parametrize("p50,fires", [(60.0, True), (59.9, False)])
+def test_the_cost_bar_boundary_at_sub_second_precision(tmp_path, p50, fires):
+    block = scan._read_type_aware_lint(_tree(tmp_path))
+    out, withheld, _c = _detect_with(
+        block, {"job_p50": {"eslint": p50, "unit": 200.0}, "long_pole_job": "unit"})
+    assert bool(out) is fires, withheld
+    if not fires:
+        assert withheld == {"lint_job_below_cost_threshold": 1}
+
+
+def test_a_matrix_suffixed_job_name_matches_its_yaml_job(tmp_path):
+    runs = _runs(95, 20)
+    for run in runs:
+        for j in run:
+            if j["name"] == "eslint":
+                j["name"] = "eslint (node-20)"
+    block = scan._read_type_aware_lint(_tree(tmp_path))
+    out, withheld, _c = _detect_with(
+        block, {"job_p50": {"eslint (node-20)": 95.0, "unit": 20.0},
+                "long_pole_job": "eslint (node-20)"}, runs=runs)
+    assert len(out) == 1, withheld
+    assert out[0]["affected_jobs"] == ["eslint (node-20)"]
+
+
+def test_an_unnamed_lint_step_is_measured_under_its_run_fallback_name(tmp_path):
+    wf = json.loads(json.dumps(_WF))
+    del wf["jobs"]["eslint"]["steps"][2]["name"]
+    runs = _runs(95, 20)
+    for run in runs:
+        for j in run:
+            for st in j["steps"]:
+                if st["name"] == "Lint":
+                    st["name"] = "Run npm run lint"
+    block = scan._read_type_aware_lint(_tree(tmp_path))
+    out, withheld, _c = _detect_with(
+        block, {"job_p50": {"eslint": 95.0, "unit": 20.0}, "long_pole_job": "eslint"},
+        runs=runs, wf=wf)
+    assert len(out) == 1, withheld
+    tal = out[0]["type_aware_lint"]
+    assert tal["ceiling_basis"] == "lint_step" and tal["ceiling_s"] == 78.0
+    assert "its lint step `Run npm run lint` measures 78s" in out[0]["evidence"]
+
+
+def test_benchmark_strips_cache_location_and_its_value(tmp_path):
+    root = _tree(tmp_path)
+    pkg = json.loads(_PACKAGE_JSON)
+    pkg["scripts"]["lint:eslint"] = ("eslint . --cache --cache-location .cache/eslint "
+                                     "--max-warnings 0")
+    (root / "package.json").write_text(json.dumps(pkg), encoding="utf-8")
+    block = scan._read_type_aware_lint(root)
+    out, withheld, _c = _detect(block)
+    assert len(out) == 1, withheld
+    bench = out[0]["type_aware_lint"]["benchmark_commands"]
+    for cmd in bench.values():
+        assert "--cache" not in cmd and ".cache/eslint" not in cmd, cmd
+        assert "--max-warnings 0" in cmd, cmd
+
+
+# --- render: the SIZING basis sentence ------------------------------------------
+
+def test_sizing_line_names_the_basis_the_ceiling_was_measured_on(tmp_path):
+    f, card = _rendered_card(tmp_path)
+    assert "SIZING: uncredited. The lint step measured 78s at p50" in card
+    assert "its lint step was not separately measured" not in card
+    f["type_aware_lint"]["ceiling_basis"] = "lint_job"
+    lines, _n, _on = bp._also_noticed_block([f], "https://example.invalid/cat.md")
+    job_card = "\n".join(lines)
+    assert ("SIZING: uncredited. The whole lint job (its lint step was not "
+            "separately measured) measured 78s at p50") in job_card
+
+
+# --- verify: orphan card, missing evidence block --------------------------------
+
+def test_verifier_fails_an_opt82_card_with_no_opt82_finding(tmp_path):
+    _f, card = _rendered_card(tmp_path)
+    p = tmp_path / "findings.json"
+    p.write_text(json.dumps({"findings": []}), encoding="utf-8")
+    c = _vr().check_opt82_type_aware_lint_uncredited(card, p)
+    assert not c.ok and "no OPT82 finding" in c.detail, c.detail
+
+
+def test_verifier_fails_a_finding_missing_its_evidence_block_kind(tmp_path):
+    f, card = _rendered_card(tmp_path)
+    f["type_aware_lint"]["kind"] = "something_else"
+    c = _vr_check(tmp_path, f, card)
+    assert not c.ok and "evidence block" in c.detail, c.detail
