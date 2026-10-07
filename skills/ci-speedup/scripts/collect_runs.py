@@ -17024,7 +17024,7 @@ def _detect_opt79_net_negative_cache(
                     effective=(_effective_volume(monthly_volume, job_runs, sampled)
                                if has_volume else None),
                     runner_min_saving=None),
-                wf_path=wf_path, gates_pr=gates_pr,
+                wf_path=wf_path, gates_pr=gates_pr, declares_pr=bool(is_pr),
                 long_pole_job=str(block.get("long_pole_job") or ""),
                 long_pole_p50_s=block.get("long_pole_p50_s"),
                 job_p50_s=block.get("job_p50_s"),
@@ -17055,6 +17055,8 @@ def _detect_opt79_net_negative_cache(
                     note_head=_note_head, note_guardrail=_note_guardrail,
                     guardrail=_guardrail, title=title,
                     idx=start_idx + len(out) + 1))
+                # Carried so a later demotion to an uncredited row keeps it.
+                out[-1]["cache_net_negative"]["declares_pull_request"] = bool(is_pr)
                 continue
             # TIED with the next-tallest job: under a second of headroom moves
             # no merge wait, so it is an uncredited row that says so, tallied
@@ -17156,6 +17158,7 @@ def _opt79_uncredited_row(
     long_pole_p50_s: Any,
     job_p50_s: Any,
     floor_p50_s: Any,
+    declares_pr: bool | None = None,
 ) -> dict[str, Any]:
     """One uncredited OPT79 row: the stamped measurement block plus WHERE the
     job sits, stated rather than implied, so the renderer can tell the
@@ -17174,6 +17177,11 @@ def _opt79_uncredited_row(
     row["job_p50_s"] = job_p50_s
     row["floor_p50_s"] = floor_p50_s
     row["workflow_gates_pull_requests"] = bool(gates_pr)
+    # Whether the YAML DECLARES a pull_request trigger, beside whether a pull
+    # request was SAMPLED: a workflow that declares one but had no PR run in the
+    # sample is not "a workflow that does not run on pull requests".
+    if declares_pr is not None:
+        row["declares_pull_request"] = bool(declares_pr)
     row["on_critical_path"] = False
     return row
 
@@ -17235,7 +17243,8 @@ def _opt79_demote_uncredited_poles(
             gates_pr=bool(cn.get("workflow_gates_pull_requests")),
             long_pole_job=str(cn.get("long_pole_job") or ""),
             long_pole_p50_s=cn.get("long_pole_p50_s"),
-            job_p50_s=cn.get("job_p50_s"), floor_p50_s=cn.get("floor_p50_s"))
+            job_p50_s=cn.get("job_p50_s"), floor_p50_s=cn.get("floor_p50_s"),
+            declares_pr=cn.get("declares_pull_request"))
         if zeroed:
             row["uncredited_reason"] = _OPT79_REASON_ZEROED
             reasons = [

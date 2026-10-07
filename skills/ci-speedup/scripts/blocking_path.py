@@ -6076,6 +6076,16 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
                 detail=detail or "no reason was recorded")
             why = (f"`{job}` is this workflow's slowest job, but {clause}; "
                    "**not credited** in this version.")
+        elif (r.get("workflow_gates_pull_requests") is False
+              and r.get("declares_pull_request") is True):
+            # Declared, but no sampled run was a pull request: say what was
+            # MEASURED, never that the workflow does not run on pull requests.
+            n = r.get("sampled_successful_run_count")
+            n_txt = f"{n} " if isinstance(n, int) and not isinstance(n, bool) else ""
+            why = (f"`{job}` runs in a workflow that declares pull requests, but "
+                   f"none of its {n_txt}sampled runs was a pull request, so no "
+                   "measured pull request waits on it; the saving is "
+                   "runner-minutes only and is **not credited** in this version.")
         elif r.get("workflow_gates_pull_requests") is False:
             why = (f"`{job}` runs in a workflow that does not run on pull "
                    "requests, so no pull request waits on it; the saving is "

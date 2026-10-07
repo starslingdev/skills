@@ -7232,7 +7232,9 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
         # workflow that gates a PR may be told its saving is on the merge wait,
         # and only a workflow no PR runs may be told no PR waits on it.
         says_merge_wait = "on the merge wait" in why
-        says_no_pr = "does not run on pull requests" in why
+        says_undeclared = "does not run on pull requests" in why
+        says_unsampled = "so no measured pull request waits on it" in why
+        says_no_pr = says_undeclared or says_unsampled
         if says_merge_wait != bool(cn.get("on_critical_path")):
             out.append(f"{tag}: `{job}` line {'claims' if says_merge_wait else 'omits'}"
                        f" the merge wait but on_critical_path is "
@@ -7247,6 +7249,19 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
         if says_no_pr != no_pr:
             out.append(f"{tag}: `{job}` line {'says' if says_no_pr else 'does not say'}"
                        " no pull request runs it, against the row's stamps")
+        elif no_pr and cn.get("declares_pull_request") is True:
+            # Declared but not sampled: the line must say what was MEASURED.
+            n = cn.get("sampled_successful_run_count")
+            want_txt = (f"none of its {n} sampled runs was a pull request, so no "
+                        "measured pull request waits on it")
+            if says_undeclared or want_txt not in why:
+                out.append(f"{tag}: `{job}` declares pull requests but none was "
+                           f"sampled; its line must say {want_txt!r}, not that the "
+                           "workflow does not run on pull requests")
+        elif no_pr and says_unsampled:
+            out.append(f"{tag}: `{job}` line says the workflow declares pull "
+                       "requests, but the row stamps declares_pull_request="
+                       f"{cn.get('declares_pull_request')!r}")
     return out
 
 

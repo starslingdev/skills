@@ -8314,3 +8314,57 @@ def test_opt79_zeroed_detail_keeps_a_non_ascii_job_name_and_the_verifier_agrees(
     data = {"per_workflow_timing": {"ci.yml": _opt79_pole_of(660.0, 600.0)},
             "opt79_uncredited_pole_caches": rows}
     assert vr._opt79_uncredited_rows_rederived(data) == []
+
+
+# ---- OPT79: a workflow that DECLARES pull_request but sampled none ----
+#
+# Whether a pull request waits on a workflow is read from its SAMPLED events,
+# so "runs in a workflow that does not run on pull requests" is false for one
+# that declares `pull_request` and simply had no PR run in the sample. The row
+# stamps `declares_pull_request` and the line says what was measured.
+
+def _opt79_declared_unsampled_row():
+    jpr, logs = _opt79_sample()
+    rows: list = []
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_pole_crit(), _opt79_wf(), 100, 0,
+        logs_by_job_id=logs, uncredited=rows, is_pr=True,
+        sampled_events={"push"})
+    assert out == [] and len(rows) == 1, (out, rows)
+    return rows[0]
+
+
+def test_opt79_declared_but_unsampled_pull_request_workflow_says_so():
+    vr = _load_verify_report_for_opt79()
+    row = _opt79_declared_unsampled_row()
+    assert row["workflow_gates_pull_requests"] is False
+    assert row["declares_pull_request"] is True
+    n = row["sampled_successful_run_count"]
+    rendered = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": [row]}))
+    assert "does not run on pull requests" not in rendered, rendered
+    assert (f"none of its {n} sampled runs was a pull request, so no measured "
+            "pull request waits on it") in rendered, rendered
+    assert vr._opt79_uncredited_rows_rendered(rendered, [row]) == []
+    # the old sentence on a declared-but-unsampled row is a false claim
+    old = rendered.replace(
+        f"declares pull requests, but none of its {n} sampled runs was a pull "
+        "request, so no measured pull request waits on it",
+        "does not run on pull requests, so no pull request waits on it")
+    assert old != rendered
+    assert any("pull request" in p for p in vr._opt79_uncredited_rows_rendered(
+        old, [row]))
+
+
+def test_opt79_undeclared_pull_request_workflow_keeps_its_wording():
+    vr = _load_verify_report_for_opt79()
+    row = _opt79_uncredited(_opt79_pole_crit(), is_pr=False)
+    assert row["declares_pull_request"] is False
+    rendered = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": [row]}))
+    assert "does not run on pull requests, so no pull request waits on it" in rendered
+    assert vr._opt79_uncredited_rows_rendered(rendered, [row]) == []
+    # the declared-but-unsampled sentence on an undeclared row is also wrong
+    row2 = dict(row, declares_pull_request=True)
+    assert any("pull request" in p for p in vr._opt79_uncredited_rows_rendered(
+        rendered, [row2]))
