@@ -1447,3 +1447,80 @@ def test_verifier_fails_a_finding_stamped_from_a_walk_that_missed_its_dir(tmp_pa
         "unreadable": [], "error": None}}), encoding="utf-8")
     c = _vr().check_opt82_type_aware_lint_uncredited(card, p)
     assert not c.ok and "truncated" in c.detail, c.detail
+
+
+# --- the lint-command resolver: cd, quoting, forwarded args, npx flags, runner --
+
+def _lint_wf(run: str):
+    wf = json.loads(json.dumps(_WF))
+    wf["jobs"]["eslint"]["steps"][2]["run"] = run
+    return wf
+
+
+def test_a_literal_cd_moves_the_lint_and_its_benchmark_to_that_directory(tmp_path):
+    """`cd packages/web && eslint .` lints from packages/web: the config is
+    looked up from there and the benchmark must run there, not at the root."""
+    block = scan._read_type_aware_lint(_tree(tmp_path))
+    out, withheld, _c = _detect(block, wf=_lint_wf("cd packages/web && eslint ."))
+    assert len(out) == 1, withheld
+    bench = out[0]["type_aware_lint"]["benchmark_commands"]
+    assert bench["as_ci_runs_it"].startswith("(cd packages/web && time "), bench
+    res = cr._opt82_resolve_lint("cd ./a && cd ../b/c && eslint .", "apps", {})
+    assert res[0] == "eslint" and res[3]["wd"] == "apps/b/c", res
+
+
+@pytest.mark.parametrize("cd", ["cd ${{ matrix.dir }}", "cd $PKG_DIR", "cd /tmp/x",
+                                "cd -", "cd", "cd ../..", "cd ~/src"])
+def test_an_untraceable_cd_before_the_lint_is_held_back(tmp_path, cd):
+    block = scan._read_type_aware_lint(_tree(tmp_path))
+    out, withheld, cands = _detect(block, wf=_lint_wf(f"{cd} && eslint ."))
+    assert out == [] and withheld.get("lint_script_unresolvable") == 1, withheld
+    assert cands[0]["gate"] == "lint_script_unresolvable"
+
+
+def test_a_quoted_path_stays_one_argument_in_the_benchmark():
+    res = cr._opt82_resolve_lint('eslint "src/my file.ts"', "", {})
+    assert res[0] == "eslint"
+    bench = cr._opt82_benchmark_commands(res[1], "", ["r"])
+    assert "'src/my file.ts'" in bench["as_ci_runs_it"], bench
+
+
+@pytest.mark.parametrize("cmd", [
+    "npm run lint -- --config eslint.config.syntax.mjs",
+    "pnpm run lint --config eslint.config.syntax.mjs",
+    "pnpm lint --config eslint.config.syntax.mjs",
+    "yarn lint -- --config eslint.config.syntax.mjs",
+    "bun run lint --config eslint.config.syntax.mjs",
+])
+def test_args_forwarded_to_a_lint_script_reach_the_eslint_command(cmd):
+    scripts = {"": {"lint": "eslint ."}}
+    res = cr._opt82_resolve_lint(cmd, "", scripts)
+    assert res[0] == "eslint", res
+    assert cr._opt82_config_flag(res[1]) == "eslint.config.syntax.mjs", res
+
+
+def test_npm_run_without_a_separator_forwards_nothing():
+    res = cr._opt82_resolve_lint("npm run lint --silent", "", {"": {"lint": "eslint ."}})
+    assert res[0] == "eslint" and res[1] == "eslint .", res
+
+
+@pytest.mark.parametrize("cmd", ["npx -p eslint eslint .", "npx --package eslint eslint .",
+                                 "npx -y -p eslint@9 eslint .",
+                                 "npm exec -p eslint -- eslint .",
+                                 "npx -c 'eslint .'", "npx --call 'eslint .'"])
+def test_npx_flags_that_take_a_value_never_become_the_lint_command(cmd):
+    res = cr._opt82_resolve_lint(cmd, "", {})
+    assert res is not None and res[0] == "eslint" and res[1] == "eslint .", res
+
+
+@pytest.mark.parametrize("cmd,runner", [
+    ("npx eslint .", "npx"), ("eslint .", "npx"),
+    ("pnpm exec eslint .", "pnpm exec"), ("yarn eslint .", "yarn"),
+    ("bunx eslint .", "bunx"), ("pnpm run lint", "pnpm exec"),
+    ("yarn lint", "yarn"),
+])
+def test_the_benchmark_runs_eslint_through_the_runner_ci_used(cmd, runner):
+    res = cr._opt82_resolve_lint(cmd, "", {"": {"lint": "eslint ."}})
+    assert res[0] == "eslint" and res[3]["runner"] == runner, res
+    bench = cr._opt82_benchmark_commands(res[1], "", ["r"], runner=res[3]["runner"])
+    assert bench["as_ci_runs_it"] == f"(time {runner} eslint .)", bench
