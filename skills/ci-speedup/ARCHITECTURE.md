@@ -992,14 +992,16 @@ enumerated in `check_tier2_neutrality_derived` (an unknown one fails):
 `below_cluster_floor` (the job's p50 is strictly below the workflow's cluster
 floor; OPT65, OPT77 — historically, see below — and OPT79, each re-derived by
 its own arm), `below_long_pole` (OPT79 only: the job is at or above the floor
-but strictly shorter than the workflow's long pole, margin
-`long_pole_p50 − job_p50` from `per_workflow_timing`), `post_completion_waste`
-(OPT35/46/57/64), `checkout_tail_excess` (OPT80 only) and `non_pr_event`
-(OPT36). The "affected job is also rendered as a Long pole" proxy is waived for
-exactly three shapes whose arm re-derives the neutrality it stands in for:
-`checkout_tail_excess`, OPT77's whole-workflow group, and `below_long_pole`
-(a workflow's second-slowest job can be drilled as a secondary pole, and the
-arm fails a job that is or ties its workflow's long pole). The renderer's
+but strictly shorter than the workflow's long pole and in no `needs:` chain
+with it, margin `long_pole_p50 − job_p50` from `per_workflow_timing`, the
+chain re-derived from `workflow_job_graph` when the run recorded one),
+`post_completion_waste` (OPT35/46/57/64), `checkout_tail_excess` (OPT80 only)
+and `non_pr_event` (OPT36). The "affected job is also rendered as a Long pole"
+proxy is waived for exactly two shapes whose arm re-derives the neutrality it
+stands in for: `checkout_tail_excess` and OPT77's whole-workflow group. It is
+NOT waived for `below_long_pole`: a job in a `needs:` chain with the long pole
+adds to the merge wait (the chain's sum), which the single-job margin cannot
+see, and a rendered pole is how such a job shows up. The renderer's
 `_tier2_cert_summary` names each token in the R-row's proof line.
 
 Whole-run Tier-2 detectors can stamp `tier2_sample_run_ids`, the sampled

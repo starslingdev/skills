@@ -15635,8 +15635,26 @@ _OPT79_POLE_MIN_HEADROOM_S = 1.0
 _OPT79_REASON_TIED = "pole_tied_with_next_job"
 _OPT79_REASON_ZEROED = "pole_merge_wait_zeroed_by_cross_check"
 _OPT79_REASON_OFF_SPINE = "pole_workflow_off_merge_gating_spine"
+# Not a pole at all: a job strictly shorter than the long pole of a pull-request
+# workflow, but in a `needs:` chain with it (either direction, any depth). The
+# merge wait is then the chain's SUM, so shrinking the job does shorten it, and
+# the `below_long_pole` proof (which compares single-job p50s) does not hold.
+_OPT79_REASON_NEEDS_CHAIN = "job_in_a_needs_chain_with_the_long_pole"
 _OPT79_UNCREDITED_REASONS = frozenset({
-    _OPT79_REASON_TIED, _OPT79_REASON_ZEROED, _OPT79_REASON_OFF_SPINE})
+    _OPT79_REASON_TIED, _OPT79_REASON_ZEROED, _OPT79_REASON_OFF_SPINE,
+    _OPT79_REASON_NEEDS_CHAIN})
+
+
+def _opt79_in_needs_chain_with(wf_doc: dict[str, Any] | None, job: str,
+                               long_pole_job: str) -> bool:
+    """True when `job` transitively `needs:` the long pole, or the long pole
+    transitively `needs:` it, per the workflow's own `needs:` graph
+    (`_job_needs_relations`). An unreadable graph or an unresolvable name reads
+    as no relation - the same parallel default that helper documents."""
+    if not job or not long_pole_job:
+        return False
+    rel = _job_needs_relations(wf_doc or {}, _matrix_base_name(long_pole_job))
+    return rel.get(_matrix_base_name(job)) in ("before", "after")
 # The events on which a pull request waits for a workflow: the same set the
 # cascade's `bound_developer_facing` reads (`wall_clock._DEVELOPER_FACING_EVENTS`).
 _OPT79_PR_EVENTS = frozenset({"pull_request", "merge_group"})
@@ -17118,6 +17136,20 @@ def _detect_opt79_net_negative_cache(
                 if row is not None:
                     row["uncredited_reason"] = _OPT79_REASON_TIED
             if row is not None:
+                uncredited.append(row)
+            continue
+        # The below-long-pole proof treats the merge gate as the slowest SINGLE
+        # job. A job in a `needs:` chain with that job adds to it - the wait is
+        # the chain's sum - so on a pull-request workflow shrinking it does cut
+        # the merge wait, and it is not wall-clock-neutral. This version does
+        # not size that, so it is an uncredited row that says why. (On a
+        # workflow no PR runs there is no merge wait; the bill credit stands.)
+        if (not below_floor and gates_pr
+                and _opt79_in_needs_chain_with(wf_doc, name, lp_job)):
+            _no(_OPT79_REASON_NEEDS_CHAIN, job=name, long_pole=lp_job)
+            if uncredited is not None:
+                row = _uncredited_row()
+                row["uncredited_reason"] = _OPT79_REASON_NEEDS_CHAIN
                 uncredited.append(row)
             continue
         if not has_volume:

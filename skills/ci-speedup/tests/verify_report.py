@@ -5285,6 +5285,18 @@ def _tier2_below_long_pole_problems(f: dict, data: dict) -> list[str]:
     got = _num(_as_dict(f.get("tier2_neutrality")).get("margin_s"))
     if got is None or want is None or abs(got - want) > 0.11:
         problems = problems + [f"below-long-pole margin {got!r} != re-derived {want!r}"]
+    # The margin compares single-job p50s; a job in a `needs:` chain with the
+    # long pole adds to the merge wait instead, so the proof does not hold for
+    # it. Re-derived from `workflow_job_graph` when the run recorded one.
+    wf = str(f.get("workflow_file") or "")
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    lp_job = str(crit.get("long_pole_job") or "")
+    for job in (str(j) for j in _as_list(f.get("affected_jobs")) if str(j)):
+        if _vr_opt79_needs_chain(data, wf, job, lp_job):
+            problems = problems + [
+                f"`{job}` is in a `needs:` chain with the long pole `{lp_job}`: "
+                "shrinking it shortens the merge wait, so it is not "
+                f"{_VR_OPT79_PROOF_BELOW_LONG_POLE}"]
     return problems
 
 
@@ -5824,7 +5836,57 @@ _VR_OPT79_UNCREDITED_REASON_PHRASES: dict[str, str] = {
         "the cross-checks found no merge wait it can shorten",
     "pole_workflow_off_merge_gating_spine":
         "the pull request can merge without waiting for this job",
+    "job_in_a_needs_chain_with_the_long_pole":
+        "it runs in a `needs:` chain with the slowest job",
 }
+_VR_OPT79_REASON_NEEDS_CHAIN = "job_in_a_needs_chain_with_the_long_pole"
+
+
+def _vr_opt79_needs_chain(data: dict, wf: str, job: str,
+                          long_pole_job: str) -> bool | None:
+    """Whether `job` and `long_pole_job` sit in one `needs:` chain (either
+    direction, any depth), re-derived from the scan's `workflow_job_graph`
+    (`{wf: {job_key: {name, needs}}}`). A job is matched by its plain `name:`
+    or its key, with a trailing matrix `(leg)` stripped - the collector's
+    `_job_needs_relations` heuristic. None when the graph is absent or either
+    name resolves to no job: the relation cannot be re-derived then."""
+    jobs = _as_dict(_as_dict(data.get("workflow_job_graph")).get(wf))
+    if not jobs or not job or not long_pole_job:
+        return None
+
+    def _base(v: str) -> str:
+        return re.sub(r"\s*\([^)]+\)\s*$", "", v).strip()
+
+    def _keys(target: str) -> set[str]:
+        out: set[str] = set()
+        for k, m in jobs.items():
+            nm = _as_dict(m).get("name")
+            cand = nm if isinstance(nm, str) and nm and "${{" not in nm else k
+            if _base(str(cand)) == _base(target):
+                out.add(str(k))
+        return out
+
+    jk, pk = _keys(job), _keys(long_pole_job)
+    if not jk or not pk:
+        return None
+    needs_of = {str(k): [str(n) for n in (_as_list(_as_dict(m).get("needs"))
+                                          if not isinstance(_as_dict(m).get("needs"), str)
+                                          else [_as_dict(m).get("needs")])]
+                for k, m in jobs.items()}
+
+    def _reaches(seed: set[str], goal: set[str]) -> bool:
+        seen: set[str] = set()
+        stack = list(seed)
+        while stack:
+            for n in needs_of.get(stack.pop(), []):
+                if n in goal:
+                    return True
+                if n not in seen:
+                    seen.add(n)
+                    stack.append(n)
+        return False
+
+    return _reaches(jk, pk) or _reaches(pk, jk)
 # The events on which a pull request waits for a workflow (the cascade's
 # `wall_clock._DEVELOPER_FACING_EVENTS`).
 _VR_OPT79_PR_EVENTS = frozenset({"pull_request", "merge_group"})
@@ -6153,6 +6215,27 @@ def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
     if reason not in _VR_OPT79_UNCREDITED_REASON_PHRASES:
         return out + [f"uncredited_reason {reason!r} is not one of "
                       f"{sorted(_VR_OPT79_UNCREDITED_REASON_PHRASES)}"]
+    if reason == _VR_OPT79_REASON_NEEDS_CHAIN:
+        # Not a pole: a job strictly shorter than the long pole of a
+        # pull-request workflow, chained to it by `needs:`. The chain is
+        # re-derived from `workflow_job_graph` when the run recorded it; without
+        # it, only the shape the collector can stamp is accepted (strictly
+        # shorter than its long pole, on a pull-request workflow).
+        if not (lp_job and job and job != lp_job and lead is not None and lead > 0
+                and gates is True):
+            out.append(
+                f"uncredited_reason {reason!r} needs a job strictly shorter than "
+                f"its long pole on a pull-request workflow: job {job!r} ({jp}s), "
+                f"long_pole_job {lp_job!r} ({lp}s), workflow_gates_pull_requests "
+                f"{gates!r}")
+        chained = _vr_opt79_needs_chain(
+            data, str(cn.get("workflow_file") or ""), job, lp_job)
+        if chained is False:
+            out.append(f"uncredited_reason {reason!r} but `{job}` and `{lp_job}` "
+                       "share no `needs:` path in workflow_job_graph")
+        if cn.get("uncredited_reason_detail") is not None:
+            out.append(f"uncredited_reason_detail on a {reason!r} row")
+        return out
     if not is_pole:
         out.append(f"uncredited_reason {reason!r} names a pole the row is not: job "
                    f"{job!r}, long_pole_job {cn.get('long_pole_job')!r}, "
@@ -7026,19 +7109,8 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
             str(f.get("pattern") or "") == "OPT77"
             and _as_dict(f.get("setup_consolidation")).get(
                 "group_is_the_whole_workflow") is True)
-        # OPT79's `below_long_pole` is the THIRD, on the same argument. The
-        # report drills more than one pole and this rule matches pole headers by
-        # job name, so a workflow's second-slowest job can be rendered as a Long
-        # pole (a secondary pole) - and that is exactly the job this token
-        # credits. Its arm re-derives the neutrality the proxy stands in for:
-        # long_pole_p50 - job_p50 > 0 from `per_workflow_timing`, failing a job
-        # that IS its workflow's long pole or ties it. Narrow by construction:
-        # only that token, only OPT79 (any other pattern claiming it fails below).
-        below_long_pole = (proof == _VR_OPT79_PROOF_BELOW_LONG_POLE
-                           and str(f.get("pattern") or "") == "OPT79")
         if (rendered_poles and jobs & rendered_poles
-                and proof != "checkout_tail_excess" and not whole_workflow_opt77
-                and not below_long_pole):
+                and proof != "checkout_tail_excess" and not whole_workflow_opt77):
             bad.append(f"{fid}: affected job is also rendered as a Long pole")
         if proof == "below_cluster_floor":
             got = _num(cert.get("margin_s"))
@@ -7064,9 +7136,9 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                 bad.append(f"{fid}: below-floor margin {got!r} != re-derived {want!r}")
         elif proof == _VR_OPT79_PROOF_BELOW_LONG_POLE:
             # OPT79's second runner-minute proof: at or above the cluster floor,
-            # strictly shorter than the long pole. The "rendered as a Long pole"
-            # proxy above needs no exemption here: the margin re-derivation
-            # fails a job that IS its workflow's long pole or ties it.
+            # strictly shorter than the long pole, and in no `needs:` chain with
+            # it. The "rendered as a Long pole" proxy above still applies: it is
+            # what catches a chained job when the run recorded no job graph.
             bad.extend(f"{fid}: {msg}"
                        for msg in _tier2_below_long_pole_problems(f, data))
         elif proof == "post_completion_waste":

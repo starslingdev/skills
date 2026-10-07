@@ -631,7 +631,13 @@ unversioned and updates by reinstall from `main`.
   fails any other pattern claiming the token, and fails a "not credited" row
   that should have been this finding. A slowest job's merge-wait finding now
   says the bill section needs proof the job is shorter than the slowest job,
-  rather than naming the second-slowest job.
+  rather than naming the second-slowest job. (2026-10-07) A job that runs in a
+  `needs:` chain with the slowest job, before or after it, is excluded from
+  this credit on a workflow pull requests wait on: the wait is then the two
+  jobs added together, so shrinking it does shorten the merge wait. It is listed
+  "measured, not credited" with that reason, and the self-check re-derives the
+  chain from the workflow's job graph and no longer exempts this credit from
+  its "also rendered as a Long pole" check.
 
 - **2026-10-06** — **A cache that costs more than it saves on a workflow's slowest
   job now gets a merge-wait number.** Until now, when the cache check (OPT79)
