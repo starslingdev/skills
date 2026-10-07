@@ -1230,16 +1230,20 @@ proven runs), tail_loss_s, on_critical_path}`, and `blocking_path.py` renders it
 as "one run in N loses up to X s on checkout to a stalled fetch": inside the
 pole's section beside its merge-wait figure (an `<!-- opt80-tail:<id> -->`
 marked line), or in a short off-pole block when the job is not a drilled pole.
-`tail_loss_s` is not capped at the next-tallest job (a tail run is already
-above the pole's typical p50, so the whole excess is on that run's gate), which
+`tail_loss_s` is the extra checkout time on a stalled run. How much of it
+reaches the merge wait depends on what else gates that run, which this line does
+not model, so it is stated as the checkout loss, not a merge-wait saving, which
 is why it is phrased "up to" and "one run in N". It is never summed into
 `wall_clock_p50_s`, the headline, a pole's buy line, the Tier-2 section, the
 runner-minutes or the certificate. `verify_report.py`'s
 `check_opt80_tail_lines` re-derives N and X from `per_run_checkout_s` and the
 proofs' own quoted lines, fails a block on a finding off the critical path, a
 block with no marked line (or a line with no block), and any "one run in N"
-sentence whose numbers no block re-derives to. The push-only and not-the-pole
-cases keep the uncredited "not credited in this version" sentence. Its certificate carries its own `proof` token,
+sentence whose numbers no block re-derives to. Only the SLOWEST job of a push-only or
+unknown-trigger workflow keeps the uncredited "not credited in this version"
+sentence; a job that is not the slowest carries no merge-wait sentence at all.
+The self-check also no longer wrongly fails a slowest job whose check is named
+`<workflow> / <job>`. Its certificate carries its own `proof` token,
 `checkout_tail_excess`, and `verify_report.py`'s
 `_opt80_checkout_stall_rederived` arm recomputes the distribution, the tail
 threshold, which runs were tail runs, each pause's seconds from the quoted

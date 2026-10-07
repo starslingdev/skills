@@ -2113,10 +2113,12 @@ Only a tail run whose own log proves the stall counts; a slow checkout with a
 smooth log does not. X is "up to" and applies to roughly one run in N: it is
 not a typical-run number, so it is never added to the headline, a pole's
 wall-clock figure, any total or the runner-minute section, and
-`wall_clock_p50_s` stays 0. On a push-only workflow, or a job that is not the
-slowest, the evidence keeps saying the effect is measured but not credited.
-The report's self-check re-derives N and X from the stamped per-run checkout
-durations and the quoted progress lines.
+`wall_clock_p50_s` stays 0. On a push-only (or unknown-trigger) workflow, the
+slowest job keeps saying the effect is measured but not credited; a job that is
+not the slowest carries no merge-wait sentence at all. The report's self-check
+re-derives N and X from the stamped per-run checkout durations and the quoted
+progress lines, and no longer wrongly fails a slowest job whose check is named
+`<workflow> / <job>`.
 
 **Fix recipe**, in this order, with the caveat that **retry and abort cap the
 damage; they do not fix the network**:
