@@ -6593,6 +6593,18 @@ def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
                          "a tail axis")
         return Check(name, True, "no OPT80 tail axis stamped")
     bad: list[str] = []
+    # Never headlined, never summed: no tail sentence (either wording) and no
+    # tail marker above the Contents (title, provenance, Bottom line) or inside
+    # the runner-minute section, even when its numbers re-derive.
+    head = report.split("## 📋 Contents", 1)[0] if "## 📋 Contents" in report else ""
+    tier2 = ""
+    if "## Runner-minute reductions" in report:
+        tier2 = report.split("## Runner-minute reductions", 1)[1].split("\n## ", 1)[0]
+    for where, text in (("the headline / Bottom line (above the Contents)", head),
+                        ("the runner-minute section", tier2)):
+        if _VR_OPT80_TAIL_PHRASE_RE.search(text) or _VR_OPT80_TAIL_MARKER_RE.search(text):
+            bad.append(f"an OPT80 tail line sits in {where} - the tail is a "
+                       "separate figure, never headlined or summed")
     allowed: set[tuple[int, int]] = set()
     want_ids = {str(f.get("id") or "") for f in tails}
     for i in sorted({i for i, _ in marks} - want_ids):

@@ -9586,6 +9586,32 @@ def test_opt80_tail_line_renders_at_the_pole_and_pairs_with_its_block(tmp_path: 
     assert not chk.ok and "up to" in chk.detail, chk
 
 
+def test_opt80_tail_line_is_refused_in_the_headline_or_runner_minute_section(
+        tmp_path: Path):
+    """The tail is never headlined or summed: a CORRECT tail sentence (or a
+    marker) above `## 📋 Contents` - the title, provenance table and Bottom
+    line - or inside the runner-minute section fails the check, even though its
+    numbers re-derive."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    good = "one run in 5 loses about 110s on checkout to a stalled fetch"
+    legacy = "one run in 5 loses up to 110s on checkout to a stalled fetch"
+    assert "> **Bottom line.**" in report
+    for text in (good, legacy, "<!-- opt80-tail:f-promoted -->"):
+        headlined = report.replace("> **Bottom line.**",
+                                   f"> **Bottom line.** {text}.", 1)
+        chk = vr.check_opt80_tail_lines(headlined, findings_path)
+        assert not chk.ok and "headline" in chk.detail, (text, chk)
+    if "## Runner-minute reductions" in report:
+        tier2 = report.replace("## Runner-minute reductions",
+                               f"## Runner-minute reductions\n\n{good}.\n\n##"
+                               " Runner-minute reductions", 1)
+        chk = vr.check_opt80_tail_lines(tier2, findings_path)
+        assert not chk.ok and "runner-minute" in chk.detail, chk
+
+
 def test_opt80_on_critical_path_matches_a_workflow_prefixed_pole_check(tmp_path: Path):
     """A plain job's check-run is named `<workflow> / <job>`. The pole header
     then says `CI / build` while the finding names `build`; the cross-check that
