@@ -3756,6 +3756,7 @@ which feeds "Why a slow lint job with type-aware ESLint produced no finding".
 | `workflow_yaml_unparsed` | workflow count | the workflow YAML did not parse; there is no job to name, so it is counted only, and disclosed through `detectors_skipped` |
 | `lint_script_unresolvable` | held back | the lint step runs a package script this audit could not trace to the command it runs |
 | `lint_step_uses_runtime_expression` | held back | the lint step's command or working directory is only known when the workflow runs |
+| `lint_step_cd_untraceable` | held back | the lint step changes directory (`cd`) to a place the read cannot follow (absolute, `-`, home, outside the repository) |
 | `lint_delegated_to_unread_tool` | held back | the lint step hands lint to another tool or action whose own configuration this audit did not read |
 | `package_json_unreadable` | held back | the package.json that defines the lint step's script could not be read |
 | `type_aware_lint_scan_missing` | held back | the repository scan behind this report carries no ESLint config read (an older scan) |

@@ -5287,6 +5287,9 @@ _OPT82_WITHHOLD_PHRASES: dict[str, str] = {
     "lint_script_unresolvable":
         "the lint step runs a package script this audit could not trace to the "
         "command it runs",
+    "lint_step_cd_untraceable":
+        "the lint step changes directory (`cd`) to a place this audit could not "
+        "follow, so which ESLint config applies is unknown",
     "type_aware_config_reader_failed":
         "the ESLint config reader failed, so whether lint builds the type graph "
         "is unknown",

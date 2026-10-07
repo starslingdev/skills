@@ -1313,15 +1313,14 @@ exception inside it skips OPT82 for that workflow and is disclosed through
 Every exit is counted in `findings_doc["opt82_withheld_by_gate"]`. Three gates are
 verdicts (the lint job never ran in the sample, it is below the cost threshold,
 type-aware parsing is off) and count only there; one is workflow-level
-(`workflow_yaml_unparsed`, no job to name) and counts only there too. Sixteen
+(`workflow_yaml_unparsed`, no job to name) and counts only there too. Seventeen
 are could-not-tell exits
 and are also listed in `findings_doc["opt82_withheld_candidates"]`, which feeds the
 shared held-back registry row `type-aware lint: held back` (noun "candidate lint
 job(s)", shape `"job"`), so a lint job this pattern could not decide is named in
 the Data sources table rather than reading as "measured, nothing found".
-A tenth gate, `workflow_yaml_unparsed` (the workflow file could not be parsed), is in
-neither group: it is counted in `opt82_withheld_by_gate`, never listed, and the
-skip is disclosed through `detectors_skipped`.
+The workflow-level `workflow_yaml_unparsed` is never listed; that skip is
+disclosed through `detectors_skipped`.
 
 OPT79 (a cache that costs more than it saves) is a measured Tier-2 bill lever
 (alongside OPT64, OPT65, OPT77 and OPT80). It reads job LOGS during collection

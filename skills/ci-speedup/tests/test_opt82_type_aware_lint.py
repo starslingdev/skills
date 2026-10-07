@@ -1586,8 +1586,13 @@ def test_a_literal_cd_moves_the_lint_and_its_benchmark_to_that_directory(tmp_pat
 def test_an_untraceable_cd_before_the_lint_is_held_back(tmp_path, cd):
     block = scan._read_type_aware_lint(_tree(tmp_path))
     out, withheld, cands = _detect(block, wf=_lint_wf(f"{cd} && eslint ."))
-    assert out == [] and withheld.get("lint_script_unresolvable") == 1, withheld
-    assert cands[0]["gate"] == "lint_script_unresolvable"
+    # A `cd` to a value only known at run time is a runtime expression; any
+    # other untraceable `cd` has its own gate. Neither is a "package script".
+    gate = ("lint_step_uses_runtime_expression" if "$" in cd
+            else "lint_step_cd_untraceable")
+    assert out == [] and withheld.get(gate) == 1, withheld
+    assert cands[0]["gate"] == gate
+    assert gate in bp._OPT82_WITHHOLD_PHRASES
 
 
 def test_a_quoted_path_stays_one_argument_in_the_benchmark():

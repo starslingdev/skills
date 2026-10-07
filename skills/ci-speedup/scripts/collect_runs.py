@@ -10793,6 +10793,7 @@ _OPT82_VERDICT_GATES = frozenset({
 # listed, and renders as the shared held-back row.
 _OPT82_HELD_BACK_GATES = frozenset({
     "lint_script_unresolvable",
+    "lint_step_cd_untraceable",
     "lint_step_uses_runtime_expression",
     "lint_delegated_to_unread_tool",
     "package_json_unreadable",
@@ -11393,6 +11394,13 @@ def _detect_opt82_type_aware_lint(
                 _no("lint_delegated_to_unread_tool", job=job_name)
             elif kind == "package_json":
                 _no("package_json_unreadable", job=job_name, wd=wd)
+            elif (kind == "cd" or kind.startswith("cd ")) and "$" in kind:
+                # `cd ${{ … }}` / `cd $DIR`: a value only known at run time.
+                _no("lint_step_uses_runtime_expression", job=job_name)
+            elif kind == "cd" or kind.startswith("cd "):
+                # Any other `cd` this read cannot follow (bare, absolute, `-`,
+                # home, out of the repository).
+                _no("lint_step_cd_untraceable", job=job_name)
             else:
                 _no("lint_script_unresolvable", job=job_name)
             continue
