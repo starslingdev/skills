@@ -3301,8 +3301,24 @@ def test_verifier_fails_an_opt79_off_pole_block_under_another_section():
                "**💾 Measured cache cost on a workflow's slowest job** - text.\n\n"
                + "\n".join(bp._opt79_pole_block([f], "https://x/c.md")))
         problems = vr._opt79_pole_findings_rendered(bad, [f])
-        assert any("not under a long pole or its own" in p for p in problems), \
+        assert any("not under its own long pole or its own" in p for p in problems), \
             (heading, problems)
+
+
+def test_verifier_fails_an_opt79_block_under_another_jobs_long_pole():
+    """"Under a long pole" means under ITS long pole: the pre-fix heading-less
+    block straight after a different job's pole section read as part of that
+    pole. A header check carrying the workflow prefix (`CI / build`) is the
+    same job."""
+    vr = _load_vr()
+    f = _opt79_pole_finding()
+    blk = "\n".join(bp._opt79_pole_block([f], "https://x/c.md"))
+    for check, ok in (("`build`", True), ("`CI / build`", True),
+                      ("`build (ubuntu, 3.12)`", True), ("`other`", False)):
+        md = f"## 🔴 Long pole 1: `ci.yml` ▸ {check} - 5m 00s\n\nbody\n\n{blk}"
+        problems = vr._opt79_pole_findings_rendered(md, [f])
+        placed = not any("not under" in p for p in problems)
+        assert placed is ok, (check, problems)
 
 
 def test_opt79_off_pole_intro_matches_the_render():

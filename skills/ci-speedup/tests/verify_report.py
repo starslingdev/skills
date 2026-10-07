@@ -6938,6 +6938,14 @@ def _opt79_finding_rederived(f: dict, data: dict) -> list[str]:
 _VR_OPT79_POLE_MARKER_RE = re.compile(r"<!-- opt79-pole:([^ ]+) -->")
 
 
+def _vr_check_is_job(check: str, job: str) -> bool:
+    """A rendered pole check names this job: the same matrix base, or the job
+    behind a `Workflow / ` prefix (`CI / build` is job `build`)."""
+    c = _matrix_base(_cmp_name(check))
+    j = _matrix_base(_cmp_name(job))
+    return bool(j) and (c == j or c.endswith("/ " + j))
+
+
 def _opt79_pole_findings_rendered(report: str, poles: list[dict]) -> list[str]:
     """Every pole-cache finding must REACH the page as its own block, opened by
     its marker, carrying its title, its id and the credited merge-wait seconds —
@@ -6980,10 +6988,17 @@ def _opt79_pole_findings_rendered(report: str, poles: list[dict]) -> list[str]:
         # section's own heading - never under the heading before it (the
         # checkout stall tails, a Runner saving card), where it would read as
         # part of that section. A fragment with no `##` heading is not placed.
+        # A long pole counts only when it is THIS finding's job's pole: the
+        # pre-fix block straight after another job's pole read as part of it.
         heads = re.findall(r"(?m)^## .*$", report[:hits[0]])
-        if heads and not (re.search(r"Long pole \d+:", heads[-1])
+        jobs = [str(j) for j in (_as_list(f.get("affected_jobs"))
+                                 or ([f.get("job")] if f.get("job") else []))]
+        pole_head = _pole_header_sections(heads[-1]) if heads else []
+        own_pole = bool(pole_head) and any(
+            _vr_check_is_job(pole_head[0][1], j) for j in jobs)
+        if heads and not (own_pole
                           or heads[-1].strip() == _VR_OPT79_OFF_POLE_HEADING):
-            out.append(f"{fid}: its block is not under a long pole or its own "
+            out.append(f"{fid}: its block is not under its own long pole or its own "
                        f"off-pole heading, but under {heads[-1].strip()!r}")
     return out
 
@@ -8495,16 +8510,21 @@ def check_opt82_type_aware_lint_uncredited(report: str,
         # step (`blocking_path._opt82_lint_is_dominant`); a slow test job with a
         # minor lint step is an honest gap, never failed here.
         lint = str(tal.get("lint_step") or "").strip().casefold()
-        doms = {
-            (Path(str(_as_dict(p).get("workflow_file") or "")).name,
-             _matrix_base(_cmp_name(str(_as_dict(p).get(k) or ""))))
-            for p in _as_list(_as_dict(_as_dict(data).get("pr_critical_path")).get("poles"))
-            if lint and str(_as_dict(p).get("dominant_step") or "").strip().casefold() == lint
-            for k in ("check", "job") if _as_dict(p).get(k)}
+        # Joined like the engine: the pole record's check OR job against the
+        # finding's jobs, then keyed by the check its header renders.
+        doms = set()
+        for p in _as_list(_as_dict(_as_dict(data).get("pr_critical_path")).get("poles")):
+            p = _as_dict(p)
+            if not lint or str(p.get("dominant_step") or "").strip().casefold() != lint:
+                continue
+            pwfb = Path(str(p.get("workflow_file") or "")).name
+            names = [str(p.get(k)) for k in ("check", "job") if p.get(k)]
+            if pwfb == wfb and any(_vr_check_is_job(n, str(j))
+                                   for n in names for j in jobs):
+                doms.add((pwfb, _matrix_base(_cmp_name(str(p.get("check") or "")))))
         if not f.get("advisory") and lint:
             for pwf, pcheck, body in _pole_header_sections(report):
-                key = (Path(pwf).name, _matrix_base(_cmp_name(pcheck)))
-                if key not in fkeys or key not in doms:
+                if (Path(pwf).name, _matrix_base(_cmp_name(pcheck))) not in doms:
                     continue
                 plain = _strip_render_artifacts(body)
                 if ("NO CATALOG PATTERN MATCHED" in plain

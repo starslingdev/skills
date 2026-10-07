@@ -1812,10 +1812,17 @@ def _opt82_on_the_drilled_pole(tmp_path):
     return doc, f
 
 
-def _render_pole(doc):
+def _render_pole(doc, **kw):
     return bp.render(json.loads(json.dumps(doc)), dict(_UNKNOWN_LOG), {},
                      {"pipeline": "https://github.com/o/r/actions/runs/123"},
-                     "2026-06-08")
+                     "2026-06-08", **kw)
+
+
+# A gap-fill analysis on offer for the pole: rendered only on a real gap.
+_GAP_FILL = {"pipeline": {
+    "cause": "The slow step spends its time in one serial phase.",
+    "breakdown": [["phase", "~60s"]], "evidence": ["one serial phase"],
+    "prompt": "REPO: o/r\nInvestigate the serial phase."}}
 
 
 def test_opt82_on_a_drilled_pole_is_its_catalog_cover_not_a_coverage_gap(tmp_path):
@@ -1836,6 +1843,7 @@ def test_opt82_on_a_drilled_pole_is_its_catalog_cover_not_a_coverage_gap(tmp_pat
     prompt = pole.split("Prompt for your coding agent", 1)[1]
     assert "OPT82" in prompt and "Also noticed" in prompt, prompt
     assert "uncredited, benchmark first" in md          # the card it points at renders
+    assert "LLM root-cause analysis" not in _render_pole(doc, analyses=_GAP_FILL)
     assert bp._gap_poles(doc, dict(_UNKNOWN_LOG)) == []
     # an advisory OPT82 makes no claim, so the pole stays a gap
     adv = json.loads(json.dumps(doc))
@@ -1861,10 +1869,29 @@ def test_opt82_on_a_pole_whose_slow_step_is_not_lint_stays_a_coverage_gap(tmp_pa
     assert "NO CATALOG PATTERN MATCHED" in sect, sect
     assert "matched this pole's lint step" not in sect
     assert len(bp._gap_poles(doc, dict(_UNKNOWN_LOG))) == 1
+    assert "LLM root-cause analysis" in _render_pole(doc, analyses=_GAP_FILL)
     p = tmp_path / "findings.json"
     p.write_text(json.dumps(doc), encoding="utf-8")
     c = _vr().check_opt82_type_aware_lint_uncredited(md, p)
     assert c.ok, c.detail
+
+
+def test_verifier_fails_a_covered_pole_whose_header_check_is_not_its_job_name(tmp_path):
+    """The engine joins the finding to the pole's check OR job; a header check
+    that carries the workflow prefix (`Pipeline / tests-web`) is still the
+    covered pole, so the gap wording there must fail."""
+    doc, _f = _opt82_on_the_drilled_pole(tmp_path)
+    doc["pr_critical_path"]["poles"][0]["check"] = "Pipeline / tests-web"
+    md = _render_pole(doc)
+    assert "matched this pole's lint step" in md
+    p = tmp_path / "findings.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    vr = _vr()
+    assert vr.check_opt82_type_aware_lint_uncredited(md, p).ok
+    head = md.index('<a id="pole-1"></a>')
+    bad = md[:head] + md[head:].replace("```text", "NO CATALOG PATTERN MATCHED\n\n```text", 1)
+    c = vr.check_opt82_type_aware_lint_uncredited(bad, p)
+    assert not c.ok and "coverage gap" in c.detail, c.detail
 
 
 def test_verifier_fails_an_opt82_pole_that_renders_the_coverage_gap(tmp_path):
