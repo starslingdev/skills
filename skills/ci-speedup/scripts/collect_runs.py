@@ -9715,6 +9715,257 @@ _OPT80_VERDICT_GATES = frozenset({
     "tail_excess_not_positive",
     "credited_runner_minutes_round_to_zero",
 })
+# The per-log outcomes that are a READ-AND-CLEAN verdict: the log was fetched,
+# parsed, and shows no stall. Only these leave a slow run out of the tail
+# axis's N. Every other non-`proven` outcome (the log was unavailable, carried
+# no timestamps or progress lines, or its proven stall was dropped as
+# credential-shaped) showed nothing about the fetch, so that run is counted
+# like a slow run past the probe cap. `verify_report.py` keeps its own copy.
+_OPT80_CLEAN_LOG_OUTCOMES = frozenset({
+    "tail_without_log_gap",
+    "tail_pause_was_advancing_or_pre_transfer",
+    "tail_pause_was_after_the_transfer_completed",
+})
+
+
+def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]],
+                     p50: float, slow_ids: list[Any] | None = None,
+                     probed_ids: list[Any] | None = None,
+                     clean_ids: list[Any] | None = None) -> dict[str, Any] | None:
+    """The tail axis of a slowest-job, pull-request OPT80 finding: how often a run
+    stalls, and how much longer its checkout takes when it does.
+
+    Derived ONLY from data the finding already stamps, so `verify_report.py`
+    re-derives every number from the same inputs:
+
+      sampled_runs            every sampled occurrence of the job (`per_run`)
+      slow_runs   m           the runs at or above the tail threshold
+                              (`tail_run_job_ids`) - MEASURED
+      logs_read   L           the slow runs whose log was fetched
+                              (`log_probed_job_ids`, at most the probe cap)
+      tail_runs   k           the fetched logs that PROVE a stall (`proven`)
+      logs_clean  d           the fetched logs read and shown CLEAN (`clean_ids`:
+                              an `_OPT80_CLEAN_LOG_OUTCOMES` outcome in the
+                              stamped `log_probe_outcomes`)
+      logs_unreadable u       L - k - d: fetched logs that showed nothing (gone,
+                              unparseable, or a stall dropped as credential-shaped)
+      counted_runs            m - d: every slow run but the clean ones. A read
+                              log that shows no stall is left out; an unread or
+                              unreadable one is not evidence of a smooth fetch,
+                              so it is not dropped. Counting only k let the
+                              probe cap set N: 10 slow runs of 30 with 4 logs
+                              read said "one in 8", not one in 3.
+      one_in_n                round(sampled_runs / counted_runs)
+      typical_checkout_p50_s  the checkout step's p50 across the whole sample
+      tail_checkout_p50_s     the median checkout of the proven tail runs
+      tail_loss_s             tail_checkout_p50_s - typical_checkout_p50_s
+
+    `tail_loss_s` is the extra checkout time on a stalled run. How much of it
+    reaches the merge wait depends on what else gates that run, which this line
+    does not model, so it is stated as the checkout loss, not a merge-wait
+    saving. It is the MEDIAN proven run's loss, not an upper bound (a proven run
+    can lose more), so it is rendered as "about", for roughly one run in N, and
+    it is never a p50 quantity — nothing adds it to a merge-wait or minute total."""
+    k = len(proven)
+    n = len(per_run)
+    slow = list(slow_ids) if slow_ids is not None else [p["job_id"] for p in proven]
+    probed = (list(probed_ids) if probed_ids is not None
+              else [p["job_id"] for p in proven])
+    m, logs_read = len(slow), len(probed)
+    # Without stamped outcomes every non-proven fetched log is taken as clean
+    # (the direct-call default); the detector always passes `clean_ids`.
+    clean = logs_read - k if clean_ids is None else len(clean_ids)
+    if (k <= 0 or n <= 0 or clean < 0 or k + clean > logs_read
+            or logs_read > m or m > n):
+        return None
+    counted = m - clean
+    tail_p50 = round(_percentile([float(p["checkout_s"]) for p in proven], 50), 1)
+    loss = round(tail_p50 - float(p50), 1)
+    if loss <= 0:
+        return None
+    return {"sampled_runs": n, "slow_runs": m, "logs_read": logs_read,
+            "tail_runs": k, "logs_clean": clean,
+            "logs_unreadable": logs_read - k - clean, "counted_runs": counted,
+            "one_in_n": int(round(n / counted)),
+            "typical_checkout_p50_s": float(p50),
+            "tail_checkout_p50_s": tail_p50,
+            "tail_loss_s": loss, "on_critical_path": True}
+
+
+def _opt80_workflow_prefixes(wf_path: str,
+                             workflow_names: dict[str, Any] | None) -> set[str]:
+    """The `<workflow>` prefixes a `<workflow> / <job>` check context of
+    `wf_path` can carry: its own `name:` (the scan's `workflow_names`), else -
+    as GitHub names an unnamed workflow - its file path or basename."""
+    name = " ".join(str((workflow_names or {}).get(wf_path) or "").split())
+    if name:
+        return {name}
+    return {p for p in (str(wf_path), str(wf_path).rsplit("/", 1)[-1]) if p}
+
+
+def _opt80_check_names_job(check: str, job_key: str, node: dict[str, Any],
+                           wf_prefixes: set[str] | None = None) -> bool:
+    """Whether the required-check context `check` is the check-run of the YAML job
+    `job_key` (its job-graph `node`). Deliberately literal, so `verify_report.py`
+    re-derives the same answer from the stamped job graph with its own copy:
+    the job's display name or key, whole or behind a `<workflow> / ` prefix that
+    is THIS workflow's own name (`wf_prefixes`; another workflow's or a
+    reusable caller's prefix never matches); a `${{ ... }}` template matched as
+    a wildcard; a matrix job's appended ` (<leg>)`; a reusable caller's
+    `<caller> / <child>` children."""
+    c = " ".join(str(check).split())
+    name = " ".join(str(node.get("name") or job_key).split())
+    parts = _re.split(r"\$\{\{.*?\}\}", name)
+    pat = ".+?".join(_re.escape(x) for x in parts)
+    if node.get("matrix"):
+        pat += r"(?: \(.+\))?"
+    cands = {c} | {c[len(p) + 3:] for p in (wf_prefixes or set())
+                   if c.startswith(p + " / ")}
+    for cand in cands:
+        if cand == job_key or _re.fullmatch(pat, cand):
+            return True
+        if node.get("reusable") and cand.startswith(name + " / "):
+            return True
+    return False
+
+
+def _opt80_merge_gating_jobs(
+    wf_path: str,
+    required_checks: "RequiredChecks | None",
+    job_graph: dict[str, dict[str, dict[str, Any]]] | None,
+    crit_by_wf: dict[str, dict[str, Any]],
+    workflow_names: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]] | None:
+    """The YAML jobs of `wf_path` a merge waits on, `{job_key: evidence}`, or None
+    when that cannot be known. A job is merge-gating when its check is REQUIRED,
+    or when a required job in the same workflow transitively `needs:` it — the
+    reachability similar to `_required_reachable_jobs`, which scopes the spine;
+    this one adds a `<workflow> / <job>` fallback when the shared resolver pins
+    nothing, and requires the literal name check (`_opt80_check_names_job`) on
+    every match.
+
+    None (unknown) whenever the required set is unread, partial or empty, or the
+    workflow has no job graph: the slowest job of a pull-request workflow is NOT
+    assumed to gate the merge (a slow non-required benchmark beside a required
+    fast `test` is the case this exists for). The evidence names the required
+    check and job, so the self-check re-derives it from `required_checks` and
+    `workflow_job_graph` instead of trusting it."""
+    if not (required_checks is not None and required_checks.complete
+            and required_checks.names and job_graph):
+        return None
+    jobs = job_graph.get(wf_path) or {}
+    if not jobs:
+        return None
+    out: dict[str, dict[str, Any]] = {}
+    anchors: list[tuple[str, str]] = []
+    for r in sorted(required_checks.names):
+        # Every (workflow, job) the context LITERALLY names, across the whole
+        # job graph, each workflow judged by its own name prefix. That literal
+        # set is what the self-check re-derives, so it decides: one hit binds
+        # it; more than one is a context GitHub itself cannot tell apart (the
+        # shared resolver refuses it too), which is UNKNOWN - never a match -
+        # and when it touches this workflow the whole answer is unknown (None).
+        hits = [(w, k) for w, wjobs in job_graph.items()
+                if isinstance(wjobs, dict)
+                for k, n in wjobs.items()
+                if _opt80_check_names_job(r, k, n if isinstance(n, dict) else {},
+                                          _opt80_workflow_prefixes(w, workflow_names))]
+        if len(hits) > 1:
+            if any(w == wf_path for w, _k in hits):
+                return None
+            continue
+        if not hits or hits[0][0] != wf_path:
+            continue
+        # The shared resolver may not disagree: when it pins a node, it must be
+        # this one (it does not split a `<workflow> / <job>` context, so None
+        # is not a disagreement).
+        node = _check_to_job_node(r, job_graph, crit_by_wf)
+        if node is not None and node != hits[0]:
+            continue
+        anchors.append((r, hits[0][1]))
+    for r, jid in anchors:
+        out.setdefault(jid, {"basis": "required", "required_check": r,
+                             "required_job": jid, "job_key": jid})
+    for r, jid in anchors:
+        stack, seen = [jid], {jid}
+        while stack:
+            for dep in (jobs.get(stack.pop()) or {}).get("needs") or []:
+                if dep in jobs and dep not in seen:
+                    seen.add(dep)
+                    stack.append(dep)
+                    out.setdefault(dep, {"basis": "needed_by_required",
+                                         "required_check": r,
+                                         "required_job": jid, "job_key": dep})
+    return out
+
+
+def _opt80_tail_phrase(axis: dict[str, Any]) -> str:
+    """The sentence the tail axis is rendered as in the finding's evidence string
+    (the only caller). `blocking_path.py` hand-copies this f-string, and
+    `verify_report.py` matches this exact shape and re-derives its two numbers.
+
+    X is the median proven run's WHOLE checkout excess, so the sentence says
+    "about" (not "up to": a proven run can lose more) and states the stall as
+    what the log shows, not as the cause of all X (a proven 90s pause can sit
+    inside a 120s excess)."""
+    return (f"one run in {int(axis['one_in_n'])} spends about "
+            f"{float(axis['tail_loss_s']):.0f}s longer on checkout, and that run's "
+            "log shows the fetch stalling")
+
+
+# Why an on-pole OPT80 finding states no tail line, keyed by the fact that
+# withheld it, and the sentence its evidence renders instead. None of them
+# claims a merge wait: only a stamped tail axis (a required or required-needed
+# job of a pull-request workflow timed on pull-request runs) does that.
+# `verify_report.py` carries an equal copy and pairs the stamped reason to the
+# rendered sentence.
+_OPT80_TAIL_WITHHELD_SENTENCES: dict[str, str] = {
+    "not_on_pull_requests":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but this workflow is not shown to run on pull requests, "
+        "so no merge-wait claim is made.",
+    "all_events_timing":
+        "`{job}` is this workflow's slowest job; the stall is measured on "
+        "all-events timing (longest pause {pause}s), with no pull-request sample, "
+        "so no tail line is printed.",
+    "merge_gating_unknown":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but whether this job gates a merge could not be read "
+        "from branch protection, so no tail line is printed.",
+    "not_merge_gating":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but the merge does not wait on this job, so no "
+        "merge-wait claim is made.",
+    # Every gate held but the proven runs yield no tail figure. Unreachable with
+    # today's tail threshold (a proven run is above the p50); kept honest anyway.
+    "tail_not_derivable":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but the proven runs yield no tail figure, so no tail "
+        "line is printed.",
+}
+
+
+def _opt80_tail_withheld_reason(is_pr: bool | None, crit: dict[str, Any],
+                                merge_gating_jobs: dict[str, Any] | None,
+                                gating: dict[str, Any] | None) -> str:
+    """The first tail-axis gate that failed, in the order the detector tests
+    them: a pull-request trigger, pull-request timing, a readable required set,
+    then this job being on it."""
+    if is_pr is not True:
+        return "not_on_pull_requests"
+    if not _crit_has_developer_timing(crit):
+        return "all_events_timing"
+    if merge_gating_jobs is None:
+        return "merge_gating_unknown"
+    if gating is None:
+        return "not_merge_gating"
+    return "tail_not_derivable"
+
+
+def _opt80_tail_withheld_sentence(reason: str, job: str, pause_s: float) -> str:
+    """The rendered sentence for `reason` (a key of the table above)."""
+    return _OPT80_TAIL_WITHHELD_SENTENCES[reason].format(
+        job=job, pause=f"{pause_s:.0f}")
 
 
 def _detect_opt80_checkout_tail_stall(
@@ -9730,6 +9981,8 @@ def _detect_opt80_checkout_tail_stall(
     withheld: dict[str, int] | None = None,
     notes: dict[str, int] | None = None,
     withheld_candidates: list[dict[str, Any]] | None = None,
+    is_pr: bool | None = None,
+    merge_gating_jobs: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Checkout stalls on the tail (catalog OPT80) — measured, and log-proven.
 
@@ -9753,6 +10006,26 @@ def _detect_opt80_checkout_tail_stall(
     (`tail_run_longest_pause_s`) and named in the rendered evidence as an UPPER
     BOUND on what capping recovers — but it is not credited, because it is not a
     p50 quantity, and because the recommended abort leaves a residual.
+
+    THE TAIL AXIS. When the job is the workflow's slowest job, the workflow
+    runs on pull requests (`is_pr` True — unknown is treated as not), the
+    workflow's timing was taken from developer events
+    (`_crit_has_developer_timing`; a missing `event_scope` counts as
+    developer-timed here, while the verifier fails it) AND the job is on the
+    merge-gating path (`merge_gating_jobs`: required, or needed by required
+    work; with no complete required-check data the merge wait is not claimed),
+    a stalled run sits on that run's merge wait. That is stamped as a separate
+    `checkout_stall.tail_axis` block — "one run in N spends about X s longer on
+    checkout, and that run's log shows the fetch stalling" — derived only from
+    the per-run durations and the LOG-PROVEN tail runs (`_opt80_tail_axis`). It
+    is never summed into `wall_clock_p50_s`, any p50 total, the runner-minute
+    saving or the neutrality certificate; the renderer shows it as its own line
+    at the pole, or in the off-pole "Checkout stall tails" section when that
+    slowest job was not drilled as a pole.
+    A slowest job that gets NO tail line stamps `tail_axis_withheld_reason`,
+    renders that reason's sentence (`_OPT80_TAIL_WITHHELD_SENTENCES`, none of
+    which claims a merge wait) and counts `tail_line_withheld_<reason>` in
+    `notes`: the finding fired, so it is a note, never a `withheld` gate.
 
     Every exit is COUNTED into `withheld` (a `{gate: count}` accumulator the
     caller stamps onto the findings doc) and logged at DEBUG. An empty return is
@@ -9989,15 +10262,22 @@ def _detect_opt80_checkout_tail_stall(
             reverse=True)[:_OPT80_LOG_PROBE_MAX]
         proven: list[dict[str, Any]] = []
         credential_shaped = 0
+        # One outcome per fetched log, in probe order: `proven`, or the reason
+        # it proved nothing. Stamped, so the verifier re-derives which fetched
+        # logs were read and CLEAN (the only ones N leaves out) from them.
+        outcomes: list[dict[str, Any]] = []
         for r in probe:
             log = _fetch_job_log(client, repo, by_id[r["job_id"]])
             if not log:
                 reasons.append("tail_run_log_unavailable")
+                outcomes.append({"job_id": r["job_id"],
+                                 "outcome": "tail_run_log_unavailable"})
                 continue
             stall, why = _opt80_stall_in_log(log, step_window[r["job_id"]])
             if why:
                 reasons.append(why)
             if stall is None:
+                outcomes.append({"job_id": r["job_id"], "outcome": why})
                 continue
             if any(_OPT80_CREDENTIAL_RE.search(str(stall[side]["line"]))
                    for side in ("before", "after")):
@@ -10007,7 +10287,10 @@ def _detect_opt80_checkout_tail_stall(
                 # suppression, which made the tally assert something false.
                 credential_shaped += 1
                 reasons.append("quoted_progress_line_is_credential_shaped")
+                outcomes.append({"job_id": r["job_id"],
+                                 "outcome": "quoted_progress_line_is_credential_shaped"})
                 continue
+            outcomes.append({"job_id": r["job_id"], "outcome": "proven"})
             proven.append({"job_id": r["job_id"], "run_url": r["run_url"],
                            "checkout_s": r["checkout_s"], **stall})
         if len(proven) < _OPT80_MIN_PROVEN_TAIL_RUNS:
@@ -10058,6 +10341,51 @@ def _detect_opt80_checkout_tail_stall(
 
         worst = max(proven, key=lambda p: float(p["gap_s"]))
         on_pole = str(crit.get("long_pole_job") or "") == job_name
+        # The slowest job of a workflow that runs on pull requests: a stalled run
+        # is on that run's merge wait, so the tail is stated on its own axis.
+        # BOTH halves of "on pull requests" are required: the declared trigger
+        # (`is_pr`) AND pull-request timing. Without a sampled pull-request run,
+        # `_crit_for` falls back to all events, so `long_pole_job` and every
+        # per-run checkout above are push timings that no pull request waited on.
+        # And the job must be on the MERGE-GATING path: required, or needed by
+        # required work (`merge_gating_jobs`, keyed by YAML job). The slowest job
+        # is not necessarily what a merge waits on — a slow non-required
+        # benchmark beside a required fast `test` is not — and with no
+        # required-check data (`None`) the merge wait is not claimed at all.
+        gating = (merge_gating_jobs or {}).get(key)
+        tail_axis = (_opt80_tail_axis(per_run, proven, p50,
+                                      slow_ids=[r["job_id"] for r in tail_runs],
+                                      probed_ids=[r["job_id"] for r in probe],
+                                      clean_ids=[o["job_id"] for o in outcomes
+                                                 if o["outcome"]
+                                                 in _OPT80_CLEAN_LOG_OUTCOMES])
+                     if on_pole and is_pr is True
+                     and _crit_has_developer_timing(crit)
+                     and gating is not None else None)
+        if tail_axis is not None:
+            tail_axis["merge_gating"] = dict(gating)
+            pole_sentence = (
+                f"`{job_name}` is this workflow's slowest job on pull requests: "
+                f"{_opt80_tail_phrase(tail_axis)} - a tail figure, never added to "
+                "the p50 merge wait or to any total.")
+        elif on_pole:
+            # No tail line: say WHICH fact withheld it, and never claim a merge
+            # wait the stamped facts do not show. One reason per case, in the
+            # order the gate above tests them, stamped on the finding so the
+            # self-check pairs the rendered sentence to it.
+            withheld_reason = _opt80_tail_withheld_reason(
+                is_pr, crit, merge_gating_jobs, gating)
+            pole_sentence = _opt80_tail_withheld_sentence(
+                withheld_reason, job_name, float(worst["gap_s"]))
+            # The finding FIRED, so the withheld line is a note, never a
+            # suppression in `withheld` (see the docstring's two tallies).
+            if notes is not None:
+                note_key = f"tail_line_withheld_{withheld_reason}"
+                notes[note_key] = notes.get(note_key, 0) + 1
+            logger.debug("OPT80 %s: tail line for %s withheld by %s", wf_path,
+                         job_name, withheld_reason)
+        else:
+            pole_sentence = ""
         title = "Checkout Stalls on the Tail"
         rows = [[f"[run]({p['run_url']})" if p["run_url"] else "run",
                  f"{float(p['checkout_s']):.0f}s",
@@ -10081,9 +10409,7 @@ def _detect_opt80_checkout_tail_stall(
             f"tail cannot move the p50 merge gate. What does improve is the stalled runs "
             f"themselves, by at most the {float(worst['gap_s']):.0f}s pause quoted below "
             f"(less, once the 30s abort and the re-fetch are paid). "
-            + (f"`{job_name}` is this workflow's slowest job; the stall's effect on "
-               f"the merge wait is measured (longest pause {float(worst['gap_s']):.0f}s) "
-               f"but not credited in this version." if on_pole else ""))
+            + pole_sentence)
         me = _measured_evidence(
             ["Tail run", "Checkout", "Pause", "Last progress line before the pause",
              "First progress line after it"],
@@ -10174,6 +10500,13 @@ def _detect_opt80_checkout_tail_stall(
             "min_proven_tail_runs": _OPT80_MIN_PROVEN_TAIL_RUNS,
             "proven_tail_runs": proven,
             "logs_fetched": len(probe),
+            # WHICH slow runs' logs were fetched: every proof must be one of
+            # them, and the tail axis counts the slow runs outside this list as
+            # unread rather than as smooth.
+            "log_probed_job_ids": [r["job_id"] for r in probe],
+            # What each fetched log showed (`proven`, or why not), so N's
+            # read-and-clean subtraction is re-derived, never trusted.
+            "log_probe_outcomes": outcomes,
             "log_probe_max": _OPT80_LOG_PROBE_MAX,
             "tail_excess_s": tail_excess,
             # The longest pause OBSERVED, which is an upper bound on what capping
@@ -10185,6 +10518,10 @@ def _detect_opt80_checkout_tail_stall(
             "effective_monthly_volume": eff_volume,
             "runner_min_saving": credited,
         }
+        if tail_axis is not None:
+            f["checkout_stall"]["tail_axis"] = tail_axis
+        elif on_pole:
+            f["checkout_stall"]["tail_axis_withheld_reason"] = withheld_reason
         f["tier2_neutrality"] = {
             # OPT80's own token. Nothing about the fix changes what any job runs
             # or what any check is called, and the credited quantity is a tail
@@ -19983,6 +20320,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _crit["declared_job_keys"] = sorted(str(k) for k in _declared)
     _pr_workflows = _declared_pr_workflows(
         client, repo, set(crit_by_wf) | set(jobs_per_run_by_wf), wf_docs=_wf_docs)
+    # Stamped so the self-check can hold OPT80's tail line to the same
+    # "declares a pull-request trigger" condition the detector used.
+    findings_doc["declared_pr_workflows"] = sorted(_pr_workflows)
     _dropped_non_pr = [n for n in pr_check_p50
                        if not _is_pr_gate_check(n, crit_by_wf, events_by_wf,
                                                 _pr_workflows, req_names)]
@@ -20798,7 +21138,16 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             # rendered as one Data sources row so "could not tell" never reads
             # as clean.
             withheld_candidates=findings_doc.setdefault(_OPT80_WITHHELD_DOC_KEY, []),
-            notes=findings_doc.setdefault("opt80_notes", {}))
+            notes=findings_doc.setdefault("opt80_notes", {}),
+            # Whether this workflow can gate a PR. Only then does a stall on its
+            # slowest job reach a merge wait, and only then is the tail line stamped.
+            is_pr=is_pr,
+            # ...and only on a job the merge actually waits on: required, or
+            # needed by required work. None (no readable required set) = unknown,
+            # and an unknown merge wait is never claimed.
+            merge_gating_jobs=_opt80_merge_gating_jobs(
+                wf_path, required_checks, findings_doc.get("workflow_job_graph"),
+                crit_by_wf, workflow_names=findings_doc.get("workflow_names")))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 

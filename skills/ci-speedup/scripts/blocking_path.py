@@ -6501,6 +6501,159 @@ def _tier2_cert_summary(f: dict[str, Any]) -> str:
     return msg
 
 
+# ---- OPT80's tail axis: a separate line, never a p50 number --------------------
+#
+# An OPT80 finding on the slowest job of a workflow that runs on pull requests
+# carries `checkout_stall.tail_axis`: how often a run stalls and how much longer
+# that run's checkout takes. It is NOT a typical-run quantity (`wall_clock_p50_s`
+# stays 0), so it is rendered as its own marked line beside the pole's merge-wait
+# figure and never summed into the headline, a pole's buy line, the Tier-2
+# runner-minute section or any total. `verify_report` pairs each
+# `<!-- opt80-tail:<id> -->` marker with its stamped block and re-derives the two
+# numbers from the per-run checkout durations and the log-proven tail runs.
+
+def _opt80_tail_axis_of(f: dict[str, Any]) -> dict[str, Any] | None:
+    cs = f.get("checkout_stall")
+    if str(f.get("pattern") or "") != "OPT80" or not isinstance(cs, dict):
+        return None
+    axis = cs.get("tail_axis")
+    return axis if isinstance(axis, dict) else None
+
+
+def _opt80_tail_for(pole: dict[str, Any],
+                    findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """OPT80 findings carrying a tail axis on THIS drilled pole, never across
+    workflows. OPT80's affected job is ONE exact runtime name, so the join is
+    exact, the same way the verifier makes it: on the pole's stamped `job`,
+    else on its check whole or with ONLY the workflow-name prefix (the first
+    ` / ` segment) stripped. A sibling matrix leg (`test (1)` vs `test (2)`) or
+    a sibling compound name is a different job."""
+    job = str(pole.get("job") or "")
+    if job:
+        targets = {job}
+    else:
+        check = str(pole.get("check") or "")
+        targets = {check} if check else set()
+        if " / " in check:
+            targets.add(check.split(" / ", 1)[1])
+    if not targets:
+        return []
+    pole_wf = str(pole.get("workflow_file") or "")
+    out: list[dict[str, Any]] = []
+    for f in findings:
+        if f.get("advisory") or _opt80_tail_axis_of(f) is None:
+            continue
+        if _wf_conflict(pole_wf, str(f.get("workflow_file") or "")):
+            continue
+        jobs = {str(j) for j in (f.get("affected_jobs") or []) if str(j)}
+        if jobs & targets:
+            out.append(f)
+    return out
+
+
+def _opt80_tail_count_sentence(axis: dict[str, Any]) -> str:
+    """What "one run in N" stands on, from the stamped counts: m of n sampled
+    runs were slow, L of their logs were read - k show the stall, u could not
+    be read, d are clean. Only a clean log is left out of N; a slow run whose
+    log was unreadable, or not read at all (the probe cap bounds cost, it is
+    not a finding), is counted."""
+    n = int(_num(axis.get("sampled_runs")) or 0)
+    k = int(_num(axis.get("tail_runs")) or 0)
+    m = int(_num(axis.get("slow_runs")) or k)
+    read = int(_num(axis.get("logs_read")) or k)
+    u = int(_num(axis.get("logs_unreadable")) or 0)
+    d = int(_num(axis.get("logs_clean"))
+            if _num(axis.get("logs_clean")) is not None else max(read - k - u, 0))
+    out = (f"{m} of {n} sampled runs had a slow checkout; logs were read for "
+           f"{read} of those: {k} show the fetch standing still, {u} unreadable, "
+           f"{d} clean.")
+    counted = [f"the {k} proven run{'' if k == 1 else 's'}"]
+    if u:
+        counted.append(f"the {u} slow run{'' if u == 1 else 's'} whose "
+                       f"log{'' if u == 1 else 's'} could not be read")
+    if m > read:
+        r = m - read
+        counted.append(f"the {r} slow run{'' if r == 1 else 's'} whose "
+                       f"log{' was' if r == 1 else 's were'} not read")
+    out += " N counts " + (counted[0] if len(counted) == 1 else
+                           ", ".join(counted[:-1]) + " and " + counted[-1])
+    if d:
+        out += (f"; the {d} clean log{'' if d == 1 else 's'} "
+                f"{'is' if d == 1 else 'are'} left out")
+    return out + "."
+
+
+def _opt80_tail_block(findings: list[dict[str, Any]], catalog_url: str) -> list[str]:
+    """One marked tail line per finding. The sentence is a hand-copied f-string
+    of the collector's `_opt80_tail_phrase` shape, rebuilt here from the stamped
+    block; it is kept in sync by `verify_report.py`'s regex, not by sharing code."""
+    out: list[str] = []
+    for f in findings:
+        axis = _opt80_tail_axis_of(f) or {}
+        fid = str(f.get("id") or "")
+        n = int(_num(axis.get("one_in_n")) or 0)
+        loss = _num(axis.get("tail_loss_s")) or 0.0
+        k = int(_num(axis.get("tail_runs")) or 0)
+        sampled = int(_num(axis.get("sampled_runs")) or 0)
+        tail_p50 = _num(axis.get("tail_checkout_p50_s")) or 0.0
+        typ = _num(axis.get("typical_checkout_p50_s")) or 0.0
+        jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
+        job = _flatten_cell(jobs[0]) if jobs else "this job"
+        wf = _wf_base(str(f.get("workflow_file") or ""))
+        anchor = f.get("fix_recipe_anchor")
+        url = f"{catalog_url}#{anchor}" if anchor else catalog_url
+        out += [f"<!-- opt80-tail:{fid} -->",
+                f"> **⏱️ Checkout stall tail (OPT80, `{fid}`):** on `{job}` in "
+                f"`{_flatten_cell(wf)}`, one run in {n} spends about {loss:.0f}s longer "
+                f"on checkout, and that run's log shows the fetch stalling. "
+                + _opt80_tail_count_sentence(axis)
+                + f" The {k} proven runs' median "
+                f"checkout is {tail_p50:.0f}s against a typical {typ:.0f}s. This is a "
+                "separate tail figure: the typical run never stalls, so it is not part "
+                "of the typical merge wait and is never added to any total. Fix "
+                f"recipe: {url}", ""]
+    return out
+
+
+def _opt80_off_pole_tail_block(findings: list[dict[str, Any]], catalog_url: str,
+                               rendered: set[str] | None = None,
+                               drilled: bool = True) -> list[str]:
+    """Tail lines whose job is NOT a drilled pole (the slowest job of another
+    pull-request workflow, or any in a static-only report). `rendered` holds the
+    ids already shown at a pole; each finding's line renders exactly once.
+    `drilled` is False on the static-only render, which drills no pole, so the
+    heading must not point at "the long poles drilled above"."""
+    done = rendered or set()
+    rest = [f for f in findings
+            if not f.get("advisory") and _opt80_tail_axis_of(f) is not None
+            and str(f.get("id") or "") not in done]
+    if not rest:
+        return []
+    where = ("but not one of the long poles drilled above." if drilled else
+             "and this report drilled no long pole, so its tail is stated here.")
+    # Its own `##` section (anchor `checkout-stall-tails`): without a heading the
+    # block would read as the tail of whatever section precedes it - the last
+    # Runner saving card - and the tail is never a runner-minute figure.
+    return ["---", "", f'<a id="{_OPT80_TAILS_ANCHOR}"></a>', "",
+            "## ⏱️ Checkout stall tails on a workflow's slowest job", "",
+            "Each job below is the slowest job of a workflow that runs on pull "
+            f"requests, {where}", "",
+            *_opt80_tail_block(rest, catalog_url)]
+
+
+_OPT80_TAILS_ANCHOR = "checkout-stall-tails"
+
+
+def _opt80_tails_toc_entry(count: int) -> list[str]:
+    """The Contents pointer to the off-pole tails section ([] for none)."""
+    if count <= 0:
+        return []
+    plural = "s" if count != 1 else ""
+    return [f"**⏱️ Checkout stall tails** - {count} job{plural} whose stalled runs "
+            "take longer on checkout (a separate tail figure, never added to any "
+            f"total): [see below](#{_OPT80_TAILS_ANCHOR}).", ""]
+
+
 def _tier2_unpromoted_accounting(findings: list[dict[str, Any]],
                                  promoted: list[dict[str, Any]]) -> dict[str, int]:
     """Classify every positive-saving finding the lead's tail must account for.
@@ -8944,13 +9097,18 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *queue_lines]
     if tier2_lines:
         out += ["---", "", *tier2_lines]
+    # No pole is drilled here, so every OPT80 tail line renders in the off-pole
+    # section, after the runner-minute cards and before Also noticed. This is
+    # the static-only path (no measured poles); the block is empty unless some
+    # finding stamps a tail axis.
+    out += _opt80_off_pole_tail_block(all_findings, catalog_url, drilled=False)
     if opt79_off_pole:
         out += ["---", "", *opt79_off_pole]
-    if also_lines:
-        out += ["---", "", *also_lines]
     _o81_lines = _opt81_unrouted_block(_opt81_findings(all_findings), catalog_url)
     if _o81_lines:
         out += ["---", "", *_o81_lines]
+    if also_lines:
+        out += ["---", "", *also_lines]
     # Measured net-negative caches that could not be PRICED (three cases: the
     # slowest job, or one tied with it, of a workflow no PR runs; a PR workflow's
     # slowest job the pole arm declined; a PR-workflow job `needs:`-chained to the
@@ -9883,11 +10041,13 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # `top_is_gate` carries the removed Level-1 chart's ◀-is-the-gate condition to the
     # Contents' first row: the frequency gate is the slowest single check AND the gate is
     # not a `needs:` chain (a chain's slowest single check is not the gate).
-    out += _toc_block(pole_wfs, wf_gate, npop, also_count, pr_floor=is_pr_floor,
-                      queue_count=queue_count, also_on_path=also_on_path,
-                      runner_spine_count=runner_spine_count,
-                      tier2_toc=tier2_toc,
-                      top_is_gate=(gate_is_slowest and not chain_active))
+    _toc_lines = _toc_block(pole_wfs, wf_gate, npop, also_count, pr_floor=is_pr_floor,
+                            queue_count=queue_count, also_on_path=also_on_path,
+                            runner_spine_count=runner_spine_count,
+                            tier2_toc=tier2_toc,
+                            top_is_gate=(gate_is_slowest and not chain_active))
+    _toc_at = len(out)
+    out += _toc_lines
     # The prose provenance ("Where this data comes from") is consolidated into the
     # 🗄️ Data sources section at the foot (owner UX edit 2026-07-19) — no longer emitted
     # here after the Contents.
@@ -10580,8 +10740,15 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                         "its own job timing wasn't sampled), so there is no step-level drill "
                         "for it here - a re-run that samples it will drill it. Attack it "
                         "there; this check follows it down for free.", ""]
+            # An OPT80 tail on the gate's own job still belongs at this pole: left
+            # to the off-pole section it would sit under "not one of the long
+            # poles drilled above", which this job is.
+            out += _opt80_tail_block(_opt80_tail_for(p, all_findings), catalog_url)
             continue
         out += _floor_note(p, floor_pool)
+        # OPT80's tail line sits beside the pole's merge-wait figure, as its own
+        # marked line: a stalled run's loss, never part of the typical wait.
+        out += _opt80_tail_block(_opt80_tail_for(p, all_findings), catalog_url)
         # A data-driven match is on-path only if ANY joined finding is NOT `spine_rare`; a match
         # made up solely of presence-demoted (opt-in/rare) findings is still coverage, but the
         # waterfall pointer must say "opt-in / rare", not "sits ON the critical path" (mirrors the
@@ -10780,18 +10947,34 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # the spine doesn't capture, NOT hygiene), then the promoted runner-minute tier, then
     # the off-path / set-aside material — the residual hygiene appendix, advisory signals, and the
     # judgment-needed checklist.
+    if queue_lines:
+        out += ["---", "", *queue_lines]
+    if tier2_lines:
+        out += ["---", "", *tier2_lines]
+    # OPT80 tail lines whose job was not drilled as a pole above get their own
+    # section here, after the runner-minute cards and before Also noticed (each
+    # renders once: the ids already shown at a pole are read off their markers).
+    _tails_lines = _opt80_off_pole_tail_block(
+        all_findings, catalog_url,
+        set(re.findall(r"<!-- opt80-tail:([^ ]+) -->", "\n".join(out))))
+    out += _tails_lines
+    if _tails_lines and _toc_lines:
+        # The Contents is rendered before the poles decide which tails they
+        # carry, so its pointer is spliced in now, ahead of the Also noticed one.
+        _entry = _opt80_tails_toc_entry(
+            sum(1 for ln in _tails_lines if ln.startswith("<!-- opt80-tail:")))
+        _also_at = next((k for k, ln in enumerate(_toc_lines)
+                         if ln.startswith("**🧹 Also noticed**")), len(_toc_lines))
+        out[_toc_at + _also_at:_toc_at + _also_at] = _entry
+    opt79_off_pole = _opt79_off_pole_block(all_findings, catalog_url, opt79_at_pole)
+    if opt79_off_pole:
+        out += ["---", "", *opt79_off_pole]
+    # OPT81 runner-class comparisons not already rendered at their pole.
     _o81_lines = _opt81_unrouted_block(
         [f for f in _opt81_findings(all_findings) if id(f) not in opt81_rendered],
         catalog_url)
     if _o81_lines:
         out += ["---", "", *_o81_lines]
-    if queue_lines:
-        out += ["---", "", *queue_lines]
-    if tier2_lines:
-        out += ["---", "", *tier2_lines]
-    opt79_off_pole = _opt79_off_pole_block(all_findings, catalog_url, opt79_at_pole)
-    if opt79_off_pole:
-        out += ["---", "", *opt79_off_pole]
     if also_lines:
         out += ["---", "", *also_lines]
     if shallow_note and not queue_lines and not also_lines:

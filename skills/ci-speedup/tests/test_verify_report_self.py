@@ -9178,6 +9178,9 @@ def _opt80_verifier_finding(**over):
             "min_gap_s": 20.0, "min_proven_tail_runs": 2,
             "proven_tail_runs": proven,
             "logs_fetched": 2, "log_probe_max": 4,
+            "log_probed_job_ids": [r["job_id"] for r in per_run if r["tail"]],
+            "log_probe_outcomes": [{"job_id": r["job_id"], "outcome": "proven"}
+                                   for r in per_run if r["tail"]],
             "tail_excess_s": 22.0, "tail_run_longest_pause_s": 40.0,
             "on_critical_path": True,
             "monthly_volume": 100, "effective_monthly_volume": 100.0,
@@ -9476,6 +9479,1140 @@ def _opt80_pole_doc():
     return doc
 
 
+# ── OPT80's tail axis: "one run in N spends about X s longer on checkout" ──
+# Every number in the line is re-derived from the per-run checkout durations and
+# the per-run stall proofs; the stamped block is compared, never trusted.
+
+_OPT80_TAIL_AXIS = {"sampled_runs": 10, "slow_runs": 2, "logs_read": 2,
+                    "tail_runs": 2, "logs_clean": 0, "logs_unreadable": 0,
+                    "counted_runs": 2, "one_in_n": 5,
+                    "typical_checkout_p50_s": 10.0, "tail_checkout_p50_s": 120.0,
+                    "tail_loss_s": 110.0, "on_critical_path": True,
+                    "merge_gating": {"basis": "required",
+                                     "required_check": "CI / build",
+                                     "required_job": "build", "job_key": "build"}}
+
+
+def _opt80_tail_eligibility(doc, *, event_scope="pull_request", declared=True,
+                            long_pole="build"):
+    """Stamp what the collector requires before it states a tail line: the
+    workflow declares a pull-request trigger, was TIMED on pull-request runs
+    (`event_scope`), and the finding's job is its slowest job."""
+    wf = doc["findings"][0]["workflow_file"]
+    events = ["pull_request"] if event_scope != "all-events" else ["push"]
+    doc.setdefault("per_workflow_timing", {})[wf] = {
+        "event_scope": event_scope, "events": events,
+        "long_pole_job": long_pole, "long_pole_p50": 121.0,
+        "job_p50": {long_pole: 121.0}}
+    doc["declared_pr_workflows"] = [wf] if declared else []
+    doc["required_checks"] = ["CI / build"]
+    doc["required_checks_complete"] = True
+    doc.setdefault("workflow_names", {})[wf] = "CI"
+    doc.setdefault("workflow_job_graph", {})[wf] = {
+        "build": {"name": "build", "needs": [], "reusable": False, "matrix": False},
+        "bench": {"name": "bench", "needs": [], "reusable": False, "matrix": False}}
+    return doc
+
+
+def _opt80_tail_doc(pole_check="build", pole_job="build"):
+    doc = _opt80_pole_doc()
+    doc["findings"][0]["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    _opt80_tail_eligibility(doc)
+    pcp = doc["pr_critical_path"]
+    pcp["critical_path_check"] = pole_check
+    pcp["checks"][0]["name"] = pole_check
+    pcp["poles"][0].update(check=pole_check, job=pole_job)
+    return doc
+
+
+def test_opt80_tail_axis_rederives_from_the_real_detector_output():
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    f = t._opt80_pr(is_pr=True)[0]
+    assert f["checkout_stall"]["tail_axis"]["one_in_n"] == 5
+    assert vr._opt80_tail_axis_rederived(f) == []
+    for key, bad in (("one_in_n", 4), ("tail_loss_s", 200.0), ("tail_runs", 3),
+                     ("sampled_runs", 9), ("tail_checkout_p50_s", 60.0),
+                     ("typical_checkout_p50_s", 1.0)):
+        g = copy.deepcopy(f)
+        g["checkout_stall"]["tail_axis"][key] = bad
+        assert any(f"tail_axis.{key}" in p for p in vr._opt80_tail_axis_rederived(g)), key
+
+
+def test_opt80_tail_axis_counts_slow_runs_and_checks_proofs_against_logs_fetched():
+    """N re-derives from the measured slow runs (proven, plus slow runs whose
+    log was never read), and every proof must be one of the logs the collector
+    says it fetched - a proof for a run outside the probe is not a log that was
+    read. Fed the REAL detector's output for a probe capped at 4 of 10."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    f = t._opt80_capped_probe()[0]
+    cs = f["checkout_stall"]
+    assert cs["tail_axis"]["one_in_n"] == 3
+    assert vr._opt80_tail_axis_rederived(f) == []
+    for key, bad in (("one_in_n", 8), ("slow_runs", 4), ("logs_read", 10),
+                     ("counted_runs", 4)):
+        g = copy.deepcopy(f)
+        g["checkout_stall"]["tail_axis"][key] = bad
+        assert any(f"tail_axis.{key}" in p for p in vr._opt80_tail_axis_rederived(g)), key
+    # A proof for a run whose log was not in the fetched set.
+    g = copy.deepcopy(f)
+    unread = next(i for i in g["checkout_stall"]["tail_run_job_ids"]
+                  if i not in g["checkout_stall"]["log_probed_job_ids"])
+    g["checkout_stall"]["proven_tail_runs"][0]["job_id"] = unread
+    assert any("fetched" in p for p in vr._opt80_tail_axis_rederived(g))
+    # A fetched-log list that is not the slow runs, or disagrees with the count.
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["log_probed_job_ids"][0] = 8001  # a typical 10s run
+    assert any("fetched" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["log_probed_job_ids"].pop()
+    assert any("fetched" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    del g["checkout_stall"]["log_probed_job_ids"]
+    assert any("fetched" in p for p in vr._opt80_tail_axis_rederived(g))
+
+
+def test_opt80_tail_axis_rederives_n_from_the_per_log_outcomes():
+    """N leaves out only the fetched logs that were READ and CLEAN. A log that
+    was unavailable, or whose proven stall was dropped as credential-shaped,
+    showed nothing, so its slow run stays in N. The verifier re-derives that
+    split from the stamped `log_probe_outcomes`: a verifier that subtracted
+    every non-proven fetched log (L - k) would refuse the real output here."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    for odd in (None, t._OPT80_SMOOTH_LOG):
+        cs, odd_id = t._opt80_three_slow_one_odd(odd)
+        f = {"pattern": "OPT80", "wall_clock_p50_s": 0.0, "checkout_stall": cs}
+        assert vr._opt80_tail_axis_rederived(f) == [], odd
+    cs, odd_id = t._opt80_three_slow_one_odd(None)
+    f = {"pattern": "OPT80", "wall_clock_p50_s": 0.0, "checkout_stall": cs}
+    assert cs["tail_axis"]["counted_runs"] == 3
+    # The old subtraction, stamped: refused.
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["tail_axis"].update(counted_runs=2, one_in_n=5,
+                                            logs_unreadable=0, logs_clean=1)
+    probs = vr._opt80_tail_axis_rederived(g)
+    assert any("tail_axis.counted_runs" in p for p in probs), probs
+    assert any("tail_axis.logs_clean" in p for p in probs), probs
+    # An unavailable log relabelled clean: the outcome is not what the log showed
+    # ... and the axis no longer re-derives either way it is stamped.
+    g = copy.deepcopy(f)
+    for o in g["checkout_stall"]["log_probe_outcomes"]:
+        if o["job_id"] == odd_id:
+            o["outcome"] = "tail_without_log_gap"
+    assert vr._opt80_tail_axis_rederived(g), g
+    # Outcomes missing, naming a run outside the fetched logs, an unknown
+    # outcome, or a `proven` outcome with no proof: all refused.
+    g = copy.deepcopy(f)
+    del g["checkout_stall"]["log_probe_outcomes"]
+    assert any("log_probe_outcomes" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["log_probe_outcomes"][0]["job_id"] = 8001
+    assert any("log_probe_outcomes" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["log_probe_outcomes"][0]["outcome"] = "looked_fine"
+    assert any("log_probe_outcomes" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    for o in g["checkout_stall"]["log_probe_outcomes"]:
+        if o["job_id"] == odd_id:
+            o["outcome"] = "proven"
+    assert any("log_probe_outcomes" in p for p in vr._opt80_tail_axis_rederived(g))
+
+
+def test_opt80_clean_log_outcomes_stay_coupled_to_the_engine():
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import collect_runs as cr  # noqa: E402
+    assert vr._VR_OPT80_CLEAN_LOG_OUTCOMES == cr._OPT80_CLEAN_LOG_OUTCOMES
+    assert cr._OPT80_CLEAN_LOG_OUTCOMES <= cr._OPT80_VERDICT_GATES
+
+
+def test_opt80_tail_axis_is_refused_off_the_critical_path_and_as_a_p50():
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    assert vr._opt80_tail_axis_rederived(f) == []
+    f["checkout_stall"]["on_critical_path"] = False
+    assert any("on_critical_path" in p for p in vr._opt80_tail_axis_rederived(f))
+    f["checkout_stall"]["on_critical_path"] = True
+    f["wall_clock_p50_s"] = 110.0
+    assert any("wall_clock_p50_s" in p for p in vr._opt80_tail_axis_rederived(f))
+
+
+def test_opt80_tail_axis_counts_only_tail_runs_whose_log_proves_a_stall():
+    """A proof whose quoted lines show the transfer ADVANCING is no stall, so
+    that run drops out of N: one proven run of ten re-derives to one in ten."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    f["checkout_stall"]["proven_tail_runs"][1]["after"]["line"] = (
+        "Receiving objects:  60% (72000/120000)")
+    probs = vr._opt80_tail_axis_rederived(f)
+    assert any("tail_axis.tail_runs" in p and "1" in p for p in probs), probs
+    assert any("tail_axis.one_in_n" in p and "10" in p for p in probs), probs
+
+
+# ── OPT80's slowest job WITHOUT a tail line ──
+# The finding stamps `tail_axis_withheld_reason` and renders that reason's own
+# sentence. The self-check pairs the two, re-derives the reason from the
+# stamped facts, and fails any merge-wait claim on a finding with no tail axis.
+
+_OPT80_WITHHELD_CHECK = "OPT80 slowest-job sentence pairs with its withheld reason"
+_OPT80_LEGACY_POLE_SENTENCE = (
+    "`build` is this workflow's slowest job; the stall's effect on the merge wait "
+    "is measured (longest pause 40s) but not credited in this version.")
+
+
+def _opt80_withheld_doc(reason, sentence_reason=None, evidence_tail=None):
+    """An on-pole OPT80 finding with no tail axis, its stamped facts set the way
+    the collector would have seen them for `reason`."""
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    doc = _opt80_pole_doc()
+    _opt80_tail_eligibility(
+        doc, event_scope="all-events" if reason == "all_events_timing" else "pull_request",
+        declared=reason != "not_on_pull_requests")
+    if reason == "merge_gating_unknown":
+        doc["required_checks_complete"] = False
+    if reason == "not_merge_gating":
+        doc["required_checks"] = ["CI / bench"]
+    f = doc["findings"][0]
+    f["checkout_stall"]["tail_axis_withheld_reason"] = reason
+    tail = (evidence_tail if evidence_tail is not None
+            else t._OPT80_WITHHELD_POLE_CASES[sentence_reason or reason][2])
+    f["evidence"] = f["evidence"] + ". " + tail
+    return doc
+
+
+def _opt80_withheld_check(tmp_path: Path, doc):
+    vr = _load_verify_report()
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    checks = {c.name: c for c in vr.run_checks(report, report_path, findings_path,
+                                               skill_repo=None)}
+    assert _OPT80_WITHHELD_CHECK in checks, sorted(checks)
+    return checks[_OPT80_WITHHELD_CHECK]
+
+
+def test_opt80_withheld_tail_sentences_are_the_collectors_own():
+    """Coupling: the verifier's copy of the withheld-reason sentences equals the
+    collector's table, key for key and byte for byte."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+    assert vr._VR_OPT80_TAIL_WITHHELD_SENTENCES == t.cr._OPT80_TAIL_WITHHELD_SENTENCES
+
+
+@pytest.mark.parametrize("reason", ["not_on_pull_requests", "all_events_timing",
+                                    "merge_gating_unknown", "not_merge_gating"])
+def test_opt80_withheld_tail_sentence_pairs_with_its_reason(tmp_path: Path, reason):
+    chk = _opt80_withheld_check(tmp_path, _opt80_withheld_doc(reason))
+    assert chk.ok, chk.detail
+
+
+@pytest.mark.parametrize("reason", ["not_on_pull_requests", "all_events_timing",
+                                    "merge_gating_unknown", "not_merge_gating"])
+def test_opt80_merge_wait_claim_without_a_tail_axis_is_caught(tmp_path: Path, reason):
+    """MUTATION: the pre-fix sentence ("the stall's effect on the merge wait is
+    measured ... but not credited") on a job the merge is not shown to wait on.
+    With gating unknown or not this job, that claim is false and must red."""
+    chk = _opt80_withheld_check(
+        tmp_path, _opt80_withheld_doc(reason, evidence_tail=_OPT80_LEGACY_POLE_SENTENCE))
+    assert not chk.ok
+    assert "merge wait" in chk.detail, chk.detail
+
+
+def test_opt80_withheld_reason_must_match_its_sentence_and_the_facts(tmp_path: Path):
+    # The sentence of another reason: a mismatch.
+    chk = _opt80_withheld_check(
+        tmp_path, _opt80_withheld_doc("merge_gating_unknown",
+                                      sentence_reason="not_merge_gating"))
+    assert not chk.ok and "merge_gating_unknown" in chk.detail, chk.detail
+    # "Branch protection could not be read" on a complete, readable required set.
+    doc = _opt80_withheld_doc("merge_gating_unknown")
+    doc["required_checks_complete"] = True
+    chk = _opt80_withheld_check(tmp_path, doc)
+    assert not chk.ok and "not_merge_gating" in chk.detail, chk.detail
+    # The slowest-job sentence with no stamped reason at all.
+    doc = _opt80_withheld_doc("not_merge_gating")
+    del doc["findings"][0]["checkout_stall"]["tail_axis_withheld_reason"]
+    chk = _opt80_withheld_check(tmp_path, doc)
+    assert not chk.ok, chk.detail
+    # A reason stamped next to a tail axis.
+    doc = _opt80_tail_doc()
+    doc["findings"][0]["checkout_stall"]["tail_axis_withheld_reason"] = "not_merge_gating"
+    chk = _opt80_withheld_check(tmp_path, doc)
+    assert not chk.ok, chk.detail
+
+
+def test_opt80_tail_line_renders_at_the_pole_and_pairs_with_its_block(tmp_path: Path):
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    line = "one run in 5 spends about 110s longer on checkout, and that run's log shows the fetch stalling"
+    pole = report.split("Long pole 1", 1)[1].split("\n## ", 1)[0]
+    assert "<!-- opt80-tail:f-promoted -->" in pole and line in pole, pole[:1500]
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    assert vr.check_tier2_neutrality_derived(report, findings_path, report_path).ok
+    # A rendered line with no stamped block fails…
+    plain = copy.deepcopy(doc)
+    del plain["findings"][0]["checkout_stall"]["tail_axis"]
+    findings_path.write_text(json.dumps(plain), encoding="utf-8")
+    assert not vr.check_opt80_tail_lines(report, findings_path).ok
+    # …and so does a stamped block with no rendered line.
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    stripped = report.replace("<!-- opt80-tail:f-promoted -->", "")
+    chk = vr.check_opt80_tail_lines(stripped, findings_path)
+    assert not chk.ok and "rendered 0 time(s), not once" in chk.detail, chk
+    # A marker rendered twice is not "once" either.
+    marker = "<!-- opt80-tail:f-promoted -->"
+    head, tail = report.split(marker, 1)
+    marked_line = tail.lstrip("\n").split("\n", 1)[0]
+    twice = report + "\n" + marker + "\n" + marked_line + "\n"
+    chk = vr.check_opt80_tail_lines(twice, findings_path)
+    assert not chk.ok and "rendered 2 time(s)" in chk.detail, chk
+    # The sentence must sit on the line right after the marker: stating it
+    # elsewhere in the report does not pair it. The sentence is lifted from the
+    # rendered line itself, so this case tracks whatever wording the renderer uses.
+    start = marked_line.index("one run in ")
+    end = marked_line.index("the fetch stalling", start) + len("the fetch stalling")
+    sentence = marked_line[start:end]
+    moved = (head + marker + "\n" + tail.lstrip("\n").replace(
+        marked_line, "> a checkout line that states no tail figure", 1)
+        + "\n" + sentence + "\n")
+    assert sentence in moved and moved.count(marker) == 1
+    chk = vr.check_opt80_tail_lines(moved, findings_path)
+    assert not chk.ok and "the line after its marker" in chk.detail, chk
+    # A tail sentence anywhere whose numbers the block does not re-derive fails.
+    stray = report + "\none run in 2 spends about 999s longer on checkout, and that run's log shows the fetch stalling\n"
+    assert not vr.check_opt80_tail_lines(stray, findings_path).ok
+    # X is the MEDIAN proven run's loss, not an upper bound (a proven run can
+    # lose more), so the legacy "loses up to" wording fails even when its
+    # numbers re-derive: a stale sentence cannot slip past the scan.
+    legacy = report.replace(
+        "spends about 110s longer on checkout, and that run's log shows the fetch stalling",
+        "loses up to 110s on checkout to a stalled fetch")
+    assert "loses up to 110s" in legacy
+    chk = vr.check_opt80_tail_lines(legacy, findings_path)
+    assert not chk.ok and "up to" in chk.detail, chk
+
+
+def test_opt80_tail_line_placement_is_its_own_pole_or_the_tails_section(tmp_path: Path):
+    """One placement rule: a tail marker sits inside its own job's Long pole
+    section or the dedicated `## ⏱️ Checkout stall tails` section, never above
+    the Contents, in a Runner saving card or in another job's pole; and the
+    tail sentence appears exactly once, on its marked line."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="other", pole_job="other")
+    report, _report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    marker = "<!-- opt80-tail:f-promoted -->"
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    i = report.index(marker)
+    line = report[i:].split("\n", 2)[1]
+    block = f"{marker}\n{line}\n"
+    assert block in report
+    rest = report.replace(block, "", 1)
+
+    def after_heading(text, heading):
+        j = text.index(heading)
+        k = text.index("\n", j) + 1
+        return text[:k] + "\n" + block + "\n" + text[k:]
+
+    assert "## 🟢 Runner saving" in rest and "Long pole 1" in rest
+    cases = {
+        "above Contents": rest.replace("## 📋 Contents", block + "\n## 📋 Contents", 1),
+        "another job's pole": after_heading(rest, "Long pole 1"),
+        "a Runner saving card": after_heading(rest, "## 🟢 Runner saving"),
+        "a second unmarked copy": report + "\n" + line + "\n",
+    }
+    for what, bad in cases.items():
+        chk = vr.check_opt80_tail_lines(bad, findings_path)
+        assert not chk.ok, (what, chk)
+    # The off-pole exemption in the neutrality check reads the same rule.
+    f = json.loads(findings_path.read_text(encoding="utf-8"))["findings"][0]
+    assert vr._vr_opt80_tail_rendered_off_pole(f, report)
+    assert not vr._vr_opt80_tail_rendered_off_pole(f, cases["a Runner saving card"])
+
+
+def test_opt80_stray_tail_scan_tolerates_spacing_and_wording_variants(tmp_path: Path):
+    """The stray-sentence scan keys on the core "one run in N ... X s ...
+    checkout" shape, not the exact canonical suffix: a spaced unit, a sentence
+    that ends early, or another verb must not slip past it."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    for stray in (
+            "one run in 2 loses 80 s on checkout",
+            "one run in 2 loses up to 80s on checkout.",
+            "one run in 2 spends about 80 s longer on checkout, and that run's "
+            "log shows the fetch stalling",
+            # Even the RIGHT numbers in a non-canonical wording are refused.
+            "one run in 5 loses about 110 s on checkout"):
+        chk = vr.check_opt80_tail_lines(report + "\n" + stray + "\n", findings_path)
+        assert not chk.ok, (stray, chk)
+
+
+def test_opt80_tail_line_is_refused_in_the_headline_or_runner_minute_section(
+        tmp_path: Path):
+    """The tail is never headlined or summed: a CORRECT tail sentence (or a
+    marker) above `## 📋 Contents` - the title, provenance table and Bottom
+    line - or inside the runner-minute section fails the check, even though its
+    numbers re-derive."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    good = "one run in 5 spends about 110s longer on checkout, and that run's log shows the fetch stalling"
+    legacy = "one run in 5 loses up to 110s on checkout to a stalled fetch"
+    assert "> **Bottom line.**" in report
+    for text in (good, legacy, "<!-- opt80-tail:f-promoted -->"):
+        headlined = report.replace("> **Bottom line.**",
+                                   f"> **Bottom line.** {text}.", 1)
+        chk = vr.check_opt80_tail_lines(headlined, findings_path)
+        assert not chk.ok and "headline" in chk.detail, (text, chk)
+    if "## Runner-minute reductions" in report:
+        tier2 = report.replace("## Runner-minute reductions",
+                               f"## Runner-minute reductions\n\n{good}.\n\n##"
+                               " Runner-minute reductions", 1)
+        chk = vr.check_opt80_tail_lines(tier2, findings_path)
+        assert not chk.ok and "runner-minute" in chk.detail, chk
+
+
+def test_opt80_tail_line_is_refused_off_the_pull_request_merge_wait(tmp_path: Path):
+    """The verifier holds a stamped tail axis to the collector's own gate: the
+    workflow declares a pull-request trigger, its timing came from sampled
+    pull-request runs, and the job is that workflow's slowest. A tail axis on a
+    push-only `smoke`-style job (timed on push, declared push-only) with
+    `on_critical_path: true` renders off-pole and used to pass; each missing
+    condition on its own must fail the check too."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    _report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    report = _report
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    for kw, why in (({"event_scope": "all-events", "declared": False}, "push-only"),
+                    ({"event_scope": "all-events"}, "pull request"),
+                    ({"declared": False}, "pull request"),
+                    ({"long_pole": "deploy"}, "slowest job")):
+        bad = _opt80_tail_eligibility(copy.deepcopy(doc), **kw)
+        findings_path.write_text(json.dumps(bad), encoding="utf-8")
+        chk = vr.check_opt80_tail_lines(report, findings_path)
+        assert not chk.ok, (kw, chk)
+    # Fail closed: a tail axis with no per-workflow timing at all is not earned.
+    bare = copy.deepcopy(doc)
+    del bare["per_workflow_timing"]
+    findings_path.write_text(json.dumps(bare), encoding="utf-8")
+    assert not vr.check_opt80_tail_lines(report, findings_path).ok
+
+
+def test_opt80_tail_line_is_refused_on_a_job_no_merge_waits_on(tmp_path: Path):
+    """A workflow's slowest job is not necessarily merge-gating: a slow,
+    non-required benchmark job beside a required fast `test`. The tail axis must
+    name the required check its job is (or is needed by), and the verifier
+    re-derives that from the stamped required set and the job graph."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+
+    def _fails(mutate):
+        bad = copy.deepcopy(doc)
+        mutate(bad)
+        findings_path.write_text(json.dumps(bad), encoding="utf-8")
+        chk = vr.check_opt80_tail_lines(report, findings_path)
+        assert not chk.ok, chk
+        return chk
+
+    axis = lambda d: d["findings"][0]["checkout_stall"]["tail_axis"]  # noqa: E731
+    # The job is not required (the required set names another check) ...
+    _fails(lambda d: d.__setitem__("required_checks", ["CI / bench"]))
+    # ... the required read was partial, or absent ...
+    _fails(lambda d: d.__setitem__("required_checks_complete", False))
+    _fails(lambda d: d.__setitem__("required_checks", None))
+    # ... the axis carries no merge-gating evidence at all ...
+    _fails(lambda d: axis(d).pop("merge_gating"))
+    # ... or claims the job is needed by a required job that does not need it.
+    def _claims_needed(d):
+        d["required_checks"] = ["CI / bench"]
+        axis(d)["merge_gating"] = {"basis": "needed_by_required",
+                                   "required_check": "CI / bench",
+                                   "required_job": "bench", "job_key": "build"}
+    _fails(_claims_needed)
+    # A real `needs:` edge from the required job makes the same claim true.
+    def _really_needed(d):
+        _claims_needed(d)
+        d["workflow_job_graph"][d["findings"][0]["workflow_file"]]["bench"][
+            "needs"] = ["build"]
+    good = copy.deepcopy(doc)
+    _really_needed(good)
+    findings_path.write_text(json.dumps(good), encoding="utf-8")
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+
+
+def test_opt80_merge_gating_rederives_the_workflow_prefix_and_refuses_ambiguity(
+        tmp_path: Path):
+    """The verifier's copy of the merge-gating predicate strips only THIS
+    workflow's own `name:` prefix (`workflow_names`), and refuses a required
+    context that literally names a job in more than one place - GitHub cannot
+    tell those check-runs apart, so the merge wait is unknown."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    wf = doc["findings"][0]["workflow_file"]
+
+    def _check(mutate):
+        bad = copy.deepcopy(doc)
+        mutate(bad)
+        findings_path.write_text(json.dumps(bad), encoding="utf-8")
+        return vr.check_opt80_tail_lines(report, findings_path)
+
+    def _foreign_prefix(d):
+        d["required_checks"] = ["deploy / build"]
+        d["findings"][0]["checkout_stall"]["tail_axis"]["merge_gating"][
+            "required_check"] = "deploy / build"
+    chk = _check(_foreign_prefix)
+    assert not chk.ok and "is not job" in str(chk.detail), chk
+
+    def _ambiguous(d):
+        d["required_checks"] = ["build"]
+        d["findings"][0]["checkout_stall"]["tail_axis"]["merge_gating"][
+            "required_check"] = "build"
+        d["workflow_job_graph"][".github/workflows/other.yml"] = {
+            "build": {"name": "build", "needs": [], "reusable": False,
+                      "matrix": False}}
+    chk = _check(_ambiguous)
+    assert not chk.ok and "ambiguous" in str(chk.detail), chk
+
+    def _unambiguous(d):
+        d["required_checks"] = ["build"]
+        d["findings"][0]["checkout_stall"]["tail_axis"]["merge_gating"][
+            "required_check"] = "build"
+    assert _check(_unambiguous).ok
+    # Unnamed workflow: GitHub's prefix is its file path.
+    def _unnamed(d):
+        d["workflow_names"] = {}
+        d["required_checks"] = [f"{wf} / build"]
+        d["findings"][0]["checkout_stall"]["tail_axis"]["merge_gating"][
+            "required_check"] = f"{wf} / build"
+    assert _check(_unnamed).ok
+
+
+def test_opt80_on_critical_path_matches_a_workflow_prefixed_pole_check(tmp_path: Path):
+    """A plain job's check-run is named `<workflow> / <job>`. The pole header
+    then says `CI / build` while the finding names `build`; the cross-check that
+    on_critical_path agrees with the rendered poles must see that as the same
+    job, or every real on-pole checkout stall fails its own report."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="CI / build", pole_job="build")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "CI / build" in report
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert chk.ok, chk
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+
+
+def test_opt80_off_critical_path_job_may_still_be_a_drilled_pole(tmp_path: Path):
+    """The collector sets on_critical_path only for the job that is its
+    workflow's SLOWEST. A drilled Long pole is often not that job (a chain pole
+    such as `prep -> verify`), so a False claim on a job rendered as a pole is
+    no contradiction and must not fail the report."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="CI / build", pole_job="build")
+    del doc["findings"][0]["checkout_stall"]["tail_axis"]
+    doc["findings"][0]["checkout_stall"]["on_critical_path"] = False
+    # A chain pole: the workflow's slowest job is another one.
+    doc["per_workflow_timing"] = _opt80_pwt("prep")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "CI / build" in report
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert chk.ok, chk
+
+
+def test_opt80_on_critical_path_is_rederived_both_ways_from_the_slowest_job(
+        tmp_path: Path):
+    """on_critical_path is the collector's "this job is its workflow's slowest
+    job" (`per_workflow_timing[wf].long_pole_job`), re-derived both ways
+    whatever the rendered poles show: a stale False on the slowest job fails,
+    and so does a True on a job that is not the slowest."""
+    vr = _load_verify_report()
+    for claimed, slowest in ((False, "build"), (True, "deploy")):
+        doc = _opt80_tail_doc(pole_check="CI / build", pole_job="build")
+        del doc["findings"][0]["checkout_stall"]["tail_axis"]
+        doc["findings"][0]["checkout_stall"]["on_critical_path"] = claimed
+        doc["per_workflow_timing"] = _opt80_pwt(slowest)
+        sub = tmp_path / f"{claimed}-{slowest}"
+        sub.mkdir()
+        report, report_path, findings_path = _tier2_artifacts(sub, doc)
+        chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+        assert not chk.ok and "slowest job" in str(chk.detail), (claimed, chk)
+
+
+def test_opt80_pole_match_uses_the_poles_own_job_not_the_last_segment(tmp_path: Path):
+    """A reusable-workflow call renders as `CI / e2e / build`; its job is
+    `e2e / build`, not the caller file's plain `build`. A finding on plain
+    `build` that claims to be on the critical path is not on that pole."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="CI / e2e / build", pole_job="e2e / build")
+    del doc["findings"][0]["checkout_stall"]["tail_axis"]
+    assert doc["findings"][0]["affected_jobs"] == ["build"]
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "CI / e2e / build" in report
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
+
+
+def test_opt80_unmapped_pole_strips_only_the_workflow_name_prefix():
+    """With no stamped pole entry to resolve a header's job, the verifier falls
+    back to the check-run name. GitHub names a check-run `<workflow name> /
+    <job>`: the prefix is the FIRST segment. A reusable-workflow job
+    `call-a / build` renders as `CI / call-a / build` and is on that pole; a
+    plain `build` is not on `CI / call-b / build`."""
+    vr = _load_verify_report()
+
+    def report(check):
+        return f"# r\n\n## 🔴 Long pole 1: `ci.yml` ▸ `{check}` - 5m 00s\n\nbody\n"
+
+    def finding(job):
+        return {"workflow_file": ".github/workflows/ci.yml", "affected_jobs": [job]}
+
+    on = vr._vr_opt80_job_rendered_as_pole
+    assert on(finding("call-a / build"), report("CI / call-a / build"), {})
+    assert not on(finding("build"), report("CI / call-b / build"), {})
+    assert on(finding("build"), report("CI / build"), {})
+    assert on(finding("build"), report("build"), {})
+    # Another workflow file's header never matches.
+    assert not on({"workflow_file": ".github/workflows/other.yml",
+                   "affected_jobs": ["build"]}, report("CI / build"), {})
+
+
+def _opt80_pwt(long_pole_job, events=("pull_request",)):
+    return {".github/workflows/ci.yml": {"long_pole_job": long_pole_job,
+                                         "long_pole_p50": 300.0,
+                                         "events": list(events),
+                                         "event_scope": next(
+                                             (e for e in events if e in (
+                                                 "pull_request", "merge_group",
+                                                 "pull_request_target")),
+                                             "all-events")}}
+
+
+def test_opt80_off_pole_exemption_rederives_the_workflows_slowest_job(tmp_path: Path):
+    """The off-pole tail exemption excuses an on_critical_path job with no pole
+    header. on_critical_path means "this workflow's slowest job", so the
+    exemption holds only when `per_workflow_timing[wf].long_pole_job` IS the
+    finding's job; a bare claim (no timing, or another job is slowest) fails."""
+    vr = _load_verify_report()
+    for pwt in (None, _opt80_pwt("deploy")):
+        doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+        if pwt is not None:
+            doc["per_workflow_timing"] = pwt
+        else:
+            doc.pop("per_workflow_timing", None)
+        report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+        assert report.count("<!-- opt80-tail:f-promoted -->") == 1
+        chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+        assert not chk.ok and "slowest job" in str(chk.detail), (pwt, chk)
+    doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    doc["per_workflow_timing"] = _opt80_pwt("build")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert chk.ok, chk
+
+
+def test_opt80_slowest_job_of_a_workflow_with_no_rendered_pole_is_no_contradiction(
+        tmp_path: Path):
+    """The collector stamps on_critical_path=True on a workflow's slowest job
+    whether or not that workflow runs on pull requests. A push-only nightly's
+    slowest job can never be a rendered pole, and a pull-request workflow
+    ranked below the drilled poles has none either; neither is a
+    contradiction. Only a workflow that HAS a rendered pole elsewhere is."""
+    vr = _load_verify_report()
+    for events in (("push", "schedule"), ("pull_request",)):
+        doc = _opt80_tail_doc(pole_check="CI / build", pole_job="build")
+        f = doc["findings"][0]
+        del f["checkout_stall"]["tail_axis"]
+        f["workflow_file"] = ".github/workflows/nightly.yml"
+        doc["per_workflow_timing"] = {".github/workflows/nightly.yml": {
+            "long_pole_job": "build", "long_pole_p50": 300.0, "events": list(events)}}
+        sub = tmp_path / events[0]
+        sub.mkdir()
+        report, report_path, findings_path = _tier2_artifacts(sub, doc)
+        chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+        assert chk.ok, (events, chk)
+
+
+def test_opt80_tail_joins_a_pole_on_its_exact_job_like_the_verifier():
+    """OPT80's affected job is ONE exact runtime name. The renderer joins the
+    tail line to a pole on the pole's stamped job exactly (else the check with
+    only the workflow-name prefix stripped), the way the verifier does: a
+    sibling matrix leg or a sibling compound name is a different job."""
+    bp = _load_blocking_path()
+
+    def f(job):
+        g = _opt80_verifier_finding(affected_jobs=[job])
+        g["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+        return g
+
+    def pole(check, job=None):
+        p = {"check": check, "workflow_file": ".github/workflows/ci.yml"}
+        if job is not None:
+            p["job"] = job
+        return p
+
+    tail_for = bp._opt80_tail_for
+    assert tail_for(pole("test (2)", "test (2)"), [f("test (1)")]) == []
+    assert tail_for(pole("test", "test"), [f("test (1)")]) == []
+    assert tail_for(pole("drizzle-adapter Integration Test",
+                         "drizzle-adapter Integration Test"),
+                    [f("prisma-adapter Integration Test")]) == []
+    assert len(tail_for(pole("test (2)", "test (2)"), [f("test (2)")])) == 1
+    assert len(tail_for(pole("CI / build"), [f("build")])) == 1
+    assert len(tail_for(pole("CI / call-a / build"), [f("call-a / build")])) == 1
+    assert tail_for(pole("CI / call-b / build"), [f("build")]) == []
+
+
+def test_opt80_tail_line_off_a_drilled_pole_renders_in_its_own_block(tmp_path: Path):
+    """The slowest job of a pull-request workflow that is not drilled: its tail
+    line renders once, outside every pole section, and that (only that) excuses
+    an on_critical_path job with no pole header."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    doc["per_workflow_timing"] = _opt80_pwt("build")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert report.count("<!-- opt80-tail:f-promoted -->") == 1
+    assert "Checkout stall tails on a workflow's slowest job" in report
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    assert vr.check_tier2_neutrality_derived(report, findings_path, report_path).ok
+    # The exemption is earned by the STAMPED axis, not by a marker on the page:
+    # the same report against findings with no tail axis fails the pole rule.
+    plain = json.loads(findings_path.read_text(encoding="utf-8"))
+    del plain["findings"][0]["checkout_stall"]["tail_axis"]
+    findings_path.write_text(json.dumps(plain), encoding="utf-8")
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
+    # Without the tail axis the exemption does not apply: the old rule stands.
+    del doc["findings"][0]["checkout_stall"]["tail_axis"]
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
+
+
+def test_opt80_tail_marker_inside_a_pole_section_is_not_off_pole(tmp_path: Path):
+    """The off-pole exemption is earned by WHERE the marker sits, not by the
+    marker existing: a tail line rendered inside a Long pole section is not the
+    off-pole tail block, so a slowest job that is not that pole stays refused."""
+    vr = _load_verify_report()
+    # On-pole render: the marker sits inside `build`'s Long pole section.
+    doc = _opt80_tail_doc()
+    report, _rp, _fp = _tier2_artifacts(tmp_path, doc)
+    marker = "<!-- opt80-tail:f-promoted -->"
+    assert marker in report.split("Long pole 1", 1)[1]
+    f = doc["findings"][0]
+    assert vr._vr_opt80_tail_rendered_off_pole(f, report) is False
+    # Off-pole render: the same helper says True, and the check accepts it.
+    doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    doc["per_workflow_timing"] = _opt80_pwt("build")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    f = doc["findings"][0]
+    assert vr._vr_opt80_tail_rendered_off_pole(f, report) is True
+    assert vr.check_tier2_neutrality_derived(report, findings_path, report_path).ok
+    # Move that marked line into the `deploy` pole section: it is no longer
+    # off-pole, so the `build` job (not a rendered pole) loses the exemption.
+    head, tail = report.split(marker, 1)
+    marked_line = tail.lstrip("\n").split("\n", 1)[0]
+    moved = report.replace(marker + "\n" + marked_line, "", 1)
+    assert marker not in moved
+    pole_hdr = "**The slowest check a typical PR waits on.**"
+    assert moved.count(pole_hdr) == 1
+    moved = moved.replace(pole_hdr, pole_hdr + "\n\n" + marker + "\n" + marked_line, 1)
+    assert moved.count(marker) == 1
+    assert marker in moved.split("Long pole 1", 1)[1].split("\n## ", 1)[0]
+    assert vr._vr_opt80_tail_rendered_off_pole(f, moved) is False
+    report_path.write_text(moved, encoding="utf-8")
+    chk = vr.check_tier2_neutrality_derived(moved, findings_path, report_path)
+    assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
+
+
+def test_opt80_tail_axis_rederives_the_median_of_a_skewed_proven_tail():
+    """Real detector output with three proven tail runs at 95s / 110s / 200s:
+    the verifier re-derives the tail median, 110s, and agrees with the stamp. A
+    verifier (or collector) that took the mean, 135s, disagrees with the other."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    f = t._opt80_pr(is_pr=True, durations=[10.0] * 7 + [95.0, 110.0, 200.0])[0]
+    want, why = vr._vr_opt80_tail_axis_expected(f["checkout_stall"])
+    assert want is not None, why
+    assert want["tail_runs"] == 3 and want["tail_checkout_p50_s"] == 110.0, want
+    assert vr._opt80_tail_axis_rederived(f) == []
+
+
+def test_opt80_one_in_n_rounds_half_to_even_in_both_collector_and_verifier():
+    """7 sampled / 2 proven = 3.5 -> 4 and 5 / 2 = 2.5 -> 2 (Python's
+    round-half-to-even). Floor says 3 for the first; ceil says 3 for the second.
+    The collector and the verifier must state the same N for both."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import collect_runs as cr  # noqa: E402
+
+    for n, want_n in ((7, 4), (5, 2)):
+        f = _opt80_verifier_finding()
+        cs = f["checkout_stall"]
+        proofs = cs["proven_tail_runs"][:2]
+        quiet = [{"job_id": 7000 + i, "run_url": f"https://x/runs/{7000 + i}",
+                  "checkout_s": 10.0, "tail": False} for i in range(n - 2)]
+        tail = [r for r in cs["per_run_checkout_s"] if r["tail"]]
+        cs["per_run_checkout_s"] = quiet + tail
+        cs["proven_tail_runs"] = proofs
+        got, why = vr._vr_opt80_tail_axis_expected(cs)
+        assert got is not None, why
+        assert got["one_in_n"] == want_n, (n, got)
+        coll = cr._opt80_tail_axis(cs["per_run_checkout_s"], proofs, got["typical_checkout_p50_s"])
+        assert coll["one_in_n"] == got["one_in_n"] == want_n, (n, coll, got)
+
+
+def _opt80_tail_expected_after(mutate):
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    mutate(f["checkout_stall"])
+    want, _why = vr._vr_opt80_tail_axis_expected(f["checkout_stall"])
+    return want
+
+
+def test_opt80_tail_axis_drops_a_proof_whose_pause_is_below_the_minimum_gap():
+    def short_gap(cs):
+        cs["proven_tail_runs"][1]["after"]["ts"] = "2026-06-01T00:00:24Z"  # 10s < 20s
+    want = _opt80_tail_expected_after(short_gap)
+    assert want["tail_runs"] == 1 and want["one_in_n"] == 10, want
+
+
+def test_opt80_tail_axis_drops_a_proof_held_at_one_hundred_percent():
+    def done(cs):
+        for side in ("before", "after"):
+            cs["proven_tail_runs"][1][side]["line"] = (
+                "Receiving objects: 100% (120000/120000)")
+    want = _opt80_tail_expected_after(done)
+    assert want["tail_runs"] == 1 and want["one_in_n"] == 10, want
+
+
+def test_opt80_tail_axis_drops_a_proof_whose_run_is_below_the_tail_threshold():
+    """A proof attached to a run whose measured checkout (30s) is under the 40s
+    tail threshold is not a tail run, however its quoted lines read."""
+    # Logs are fetched for slow runs only, so a proof on a run under the
+    # threshold is either a fetched log of a run that was not slow, or a proof
+    # outside the fetched logs. Both refuse the axis rather than count it.
+    vr = _load_verify_report()
+    for unlist in (False, True):
+        f = _opt80_verifier_finding()
+        cs = f["checkout_stall"]
+        jid = cs["proven_tail_runs"][1]["job_id"]
+        for r in cs["per_run_checkout_s"]:
+            if r["job_id"] == jid:
+                r["checkout_s"] = 30.0
+        if unlist:
+            cs["log_probed_job_ids"].remove(jid)
+            cs["logs_fetched"] = 1
+        want, why = vr._vr_opt80_tail_axis_expected(cs)
+        assert want is None and any("fetched" in w for w in why), (unlist, why)
+
+
+def test_opt80_tail_axis_counts_a_job_proven_twice_once():
+    def dup(cs):
+        cs["proven_tail_runs"].append(copy.deepcopy(cs["proven_tail_runs"][1]))
+    want = _opt80_tail_expected_after(dup)
+    assert want["tail_runs"] == 2 and want["one_in_n"] == 5, want
+
+
+def test_opt80_tail_line_marker_must_be_followed_by_its_own_sentence(tmp_path: Path):
+    """The marker pairs with the line right after it. A marker followed by some
+    other line, with the true sentence moved elsewhere, is not a pairing."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    marker = "<!-- opt80-tail:f-promoted -->"
+    i = report.index(marker)
+    end = report.index("\n\n", i)
+    block = report[i:end]
+    line = block.split("\n", 1)[1]
+    moved = report.replace(block, marker + "\n> something else\n\n" + line, 1)
+    chk = vr.check_opt80_tail_lines(moved, findings_path)
+    assert not chk.ok and "line after its marker" in str(chk.detail), chk
+
+
+def test_opt80_tail_line_rendered_twice_for_one_block_fails(tmp_path: Path):
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    marker = "<!-- opt80-tail:f-promoted -->"
+    i = report.index(marker)
+    end = report.index("\n\n", i)
+    twice = report[:end] + "\n\n" + report[i:end] + report[end:]
+    chk = vr.check_opt80_tail_lines(twice, findings_path)
+    assert not chk.ok and "rendered 2 time(s)" in str(chk.detail), chk
+
+
+def test_opt80_tail_marker_for_an_id_with_no_tail_axis_fails_beside_real_tails(
+        tmp_path: Path):
+    """Another finding's tail line is real and paired; a marker for an id that
+    stamps no tail axis must still fail, even when its sentence's numbers happen
+    to match the real one."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    ghost = ("\n<!-- opt80-tail:f-ghost -->\n> one run in 5 loses up to 110s on "
+             "checkout to a stalled fetch.\n")
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    chk = vr.check_opt80_tail_lines(report + ghost, findings_path)
+    assert not chk.ok and "f-ghost" in str(chk.detail), chk
+
+
+def _opt80_with_also_noticed(doc):
+    """Add one residual hygiene finding so the report renders an Also noticed
+    section (and its Contents pointer) beside the tail line."""
+    doc["findings"].append({"id": "f-hyg", "pattern": "OPT5",
+                            "title": "pnpm Store Not Cached", "severity": "MEDIUM",
+                            "runner_min_saving": 68.0,
+                            "workflow_file": ".github/workflows/ci.yml", "line": 20})
+    return doc
+
+
+def test_opt80_tail_marker_under_contents_also_noticed_or_data_sources_fails(
+        tmp_path: Path):
+    """The placement rule names two homes: the finding's own Long pole section
+    and the Checkout stall tails section. Any OTHER `##` section - the Contents,
+    Also noticed, Data sources - is not one of them, even though none of those
+    is the headline or a runner-minute card."""
+    vr = _load_verify_report()
+    doc = _opt80_with_also_noticed(_opt80_tail_doc(pole_check="other", pole_job="other"))
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    marker = "<!-- opt80-tail:f-promoted -->"
+    i = report.index(marker)
+    block = f"{marker}\n{report[i:].split(chr(10), 2)[1]}\n"
+    rest = report.replace(block, "", 1)
+    for heading in ("## 📋 Contents", "## 🧹 Also noticed", "## 🗄️ Data sources"):
+        assert heading in rest, heading
+        j = rest.index(heading)
+        k = rest.index("\n", j) + 1
+        moved = rest[:k] + "\n" + block + "\n" + rest[k:]
+        chk = vr.check_opt80_tail_lines(moved, findings_path)
+        assert not chk.ok and "section" in chk.detail, (heading, chk)
+
+
+def test_opt80_stray_tail_scan_is_case_insensitive(tmp_path: Path):
+    """A tail sentence that opens a sentence ("One run in 2 ...") is the same
+    claim; the scan must not let it through on its capital letter."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    stray = ("One run in 2 spends about 80s longer on checkout, and that run's "
+             "log shows the fetch stalling.")
+    chk = vr.check_opt80_tail_lines(report + "\n" + stray + "\n", findings_path)
+    assert not chk.ok and "One run in 2" in chk.detail, chk
+
+
+def test_opt80_tail_numbers_in_the_findings_own_card_must_rederive(tmp_path: Path):
+    """The finding's own Runner saving card may carry the tail sentence (its
+    evidence prose), but only with numbers a stamped axis re-derives: the card
+    is an allowed PLACE, never an exemption from the numbers."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="other", pole_job="other")
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    anchor = "**The largest merge-safe runner-minute saving measured on this repo.**"
+    assert anchor in report
+    good = ("one run in 5 spends about 110s longer on checkout, and that run's log "
+            "shows the fetch stalling")
+    ok = report.replace(anchor, f"{anchor}\n\n{good}.", 1)
+    assert vr.check_opt80_tail_lines(ok, findings_path).ok
+    wrong = report.replace(anchor, f"{anchor}\n\n{good.replace('110s', '999s')}.", 1)
+    chk = vr.check_opt80_tail_lines(wrong, findings_path)
+    assert not chk.ok and "no stamped tail axis re-derives" in chk.detail, chk
+
+
+def test_opt80_tail_axis_refuses_duplicate_fetched_log_ids():
+    """A fetched log is one distinct slow run: listing the same id twice
+    inflates `logs_read` and so moves N."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    assert vr._opt80_tail_axis_rederived(f) == []
+    cs = f["checkout_stall"]
+    cs["log_probed_job_ids"] = cs["log_probed_job_ids"] + cs["log_probed_job_ids"][-1:]
+    cs["logs_fetched"] = len(cs["log_probed_job_ids"])
+    probs = vr._opt80_tail_axis_rederived(f)
+    assert any("not distinct" in p for p in probs), probs
+
+
+def test_opt80_tail_axis_refuses_a_logs_fetched_count_that_disagrees_alone():
+    """`logs_fetched` must equal the fetched-log ids, checked on its own: the
+    ids, proofs and axis numbers all still agree here."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    assert vr._opt80_tail_axis_rederived(f) == []
+    f["checkout_stall"]["logs_fetched"] = 3
+    probs = vr._opt80_tail_axis_rederived(f)
+    assert any(p.startswith("logs_fetched 3 != the 2") for p in probs), probs
+
+
+def test_opt80_tail_axis_refuses_its_own_on_critical_path_tampered_alone():
+    """The axis carries its own `on_critical_path`; a False there is refused
+    even when the finding's stamp still says True."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS, on_critical_path=False)
+    assert f["checkout_stall"]["on_critical_path"] is True
+    probs = vr._opt80_tail_axis_rederived(f)
+    assert any("on_critical_path" in p for p in probs), probs
+
+
+def test_opt80_merge_gating_basis_label_rederives():
+    """`basis` says whether the job IS the required job or is needed by it;
+    a job that is the required job labelled `needed_by_required` is refused."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    f = doc["findings"][0]
+    assert vr._vr_opt80_merge_gating_problems(f, doc) == []
+    f["checkout_stall"]["tail_axis"]["merge_gating"] = dict(
+        _OPT80_TAIL_AXIS["merge_gating"], basis="needed_by_required")
+    probs = vr._vr_opt80_merge_gating_problems(f, doc)
+    assert any("basis" in p for p in probs), probs
+
+
+def test_opt80_pole_is_own_reads_the_mapped_job_of_its_own_workflow_only():
+    """A workflow NAME can itself hold ` / ` (`CI / main`), so the fallback
+    prefix strip of `CI / main / build` gives `main / build`, not `build`. The
+    stamped pole entry is what resolves it - and only an entry of the SAME
+    workflow file: another file's entry for the same check name never maps."""
+    vr = _load_verify_report()
+    f = {"workflow_file": ".github/workflows/ci.yml", "affected_jobs": ["build"]}
+    check = "CI / main / build"
+
+    def data(wf):
+        return {"pr_critical_path": {"poles": [
+            {"check": check, "job": "build", "workflow_file": wf}]}}
+
+    assert vr._vr_opt80_pole_is_own(f, "ci.yml", check, data(".github/workflows/ci.yml"))
+    assert not vr._vr_opt80_pole_is_own(f, "ci.yml", check, {})
+    assert not vr._vr_opt80_pole_is_own(
+        f, "ci.yml", check, data(".github/workflows/other.yml"))
+
+
+def _opt80_node(name, matrix=False, reusable=False):
+    return {"name": name, "needs": [], "matrix": matrix, "reusable": reusable}
+
+
+# (required check, YAML key, job-graph node, this workflow's name prefixes, names it?)
+_OPT80_CHECK_NAMES_JOB_CASES = [
+    ("build", "build", _opt80_node("build"), {"CI"}, True),
+    # Only THIS workflow's own name prefix is stripped.
+    ("CI / build", "build", _opt80_node("build"), {"CI"}, True),
+    ("Other / build", "build", _opt80_node("build"), {"CI"}, False),
+    ("CI / build", "build", _opt80_node("build"), set(), False),
+    # The YAML key names the job even when its display name differs.
+    ("build", "build", _opt80_node("Build & Test"), {"CI"}, True),
+    ("Build & Test", "build", _opt80_node("Build & Test"), {"CI"}, True),
+    ("Build & Lint", "build", _opt80_node("Build & Test"), {"CI"}, False),
+    # A `${{ ... }}` template is a wildcard.
+    ("test (ubuntu)", "test", _opt80_node("test (${{ matrix.os }})", matrix=True),
+     {"CI"}, True),
+    ("lint (ubuntu)", "test", _opt80_node("test (${{ matrix.os }})", matrix=True),
+     {"CI"}, False),
+    # A matrix job's check carries an appended ` (<leg>)`; a plain job's does not.
+    ("test (ubuntu, 3.12)", "test", _opt80_node("test", matrix=True), {"CI"}, True),
+    ("CI / test (ubuntu)", "test", _opt80_node("test", matrix=True), {"CI"}, True),
+    ("test (ubuntu)", "test", _opt80_node("test"), {"CI"}, False),
+    # A reusable caller's children are `<caller> / <child>`.
+    ("call / build", "call", _opt80_node("call", reusable=True), {"CI"}, True),
+    ("CI / call / build", "call", _opt80_node("call", reusable=True), {"CI"}, True),
+    ("call / build", "call", _opt80_node("call"), {"CI"}, False),
+    # Whitespace runs are one space on both sides.
+    ("Build and  Test", "build", _opt80_node("Build  and\n Test"), {"CI"}, True),
+]
+
+
+def test_opt80_check_names_job_copies_agree_on_every_branch():
+    """The verifier re-derives merge gating with its OWN copy of the
+    collector's literal check-name predicate. Fed the same inputs, both copies
+    give the same answer on every branch - this workflow's prefix only, the
+    YAML key, a template wildcard, a matrix leg, a reusable child, whitespace -
+    and each branch has a case that only it decides."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import collect_runs as cr  # noqa: E402
+
+    for check, key, node, prefixes, want in _OPT80_CHECK_NAMES_JOB_CASES:
+        got_cr = cr._opt80_check_names_job(check, key, dict(node), set(prefixes))
+        got_vr = vr._vr_opt80_check_names_job(check, key, dict(node), set(prefixes))
+        assert (got_cr, got_vr) == (want, want), (check, key, node, prefixes)
+    # The prefix set: the workflow's own `name:`, else its path or basename.
+    path = ".github/workflows/ci.yml"
+    for names, want in (({path: "CI"}, {"CI"}), ({}, {path, "ci.yml"})):
+        assert cr._opt80_workflow_prefixes(path, names) == want, names
+        assert vr._vr_opt80_workflow_prefixes(path, names) == want, names
+
+
+def test_opt80_merge_gating_refuses_a_required_check_that_is_not_the_required_job():
+    """`required_check` must BE `required_job`'s check-run: a required `bench`
+    stamped as the evidence for job `build` is refused."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    f = doc["findings"][0]
+    assert vr._vr_opt80_merge_gating_problems(f, doc) == []
+    doc["required_checks"] = list(doc["required_checks"]) + ["bench"]
+    f["checkout_stall"]["tail_axis"]["merge_gating"] = dict(
+        _OPT80_TAIL_AXIS["merge_gating"], required_check="bench")
+    probs = vr._vr_opt80_merge_gating_problems(f, doc)
+    assert any("is not job 'build'" in p for p in probs), probs
+
+
+def test_opt80_merge_gating_refuses_evidence_naming_a_different_job():
+    """The evidence's `job_key` must be the finding's own job: gating evidence
+    for `build` does not put a stall on `bench` on the merge wait."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    f = doc["findings"][0]
+    assert vr._vr_opt80_merge_gating_problems(f, doc) == []
+    f["checkout_stall"]["job"] = "bench"
+    probs = vr._vr_opt80_merge_gating_problems(f, doc)
+    assert any("is not the finding's job 'bench'" in p for p in probs), probs
+
+
+def test_opt80_log_probe_outcomes_each_gate_names_its_own_fault():
+    """Each guard on `log_probe_outcomes` refuses its own fault by name: a
+    missing list, a list that is not exactly the fetched logs, and an outcome
+    that is neither proven, clean nor unreadable. A later guard catching the
+    same tamper under another reason is not this guard holding."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    assert vr._opt80_tail_axis_rederived(f) == []
+
+    def probs(mutate):
+        g = copy.deepcopy(f)
+        mutate(g["checkout_stall"])
+        return vr._opt80_tail_axis_rederived(g)
+
+    got = probs(lambda cs: cs.update(log_probe_outcomes="proven"))
+    assert any("log_probe_outcomes is missing" in p for p in got), got
+    got = probs(lambda cs: cs["log_probe_outcomes"][0].update(job_id=8001))
+    assert any("do not name exactly the log_probed_job_ids" in p for p in got), got
+    got = probs(lambda cs: cs["log_probe_outcomes"][0].update(outcome="looked_fine"))
+    assert any("neither proven, clean nor unreadable" in p for p in got), got
+
+
 def test_tier2_accepts_a_checkout_stall_on_the_rendered_long_pole(tmp_path: Path):
     """The pole rule is a PROXY for "the credited work is not on the merge gate".
     `checkout_tail_excess` carries the thing the proxy stands in for: mean - p50
@@ -9484,6 +10621,7 @@ def test_tier2_accepts_a_checkout_stall_on_the_rendered_long_pole(tmp_path: Path
     pattern's most valuable case to satisfy an inference a measurement replaced."""
     vr = _load_verify_report()
     doc = _opt80_pole_doc()
+    doc["per_workflow_timing"] = _opt80_pwt("build")
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     assert "Long pole" in report and "build" in report, report[:400]
     chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
@@ -9626,14 +10764,24 @@ def test_checkout_tail_excess_token_is_refused_from_a_non_opt80_pattern(
 def test_tier2_rederives_on_critical_path_against_the_rendered_poles(tmp_path: Path):
     """`on_critical_path` is what the evidence's "this workflow's slowest job"
     sentence is rendered from, and it is the exact fact the exemption turns the
-    blanket check off for. It was a bare assertion."""
+    blanket check off for. It was a bare assertion. A True claim on a job that
+    is no rendered pole fails; a False claim on a rendered pole does not (the
+    collector's flag means "this workflow's slowest job", and a drilled pole is
+    often not that job)."""
     vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    doc["pr_critical_path"]["poles"][0].update(check="deploy", job="deploy")
+    doc["pr_critical_path"]["critical_path_check"] = "deploy"
+    doc["pr_critical_path"]["checks"][0]["name"] = "deploy"
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok, chk
+    assert "on_critical_path=True but the job is not rendered" in str(chk.detail), chk
     doc = _opt80_pole_doc()
     doc["findings"][0]["checkout_stall"]["on_critical_path"] = False
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
-    assert not chk.ok, chk
-    assert "on_critical_path" in str(chk.detail), chk
+    assert chk.ok, chk
 
 
 def test_tier2_still_rejects_a_non_zero_wall_clock_on_that_same_finding(tmp_path: Path):
