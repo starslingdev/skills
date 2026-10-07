@@ -1157,7 +1157,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
             (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
                             and f.get("affected_jobs") == ["deps"]
                             ).__setitem__("wall_clock_p50_s", 5),
-             "a below-the-floor OPT79 finding claims wall_clock_p50_s=5")):
+             "a runner-minute-certified OPT79 finding claims wall_clock_p50_s=5")):
         _bad = json.loads(findings_path.read_text(encoding="utf-8"))
         _tamper(_bad)
         _bad_path = tmp_path / "findings_tampered.json"
