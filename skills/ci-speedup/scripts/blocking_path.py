@@ -5994,6 +5994,10 @@ _OPT79_HELD_BACK_REASONS: dict[str, str] = {
     "neutrality_margin_not_positive":
         "the job is about as slow as its workflow's slowest jobs, so removing "
         "the cache could not be shown to leave the pull-request wait unchanged",
+    "needs_chain_with_the_long_pole_unresolved":
+        "the workflow file could not show whether this job waits on, or is "
+        "waited on by, its slowest job, so removing the cache could not be "
+        "shown to leave the pull-request wait unchanged",
 }
 # OPT79's table joins the shared registry: the held-back row, its job list and
 # the verifier's re-derivation are the same code for OPT77, OPT79 and OPT80.
@@ -6015,41 +6019,56 @@ _OPT79_UNCREDITED_REASON_PHRASES: dict[str, str] = {
     "pole_workflow_off_merge_gating_spine":
         "the pull request can merge without waiting for this job, so its excess "
         "is not part of the merge wait",
+    "job_in_a_needs_chain_with_the_long_pole":
+        "it runs in a `needs:` chain with the slowest job, so shrinking it "
+        "may shorten the merge wait, which this version does not size",
 }
 
 
 def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
-    """Caches MEASURED to cost more than they save on a job that is not below its
-    workflow's cluster floor — stated, with no number attached.
+    """Caches MEASURED to cost more than they save that the audit declined to
+    size (five cases, listed below) — stated, with no number attached.
 
     These are not findings and never enter a total: no runner-minutes, no
     wall-clock claim, no neutrality certificate, no Tier-2 row. The measurement
     is as real as a credited one; what is missing is the sizing.
 
-    WHY it is missing differs by job. `not below the cluster floor` spans
-    everything from the SECOND-ranked job upwards. There are FIVE ways in
-    (`uncredited_reason` names the pole-specific ones):
-      1. a workflow no pull request runs (`workflow_gates_pull_requests` false):
-         no merge gate at all, the saving is pure runner-minutes;
-      2. a job at or above the floor that is not the long pole: runner-minutes
-         too, uncredited because this version cannot prove shrinking it leaves
-         the gate unchanged;
-      3. the PR long pole TIED with the next-tallest job (headroom under 1.0s,
-         `_OPT79_POLE_MIN_HEADROOM_S`): no merge wait moves;
-      4. the pole zeroed by the cross-checks
+    Five ways in (`uncredited_reason` names all but the first). Every other
+    job strictly shorter than its workflow's long pole is credited
+    runner-minutes (below the cluster floor, or at/above it and below the long
+    pole), on any workflow; the untied, un-zeroed, on-spine long pole of a
+    pull-request workflow is a credited wall-clock finding rendered at its pole
+    (`_opt79_pole_block`) or in the off-pole block (`_opt79_off_pole_block`).
+    What is left:
+
+      1. the long pole (or a job tied with it) of a workflow no pull request
+         runs (`workflow_gates_pull_requests` false): no merge gate at all, the
+         saving is pure runner-minutes. When the YAML declares a pull_request
+         trigger (`declares_pull_request` true) the line says "none of its N
+         sampled runs was a pull request", never that the workflow does not run
+         on pull requests;
+      2. the PR long pole TIED with the next-tallest job (headroom under 1.0s,
+         `_OPT79_POLE_MIN_HEADROOM_S`; a job tied with the long pole is a
+         co-pole, stamped the same way and named beside the job it ties): no
+         merge wait moves;
+      3. the pole zeroed by the cross-checks to a figure that rounds to 0s
          (`pole_merge_wait_zeroed_by_cross_check`, with
-         `uncredited_reason_detail`): `collect()` demotes it via
-         `_opt79_demote_uncredited_poles`;
-      5. the pole off the merge-gating spine
-         (`pole_workflow_off_merge_gating_spine`).
-    So a PR workflow's slowest job IS in this block for cases 3-5 (only an
-    untied, un-zeroed, on-spine pole is a credited wall-clock finding, rendered
-    at its pole by `_opt79_pole_block` or in `_opt79_off_pole_block`), and
-    `verify_report` fails an uncredited row that claims the merge wait. The
-    renderer has three wordings: a reason-phrase branch that reads "`X` is this
-    workflow's slowest job, but ..." (cases 3-5), the no-PR branch, and the
-    at-or-above-floor branch. The block says only what the stamps support -
-    never a merge wait or a merge gate on a workflow that has none.
+         `uncredited_reason_detail` and `uncredited_derivation`): `collect()`
+         demotes it via `_opt79_demote_uncredited_poles`;
+      4. the pole off the merge-gating spine
+         (`pole_workflow_off_merge_gating_spine`), demoted the same way;
+      5. a job shorter than the long pole of a pull-request workflow but in a
+         `needs:` chain with it (`job_in_a_needs_chain_with_the_long_pole`):
+         the chain's sum is the merge wait, so shrinking it may shorten that
+         wait, which this version does not size.
+
+    The renderer words cases 2-4 as "`X` is this workflow's slowest job, but
+    ..." (a co-pole reads "`X` is tied with `Y`, this workflow's slowest job"),
+    case 1 by its two no-PR wordings, and case 5 as "`X` is not this
+    workflow's slowest job". `verify_report` fails a row that claims the merge
+    wait, and a row with no reason that should have been credited. The block
+    says only what the stamps support: never a merge wait or a merge gate on a
+    workflow that has none.
 
     Rendered beside `_dropped_unprovable_banner`, its nearest precedent: a
     measured fact deliberately kept out of the numbers and shown anyway. [] when
@@ -6100,11 +6119,23 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
                 floor=(f" ({float(floor):.0f}s)"
                        if isinstance(floor, (int, float)) else ""),
                 detail=detail or "no reason was recorded")
+            lp_job = str(r.get("long_pole_job") or "")
+            lp_p50 = r.get("long_pole_p50_s")
             # A zeroed row was sized (to no merge wait), so it is not
             # "not credited in this version" - it is not credited, full stop.
             credit = ("**not credited**." if r.get("uncredited_reason") == _zeroed
                       else "**not credited** in this version.")
-            why = f"`{job}` is this workflow's slowest job, but {clause}; {credit}"
+            if (lp_job not in ("", job)
+                    and r.get("uncredited_reason") == "pole_tied_with_next_job"):
+                # A co-pole: tied with the job the run named slowest. Name that
+                # job and its time; "the next-tallest job" would be this job.
+                lp_txt = (f" ({float(lp_p50):.0f}s)"
+                          if isinstance(lp_p50, (int, float)) else "")
+                why = (f"`{job}` is tied with `{lp_job}`, this workflow's slowest "
+                       f"job{lp_txt}, so neither job alone sets the merge wait; "
+                       f"{credit}")
+            else:
+                why = f"`{job}` is this workflow's slowest job, but {clause}; {credit}"
         elif (r.get("workflow_gates_pull_requests") is False
               and r.get("declares_pull_request") is True):
             # Declared, but no sampled run was a pull request: say what was
@@ -6120,13 +6151,18 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
                    "requests, so no pull request waits on it; the saving is "
                    "runner-minutes only and is **not credited** in this version.")
         else:
-            floor = r.get("floor_p50_s")
-            floor_txt = (f" ({float(floor):.0f}s)"
-                         if isinstance(floor, (int, float)) else "")
-            why = (f"`{job}` is at or above this workflow's second-slowest job"
-                   f"{floor_txt}, so this audit cannot prove that shrinking it "
-                   "leaves the merge gate unchanged; **not credited** in this "
-                   "version.")
+            # No stamped reason on a pull-request workflow: not a shape the
+            # collector writes (`verify_report` fails every reason-less row on a
+            # pull-request workflow, whatever its headroom), so the line claims
+            # nothing about where the job sits.
+            why = (f"`{job}` carries no recorded reason it could not be "
+                   "priced; **not credited** in this version.")
+        if str(r.get("uncredited_reason") or "") == "job_in_a_needs_chain_with_the_long_pole":
+            # Not a pole: it is shorter than the slowest job, but chained to it.
+            lp_job = str(r.get("long_pole_job") or "")
+            pole = f" (`{lp_job}` is)" if lp_job else ""
+            why = (f"`{job}` is not this workflow's slowest job{pole}, but "
+                   f"{reason}; **not credited** in this version.")
         lines.append(
             f"> - a cache on `{job}`{where} measured net-negative by {waste_txt} "
             f"per cache hit ({hits} hit / {misses} miss run(s) sampled); {why}")
@@ -6373,6 +6409,15 @@ def _tier2_cert_summary(f: dict[str, Any]) -> str:
         # certificate's own `ref` (appended below) names what each one was
         # actually compared against.
         msg = f"`below_cluster_floor` with {_clock(margin)} margin"
+    elif proof == "below_long_pole" and margin is not None:
+        # OPT79's second runner-minute proof: the job sits at or above the
+        # cluster floor but is strictly shorter than the workflow's slowest job.
+        # Only "cannot lengthen" is provable: the slowest job may not gate a
+        # merge at all (an off-spine or push-only workflow). The margin is the
+        # slowest job's lead over it; the `ref` below names that job and both p50s.
+        msg = (f"`below_long_pole` with {_clock(margin)} margin - shorter than "
+               "the workflow's slowest job, so shrinking it cannot make the "
+               "workflow take longer")
     elif proof == "post_completion_waste":
         msg = "`post_completion_waste` - compute burned after the run signal is already decided"
     elif proof == "checkout_tail_excess" and margin is not None:
@@ -8578,8 +8623,10 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *opt79_off_pole]
     if also_lines:
         out += ["---", "", *also_lines]
-    # Measured net-negative caches that could not be PRICED (their job is not
-    # below the cluster floor). Beside the dropped-unprovable banner, its nearest
+    # Measured net-negative caches that could not be PRICED (three cases: the
+    # slowest job, or one tied with it, of a workflow no PR runs; a PR workflow's
+    # slowest job the pole arm declined; a PR-workflow job `needs:`-chained to the
+    # slowest). Beside the dropped-unprovable banner, its nearest
     # precedent: a measured fact kept out of the numbers and shown anyway.
     out += uncredited_lines
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
@@ -10400,8 +10447,10 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # (§5.5/G15; `check_cost_spine_shallow_disclosed` re-derives it from
         # `data_sources`, so dropping this line is a verify FAIL, not a style choice).
         out += ["---", "", f"> ⚠️ _{shallow_note}_", ""]
-    # Measured net-negative caches that could not be PRICED (their job is not
-    # below the cluster floor). Beside the dropped-unprovable banner, its nearest
+    # Measured net-negative caches that could not be PRICED (three cases: the
+    # slowest job, or one tied with it, of a workflow no PR runs; a PR workflow's
+    # slowest job the pole arm declined; a PR-workflow job `needs:`-chained to the
+    # slowest). Beside the dropped-unprovable banner, its nearest
     # precedent: a measured fact kept out of the numbers and shown anyway.
     out += _opt79_uncredited_block(doc)
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
