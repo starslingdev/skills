@@ -458,9 +458,21 @@ def test_opt81_a1_card_states_both_distributions_and_the_disclosure():
 # test_opt81_vendor_guard.py so it never ships in the installed skill; the
 # shipped half is the vendor-neutral domain rule below.
 _DOMAIN_RE = re.compile(
-    r"\b((?:[a-z0-9-]+\.)+(?:com|io|dev|net|org|app|cloud|sh|so|co|ai|run|build|tech))\b",
+    r"\b((?:[a-z0-9-]+\.)+(?:com|io|dev|net|org|app|cloud|sh|so|co|ai|run|build|tech"
+    r"|xyz|gg|me|page|us|eu|cc|tv|works|systems|software|tools|ci))\b",
     re.I)
 _ALLOWED_DOMAINS = ("github.com", "starsling.dev")
+
+
+def _foreign_domains(text: str) -> list[str]:
+    """Every domain in `text` other than github.com / starsling.dev (and their
+    subdomains). The guard and its non-vacuous proof share this one scan."""
+    out = []
+    for dom in _DOMAIN_RE.findall(text):
+        d = dom.lower()
+        if not (d in _ALLOWED_DOMAINS or any(d.endswith("." + a) for a in _ALLOWED_DOMAINS)):
+            out.append(dom)
+    return out
 
 
 def _opt81_catalog_entry() -> str:
@@ -489,15 +501,13 @@ def test_opt81_text_names_no_domain_but_github_and_starsling():
     """Owner rule: no OPT81 text, anywhere it renders, names any domain but
     github.com and starsling.dev."""
     for where, text in _opt81_texts().items():
-        for dom in _DOMAIN_RE.findall(text):
-            d = dom.lower()
-            assert d in _ALLOWED_DOMAINS or any(d.endswith("." + a) for a in _ALLOWED_DOMAINS), (
-                f"{where} names a domain other than github.com / starsling.dev: {dom}")
+        assert not _foreign_domains(text), f"{where} names a foreign domain: {_foreign_domains(text)}"
 
 
 def test_opt81_domain_guard_is_not_vacuous():
-    doctored = "see https://example.org/x"
-    assert any(d.lower() not in _ALLOWED_DOMAINS for d in _DOMAIN_RE.findall(doctored))
+    assert _foreign_domains("see https://example.org/x") == ["example.org"]
+    assert _foreign_domains("runners at fast.xyz") == ["fast.xyz"]
+    assert _foreign_domains("https://docs.github.com/x and https://starsling.dev") == []
 
 
 def test_opt81_catalog_entry_carries_the_disclosure_and_no_dollars():

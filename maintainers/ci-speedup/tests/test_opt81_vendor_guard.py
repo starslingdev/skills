@@ -22,7 +22,7 @@ _OTHER_RUNNER_VENDORS = (
     "blacksmith", "buildjet", "warpbuild", "ubicloud", "depot", "namespace.so",
     "namespacelabs", "runs-on.com", "runson", "cirun", "actuated", "cirrus",
     "buildkite", "circleci", "gitlab", "jenkins", "codebuild", "semaphore",
-    "bitrise", "travis", "harness", "earthly",
+    "bitrise", "travis", "harness", "earthly", "tenki", "shipfox", "sprinters",
 )
 
 
