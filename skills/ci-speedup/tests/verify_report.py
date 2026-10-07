@@ -6764,6 +6764,13 @@ _VR_OPT82_CARD_RE = re.compile(
     r"<summary><strong>OPT82 - .*?</details>", re.S)
 
 
+def _opt82_card_where_keys(card: str) -> set[tuple[str, str]]:
+    """`{(wf_base, job_base)}` an OPT82 card's `**Where:**` line names."""
+    mw = re.search(r"^\*\*Where:\*\*\s*(.+)$", card, re.MULTILINE)
+    return {_appendix_wf_job_key(wf, job)
+            for wf, job in (_APPENDIX_WHERE_PAIR_RE.findall(mw.group(1)) if mw else [])}
+
+
 def check_opt82_type_aware_lint_uncredited(report: str,
                                            findings_path: Path | None) -> Check:
     """Every OPT82 finding is UNCREDITED and names its rules, and every OPT82
@@ -6804,6 +6811,24 @@ def check_opt82_type_aware_lint_uncredited(report: str,
         if not rules:
             bad.append(f"{fid}: OPT82 names no type-aware rule - 'type-aware is on' "
                        "without a named rule is a shape claim, not a finding")
+        # The card is the only place the rules, benchmark and ledger reach the
+        # reader, and the engine renders one per lint job (never folded, never
+        # capped), so each finding must have its OWN card naming every rule.
+        wfb = Path(str(f.get("workflow_file") or "")).name
+        jobs = _as_list(f.get("affected_jobs")) or ([f.get("job")] if f.get("job") else [])
+        fkeys = {(wfb, _matrix_base(_cmp_name(str(j)))) for j in jobs}
+        own = [c for c in cards if fkeys & _opt82_card_where_keys(c)]
+        if not own:
+            bad.append(f"{fid}: OPT82 finding on `{wfb}` "
+                       f"({', '.join(str(j) for j in jobs)}) has no card of its own - "
+                       "its rules, benchmark and ledger never reach the reader")
+        else:
+            body = _strip_render_artifacts(own[0])
+            missing = [str(_as_dict(r).get("rule")).strip() for r in rules
+                       if f"- {str(_as_dict(r).get('rule')).strip()}" not in body]
+            if missing:
+                bad.append(f"{fid}: its OPT82 card does not list rule(s) "
+                           + ", ".join(missing))
     for card in cards:
         if _strip_render_artifacts(_VR_OPT82_LEDGER_SENTENCE) not in \
                 _strip_render_artifacts(card):
@@ -7668,6 +7693,12 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
         pat = str(f.get("pattern", ""))
         if pat not in block_keys:
             continue   # this pattern isn't rendered in the appendix
+        if pat == "OPT82":
+            # Numberless BY DESIGN, not valueless: the engine's `_on_pole_job`
+            # keeps an OPT82 card on a drilled-pole lint job (its card is the only
+            # place the rules and ledger reach the reader), so it is no
+            # contradiction of the pole headline. Mirror that exemption.
+            continue
         rm = f.get("runner_min_saving")
         rm = float(rm) if isinstance(rm, (int, float)) else 0.0
         wc = f.get("wall_clock_p50_s")
