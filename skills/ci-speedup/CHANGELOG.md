@@ -26,13 +26,12 @@ unversioned and updates by reinstall from `main`.
   a slow checkout, leaving out only those whose log was read and shows no stall
   (a log the probe cap never read is not evidence of a smooth fetch); X comes
   only from runs whose own log proves the stall. The line is
-  never added to the headline, a pole's figure, any total or the runner-minute
-  section, and the finding still credits 0s of typical merge wait; a push-only
+  never added to the headline and never summed into any total, and the finding still credits 0s of typical merge wait; a push-only
   workflow (or one whose trigger is unknown) keeps the old sentence on its
   slowest job only; a job that is not the slowest carries no merge-wait sentence
   at all. The report's self-check re-derives both numbers from the per-run
   checkout times and the quoted log lines, fails a tail line with no stamped
-  figure behind it (or the reverse), and the report's self-check no longer
+  figure behind it (or the reverse), and no longer
   wrongly fails a slowest job whose check is named `<workflow> / <job>`. X is
   the median proven run's loss, not a ceiling (a stalled run can lose more), so
   the line says "about", and the self-check fails a sentence still worded "up to".

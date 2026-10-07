@@ -8475,8 +8475,9 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     if tier2_lines:
         out += ["---", "", *tier2_lines]
     # No pole is drilled here, so every OPT80 tail line renders in the off-pole
-    # section, after the runner-minute cards and before Also noticed. A
-    # tail-axis finding is a Tier-2 finding, so this path is reached.
+    # section, after the runner-minute cards and before Also noticed. This is
+    # the static-only path (no measured poles); the block is empty unless some
+    # finding stamps a tail axis.
     out += _opt80_off_pole_tail_block(all_findings, catalog_url, drilled=False)
     if also_lines:
         out += ["---", "", *also_lines]

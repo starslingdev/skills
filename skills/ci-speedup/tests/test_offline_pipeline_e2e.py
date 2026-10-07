@@ -126,7 +126,11 @@ _JOB_ID = 9001
 #            check-runs page is read) cost one `runs/{id}/jobs` page each (+3), and
 #            two of them are checkout tail runs whose logs OPT80 fetches to prove
 #            the stall (+2, one per tail run, inside `_OPT80_LOG_PROBE_MAX`). The
-#            tail line it stamps is derived from data already in hand: +0.)
+#            tail line it stamps is derived from data already in hand: +0.
+#            The `..._branches_main_protection_required_status_checks.json`
+#            replay fixture costs +0 as well: the required-checks endpoint it
+#            answers was already called, so the fixture only supplies the
+#            response for an existing call.)
 _GOLDEN_GH_QUERY_COUNT = 73
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
@@ -776,7 +780,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # sampled pull_request runs and 125s / 95s on two (runs 5004 / 5005), whose
     # logs hold the transfer at 17% for 90s / 60s. The median run never stalls,
     # so `wall_clock_p50_s` stays 0 — but one run in three spends about 105s longer on
-    # the merge wait, and that is stamped as a SEPARATE tail axis, re-derived
+    # checkout, and that is stamped as a SEPARATE tail axis, re-derived
     # from the per-run durations and the proven runs alone:
     #   sampled_runs 6, slow_runs 2, logs_read 2, tail_runs 2 (log-proven),
     #   counted_runs 2 - (2 - 2) = 2, one_in_n round(6/2) = 3,
@@ -986,7 +990,8 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert "▸ `CI / test`" in _pole1 and _marker in _pole1, (
         "the tail line must render inside the `CI / test` long-pole section")
     assert _tail in _pole1.split(_marker, 1)[1].split("\n\n", 1)[0], _pole1[:1200]
-    # Never in the headline / Bottom line, never in the runner-minute section.
+    # Never in the headline / Bottom line, and never summed into any total (the
+    # sentence may be restated inside the finding's own runner-saving card).
     _head = report.split("## 📋 Contents", 1)[0]
     assert "longer on checkout" not in _head and "opt80-tail" not in _head, _head
     _tier2 = report.split("## Runner-minute reductions", 1)[1].split("## 🧹", 1)[0]
