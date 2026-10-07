@@ -6213,24 +6213,33 @@ def _opt80_tail_for(pole: dict[str, Any],
 
 def _opt80_tail_count_sentence(axis: dict[str, Any]) -> str:
     """What "one run in N" stands on, from the stamped counts: m of n sampled
-    runs were slow, L of their logs were read, k of those show the stall. A read
-    log with no stall is left out of N; a slow run whose log was not read is
-    counted (the probe cap bounds cost, it is not a finding)."""
+    runs were slow, L of their logs were read - k show the stall, u could not
+    be read, d are clean. Only a clean log is left out of N; a slow run whose
+    log was unreadable, or not read at all (the probe cap bounds cost, it is
+    not a finding), is counted."""
     n = int(_num(axis.get("sampled_runs")) or 0)
     k = int(_num(axis.get("tail_runs")) or 0)
     m = int(_num(axis.get("slow_runs")) or k)
     read = int(_num(axis.get("logs_read")) or k)
+    u = int(_num(axis.get("logs_unreadable")) or 0)
+    d = int(_num(axis.get("logs_clean"))
+            if _num(axis.get("logs_clean")) is not None else max(read - k - u, 0))
     out = (f"{m} of {n} sampled runs had a slow checkout; logs were read for "
-           f"{read} of those, and {k} show the fetch standing still. N counts the "
-           f"{k} proven run{'' if k == 1 else 's'}")
+           f"{read} of those: {k} show the fetch standing still, {u} unreadable, "
+           f"{d} clean.")
+    counted = [f"the {k} proven run{'' if k == 1 else 's'}"]
+    if u:
+        counted.append(f"the {u} slow run{'' if u == 1 else 's'} whose "
+                       f"log{'' if u == 1 else 's'} could not be read")
     if m > read:
-        u = m - read
-        out += (f" and the {u} slow run{'' if u == 1 else 's'} whose "
-                f"log{' was' if u == 1 else 's were'} not read")
-    if read > k:
-        d = read - k
-        out += (f"; the {d} read log{'' if d == 1 else 's'} that "
-                f"{'does' if d == 1 else 'do'} not {'is' if d == 1 else 'are'} left out")
+        r = m - read
+        counted.append(f"the {r} slow run{'' if r == 1 else 's'} whose "
+                       f"log{' was' if r == 1 else 's were'} not read")
+    out += " N counts " + (counted[0] if len(counted) == 1 else
+                           ", ".join(counted[:-1]) + " and " + counted[-1])
+    if d:
+        out += (f"; the {d} clean log{'' if d == 1 else 's'} "
+                f"{'is' if d == 1 else 'are'} left out")
     return out + "."
 
 

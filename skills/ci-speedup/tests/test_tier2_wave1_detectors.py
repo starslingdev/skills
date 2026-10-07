@@ -6566,6 +6566,7 @@ def test_opt80_stamps_a_tail_axis_on_the_slowest_job_of_a_pull_request_workflow(
     cs = f["checkout_stall"]
     assert cs["tail_axis"] == {
         "sampled_runs": 10, "slow_runs": 2, "logs_read": 2, "tail_runs": 2,
+        "logs_clean": 0, "logs_unreadable": 0,
         "counted_runs": 2, "one_in_n": 5,
         "typical_checkout_p50_s": 10.0, "tail_checkout_p50_s": 120.0,
         "tail_loss_s": 110.0, "on_critical_path": True,
@@ -6639,6 +6640,64 @@ def test_opt80_tail_axis_counts_the_slow_runs_past_the_log_probe_cap():
         merge_gating_jobs=_OPT80_BUILD_GATES)[0]["checkout_stall"]["tail_axis"]
     assert (axis["slow_runs"], axis["logs_read"], axis["tail_runs"],
             axis["counted_runs"], axis["one_in_n"]) == (3, 3, 2, 2, 5), axis
+
+
+def _opt80_three_slow_one_odd(odd_log):
+    """Ten sampled runs, three slow (120s against 10s): two logs prove the
+    stall, the third log is `odd_log` (None = the log could not be fetched)."""
+    runs = _opt80_runs([10.0] * 7 + [120.0, 120.0, 120.0])
+    logs = {run[0]["id"]: _OPT80_STALLED_LOG for run in runs}
+    if odd_log is None:
+        del logs[runs[-1][0]["id"]]
+    else:
+        logs[runs[-1][0]["id"]] = odd_log
+    out = cr._detect_opt80_checkout_tail_stall(
+        _Opt80Gh(logs), "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(),
+        _opt80_wf(), None, 100, 0, is_pr=True,
+        merge_gating_jobs=_OPT80_BUILD_GATES)
+    assert len(out) == 1, out
+    return out[0]["checkout_stall"], runs[-1][0]["id"]
+
+
+def test_opt80_tail_axis_keeps_a_slow_run_whose_log_was_unavailable_in_n():
+    """Only a log that was READ and shows a smooth fetch is left out of N. A
+    slow run whose log could not be fetched showed nothing, so it is counted
+    like a slow run past the probe cap: three slow of ten, two proven, one
+    unavailable is one run in 3 (10 / 3), not one in 5 (10 / 2)."""
+    cs, odd = _opt80_three_slow_one_odd(None)
+    axis = cs["tail_axis"]
+    assert (axis["slow_runs"], axis["logs_read"], axis["tail_runs"]) == (3, 3, 2), axis
+    assert axis["counted_runs"] == 3 and axis["one_in_n"] == 3, axis
+    assert axis["logs_unreadable"] == 1 and axis["logs_clean"] == 0, axis
+    outcomes = {o["job_id"]: o["outcome"] for o in cs["log_probe_outcomes"]}
+    assert outcomes[odd] == "tail_run_log_unavailable", outcomes
+    assert sorted(outcomes.values()).count("proven") == 2, outcomes
+
+
+def test_opt80_tail_axis_keeps_a_credential_shaped_proven_stall_in_n():
+    """A proven stall whose quoted line is credential-shaped is DROPPED as a
+    proof, but its log showed a stall, not a smooth fetch: it stays in N."""
+    fake_token = "gh" + "p_" + "C" * 36
+    token_url = "https://" + "x-access" + "-token:" + fake_token + "@github.com/acme/app"
+    poisoned = _OPT80_STALLED_LOG.replace(
+        "Receiving objects:  12% (14400/120000)",
+        "Receiving objects:  12% (14400/120000) from " + token_url)
+    cs, odd = _opt80_three_slow_one_odd(poisoned)
+    axis = cs["tail_axis"]
+    assert axis["counted_runs"] == 3 and axis["one_in_n"] == 3, axis
+    assert axis["logs_unreadable"] == 1 and axis["logs_clean"] == 0, axis
+    outcomes = {o["job_id"]: o["outcome"] for o in cs["log_probe_outcomes"]}
+    assert outcomes[odd] == "quoted_progress_line_is_credential_shaped", outcomes
+
+
+def test_opt80_tail_axis_still_leaves_a_clean_read_log_out_of_n():
+    """The verdict case is unchanged: a read log with a smooth fetch is left out."""
+    cs, odd = _opt80_three_slow_one_odd(_OPT80_SMOOTH_LOG)
+    axis = cs["tail_axis"]
+    assert axis["counted_runs"] == 2 and axis["one_in_n"] == 5, axis
+    assert axis["logs_unreadable"] == 0 and axis["logs_clean"] == 1, axis
+    outcomes = {o["job_id"]: o["outcome"] for o in cs["log_probe_outcomes"]}
+    assert outcomes[odd] == "tail_without_log_gap", outcomes
 
 
 def test_opt80_stamps_no_tail_axis_off_the_pull_request_merge_wait():

@@ -6132,6 +6132,23 @@ _VR_OPT80_MIN_PROVEN_TAIL_RUNS = 2
 _VR_OPT80_MIN_GAP_S = 20.0
 _VR_OPT80_LOG_PROBE_MAX = 4
 _VR_OPT80_MIN_SAMPLED_OCCURRENCES = 6
+# A fetched log's outcome (`log_probe_outcomes`): `proven`, read-and-CLEAN (the
+# only outcomes the tail axis's N leaves out; coupled to the collector's
+# `_OPT80_CLEAN_LOG_OUTCOMES`), or a log that showed nothing about the fetch.
+_VR_OPT80_CLEAN_LOG_OUTCOMES = frozenset({
+    "tail_without_log_gap",
+    "tail_pause_was_advancing_or_pre_transfer",
+    "tail_pause_was_after_the_transfer_completed",
+})
+_VR_OPT80_UNREADABLE_LOG_OUTCOMES = frozenset({
+    "tail_run_log_unavailable",
+    "tail_run_step_window_unreadable",
+    "log_carries_no_parseable_timestamps",
+    "log_lines_without_timestamps",
+    "log_carries_no_progress_vocabulary",
+    "progress_lines_all_outside_step_window",
+    "quoted_progress_line_is_credential_shaped",
+})
 # The arm's own copy of the detector's transfer-progress regex. The stamped
 # `stalled_at_pct` and the "same N on both sides" predicate are what make a gap a
 # STALL rather than a slow fetch; re-reading the quoted lines here is the only
@@ -6583,8 +6600,33 @@ def _vr_opt80_tail_axis_expected(cs: dict) -> "tuple[dict | None, list[str]]":
         if isinstance(p, dict) and str(p.get("job_id")) not in set(map(str, probed)):
             fetched_problems.append(
                 f"proof for {p.get('job_id')!r} is not one of the logs fetched")
+    # What each fetched log showed. N leaves out ONLY a log read and shown
+    # clean; an unavailable or unparseable log, or a stall dropped as
+    # credential-shaped, showed nothing, so its slow run stays in N.
+    raw_outcomes = cs.get("log_probe_outcomes")
+    outcomes = [o for o in _as_list(raw_outcomes) if isinstance(o, dict)]
+    known = ({"proven"} | _VR_OPT80_CLEAN_LOG_OUTCOMES
+             | _VR_OPT80_UNREADABLE_LOG_OUTCOMES)
+    if not isinstance(raw_outcomes, list) or len(outcomes) != len(raw_outcomes):
+        fetched_problems.append(
+            "log_probe_outcomes is missing, so which fetched logs were read and "
+            "clean is unstated")
+    elif sorted(str(o.get("job_id")) for o in outcomes) != sorted(map(str, probed)):
+        fetched_problems.append(
+            "log_probe_outcomes do not name exactly the log_probed_job_ids")
+    elif any(str(o.get("outcome")) not in known for o in outcomes):
+        fetched_problems.append(
+            "log_probe_outcomes carry an outcome that is neither proven, clean "
+            "nor unreadable")
+    elif ({str(o.get("job_id")) for o in outcomes if o.get("outcome") == "proven"}
+          != {str(p.get("job_id")) for p in _as_list(cs.get("proven_tail_runs"))
+              if isinstance(p, dict)}):
+        fetched_problems.append(
+            "log_probe_outcomes' proven logs are not the proven_tail_runs")
     if fetched_problems:
         return None, fetched_problems
+    clean = sum(1 for o in outcomes
+                if str(o.get("outcome")) in _VR_OPT80_CLEAN_LOG_OUTCOMES)
     probed_set = set(map(str, probed))
     proven_s: list[float] = []
     seen: set = set()
@@ -6610,10 +6652,14 @@ def _vr_opt80_tail_axis_expected(cs: dict) -> "tuple[dict | None, list[str]]":
         return None, ["no tail run's log proves a stall, so there is no tail to state"]
     n, k = len(per_run), len(proven_s)
     m, logs_read = len(slow), len(probed)
-    counted = m - (logs_read - k)
+    # A log labelled `proven` whose quoted lines do not re-derive a stall is
+    # left out of N like a clean one: the smaller claim, never the larger.
+    clean += sum(1 for o in outcomes if o.get("outcome") == "proven") - k
+    counted = m - clean
     tail_p50 = round(_vr_percentile(proven_s, 50), 1)
     return {"sampled_runs": n, "slow_runs": m, "logs_read": logs_read,
-            "tail_runs": k, "counted_runs": counted,
+            "tail_runs": k, "logs_clean": clean,
+            "logs_unreadable": logs_read - k - clean, "counted_runs": counted,
             "one_in_n": int(round(n / counted)),
             "typical_checkout_p50_s": p50, "tail_checkout_p50_s": tail_p50,
             "tail_loss_s": round(tail_p50 - p50, 1)}, []

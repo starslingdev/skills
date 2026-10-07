@@ -3227,13 +3227,31 @@ def test_opt80_tail_count_sentence_names_slow_runs_logs_read_and_proofs():
     doc = _opt80_tail_render_doc()
     axis = doc["findings"][0]["checkout_stall"]["tail_axis"]
     axis.update(sampled_runs=30, slow_runs=10, logs_read=4, tail_runs=3,
-                counted_runs=9, one_in_n=3)
+                logs_clean=1, logs_unreadable=0, counted_runs=9, one_in_n=3)
     line = bp._opt80_tail_block(doc["findings"], "https://catalog")[1]
     assert "10 of 30 sampled runs had a slow checkout" in line, line
-    assert "logs were read for 4 of those, and 3 show the fetch standing still" in line, line
-    assert "the 1 read log that does not is left out" in line, line
+    assert ("logs were read for 4 of those: 3 show the fetch standing still, "
+            "0 unreadable, 1 clean") in line, line
+    assert "the 1 clean log is left out" in line, line
     assert "the 6 slow runs whose logs were not read" in line, line
     assert "sampled runs have a checkout log" not in line, line
+
+
+def test_opt80_tail_count_sentence_states_unreadable_logs_separately():
+    """A fetched log that could not be read (gone, unparseable, or a stall
+    dropped as credential-shaped) is not a clean fetch: the sentence names it
+    apart from the clean ones and counts its slow run in N."""
+    doc = _opt80_tail_render_doc()
+    axis = doc["findings"][0]["checkout_stall"]["tail_axis"]
+    axis.update(sampled_runs=30, slow_runs=10, logs_read=4, tail_runs=2,
+                logs_clean=1, logs_unreadable=1, counted_runs=9, one_in_n=3)
+    line = bp._opt80_tail_block(doc["findings"], "https://catalog")[1]
+    assert ("logs were read for 4 of those: 2 show the fetch standing still, "
+            "1 unreadable, 1 clean") in line, line
+    assert ("N counts the 2 proven runs, the 1 slow run whose log could not be "
+            "read and the 6 slow runs whose logs were not read") in line, line
+    assert "the 1 clean log is left out" in line, line
+    assert "read log that does not" not in line, line
 
 
 def test_second_pole_role_names_the_real_slowest_concurrent_check_above_it():

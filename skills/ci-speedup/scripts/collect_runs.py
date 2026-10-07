@@ -9711,11 +9711,23 @@ _OPT80_VERDICT_GATES = frozenset({
     "tail_excess_not_positive",
     "credited_runner_minutes_round_to_zero",
 })
+# The per-log outcomes that are a READ-AND-CLEAN verdict: the log was fetched,
+# parsed, and shows no stall. Only these leave a slow run out of the tail
+# axis's N. Every other non-`proven` outcome (the log was unavailable, carried
+# no timestamps or progress lines, or its proven stall was dropped as
+# credential-shaped) showed nothing about the fetch, so that run is counted
+# like a slow run past the probe cap. `verify_report.py` keeps its own copy.
+_OPT80_CLEAN_LOG_OUTCOMES = frozenset({
+    "tail_without_log_gap",
+    "tail_pause_was_advancing_or_pre_transfer",
+    "tail_pause_was_after_the_transfer_completed",
+})
 
 
 def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]],
                      p50: float, slow_ids: list[Any] | None = None,
-                     probed_ids: list[Any] | None = None) -> dict[str, Any] | None:
+                     probed_ids: list[Any] | None = None,
+                     clean_ids: list[Any] | None = None) -> dict[str, Any] | None:
     """The tail axis of an on-pole, pull-request OPT80 finding: how often a run
     stalls, and how much longer its checkout takes when it does.
 
@@ -9728,12 +9740,17 @@ def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]]
       logs_read   L           the slow runs whose log was fetched
                               (`log_probed_job_ids`, at most the probe cap)
       tail_runs   k           the fetched logs that PROVE a stall (`proven`)
-      counted_runs            m - (L - k): the proven runs plus the slow runs
-                              whose log was never read. A read log that shows no
-                              stall is left out; an unread one is not evidence
-                              of a smooth fetch, so it is not dropped. Counting
-                              only k let the probe cap set N: 10 slow runs of
-                              30 with 4 logs read said "one in 8", not one in 3.
+      logs_clean  d           the fetched logs read and shown CLEAN (`clean_ids`:
+                              an `_OPT80_CLEAN_LOG_OUTCOMES` outcome in the
+                              stamped `log_probe_outcomes`)
+      logs_unreadable u       L - k - d: fetched logs that showed nothing (gone,
+                              unparseable, or a stall dropped as credential-shaped)
+      counted_runs            m - d: every slow run but the clean ones. A read
+                              log that shows no stall is left out; an unread or
+                              unreadable one is not evidence of a smooth fetch,
+                              so it is not dropped. Counting only k let the
+                              probe cap set N: 10 slow runs of 30 with 4 logs
+                              read said "one in 8", not one in 3.
       one_in_n                round(sampled_runs / counted_runs)
       typical_checkout_p50_s  the checkout step's p50 across the whole sample
       tail_checkout_p50_s     the median checkout of the proven tail runs
@@ -9751,15 +9768,20 @@ def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]]
     probed = (list(probed_ids) if probed_ids is not None
               else [p["job_id"] for p in proven])
     m, logs_read = len(slow), len(probed)
-    if k <= 0 or n <= 0 or k > logs_read or logs_read > m or m > n:
+    # Without stamped outcomes every non-proven fetched log is taken as clean
+    # (the direct-call default); the detector always passes `clean_ids`.
+    clean = logs_read - k if clean_ids is None else len(clean_ids)
+    if (k <= 0 or n <= 0 or clean < 0 or k + clean > logs_read
+            or logs_read > m or m > n):
         return None
-    counted = m - (logs_read - k)
+    counted = m - clean
     tail_p50 = round(_percentile([float(p["checkout_s"]) for p in proven], 50), 1)
     loss = round(tail_p50 - float(p50), 1)
     if loss <= 0:
         return None
     return {"sampled_runs": n, "slow_runs": m, "logs_read": logs_read,
-            "tail_runs": k, "counted_runs": counted,
+            "tail_runs": k, "logs_clean": clean,
+            "logs_unreadable": logs_read - k - clean, "counted_runs": counted,
             "one_in_n": int(round(n / counted)),
             "typical_checkout_p50_s": float(p50),
             "tail_checkout_p50_s": tail_p50,
@@ -10141,15 +10163,22 @@ def _detect_opt80_checkout_tail_stall(
             reverse=True)[:_OPT80_LOG_PROBE_MAX]
         proven: list[dict[str, Any]] = []
         credential_shaped = 0
+        # One outcome per fetched log, in probe order: `proven`, or the reason
+        # it proved nothing. Stamped, so the verifier re-derives which fetched
+        # logs were read and CLEAN (the only ones N leaves out) from them.
+        outcomes: list[dict[str, Any]] = []
         for r in probe:
             log = _fetch_job_log(client, repo, by_id[r["job_id"]])
             if not log:
                 reasons.append("tail_run_log_unavailable")
+                outcomes.append({"job_id": r["job_id"],
+                                 "outcome": "tail_run_log_unavailable"})
                 continue
             stall, why = _opt80_stall_in_log(log, step_window[r["job_id"]])
             if why:
                 reasons.append(why)
             if stall is None:
+                outcomes.append({"job_id": r["job_id"], "outcome": why})
                 continue
             if any(_OPT80_CREDENTIAL_RE.search(str(stall[side]["line"]))
                    for side in ("before", "after")):
@@ -10159,7 +10188,10 @@ def _detect_opt80_checkout_tail_stall(
                 # suppression, which made the tally assert something false.
                 credential_shaped += 1
                 reasons.append("quoted_progress_line_is_credential_shaped")
+                outcomes.append({"job_id": r["job_id"],
+                                 "outcome": "quoted_progress_line_is_credential_shaped"})
                 continue
+            outcomes.append({"job_id": r["job_id"], "outcome": "proven"})
             proven.append({"job_id": r["job_id"], "run_url": r["run_url"],
                            "checkout_s": r["checkout_s"], **stall})
         if len(proven) < _OPT80_MIN_PROVEN_TAIL_RUNS:
@@ -10224,7 +10256,10 @@ def _detect_opt80_checkout_tail_stall(
         gating = (merge_gating_jobs or {}).get(key)
         tail_axis = (_opt80_tail_axis(per_run, proven, p50,
                                       slow_ids=[r["job_id"] for r in tail_runs],
-                                      probed_ids=[r["job_id"] for r in probe])
+                                      probed_ids=[r["job_id"] for r in probe],
+                                      clean_ids=[o["job_id"] for o in outcomes
+                                                 if o["outcome"]
+                                                 in _OPT80_CLEAN_LOG_OUTCOMES])
                      if on_pole and is_pr is True
                      and _crit_has_developer_timing(crit)
                      and gating is not None else None)
@@ -10360,6 +10395,9 @@ def _detect_opt80_checkout_tail_stall(
             # them, and the tail axis counts the slow runs outside this list as
             # unread rather than as smooth.
             "log_probed_job_ids": [r["job_id"] for r in probe],
+            # What each fetched log showed (`proven`, or why not), so N's
+            # read-and-clean subtraction is re-derived, never trusted.
+            "log_probe_outcomes": outcomes,
             "log_probe_max": _OPT80_LOG_PROBE_MAX,
             "tail_excess_s": tail_excess,
             # The longest pause OBSERVED, which is an upper bound on what capping

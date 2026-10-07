@@ -9179,6 +9179,8 @@ def _opt80_verifier_finding(**over):
             "proven_tail_runs": proven,
             "logs_fetched": 2, "log_probe_max": 4,
             "log_probed_job_ids": [r["job_id"] for r in per_run if r["tail"]],
+            "log_probe_outcomes": [{"job_id": r["job_id"], "outcome": "proven"}
+                                   for r in per_run if r["tail"]],
             "tail_excess_s": 22.0, "tail_run_longest_pause_s": 40.0,
             "on_critical_path": True,
             "monthly_volume": 100, "effective_monthly_volume": 100.0,
@@ -9482,7 +9484,8 @@ def _opt80_pole_doc():
 # the per-run stall proofs; the stamped block is compared, never trusted.
 
 _OPT80_TAIL_AXIS = {"sampled_runs": 10, "slow_runs": 2, "logs_read": 2,
-                    "tail_runs": 2, "counted_runs": 2, "one_in_n": 5,
+                    "tail_runs": 2, "logs_clean": 0, "logs_unreadable": 0,
+                    "counted_runs": 2, "one_in_n": 5,
                     "typical_checkout_p50_s": 10.0, "tail_checkout_p50_s": 120.0,
                     "tail_loss_s": 110.0, "on_critical_path": True,
                     "merge_gating": {"basis": "required",
@@ -9571,6 +9574,63 @@ def test_opt80_tail_axis_counts_slow_runs_and_checks_proofs_against_logs_fetched
     g = copy.deepcopy(f)
     del g["checkout_stall"]["log_probed_job_ids"]
     assert any("fetched" in p for p in vr._opt80_tail_axis_rederived(g))
+
+
+def test_opt80_tail_axis_rederives_n_from_the_per_log_outcomes():
+    """N leaves out only the fetched logs that were READ and CLEAN. A log that
+    was unavailable, or whose proven stall was dropped as credential-shaped,
+    showed nothing, so its slow run stays in N. The verifier re-derives that
+    split from the stamped `log_probe_outcomes`: a verifier that subtracted
+    every non-proven fetched log (L - k) would refuse the real output here."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    for odd in (None, t._OPT80_SMOOTH_LOG):
+        cs, odd_id = t._opt80_three_slow_one_odd(odd)
+        f = {"pattern": "OPT80", "wall_clock_p50_s": 0.0, "checkout_stall": cs}
+        assert vr._opt80_tail_axis_rederived(f) == [], odd
+    cs, odd_id = t._opt80_three_slow_one_odd(None)
+    f = {"pattern": "OPT80", "wall_clock_p50_s": 0.0, "checkout_stall": cs}
+    assert cs["tail_axis"]["counted_runs"] == 3
+    # The old subtraction, stamped: refused.
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["tail_axis"].update(counted_runs=2, one_in_n=5,
+                                            logs_unreadable=0, logs_clean=1)
+    probs = vr._opt80_tail_axis_rederived(g)
+    assert any("tail_axis.counted_runs" in p for p in probs), probs
+    assert any("tail_axis.logs_clean" in p for p in probs), probs
+    # An unavailable log relabelled clean: the outcome is not what the log showed
+    # ... and the axis no longer re-derives either way it is stamped.
+    g = copy.deepcopy(f)
+    for o in g["checkout_stall"]["log_probe_outcomes"]:
+        if o["job_id"] == odd_id:
+            o["outcome"] = "tail_without_log_gap"
+    assert vr._opt80_tail_axis_rederived(g), g
+    # Outcomes missing, naming a run outside the fetched logs, an unknown
+    # outcome, or a `proven` outcome with no proof: all refused.
+    g = copy.deepcopy(f)
+    del g["checkout_stall"]["log_probe_outcomes"]
+    assert any("log_probe_outcomes" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["log_probe_outcomes"][0]["job_id"] = 8001
+    assert any("log_probe_outcomes" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["log_probe_outcomes"][0]["outcome"] = "looked_fine"
+    assert any("log_probe_outcomes" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    for o in g["checkout_stall"]["log_probe_outcomes"]:
+        if o["job_id"] == odd_id:
+            o["outcome"] = "proven"
+    assert any("log_probe_outcomes" in p for p in vr._opt80_tail_axis_rederived(g))
+
+
+def test_opt80_clean_log_outcomes_stay_coupled_to_the_engine():
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import collect_runs as cr  # noqa: E402
+    assert vr._VR_OPT80_CLEAN_LOG_OUTCOMES == cr._OPT80_CLEAN_LOG_OUTCOMES
+    assert cr._OPT80_CLEAN_LOG_OUTCOMES <= cr._OPT80_VERDICT_GATES
 
 
 def test_opt80_tail_axis_is_refused_off_the_critical_path_and_as_a_p50():
