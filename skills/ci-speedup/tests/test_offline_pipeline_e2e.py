@@ -2324,7 +2324,15 @@ def test_opt82_detector_crash_skips_and_discloses_through_collect(tmp_path, monk
     assert "OPT82" in entry["detectors"]
     assert "type-aware lint check failed (RuntimeError)" in entry["reason"], entry
 
+    # The pass survived the crash: a detector dispatched after OPT82 still ran.
+    assert [f for f in data["findings"] if f.get("pattern") == "OPT77"]
+
     report = _render(_SCRIPTS, findings_path, report_path, env)
-    assert "OPT82" in report and "lint.yml" in report
+    line = next(ln for ln in report.splitlines()
+                if "`lint.yml`: OPT82 did not run." in ln)
+    assert "UNKNOWN, not clean" in line
+    # The run-list family's unmeasured quantities are not what a skipped lint
+    # check leaves unmeasured; the disclosure must not claim them.
+    assert "re-run waste" not in line and "schedule burn" not in line, line
     ok = _verify(report_path, findings_path, env)
     assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"

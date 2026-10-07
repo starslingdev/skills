@@ -508,3 +508,14 @@ def test_the_two_readers_of_the_rule_list_agree():
     """scan.py and collect_runs.py each read the committed list (collect_runs
     must not import scan); pinned equal so neither can drift."""
     assert cr._opt82_rules_catalog() == scan._load_type_aware_rules()
+
+
+@pytest.mark.parametrize("lint_s,fires", [(60, True), (59, False)])
+def test_the_cost_bar_is_inclusive_at_sixty_seconds(tmp_path, lint_s, fires):
+    """Off the long pole (the unit job is slower), so only the cost bar decides:
+    a lint job at exactly `_OPT82_MIN_LINT_P50_S` fires, one second under does not."""
+    block = scan._read_type_aware_lint(_tree(tmp_path))
+    out, withheld, _c = _detect(block, lint_s=lint_s, unit_s=200)
+    assert bool(out) is fires, (out, withheld)
+    if not fires:
+        assert withheld.get("lint_job_below_cost_threshold") == 1

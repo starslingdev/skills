@@ -4054,6 +4054,13 @@ def _audit_links(timeline: dict[str, Any] | None, pole: dict[str, Any],
     return ["**🔗 Audit:** " + " → ".join(parts) + how, ""]
 
 
+# The run-list-sized detectors `collect_runs` skips when a run page cannot be
+# fetched (run elimination OPT35/46/47/64, OPT57's timeout page, OPT36's
+# schedule page).
+_RUN_LIST_SKIP_DETECTORS = frozenset(
+    {"OPT35", "OPT36", "OPT46", "OPT47", "OPT57", "OPT64"})
+
+
 def _detectors_skipped_lines(doc: dict[str, Any]) -> list[str]:
     """Name every workflow whose detectors could NOT be evaluated, and say so as
     UNKNOWN — never as clean.
@@ -4083,12 +4090,19 @@ def _detectors_skipped_lines(doc: dict[str, Any]) -> list[str]:
         if not wf or not dets:
             continue
         reason = str(entry.get("reason") or "its run list could not be fetched")
+        # The run-list family's quantities are named only when one of those
+        # detectors is in the entry; a skipped YAML-gated or lint check leaves
+        # different things unmeasured, and must not claim these.
+        if _RUN_LIST_SKIP_DETECTORS.intersection(dets):
+            unmeasured = ("re-run waste, superseded runs, double-triggers and "
+                          "schedule burn on this workflow are unmeasured here")
+        else:
+            unmeasured = ("whatever these detectors would have found on this "
+                          "workflow is unmeasured here")
         out.append(
             f"> - ⚠️ **`{_wf_base(wf)}`: {'/'.join(dets)} did not run.** These detectors "
             f"were NOT evaluated for this workflow — {reason}. Their absence from this "
-            "report is **UNKNOWN, not clean**: re-run waste, superseded runs, "
-            "double-triggers and schedule burn on this workflow are unmeasured here, "
-            "not measured-at-zero.")
+            f"report is **UNKNOWN, not clean**: {unmeasured}, not measured-at-zero.")
     return out
 
 
