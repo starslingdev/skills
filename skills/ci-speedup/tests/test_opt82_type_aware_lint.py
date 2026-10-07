@@ -659,3 +659,23 @@ def test_pole_verifier_accepts_an_opt82_card_on_a_drilled_pole(tmp_path):
     p.write_text(json.dumps({"findings": [twin]}), encoding="utf-8")
     assert not _vr().check_pole_not_reframed_as_hygiene(
         report.replace("OPT82 - ", "OPT24 - "), p).ok
+
+
+@pytest.mark.parametrize("edit", [
+    lambda c: c.replace("**Where:**", "**Saving:** ~72s wall-clock per run, "
+                        "120 runner-min/mo\n**Where:**", 1),
+    lambda c: c.replace("uncredited, benchmark first", "saves ~72s", 1),
+    lambda c: c.replace("Fix order:", "Splitting lint saves ~1m 10s per run.\n"
+                        "Fix order:", 1),
+    lambda c: c.replace("Fix order:", "Expected: 120 runner-min/mo back.\n"
+                        "Fix order:", 1),
+])
+def test_verifier_fails_a_card_that_claims_a_saving(tmp_path, edit):
+    """OPT82 is uncredited: the findings fields carry no number, and the card
+    must not either. Its only figures are the labelled SIZING ceiling, the
+    evidence's measured p50s and the benchmark commands."""
+    f, card = _rendered_card(tmp_path)
+    edited = edit(card)
+    assert edited != card
+    c = _vr_check(tmp_path, f, edited)
+    assert not c.ok and "saving" in c.detail.lower(), c.detail
