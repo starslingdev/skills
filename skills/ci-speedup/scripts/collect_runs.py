@@ -9729,9 +9729,10 @@ def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]]
       tail_checkout_p50_s     the median checkout of the proven tail runs
       tail_loss_s             tail_checkout_p50_s - typical_checkout_p50_s
 
-    `tail_loss_s` is not capped at the next-tallest job: a tail run's checkout is
-    already above the pole's typical p50 on that run, so the whole excess sits on
-    that run's gate. It is rendered as "up to", for roughly one run in N, and it
+    `tail_loss_s` is the extra checkout time on a stalled run. How much of it
+    reaches the merge wait depends on what else gates that run, which this line
+    does not model, so it is stated as the checkout loss, not a merge-wait
+    saving. It is rendered as "up to", for roughly one run in N, and it
     is never a p50 quantity — nothing adds it to a merge-wait or minute total."""
     k = len(proven)
     n = len(per_run)
@@ -9748,7 +9749,8 @@ def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]]
 
 
 def _opt80_tail_phrase(axis: dict[str, Any]) -> str:
-    """The one sentence the tail axis is rendered as, everywhere it appears.
+    """The sentence the tail axis is rendered as in the finding's evidence string
+    (the only caller). `blocking_path.py` hand-copies this f-string, and
     `verify_report.py` matches this exact shape and re-derives its two numbers."""
     return (f"one run in {int(axis['one_in_n'])} loses up to "
             f"{float(axis['tail_loss_s']):.0f}s on checkout to a stalled fetch")

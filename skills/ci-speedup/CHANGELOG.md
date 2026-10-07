@@ -20,14 +20,15 @@ unversioned and updates by reinstall from `main`.
   report now prints a separate tail line in that job's long-pole section, beside
   its merge-wait figure — "one run in N loses up to X s on checkout to a stalled
   fetch" — or in a short block of its own when the job is not one of the drilled
-  poles. N and X come only from runs whose own log proves the stall. The line is
+  poles. The tail count and the tail median come only from runs whose own log proves the stall. The line is
   never added to the headline, a pole's figure, any total or the runner-minute
   section, and the finding still credits 0s of typical merge wait; a push-only
-  workflow, or a job that is not the slowest, keeps the old sentence. The
-  report's self-check re-derives both numbers from the per-run checkout times and
-  the quoted log lines, fails a tail line with no stamped figure behind it (or
-  the reverse), and no longer misses a slowest job whose check is named
-  `<workflow> / <job>`.
+  workflow (or one whose trigger is unknown) keeps the old sentence on its
+  slowest job only; a job that is not the slowest carries no merge-wait sentence
+  at all. The report's self-check re-derives both numbers from the per-run
+  checkout times and the quoted log lines, fails a tail line with no stamped
+  figure behind it (or the reverse), and the report's self-check no longer
+  wrongly fails a slowest job whose check is named `<workflow> / <job>`.
 
 - **2026-09-30** — **The report now says, in plain English, which caches it held
   back and why.** When the cache check (OPT79) could not reach a verdict on a

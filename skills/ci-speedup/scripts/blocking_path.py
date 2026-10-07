@@ -6202,8 +6202,9 @@ def _opt80_tail_for(pole: dict[str, Any],
 
 
 def _opt80_tail_block(findings: list[dict[str, Any]], catalog_url: str) -> list[str]:
-    """One marked tail line per finding. The sentence is the collector's
-    `_opt80_tail_phrase`, rebuilt here from the stamped block."""
+    """One marked tail line per finding. The sentence is a hand-copied f-string
+    of the collector's `_opt80_tail_phrase` shape, rebuilt here from the stamped
+    block; it is kept in sync by `verify_report.py`'s regex, not by sharing code."""
     out: list[str] = []
     for f in findings:
         axis = _opt80_tail_axis_of(f) or {}
@@ -8426,6 +8427,11 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     out += uncredited_lines
     # No pole is drilled here, so every OPT80 tail line renders in the off-pole
     # block. A tail-axis finding is a Tier-2 finding, so this path is reached.
+    # The off-pole heading ("not one of the long poles drilled above") is shared
+    # with this static-only path, where nothing was drilled at all.
+    # TODO(code agent): the heading wording does not fit the static-only path;
+    # it is a rendered string, so it is deliberately not changed in this
+    # comments-only pass.
     out += _opt80_off_pole_tail_block(all_findings, catalog_url)
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
                                       or doc.get("dropped_unprovable"))

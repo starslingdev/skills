@@ -140,6 +140,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # The name must equal the replayed `steps[].name` in the jobs fixtures
+      # ("Checkout"); the unnamed form folds to the same identity in production,
+      # so this is fixture consistency, not a detector fix.
       - name: Checkout
         uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -763,8 +766,9 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert cs.get("logs_fetched") == 2, cs
     assert cs.get("logs_fetched") <= cs.get("log_probe_max")
     assert o80[0].get("tier2_neutrality", {}).get("proof") == "checkout_tail_excess"
-    # `smoke` is in a push-only workflow, so nothing waits on it to merge: it is
-    # off the critical path and carries no tail line.
+    # `smoke` is not build-matrix's slowest job (`integration` is), so it is off
+    # the critical path and carries no tail line. Its workflow being push-only
+    # would block the tail axis independently of that.
     assert cs.get("on_critical_path") is False, cs
     assert "tail_axis" not in cs, cs
     # The ON-POLE pull-request case. ci.yml's `test` job is the PR critical path's
