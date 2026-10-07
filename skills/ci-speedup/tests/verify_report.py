@@ -6086,6 +6086,16 @@ def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
         out.append(f"uncredited_reason {reason!r} names a pole the row is not: job "
                    f"{job!r}, long_pole_job {cn.get('long_pole_job')!r}, "
                    f"workflow_gates_pull_requests {gates!r}")
+    # Every reason renders "`job` is this workflow's slowest job, but ...": the
+    # stamps agreeing with each other is not enough when the timing the run
+    # MEASURED names another job as this workflow's long pole.
+    timing = _as_dict(_as_dict(data.get("per_workflow_timing")).get(
+        str(cn.get("workflow_file") or "")))
+    measured_pole = str(timing.get("long_pole_job") or "")
+    if measured_pole and measured_pole != job:
+        out.append(f"uncredited_reason {reason!r} on `{job}`, but "
+                   f"per_workflow_timing names {measured_pole!r} as this "
+                   "workflow's long pole, so the row is not its slowest job")
     if reason == "pole_tied_with_next_job":
         if headroom is None or headroom >= _VR_OPT79_POLE_MIN_HEADROOM_S:
             out.append(f"uncredited_reason {reason!r} but the headroom is {headroom!r}s "
@@ -6342,10 +6352,15 @@ _VR_OPT79_POLE_EVIDENCE_RE = re.compile(
     r"cache HIT, against (\d+)s across (\d+) run\(s\) whose log reported a MISS: "
     r"the hit path is (\d+)s SLOWER.*?`([^`]+)` is this workflow's slowest job at "
     r"(\d+)s and its next-tallest job(?:, `([^`]*)`,)? runs (\d+)s; "
-    r"(?:the audit caps the saving at that \d+s gap, so up to|the \d+s excess "
-    r"fits under that \d+s gap, so all) (\d+)s of (?:the excess|it) comes off "
+    r"(?:the audit caps the saving at that (?P<cap_gap>\d+)s gap, so up to|the "
+    r"(?P<excess>\d+)s excess fits under that (?P<fit_gap>\d+)s gap, so all) "
+    r"(\d+)s of (?:the excess|it) comes off "
     r"the merge wait on the (\d+)% of sampled runs where the cache hit "
     r"\((\d+) of (\d+) runs read\)", re.S)
+# The note restates the cap: the gap, the pole's duration, the next job's.
+_VR_OPT79_POLE_NOTE_RE = re.compile(
+    r"capped at the (\d+)s gap between this job's duration \((\d+)s\) and "
+    r"(?:`([^`]*)`|the next-tallest job)'s \((\d+)s\)")
 
 
 def _opt79_hit_share_clause(cn: dict) -> str | None:
@@ -6379,7 +6394,10 @@ def _opt79_pole_prose_rederived(f: dict, cn: dict) -> list[str]:
         return ["evidence does not state the measured comparison, the slowest "
                 "job, the next-tallest job, the capped merge-wait figure and the "
                 "hit rate it applies to"]
-    got = m.groups()
+    # The named groups (the gap and the excess the sentence states) are paired
+    # with pole_sizing below; the numbered ones are restated as one tuple.
+    named = set(m.re.groupindex.values())
+    got = tuple(g for i, g in enumerate(m.groups(), 1) if i not in named)
     share = _num(cn.get("hit_share"))
     counts = [cn.get(k) for k in ("hits", "misses", "ambiguous_runs")]
     read = (sum(counts) if all(isinstance(c, int) and not isinstance(c, bool)
@@ -6393,6 +6411,34 @@ def _opt79_pole_prose_rederived(f: dict, cn: dict) -> list[str]:
             str(read))
     if got != want:
         out.append(f"evidence states {got} but the stamped block gives {want}")
+    capped_prose = m.group("cap_gap") is not None
+    gap = m.group("cap_gap") if capped_prose else m.group("fit_gap")
+    if gap != _w(ps.get("headroom_s")):
+        out.append(f"evidence states a {gap}s gap but pole_sizing.headroom_s is "
+                   f"{_w(ps.get('headroom_s'))}s")
+    if not capped_prose and m.group("excess") != _w(ps.get("waste_s")):
+        out.append(f"evidence states a {m.group('excess')}s excess but "
+                   f"pole_sizing.waste_s is {_w(ps.get('waste_s'))}s")
+    if capped_prose is not (ps.get("capped_by_next_tallest_job") is True):
+        out.append(f"evidence says the saving is {'' if capped_prose else 'not '}"
+                   "capped at the gap, but pole_sizing.capped_by_next_tallest_job is "
+                   f"{ps.get('capped_by_next_tallest_job')!r}")
+    note = str(_as_dict(f.get("measured_evidence")).get("note") or "")
+    n = _VR_OPT79_POLE_NOTE_RE.search(note)
+    if not n:
+        out.append("the measured-evidence note does not state the gap the saving "
+                   "is capped at between this job's duration and the next-tallest "
+                   "job's")
+    else:
+        for key, said in (("headroom_s", n.group(1)), ("long_pole_p50_s", n.group(2)),
+                          ("floor_p50_s", n.group(4))):
+            if said != _w(ps.get(key)):
+                out.append(f"the note states {said}s where pole_sizing.{key} is "
+                           f"{_w(ps.get(key))}s")
+        if (n.group(3) or "") != str(ps.get("next_tallest_job") or ""):
+            out.append(f"the note names {n.group(3)!r} as the next-tallest job, not "
+                       f"pole_sizing.next_tallest_job "
+                       f"{ps.get('next_tallest_job')!r}")
     return out
 
 

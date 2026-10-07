@@ -8135,6 +8135,44 @@ def test_opt79_pole_finding_is_named_at_its_pole_not_sent_to_the_appendix():
                 not in md, md
 
 
+def test_opt79_pole_block_renders_inside_its_own_pole_section():
+    """With two drilled poles, the pole-cache block sits in ITS pole's section -
+    after that pole's anchor and before the next pole's - not merely once
+    somewhere in the report (the off-pole fallback would also render it once)."""
+    doc = _doc_one_pole()
+    doc["pr_critical_path"]["poles"].append({
+        "check": "lint", "p50_s": 200.0, "workflow_file": ".github/workflows/lint.yml",
+        "job": "lint", "dominant_step": "eslint", "dominant_p50_s": 150.0,
+        "steps": [{"step": "eslint", "category": "lint", "p50_s": 150.0}]})
+    doc["findings"] = [_opt79_on_tests_web(18.0)]
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {},
+                   {"pipeline": "https://github.com/o/r/actions/runs/123"},
+                   "2026-06-08")
+    assert md.count("<!-- opt79-pole:f7 -->") == 1, md
+    here = md.index("<!-- opt79-pole:f7 -->")
+    own, nxt = md.index('<a id="pole-1"></a>'), md.index('<a id="pole-2"></a>')
+    assert "`tests-web`" in md[own:nxt].split("\n", 3)[2], md[own:nxt][:300]
+    assert own < here < nxt, (own, here, nxt)
+    assert "Measured cache cost on a workflow's slowest job" not in md
+
+
+def test_opt79_pole_cache_at_the_floor_suppresses_the_llm_gap_fill():
+    """A pole-cache finding of 30s or more on the pole is a catalog match for it,
+    so a supplied LLM gap-fill analysis must not render; under 30s the pole is
+    still a coverage gap and the analysis does render."""
+    analysis = {"cause": "The `run tests` step is slow for a reason the log shows.",
+                "breakdown": [["tests", "~90s"]], "evidence": ["Ran 900 tests"],
+                "prompt": "REPO: o/r\nInvestigate the test step."}
+    for wc, gap_fill in ((45.0, False), (30.0, False), (18.0, True)):
+        doc = _doc_one_pole()
+        doc["findings"] = [_opt79_on_tests_web(wc)]
+        md = bp.render(doc, {"pipeline": "nothing any detector knows\n"}, {},
+                       {"pipeline": "https://github.com/o/r/actions/runs/123"},
+                       "2026-06-08", analyses={"pipeline": analysis})
+        assert ("LLM root-cause analysis" in md) is gap_fill, (wc, md)
+        assert md.count("<!-- opt79-pole:f7 -->") == 1, (wc, md)
+
+
 def test_gap_poles_counts_an_opt79_pole_cache_as_cover_only_at_the_floor():
     """`_gap_poles` feeds the maintainer gap-capture / detector-draft loop. A
     drilled pole with an unrecognized log and a >=30s OPT79 pole-cache finding is

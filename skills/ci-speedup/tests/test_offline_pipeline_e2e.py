@@ -1215,6 +1215,110 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
         f"(cost_deepened_workflow_count={ds.get('cost_deepened_workflow_count')!r})")
 
 
+# ---- OPT79's pole arm through the REAL collect() ----
+#
+# The pole arm's two collect()-level steps were pinned only by unit tests that
+# call the helpers directly: the demotion of a pole finding that no longer
+# carries a merge wait, and the sampled events the detector is handed. These
+# drive the real collect() over the replay corpus in-process, so deleting the
+# demotion call, or handing the detector no events, fails a test.
+
+_CHAINED = ".github/workflows/chained.yml"
+
+
+def _collect_in_process(tmp_path, monkeypatch, edit_fixtures=None):
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    if edit_fixtures is not None:
+        edit_fixtures(fixtures)
+    scan = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO], capture_output=True, text=True, timeout=60)
+    assert scan.returncode == 0, scan.stderr
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    return cr.collect(json.loads(scan.stdout), _REPO, 20, root=repo_root)
+
+
+def _opt79_poles(doc):
+    return [f for f in doc["findings"] if f.get("pattern") == "OPT79"
+            and (f.get("cache_net_negative") or {}).get("kind")
+            == "opt79_pole_net_negative_cache"]
+
+
+def _opt79_rows(doc, wf=_CHAINED):
+    return [r for r in doc.get("opt79_uncredited_pole_caches") or []
+            if r.get("workflow_file") == wf]
+
+
+def test_collect_credits_the_chained_pole_cache_untouched(tmp_path, monkeypatch):
+    """The baseline the two tests below change one thing against."""
+    doc = _collect_in_process(tmp_path, monkeypatch)
+    poles = _opt79_poles(doc)
+    assert [(f["workflow_file"], f["affected_jobs"]) for f in poles] == [
+        (_CHAINED, ["prep"])], poles
+    assert _opt79_rows(doc) == []
+
+
+@pytest.mark.parametrize("how", ["zeroed", "off_spine"])
+def test_collect_demotes_a_pole_finding_with_no_merge_wait_left(
+        tmp_path, monkeypatch, how):
+    """A pole finding the cascade zeroed, or whose job the merge-gating spine
+    dropped, must leave collect() as an uncredited row that says why - never as
+    a credited finding. The cascade's verdict is simulated at the last stamp
+    collect() applies before demoting (the off-spine stamping), so the REAL
+    demotion call is what has to act on it."""
+    real = cr._stamp_off_spine_findings
+
+    def stamp(findings, *a, **k):
+        out = real(findings, *a, **k)
+        for f in findings:
+            if (f.get("cache_net_negative") or {}).get("kind") \
+                    == "opt79_pole_net_negative_cache":
+                if how == "off_spine":
+                    f["off_spine"] = True
+                else:
+                    wc = f["wall_clock_p50_s"]
+                    f.update(wall_clock_uncapped_p50_s=wc, wall_clock_p50_s=0.0,
+                             wall_clock_derivation=[{
+                                 "bound": "measured-critical-path", "from_s": wc,
+                                 "to_s": 0.0, "reason": "a slower check gates the PR"}])
+        return out
+
+    monkeypatch.setattr(cr, "_stamp_off_spine_findings", stamp)
+    doc = _collect_in_process(tmp_path, monkeypatch)
+    assert _opt79_poles(doc) == [], _opt79_poles(doc)
+    rows = _opt79_rows(doc)
+    assert len(rows) == 1, rows
+    want = {"zeroed": "pole_merge_wait_zeroed_by_cross_check",
+            "off_spine": "pole_workflow_off_merge_gating_spine"}[how]
+    assert rows[0]["job"] == "prep" and rows[0]["uncredited_reason"] == want, rows[0]
+    assert rows[0]["on_critical_path"] is False
+
+
+def test_collect_reads_pull_request_status_from_the_sampled_runs(tmp_path, monkeypatch):
+    """`chained.yml` DECLARES `pull_request`; with every sampled run re-labelled a
+    push, no measured pull request waits on it, so its pole cache is an
+    uncredited row (declared, not sampled) - not a merge-wait finding credited
+    off the declared trigger."""
+    def all_push(fixtures):
+        page = fixtures / cr._fixture_name(
+            f"repos/{_REPO}/actions/workflows/1003/runs?per_page=100", "json")
+        doc = json.loads(page.read_text(encoding="utf-8"))
+        for r in doc["workflow_runs"]:
+            r["event"] = "push"
+        page.write_text(json.dumps(doc), encoding="utf-8")
+
+    doc = _collect_in_process(tmp_path, monkeypatch, edit_fixtures=all_push)
+    assert _opt79_poles(doc) == [], _opt79_poles(doc)
+    rows = _opt79_rows(doc)
+    assert len(rows) == 1, rows
+    assert rows[0]["job"] == "prep"
+    assert rows[0]["workflow_gates_pull_requests"] is False
+    assert rows[0]["declares_pull_request"] is True
+
+
 def test_workflow_yaml_reads_the_checkout_not_the_api(tmp_path, monkeypatch):
     """Workflow YAML comes from the local checkout (`--root`), and the parsed docs are
     IDENTICAL to what the `contents/` API path produces — proving the gh call it drops

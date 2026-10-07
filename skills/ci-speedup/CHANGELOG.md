@@ -651,7 +651,11 @@ unversioned and updates by reinstall from `main`.
   that zeroed it, and the self-check re-derives them, and checks an off-spine
   row against the checks the merge actually dropped. A workflow that declares
   pull requests but had none in the sample is told so, instead of being called
-  a workflow that does not run on pull requests.
+  a workflow that does not run on pull requests. The self-check also pairs the
+  gap and the excess the sentence states ("that 10s gap", "the 19s excess") and
+  the note's gap, durations and next-tallest job with the stamped sizing, and
+  fails a "slowest job, but ..." line on a job the run did not measure as that
+  workflow's slowest.
 
 - **2026-09-30** — **Five fix moves the catalog only half-covered are now in the
   advice.** OPT28 gains "delete the checkout step if no step reads a file" and
