@@ -10829,22 +10829,83 @@ def _opt82_tokens(segment: str) -> list[str]:
     return toks
 
 
+# Each exec prefix, and the runner the benchmark uses to run ESLint the same way.
+_OPT82_EXEC_PREFIXES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("npm", "exec", "--"), "npx"), (("npm", "exec"), "npx"),
+    (("pnpm", "exec"), "pnpm exec"), (("pnpm", "dlx"), "pnpm dlx"),
+    (("yarn", "exec"), "yarn"), (("yarn", "dlx"), "yarn dlx"), (("bun", "x"), "bunx"),
+    (("npx",), "npx"), (("bunx",), "bunx"), (("yarn",), "yarn"))
+# The runner a bare `eslint` inside a package script gets from the package
+# manager that ran the script (its local bin directory is on PATH).
+_OPT82_RUNNER_BY_PM = {"npm": "npx", "pnpm": "pnpm exec", "yarn": "yarn", "bun": "bunx"}
+
+
+def _opt82_exec_call(toks: list[str], runner: str = "npx"
+                     ) -> "tuple[list[str], str, str | None]":
+    """`(command tokens, runner, npx -c string)` once an exec prefix such as
+    `npx` / `pnpm exec` and its own flags are stripped from `toks`."""
+    t = list(toks)
+    call: "str | None" = None
+    for prefix, r in _OPT82_EXEC_PREFIXES:
+        if tuple(t[:len(prefix)]) != prefix:
+            continue
+        t, runner = t[len(prefix):], r
+        npx = prefix[0] in ("npx", "npm")
+        while t and t[0].startswith("-") and t[0] != "--":
+            flag = t.pop(0)                # `npx --no-install eslint`
+            if flag in ("-p", "--package") and t:
+                t.pop(0)                   # its value names a package, not the command
+            elif npx and flag in ("-c", "--call") and t:
+                call = t.pop(0)
+            elif npx and flag.startswith("--call="):
+                call = flag.split("=", 1)[1]
+        if t[:1] == ["--"]:
+            t = t[1:]
+        break
+    return t, runner, call
+
+
 def _opt82_eslint_args(toks: list[str]) -> "list[str] | None":
     """The args of an ESLint invocation, or None when `toks` is not one."""
-    t = list(toks)
-    for prefix in (["npm", "exec", "--"], ["npm", "exec"], ["pnpm", "exec"],
-                   ["pnpm", "dlx"], ["yarn", "exec"], ["yarn", "dlx"], ["bun", "x"],
-                   ["npx"], ["bunx"], ["yarn"]):
-        if t[:len(prefix)] == prefix:
-            t = t[len(prefix):]
-            while t and t[0].startswith("-") and t[0] != "--":
-                t = t[1:]                  # `npx --no-install eslint`
-            if t[:1] == ["--"]:
-                t = t[1:]
-            break
+    t, _runner, _call = _opt82_exec_call(toks)
     if t and t[0].rsplit("/", 1)[-1] == "eslint":
         return t[1:]
     return None
+
+
+def _opt82_cd(wd: str, target: str) -> "str | None":
+    """The repo-relative directory a literal `cd <target>` from `wd` moves to;
+    None when the target is an expression, absolute, `-`, home, or leaves the
+    repo, so where the lint runs cannot be read."""
+    import posixpath
+    import shlex
+    try:
+        toks = shlex.split(target)
+    except ValueError:
+        return None
+    if len(toks) != 1 or "${{" in target:
+        return None
+    t = toks[0]
+    if t.startswith(("/", "~", "-")) or "$" in t or "`" in t:
+        return None
+    p = posixpath.normpath(posixpath.join(wd, t) if wd else t)
+    if p == ".":
+        return ""
+    if p == ".." or p.startswith("../"):
+        return None
+    return p
+
+
+def _opt82_forwarded_args(toks: list[str], name: str) -> list[str]:
+    """The args a package-manager script call passes on to the script: those
+    after `--` for npm, everything after the script name for pnpm/yarn/bun."""
+    try:
+        rest = toks[toks.index(name, 1) + 1:]
+    except ValueError:
+        return []
+    if toks[0] == "npm":
+        return rest[rest.index("--") + 1:] if "--" in rest else []
+    return rest[1:] if rest[:1] == ["--"] else rest
 
 
 def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None"
@@ -10886,16 +10947,32 @@ def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None"
 
 
 def _opt82_resolve_lint(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
-                        chain: "list[str] | None" = None, depth: int = 0
-                        ) -> "tuple[str, str, list[str]] | None":
-    """("eslint", eslint command, script chain) when `cmd` runs ESLint;
-    ("unresolvable", reason, chain) when it runs a lint-named package script
-    this read cannot trace; None when it is not a lint step."""
+                        chain: "list[str] | None" = None, depth: int = 0,
+                        runner: str = "npx") -> "tuple | None":
+    """("eslint", eslint command, script chain, {"wd", "runner"}) when `cmd`
+    runs ESLint — `wd` the directory it runs in after any literal `cd`,
+    `runner` how to run ESLint the way CI did; ("unresolvable", reason, chain)
+    when it runs a lint-named package script this read cannot trace, or lints
+    after a `cd` it cannot follow; None when it is not a lint step."""
+    import shlex
     chain = list(chain or [])
     unresolvable: "tuple[str, str, list[str]] | None" = None
+    lost: "str | None" = None              # an untraceable `cd` target
+
+    def _found(res: tuple) -> tuple:
+        return ("unresolvable", f"cd {lost}".strip(), chain) if lost is not None \
+            else res
+
     for seg in _OPT82_SEGMENT_SPLIT_RE.split(cmd or ""):
         seg = seg.strip()
         if not seg:
+            continue
+        if seg == "cd" or seg.startswith(("cd ", "cd\t")):
+            new_wd = None if lost is not None else _opt82_cd(wd, seg[2:].strip())
+            if new_wd is None:
+                lost = lost if lost is not None else seg[2:].strip()
+            else:
+                wd = new_wd
             continue
         lintish = "lint" in seg.lower()
         if "${{" in seg:
@@ -10903,9 +10980,18 @@ def _opt82_resolve_lint(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, s
                 unresolvable = unresolvable or ("unresolvable", "expression", chain)
             continue
         toks = _opt82_tokens(seg)
-        args = _opt82_eslint_args(toks)
-        if args is not None:
-            return "eslint", " ".join(["eslint", *args]), chain
+        rest, seg_runner, call = _opt82_exec_call(toks, runner)
+        if call is not None:               # `npx -c '<command>'`
+            sub = _opt82_resolve_lint(call, wd, scripts_by_dir, chain, depth + 1,
+                                      seg_runner)
+            if sub is not None and sub[0] == "eslint":
+                return _found(sub)
+            if sub is not None:
+                unresolvable = unresolvable or sub
+            continue
+        if rest and rest[0].rsplit("/", 1)[-1] == "eslint":
+            return _found(("eslint", shlex.join(["eslint", *rest[1:]]), chain,
+                           {"wd": wd, "runner": seg_runner}))
         scripts = scripts_by_dir.get(wd)
         ref = _opt82_script_ref(toks, scripts)
         if ref is None:
@@ -10917,10 +11003,13 @@ def _opt82_resolve_lint(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, s
             if lint_named:
                 unresolvable = unresolvable or ("unresolvable", name, chain)
             continue
-        sub = _opt82_resolve_lint(body, wd, scripts_by_dir,
-                                  chain + [f"{toks[0]} run {name}"], depth + 1)
+        fwd = _opt82_forwarded_args(toks, name)
+        sub = _opt82_resolve_lint(body + (" " + shlex.join(fwd) if fwd else ""),
+                                  wd, scripts_by_dir,
+                                  chain + [f"{toks[0]} run {name}"], depth + 1,
+                                  _OPT82_RUNNER_BY_PM.get(toks[0], "npx"))
         if sub is not None and sub[0] == "eslint":
-            return sub
+            return _found(sub)
         if sub is not None and lint_named:
             unresolvable = unresolvable or sub
     return unresolvable
@@ -10990,8 +11079,8 @@ def _opt82_applicable_configs(block: dict[str, Any], wd: str, explicit: "str | N
     return picked, bad
 
 
-def _opt82_benchmark_commands(eslint_cmd: str, wd: str, rules: list[str]
-                              ) -> dict[str, str]:
+def _opt82_benchmark_commands(eslint_cmd: str, wd: str, rules: list[str],
+                              runner: str = "npx") -> dict[str, str]:
     """The two-command benchmark: the lint as CI runs it, and the same lint
     with type information unset and the enumerated rules off FOR THE TIMING
     RUN ONLY. Both cold: `--cache` is removed from both."""
@@ -11011,7 +11100,7 @@ def _opt82_benchmark_commands(eslint_cmd: str, wd: str, rules: list[str]
             continue
         kept.append(t)
     import shlex
-    base = "npx eslint" + "".join(" " + shlex.quote(t) for t in kept)
+    base = f"{runner} eslint" + "".join(" " + shlex.quote(t) for t in kept)
     off = (" --parser-options project:false --parser-options projectService:false"
            + "".join(f" --rule '{r}: off'" for r in rules))
     pre = f"cd {shlex.quote(wd)} && " if wd else ""
@@ -11098,6 +11187,8 @@ def _detect_opt82_type_aware_lint(
                 res = ("unresolvable", "working-directory expression", res[2])
             if res[0] == "eslint" or found is None:
                 found, lint_step, wd = res, step, step_wd or ""
+                if res[0] == "eslint":
+                    wd = res[3]["wd"]          # after any literal `cd` in the step
             if res[0] == "eslint":
                 break
         if found is None:
@@ -11183,7 +11274,8 @@ def _detect_opt82_type_aware_lint(
         ceiling_label = "lint step's" if basis == "lint_step" else "lint job's"
         ceiling_why = ("" if basis == "lint_step"
                        else " (its lint step was not separately measured)")
-        bench = _opt82_benchmark_commands(eslint_cmd, wd, sorted(rules))
+        bench = _opt82_benchmark_commands(eslint_cmd, wd, sorted(rules),
+                                          runner=found[3]["runner"])
         title = "Lint Builds the Whole Type Graph"
         via = (f", via `{' -> '.join(chain)}`" if chain else "")
         ta_ev = next((e for c in on for e in (c.get("type_aware_evidence") or [])), "")
