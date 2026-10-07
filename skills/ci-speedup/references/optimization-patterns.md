@@ -563,7 +563,10 @@ family reads, so retuning it there moves this gate too.
    sits: strictly shorter than the workflow's long pole is a runner-minute
    finding (against the cluster floor when it is below it, else against the long
    pole), the workflow's long pole on a pull-request workflow is a wall-clock
-   finding, and what is left is reported uncredited. This is a crediting gate,
+   finding, and what is left is reported uncredited. (Counted by
+   `cache_net_negative.kind`: three tags, four emitting arms — the two
+   runner-minute certificates, the pole finding, and the uncredited row with its
+   sub-reasons.) This is a crediting gate,
    not a candidate gate: a job at or above the floor is still measured by steps
    1-6.
    See *Three outcomes* below.
@@ -603,7 +606,8 @@ answered from data already in hand, so those jobs cost no log fetch. That is
 not the same as "no log is fetched for a job that could not produce a finding":
 the workflow's slowest job is probed too, and what it produces is a credited
 wall-clock finding (on a workflow that runs on pull requests) or the uncredited
-line below; every job shorter than it is a credited runner-minute finding.
+line below; every job shorter than it is a credited runner-minute finding, given
+a measured net-negative cache and a known monthly volume.
 
 **Sizing (measured)**:
 
@@ -634,9 +638,10 @@ they gate how the measured excess is credited.
 
 1. **Strictly shorter than the long pole: runner-minutes only**, on any
    workflow (the bill does not depend on pull requests). `wall_clock_p50_s` is
-   0, which is literally true and re-derivable: shrinking a job that is shorter
-   than the slowest one cannot lengthen the merge gate, because the slowest job
-   still sets it. The finding carries one of two neutrality certificates:
+   0, the conservative lower bound: shrinking a job that is shorter
+   than the slowest one cannot lengthen the merge gate (the slowest job is
+   longer than it); a saving there may still
+   shorten the gate through a `needs:` chain, which is not claimed. The finding carries one of two neutrality certificates:
    - **strictly below the cluster floor** → `below_cluster_floor`, margin
      `floor_p50 − job_p50`;
    - **at or above the floor, strictly below the long pole** →
@@ -671,7 +676,9 @@ they gate how the measured excess is credited.
    recorded in `wall_clock_derivation`. A long pole TIED with the next-tallest
    job (zero headroom) is not credited here: shrinking it moves no merge wait,
    because the other job still finishes then, so it falls through to outcome 3
-   (so does a job TIED with the long pole, which is a co-pole).
+   (so does a job TIED with the long pole, which is a co-pole). The two tie
+   thresholds differ: the pole arm declines headroom under 1.0s, while a job
+   counts as tied with the long pole only at 0.0s lead after rounding to 0.1s.
    The finding renders inside that job's long-pole section of the report, opened
    by an `<!-- opt79-pole:<id> -->` marker, as
    `💾 Measured cache cost - OPT79 · <title> (<id>) - up to **Ns** off the merge wait on the P% of sampled runs where the cache hit (H of R runs read)`

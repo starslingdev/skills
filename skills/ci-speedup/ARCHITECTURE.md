@@ -1353,8 +1353,11 @@ first withholds the occurrence, the second withholds the job, and
 rather than inventing a label (that reading holds only because a separate
 `actions/cache/save` step withholds earlier, so no unmeasured save can exist). And the
 RUNNER-MINUTE credit gate requires the job's p50 to be strictly shorter than
-another job of the same workflow, so shrinking it cannot make the workflow take
-longer, which is what makes `wall_clock_p50_s=0` literally true on that finding. Below the workflow's cluster floor that proof is
+another job's, so shrinking it cannot make the workflow take longer;
+`wall_clock_p50_s=0` is the conservative lower bound on that finding (below the
+floor the saving may still shorten the gate through a `needs:` chain, which this
+audit does not claim; at or above the floor a job chained to the long pole is not
+credited at all). Below the workflow's cluster floor that proof is
 `below_cluster_floor` — unlike OPT77, the token is not historical for OPT79, it
 is the proof; at or above the floor but below the long pole it is
 `below_long_pole`, measured against the long pole itself. The floor does NOT gate `_opt79_candidates` (which is
@@ -1363,7 +1366,11 @@ were never fetched and its cache never classified: not a suppressed measurement,
 an absent one, and one no reader could distinguish from a repository with no such
 cache. The candidate merely records `below_cluster_floor`; the floor decides HOW
 the measurement is credited, in `_detect_opt79_net_negative_cache`. The detector
-measures both populations as usual and then splits three ways:
+measures both populations as usual and then splits three ways. (Counted by
+`cache_net_negative.kind` there are three tags, and four emitting arms: the two
+runner-minute certificates share `opt79_net_negative_cache`; the credited pole
+finding is `opt79_pole_net_negative_cache`; the uncredited row is
+`opt79_uncredited_pole_cache`, with its sub-reasons below.)
 
 - strictly shorter than the workflow's long pole → the credited runner-minute
   finding described above (`opt79_net_negative_cache`, Tier-2,
@@ -1372,8 +1379,8 @@ measures both populations as usual and then splits three ways:
   below the floor, else `below_long_pole` (margin `long_pole_p50 − job_p50`,
   strictly positive after rounding, `ref` naming the long pole and both p50s).
   The second arm is the owner decision of 2026-10-06: shrinking a job shorter
-  than the long pole cannot lengthen the gate, because the long pole still sets
-  it — the same move OPT77's whole-workflow arm makes against its slowest
+  than the long pole cannot lengthen the gate, because the long pole is longer
+  than it — the same move OPT77's whole-workflow arm makes against its slowest
   member. The comparison is against the ACTUAL long pole's p50, never the
   second-slowest job's;
 - the workflow's long pole, on a workflow that runs on pull requests → a credited
@@ -1384,8 +1391,9 @@ measures both populations as usual and then splits three ways:
 
 The long-pole finding is where the merge wait lives. The floor is the SECOND-ranked
 job's p50, so "not strictly below it" spans everything from second place upwards,
-and only the workflow's long pole — on a workflow that can gate a PR — actually
-carries the merge wait. That job's raw wall-clock is the measured excess
+and only the workflow's long pole — on a workflow that can gate a PR — carries
+the merge-wait claim this audit makes (a job in a `needs:` chain can also carry
+merge wait, and a long pole can be off the merge-gating spine). That job's raw wall-clock is the measured excess
 `waste_s`, pre-capped by CAP 1 (§5) through `bound_within_workflow`:
 `min(waste_s, long_pole_p50 − floor_p50)`, i.e. credit the pole only as far as
 the next-tallest job's duration. The cap compares job DURATIONS and does not
@@ -1435,6 +1443,9 @@ the stamped block and fails any mismatch, any such finding carrying
 `tier2_neutrality` or a non-null `runner_min_saving`, and any uncredited row whose
 `on_critical_path` is missing or not `false`.
 
+The two tie thresholds differ and are stated, not unified: the pole arm declines
+a pole whose headroom to the next-tallest job is under 1.0s, while a job counts
+as tied with the long pole (a co-pole) only at 0.0s lead after rounding to 0.1s.
 The uncredited line therefore covers exactly two cases: the long pole of a
 workflow that runs on no pull request (runner-minutes only, unpriced here; tallied
 under `long_pole_of_a_workflow_no_pull_request_runs`, together with a job tied

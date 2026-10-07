@@ -614,8 +614,8 @@ unversioned and updates by reinstall from `main`.
   that costs more than it saves on a job at or above the workflow's
   second-slowest job but still shorter than its slowest job, the report listed it
   as "measured, not credited", saying the audit could not prove that shrinking it
-  leaves the merge gate unchanged. It can: the slowest job still sets the gate,
-  so a shorter job getting faster cannot lengthen it. Such a cache is now a
+  leaves the merge gate unchanged. It can: shrinking it cannot lengthen the merge gate,
+  because the slowest job is longer than it. Such a cache is now a
   credited runner-minute finding with its own neutrality proof,
   `below_long_pole`, whose margin is the slowest job's lead over this job
   (compared against the slowest job's measured p50, not the second-slowest's),
@@ -669,15 +669,17 @@ unversioned and updates by reinstall from `main`.
   fired first, the pole's waterfall and agent prompt name OPT79
   and point at its block, rather than calling the pole a coverage gap.
   Runner-minutes are deliberately not stated on it: the runner-minute section
-  needs proof that a job sits below the second-slowest
-  job, which the slowest job cannot have. The "not credited" line now covers only
-  workflows no pull request runs and jobs at or above the floor other than an
-  untied slowest job. A slowest job is also kept on that line, with the reason
+  needs a neutrality proof (the job sits below the second-slowest job, or below
+  the slowest job), which the slowest job cannot have. (Superseded for the
+  other jobs by the entry above: a job shorter than the slowest job is now a
+  credited runner-minute finding, and the "not credited" line holds only the
+  slowest job, or a job tied with it.) A slowest job is kept on that line, with the reason
   stated, when it is tied with the next-tallest job (under 1s apart), when the
   cross-checks find no merge wait it can shorten, when the pull request can merge
   without that workflow, or when the workflow's sampled runs include no pull
   request. The report's self-check re-derives the capped number from the stamped measurements, rejects
-  any OPT79 finding that claims wall-clock under a below-the-floor certificate,
+  any OPT79 finding that claims wall-clock under a runner-minute certificate
+  (`below_cluster_floor` or `below_long_pole`),
   checks that the job it names as the cap is the tallest other job the run
   measured, and fails an uncredited line that claims the merge wait.
 
