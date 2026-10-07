@@ -6602,6 +6602,37 @@ def test_opt80_stamps_no_tail_axis_off_the_pull_request_merge_wait():
         assert ("not credited in this version" in f["evidence"]) is (pole == "build")
 
 
+
+def test_opt80_tail_axis_states_the_median_of_three_proven_runs_not_the_mean():
+    """Three log-proven tail runs whose checkouts spread 95s / 110s / 200s: the
+    tail figure is their MEDIAN, 110s, not their mean, 135s. Two proven runs
+    cannot tell the two apart (the median of two IS their mean), so this is the
+    only shape that pins which one the line states."""
+    out = _opt80_pr(is_pr=True, durations=[10.0] * 7 + [95.0, 110.0, 200.0])
+    assert len(out) == 1, out
+    axis = out[0]["checkout_stall"]["tail_axis"]
+    assert axis["tail_runs"] == 3, axis
+    assert axis["tail_checkout_p50_s"] == 110.0, axis
+    assert axis["tail_loss_s"] == 100.0, axis
+    assert "loses up to 100s on checkout" in out[0]["evidence"], out[0]["evidence"]
+
+
+def test_opt80_tail_axis_one_in_n_rounds_half_to_even_7_of_2_is_4_and_5_of_2_is_2():
+    """`one_in_n` is Python's `round(sampled / proven)`, which rounds a half to
+    the EVEN integer: 7 / 2 = 3.5 -> 4 (floor would say 3) and 5 / 2 = 2.5 -> 2
+    (ceil would say 3). The verifier re-derives with the same call, so the two
+    must agree on both halves; a fixture that divides exactly cannot see this."""
+    def axis(n, k):
+        per_run = [{"job_id": i, "checkout_s": 10.0} for i in range(n - k)]
+        proven = [{"job_id": 100 + i, "checkout_s": 120.0} for i in range(k)]
+        per_run += [{"job_id": p["job_id"], "checkout_s": 120.0} for p in proven]
+        return cr._opt80_tail_axis(per_run, proven, 10.0)
+
+    assert axis(7, 2)["one_in_n"] == 4
+    assert axis(5, 2)["one_in_n"] == 2
+    assert axis(7, 2)["sampled_runs"] == 7 and axis(5, 2)["tail_runs"] == 2
+
+
 # ---- the log READER: what a record is, and what a dropped line costs ----------
 #
 # git writes fetch progress with a CARRIAGE RETURN, so one timestamped log RECORD
