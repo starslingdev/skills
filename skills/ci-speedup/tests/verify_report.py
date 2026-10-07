@@ -5259,6 +5259,12 @@ def _below_long_pole_margin(f: dict, data: dict) -> tuple[float | None, list[str
     vals = [v for v in vals if v is not None and v > 0]
     if not vals:
         return None, ["per_workflow_timing records no p50 for the credited job"]
+    floor = _num(crit.get("floor_p50"))
+    if floor is not None and floor > 0 and max(vals) < floor:
+        return None, [f"the credited job ({max(vals)}s) is below the workflow cluster "
+                      f"floor ({floor}s): its proof is below_cluster_floor, and the "
+                      "below-the-long-pole wording (at or above the second-slowest "
+                      "job) would be false"]
     margin = round(lp - max(vals), 1)
     if margin <= 0:
         return None, [f"the credited job ({max(vals)}s) is not strictly shorter than "

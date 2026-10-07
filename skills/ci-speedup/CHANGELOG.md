@@ -626,6 +626,8 @@ unversioned and updates by reinstall from `main`.
   cross-check, or off the merge-gating spine; a job tied with the slowest job is
   treated as one of those). The report's self-check re-derives the new margin
   from the run's own job timings, fails a job that is or ties the slowest job,
+  fails a job below the second-slowest job claiming it (that job's proof is the
+  below-the-floor one, and the new wording would be false for it),
   fails any other pattern claiming the token, and fails a "not credited" row
   that should have been this finding. A slowest job's merge-wait finding now
   says the bill section needs proof the job is shorter than the slowest job,

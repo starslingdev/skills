@@ -4448,6 +4448,10 @@ def test_opt79_verifier_rederives_a_below_long_pole_finding():
     # the job TIES the long pole
     (lambda f, d: d["per_workflow_timing"]["ci.yml"]["job_p50"].__setitem__(
         _OPT79_JOB, 660.0), "long pole"),
+    # the job sits BELOW the cluster floor: its proof is `below_cluster_floor`,
+    # and the stamped prose ("at or above the second-slowest job") would be false
+    (lambda f, d: d["per_workflow_timing"]["ci.yml"].__setitem__(
+        "floor_p50", 610.0), "floor"),
     # another pattern claims OPT79's token
     (lambda f, d: f.__setitem__("pattern", "OPT65"), "OPT79's certificate"),
     # the measurement behind it is still re-derived, not taken on faith
