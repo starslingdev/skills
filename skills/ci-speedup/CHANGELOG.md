@@ -624,7 +624,12 @@ unversioned and updates by reinstall from `main`.
   credited" list now holds only the slowest job of a workflow no pull request
   runs and a slowest job the merge-wait arm declined (tied, zeroed by a
   cross-check, or off the merge-gating spine; a job tied with the slowest job is
-  treated as one of those). The report's self-check re-derives the new margin
+  treated as one of those; within 1s of the slowest job counts as tied, the
+  same cutoff the slowest-job arm uses). A job a hair under the second-slowest
+  job, whose below-the-floor margin rounds to zero, now gets this credit instead
+  of being held back. Like the below-the-floor credit, a job whose monthly run
+  count is unknown is measured and then held back for that reason, not listed
+  as "measured, not credited". The report's self-check re-derives the new margin
   from the run's own job timings, fails a job that is or ties the slowest job,
   fails a job below the second-slowest job claiming it (that job's proof is the
   below-the-floor one, and the new wording would be false for it),

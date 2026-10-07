@@ -4625,6 +4625,16 @@ def _opt79_blp_finding():
     return f, {"per_workflow_timing": {"ci.yml": crit}, "findings": [f]}
 
 
+def test_opt79_below_long_pole_job_with_no_monthly_volume_is_held_back():
+    """Same as the below-the-floor arm: a job below the long pole whose monthly
+    run count is unknown is measured, then withheld on the held-back line
+    (`no_monthly_volume`) - not an uncredited row, which is reserved for the
+    long pole and jobs tied with it."""
+    out, rows, w = _opt79_pole_run(_opt79_pole_crit(), monthly=None)
+    assert out == [] and rows == [], (out, rows)
+    assert w.get("no_monthly_volume") == 1, w
+
+
 def test_opt79_verifier_rederives_a_below_long_pole_finding():
     """Routed to the OPT79 arm, with the margin re-derived as
     long_pole_p50 - job_p50 from `per_workflow_timing` - never read back."""
@@ -4649,6 +4659,9 @@ def test_opt79_verifier_rederives_a_below_long_pole_finding():
     # and the stamped prose ("at or above the second-slowest job") would be false
     (lambda f, d: d["per_workflow_timing"]["ci.yml"].__setitem__(
         "floor_p50", 610.0), "floor"),
+    # the run measured no long pole for the workflow: nothing to be below
+    (lambda f, d: d["per_workflow_timing"]["ci.yml"].pop("long_pole_job"),
+     "no long pole"),
     # another pattern claims OPT79's token
     (lambda f, d: f.__setitem__("pattern", "OPT65"), "OPT79's certificate"),
     # the measurement behind it is still re-derived, not taken on faith

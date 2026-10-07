@@ -645,8 +645,10 @@ they gate how the measured excess is credited.
    - **strictly below the cluster floor** → `below_cluster_floor`, margin
      `floor_p50 − job_p50`;
    - **at or above the floor, strictly below the long pole** →
-     `below_long_pole`, margin `long_pole_p50 − job_p50` (strictly positive
-     after rounding; a job tied with the long pole is not credited), with a
+     `below_long_pole`, margin `long_pole_p50 − job_p50` (each p50 rounded to
+     0.1s first; within 1s of the slowest job counts as tied, the same cutoff
+     the slowest-job arm uses, and a tied job is not credited; a job under the
+     floor whose floor margin rounds to 0.0 lands here too), with a
      `ref` naming the long-pole job and both p50s. The comparison is against the
      actual slowest job's p50, not the second-slowest job's, against which such
      a job's margin is not positive. The finding says so in plain words:
@@ -722,8 +724,8 @@ they gate how the measured excess is credited.
 > the saving is runner-minutes only and is **not credited** in this version.
 
 A workflow that cannot gate a PR is never told it has a merge wait. The report's
-self-check fails an uncredited row with no stated reason whose job is strictly
-shorter than its long pole: that job is outcome 1's `below_long_pole` finding,
+self-check fails an uncredited row with no stated reason whose job is at least
+1s shorter than its long pole: that job is outcome 1's `below_long_pole` finding,
 and listing it here would under-report a priced saving.
 
 An uncredited row carries no runner-minutes, no wall-clock claim, no certificate,
@@ -772,7 +774,9 @@ evidence and a neutrality certificate whose `proof` token is
 the credited job's own p50 is below the workflow's cluster floor (margin: that
 difference), or below the workflow's long pole (margin: the long pole's p50
 minus the job's, re-derived from `per_workflow_timing`; the self-check fails a
-job that is or ties the long pole, and any other pattern claiming the token).
+job that is or ties the long pole (within 1s of the slowest job counts as tied,
+the same cutoff the slowest-job arm uses), and any other pattern claiming the
+token).
 A job in a `needs:` chain with the long pole (either direction, any depth) of
 a pull-request workflow is never `below_long_pole`: the merge wait is then the
 chain's sum, so shrinking it does shorten the wait. It is listed uncredited
