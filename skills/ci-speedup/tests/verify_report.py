@@ -9500,6 +9500,14 @@ _VR_OPT81_NUMBER_RE = re.compile(
     r"(?<![\w-])\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds|m|min|mins|minutes|h|hours|%)"
     r"(?![\w-])|runner-min|~\s*\d|\$\s*\d", re.I)
 _VR_OPT81_INSTALL_SENTENCE = "installing the StarSling GitHub app"
+# Inline-code spans hold repo-controlled names (a job, a step, a label). A step
+# called `Run tests (30s timeout)` is a name, not a promised saving, so the
+# number ban reads only the advisory's own prose.
+_VR_OPT81_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+
+
+def _vr_opt81_number_in(text: str) -> "re.Match[str] | None":
+    return _VR_OPT81_NUMBER_RE.search(_VR_OPT81_CODE_SPAN_RE.sub("``", text or ""))
 
 
 def _vr_opt81_runner_class(label: object) -> "tuple[str, str] | None":
@@ -9625,7 +9633,7 @@ def _opt81_a2_rederived(f: dict, data: dict) -> list[str]:
         out.append(f"OPT81 {fid}: an A2 advisory carries a runner_min_saving")
     if not f.get("advisory"):
         out.append(f"OPT81 {fid}: an A2 advisory is not marked advisory")
-    if _VR_OPT81_NUMBER_RE.search(str(f.get("evidence") or "")):
+    if _vr_opt81_number_in(str(f.get("evidence") or "")):
         out.append(f"OPT81 {fid}: an A2 advisory's evidence states a number")
     rc = _vr_opt81_runner_class(fr.get("runner_label"))
     if rc is None or rc[0] != "github-standard":
@@ -9658,6 +9666,18 @@ def _opt81_a2_rederived(f: dict, data: dict) -> list[str]:
                        "half its median")
         if pat == "OPT79" and wc >= _VR_OPT81_CACHE_LEVER_MIN_S:
             out.append(f"OPT81 {fid}: a net-negative cache already addresses `{job}`")
+    # …and the uncredited net-negative caches, where a cache on a long pole lives.
+    for r in _as_list(data.get(_VR_OPT79_UNCREDITED_DOC_KEY)):
+        if not isinstance(r, dict):
+            continue
+        if _wf_base(str(r.get("workflow_file") or "")) != wf:
+            continue
+        rj = str(r.get("job") or "")
+        if not (rj == job or _vr_opt81_toks(rj) == jt):
+            continue
+        if (_num(r.get("waste_s")) or 0.0) >= _VR_OPT81_CACHE_LEVER_MIN_S:
+            out.append(f"OPT81 {fid}: a net-negative cache ({r.get('waste_s')}s per "
+                       f"hit) already addresses `{job}`")
     return out
 
 
@@ -9725,7 +9745,7 @@ def check_opt81_runner_comparison_rederived(report: str,
         elif not held:
             if _VR_OPT81_INSTALL_SENTENCE not in block:
                 bad.append(f"OPT81 {fid}: the A2 recipe omits the app-install prerequisite")
-            m = _VR_OPT81_NUMBER_RE.search(block)
+            m = _vr_opt81_number_in(block)
             if m:
                 bad.append(f"OPT81 {fid}: the A2 card states a number (`{m.group(0)}`)")
     return Check(name, not bad,

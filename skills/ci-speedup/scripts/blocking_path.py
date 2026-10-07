@@ -7065,6 +7065,20 @@ def _opt81_for_pole(pole: dict[str, Any],
     return out
 
 
+def _opt81_holding_leaf(leaf: "dict[str, Any] | None",
+                        offcat_leaf: "dict[str, Any] | None") -> "dict[str, Any] | None":
+    """The log leaf that holds the A2 advisory back, if any. A leaf demoted
+    off-category (issue #16) still matched the pole's own log, so it is a
+    cheaper lever than a bigger runner even though it is not the dominant work."""
+    return leaf if leaf is not None else offcat_leaf
+
+
+def _opt81_leaf_name(leaf: dict[str, Any]) -> str:
+    """A matched log leaf's name, for the advisory's held-back note."""
+    return str(leaf.get("fix_key") or leaf.get("kind") or leaf.get("pattern")
+               or "a log-level lever")
+
+
 def _opt81_evidence(f: dict[str, Any]) -> str:
     """The finding's evidence without its trailing disclosure: every card and
     prompt states the disclosure once, on its own line, so it is not repeated."""
@@ -10312,15 +10326,17 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # advisory as the LAST option — after the pole's own prompt and any OPT75
         # decomposition, never above a credited lever. A log-level leaf that
         # matched this pole is a cheaper lever, so it holds the advisory back.
+        # A leaf demoted off-category (`offcat_leaf`) still matched this pole's log:
+        # it is a cheaper lever than hardware even when it is not the dominant work.
+        _o81_leaf = _opt81_holding_leaf(leaf, offcat_leaf)
         for _o81 in _opt81_for_pole(p, all_findings):
             if id(_o81) in opt81_rendered:
                 continue
             opt81_rendered.add(id(_o81))
             out += _opt81_card(
                 _o81, catalog_url,
-                held_back_by=(str(leaf.get("kind") or leaf.get("pattern") or "log leaf")
-                              if (leaf is not None and _opt81_half(_o81) == "A2")
-                              else None))
+                held_back_by=_opt81_leaf_name(_o81_leaf)
+                if (_o81_leaf is not None and _opt81_half(_o81) == "A2") else None)
 
     # Disclose per-pole structural levers (OPT70/71/72/74/75) on checks ranked below the
     # top-N spine: collect_runs analyses the top 5 critical-path checks but the spine shows

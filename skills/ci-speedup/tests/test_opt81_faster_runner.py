@@ -606,6 +606,51 @@ def test_opt81_verifier_reddens_on_a_tampered_a2(mutate, extra, needle):
     assert any(needle in p for p in problems), problems
 
 
+def test_opt81_a2_step_name_carrying_digits_is_not_a_promised_number():
+    """A step named `Run tests (30s timeout)` is a repo-controlled NAME. The
+    number ban reads the advisory's own prose, not quoted names, so a valid
+    advisory on such a pole verifies; a number in the prose still fails."""
+    vr = _load_verify_report()
+    runs = _a2_runs(work="Run tests (30s timeout)")
+    out, withheld, _ = _a2([_f("OPT75", structural=True)], runs=runs)
+    assert len(out) == 1, withheld
+    a2 = out[0]
+    a2["id"] = "f9"
+    assert "`Run tests (30s timeout)`" in a2["evidence"]
+    assert vr._opt81_a2_rederived(a2, _doc(a2)) == []
+    card = "\n".join(bp._opt81_card(a2, "u"))
+    assert vr._vr_opt81_number_in(card) is None
+    bad = copy.deepcopy(a2)
+    bad["evidence"] += " It would save about 40s."
+    assert any("states a number" in p for p in vr._opt81_a2_rederived(bad, _doc(bad)))
+
+
+def test_opt81_verifier_mirrors_the_uncredited_opt79_cache_gate():
+    vr = _load_verify_report()
+    a2 = _a2_finding()
+    doc = _doc(a2)
+    doc["opt79_uncredited_pole_caches"] = [
+        {"workflow_file": _CI, "job": "test", "waste_s": 31.0}]
+    problems = vr._opt81_a2_rederived(a2, doc)
+    assert any("net-negative cache" in p for p in problems), problems
+    doc["opt79_uncredited_pole_caches"][0]["waste_s"] = 29.0
+    assert vr._opt81_a2_rederived(a2, doc) == []
+
+
+def test_opt81_an_off_category_leaf_still_holds_the_advisory_back():
+    """A build-cache leaf on a test-dominated pole is demoted off-category, but
+    it matched the pole's own log: it is still cheaper than hardware."""
+    offcat = {"fix_key": "build-cache-miss"}
+    assert bp._opt81_holding_leaf(None, offcat) is offcat
+    assert bp._opt81_holding_leaf({"fix_key": "a"}, offcat) == {"fix_key": "a"}
+    assert bp._opt81_holding_leaf(None, None) is None
+    held = bp._opt81_holding_leaf(None, offcat)
+    card = "\n".join(bp._opt81_card(_a2_finding(), "u",
+                                    held_back_by=bp._opt81_leaf_name(held)))
+    assert "advisory held back" in card and "build-cache-miss" in card
+    assert "Option 1" not in card
+
+
 def _report_with(cards: list[str]) -> str:
     return "# r\n\n" + "\n".join(cards) + "\n\n## 🗄️ Data sources\n"
 
