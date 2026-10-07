@@ -17236,9 +17236,12 @@ def _detect_opt79_net_negative_cache(
                         f"{margin:.1f}s below the workflow long pole `{lp_job}` at "
                         f"{lp50_s:.1f}s"),
             }
+            # Whole seconds unless both round to the same one (a 1.0s lead can:
+            # 239.5 vs 240.5), where "240s is shorter than 240s" would read false.
+            fmt = ".1f" if f"{job_p50:.0f}" == f"{lp50_s:.0f}" else ".0f"
             where_txt = (
-                f"runner-minutes only; this job ({job_p50:.0f}s) is shorter than "
-                f"the workflow's slowest job (`{lp_job}`, {lp50_s:.0f}s), so making "
+                f"runner-minutes only; this job ({job_p50:{fmt}}s) is shorter than "
+                f"the workflow's slowest job (`{lp_job}`, {lp50_s:{fmt}}s), so making "
                 "it faster cannot make the workflow take longer")
             where_note = where_txt[0].upper() + where_txt[1:] + ". "
             where_ev = " " + where_note.strip()

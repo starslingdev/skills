@@ -4393,6 +4393,22 @@ def test_opt79_below_the_long_pole_needs_a_positive_margin_after_rounding():
     assert w.get("pole_tied_with_next_job") == 1, w
 
 
+def test_opt79_below_long_pole_sentence_never_shows_two_equal_durations():
+    """At a 1.0s lead the two p50s can round to the same whole second (239.5
+    and 240.5 both show as 240s), and "this job (240s) is shorter than ...
+    240s" contradicts itself. The sentence then shows tenths."""
+    crit = _opt79_pole_crit(long_pole_p50=240.5, floor_p50=239.5,
+                            job_p50={_OPT79_JOB: 239.5, "integration": 200.0,
+                                     "e2e": 240.5})
+    out, rows, w = _opt79_pole_run(crit)
+    assert rows == [] and len(out) == 1, (out, rows, w)
+    f = out[0]
+    assert f["tier2_neutrality"]["proof"] == "below_long_pole"
+    for text in (f["evidence"], f["size_note"], f["measured_evidence"]["note"]):
+        assert "this job (239.5s)" in text or "This job (239.5s)" in text, text
+        assert "`e2e`, 240.5s)" in text, text
+
+
 @pytest.mark.parametrize("lp, jp, credited", [
     # 660.06 -> 660.1 and 659.14 -> 659.1: a 1.0s margin from the stamped p50s,
     # though the raw difference (0.92s) would round to 0.9
