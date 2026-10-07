@@ -8600,7 +8600,12 @@ def _data_driven_for_pole(pole: dict[str, Any],
     unexpanded matrix base (a finding routed to job id `pytest-torch` covers the rendered
     leg `pytest-torch (ubuntu-latest, 3.10)`). A finding from a DIFFERENT workflow file
     never joins (`_wf_conflict`), so a cross-workflow check-name collision (`Python 3.13` in
-    two workflows) can't mis-attribute a credited finding to the wrong pole."""
+    two workflows) can't mis-attribute a credited finding to the wrong pole.
+    EXCEPTION, OPT81: a credited OPT81 finding is not an appendix finding; it renders AT
+    its pole as its own card and is excluded from Also noticed. So it joins on
+    `_opt81_for_pole`'s rule (exact job, or the unexpanded matrix base; never a sibling
+    leg), the same rule that places the card, so `_dd_where`'s "card below this pole's
+    prompt" pointer always names a card that renders there."""
     targets = [t for t in (str(pole.get("check", "")), str(pole.get("job", ""))) if t]
     if not targets:
         return []
@@ -8628,6 +8633,12 @@ def _data_driven_for_pole(pole: dict[str, Any],
         jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
         if not jobs:
             continue  # an unrouted finding can't anchor to a pole
+        if str(f.get("pattern", "")) == "OPT81":
+            # OPT81 renders AT the pole `_opt81_for_pole` picks (no sibling-leg
+            # fold), and `_dd_where` points the reader there: join on that rule.
+            if _opt81_for_pole(pole, [f]):
+                out.append(f)
+            continue
         if any(_job_targets_pole(j, t) for j in jobs for t in targets):
             out.append(f)
     return out
