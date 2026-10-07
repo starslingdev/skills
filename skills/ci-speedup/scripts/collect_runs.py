@@ -9713,6 +9713,47 @@ _OPT80_VERDICT_GATES = frozenset({
 })
 
 
+def _opt80_tail_axis(per_run: list[dict[str, Any]], proven: list[dict[str, Any]],
+                     p50: float) -> dict[str, Any] | None:
+    """The tail axis of an on-pole, pull-request OPT80 finding: how often a run
+    stalls, and how much longer its checkout takes when it does.
+
+    Derived ONLY from data the finding already stamps, so `verify_report.py`
+    re-derives every number from the same inputs:
+
+      sampled_runs            every sampled occurrence of the job (`per_run`)
+      tail_runs               the runs whose LOG proved a stall (`proven`) — a
+                              slow checkout with no proof does not count
+      one_in_n                round(sampled_runs / tail_runs)
+      typical_checkout_p50_s  the checkout step's p50 across the whole sample
+      tail_checkout_p50_s     the median checkout of the proven tail runs
+      tail_loss_s             tail_checkout_p50_s - typical_checkout_p50_s
+
+    `tail_loss_s` is not capped at the next-tallest job: a tail run's checkout is
+    already above the pole's typical p50 on that run, so the whole excess sits on
+    that run's gate. It is rendered as "up to", for roughly one run in N, and it
+    is never a p50 quantity — nothing adds it to a merge-wait or minute total."""
+    k = len(proven)
+    n = len(per_run)
+    if k <= 0 or n <= 0 or k > n:
+        return None
+    tail_p50 = round(_percentile([float(p["checkout_s"]) for p in proven], 50), 1)
+    loss = round(tail_p50 - float(p50), 1)
+    if loss <= 0:
+        return None
+    return {"sampled_runs": n, "tail_runs": k, "one_in_n": int(round(n / k)),
+            "typical_checkout_p50_s": float(p50),
+            "tail_checkout_p50_s": tail_p50,
+            "tail_loss_s": loss, "on_critical_path": True}
+
+
+def _opt80_tail_phrase(axis: dict[str, Any]) -> str:
+    """The one sentence the tail axis is rendered as, everywhere it appears.
+    `verify_report.py` matches this exact shape and re-derives its two numbers."""
+    return (f"one run in {int(axis['one_in_n'])} loses up to "
+            f"{float(axis['tail_loss_s']):.0f}s on checkout to a stalled fetch")
+
+
 def _detect_opt80_checkout_tail_stall(
     client: "GhClient",
     repo: str,
@@ -9726,6 +9767,7 @@ def _detect_opt80_checkout_tail_stall(
     withheld: dict[str, int] | None = None,
     notes: dict[str, int] | None = None,
     withheld_candidates: list[dict[str, Any]] | None = None,
+    is_pr: bool | None = None,
 ) -> list[dict[str, Any]]:
     """Checkout stalls on the tail (catalog OPT80) — measured, and log-proven.
 
@@ -9749,6 +9791,15 @@ def _detect_opt80_checkout_tail_stall(
     (`tail_run_longest_pause_s`) and named in the rendered evidence as an UPPER
     BOUND on what capping recovers — but it is not credited, because it is not a
     p50 quantity, and because the recommended abort leaves a residual.
+
+    THE TAIL AXIS. When the job is the workflow's slowest job AND the workflow
+    runs on pull requests (`is_pr` True — unknown is treated as not), a stalled
+    run sits on that run's merge wait. That is stamped as a separate
+    `checkout_stall.tail_axis` block — "one run in N loses up to X s on
+    checkout to a stalled fetch" — derived only from the per-run durations and
+    the LOG-PROVEN tail runs (`_opt80_tail_axis`). It is never summed into
+    `wall_clock_p50_s`, any p50 total, the runner-minute saving or the
+    neutrality certificate; the renderer shows it as its own line at the pole.
 
     Every exit is COUNTED into `withheld` (a `{gate: count}` accumulator the
     caller stamps onto the findings doc) and logged at DEBUG. An empty return is
@@ -10054,6 +10105,22 @@ def _detect_opt80_checkout_tail_stall(
 
         worst = max(proven, key=lambda p: float(p["gap_s"]))
         on_pole = str(crit.get("long_pole_job") or "") == job_name
+        # The slowest job of a workflow that runs on pull requests: a stalled run
+        # is on that run's merge wait, so the tail is stated on its own axis.
+        tail_axis = (_opt80_tail_axis(per_run, proven, p50)
+                     if on_pole and is_pr is True else None)
+        if tail_axis is not None:
+            pole_sentence = (
+                f"`{job_name}` is this workflow's slowest job on pull requests: "
+                f"{_opt80_tail_phrase(tail_axis)} - a tail figure, never added to "
+                "the p50 merge wait or to any total.")
+        elif on_pole:
+            pole_sentence = (
+                f"`{job_name}` is this workflow's slowest job; the stall's effect on "
+                f"the merge wait is measured (longest pause {float(worst['gap_s']):.0f}s) "
+                f"but not credited in this version.")
+        else:
+            pole_sentence = ""
         title = "Checkout Stalls on the Tail"
         rows = [[f"[run]({p['run_url']})" if p["run_url"] else "run",
                  f"{float(p['checkout_s']):.0f}s",
@@ -10077,9 +10144,7 @@ def _detect_opt80_checkout_tail_stall(
             f"tail cannot move the p50 merge gate. What does improve is the stalled runs "
             f"themselves, by at most the {float(worst['gap_s']):.0f}s pause quoted below "
             f"(less, once the 30s abort and the re-fetch are paid). "
-            + (f"`{job_name}` is this workflow's slowest job; the stall's effect on "
-               f"the merge wait is measured (longest pause {float(worst['gap_s']):.0f}s) "
-               f"but not credited in this version." if on_pole else ""))
+            + pole_sentence)
         me = _measured_evidence(
             ["Tail run", "Checkout", "Pause", "Last progress line before the pause",
              "First progress line after it"],
@@ -10181,6 +10246,8 @@ def _detect_opt80_checkout_tail_stall(
             "effective_monthly_volume": eff_volume,
             "runner_min_saving": credited,
         }
+        if tail_axis is not None:
+            f["checkout_stall"]["tail_axis"] = tail_axis
         f["tier2_neutrality"] = {
             # OPT80's own token. Nothing about the fix changes what any job runs
             # or what any check is called, and the credited quantity is a tail
@@ -19519,7 +19586,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             # rendered as one Data sources row so "could not tell" never reads
             # as clean.
             withheld_candidates=findings_doc.setdefault(_OPT80_WITHHELD_DOC_KEY, []),
-            notes=findings_doc.setdefault("opt80_notes", {}))
+            notes=findings_doc.setdefault("opt80_notes", {}),
+            # Whether this workflow can gate a PR. Only then does a stall on its
+            # slowest job reach a merge wait, and only then is the tail line stamped.
+            is_pr=is_pr)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 

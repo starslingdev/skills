@@ -6161,6 +6161,94 @@ def _tier2_cert_summary(f: dict[str, Any]) -> str:
     return msg
 
 
+# ---- OPT80's tail axis: a separate line, never a p50 number --------------------
+#
+# An OPT80 finding on the slowest job of a workflow that runs on pull requests
+# carries `checkout_stall.tail_axis`: how often a run stalls and how much longer
+# that run's checkout takes. It is NOT a typical-run quantity (`wall_clock_p50_s`
+# stays 0), so it is rendered as its own marked line beside the pole's merge-wait
+# figure and never summed into the headline, a pole's buy line, the Tier-2
+# runner-minute section or any total. `verify_report` pairs each
+# `<!-- opt80-tail:<id> -->` marker with its stamped block and re-derives the two
+# numbers from the per-run checkout durations and the log-proven tail runs.
+
+def _opt80_tail_axis_of(f: dict[str, Any]) -> dict[str, Any] | None:
+    cs = f.get("checkout_stall")
+    if str(f.get("pattern") or "") != "OPT80" or not isinstance(cs, dict):
+        return None
+    axis = cs.get("tail_axis")
+    return axis if isinstance(axis, dict) else None
+
+
+def _opt80_tail_for(pole: dict[str, Any],
+                    findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """OPT80 findings carrying a tail axis on THIS drilled pole: the job joined
+    against the pole's check/job, never across workflows."""
+    targets = [t for t in (str(pole.get("check", "")), str(pole.get("job", ""))) if t]
+    if not targets:
+        return []
+    pole_wf = str(pole.get("workflow_file") or "")
+    out: list[dict[str, Any]] = []
+    for f in findings:
+        if f.get("advisory") or _opt80_tail_axis_of(f) is None:
+            continue
+        if _wf_conflict(pole_wf, str(f.get("workflow_file") or "")):
+            continue
+        jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
+        if any(j == t or _same_matrix(j, t) or _matrix_base(t) == j
+               or _matrix_base(j) == t for j in jobs for t in targets):
+            out.append(f)
+    return out
+
+
+def _opt80_tail_block(findings: list[dict[str, Any]], catalog_url: str) -> list[str]:
+    """One marked tail line per finding. The sentence is the collector's
+    `_opt80_tail_phrase`, rebuilt here from the stamped block."""
+    out: list[str] = []
+    for f in findings:
+        axis = _opt80_tail_axis_of(f) or {}
+        fid = str(f.get("id") or "")
+        n = int(_num(axis.get("one_in_n")) or 0)
+        loss = _num(axis.get("tail_loss_s")) or 0.0
+        k = int(_num(axis.get("tail_runs")) or 0)
+        sampled = int(_num(axis.get("sampled_runs")) or 0)
+        tail_p50 = _num(axis.get("tail_checkout_p50_s")) or 0.0
+        typ = _num(axis.get("typical_checkout_p50_s")) or 0.0
+        jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
+        job = _flatten_cell(jobs[0]) if jobs else "this job"
+        wf = _wf_base(str(f.get("workflow_file") or ""))
+        anchor = f.get("fix_recipe_anchor")
+        url = f"{catalog_url}#{anchor}" if anchor else catalog_url
+        out += [f"<!-- opt80-tail:{fid} -->",
+                f"> **⏱️ Checkout stall tail (OPT80, `{fid}`):** on `{job}` in "
+                f"`{_flatten_cell(wf)}`, one run in {n} loses up to {loss:.0f}s on "
+                f"checkout to a stalled fetch. {k} of {sampled} sampled runs have a "
+                f"checkout log that shows the fetch standing still; their median "
+                f"checkout is {tail_p50:.0f}s against a typical {typ:.0f}s. This is a "
+                "separate tail figure: the typical run never stalls, so it is not part "
+                "of the typical merge wait and is never added to any total. Fix "
+                f"recipe: {url}", ""]
+    return out
+
+
+def _opt80_off_pole_tail_block(findings: list[dict[str, Any]], catalog_url: str,
+                               rendered: set[str] | None = None) -> list[str]:
+    """Tail lines whose job is NOT a drilled pole (the slowest job of another
+    pull-request workflow, or any in a static-only report). `rendered` holds the
+    ids already shown at a pole; each finding's line renders exactly once."""
+    done = rendered or set()
+    rest = [f for f in findings
+            if not f.get("advisory") and _opt80_tail_axis_of(f) is not None
+            and str(f.get("id") or "") not in done]
+    if not rest:
+        return []
+    return ["---", "",
+            "**⏱️ Checkout stall tails on a workflow's slowest job** - each job below "
+            "is the slowest job of a workflow that runs on pull requests, but not one "
+            "of the long poles drilled above.", "",
+            *_opt80_tail_block(rest, catalog_url)]
+
+
 def _tier2_unpromoted_accounting(findings: list[dict[str, Any]],
                                  promoted: list[dict[str, Any]]) -> dict[str, int]:
     """Classify every positive-saving finding the lead's tail must account for.
@@ -8336,6 +8424,9 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # below the cluster floor). Beside the dropped-unprovable banner, its nearest
     # precedent: a measured fact kept out of the numbers and shown anyway.
     out += uncredited_lines
+    # No pole is drilled here, so every OPT80 tail line renders in the off-pole
+    # block. A tail-axis finding is a Tier-2 finding, so this path is reached.
+    out += _opt80_off_pole_tail_block(all_findings, catalog_url)
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
                                       or doc.get("dropped_unprovable"))
     # Issue #12: a static-only report (no measured pole to crown) can still carry a stamped
@@ -9955,6 +10046,9 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                         "there; this check follows it down for free.", ""]
             continue
         out += _floor_note(p, floor_pool)
+        # OPT80's tail line sits beside the pole's merge-wait figure, as its own
+        # marked line: a stalled run's loss, never part of the typical wait.
+        out += _opt80_tail_block(_opt80_tail_for(p, all_findings), catalog_url)
         # A data-driven match is on-path only if ANY joined finding is NOT `spine_rare`; a match
         # made up solely of presence-demoted (opt-in/rare) findings is still coverage, but the
         # waterfall pointer must say "opt-in / rare", not "sits ON the critical path" (mirrors the
@@ -10146,6 +10240,11 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # below the cluster floor). Beside the dropped-unprovable banner, its nearest
     # precedent: a measured fact kept out of the numbers and shown anyway.
     out += _opt79_uncredited_block(doc)
+    # OPT80 tail lines whose job was not drilled as a pole above (each renders
+    # once: the ids already shown at a pole are read back off their markers).
+    out += _opt80_off_pole_tail_block(
+        all_findings, catalog_url,
+        set(re.findall(r"<!-- opt80-tail:([^ ]+) -->", "\n".join(out))))
     out += _dropped_unprovable_banner(cp.get("dropped_unprovable")
                                       or doc.get("dropped_unprovable"))
     # The prose provenance block leads the Data sources section (owner UX edit

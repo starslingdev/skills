@@ -2096,6 +2096,28 @@ as one. It is an upper bound, not a forecast: the recommended abort fires at 30
 seconds and the retry re-fetches, so the realised gain on a stalled run is
 smaller than the pause it replaces.
 
+**The tail line (slowest job of a pull-request workflow only).** When the
+stalling job is its workflow's slowest job and the workflow runs on pull
+requests, a stalled run's checkout sits on that run's merge wait. The report
+then states the tail on its own line, next to that job's merge-wait figure in
+its long-pole section (or in a short block of its own when the job is not one
+of the drilled poles):
+
+```
+one run in N loses up to X s on checkout to a stalled fetch
+N = round(sampled runs / log-proven tail runs)
+X = median checkout of the log-proven tail runs - p50 checkout of the sample
+```
+
+Only a tail run whose own log proves the stall counts; a slow checkout with a
+smooth log does not. X is "up to" and applies to roughly one run in N: it is
+not a typical-run number, so it is never added to the headline, a pole's
+wall-clock figure, any total or the runner-minute section, and
+`wall_clock_p50_s` stays 0. On a push-only workflow, or a job that is not the
+slowest, the evidence keeps saying the effect is measured but not credited.
+The report's self-check re-derives N and X from the stamped per-run checkout
+durations and the quoted progress lines.
+
 **Fix recipe**, in this order, with the caveat that **retry and abort cap the
 damage; they do not fix the network**:
 

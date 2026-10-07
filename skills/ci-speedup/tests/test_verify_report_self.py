@@ -9584,6 +9584,13 @@ def test_opt80_tail_line_off_a_drilled_pole_renders_in_its_own_block(tmp_path: P
     assert "Checkout stall tails on a workflow's slowest job" in report
     assert vr.check_opt80_tail_lines(report, findings_path).ok
     assert vr.check_tier2_neutrality_derived(report, findings_path, report_path).ok
+    # The exemption is earned by the STAMPED axis, not by a marker on the page:
+    # the same report against findings with no tail axis fails the pole rule.
+    plain = json.loads(findings_path.read_text(encoding="utf-8"))
+    del plain["findings"][0]["checkout_stall"]["tail_axis"]
+    findings_path.write_text(json.dumps(plain), encoding="utf-8")
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
     # Without the tail axis the exemption does not apply: the old rule stands.
     del doc["findings"][0]["checkout_stall"]["tail_axis"]
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)

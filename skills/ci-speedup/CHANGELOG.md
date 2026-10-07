@@ -13,6 +13,22 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-06** — **A checkout that stalls on the slowest job of a pull-request
+  workflow now says how often, and how much, it costs the runs it hits.** The
+  checkout-stall pattern (OPT80) used to end that case with "measured but not
+  credited in this version", which gave the reader no number to weigh. The
+  report now prints a separate tail line in that job's long-pole section, beside
+  its merge-wait figure — "one run in N loses up to X s on checkout to a stalled
+  fetch" — or in a short block of its own when the job is not one of the drilled
+  poles. N and X come only from runs whose own log proves the stall. The line is
+  never added to the headline, a pole's figure, any total or the runner-minute
+  section, and the finding still credits 0s of typical merge wait; a push-only
+  workflow, or a job that is not the slowest, keeps the old sentence. The
+  report's self-check re-derives both numbers from the per-run checkout times and
+  the quoted log lines, fails a tail line with no stamped figure behind it (or
+  the reverse), and no longer misses a slowest job whose check is named
+  `<workflow> / <job>`.
+
 - **2026-09-30** — **The report now says, in plain English, which caches it held
   back and why.** When the cache check (OPT79) could not reach a verdict on a
   candidate cache, the Data sources table used to print an internal gate name as

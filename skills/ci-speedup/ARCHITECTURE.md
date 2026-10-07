@@ -1220,7 +1220,26 @@ and never the whole step. `wall_clock_p50_s` is 0 by construction: the median
 run has no stall, so capping the tail cannot move the p50 merge gate; the tail
 runs' own improvement is bounded above by the longest observed pause, stamped
 (`tail_run_longest_pause_s`, with `on_critical_path`), named in the rendered
-evidence and deliberately left uncredited rather than rendered as a p50 saving. Its certificate carries its own `proof` token,
+evidence and deliberately left uncredited rather than rendered as a p50 saving.
+When the job is the workflow's slowest AND the workflow runs on pull requests
+(the detector's `is_pr`; unknown counts as not), a stalled run sits on that
+run's merge wait, so the finding also stamps a SEPARATE tail axis,
+`checkout_stall.tail_axis` = `{sampled_runs n, tail_runs k (log-proven only),
+one_in_n round(n/k), typical_checkout_p50_s, tail_checkout_p50_s (median of the
+proven runs), tail_loss_s, on_critical_path}`, and `blocking_path.py` renders it
+as "one run in N loses up to X s on checkout to a stalled fetch": inside the
+pole's section beside its merge-wait figure (an `<!-- opt80-tail:<id> -->`
+marked line), or in a short off-pole block when the job is not a drilled pole.
+`tail_loss_s` is not capped at the next-tallest job (a tail run is already
+above the pole's typical p50, so the whole excess is on that run's gate), which
+is why it is phrased "up to" and "one run in N". It is never summed into
+`wall_clock_p50_s`, the headline, a pole's buy line, the Tier-2 section, the
+runner-minutes or the certificate. `verify_report.py`'s
+`check_opt80_tail_lines` re-derives N and X from `per_run_checkout_s` and the
+proofs' own quoted lines, fails a block on a finding off the critical path, a
+block with no marked line (or a line with no block), and any "one run in N"
+sentence whose numbers no block re-derives to. The push-only and not-the-pole
+cases keep the uncredited "not credited in this version" sentence. Its certificate carries its own `proof` token,
 `checkout_tail_excess`, and `verify_report.py`'s
 `_opt80_checkout_stall_rederived` arm recomputes the distribution, the tail
 threshold, which runs were tail runs, each pause's seconds from the quoted

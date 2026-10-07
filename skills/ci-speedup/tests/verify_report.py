@@ -6415,6 +6415,174 @@ def _opt80_checkout_stall_rederived(f: dict) -> list[str]:
     return problems
 
 
+# ---- OPT80's tail axis ---------------------------------------------------------
+#
+# An on-pole, pull-request OPT80 finding stamps `checkout_stall.tail_axis` and the
+# report renders it as "one run in N loses up to X s on checkout to a stalled
+# fetch" — a separate tail figure, never a p50 one. Every number in that sentence
+# is re-derived here from the per-run checkout durations and the per-run stall
+# proofs; the stamped summary values are compared, never trusted.
+_VR_OPT80_TAIL_MARKER_RE = re.compile(r"<!-- opt80-tail:([^ ]+) -->")
+_VR_OPT80_TAIL_PHRASE_RE = re.compile(
+    r"one run in (\d+) loses up to (\d+)s on checkout to a stalled fetch")
+
+
+def _vr_opt80_job_rendered_as_pole(f: dict, report: str) -> bool:
+    """Whether the finding's job is rendered as a Long pole of its OWN workflow.
+    A plain job's check-run is named `<workflow name> / <job>` (`CI / test`),
+    so the pole header's check is matched on its last ` / ` segment as well as
+    whole; a header in another workflow file never matches."""
+    jobs = {_cmp_name(str(j)) for j in _as_list(f.get("affected_jobs")) if str(j)}
+    wf_f = str(f.get("workflow_file") or "").rsplit("/", 1)[-1]
+    for wf, check, _body in _pole_header_sections(report):
+        if wf_f and wf and wf != wf_f:
+            continue
+        c = _cmp_name(check)
+        if c in jobs or c.rsplit(" / ", 1)[-1] in jobs:
+            return True
+    return False
+
+
+def _vr_opt80_tail_rendered_off_pole(f: dict, report: str) -> bool:
+    """The finding stamps a tail axis AND its marked tail line sits outside
+    every Long pole section (the renderer's off-pole tail block)."""
+    if "tail_axis" not in _as_dict(f.get("checkout_stall")):
+        return False
+    marker = f"<!-- opt80-tail:{f.get('id')} -->"
+    return marker in report and not any(
+        marker in body for _wf, _check, body in _pole_header_sections(report))
+
+
+def _vr_opt80_tail_axis_expected(cs: dict) -> "tuple[dict | None, list[str]]":
+    """The tail axis re-derived from the stamped per-run inputs, or None with
+    the reasons it cannot be. Only a tail run whose quoted log lines PROVE a
+    stall (same `Receiving objects: N%` below 100 on both sides, timestamps at
+    least `_VR_OPT80_MIN_GAP_S` apart) counts; its checkout seconds come from
+    `per_run_checkout_s`, not from the proof's own copy."""
+    per_run = [r for r in _as_list(cs.get("per_run_checkout_s")) if isinstance(r, dict)]
+    durs = {r.get("job_id"): _num(r.get("checkout_s")) for r in per_run}
+    vals = [float(d) for d in durs.values() if d is not None]
+    if not per_run or len(vals) != len(per_run):
+        return None, ["per_run_checkout_s is missing or carries a non-numeric duration"]
+    p50 = round(_vr_percentile(vals, 50), 1)
+    threshold = round(max(_VR_OPT80_TAIL_P95_MULTIPLE * p50,
+                          p50 + _VR_OPT80_TAIL_P95_ABS_S), 1)
+    proven_s: list[float] = []
+    seen: set = set()
+    for p in _as_list(cs.get("proven_tail_runs")):
+        if not isinstance(p, dict):
+            continue
+        jid = p.get("job_id")
+        d = durs.get(jid)
+        if jid in seen or d is None or d < threshold - 0.11:
+            continue
+        before, after = _as_dict(p.get("before")), _as_dict(p.get("after"))
+        ma = _VR_OPT80_RECEIVING_RE.search(str(before.get("line") or ""))
+        mb = _VR_OPT80_RECEIVING_RE.search(str(after.get("line") or ""))
+        t0, t1 = _vr_opt80_ts(before.get("ts")), _vr_opt80_ts(after.get("ts"))
+        if (not ma or not mb or ma.groups() != mb.groups()
+                or int(ma.group(1)) >= 100 or t0 is None or t1 is None
+                or round(t1 - t0, 1) + 0.11 < _VR_OPT80_MIN_GAP_S):
+            continue
+        seen.add(jid)
+        proven_s.append(float(d))
+    if not proven_s:
+        return None, ["no tail run's log proves a stall, so there is no tail to state"]
+    n, k = len(per_run), len(proven_s)
+    tail_p50 = round(_vr_percentile(proven_s, 50), 1)
+    return {"sampled_runs": n, "tail_runs": k, "one_in_n": int(round(n / k)),
+            "typical_checkout_p50_s": p50, "tail_checkout_p50_s": tail_p50,
+            "tail_loss_s": round(tail_p50 - p50, 1)}, []
+
+
+def _opt80_tail_axis_rederived(f: dict) -> list[str]:
+    """[] when the finding carries no tail axis, or carries one every number of
+    which re-derives; otherwise the reasons it does not."""
+    cs = _as_dict(f.get("checkout_stall"))
+    if "tail_axis" not in cs:
+        return []
+    axis = cs.get("tail_axis")
+    if not isinstance(axis, dict):
+        return [f"tail_axis is {type(axis).__name__}, not a block"]
+    problems: list[str] = []
+    if cs.get("on_critical_path") is not True or axis.get("on_critical_path") is not True:
+        problems.append(
+            f"a tail axis is stamped on a finding whose on_critical_path is "
+            f"{cs.get('on_critical_path')!r} - a stall off the merge wait has no "
+            "tail line to state")
+    if _num(f.get("wall_clock_p50_s")) != 0:
+        problems.append(
+            f"wall_clock_p50_s={f.get('wall_clock_p50_s')!r} - the tail is never a "
+            "p50 quantity, so an OPT80 finding credits no wall-clock")
+    want, why = _vr_opt80_tail_axis_expected(cs)
+    if want is None:
+        return problems + why
+    for key, val in want.items():
+        got = _num(axis.get(key))
+        tol = 0.11 if key.endswith("_s") else 0.0
+        if got is None or abs(got - float(val)) > tol:
+            problems.append(f"tail_axis.{key} {axis.get(key)!r} != re-derived {val}")
+    if want["tail_loss_s"] <= 0:
+        problems.append("the proven tail runs' checkout is not above the typical one")
+    return problems
+
+
+def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
+    """OPT80's tail line: stamped block, rendered line and numbers agree.
+
+    Fails on a tail axis whose numbers do not re-derive, on one stamped on a
+    finding off the critical path, on a stamped block with no marked line (or
+    two), on a marked line with no stamped block, and on ANY "one run in N
+    loses up to X s on checkout" sentence in the report whose N and X are not a
+    stamped finding's re-derived values. TOP-LEVEL: the Tier-2 pass compat-skips
+    a report with no Tier-2 stamps, and the tail line lives at the pole."""
+    name = "OPT80 tail lines re-derive and pair with their stamped blocks"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    tails = [f for f in _as_list(_as_dict(data).get("findings"))
+             if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT80"
+             and "tail_axis" in _as_dict(f.get("checkout_stall"))]
+    marks = [(m.group(1), m.end()) for m in _VR_OPT80_TAIL_MARKER_RE.finditer(report)]
+    phrases = [(int(m.group(1)), int(m.group(2)))
+               for m in _VR_OPT80_TAIL_PHRASE_RE.finditer(report)]
+    if not tails:
+        if marks or phrases:
+            return Check(name, False,
+                         "the report renders an OPT80 tail line but no finding stamps "
+                         "a tail axis")
+        return Check(name, True, "no OPT80 tail axis stamped")
+    bad: list[str] = []
+    allowed: set[tuple[int, int]] = set()
+    want_ids = {str(f.get("id") or "") for f in tails}
+    for i in sorted({i for i, _ in marks} - want_ids):
+        bad.append(f"the report renders a tail line for {i!r}, which stamps no tail axis")
+    for f in tails:
+        fid = str(f.get("id") or "?")
+        bad.extend(f"{fid}: {msg}" for msg in _opt80_tail_axis_rederived(f))
+        want, _why = _vr_opt80_tail_axis_expected(_as_dict(f.get("checkout_stall")))
+        if want is None:
+            continue
+        sentence = (f"one run in {want['one_in_n']} loses up to "
+                    f"{want['tail_loss_s']:.0f}s on checkout to a stalled fetch")
+        allowed.add((int(want["one_in_n"]), int(f"{want['tail_loss_s']:.0f}")))
+        hits = [end for i, end in marks if i == fid]
+        if len(hits) != 1:
+            bad.append(f"{fid}: its tail line is rendered {len(hits)} time(s), not once")
+            continue
+        line = report[hits[0]:].lstrip("\n").split("\n", 1)[0]
+        if sentence not in _strip_render_artifacts(line) and sentence not in line:
+            bad.append(f"{fid}: the line after its marker does not state the "
+                       f"re-derived {sentence!r}")
+    for n, x in phrases:
+        if (n, x) not in allowed:
+            bad.append(f"the report says 'one run in {n} loses up to {x}s on checkout', "
+                       "which no stamped tail axis re-derives to")
+    return Check(name, not bad,
+                 f"{len(tails)} tail line(s) re-derived and paired"
+                 if not bad else "; ".join(bad[:6]))
+
+
 def _opt65_suppressions_are_accounted_for(data: dict) -> list[str]:
     """Every OPT65 finding dropped for overlapping an OPT77 consolidation must be
     disclosed, and the consolidation that displaced it must actually be in the
@@ -6591,10 +6759,18 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                 # poles the rule itself reads.
                 if rendered_poles:
                     claimed = _as_dict(f.get("checkout_stall")).get("on_critical_path")
-                    if bool(claimed) != bool(jobs & rendered_poles):
+                    on_pole = _vr_opt80_job_rendered_as_pole(f, report)
+                    # One exemption, narrow: a slowest job whose workflow runs on
+                    # pull requests but was not drilled (it ranks below the rendered
+                    # poles) is on its own merge wait without a pole header. It is
+                    # accepted only when its tail line renders OUTSIDE every pole
+                    # section, which `check_opt80_tail_lines` pairs and re-derives.
+                    off_pole_tail = (bool(claimed) and not on_pole
+                                     and _vr_opt80_tail_rendered_off_pole(f, report))
+                    if bool(claimed) != on_pole and not off_pole_tail:
                         bad.append(
                             f"{fid}: on_critical_path={claimed!r} but the job is "
-                            f"{'' if jobs & rendered_poles else 'not '}rendered as "
+                            f"{'' if on_pole else 'not '}rendered as "
                             "a Long pole")
         elif proof == "non_pr_event":
             if not _non_pr_event_corroborated(f, data):
@@ -9494,6 +9670,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_savings_rows_backed_by_cost_spine(report, findings_path),
         check_runner_minute_spine_contract(report, findings_path),
         check_no_rate_derived_dollars(report, findings_path),
+        check_opt80_tail_lines(report, findings_path),
         check_structural_pole_has_measured_step(findings_path),
         check_structural_step_category_not_payload_binned_as_build(findings_path),
         check_detector_leaf_agrees_with_dominant_category(report, findings_path),
