@@ -4416,6 +4416,9 @@ def test_opt79_below_long_pole_sentence_never_shows_two_equal_durations():
     # 660.04 -> 660.0 and 659.06 -> 659.1: 0.9s from the stamped p50s (a tie),
     # though the raw difference (0.98s) would round to 1.0
     (660.04, 659.06, False),
+    # 256.4 - 255.4 is 0.99999... in floating point: the stamped margin is
+    # exactly 1.0s, the tie cutoff, so the job is credited
+    (256.4, 255.4, True),
 ])
 def test_opt79_below_long_pole_margin_rounds_the_stamped_p50s(lp, jp, credited):
     """The detector gets UNROUNDED p50s, stamps each to 0.1s, and takes the
@@ -4745,6 +4748,136 @@ def test_opt79_verifier_keeps_a_chained_below_long_pole_credit_off_pull_requests
     old["cache_net_negative"].pop("workflow_gates_pull_requests")
     problems = vr._tier2_below_long_pole_problems(old, data)
     assert any("needs:" in p for p in problems), problems
+
+
+def _opt79_chain_line(md, job=_OPT79_JOB):
+    lines = [ln for ln in md.splitlines() if ln.startswith(f"> - a cache on `{job}`")]
+    assert len(lines) == 1, md
+    return lines[0]
+
+
+def test_opt79_needs_chain_row_never_calls_the_job_the_slowest():
+    """The chain row is NOT the long pole: its line must never tell the reader
+    the job "is this workflow's slowest job", and it names the job that is."""
+    _out, rows, _w = _opt79_chain_run({_OPT79_JOB: ["e2e"]})
+    assert rows and rows[0]["uncredited_reason"] == _OPT79_CHAIN_REASON, rows
+    line = _opt79_chain_line("\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": rows})))
+    assert "is this workflow's slowest job" not in line, line
+    assert "`e2e`" in line, line
+
+
+def test_opt79_verifier_fails_a_non_pole_row_told_it_is_the_slowest_job():
+    """`verify_report` twin of the render rule: a row whose job is not the long
+    pole must not be rendered as the workflow's slowest job."""
+    vr = _load_verify_report_for_opt79()
+    _out, rows, _w = _opt79_chain_run({_OPT79_JOB: ["e2e"]})
+    md = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": rows}))
+    assert vr._opt79_uncredited_rows_rendered(md, rows) == []
+    bad = re.sub(r"`unit` is not this workflow's slowest job[^,;]*,",
+                 "`unit` is this workflow's slowest job,", md)
+    assert "`unit` is this workflow's slowest job," in bad, bad
+    problems = vr._opt79_uncredited_rows_rendered(bad, rows)
+    assert any("slowest job" in p for p in problems), problems
+
+
+def test_opt79_verifier_walks_a_two_hop_needs_chain():
+    """unit -> integration -> e2e: the long pole is two `needs:` hops away, in
+    either direction, and the stamped chain reason is accepted."""
+    vr = _load_verify_report_for_opt79()
+    _out, rows, _w = _opt79_chain_run(
+        {_OPT79_JOB: ["integration"], "integration": ["e2e"]})
+    graph = {"ci.yml": {_OPT79_JOB: {"name": _OPT79_JOB, "needs": ["integration"]},
+                        "integration": {"name": "integration", "needs": ["e2e"]},
+                        "e2e": {"name": "e2e", "needs": []}}}
+    data = {"workflow_job_graph": graph}
+    assert vr._vr_opt79_needs_chain(data, "ci.yml", _OPT79_JOB, "e2e") is True
+    assert vr._vr_opt79_needs_chain(data, "ci.yml", "e2e", _OPT79_JOB) is True
+    assert vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": rows, "workflow_job_graph": graph}) == []
+
+
+def test_opt79_verifier_resolves_a_job_by_its_name_not_its_key():
+    """`needs:` lists job KEYS, the run reports display NAMES: a job keyed
+    `integration` with `name: Integration tests` is found by its name."""
+    vr = _load_verify_report_for_opt79()
+    graph = {"ci.yml": {"integration": {"name": "Integration tests", "needs": ["e2e"]},
+                        "e2e": {"name": "e2e", "needs": []}}}
+    data = {"workflow_job_graph": graph}
+    assert vr._vr_opt79_needs_chain(data, "ci.yml", "Integration tests", "e2e") is True
+    _out, rows, _w = _opt79_chain_run({_OPT79_JOB: ["e2e"]})
+    rows[0]["job"] = "Integration tests"
+    assert vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": rows, "workflow_job_graph": graph}) == []
+
+
+def test_opt79_verifier_fails_closed_when_the_chain_cannot_be_resolved():
+    """A recorded job graph in which the job (or the long pole) resolves to no
+    job cannot re-derive the chain: that is a problem, never a silent pass -
+    for the uncredited chain row and for a credited below-long-pole job."""
+    vr = _load_verify_report_for_opt79()
+    graph = {"ci.yml": {"other": {"name": "other", "needs": ["e2e"]},
+                        "e2e": {"name": "e2e", "needs": []}}}
+    _out, rows, _w = _opt79_chain_run({_OPT79_JOB: ["e2e"]})
+    problems = vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": rows, "workflow_job_graph": graph})
+    assert any("resolve to no job" in p for p in problems), problems
+    f, data = _opt79_blp_finding()
+    data["workflow_job_graph"] = graph
+    problems = vr._tier2_below_long_pole_problems(f, data)
+    assert any("cannot resolve" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("job, pole", [
+    (_OPT79_JOB + " (node 20)", "e2e"),
+    (_OPT79_JOB, "e2e (node 20)"),
+])
+def test_opt79_needs_chain_matches_matrix_legs_on_both_sides(job, pole):
+    """A matrix leg (`e2e (node 20)`) is its job: the trailing `(leg)` is
+    stripped on the job and on the long pole, in the collector and in the
+    verifier alike."""
+    assert cr._opt79_in_needs_chain_with(
+        _opt79_chain_wf({_OPT79_JOB: ["e2e"]}), job, pole) is True
+    vr = _load_verify_report_for_opt79()
+    graph = {"ci.yml": {_OPT79_JOB: {"name": _OPT79_JOB, "needs": ["e2e"]},
+                        "e2e": {"name": "e2e", "needs": []}}}
+    assert vr._vr_opt79_needs_chain(
+        {"workflow_job_graph": graph}, "ci.yml", job, pole) is True
+
+
+def test_opt79_verifier_rejects_the_chain_reason_on_a_workflow_no_pr_runs():
+    """The collector stamps the chain reason only on a pull-request workflow
+    (elsewhere there is no merge wait and the bill-only credit stands)."""
+    vr = _load_verify_report_for_opt79()
+    _out, rows, _w = _opt79_chain_run({_OPT79_JOB: ["e2e"]})
+    rows[0]["workflow_gates_pull_requests"] = False
+    problems = vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": rows})
+    assert any(_OPT79_CHAIN_REASON in p and "pull-request" in p
+               for p in problems), problems
+
+
+def test_opt79_verifier_rejects_a_detail_on_a_needs_chain_row():
+    vr = _load_verify_report_for_opt79()
+    _out, rows, _w = _opt79_chain_run({_OPT79_JOB: ["e2e"]})
+    rows[0]["uncredited_reason_detail"] = "stray"
+    problems = vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": rows})
+    assert any("uncredited_reason_detail" in p for p in problems), problems
+
+
+def test_opt79_converse_rule_fires_at_exactly_the_one_second_cutoff():
+    """A job exactly 1.0s shorter than its long pole is not a co-pole: listed
+    with no reason, it is the credited below-long-pole finding left out."""
+    vr = _load_verify_report_for_opt79()
+    row = _opt79_no_pr_pole_row()
+    row["long_pole_job"] = "e2e"
+    row["long_pole_p50_s"] = round(float(row["job_p50_s"]) + 1.0, 1)
+    problems = vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": [row]})
+    assert any("below_long_pole" in p for p in problems), problems
+
 
 
 def test_opt79_below_the_floor_note_claims_no_merge_gate():

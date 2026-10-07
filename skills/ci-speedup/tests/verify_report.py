@@ -5938,6 +5938,15 @@ def _vr_opt79_needs_chain(data: dict, wf: str, job: str,
         return False
 
     return _reaches(jk, pk) or _reaches(pk, jk)
+
+
+def _vr_opt79_chain_unresolved(wf: str, job: str, long_pole_job: str) -> str:
+    """The problem for a recorded `workflow_job_graph` in which `job` or the
+    long pole resolves to no job of `wf`: the chain cannot be re-derived, so the
+    verifier fails closed rather than skipping the check."""
+    return (f"`{job}` / long pole `{long_pole_job}` resolve to no job in "
+            f"workflow_job_graph[{wf!r}]: whether they share a `needs:` chain "
+            "cannot be re-derived")
 # The events on which a pull request waits for a workflow (the cascade's
 # `wall_clock._DEVELOPER_FACING_EVENTS`).
 _VR_OPT79_PR_EVENTS = frozenset({"pull_request", "merge_group"})
@@ -6303,6 +6312,12 @@ def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
         if chained is False:
             out.append(f"uncredited_reason {reason!r} but `{job}` and `{lp_job}` "
                        "share no `needs:` path in workflow_job_graph")
+        elif chained is None and _as_dict(_as_dict(data.get(
+                "workflow_job_graph")).get(str(cn.get("workflow_file") or ""))):
+            # Graph recorded for the workflow but the job or the long pole
+            # resolves to no job in it: fail closed, never a silent skip.
+            out.append(_vr_opt79_chain_unresolved(
+                str(cn.get("workflow_file") or ""), job, lp_job))
         if cn.get("uncredited_reason_detail") is not None:
             out.append(f"uncredited_reason_detail on a {reason!r} row")
         return out
@@ -7403,6 +7418,12 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
         if frag and _strip_render_artifacts(frag) not in why:
             out.append(f"{tag}: `{job}` line does not state its reason "
                        f"({cn.get('uncredited_reason')!r}: {frag!r})")
+        # Only the long pole is the workflow's slowest job: a row whose job is
+        # not it (a `needs:`-chain job, a co-pole) must never be told it is.
+        if (lp_job and lp_job != job and f"{_strip_render_artifacts(job)} is "
+                "this workflow's slowest job" in why):
+            out.append(f"{tag}: `{job}` line calls it this workflow's slowest job, "
+                       f"but the long pole is `{lp_job}`")
         if says_no_pr != no_pr:
             out.append(f"{tag}: `{job}` line {'says' if says_no_pr else 'does not say'}"
                        " no pull request runs it, against the row's stamps")
