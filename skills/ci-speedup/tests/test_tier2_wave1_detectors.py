@@ -4424,6 +4424,98 @@ def test_opt79_job_tied_with_the_long_pole_stays_uncredited():
         {"opt79_uncredited_pole_caches": rows}) == []
 
 
+_OPT79_CHAIN_REASON = "job_in_a_needs_chain_with_the_long_pole"
+
+
+def _opt79_chain_wf(needs):
+    """`_opt79_wf()` plus the long pole `e2e`, with the `needs:` edges given as
+    `{job: [deps]}`."""
+    wf = _opt79_wf()
+    wf["jobs"]["e2e"] = {"runs-on": "ubuntu-latest",
+                         "steps": [{"run": "npm run e2e"}]}
+    for job, deps in needs.items():
+        wf["jobs"][job]["needs"] = deps
+    return wf
+
+
+def _opt79_chain_run(needs, *, is_pr=True):
+    jpr, logs = _opt79_sample()
+    rows: list = []
+    withheld: dict = {}
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_pole_crit(), _opt79_chain_wf(needs), 100, 0,
+        logs_by_job_id=logs, uncredited=rows, is_pr=is_pr, withheld=withheld)
+    return out, rows, withheld
+
+
+@pytest.mark.parametrize("needs", [
+    {_OPT79_JOB: ["e2e"]},                          # runs after the long pole
+    {"e2e": [_OPT79_JOB]},                          # runs before the long pole
+    {_OPT79_JOB: ["integration"], "integration": ["e2e"]},   # transitively
+])
+def test_opt79_job_in_a_needs_chain_with_the_long_pole_is_not_credited(needs):
+    """The below-long-pole proof models the merge gate as the slowest SINGLE
+    job. A job in a `needs:` chain with that job (either direction, at any
+    depth) adds to it: the merge wait is the chain's sum, so shrinking it DOES
+    shorten the merge wait, and crediting it in the wall-clock-neutral section
+    would be false. It is an uncredited row that says why."""
+    out, rows, w = _opt79_chain_run(needs)
+    assert out == [], out
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["uncredited_reason"] == _OPT79_CHAIN_REASON, row
+    assert row["on_critical_path"] is False
+    assert w.get(_OPT79_CHAIN_REASON) == 1, w
+    md = "\n".join(bp._opt79_uncredited_block(
+        {"opt79_uncredited_pole_caches": rows}))
+    assert "`needs:` chain with the slowest job" in md, md
+    assert "tied" not in md and "on the merge wait" not in md, md
+    vr = _load_verify_report_for_opt79()
+    assert vr._opt79_uncredited_rows_rederived(
+        {"opt79_uncredited_pole_caches": rows}) == []
+
+
+def test_opt79_needs_chain_exclusion_is_for_pull_request_workflows_only():
+    """No pull request waits on a workflow no PR runs, so a chain there has no
+    merge wait to shorten: the bill-only below-long-pole credit stands."""
+    out, rows, _w = _opt79_chain_run({_OPT79_JOB: ["e2e"]}, is_pr=False)
+    assert rows == [] and len(out) == 1, (out, rows)
+    assert out[0]["tier2_neutrality"]["proof"] == "below_long_pole"
+
+
+def test_opt79_verifier_checks_the_needs_chain_reason_against_the_job_graph():
+    """The stamped chain reason is re-derived from `workflow_job_graph` when the
+    run recorded it; without the graph it is accepted only for a job strictly
+    shorter than its long pole on a pull-request workflow."""
+    vr = _load_verify_report_for_opt79()
+    _out, rows, _w = _opt79_chain_run({_OPT79_JOB: ["e2e"]})
+    graph = {"ci.yml": {_OPT79_JOB: {"name": _OPT79_JOB, "needs": ["e2e"]},
+                        "e2e": {"name": "e2e", "needs": []},
+                        "integration": {"name": "integration", "needs": []}}}
+    doc = {"opt79_uncredited_pole_caches": rows, "workflow_job_graph": graph}
+    assert vr._opt79_uncredited_rows_rederived(doc) == []
+    graph["ci.yml"][_OPT79_JOB]["needs"] = []
+    problems = vr._opt79_uncredited_rows_rederived(doc)
+    assert any("needs:" in p for p in problems), problems
+    # without the graph: a job tied with its long pole cannot carry the reason
+    doc.pop("workflow_job_graph")
+    rows[0]["job_p50_s"] = rows[0]["long_pole_p50_s"]
+    problems = vr._opt79_uncredited_rows_rederived(doc)
+    assert any(_OPT79_CHAIN_REASON in p for p in problems), problems
+
+
+def test_opt79_verifier_fails_a_credited_below_long_pole_job_in_a_needs_chain():
+    vr = _load_verify_report_for_opt79()
+    f, data = _opt79_blp_finding()
+    data["workflow_job_graph"] = {"ci.yml": {
+        _OPT79_JOB: {"name": _OPT79_JOB, "needs": []},
+        "e2e": {"name": "e2e", "needs": []}}}
+    assert vr._tier2_below_long_pole_problems(f, data) == []
+    data["workflow_job_graph"]["ci.yml"]["e2e"]["needs"] = [_OPT79_JOB]
+    problems = vr._tier2_below_long_pole_problems(f, data)
+    assert any("needs:" in p for p in problems), problems
+
+
 def test_opt79_below_long_pole_token_is_one_contract():
     vr = _load_verify_report_for_opt79()
     assert cr._OPT79_PROOF_BELOW_LONG_POLE == "below_long_pole"

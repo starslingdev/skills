@@ -6016,6 +6016,9 @@ _OPT79_UNCREDITED_REASON_PHRASES: dict[str, str] = {
     "pole_workflow_off_merge_gating_spine":
         "the pull request can merge without waiting for this job, so its excess "
         "is not part of the merge wait",
+    "job_in_a_needs_chain_with_the_long_pole":
+        "it runs in a `needs:` chain with the slowest job, so shrinking it "
+        "shortens the merge wait, which this version does not size",
 }
 
 
@@ -6027,7 +6030,7 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
     wall-clock claim, no neutrality certificate, no Tier-2 row. The measurement
     is as real as a credited one; what is missing is the sizing.
 
-    Exactly two cases reach it. Every job strictly shorter than its
+    Three cases reach it. Every other job strictly shorter than its
     workflow's long pole is credited runner-minutes (below the cluster floor,
     or at/above it and below the long pole), on any workflow; the untied long
     pole of a pull-request workflow is a credited wall-clock finding rendered
@@ -6040,7 +6043,10 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
     - the long pole of a pull-request workflow that the wall-clock arm declined,
       with its stamped `uncredited_reason` (tied with the next job - a job tied
       with the long pole is stamped the same way - zeroed by a cross-check, or
-      off the merge-gating spine), stated in plain English.
+      off the merge-gating spine), stated in plain English;
+    - a job shorter than the long pole of a pull-request workflow but in a
+      `needs:` chain with it (`job_in_a_needs_chain_with_the_long_pole`): the
+      chain's sum is the merge wait, which this version does not size.
 
     `verify_report` fails a row that claims the merge wait, and a row with no
     reason that should have been credited. The block says only what the stamps
@@ -6103,6 +6109,12 @@ def _opt79_uncredited_block(doc: dict[str, Any] | None) -> list[str]:
             # nothing about where the job sits.
             why = (f"`{job}` carries no recorded reason it could not be "
                    "priced; **not credited** in this version.")
+        if str(r.get("uncredited_reason") or "") == "job_in_a_needs_chain_with_the_long_pole":
+            # Not a pole: it is shorter than the slowest job, but chained to it.
+            lp_job = str(r.get("long_pole_job") or "")
+            pole = f" (`{lp_job}` is)" if lp_job else ""
+            why = (f"`{job}` is not this workflow's slowest job{pole}, but "
+                   f"{reason}; **not credited** in this version.")
         lines.append(
             f"> - a cache on `{job}`{where} measured net-negative by {waste_txt} "
             f"per cache hit ({hits} hit / {misses} miss run(s) sampled); {why}")

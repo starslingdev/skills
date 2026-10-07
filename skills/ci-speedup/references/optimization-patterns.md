@@ -766,10 +766,11 @@ the credited job's own p50 is below the workflow's cluster floor (margin: that
 difference), or below the workflow's long pole (margin: the long pole's p50
 minus the job's, re-derived from `per_workflow_timing`; the self-check fails a
 job that is or ties the long pole, and any other pattern claiming the token).
-A `below_long_pole` job can be the second-slowest job of a pull-request workflow
-that the report drills as a secondary Long pole; the self-check's "also rendered
-as a Long pole" proxy is waived for this token because its re-derivation checks
-the fact the proxy stands in for. That finding must stamp
+A job in a `needs:` chain with the long pole (either direction, any depth) of
+a pull-request workflow is never `below_long_pole`: the merge wait is then the
+chain's sum, so shrinking it does shorten the wait. It is listed uncredited
+(`job_in_a_needs_chain_with_the_long_pole`), and the self-check's "also rendered
+as a Long pole" proxy applies to this token like any other. That finding must stamp
 `wall_clock_p50_s=0`, `sizing_basis=measured`, the two-path model in
 `measured_signal`, and a structured `cache_net_negative` block that lets
 `verify_report.py` re-derive the credited minutes and the margin without reading
