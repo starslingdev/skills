@@ -9695,6 +9695,36 @@ def test_opt80_slowest_job_of_a_workflow_with_no_rendered_pole_is_no_contradicti
         assert chk.ok, (events, chk)
 
 
+def test_opt80_tail_joins_a_pole_on_its_exact_job_like_the_verifier():
+    """OPT80's affected job is ONE exact runtime name. The renderer joins the
+    tail line to a pole on the pole's stamped job exactly (else the check with
+    only the workflow-name prefix stripped), the way the verifier does: a
+    sibling matrix leg or a sibling compound name is a different job."""
+    bp = _load_blocking_path()
+
+    def f(job):
+        g = _opt80_verifier_finding(affected_jobs=[job])
+        g["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+        return g
+
+    def pole(check, job=None):
+        p = {"check": check, "workflow_file": ".github/workflows/ci.yml"}
+        if job is not None:
+            p["job"] = job
+        return p
+
+    tail_for = bp._opt80_tail_for
+    assert tail_for(pole("test (2)", "test (2)"), [f("test (1)")]) == []
+    assert tail_for(pole("test", "test"), [f("test (1)")]) == []
+    assert tail_for(pole("drizzle-adapter Integration Test",
+                         "drizzle-adapter Integration Test"),
+                    [f("prisma-adapter Integration Test")]) == []
+    assert len(tail_for(pole("test (2)", "test (2)"), [f("test (2)")])) == 1
+    assert len(tail_for(pole("CI / build"), [f("build")])) == 1
+    assert len(tail_for(pole("CI / call-a / build"), [f("call-a / build")])) == 1
+    assert tail_for(pole("CI / call-b / build"), [f("build")]) == []
+
+
 def test_opt80_tail_line_off_a_drilled_pole_renders_in_its_own_block(tmp_path: Path):
     """The slowest job of a pull-request workflow that is not drilled: its tail
     line renders once, outside every pole section, and that (only that) excuses

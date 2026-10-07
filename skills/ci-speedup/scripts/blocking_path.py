@@ -6182,9 +6182,20 @@ def _opt80_tail_axis_of(f: dict[str, Any]) -> dict[str, Any] | None:
 
 def _opt80_tail_for(pole: dict[str, Any],
                     findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """OPT80 findings carrying a tail axis on THIS drilled pole: the job joined
-    against the pole's check/job, never across workflows."""
-    targets = [t for t in (str(pole.get("check", "")), str(pole.get("job", ""))) if t]
+    """OPT80 findings carrying a tail axis on THIS drilled pole, never across
+    workflows. OPT80's affected job is ONE exact runtime name, so the join is
+    exact, the same way the verifier makes it: on the pole's stamped `job`,
+    else on its check whole or with ONLY the workflow-name prefix (the first
+    ` / ` segment) stripped. A sibling matrix leg (`test (1)` vs `test (2)`) or
+    a sibling compound name is a different job."""
+    job = str(pole.get("job") or "")
+    if job:
+        targets = {job}
+    else:
+        check = str(pole.get("check") or "")
+        targets = {check} if check else set()
+        if " / " in check:
+            targets.add(check.split(" / ", 1)[1])
     if not targets:
         return []
     pole_wf = str(pole.get("workflow_file") or "")
@@ -6194,9 +6205,8 @@ def _opt80_tail_for(pole: dict[str, Any],
             continue
         if _wf_conflict(pole_wf, str(f.get("workflow_file") or "")):
             continue
-        jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
-        if any(j == t or _same_matrix(j, t) or _matrix_base(t) == j
-               or _matrix_base(j) == t for j in jobs for t in targets):
+        jobs = {str(j) for j in (f.get("affected_jobs") or []) if str(j)}
+        if jobs & targets:
             out.append(f)
     return out
 
