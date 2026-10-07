@@ -6140,6 +6140,15 @@ def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
                 f"`{job}` is the long pole of a workflow pull requests wait on, with "
                 f"{headroom!r}s of headroom and no uncredited_reason: it should have "
                 "been the credited pole finding")
+        elif gates is True:
+            # Every row the collector lists on a workflow pull requests wait on
+            # carries a stamped reason; one without renders the "no recorded
+            # reason" fallback. Fails ALWAYS - a tie (headroom 0), a co-pole, or
+            # a row with no long pole recorded is no exemption.
+            out.append(
+                f"`{job}` is on a workflow pull requests wait on and names no "
+                "uncredited_reason: the collector never lists such a row, and the "
+                "report could only say no reason was recorded")
         # The converse of the below-the-long-pole arm: a job strictly shorter
         # than its workflow's long pole IS that credited runner-minute finding,
         # on any workflow, so listing it here under-reports a priced saving.

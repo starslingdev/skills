@@ -629,7 +629,11 @@ unversioned and updates by reinstall from `main`.
   fails a job below the second-slowest job claiming it (that job's proof is the
   below-the-floor one, and the new wording would be false for it),
   fails any other pattern claiming the token, and fails a "not credited" row
-  that should have been this finding. A slowest job's merge-wait finding now
+  that should have been this finding. It also fails any "not credited" row on a
+  workflow pull requests run that names no reason, whatever the headroom; and a
+  job whose workflow has no slowest job recorded is no longer listed there on a
+  pull-request workflow (it is counted among the held-back candidates instead),
+  since no reason fits it. A slowest job's merge-wait finding now
   says the bill section needs proof the job is shorter than the slowest job,
   rather than naming the second-slowest job.
 
