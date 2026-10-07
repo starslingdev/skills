@@ -7556,19 +7556,442 @@ def test_opt80_withholds_when_the_tail_runs_logs_cannot_be_fetched():
 
 def test_opt80_names_the_slowest_job_case_in_plain_words():
     """When the stalling job IS the workflow's slowest, the reader is told so in
-    one honest line: the effect on the merge wait is measured, and it is not
-    credited in this version. Anything vaguer reads as either a hidden saving or
-    no saving at all."""
+    one honest line. Here the trigger is not known to be a pull request, so the
+    line names the measured pause and says why no merge wait is claimed: no
+    sentence about a merge wait a pull request never waits on."""
     out, _gh = _opt80(crit=_opt80_crit(long_pole="build"))
     ev = out[0]["evidence"]
-    assert ("`build` is this workflow's slowest job; the stall's effect on the "
-            "merge wait is measured (longest pause 40s) but not credited in this "
-            "version.") in ev, ev
+    assert ("`build` is this workflow's slowest job; the stall is measured "
+            "(longest pause 40s), but this workflow is not shown to run on pull "
+            "requests, so no merge-wait claim is made.") in ev, ev
+    assert "merge wait is measured" not in ev, ev
     assert out[0]["checkout_stall"]["on_critical_path"] is True
+    assert out[0]["checkout_stall"]["tail_axis_withheld_reason"] == (
+        "not_on_pull_requests")
     # A job that is NOT the pole says none of it.
     other, _gh2 = _opt80(crit=_opt80_crit(long_pole="deploy"))
     assert "slowest job" not in other[0]["evidence"], other[0]["evidence"]
     assert other[0]["checkout_stall"]["on_critical_path"] is False
+
+
+# `build` is a required check: the merge waits on it.
+_OPT80_BUILD_GATES = {"build": {"basis": "required", "required_check": "build",
+                                "required_job": "build", "job_key": "build"}}
+
+
+def _opt80_pr(is_pr, long_pole="build", durations=None, merge_gating="required"):
+    runs = _opt80_runs(durations)
+    gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
+    gating = _OPT80_BUILD_GATES if merge_gating == "required" else merge_gating
+    return cr._detect_opt80_checkout_tail_stall(
+        gh, "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(long_pole=long_pole),
+        _opt80_wf(), None, 100, 0, is_pr=is_pr, merge_gating_jobs=gating)
+
+
+def test_opt80_stamps_a_tail_axis_on_the_slowest_job_of_a_pull_request_workflow():
+    """The owner decision of 2026-10-06: the on-pole pull-request case states the
+    tail on its OWN axis — "one run in N spends about X s longer on checkout, and that run's log
+    shows the fetch stalling" — and still credits no wall-clock. Ten sampled runs, two of them
+    log-proven 120s stalls against a 10s p50: one in five, 110s."""
+    out = _opt80_pr(is_pr=True)
+    assert len(out) == 1, out
+    f = out[0]
+    cs = f["checkout_stall"]
+    assert cs["tail_axis"] == {
+        "sampled_runs": 10, "slow_runs": 2, "logs_read": 2, "tail_runs": 2,
+        "logs_clean": 0, "logs_unreadable": 0,
+        "counted_runs": 2, "one_in_n": 5,
+        "typical_checkout_p50_s": 10.0, "tail_checkout_p50_s": 120.0,
+        "tail_loss_s": 110.0, "on_critical_path": True,
+        "merge_gating": _OPT80_BUILD_GATES["build"]}
+    # Never a p50 number, never in the credited minutes or the certificate.
+    assert f["wall_clock_p50_s"] == 0.0
+    assert f["runner_min_saving"] == 36.7 and cs["runner_min_saving"] == 36.7
+    assert f["tier2_neutrality"]["margin_s"] == 22.0
+    assert set(f["tier2_neutrality"]) == {"proof", "margin_s", "ref"}
+    assert "one run in" not in f["tier2_neutrality"]["ref"]
+    assert "one run in" not in f["size_note"]
+    # The evidence reads the tail line instead of "not credited in this version".
+    ev = f["evidence"]
+    assert ("`build` is this workflow's slowest job on pull requests: one run in 5 "
+            "spends about 110s longer on checkout, and that run's log shows the fetch stalling") in ev, ev
+    assert "not credited in this version" not in ev, ev
+
+
+def test_opt80_tail_axis_counts_only_log_proven_tail_runs():
+    """A slow checkout whose log shows a smooth fetch is not a stall, so it is not
+    one of the N in "one run in N". Three 120s runs, only two proven: the sentence
+    must say one in five (10 / 2), not one in three (10 / 3)."""
+    runs = _opt80_runs([10.0] * 7 + [120.0, 120.0, 120.0])
+    logs = {run[0]["id"]: _OPT80_STALLED_LOG for run in runs}
+    logs[runs[-1][0]["id"]] = _OPT80_SMOOTH_LOG
+    out = cr._detect_opt80_checkout_tail_stall(
+        _Opt80Gh(logs), "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(),
+        _opt80_wf(), None, 100, 0, is_pr=True,
+        merge_gating_jobs=_OPT80_BUILD_GATES)
+    axis = out[0]["checkout_stall"]["tail_axis"]
+    assert axis["tail_runs"] == 2 and axis["one_in_n"] == 5, axis
+    assert len(out[0]["checkout_stall"]["tail_run_job_ids"]) == 3
+
+
+def _opt80_capped_probe():
+    """Thirty sampled runs, ten of them slow (120s against a 10s p50), every
+    log a stall. The probe reads only `_OPT80_LOG_PROBE_MAX` (4) of the ten."""
+    runs = _opt80_runs([10.0] * 20 + [120.0] * 10)
+    gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
+    return cr._detect_opt80_checkout_tail_stall(
+        gh, "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(), _opt80_wf(), None,
+        100, 0, is_pr=True, merge_gating_jobs=_OPT80_BUILD_GATES)
+
+
+def test_opt80_tail_axis_counts_the_slow_runs_past_the_log_probe_cap():
+    """The probe cap is a COST bound, not a finding: a slow run whose log was
+    never read did not show a smooth fetch. Counting only the 4 proven runs
+    said "one run in 8" (30 / 4) when ten of thirty runs were slow - one in 3.
+    N is now based on the measured slow runs: the proven ones plus the slow
+    runs whose logs were not read; a slow run whose log WAS read and shows no
+    stall is left out. Every count is stamped separately."""
+    out = _opt80_capped_probe()
+    cs = out[0]["checkout_stall"]
+    axis = cs["tail_axis"]
+    assert cs["logs_fetched"] == 4
+    assert axis["sampled_runs"] == 30 and axis["slow_runs"] == 10, axis
+    assert axis["logs_read"] == 4 and axis["tail_runs"] == 4, axis
+    assert axis["counted_runs"] == 10 and axis["one_in_n"] == 3, axis
+    # The ids of the logs actually fetched are stamped, and every proof is one.
+    probed = cs["log_probed_job_ids"]
+    assert len(probed) == 4 and set(probed) <= set(cs["tail_run_job_ids"])
+    assert {p["job_id"] for p in cs["proven_tail_runs"]} <= set(probed)
+    # A read log that shows no stall is left OUT of N (three slow, one smooth:
+    # 3 - 1 = 2 counted, one in five).
+    runs = _opt80_runs([10.0] * 7 + [120.0, 120.0, 120.0])
+    logs = {run[0]["id"]: _OPT80_STALLED_LOG for run in runs}
+    logs[runs[-1][0]["id"]] = _OPT80_SMOOTH_LOG
+    axis = cr._detect_opt80_checkout_tail_stall(
+        _Opt80Gh(logs), "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(),
+        _opt80_wf(), None, 100, 0, is_pr=True,
+        merge_gating_jobs=_OPT80_BUILD_GATES)[0]["checkout_stall"]["tail_axis"]
+    assert (axis["slow_runs"], axis["logs_read"], axis["tail_runs"],
+            axis["counted_runs"], axis["one_in_n"]) == (3, 3, 2, 2, 5), axis
+
+
+def _opt80_three_slow_one_odd(odd_log):
+    """Ten sampled runs, three slow (120s against 10s): two logs prove the
+    stall, the third log is `odd_log` (None = the log could not be fetched)."""
+    runs = _opt80_runs([10.0] * 7 + [120.0, 120.0, 120.0])
+    logs = {run[0]["id"]: _OPT80_STALLED_LOG for run in runs}
+    if odd_log is None:
+        del logs[runs[-1][0]["id"]]
+    else:
+        logs[runs[-1][0]["id"]] = odd_log
+    out = cr._detect_opt80_checkout_tail_stall(
+        _Opt80Gh(logs), "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(),
+        _opt80_wf(), None, 100, 0, is_pr=True,
+        merge_gating_jobs=_OPT80_BUILD_GATES)
+    assert len(out) == 1, out
+    return out[0]["checkout_stall"], runs[-1][0]["id"]
+
+
+def test_opt80_tail_axis_keeps_a_slow_run_whose_log_was_unavailable_in_n():
+    """Only a log that was READ and shows a smooth fetch is left out of N. A
+    slow run whose log could not be fetched showed nothing, so it is counted
+    like a slow run past the probe cap: three slow of ten, two proven, one
+    unavailable is one run in 3 (10 / 3), not one in 5 (10 / 2)."""
+    cs, odd = _opt80_three_slow_one_odd(None)
+    axis = cs["tail_axis"]
+    assert (axis["slow_runs"], axis["logs_read"], axis["tail_runs"]) == (3, 3, 2), axis
+    assert axis["counted_runs"] == 3 and axis["one_in_n"] == 3, axis
+    assert axis["logs_unreadable"] == 1 and axis["logs_clean"] == 0, axis
+    outcomes = {o["job_id"]: o["outcome"] for o in cs["log_probe_outcomes"]}
+    assert outcomes[odd] == "tail_run_log_unavailable", outcomes
+    assert sorted(outcomes.values()).count("proven") == 2, outcomes
+
+
+def test_opt80_tail_axis_keeps_a_credential_shaped_proven_stall_in_n():
+    """A proven stall whose quoted line is credential-shaped is DROPPED as a
+    proof, but its log showed a stall, not a smooth fetch: it stays in N."""
+    fake_token = "gh" + "p_" + "C" * 36
+    token_url = "https://" + "x-access" + "-token:" + fake_token + "@github.com/acme/app"
+    poisoned = _OPT80_STALLED_LOG.replace(
+        "Receiving objects:  12% (14400/120000)",
+        "Receiving objects:  12% (14400/120000) from " + token_url)
+    cs, odd = _opt80_three_slow_one_odd(poisoned)
+    axis = cs["tail_axis"]
+    assert axis["counted_runs"] == 3 and axis["one_in_n"] == 3, axis
+    assert axis["logs_unreadable"] == 1 and axis["logs_clean"] == 0, axis
+    outcomes = {o["job_id"]: o["outcome"] for o in cs["log_probe_outcomes"]}
+    assert outcomes[odd] == "quoted_progress_line_is_credential_shaped", outcomes
+
+
+def test_opt80_tail_axis_still_leaves_a_clean_read_log_out_of_n():
+    """The verdict case is unchanged: a read log with a smooth fetch is left out."""
+    cs, odd = _opt80_three_slow_one_odd(_OPT80_SMOOTH_LOG)
+    axis = cs["tail_axis"]
+    assert axis["counted_runs"] == 2 and axis["one_in_n"] == 5, axis
+    assert axis["logs_unreadable"] == 0 and axis["logs_clean"] == 1, axis
+    outcomes = {o["job_id"]: o["outcome"] for o in cs["log_probe_outcomes"]}
+    assert outcomes[odd] == "tail_without_log_gap", outcomes
+
+
+def test_opt80_stamps_no_tail_axis_off_the_pull_request_merge_wait():
+    """No pull request waits on a push-only workflow, an unknown trigger is not
+    assumed to be one, and a job that is not the slowest is not on the gate: none
+    of the three gets a tail line. The pole cases say why in their own sentence,
+    and none of the three claims a merge wait."""
+    for is_pr, pole in ((False, "build"), (None, "build"), (True, "deploy")):
+        f = _opt80_pr(is_pr=is_pr, long_pole=pole)[0]
+        assert "tail_axis" not in f["checkout_stall"], (is_pr, pole)
+        assert "spends about" not in f["evidence"], (is_pr, pole)
+        assert "not credited in this version" not in f["evidence"], (is_pr, pole)
+        assert "effect on the merge wait" not in f["evidence"], (is_pr, pole)
+        assert ("no merge-wait claim is made" in f["evidence"]) is (pole == "build")
+        assert f["checkout_stall"].get("tail_axis_withheld_reason") == (
+            "not_on_pull_requests" if pole == "build" else None), (is_pr, pole)
+
+
+_OPT80_WITHHELD_POLE_CASES = {
+    # reason: (detector kwargs, crit overrides, the sentence it must render)
+    "not_on_pull_requests": (
+        {"is_pr": False, "merge_gating_jobs": _OPT80_BUILD_GATES}, {},
+        "`build` is this workflow's slowest job; the stall is measured (longest "
+        "pause 40s), but this workflow is not shown to run on pull requests, so "
+        "no merge-wait claim is made."),
+    "merge_gating_unknown": (
+        {"is_pr": True, "merge_gating_jobs": None}, {},
+        "`build` is this workflow's slowest job; the stall is measured (longest "
+        "pause 40s), but whether this job gates a merge could not be read from "
+        "branch protection, so no tail line is printed."),
+    "not_merge_gating": (
+        {"is_pr": True, "merge_gating_jobs": {}}, {},
+        "`build` is this workflow's slowest job; the stall is measured (longest "
+        "pause 40s), but the merge does not wait on this job, so no merge-wait "
+        "claim is made."),
+    "all_events_timing": (
+        {"is_pr": True, "merge_gating_jobs": _OPT80_BUILD_GATES},
+        {"event_scope": "all-events"},
+        "`build` is this workflow's slowest job; the stall is measured on "
+        "all-events timing (longest pause 40s), with no pull-request sample, so "
+        "no tail line is printed."),
+}
+
+
+@pytest.mark.parametrize("reason", sorted(_OPT80_WITHHELD_POLE_CASES))
+def test_opt80_pole_without_a_tail_line_says_why_and_claims_no_merge_wait(reason):
+    """The slowest job without a tail line used to read "the stall's effect on
+    the merge wait is measured ... but not credited" in EVERY case - including a
+    job the merge does not wait on, one whose branch protection was unreadable
+    and one timed on push runs. Each case now renders its own honest sentence,
+    stamps the reason it was withheld (so the self-check can pair the two), and
+    counts the withheld line in `opt80_notes` (the finding fired, so it is a
+    note, never a suppression in `withheld`)."""
+    kwargs, crit_over, sentence = _OPT80_WITHHELD_POLE_CASES[reason]
+    runs = _opt80_runs()
+    gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
+    crit = {**_opt80_crit(), **crit_over}
+    withheld: dict = {}
+    notes: dict = {}
+    out = cr._detect_opt80_checkout_tail_stall(
+        gh, "acme/app", _OPT80_WF_PATH, runs, crit, _opt80_wf(), None, 100, 0,
+        withheld=withheld, notes=notes, **kwargs)
+    assert len(out) == 1, out
+    f = out[0]
+    assert "tail_axis" not in f["checkout_stall"], f["checkout_stall"]
+    assert f["checkout_stall"]["tail_axis_withheld_reason"] == reason
+    assert sentence in f["evidence"], f["evidence"]
+    assert "merge wait is measured" not in f["evidence"], f["evidence"]
+    assert "not credited in this version" not in f["evidence"], f["evidence"]
+    assert notes == {f"tail_line_withheld_{reason}": 1}, notes
+    assert not any(k.startswith("tail_line") for k in withheld), withheld
+
+
+def test_opt80_pole_with_a_tail_line_stamps_no_withheld_reason():
+    f = _opt80_pr(is_pr=True)[0]
+    assert "tail_axis" in f["checkout_stall"]
+    assert "tail_axis_withheld_reason" not in f["checkout_stall"], f["checkout_stall"]
+
+
+def test_opt80_tail_axis_states_the_median_of_three_proven_runs_not_the_mean():
+    """Three log-proven tail runs whose checkouts spread 95s / 110s / 200s: the
+    tail figure is their MEDIAN, 110s, not their mean, 135s. Two proven runs
+    cannot tell the two apart (the median of two IS their mean), so this is the
+    only shape that pins which one the line states."""
+    out = _opt80_pr(is_pr=True, durations=[10.0] * 7 + [95.0, 110.0, 200.0])
+    assert len(out) == 1, out
+    axis = out[0]["checkout_stall"]["tail_axis"]
+    assert axis["tail_runs"] == 3, axis
+    assert axis["tail_checkout_p50_s"] == 110.0, axis
+    assert axis["tail_loss_s"] == 100.0, axis
+    assert "spends about 100s longer on checkout" in out[0]["evidence"], out[0]["evidence"]
+
+
+def test_opt80_tail_axis_one_in_n_rounds_half_to_even_7_of_2_is_4_and_5_of_2_is_2():
+    """`one_in_n` is Python's `round(sampled / proven)`, which rounds a half to
+    the EVEN integer: 7 / 2 = 3.5 -> 4 (floor would say 3) and 5 / 2 = 2.5 -> 2
+    (ceil would say 3). The verifier re-derives with the same call, so the two
+    must agree on both halves; a fixture that divides exactly cannot see this."""
+    def axis(n, k):
+        per_run = [{"job_id": i, "checkout_s": 10.0} for i in range(n - k)]
+        proven = [{"job_id": 100 + i, "checkout_s": 120.0} for i in range(k)]
+        per_run += [{"job_id": p["job_id"], "checkout_s": 120.0} for p in proven]
+        return cr._opt80_tail_axis(per_run, proven, 10.0)
+
+    assert axis(7, 2)["one_in_n"] == 4
+    assert axis(5, 2)["one_in_n"] == 2
+    assert axis(7, 2)["sampled_runs"] == 7 and axis(5, 2)["tail_runs"] == 2
+
+
+def test_opt80_stamps_no_tail_axis_when_merge_gating_is_unknown():
+    """The slowest job of a pull-request workflow is not necessarily what a merge
+    waits on: a non-required benchmark job can be the slowest while the required
+    `test` job is the gate. With no required-check data for the workflow (an
+    unreadable branch protection, the common case), the audit cannot say the
+    stall is on the merge wait, so it states no tail line."""
+    runs = _opt80_runs()
+    gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
+    out = cr._detect_opt80_checkout_tail_stall(
+        gh, "acme/app", _OPT80_WF_PATH, runs, _opt80_crit(), _opt80_wf(), None,
+        100, 0, is_pr=True)
+    assert len(out) == 1, out
+    assert "tail_axis" not in out[0]["checkout_stall"], out[0]["checkout_stall"]
+    assert "one run in" not in out[0]["evidence"], out[0]["evidence"]
+
+
+def test_opt80_stamps_no_tail_axis_on_a_slowest_job_no_merge_waits_on():
+    """Required-check data exists and `build` (the slowest job) is neither
+    required nor needed by required work: no tail axis. Listed on the path: it
+    is stamped, carrying the evidence it was stamped on."""
+    for gating in ({}, {"test": {"basis": "required", "required_check": "test",
+                                 "required_job": "test", "job_key": "test"}}):
+        f = _opt80_pr(is_pr=True, merge_gating=gating)[0]
+        assert "tail_axis" not in f["checkout_stall"], gating
+        assert "one run in" not in f["evidence"], gating
+    f = _opt80_pr(is_pr=True)[0]
+    assert f["checkout_stall"]["tail_axis"]["merge_gating"] == (
+        _OPT80_BUILD_GATES["build"])
+
+
+def test_opt80_merge_gating_is_looked_up_by_yaml_key_not_display_name():
+    """`merge_gating_jobs` is keyed by YAML job key. A job whose display name
+    differs from its key (`name: Build & Test` under `build`) must still find
+    its gating evidence: looking it up by the runtime name finds nothing and
+    silently drops a tail line the merge does wait on."""
+    name = "Build & Test"
+    runs = _opt80_runs(name=name)
+    gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
+    crit = _opt80_crit(long_pole=name)
+    crit["job_p50"] = {name: 121.0}
+    crit["job_runner"] = {name: "ubuntu-latest"}
+    wf = _opt80_wf()
+    wf["jobs"]["build"]["name"] = name
+    gates = {"build": dict(_OPT80_BUILD_GATES["build"])}
+    out = cr._detect_opt80_checkout_tail_stall(
+        gh, "acme/app", _OPT80_WF_PATH, runs, crit, wf, None, 100, 0,
+        is_pr=True, merge_gating_jobs=gates)
+    assert len(out) == 1, out
+    cs = out[0]["checkout_stall"]
+    assert cs.get("tail_axis", {}).get("merge_gating") == gates["build"], cs
+
+
+def _opt80_gating_graph():
+    return {"ci.yml": {
+        "test": {"name": "test", "needs": [], "reusable": False, "matrix": False},
+        "benchmark": {"name": "benchmark", "needs": [], "reusable": False,
+                      "matrix": False},
+        "build": {"name": "build", "needs": [], "reusable": False, "matrix": False},
+        "gate": {"name": "gate", "needs": ["build"], "reusable": False,
+                 "matrix": False}}}
+
+
+def test_opt80_merge_gating_jobs_are_required_or_needed_by_required_work():
+    crit_by_wf = {"ci.yml": {"job_p50": {"test": 50.0, "benchmark": 300.0,
+                                         "build": 100.0, "gate": 1.0},
+                             "event_scope": "pull_request"}}
+    graph = _opt80_gating_graph()
+    req = cr.RequiredChecks(frozenset({"CI / test", "gate"}), True)
+    got = cr._opt80_merge_gating_jobs("ci.yml", req, graph, crit_by_wf,
+                                      workflow_names={"ci.yml": "CI"})
+    assert set(got) == {"test", "gate", "build"}, got
+    assert got["test"] == {"basis": "required", "required_check": "CI / test",
+                           "required_job": "test", "job_key": "test"}
+    assert got["build"] == {"basis": "needed_by_required", "required_check": "gate",
+                            "required_job": "gate", "job_key": "build"}
+    # The slow benchmark gates nothing.
+    assert "benchmark" not in got
+    # No data, or a partial read, is "unknown" - never "on the merge wait".
+    assert cr._opt80_merge_gating_jobs("ci.yml", None, graph, crit_by_wf) is None
+    assert cr._opt80_merge_gating_jobs(
+        "ci.yml", cr.RequiredChecks(frozenset({"gate"}), False), graph,
+        crit_by_wf) is None
+    assert cr._opt80_merge_gating_jobs("ci.yml", req, None, crit_by_wf) is None
+
+
+def test_opt80_merge_gating_strips_only_the_workflows_own_name_prefix():
+    """A required `<workflow> / <job>` context names THIS workflow's job only
+    when the prefix is this workflow's own `name:`. `deploy / bench` is not
+    `CI`'s `bench` (it is another workflow's, or a reusable call's), so the
+    slow `bench` beside a required `test` is not marked merge-gating."""
+    graph = {"ci.yml": {
+        "test": {"name": "test", "needs": [], "reusable": False, "matrix": False},
+        "bench": {"name": "bench", "needs": [], "reusable": False, "matrix": False}}}
+    crit = {"ci.yml": {"job_p50": {"test": 100.0, "bench": 300.0},
+                       "event_scope": "pull_request"}}
+    names = {"ci.yml": "CI"}
+    for ctx in ("deploy / bench", "Release / bench", "anything at all / bench"):
+        req = cr.RequiredChecks(frozenset({ctx}), True)
+        assert cr._opt80_merge_gating_jobs(
+            "ci.yml", req, graph, crit, workflow_names=names) == {}, ctx
+    req = cr.RequiredChecks(frozenset({"CI / bench"}), True)
+    assert set(cr._opt80_merge_gating_jobs(
+        "ci.yml", req, graph, crit, workflow_names=names)) == {"bench"}
+    # No `name:`: GitHub names the workflow by its file path.
+    req = cr.RequiredChecks(frozenset({"ci.yml / bench"}), True)
+    assert set(cr._opt80_merge_gating_jobs(
+        "ci.yml", req, graph, crit, workflow_names={})) == {"bench"}
+
+
+def test_opt80_merge_gating_is_unknown_when_the_required_check_is_ambiguous():
+    """`test` in two workflows and a required `test`: GitHub cannot tell the two
+    check-runs apart, and the shared resolver refuses to pick. That refusal is
+    UNKNOWN, never a match - neither workflow's `test` is marked gating."""
+    node = {"name": "test", "needs": [], "reusable": False, "matrix": False}
+    graph = {"ci.yml": {"test": dict(node)}, "other.yml": {"test": dict(node)}}
+    crit = {"ci.yml": {"job_p50": {"test": 100.0}, "event_scope": "pull_request"},
+            "other.yml": {"job_p50": {"test": 90.0}, "event_scope": "pull_request"}}
+    req = cr.RequiredChecks(frozenset({"test"}), True)
+    names = {"ci.yml": "CI", "other.yml": "Other"}
+    assert cr._check_to_job_node("test", graph, crit) is None
+    for wf in graph:
+        assert cr._opt80_merge_gating_jobs(
+            wf, req, graph, crit, workflow_names=names) is None, wf
+    # The workflow-qualified context is not ambiguous.
+    req = cr.RequiredChecks(frozenset({"CI / test"}), True)
+    assert set(cr._opt80_merge_gating_jobs(
+        "ci.yml", req, graph, crit, workflow_names=names)) == {"test"}
+    assert cr._opt80_merge_gating_jobs(
+        "other.yml", req, graph, crit, workflow_names=names) == {}
+
+
+def test_opt80_stamps_no_tail_axis_when_no_pull_request_run_was_timed():
+    """A workflow that DECLARES pull_request but had no sampled pull-request run
+    is timed on whatever ran instead (`_crit_for` falls back to all events, so
+    `event_scope` is `all-events`). Its slowest job and its checkout durations
+    are then push timings, and "the slowest job on pull requests" plus "one run
+    in N" would be stated about runs no pull request waited on. No tail axis;
+    the pole says it was timed on all events, and claims no merge wait."""
+    runs = _opt80_runs()
+    gh = _Opt80Gh({run[0]["id"]: _OPT80_STALLED_LOG for run in runs})
+    crit = _opt80_crit()
+    crit["event_scope"] = "all-events"
+    out = cr._detect_opt80_checkout_tail_stall(
+        gh, "acme/app", _OPT80_WF_PATH, runs, crit, _opt80_wf(), None, 100, 0,
+        is_pr=True, merge_gating_jobs=_OPT80_BUILD_GATES)
+    assert len(out) == 1, out
+    f = out[0]
+    assert "tail_axis" not in f["checkout_stall"], f["checkout_stall"].get("tail_axis")
+    assert "one run in" not in f["evidence"], f["evidence"]
+    assert "measured on all-events timing" in f["evidence"], f["evidence"]
+    assert "merge wait is measured" not in f["evidence"], f["evidence"]
+    assert f["checkout_stall"]["tail_axis_withheld_reason"] == "all_events_timing"
 
 
 # ---- the log READER: what a record is, and what a dropped line costs ----------

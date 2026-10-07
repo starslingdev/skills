@@ -3090,6 +3090,238 @@ def test_every_recordable_withhold_gate_has_a_plain_english_phrase():
         assert phrase and "_" not in phrase and "$" not in phrase, phrase
 
 
+def _opt80_tail_render_doc(**kw):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_verify_report_self as vs  # noqa: E402
+
+    doc = vs._opt80_tail_doc(**kw)
+    vs._ensure_tier2_source_rows(doc)
+    return doc
+
+
+def test_opt80_tail_line_never_moves_the_headline_or_bottom_line():
+    """The tail line is a separate axis. Rendering the same findings with and
+    without `tail_axis` must leave everything above the Contents (title,
+    provenance table, Bottom line) byte-identical, and the line must sit inside
+    the pole section only."""
+    doc = _opt80_tail_render_doc()
+    with_tail = bp.render(doc)
+    plain = json.loads(json.dumps(doc))
+    del plain["findings"][0]["checkout_stall"]["tail_axis"]
+    without = bp.render(plain)
+    head = lambda r: r.split("## 📋 Contents", 1)[0]  # noqa: E731
+    assert head(with_tail) == head(without)
+    assert "longer on checkout" not in head(with_tail)
+    assert "<!-- opt80-tail:" not in without
+    assert with_tail.count("<!-- opt80-tail:f-promoted -->") == 1
+    tier2 = with_tail.split("## Runner-minute reductions", 1)[-1]
+    assert "<!-- opt80-tail:" not in tier2
+
+
+def test_opt80_tail_line_states_the_stamped_numbers_as_a_tail_not_a_p50():
+    doc = _opt80_tail_render_doc()
+    lines = bp._opt80_tail_block(doc["findings"], "https://catalog")
+    assert lines[0] == "<!-- opt80-tail:f-promoted -->"
+    assert ("one run in 5 spends about 110s longer on checkout, and that run's log shows the fetch stalling"
+            in lines[1]), lines[1]
+    assert "never added to any total" in lines[1]
+    assert "**~" not in lines[1] and "min/mo" not in lines[1]
+    # The collector's own phrase is the same sentence the renderer prints.
+    axis = doc["findings"][0]["checkout_stall"]["tail_axis"]
+    assert cr._opt80_tail_phrase(axis) in lines[1]
+    # A finding with no tail axis renders nothing, at a pole or off it.
+    del doc["findings"][0]["checkout_stall"]["tail_axis"]
+    assert bp._opt80_tail_for({"check": "build", "job": "build",
+                               "workflow_file": ".github/workflows/ci.yml"},
+                              doc["findings"]) == []
+    assert bp._opt80_off_pole_tail_block(doc["findings"], "u") == []
+
+
+def test_opt80_tail_line_states_every_number_in_its_own_slot():
+    """The rendered line carries more than the two numbers the verifier
+    re-derives: the job and workflow it is on, how many sampled runs proved a
+    stall, and the tail vs typical checkout. Each must sit in its own slot - a
+    swap reads as a different (wrong) claim with the same digits."""
+    doc = _opt80_tail_render_doc()
+    line = bp._opt80_tail_block(doc["findings"], "https://catalog")[1]
+    assert "on `build` in `ci.yml`, one run in 5" in line, line
+    assert "2 of 10 sampled runs had a slow checkout" in line, line
+    assert "The 2 proven runs' median checkout is 120s against a typical 10s" in line, line
+    assert "this job" not in line, line
+
+
+def test_opt80_tail_line_off_a_drilled_pole_never_moves_the_headline():
+    """The off-pole case of the headline-identity rule: the stalling job is not
+    a drilled pole, so its line renders in its own block - and the headline and
+    Bottom line stay byte-identical with and without the tail axis."""
+    doc = _opt80_tail_render_doc(pole_check="deploy", pole_job="deploy")
+    with_tail = bp.render(doc)
+    plain = json.loads(json.dumps(doc))
+    del plain["findings"][0]["checkout_stall"]["tail_axis"]
+    without = bp.render(plain)
+    head = lambda r: r.split("## 📋 Contents", 1)[0]  # noqa: E731
+    assert head(with_tail) == head(without)
+    bottom = lambda r: [ln for ln in r.splitlines() if "Bottom line" in ln]  # noqa: E731
+    assert bottom(with_tail) and bottom(with_tail) == bottom(without)
+    assert "the fetch stalling" not in head(with_tail)
+    assert with_tail.count("<!-- opt80-tail:f-promoted -->") == 1
+    assert "Checkout stall tails on a workflow's slowest job" in with_tail
+    assert "<!-- opt80-tail:" not in without
+
+
+def test_opt80_tail_line_renders_in_a_static_only_report():
+    """No pole is measured, so the static-only body is the only place the tail
+    line can reach the reader; it renders there once, in the off-pole block."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_verify_report_self as vs  # noqa: E402
+
+    f = vs._opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(vs._OPT80_TAIL_AXIS)
+    doc = {"repo": "o/r", "findings": [f], "pr_critical_path": {"poles": []},
+           "data_sources": {}}
+    static = bp._render_static_only(doc)
+    assert static.count("<!-- opt80-tail:f1 -->") == 1, static
+    assert "one run in 5 spends about 110s longer on checkout, and that run's log shows the fetch stalling" in static
+
+def test_opt80_off_pole_tail_renders_in_its_own_section_in_both_renders():
+    """A tail on a job that is not a drilled pole gets its own `##` section -
+    never the tail of the last Runner saving card - placed before Also noticed
+    and Data sources, in the full render (with a Contents entry) and in the
+    static-only render (which has no Contents)."""
+    marker = "<!-- opt80-tail:f-promoted -->"
+    for static in (False, True):
+        doc = _opt80_tail_render_doc(pole_check="other", pole_job="other")
+        if static:
+            doc["pr_critical_path"]["poles"] = []
+        md = bp.render(doc)
+        assert md.count(marker) == 1, static
+        head_i = md.find("## ⏱️ Checkout stall tails")
+        assert head_i != -1, (static, md[-3000:])
+        enclosing = re.findall(r"(?m)^## .*$", md[:md.index(marker)])[-1]
+        assert "Checkout stall tails" in enclosing, (static, enclosing)
+        assert '<a id="checkout-stall-tails"></a>' in md
+        for later in ("## 🧹 Also noticed", "## 🗄️ Data sources"):
+            if later in md:
+                assert md.index(later) > head_i, (static, later)
+        if not static:
+            toc = md.split("## 📋 Contents", 1)[1].split("\n## ", 1)[0]
+            assert "(#checkout-stall-tails)" in toc, toc
+
+
+def test_opt80_off_pole_tail_heading_matches_the_render():
+    """The off-pole block says "not one of the long poles drilled above" only
+    when poles were drilled; a static-only report drills none."""
+    doc = _opt80_tail_render_doc()
+    drilled = bp._opt80_off_pole_tail_block(doc["findings"], "u")
+    static = bp._opt80_off_pole_tail_block(doc["findings"], "u", drilled=False)
+    assert "drilled above" in "\n".join(drilled)
+    assert "drilled above" not in "\n".join(static)
+    assert "no long pole" in "\n".join(static), static
+    assert "<!-- opt80-tail:f-promoted -->" in static
+
+
+def test_opt80_tail_count_sentence_names_slow_runs_logs_read_and_proofs():
+    """The count sentence states what N stands on: how many sampled runs were
+    slow, how many of their logs were read, how many of those show the stall,
+    and that the slow runs whose logs were not read are counted in N."""
+    doc = _opt80_tail_render_doc()
+    axis = doc["findings"][0]["checkout_stall"]["tail_axis"]
+    axis.update(sampled_runs=30, slow_runs=10, logs_read=4, tail_runs=3,
+                logs_clean=1, logs_unreadable=0, counted_runs=9, one_in_n=3)
+    line = bp._opt80_tail_block(doc["findings"], "https://catalog")[1]
+    assert "10 of 30 sampled runs had a slow checkout" in line, line
+    assert ("logs were read for 4 of those: 3 show the fetch standing still, "
+            "0 unreadable, 1 clean") in line, line
+    assert "the 1 clean log is left out" in line, line
+    assert "the 6 slow runs whose logs were not read" in line, line
+    assert "sampled runs have a checkout log" not in line, line
+
+
+def test_opt80_tail_count_sentence_states_unreadable_logs_separately():
+    """A fetched log that could not be read (gone, unparseable, or a stall
+    dropped as credential-shaped) is not a clean fetch: the sentence names it
+    apart from the clean ones and counts its slow run in N."""
+    doc = _opt80_tail_render_doc()
+    axis = doc["findings"][0]["checkout_stall"]["tail_axis"]
+    axis.update(sampled_runs=30, slow_runs=10, logs_read=4, tail_runs=2,
+                logs_clean=1, logs_unreadable=1, counted_runs=9, one_in_n=3)
+    line = bp._opt80_tail_block(doc["findings"], "https://catalog")[1]
+    assert ("logs were read for 4 of those: 2 show the fetch standing still, "
+            "1 unreadable, 1 clean") in line, line
+    assert ("N counts the 2 proven runs, the 1 slow run whose log could not be "
+            "read and the 6 slow runs whose logs were not read") in line, line
+    assert "the 1 clean log is left out" in line, line
+    assert "read log that does not" not in line, line
+
+
+def _opt80_tail_finding(fid="f-promoted", job="build",
+                        wf=".github/workflows/ci.yml"):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_verify_report_self as vs  # noqa: E402
+
+    f = vs._opt80_verifier_finding(id=fid, affected_jobs=[job], workflow_file=wf)
+    f["checkout_stall"]["tail_axis"] = dict(vs._OPT80_TAIL_AXIS)
+    return f
+
+
+def test_opt80_tail_never_joins_a_pole_in_another_workflow_file():
+    """GitHub gives same-named jobs in different workflows the same check
+    name, so `build` in other.yml must not ride a `ci.yml` pole named `build`."""
+    pole = {"check": "build", "job": "build", "workflow_file": ".github/workflows/ci.yml"}
+    assert len(bp._opt80_tail_for(pole, [_opt80_tail_finding()])) == 1
+    other = _opt80_tail_finding(wf=".github/workflows/other.yml")
+    assert bp._opt80_tail_for(pole, [other]) == []
+
+
+def test_opt80_tail_joins_on_the_poles_stamped_job_over_the_check_name():
+    """A workflow NAME can hold ` / ` (`CI / main`): the prefix strip of check
+    `CI / main / build` gives `main / build`. The pole's stamped job, `build`,
+    is the job, and the tail joins on it."""
+    pole = {"check": "CI / main / build", "job": "build",
+            "workflow_file": ".github/workflows/ci.yml"}
+    assert len(bp._opt80_tail_for(pole, [_opt80_tail_finding()])) == 1
+
+
+def test_opt80_static_only_report_tail_heading_does_not_say_drilled_above():
+    """The static-only render drills no pole, so its tails section must not
+    point at "the long poles drilled above"."""
+    doc = {"repo": "o/r", "findings": [_opt80_tail_finding()],
+           "pr_critical_path": {"poles": []}, "data_sources": {}}
+    static = bp._render_static_only(doc)
+    assert "<!-- opt80-tail:f-promoted -->" in static
+    assert "drilled above" not in static, static
+    assert "drilled no long pole" in static, static
+
+
+def _opt80_toc_doc(tails):
+    doc = _opt80_tail_render_doc(pole_check="other", pole_job="other")
+    for i in range(1, tails):
+        g = json.loads(json.dumps(doc["findings"][0]))
+        g.update(id=f"f-tail-{i}", affected_jobs=[f"lint{i}"], line=40 + i)
+        g["checkout_stall"]["job"] = f"lint{i}"
+        doc["findings"].append(g)
+    doc["findings"].append({"id": "f-hyg", "pattern": "OPT5",
+                            "title": "pnpm Store Not Cached", "severity": "MEDIUM",
+                            "runner_min_saving": 68.0,
+                            "workflow_file": ".github/workflows/ci.yml", "line": 20})
+    return doc
+
+
+def test_opt80_tails_contents_entry_counts_jobs_and_sits_before_also_noticed():
+    """The Contents pointer to the tails section is spliced in after the poles
+    render: it must land inside the Contents, directly ahead of the Also
+    noticed pointer, and count the tail lines with the right plural."""
+    for tails, phrase in ((1, "1 job whose"), (2, "2 jobs whose")):
+        md = bp.render(_opt80_toc_doc(tails))
+        assert md.count("<!-- opt80-tail:") == tails, tails
+        toc = md.split("## 📋 Contents", 1)[1].split("\n## ", 1)[0].split("\n")
+        entry = next(i for i, ln in enumerate(toc)
+                     if ln.startswith("**⏱️ Checkout stall tails**"))
+        assert phrase in toc[entry], (tails, toc[entry])
+        assert toc[entry + 1] == "", toc
+        assert toc[entry + 2].startswith("**🧹 Also noticed**"), toc
+
+
 def test_second_pole_role_names_the_real_slowest_concurrent_check_above_it():
     # Regression (two-pole): pole 2's "becomes the gate once X drops" must name the
     # ACTUAL slowest concurrent check above it - which may be an intervening check that
@@ -7451,6 +7683,25 @@ def _pole_section(md: str, check: str) -> str:
     i = md.rindex("\n## ", 0, i)
     j = md.find("\n## ", i + 4)
     return md[i:j if j != -1 else len(md)]
+
+
+def test_opt80_tail_on_an_aggregation_gate_pole_renders_in_that_pole():
+    """An aggregation-gate pole renders its upstream story and stops early. Its
+    OPT80 tail line must still render IN that pole: falling through to the
+    off-pole tails section would place it under a heading that says its job is
+    "not one of the long poles drilled above" - which it is."""
+    tail = _opt80_tail_render_doc()["findings"][0]
+    tail = json.loads(json.dumps(tail))
+    tail.update(workflow_file=_AGG_DEPLOY, affected_jobs=["gate"])
+    tail["checkout_stall"]["job"] = "gate"
+    doc = _agg_gate_doc()
+    doc["findings"] = [tail]
+    md = bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    sec = _pole_section(md, "thank you, build")
+    assert "**Aggregation gate" in sec
+    assert f"<!-- opt80-tail:{tail['id']} -->" in sec, sec
+    assert md.count(f"<!-- opt80-tail:{tail['id']} -->") == 1
+    assert "not one of the long poles drilled above" not in md
 
 
 def test_aggregation_gate_pole_tells_the_upstream_story_not_a_prompt():

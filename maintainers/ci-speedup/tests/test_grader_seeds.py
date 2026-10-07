@@ -38,7 +38,8 @@ def test_every_check_is_classified():
 
 def test_classification_counts_match_spec():
     counts = Counter(gs.TRIAGE_ALLOWLIST.values())
-    assert counts[gs.AUTO_SEED] == 64   # +1 (pre-flip audit: static-only banner matches CI shape — no dormant-repo hedge at a live no-PR-gating repo, no "no run timing" beside priced timed runs);
+    assert counts[gs.AUTO_SEED] == 66   # +1 (OPT79 pole cache, below); +1 (OPT80 slowest job without a tail line: its sentence pairs with its stamped withheld reason, and no merge wait is claimed without a tail axis);
+    # +1 (pre-flip audit: static-only banner matches CI shape — no dormant-repo hedge at a live no-PR-gating repo, no "no run timing" beside priced timed runs);
     # +2 (issue #114: crowned cluster lever is on the merge-gating spine — no off-spine crown; issue #115: headline leads with the observed wall when the chain sum diverges from the makespan);
     # +1 (issue #106: every 🤖 gap-fill evidence line is verbatim from the captured job log — the injection-residual grounding backstop);
     # +1 (fence-escaping: code fences are balanced — no stray ``` breaks out of a fence / desyncs the verifier's fence split);
@@ -69,6 +70,8 @@ def test_classification_counts_match_spec():
     #     row carries measurements no total contradicts, so it needs its own re-derivation).
     # +1 (OPT79 pole cache: OPT79 findings re-derive by their arm, and the pole cache's
     #     merge-wait figure renders — a capped wall-clock number with no Tier-2 certificate).
+    # +1 (OPT80 tail line: every "one run in N spends about X s longer on checkout" sentence re-derives from the stamped
+    #     per-run checkout rows and stall proofs, and pairs with exactly one stamped block).
     assert counts[gs.EXCLUDE] == 1
     assert counts[gs.TRIAGE] == 2
 

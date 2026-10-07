@@ -3878,6 +3878,12 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
         # collect_runs to scope the critical-path pole to merge-blocking (required-
         # reachable) work. Repo-agnostic; harmless if unconsumed.
         "workflow_job_graph": _build_workflow_job_graph(parsed),
+        # Each workflow's own top-level `name:` (absent when it declares none).
+        # A required check context `<workflow> / <job>` names THIS workflow's
+        # job only when the prefix is this name (or, unnamed, its file path).
+        "workflow_names": {rel: " ".join(doc["name"].split()) for rel, doc, _raw in parsed
+                           if isinstance(doc, dict) and isinstance(doc.get("name"), str)
+                           and doc["name"].strip()},
         # What the repo's vitest config says about per-file isolation. NOT a
         # finding — the corroborating config fact the drill-time OPT78 leaf
         # (`blocking_path`'s `vitest-isolate-pool`) must read before it can

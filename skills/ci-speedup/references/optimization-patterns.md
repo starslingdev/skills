@@ -2223,6 +2223,44 @@ as one. It is an upper bound, not a forecast: the recommended abort fires at 30
 seconds and the retry re-fetches, so the realised gain on a stalled run is
 smaller than the pause it replaces.
 
+**The tail line (slowest job of a pull-request workflow only).** When the
+stalling job is its workflow's slowest job and the workflow runs on pull
+requests (and was timed on sampled pull-request runs, not on push runs standing
+in for them), and the job is one the merge actually waits on (a required check,
+or a job a required job `needs:`; with no readable required-check set the
+merge wait is not claimed), a stalled run's checkout sits on that run's merge wait. The report
+then states the tail on its own line, next to that job's merge-wait figure in
+its long-pole section (or in a short block of its own when the job is not one
+of the drilled poles):
+
+```
+one run in N spends about X s longer on checkout, and that run's log shows the fetch stalling
+N = round(sampled runs / counted slow runs)
+counted slow runs = slow runs - logs read and shown clean
+X = median checkout of the log-proven tail runs - p50 checkout of the sample
+```
+
+A slow run is one at or above the tail threshold. Logs are read for at most
+four of them (a cost bound). A slow run whose log was read and shows a clean
+fetch is left out of N; a slow run whose log was never read, or could not be
+read (gone, unparseable, or its stall dropped as credential-shaped), is not
+evidence of a smooth fetch and stays in. The report says how many runs were
+slow, how many of their logs were read, and how many of those prove the stall,
+were unreadable and were clean.
+X uses only the proven runs. X is the median proven run's loss, not an upper
+bound (a proven run can lose more), so it reads "about" and applies to roughly
+one run in N: it is
+not a typical-run number, so it is never added to the headline, a pole's
+wall-clock figure, any total or the runner-minute section, and
+`wall_clock_p50_s` stays 0. A slowest job with no tail line says why, and
+claims no merge wait: the workflow is not shown to run on pull requests
+(push-only or unknown trigger), it was timed on all events with no pull-request
+sample, branch protection could not be read, or the merge does not wait on that
+job. A job that is not the slowest carries no merge-wait sentence at all. The report's self-check
+re-derives N and X from the stamped per-run checkout durations and the quoted
+progress lines, and no longer wrongly fails a slowest job whose check is named
+`<workflow> / <job>`.
+
 **Fix recipe**, in this order, with the caveat that **retry and abort cap the
 damage; they do not fix the network**:
 
@@ -2300,9 +2338,10 @@ instead of being silently trusted:
 | `tail_run_job_ids` | **re-derived** — which runs were tail runs, against the threshold, bounded by the sampled occurrences |
 | `proven_tail_runs` | **re-derived** — per proven run the two quoted lines, their log timestamps and the derived gap. The gap is recomputed from the timestamps, and so is the PREDICATE: the arm re-runs its own copy of the `Receiving objects: N%` regex over both quoted lines and fails the claim unless both match, report the same N, and that N is below 100 — otherwise a stamped `5% → 60%` pair would render as proof of a stall. Both lines are re-scanned for credential shapes here too |
 | `logs_fetched` | **re-derived** — against the verifier's PINNED probe cap (never the stamped `log_probe_max`, which is only compared to it), and against the number of tail runs |
+| `log_probed_job_ids` | **re-derived** (tail axis) — must be distinct slow runs, as many as `logs_fetched`; every proven run must be one of them, and the slow runs outside it are the unread ones the tail axis keeps in N |
 | `tail_excess_s` / `runner_min_saving` | **re-derived** — the credited quantity and the minutes it becomes |
 | `tail_run_longest_pause_s` | **re-derived** — must equal the largest gap across the proven runs, because the evidence renders it as the upper bound on what capping the stall recovers |
-| `on_critical_path` | **re-derived** — against the report's own rendered Long-pole sections, since this is the exact fact the pole-rule exemption below turns the blanket check off for |
+| `on_critical_path` | **checked one way, against the report's own rendered Long-pole sections** — since this is the exact fact the pole-rule exemption below turns the blanket check off for. A `True` with no rendered pole for the job fails; a `False` on a rendered pole is accepted (the flag marks the workflow's slowest job, and a drilled pole is often another job, such as a chain pole). Three exemptions from the `True` rule: the slowest job's tail line renders in the dedicated Checkout stall tails section and `per_workflow_timing[wf].long_pole_job` names that job; the workflow records no pull-request event; or the workflow has no rendered pole header at all |
 | `monthly_volume` / `sampled_successful_run_count` | bounds-checked, not re-derivable — they come from the collection, not from anything in the block. `monthly_volume` must be positive and the sampled count must be at least the occurrences |
 | `effective_monthly_volume` / `occurrences` | **re-derived** — the scaling; `occurrences` can never exceed the sampled run count, and the effective volume must be the monthly volume scaled by `occurrences / sampled` |
 
