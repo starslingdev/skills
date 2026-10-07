@@ -9573,6 +9573,35 @@ def test_opt80_on_critical_path_matches_a_workflow_prefixed_pole_check(tmp_path:
     assert vr.check_opt80_tail_lines(report, findings_path).ok
 
 
+def test_opt80_off_critical_path_job_may_still_be_a_drilled_pole(tmp_path: Path):
+    """The collector sets on_critical_path only for the job that is its
+    workflow's SLOWEST. A drilled Long pole is often not that job (a chain pole
+    such as `prep -> verify`), so a False claim on a job rendered as a pole is
+    no contradiction and must not fail the report."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="CI / build", pole_job="build")
+    del doc["findings"][0]["checkout_stall"]["tail_axis"]
+    doc["findings"][0]["checkout_stall"]["on_critical_path"] = False
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "CI / build" in report
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert chk.ok, chk
+
+
+def test_opt80_pole_match_uses_the_poles_own_job_not_the_last_segment(tmp_path: Path):
+    """A reusable-workflow call renders as `CI / e2e / build`; its job is
+    `e2e / build`, not the caller file's plain `build`. A finding on plain
+    `build` that claims to be on the critical path is not on that pole."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="CI / e2e / build", pole_job="e2e / build")
+    del doc["findings"][0]["checkout_stall"]["tail_axis"]
+    assert doc["findings"][0]["affected_jobs"] == ["build"]
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "CI / e2e / build" in report
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
+
+
 def test_opt80_tail_line_off_a_drilled_pole_renders_in_its_own_block(tmp_path: Path):
     """The slowest job of a pull-request workflow that is not drilled: its tail
     line renders once, outside every pole section, and that (only that) excuses
@@ -9677,14 +9706,24 @@ def test_checkout_tail_excess_token_is_refused_from_a_non_opt80_pattern(
 def test_tier2_rederives_on_critical_path_against_the_rendered_poles(tmp_path: Path):
     """`on_critical_path` is what the evidence's "this workflow's slowest job"
     sentence is rendered from, and it is the exact fact the exemption turns the
-    blanket check off for. It was a bare assertion."""
+    blanket check off for. It was a bare assertion. A True claim on a job that
+    is no rendered pole fails; a False claim on a rendered pole does not (the
+    collector's flag means "this workflow's slowest job", and a drilled pole is
+    often not that job)."""
     vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    doc["pr_critical_path"]["poles"][0].update(check="deploy", job="deploy")
+    doc["pr_critical_path"]["critical_path_check"] = "deploy"
+    doc["pr_critical_path"]["checks"][0]["name"] = "deploy"
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok, chk
+    assert "on_critical_path=True but the job is not rendered" in str(chk.detail), chk
     doc = _opt80_pole_doc()
     doc["findings"][0]["checkout_stall"]["on_critical_path"] = False
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
-    assert not chk.ok, chk
-    assert "on_critical_path" in str(chk.detail), chk
+    assert chk.ok, chk
 
 
 def test_tier2_still_rejects_a_non_zero_wall_clock_on_that_same_finding(tmp_path: Path):

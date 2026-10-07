@@ -6427,18 +6427,32 @@ _VR_OPT80_TAIL_PHRASE_RE = re.compile(
     r"one run in (\d+) loses up to (\d+)s on checkout to a stalled fetch")
 
 
-def _vr_opt80_job_rendered_as_pole(f: dict, report: str) -> bool:
+def _vr_opt80_job_rendered_as_pole(f: dict, report: str, data: dict | None = None) -> bool:
     """Whether the finding's job is rendered as a Long pole of its OWN workflow.
-    A plain job's check-run is named `<workflow name> / <job>` (`CI / test`),
-    so the pole header's check is matched on its last ` / ` segment as well as
-    whole; a header in another workflow file never matches."""
+    A rendered pole header is resolved to the job the collector mapped it to
+    (`pr_critical_path.poles[].job`), so `CI / e2e / build` (a reusable-workflow
+    call whose job is `e2e / build`) never matches a plain `build` in the same
+    caller file. Only a header with no stamped pole entry falls back to the
+    check-run name `<workflow name> / <job>` matched whole or on its last
+    ` / ` segment. A header in another workflow file never matches."""
     jobs = {_cmp_name(str(j)) for j in _as_list(f.get("affected_jobs")) if str(j)}
     wf_f = str(f.get("workflow_file") or "").rsplit("/", 1)[-1]
+    stamped: dict[str, list[tuple[str, str]]] = {}
+    for p in _as_list(_as_dict(_as_dict(data).get("pr_critical_path")).get("poles")):
+        if isinstance(p, dict) and p.get("check") and p.get("job"):
+            stamped.setdefault(_cmp_name(str(p["check"])), []).append(
+                (str(p.get("workflow_file") or "").rsplit("/", 1)[-1],
+                 _cmp_name(str(p["job"]))))
     for wf, check, _body in _pole_header_sections(report):
         if wf_f and wf and wf != wf_f:
             continue
         c = _cmp_name(check)
-        if c in jobs or c.rsplit(" / ", 1)[-1] in jobs:
+        mapped = [job for p_wf, job in stamped.get(c, [])
+                  if not (wf_f and p_wf and p_wf != wf_f)]
+        if mapped:
+            if any(job in jobs for job in mapped):
+                return True
+        elif c in jobs or c.rsplit(" / ", 1)[-1] in jobs:
             return True
     return False
 
@@ -6759,7 +6773,12 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                 # poles the rule itself reads.
                 if rendered_poles:
                     claimed = _as_dict(f.get("checkout_stall")).get("on_critical_path")
-                    on_pole = _vr_opt80_job_rendered_as_pole(f, report)
+                    on_pole = _vr_opt80_job_rendered_as_pole(f, report, data)
+                    # Only ONE direction is a contradiction. The collector sets
+                    # on_critical_path for the job that is its workflow's
+                    # SLOWEST; a drilled pole is often not that job (a chain
+                    # pole such as `prep -> verify`), so False on a rendered
+                    # pole is consistent and never fails here.
                     # One exemption, narrow: a slowest job whose workflow runs on
                     # pull requests but was not drilled (it ranks below the rendered
                     # poles) is on its own merge wait without a pole header. It is
@@ -6767,11 +6786,10 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                     # section, which `check_opt80_tail_lines` pairs and re-derives.
                     off_pole_tail = (bool(claimed) and not on_pole
                                      and _vr_opt80_tail_rendered_off_pole(f, report))
-                    if bool(claimed) != on_pole and not off_pole_tail:
+                    if bool(claimed) and not on_pole and not off_pole_tail:
                         bad.append(
                             f"{fid}: on_critical_path={claimed!r} but the job is "
-                            f"{'' if on_pole else 'not '}rendered as "
-                            "a Long pole")
+                            "not rendered as a Long pole")
         elif proof == "non_pr_event":
             if not _non_pr_event_corroborated(f, data):
                 bad.append(f"{fid}: non_pr_event lacks stamped event-subset evidence")
