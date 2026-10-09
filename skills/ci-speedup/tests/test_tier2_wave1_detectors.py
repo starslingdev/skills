@@ -9983,6 +9983,46 @@ def test_opt80_finds_the_checkout_step_inside_a_parallel_group():
     assert out[0]["affected_jobs"] == ["build"]
 
 
+def test_sharded_bases_reads_a_shard_command_inside_a_parallel_group():
+    doc = {"jobs": {"tests": {"steps": [
+        {"uses": "actions/checkout@v4"},
+        {"parallel": [{"run": "echo warm"},
+                      {"run": "uv run pytest --splits 2 --group 1"}]}]}}}
+    assert "tests" in cr._sharded_bases(doc)
+
+
+def test_opt79_package_json_needed_reads_setup_node_inside_a_parallel_group():
+    wf = _opt79_steps(_OPT79_CHECKOUT,
+                      {"parallel": [{"uses": "actions/setup-node@v5"},
+                                    {"run": "echo warm"}]},
+                      {"run": "npm ci"})
+    assert cr._opt79_package_json_needed({"ci.yml": wf}) is True
+
+
+def test_opt80_retry_env_on_a_checkout_inside_a_parallel_group_is_read():
+    co = {"uses": "actions/checkout@v4", "env": {"GIT_HTTP_LOW_SPEED_LIMIT": "1000"}}
+    wf = _opt80_wf(steps=[{"parallel": [co, {"run": "echo warm"}]},
+                          {"run": "npm test"}])
+    job = wf["jobs"]["build"]
+    assert cr._opt80_retry_already_configured(wf, job, None, checkout_step=co) is True
+
+
+def test_opt79_cache_in_an_outer_group_and_install_in_a_nested_group_run_together():
+    """Nested groups carry their top-level group's ordinal: an install in a
+    group nested inside the cache's group still runs beside the restore."""
+    wf = _opt79_steps(
+        {"parallel": [dict(_OPT79_NODE_CACHE),
+                      {"parallel": [{"run": "npm ci"}, {"run": "echo warm"}]}]},
+        {"run": "npm test"})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None and gate == "cache_and_install_run_in_the_same_parallel_group", gate
+
+
+def test_non_work_step_pattern_is_identical_in_collector_and_renderer():
+    assert cr._NON_WORK_STEP_RE.pattern == bp._NON_WORK_STEP_RE.pattern
+    assert cr._NON_WORK_STEP_RE.flags == bp._NON_WORK_STEP_RE.flags
+
+
 def test_a_control_step_only_job_never_crashes_the_yaml_readers():
     """`wait:` / `wait-all:` / `cancel:` steps carry no `run:`/`uses:`."""
     wf = _opt79_steps({"wait-all": None}, {"cancel": "db"}, {"wait": ["a", "b"]})

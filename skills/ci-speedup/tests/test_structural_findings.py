@@ -103,6 +103,24 @@ def test_long_pole_is_decomposed_to_its_dominant_step():
     assert d["redundant_ratio"] == 4.0
 
 
+def test_dominant_lead_falls_back_past_control_steps_never_crowns_one():
+    """All-boilerplate job with a long `wait-all`: the fallback set drops the
+    control step (it runs nothing), so the crown goes to real boilerplate."""
+    lead = cr._dominant_category_lead(
+        [("Set up job", 3.0), ("wait-all", 50.0), ("Checkout", 5.0)])
+    assert lead == ("Checkout", 5.0), lead
+    # nothing but control steps: no step does the work
+    assert cr._dominant_category_lead([("wait", 5.0), ("wait-all", 3.0)]) is None
+
+
+def test_decompose_job_of_only_control_steps_returns_none():
+    d = cr._decompose_job_steps([_job("waits", [("wait", 5), ("wait-all", 3)])])
+    assert d is None
+    d = cr._decompose_job_steps([_job("noop", [("Set up job", 3), ("wait-all", 50),
+                                               ("Checkout", 5)])])
+    assert d is not None and d["dominant_step"] == "Checkout", d
+
+
 def test_decompose_aggregates_same_category_steps_not_single_max():
     # A multi-step pole with NO single dominant step: the job runs the same suite
     # back-to-back under four state-backend configs (four sequential `test` steps,

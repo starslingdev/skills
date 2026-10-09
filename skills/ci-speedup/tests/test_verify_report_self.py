@@ -11293,6 +11293,25 @@ def test_parallel_steps_row_is_rendered_and_required(tmp_path):
     assert vr._parallel_steps_violation(hidden, fp)[0], "a hidden malformed group must fail"
 
 
+def test_parallel_steps_violation_is_wired_into_coverage_and_needs_control_clause(tmp_path):
+    """Guard integrity: dropping the row must fail the PUBLIC check (not only the
+    helper), and a row that hides the control-step clause must fail too."""
+    vr = _load_verify_report()
+    bp = _load_blocking_path()
+    doc = {"parallel_steps": dict(_PARALLEL_STAMP), "data_sources": {}}
+    footer = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    report = "## 🗄️ Data sources\n" + footer
+    without = "\n".join(ln for ln in report.splitlines()
+                        if not ln.startswith("| Parallel steps |"))
+    chk = vr.check_coverage_disclosed(without, fp)
+    assert not chk.ok and "Parallel steps" in chk.detail, chk
+    clause = "1 `wait`/`wait-all`/`cancel` control step(s)"
+    assert clause in footer, footer
+    assert vr._parallel_steps_violation(footer.replace(clause, ""), fp)[0]
+
+
 def test_quiet_repo_with_parallel_steps_still_renders_the_required_row(tmp_path):
     """Valid `parallel:` groups, no findings, no measured jobs: the scan stamps
     `parallel_steps`, and the verifier requires its Data sources row. The
