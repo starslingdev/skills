@@ -49,38 +49,98 @@ def _load_sibling(mod_name: str, filename: str):
     return mod
 
 
+_REASON_WORDS = {
+    "in_composite": "inside a composite action",
+    "nested": "a group inside a group",
+    "beside_run_uses": "beside `run:`/`uses:` on one step",
+    "not_a_list:mapping": "a single step, not a list",
+    "null": "empty",
+    "cyclic": "contains itself",
+    "too_deep": "nested more than 64 deep",
+    "over_budget": "past the 10,000-entry read limit",
+}
+_COUNT_KEYS = ("groups", "steps_in_groups", "control_steps",
+               "invalid_groups", "malformed_groups", "skipped_children")
+_LISTED = (("invalid_groups", "invalid"), ("malformed_groups", "malformed"),
+           ("skipped_children", "skipped"))
+
+
+def _parallel_record_problems(rec: dict) -> list[str]:
+    """Type and consistency guards on the record, so a mistyped record is
+    reported (never a TypeError out of the row rebuild)."""
+    out = []
+    for key in _COUNT_KEYS:
+        v = rec.get(key, 0)
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            out.append(f"HEADER: data_sources.parallel_steps.{key} is not a count: {v!r}")
+    for count_key, list_key in _LISTED:
+        entries = rec.get(list_key, [])
+        if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+            out.append(f"HEADER: data_sources.parallel_steps.{list_key} is not a list "
+                       f"of entries: {entries!r}")
+        elif isinstance(rec.get(count_key, 0), int) and rec.get(count_key, 0) != len(entries):
+            out.append(f"HEADER: data_sources.parallel_steps.{count_key} is "
+                       f"{rec.get(count_key, 0)!r} but {list_key} names {len(entries)}")
+    return out
+
+
 def _expected_parallel_row(rec: Any) -> str | None:
     """The exact "Parallel steps" header row a faithful report carries for
     this `data_sources.parallel_steps` record, derived independently of
-    render_report.py. None when there is no record."""
+    render_report.py. None when there is no record. Call only on a record
+    `_parallel_record_problems` passed."""
     if not isinstance(rec, dict):
         return None
 
-    def files(key: str) -> str:
-        names = [str(f).replace("|", "\\|") for f in (rec.get(key) or [])]
-        if not names:
+    def safe(v: Any) -> str:
+        return str(v).replace("|", "\\|").replace("`", "\\`")
+
+    def words(code: Any) -> str:
+        code = str(code)
+        if code in _REASON_WORDS:
+            return _REASON_WORDS[code]
+        if code.startswith("not_a_list:") and len(code) > len("not_a_list:"):
+            return "a %s, not a list of steps" % safe(code[len("not_a_list:"):])
+        if code.startswith("not_a_step:") and len(code) > len("not_a_step:"):
+            return "a %s, not a step" % safe(code[len("not_a_step:"):])
+        return safe(code)
+
+    def named(key: str) -> str:
+        entries = rec.get(key) or []
+        if not entries:
             return ""
-        extra = len(names) - 3
-        tail = f" and {extra} more file(s)" if extra > 0 else ""
-        return ": in " + ", ".join("`" + n + "`" for n in names[:3]) + tail
+        texts = []
+        for e in entries[:3]:
+            t = "`" + safe(e.get("file")) + "`"
+            if e.get("job") is not None:
+                t += " job `" + safe(e["job"]) + "`"
+            if e.get("step") is not None:
+                t += " step " + safe(e["step"])
+            reasons = e.get("reasons")
+            if isinstance(reasons, list) and reasons:
+                t += " (" + "; ".join(words(r) for r in reasons) + ")"
+            texts.append(t)
+        tail = " and %d more" % (len(entries) - 3) if len(entries) > 3 else ""
+        return ": " + ", ".join(texts) + tail
 
     cells = []
     if rec.get("groups"):
         cells.append("%d step(s) in %d `parallel:` group(s) checked like any other step "
-                     "(steps in a group run side by side)"
+                     "(GitHub runs a group's steps side by side, up to 10 at a time)"
                      % (rec.get("steps_in_groups", 0), rec["groups"]))
     if rec.get("control_steps"):
-        cells.append("%d `wait`/`wait-all`/`cancel` step(s) skipped: they only coordinate "
-                     "the side-by-side steps and run no code of their own"
+        cells.append("%d `wait`/`wait-all`/`cancel` step(s) skipped: they only wait for "
+                     "or cancel background steps and run no code of their own"
                      % rec["control_steps"])
     if rec.get("invalid_groups"):
-        cells.append("**%d `parallel:` group(s) GitHub would reject were checked anyway** "
-                     "(inside a composite action, or on a step that also has `run:`/`uses:`)"
-                     % rec["invalid_groups"] + files("invalid_files"))
+        cells.append("**%d `parallel:` group(s) in a shape GitHub does not document were "
+                     "read anyway**" % rec["invalid_groups"] + named("invalid"))
     if rec.get("malformed_groups"):
         cells.append("**%d `parallel:` group(s) could not be read, so their steps were not "
-                     "checked** (not a list of steps, or a group that contains itself)"
-                     % rec["malformed_groups"] + files("malformed_files"))
+                     "checked**" % rec["malformed_groups"] + named("malformed"))
+    if rec.get("skipped_children"):
+        cells.append("**%d entr(ies) inside `parallel:` groups are not steps and were not "
+                     "checked**" % rec["skipped_children"] + named("skipped"))
     return "| **Parallel steps** | " + " · ".join(cells) + " |" if cells else None
 
 
@@ -119,9 +179,14 @@ def verify(doc: dict[str, Any], report: str, registry: dict[str, Any]) -> list[s
     # module's own code, not the renderer's, so a renderer bug cannot pass by
     # construction. No record → no row: a header cannot claim a read the
     # document does not carry.
-    want_row = _expected_parallel_row((doc.get("data_sources") or {}).get("parallel_steps"))
+    rec = (doc.get("data_sources") or {}).get("parallel_steps")
+    rec_problems = _parallel_record_problems(rec) if isinstance(rec, dict) else []
+    problems.extend(rec_problems)
+    want_row = None if rec_problems else _expected_parallel_row(rec)
     got_rows = [l for l in header.splitlines() if l.startswith("| **Parallel steps** |")]
-    if want_row is None and got_rows:
+    if rec_problems:
+        pass  # the record itself is reported above; no row can be re-derived from it
+    elif want_row is None and got_rows:
         problems.append("HEADER: a Parallel steps row is rendered but the document "
                         "records no data_sources.parallel_steps")
     elif want_row is not None and got_rows != [want_row]:

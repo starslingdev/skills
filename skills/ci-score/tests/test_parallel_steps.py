@@ -170,18 +170,84 @@ def test_a_composite_action_parallel_group_is_read_defensively_and_disclosed(tmp
     assert f["state"] == "pass", f["evidence"]
     stats = pf_mod._step_walk_stats(_parsed(wf), tmp_path)
     assert stats["invalid_groups"] == 1
-    assert stats["invalid_files"] == [".github/actions/setup/action.yml"]
+    assert stats["invalid"] == [_entry(".github/actions/setup/action.yml", None, "1",
+                                       "in_composite")]
+    # Not a group GitHub runs side by side, so not in the side-by-side counts.
+    assert stats["groups"] == 0 and stats["steps_in_groups"] == 0
+
+
+def _entry(file: str, job: str | None, step: str | None, *reasons: str) -> dict:
+    return {"file": file, "job": job, "step": step, "reasons": list(reasons)}
 
 
 def test_a_step_with_parallel_and_run_reads_both_and_is_disclosed():
-    """`parallel:` next to `run:`/`uses:` is not valid syntax. Never a silent
-    skip: the step is read, its group's children are read too, and the group
-    is counted as one GitHub rejects."""
+    """`parallel:` next to `run:`/`uses:` is not a documented shape. Never a
+    silent skip: the step is read, its group's children are read too, and the
+    group is counted as undocumented (not as one GitHub runs side by side)."""
     stats = pf_mod._new_step_stats()
     steps = [{"run": "a", "parallel": [{"uses": "some-org/deploy@main"}]}]
-    leaves = pf_mod._walk_steps(steps, stats, "ci.yml")
+    leaves = pf_mod._walk_steps(steps, stats, "ci.yml", job="test")
     assert [s.get("run") or s.get("uses") for s in leaves] == ["a", "some-org/deploy@main"]
-    assert stats["invalid_groups"] == 1 and stats["invalid_files"] == ["ci.yml"]
+    assert stats["invalid"] == [_entry("ci.yml", "test", "1", "beside_run_uses")]
+    assert stats["groups"] == 0 and stats["steps_in_groups"] == 0
+
+
+def test_a_step_with_run_beside_an_unreadable_parallel_counts_as_both():
+    stats = pf_mod._new_step_stats()
+    leaves = pf_mod._walk_steps([{"run": "npm ci", "parallel": "x"}], stats, "ci.yml", job="t")
+    assert [s["run"] for s in leaves] == ["npm ci"]
+    assert stats["invalid"] == [_entry("ci.yml", "t", "1", "beside_run_uses")]
+    assert stats["malformed"] == [_entry("ci.yml", "t", "1", "not_a_list:string")]
+
+
+def test_a_single_step_mapping_as_parallel_is_read_and_named_undocumented(tmp_path):
+    """`parallel: {uses: ...}` is one step where GitHub documents a list. It
+    is readable, so it is read (the same verdict as the step written flat)
+    and counted as undocumented, not as unreadable."""
+    wf = _wf([{"uses": f"actions/checkout@{SHA}"},
+              {"parallel": {"uses": "some-org/deploy@main"}}])
+    f = pf_mod._practice_facts(_parsed(wf), tmp_path)["ci.security.pinned-action-shas"]
+    assert f["state"] == "fail", f["evidence"]
+    stats = pf_mod._step_walk_stats(_parsed(wf), tmp_path)
+    assert stats["invalid"] == [_entry("ci.yml", "b", "2", "not_a_list:mapping")]
+    assert stats["malformed_groups"] == 0
+
+
+def test_non_step_entries_inside_a_group_are_counted_and_named():
+    stats = pf_mod._new_step_stats()
+    steps = [{"parallel": ["junk", None, [1], {"run": "a"}]}]
+    leaves = pf_mod._walk_steps(steps, stats, "ci.yml", job="t")
+    assert [s["run"] for s in leaves] == ["a"]
+    assert stats["skipped_children"] == 3
+    assert stats["skipped"] == [_entry("ci.yml", "t", "1.1", "not_a_step:string"),
+                                _entry("ci.yml", "t", "1.2", "null"),
+                                _entry("ci.yml", "t", "1.3", "not_a_step:list")]
+
+
+def test_a_nested_group_is_read_but_counted_undocumented():
+    """GitHub documents `parallel:` on a job's own step list; a group inside a
+    group is read defensively and counted as undocumented, and its steps stay
+    out of the side-by-side counts."""
+    stats = pf_mod._new_step_stats()
+    steps = [{"parallel": [{"run": "a"}, {"parallel": [{"run": "b"}, {"run": "c"}]}]}]
+    leaves = pf_mod._walk_steps(steps, stats, "ci.yml", job="t")
+    assert [s["run"] for s in leaves] == ["a", "b", "c"]
+    assert stats["groups"] == 1 and stats["steps_in_groups"] == 1
+    assert stats["invalid"] == [_entry("ci.yml", "t", "1.2", "nested")]
+
+
+def test_in_composite_propagates_to_nested_groups():
+    stats = pf_mod._new_step_stats()
+    steps = [{"parallel": [{"parallel": [{"run": "a"}]}]}]
+    pf_mod._walk_steps(steps, stats, "action.yml", in_composite=True)
+    assert stats["invalid"] == [_entry("action.yml", None, "1", "in_composite"),
+                                _entry("action.yml", None, "1.1", "in_composite", "nested")]
+
+
+def test_a_run_step_with_wait_is_a_step_not_a_control_step():
+    stats = pf_mod._new_step_stats()
+    leaves = pf_mod._walk_steps([{"run": "a", "wait": "x"}], stats, "ci.yml")
+    assert [s["run"] for s in leaves] == ["a"] and stats["control_steps"] == 0
 
 
 def test_a_local_history_action_inside_a_parallel_group_exempts_a_deep_checkout(tmp_path):
@@ -205,9 +271,9 @@ def test_a_cyclic_parallel_group_is_disclosed_not_a_crash():
     as unreadable."""
     loaded = yaml.safe_load("steps: &s\n  - run: a\n  - parallel: *s\n")["steps"]
     stats = pf_mod._new_step_stats()
-    leaves = pf_mod._walk_steps(loaded, stats, "ci.yml")
+    leaves = pf_mod._walk_steps(loaded, stats, "ci.yml", job="b")
     assert [s["run"] for s in leaves] == ["a"]
-    assert stats["malformed_groups"] == 1 and stats["malformed_files"] == ["ci.yml"]
+    assert stats["malformed"] == [_entry("ci.yml", "b", "2", "cyclic")]
     facts = pf_mod._practice_facts([("ci.yml", {"on": PR_ON, "jobs": {"b": {"steps": loaded}}}, "")],
                                    Path("/nonexistent-root"))
     assert len(facts) == 11
@@ -256,13 +322,15 @@ def test_walker_yields_leaves_in_declaration_order_and_counts_what_it_skipped():
              {"parallel": [{"run": "b"}, {"parallel": [{"run": "c"}]}, {"wait-all": None}]},
              {"wait": ["x"]}, {"cancel": "y"}, {"parallel": "not-a-list"},
              {"parallel": {"run": "e"}}, None, "junk", {"run": "d"}]
-    leaves = pf_mod._walk_steps(steps, stats, "ci.yml")
-    assert [s["run"] for s in leaves] == ["a", "b", "c", "d"]
-    assert stats["groups"] == 2            # outer, nested — groups actually READ
-    assert stats["steps_in_groups"] == 2   # b, c
+    leaves = pf_mod._walk_steps(steps, stats, "ci.yml", job="t")
+    assert [s["run"] for s in leaves] == ["a", "b", "c", "e", "d"]
+    assert stats["groups"] == 1            # the outer group (documented shape)
+    assert stats["steps_in_groups"] == 1   # b (c sits in the nested group)
     assert stats["control_steps"] == 3     # wait-all, wait, cancel
-    assert stats["malformed_groups"] == 2  # counted apart from the groups read
-    assert stats["malformed_files"] == ["ci.yml"]   # named once per file
+    assert stats["invalid"] == [_entry("ci.yml", "t", "2.2", "nested"),
+                                _entry("ci.yml", "t", "6", "not_a_list:mapping")]
+    assert stats["malformed"] == [_entry("ci.yml", "t", "5", "not_a_list:string")]
+    assert stats["skipped_children"] == 0  # top-level junk is not inside a group
 
 
 # --- disclosure: findings document + report header ---------------------------
@@ -300,7 +368,7 @@ PARALLEL_WF = (
     "      - run: npm test\n")
 
 MALFORMED_WF = ("on:\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
-                "      - parallel:\n          run: npm ci\n      - run: npm test\n")
+                "      - parallel: npm ci\n      - run: npm test\n")
 
 
 def _render_and_verify(doc: dict) -> str:
@@ -325,9 +393,9 @@ def test_collector_records_and_report_discloses_steps_read_from_parallel_groups(
     assert doc["practice_facts"]["ci.cache.dependency-cache"]["state"] == "pass"
     assert _row(_render_and_verify(doc)) == (
         "| **Parallel steps** | 2 step(s) in 1 `parallel:` group(s) checked like any "
-        "other step (steps in a group run side by side) · 1 `wait`/`wait-all`/`cancel` "
-        "step(s) skipped: they only coordinate the side-by-side steps and run no code "
-        "of their own |")
+        "other step (GitHub runs a group's steps side by side, up to 10 at a time) · "
+        "1 `wait`/`wait-all`/`cancel` step(s) skipped: they only wait for or cancel "
+        "background steps and run no code of their own |")
 
 
 def test_a_malformed_parallel_group_is_disclosed_never_silently_skipped(tmp_path):
@@ -335,37 +403,42 @@ def test_a_malformed_parallel_group_is_disclosed_never_silently_skipped(tmp_path
     assert code == 0
     rec = doc["data_sources"]["parallel_steps"]
     assert rec["groups"] == 0 and rec["malformed_groups"] == 1
-    assert rec["malformed_files"] == [".github/workflows/ci.yml"]
+    assert rec["malformed"] == [_entry(".github/workflows/ci.yml", "test", "1",
+                                       "not_a_list:string")]
     row = _row(_render_and_verify(doc))
     assert "0 step(s)" not in row   # no group was read, so no "read" clause
-    assert ("**1 `parallel:` group(s) could not be read, so their steps were not "
-            "checked** (not a list of steps, or a group that contains itself): "
-            "in `.github/workflows/ci.yml` |") in row
+    assert row == ("| **Parallel steps** | **1 `parallel:` group(s) could not be read, "
+                   "so their steps were not checked**: `.github/workflows/ci.yml` job "
+                   "`test` step 1 (a string, not a list of steps) |")
 
 
 def test_a_parallel_group_only_in_a_composite_action_is_disclosed(tmp_path):
     """No workflow uses the syntax; the only groups sit in local composite
-    actions, where GitHub does not allow them — one well-formed (read
+    actions, where GitHub does not document them — one well-formed (read
     defensively) and one malformed (not readable). Still stamped, still in
     the header, still verified."""
     wf = ("on:\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
           "      - uses: ./.github/actions/setup\n      - uses: ./.github/actions/bad\n")
-    bad = "runs:\n  using: composite\n  steps:\n    - parallel:\n        run: npm ci\n"
+    bad = "runs:\n  using: composite\n  steps:\n    - parallel: npm ci\n"
     doc, code = cc_mod.collect(_repo(tmp_path, wf, {
         ".github/actions/setup/action.yml": _COMPOSITE_WITH_PARALLEL,
         ".github/actions/bad/action.yml": bad}))
     assert code == 0
     rec = doc["data_sources"]["parallel_steps"]
-    assert rec["groups"] == 1 and rec["steps_in_groups"] == 2
-    assert rec["invalid_groups"] == 1
-    assert rec["invalid_files"] == [".github/actions/setup/action.yml"]
-    assert rec["malformed_groups"] == 1
-    assert rec["malformed_files"] == [".github/actions/bad/action.yml"]
+    assert rec["groups"] == 0 and rec["steps_in_groups"] == 0
+    assert rec["invalid"] == [
+        _entry(".github/actions/bad/action.yml", None, "1", "in_composite"),
+        _entry(".github/actions/setup/action.yml", None, "1", "in_composite")]
+    assert rec["malformed"] == [_entry(".github/actions/bad/action.yml", None, "1",
+                                       "not_a_list:string")]
     row = _row(_render_and_verify(doc))
-    assert ("**1 `parallel:` group(s) GitHub would reject were checked anyway** "
-            "(inside a composite action, or on a step that also has `run:`/`uses:`): "
-            "in `.github/actions/setup/action.yml`") in row
-    assert "in `.github/actions/bad/action.yml`" in row
+    assert ("**2 `parallel:` group(s) in a shape GitHub does not document were read "
+            "anyway**: `.github/actions/bad/action.yml` step 1 (inside a composite "
+            "action), `.github/actions/setup/action.yml` step 1 (inside a composite "
+            "action)") in row
+    assert ("**1 `parallel:` group(s) could not be read, so their steps were not "
+            "checked**: `.github/actions/bad/action.yml` step 1 (a string, not a list "
+            "of steps) |") in row
 
 
 def test_wait_or_cancel_without_any_parallel_group_adds_nothing(tmp_path):
@@ -383,7 +456,7 @@ def test_wait_or_cancel_without_any_parallel_group_adds_nothing(tmp_path):
 def _parallel_doc(tmp_path: Path) -> tuple[dict, dict, str]:
     doc, _code = cc_mod.collect(_repo(tmp_path, PARALLEL_WF))
     doc["data_sources"]["parallel_steps"].update(
-        malformed_groups=1, malformed_files=[".github/workflows/x.yml"])
+        malformed_groups=1, malformed=[_entry(".github/workflows/x.yml", "test", "3", "null")])
     registry = json.loads(_SPEC_PATH.read_text())
     report = rr_mod.render_report(doc, registry)
     assert vr_mod.verify(doc, report, registry) == []
@@ -391,7 +464,8 @@ def _parallel_doc(tmp_path: Path) -> tuple[dict, dict, str]:
 
 
 def _red(doc: dict, report: str, registry: dict) -> bool:
-    return any("parallel" in p.lower() for p in vr_mod.verify(doc, report, registry))
+    return any(p.startswith("HEADER:") and "Parallel steps" in p
+               for p in vr_mod.verify(doc, report, registry))
 
 
 def test_verify_goes_red_when_the_parallel_disclosure_is_dropped(tmp_path):
@@ -427,21 +501,50 @@ def test_verify_goes_red_on_a_row_the_document_does_not_record(tmp_path):
     assert _red(doc, report, registry)
 
 
-def test_many_unreadable_files_are_counted_never_cut_short(tmp_path):
+def test_many_unreadable_groups_are_counted_never_cut_short(tmp_path):
     doc, registry, _report = _parallel_doc(tmp_path)
-    files = [f".github/workflows/w{i}.yml" for i in range(5)]
-    doc["data_sources"]["parallel_steps"].update(malformed_groups=5, malformed_files=files)
+    entries = [_entry(f".github/workflows/w{i}.yml", "t", "2", "cyclic") for i in range(5)]
+    doc["data_sources"]["parallel_steps"].update(malformed_groups=5, malformed=entries)
     row = _row(_render_and_verify(doc))
-    assert row.endswith("in `.github/workflows/w0.yml`, `.github/workflows/w1.yml`, "
-                        "`.github/workflows/w2.yml` and 2 more file(s) |")
+    assert row.endswith("`.github/workflows/w0.yml` job `t` step 2 (contains itself), "
+                        "`.github/workflows/w1.yml` job `t` step 2 (contains itself), "
+                        "`.github/workflows/w2.yml` job `t` step 2 (contains itself) "
+                        "and 2 more |")
 
 
-def test_a_pipe_in_a_filename_cannot_break_the_table_row(tmp_path):
+def test_a_pipe_in_a_name_cannot_break_the_table_row(tmp_path):
     doc, registry, _report = _parallel_doc(tmp_path)
-    doc["data_sources"]["parallel_steps"]["malformed_files"] = [".github/workflows/a|b.yml"]
+    doc["data_sources"]["parallel_steps"]["malformed"] = [
+        _entry(".github/workflows/a|b.yml", "j|k", "1", "null")]
     row = _row(_render_and_verify(doc))
-    assert "`.github/workflows/a\\|b.yml`" in row
+    assert "`.github/workflows/a\\|b.yml` job `j\\|k`" in row
     assert row.replace("\\|", "").count("|") == 3   # label cell + value cell only
+
+
+def test_a_backtick_fence_in_a_name_cannot_cut_the_header_short(tmp_path):
+    """The verifier reads the header as everything before the first ```; a
+    file name holding one must not end the header inside the row."""
+    doc, registry, _report = _parallel_doc(tmp_path)
+    doc["data_sources"]["parallel_steps"]["malformed"] = [
+        _entry(".github/workflows/a```b.yml", "j`k", "1", "null")]
+    report = _render_and_verify(doc)
+    assert "```b" not in _row(report)
+
+
+@pytest.mark.parametrize("key,value", [("groups", "1"), ("malformed_groups", None),
+                                       ("control_steps", True), ("malformed", "x.yml")])
+def test_verify_reports_a_mistyped_record_instead_of_crashing(tmp_path, key, value):
+    doc, registry, report = _parallel_doc(tmp_path)
+    doc["data_sources"]["parallel_steps"][key] = value
+    problems = vr_mod.verify(doc, report, registry)
+    assert any(p.startswith("HEADER:") and key in p for p in problems), problems
+
+
+def test_verify_reports_a_count_that_disagrees_with_its_entries(tmp_path):
+    doc, registry, report = _parallel_doc(tmp_path)
+    doc["data_sources"]["parallel_steps"]["malformed_groups"] = 2
+    problems = vr_mod.verify(doc, report, registry)
+    assert any(p.startswith("HEADER:") and "malformed_groups" in p for p in problems), problems
 
 
 def test_no_parallel_syntax_leaves_the_document_and_header_unchanged(tmp_path):
@@ -478,8 +581,11 @@ def test_a_deep_alias_chain_is_capped_and_counted_never_a_crash():
     stats = pf_mod._new_step_stats()
     leaves = pf_mod._walk_steps(steps, stats, "ci.yml")
     assert leaves == []
-    assert stats["groups"] == pf_mod._MAX_PARALLEL_DEPTH
-    assert stats["malformed_groups"] == 1 and stats["malformed_files"] == ["ci.yml"]
+    assert stats["groups"] == 1   # the outer group
+    # every deeper group is nested (undocumented); the one past the cap is
+    # ALSO unreadable, so it lands in both buckets
+    assert stats["invalid_groups"] == pf_mod._MAX_PARALLEL_DEPTH
+    assert stats["malformed"] == [_entry("ci.yml", None, ".".join(["1"] * 65), "too_deep")]
 
 
 def test_a_group_at_the_depth_cap_is_still_read():
@@ -499,7 +605,8 @@ def test_an_alias_doubling_chain_stops_at_the_step_budget(bottom):
     stats = pf_mod._new_step_stats()
     leaves = pf_mod._walk_steps(steps, stats, "ci.yml")
     assert len(leaves) <= getattr(pf_mod, "_MAX_WALK_STEPS", 10_000)
-    assert stats["malformed_groups"] == 1 and stats["malformed_files"] == ["ci.yml"]
+    assert stats["malformed_groups"] == 1
+    assert stats["malformed"][0]["reasons"] == ["over_budget"]
 
 
 def _wf_text(steps_yaml_anchor_block: str, ref: str) -> str:
@@ -524,7 +631,8 @@ def test_a_two_hop_cycle_is_counted_once_at_walker_level():
     steps = yaml.safe_load("s: &s\n  - run: a\n  - parallel:\n      - parallel: *s\n")["s"]
     stats = pf_mod._new_step_stats()
     assert [s["run"] for s in pf_mod._walk_steps(steps, stats, "ci.yml")] == ["a"]
-    assert stats["groups"] == 1 and stats["malformed_groups"] == 1
+    assert stats["groups"] == 1
+    assert stats["malformed"] == [_entry("ci.yml", None, "2.1", "cyclic")]
 
 
 @pytest.mark.parametrize("exc", [RecursionError, MemoryError])

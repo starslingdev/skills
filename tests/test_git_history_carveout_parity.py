@@ -178,35 +178,42 @@ def test_job_needs_git_history_agrees_on_every_battery_row(sides):
 
 
 # GitHub Actions `parallel:` groups (2026-06-25). ci-score walks into them;
-# ci-speedup still reads `steps:` flat, so on the first row ci-score says the
-# deep checkout is needed (a history op sits in the group) and ci-speedup
-# says it is not. A KNOWN gap, pinned rather than hidden: a NON-strict xfail.
+# ci-speedup still reads `steps:` flat, so on the two history rows ci-score
+# says the deep checkout is needed (a history op sits in a group: a list, or a
+# single step mapping, which ci-score reads defensively) and ci-speedup says
+# it is not. A KNOWN gap, pinned rather than hidden: a NON-strict xfail.
 # It is non-strict on purpose: the ci-speedup `parallel:` change (PR #122) is
 # in flight in parallel, and a strict marker would turn main red for whichever
 # of the two PRs lands second. Once both are on main, delete this marker and
-# the test becomes a plain agreement check. The other rows (control step,
-# malformed group) must agree already and are pinned in the battery test's
-# shape below.
-_PARALLEL_BATTERY = [
+# the test becomes a plain agreement check. The other rows (a history op after
+# a control step, an unreadable group) must agree already, pinned by
+# `test_parallel_rows_that_already_agree` below.
+_PARALLEL_HISTORY_ROWS = [
     ("parallel-history", {"steps": [
         {"uses": "actions/checkout@v4", "with": {"fetch-depth": 0}},
         {"parallel": [{"run": "git log --oneline"}, {"run": "true"}]}]}),
+    ("parallel-single-mapping", {"steps": [{"parallel": {"run": "git log"}}]}),
+]
+_PARALLEL_AGREEING_ROWS = [
+    # A control step must not end the read: the history op after it counts.
     ("parallel-wait-all", {"steps": [
-        {"parallel": [{"run": "npm test"}]}, {"wait-all": None}]}),
-    ("parallel-malformed", {"steps": [{"parallel": {"run": "git log"}}]}),
+        {"parallel": [{"run": "npm test"}]}, {"wait-all": None}, {"run": "git log"}]}),
+    ("parallel-unreadable", {"steps": [{"parallel": "git log"}]}),
 ]
 
 
 def test_parallel_rows_that_already_agree(sides):
     speed, score = sides
     speed._GIT_HISTORY_LOCAL_ACTIONS = set()
-    for name, job in _PARALLEL_BATTERY[1:]:
+    for name, job in _PARALLEL_AGREEING_ROWS:
         assert speed._job_needs_git_history(job, name) == \
             score._job_needs_git_history(job, name), name
+    name, job = _PARALLEL_AGREEING_ROWS[0]
+    assert score._job_needs_git_history(job, name) is True
     # ci-score's side of the xfail below is pinned OUTSIDE it, so the xfail
     # can only be explained by ci-speedup's flat read.
-    name, job = _PARALLEL_BATTERY[0]
-    assert score._job_needs_git_history(job, name) is True
+    for name, job in _PARALLEL_HISTORY_ROWS:
+        assert score._job_needs_git_history(job, name) is True, name
 
 
 @pytest.mark.xfail(strict=False, reason=(
@@ -216,10 +223,10 @@ def test_parallel_rows_that_already_agree(sides):
 def test_job_needs_git_history_agrees_inside_parallel_groups(sides):
     speed, score = sides
     speed._GIT_HISTORY_LOCAL_ACTIONS = set()
-    name, job = _PARALLEL_BATTERY[0]
-    assert speed._job_needs_git_history(job, name) is True, (
-        "ci-speedup would recommend shallowing a job whose `parallel:` group "
-        "walks git history")
+    for name, job in _PARALLEL_HISTORY_ROWS:
+        assert speed._job_needs_git_history(job, name) is True, (
+            f"{name}: ci-speedup would recommend shallowing a job whose "
+            "`parallel:` group walks git history")
 
 
 def test_local_composite_action_indexing_agrees(sides, tmp_path: Path):

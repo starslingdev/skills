@@ -388,38 +388,23 @@ def _wf_jobs(doc: dict) -> dict[str, dict]:
 
 # ---- The step walker ---------------------------------------------------------
 #
-# GitHub Actions parallel steps (2026-06-25): a step may be `- parallel:`
-# holding a LIST of ordinary child steps, and the control steps `- wait:`,
-# `- wait-all:` and `- cancel:` carry no `run:`/`uses:`. A flat read of
-# `steps:` saw a `parallel:` entry as a step with neither key, so every child
-# inside it — an unpinned action, the only cache step, a `fetch-depth: 0`
-# checkout, the history op that exempts it — was invisible and a check could
-# PASS or FAIL on a step it never read. EVERY step read in this module goes
-# through `_walk_steps`, so no check can drift back to a flat read.
+# GitHub Actions parallel steps (shipped by GitHub 2026-06-25 on github.com
+# and GHEC; not GHES): a step may be `- parallel:` holding a LIST of ordinary
+# child steps, and the control steps `- wait:`, `- wait-all:` and `- cancel:`
+# carry no `run:`/`uses:`. A flat read of `steps:` saw a `parallel:` entry as
+# a step with neither key, so every child inside it — an unpinned action, the
+# only cache step, a `fetch-depth: 0` checkout, the history op that exempts
+# it — was invisible and a check could PASS or FAIL on a step it never read.
+# EVERY step read in this module goes through `_walk_steps`;
+# `tests/test_parallel_steps.py::test_no_step_list_is_read_outside_the_walker`
+# fails if a `.get("steps")` appears anywhere else, so no check can drift back
+# to a flat read.
+#
+# Control steps inside a local composite action: composites cannot use
+# `background:`, so a `wait:` / `cancel:` there coordinates nothing. It is
+# skipped and counted like any other control step (it runs no code either way).
 _PARALLEL_KEY = "parallel"
 _CONTROL_STEP_KEYS = ("wait", "wait-all", "cancel")
-
-
-def _new_step_stats() -> dict[str, Any]:
-    """`groups` counts groups whose children were READ; `malformed_groups`
-    counts groups that could not be read (value not a list, or a list that
-    contains itself through a YAML alias); `invalid_groups` counts groups
-    GitHub rejects but whose children were read anyway (a `parallel:` inside a
-    composite action, or beside `run:`/`uses:` on one step). Each unreadable
-    or rejected group's file is named once."""
-    return {"groups": 0, "steps_in_groups": 0, "control_steps": 0,
-            "malformed_groups": 0, "malformed_files": [],
-            "invalid_groups": 0, "invalid_files": []}
-
-
-def _note(stats: dict[str, Any] | None, kind: str, rel: str) -> None:
-    if stats is None:
-        return
-    stats[f"{kind}_groups"] += 1
-    files = stats[f"{kind}_files"]
-    if rel and rel not in files:
-        files.append(rel)
-
 
 # Bounds on one walk, so a hostile or broken workflow cannot stall or crash
 # the scorer. YAML aliases let a few lines build a group nested 1,000 deep
@@ -429,68 +414,147 @@ def _note(stats: dict[str, Any] | None, kind: str, rel: str) -> None:
 # control steps and groups alike, so a chain of empty groups is bounded too —
 # per top-level walk; GitHub allows at most 1,000 steps per job, so no real
 # job comes near it. A group past either bound is counted as unreadable and
-# named, never silently dropped. Shared (aliased) groups are NOT deduplicated:
-# a step reused twice through an alias counts twice, exactly as the same steps
-# written out flat would.
+# named, never silently dropped. A self-referencing group cannot make the walk
+# recurse forever; a shared (aliased) group is read once per reference, up to
+# the budget, and is NOT deduplicated: a step reused twice through an alias
+# counts twice, exactly as the same steps written out flat would.
 _MAX_PARALLEL_DEPTH = 64
 _MAX_WALK_STEPS = 10_000
+
+# YAML-facing names for the Python type a non-list `parallel:` value (or a
+# non-step entry inside a group) loaded as; they form the record's reason codes.
+_YAML_TYPE_NAMES = {"dict": "mapping", "str": "string", "int": "number",
+                    "float": "number", "bool": "boolean", "list": "list"}
+
+
+def _yaml_type(value: Any) -> str:
+    return _YAML_TYPE_NAMES.get(type(value).__name__, type(value).__name__)
+
+
+def _new_step_stats() -> dict[str, Any]:
+    """What one walk read, by bucket (the collector records it as
+    `data_sources.parallel_steps`):
+
+    - `groups` / `steps_in_groups`: documented groups — a `parallel:` list on
+      a workflow job's own step list — and the steps directly inside them,
+      which GitHub runs side by side.
+    - `control_steps`: `wait:` / `wait-all:` / `cancel:` steps skipped.
+    - `invalid_groups` / `invalid`: groups in a shape GitHub does not
+      document, read anyway (defensively: the same verdict as if their steps
+      were written flat) and NOT counted in `groups`. Reasons: `in_composite`,
+      `nested` (a group inside a group), `beside_run_uses` (on a step that
+      also has `run:`/`uses:`), `not_a_list:mapping` (a single step mapping
+      instead of a list).
+    - `malformed_groups` / `malformed`: groups that could not be read, so
+      their steps were not checked. Reasons: `not_a_list:<type>`, `null`,
+      `cyclic` (contains itself through a YAML alias), `too_deep` (past
+      `_MAX_PARALLEL_DEPTH`), `over_budget` (the walk spent
+      `_MAX_WALK_STEPS` inside it).
+    - `skipped_children` / `skipped`: entries inside a read group that are
+      not steps (`not_a_step:<type>` or `null`).
+
+    Every entry is `{"file", "job", "step", "reasons"}`: `job` is None in a
+    composite action, `step` is the 1-based position (`3.2` = child 2 of
+    step 3), None when the walk ran out of budget outside any group. A step
+    with `run:` beside an unreadable `parallel:` lands in BOTH `invalid` and
+    `malformed`."""
+    return {"groups": 0, "steps_in_groups": 0, "control_steps": 0,
+            "invalid_groups": 0, "invalid": [],
+            "malformed_groups": 0, "malformed": [],
+            "skipped_children": 0, "skipped": []}
+
+
+_BUCKET_COUNT = {"invalid": "invalid_groups", "malformed": "malformed_groups",
+                 "skipped": "skipped_children"}
+
+
+def _note(stats: dict[str, Any] | None, bucket: str, rel: str, job: str | None,
+          step: str | None, reasons: list[str]) -> None:
+    if stats is None:
+        return
+    stats[_BUCKET_COUNT[bucket]] += 1
+    stats[bucket].append({"file": rel, "job": job, "step": step, "reasons": reasons})
 
 
 def _walk_steps(steps: Any, stats: dict[str, Any] | None = None,
                 rel: str = "", _depth: int = 0, *, in_composite: bool = False,
+                job: str | None = None, _prefix: str = "",
                 _path: frozenset[int] = frozenset(),
-                _budget: list[int] | None = None) -> list[dict]:
-    """Every LEAF step (a mapping with `run:`/`uses:`/... of its own) in
-    declaration order, descending into `parallel:` lists. Control steps
-    (`wait:` / `wait-all:` / `cancel:` without `run`/`uses`) are skipped but
-    counted. Never a silent skip: a `parallel:` that cannot be read (not a
-    list, a list containing itself, nested past `_MAX_PARALLEL_DEPTH`, or the
-    group the walk was in when it spent `_MAX_WALK_STEPS`) is counted and its
-    file named; a `parallel:` GitHub rejects (inside a composite action, or on
-    a step that also has `run:`/`uses:`) is read anyway — defensively, the
-    same verdict as if its steps were written flat — and counted and named as
-    rejected."""
+                _budget: list[int] | None = None,
+                _side_by_side: bool = False) -> list[dict]:
+    """Every step the checks read — any mapping that is not a `parallel:`
+    group or a bare control step — in declaration order, descending into
+    `parallel:` groups. `_depth` is the nesting level of `steps` (0 = the
+    job's or composite action's own list); a group whose children would sit
+    past `_MAX_PARALLEL_DEPTH` is not entered. `_budget` is the one counter
+    the whole walk spends from (`_MAX_WALK_STEPS`). `_side_by_side` marks
+    `steps` as a documented group's children, the only steps counted in
+    `steps_in_groups`. See `_new_step_stats` for
+    what is counted and why: inside `parallel:` groups nothing is skipped
+    without being counted and named."""
     out: list[dict] = []
     if not isinstance(steps, list):
         return out
     if _budget is None:
         _budget = [_MAX_WALK_STEPS]
     path = _path | {id(steps)}
-    for step in steps:
+    for i, step in enumerate(steps):
         if _budget[0] <= 0:
             # Spent: stop here and count the group being read as unreadable
-            # (the top-level list when the budget ran out outside any group).
+            # (the job's own list when the budget ran out outside any group).
             if _budget[0] == 0:
-                _note(stats, "malformed", rel)
+                _note(stats, "malformed", rel, job, _prefix.rstrip(".") or None,
+                      ["over_budget"])
                 _budget[0] = -1  # noted once; every enclosing level just stops
             break
         _budget[0] -= 1
+        label = f"{_prefix}{i + 1}"
         if not isinstance(step, dict):
+            if _depth > 0:
+                _note(stats, "skipped", rel, job, label,
+                      ["null"] if step is None else [f"not_a_step:{_yaml_type(step)}"])
             continue
         is_leaf = "run" in step or "uses" in step
         if _PARALLEL_KEY in step:
             group = step.get(_PARALLEL_KEY)
             if is_leaf:
                 out.append(step)
-                if stats is not None and _depth > 0:
+                if stats is not None and _side_by_side:
                     stats["steps_in_groups"] += 1
-            if (not isinstance(group, list) or id(group) in path
-                    or _depth + 1 > _MAX_PARALLEL_DEPTH):
-                _note(stats, "malformed", rel)
+            undocumented = [r for r, hit in (("in_composite", in_composite),
+                                              ("nested", _depth > 0),
+                                              ("beside_run_uses", is_leaf)) if hit]
+            if isinstance(group, dict):
+                children: Any = [group]  # one step mapping: read it as a list of one
+                undocumented.append("not_a_list:mapping")
+            else:
+                children = group
+            bad = None
+            if group is None:
+                bad = "null"
+            elif not isinstance(children, list):
+                bad = f"not_a_list:{_yaml_type(group)}"
+            elif id(group) in path:
+                bad = "cyclic"
+            elif _depth + 1 > _MAX_PARALLEL_DEPTH:
+                bad = "too_deep"
+            if undocumented:
+                _note(stats, "invalid", rel, job, label, undocumented)
+            if bad:
+                _note(stats, "malformed", rel, job, label, [bad])
                 continue
-            if stats is not None:
+            if stats is not None and not undocumented:
                 stats["groups"] += 1
-            if in_composite or is_leaf:
-                _note(stats, "invalid", rel)
-            out.extend(_walk_steps(group, stats, rel, _depth + 1,
-                                   in_composite=in_composite, _path=path,
-                                   _budget=_budget))
+            out.extend(_walk_steps(children, stats, rel, _depth + 1,
+                                   in_composite=in_composite, job=job,
+                                   _prefix=f"{label}.", _path=path | {id(group)},
+                                   _budget=_budget, _side_by_side=not undocumented))
             continue
         if not is_leaf and any(k in step for k in _CONTROL_STEP_KEYS):
             if stats is not None:
                 stats["control_steps"] += 1
             continue
-        if stats is not None and _depth > 0:
+        if stats is not None and _side_by_side:
             stats["steps_in_groups"] += 1
         out.append(step)
     return out
@@ -512,12 +576,12 @@ def _step_sources(parsed: list[tuple[str, dict, str]],
                   composites: list[tuple[str, dict]],
                   stats: dict[str, Any] | None = None) -> list[tuple[str, list[dict]]]:
     """Steps everywhere the repo's own files define them — workflow jobs plus
-    local composite actions (the `runs.steps` shape) — leaf steps only. With
+    local composite actions (the `runs.steps` shape), via the walker. With
     `stats`, the same walk records what it read (see `_new_step_stats`)."""
     out: list[tuple[str, list[dict]]] = []
     for rel, doc, _raw in parsed:
-        for job in _wf_jobs(doc).values():
-            out.append((rel, _walk_steps(job.get("steps"), stats, rel)))
+        for jid, job in _wf_jobs(doc).items():
+            out.append((rel, _walk_steps(job.get("steps"), stats, rel, job=jid)))
     for rel, doc in composites:
         if isinstance(doc.get("runs"), dict):
             out.append((rel, _composite_steps(doc, stats, rel)))
