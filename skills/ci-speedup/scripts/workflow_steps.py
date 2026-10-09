@@ -220,7 +220,11 @@ def parallel_steps_stats(docs: Iterable[tuple[str, Any]]) -> dict[str, Any]:
             out["steps_in_groups"] += w.steps_in_groups
             out["control_steps"] += w.control_steps
             if w.groups:
-                out["jobs_with_groups"].append({"path": rel, "job": str(key)})
+                row = {"path": rel, "job": str(key)}
+                # The display name, when set, so a pole labelled by it matches.
+                if isinstance(job, dict) and isinstance(job.get("name"), str) and job["name"]:
+                    row["name"] = job["name"]
+                out["jobs_with_groups"].append(row)
             for kind, n in (("malformed", w.malformed_groups),
                             ("invalid", w.invalid_groups)):
                 if not n:

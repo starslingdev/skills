@@ -79,6 +79,16 @@ def test_jobs_with_groups_names_every_job_that_holds_a_group():
                                          {"path": "b.yml", "job": "bad"}], stats
 
 
+def test_jobs_with_groups_carries_the_display_name_when_the_job_has_one():
+    # The pole drill matches a pole's check/job against this row; a job whose
+    # `name:` differs from its key is only matchable when the name is stamped.
+    docs = [("ci.yml", {"jobs": {"test": {"name": "Unit tests",
+                                          "steps": [{"parallel": [{"run": "a"}]}]}}})]
+    stats = ws.parallel_steps_stats(docs)
+    assert stats["jobs_with_groups"] == [{"path": "ci.yml", "job": "test",
+                                          "name": "Unit tests"}], stats
+
+
 def test_invalid_groups_are_recorded_per_job():
     docs = [("c.yml", {"jobs": {"j": {"steps": [{"run": "a", "parallel": [{"run": "b"}]}]}}})]
     stats = ws.parallel_steps_stats(docs)
