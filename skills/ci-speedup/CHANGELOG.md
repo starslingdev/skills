@@ -972,7 +972,10 @@ unversioned and updates by reinstall from `main`.
   counts a cache that runs alongside the install as covering it; OPT79 holds
   back a cache restore that runs in a group or in the background; a group-level
   `if:` is read as gating its steps; and the pole drill no longer says a job
-  with a parallel group runs its steps one after another. (#122)
+  with a parallel group runs its steps one after another; OPT79 no longer reads
+  `package.json` through a checkout that may still be running beside the setup
+  step; and a repo with no findings that uses the syntax still gets its
+  Parallel steps row. (#122)
 
 - **2026-10-07** — **A slow lint job flagged by OPT82 no longer reads as a
   coverage gap, and a cache cost off the long poles no longer lands inside the
