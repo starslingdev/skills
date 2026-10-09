@@ -95,3 +95,51 @@ def test_invalid_groups_are_recorded_per_job():
     assert stats["invalid_groups"] == 1 and stats["invalid_files"] == ["c.yml"], stats
     assert stats["invalid_jobs"] == [{"path": "c.yml", "job": "j", "count": 1}], stats
     assert stats["malformed_groups"] == 0, stats
+
+
+def _alias_fanout_doc(n: int) -> str:
+    # Each level is a two-group list whose groups BOTH alias the level below,
+    # so the expanded tree holds 2**n leaves with no list containing itself.
+    lines = ["x0: &x0 [{run: a}]"]
+    for i in range(1, n + 1):
+        lines.append(f"x{i}: &x{i} [{{parallel: *x{i - 1}}}, {{parallel: *x{i - 1}}}]")
+    lines.append(f"jobs: {{j: {{steps: *x{n}}}}}")
+    return "\n".join(lines)
+
+
+def test_an_alias_fan_out_stops_at_the_walk_budget_and_is_counted_malformed():
+    """A list reused by sibling groups through YAML aliases is not a cycle, but
+    it doubles the leaves per level: n=40 is 2**40 leaves and the walk never
+    returns. The walk reads at most `WALK_MAX_NODES` leaves and groups, then
+    counts the group it was entering as malformed and stops, so the job lands
+    in `scan_incomplete` instead of hanging every detector that walks it."""
+    import signal
+    yaml = pytest.importorskip("yaml")
+    doc = yaml.safe_load(_alias_fanout_doc(40))
+
+    def _timeout(*_a):
+        raise TimeoutError("walk did not finish within 10s")
+
+    old = signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(10)
+    try:
+        w = ws.job_walk(doc["jobs"]["j"])
+        stats = ws.parallel_steps_stats([("fan.yml", doc)])
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+    assert w.malformed_groups == 1, w.malformed_groups
+    # The budget is checked on entering a group, so a walk can pass it by at
+    # most the one group it stops on plus one list's direct leaves (here 1).
+    assert len(w.leaves) + w.groups <= ws.WALK_MAX_NODES + 2, (len(w.leaves), w.groups)
+    assert stats["malformed_files"] == ["fan.yml"], stats["malformed_files"]
+    assert [(r["path"], r["job"], r["count"]) for r in stats["malformed_jobs"]] == [
+        ("fan.yml", "j", 1)], stats["malformed_jobs"]
+
+
+def test_a_small_alias_reuse_is_read_in_full_under_the_budget():
+    # Reuse below the budget is ordinary YAML: every use is read, nothing malformed.
+    yaml = pytest.importorskip("yaml")
+    doc = yaml.safe_load(_alias_fanout_doc(4))
+    w = ws.job_walk(doc["jobs"]["j"])
+    assert len(w.leaves) == 16 and w.malformed_groups == 0, w

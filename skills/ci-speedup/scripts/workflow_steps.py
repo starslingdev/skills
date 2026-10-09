@@ -40,6 +40,12 @@ only place in this skill that knows the shape:
     deeper than `WALK_MAX_DEPTH` (ci-secure's cap) is MALFORMED: its contents
     are not read, and the walk counts it instead of treating the job as clean
     (or recursing until Python gives up);
+  * a list REUSED through YAML aliases is not a cycle and is read again at
+    each use, so sibling groups aliasing one list double the leaves per level
+    (40 levels is 2**40 leaves). The walk therefore reads at most
+    `WALK_MAX_NODES` leaves and groups per job: on reaching it, the group it
+    was about to enter is counted MALFORMED and the walk stops, so the job is
+    a named coverage gap instead of a scan that never returns;
   * a `parallel:` on a step that also has `run:` or `uses:` (GitHub rejects
     it) is INVALID: the step's own command is still a leaf, its children are
     read anyway — the same verdict as if they were written flat — and the
@@ -73,6 +79,9 @@ CONTROL_KEYS: tuple[str, ...] = ("wait", "wait-all", "cancel")
 # Groups nested deeper than this are counted malformed and not read — the same
 # cap as ci-secure's `_WALK_MAX_DEPTH`, so the engines agree on what is read.
 WALK_MAX_DEPTH = 64
+# Leaves + groups one job's walk reads before it stops (see the module
+# docstring): far above any real job, far below an alias fan-out's 2**n.
+WALK_MAX_NODES = 10_000
 
 
 @dataclass(frozen=True)
@@ -145,6 +154,7 @@ def walk_steps(steps: Any) -> StepWalk:
     Anything that is not a list reads as no steps, and a non-mapping item is
     skipped, exactly as every flat reader already treated them."""
     walk = StepWalk()
+    stopped = False  # the walk budget was reached: read nothing more
 
     def _leaf(item: dict[str, Any], group: int | None, cond: str | None) -> None:
         bg = group is not None or _truthy(item.get("background"))
@@ -158,13 +168,23 @@ def walk_steps(steps: Any) -> StepWalk:
 
     def _visit(items: Any, group: int | None, cond: str | None,
                path: frozenset[int], depth: int) -> None:
+        nonlocal stopped
         if not isinstance(items, list):
             return
         path = path | {id(items)}  # the lists on THIS branch: a repeat is a cycle
         for item in items:
+            if stopped:
+                return
             if not isinstance(item, dict):
                 continue
             if is_group_step(item):
+                if len(walk.leaves) + walk.groups >= WALK_MAX_NODES:
+                    # Budget reached (an alias fan-out): this group is the
+                    # unread one, and nothing after it is read either.
+                    walk.groups += 1
+                    walk.malformed_groups += 1
+                    stopped = True
+                    return
                 walk.groups += 1
                 if _is_leaf(item):
                     _leaf(item, group, cond)
