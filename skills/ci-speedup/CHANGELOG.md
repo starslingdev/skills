@@ -965,7 +965,10 @@ unversioned and updates by reinstall from `main`.
   overlapping steps is undocumented, so the per-step decomposition still adds
   step times as if they ran one after another; that needs a live probe first.
   Also: a step that has `parallel:` plus `run:` / `uses:` is now read (its
-  command and its children) and reported as incomplete coverage; OPT2 no longer
+  command and its children) and reported as incomplete coverage; a workflow
+  whose steps list is nested in itself through a YAML alias no longer stops the
+  scan (it is reported as a group not read); OPT12's shared setup preamble
+  stops at the first `parallel:` group; OPT2 no longer
   counts a cache that runs alongside the install as covering it; OPT79 holds
   back a cache restore that runs in a group or in the background; a group-level
   `if:` is read as gating its steps; and the pole drill no longer says a job

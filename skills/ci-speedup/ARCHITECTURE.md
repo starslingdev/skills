@@ -3043,7 +3043,12 @@ step carry `background: true`, and add control steps (`wait:`, `wait-all:`,
   informational note.
 - **A step with `parallel:` and `run:` / `uses:`** is still read: its own
   command counts as a step, its children are walked, and it is counted
-  malformed (named in `scan_incomplete`).
+  under `invalid_groups` / `invalid_files` / `invalid_jobs` (GitHub rejects the
+  shape; the steps were read as if written flat), named in `scan_incomplete`.
+  This matches ci-score's `_walk_steps` (PR #120). `malformed_groups` is kept
+  for a group that could not be read at all: a `parallel:` value that is not a
+  list, a list nested in itself through a YAML alias, or nesting deeper than 64
+  (ci-secure's cap).
 - **Never-dominant guard limits.** An unnamed `wait: server` may show up in run
   data under a generated name such as "Wait for server"; that is unprobed, so it
   can still be picked as dominant. Conversely a user step literally named
