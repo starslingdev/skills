@@ -6683,8 +6683,9 @@ def _decompose_job_steps(
     # 4s). Boilerplate still counts toward `setup_build_s` / `redundant_ratio`
     # below — it's real cost — just not an addressable dominant lever. Fall back to
     # the full set only when a job is ALL boilerplate (nothing else to crown).
-    sel = ([s for s in steps if not _NON_WORK_STEP_RE.match(s[0])]
-           or [s for s in steps if not _CONTROL_STEP_NAME_RE.match(s[0])])
+    sel = ([s for s in steps if not _NON_WORK_STEP_RE.match(s[0])
+            and not _is_control_step_name(s[0])]
+           or [s for s in steps if not _is_control_step_name(s[0])])
     if not sel:
         return None  # nothing but control steps: no step does the work
     cat_p50: dict[str, float] = {}
@@ -6734,8 +6735,9 @@ def _dominant_category_lead(named_durs: "list[tuple[str, float]]") -> "tuple[str
     items = [(n, d) for n, d in named_durs if isinstance(d, (int, float)) and d > 0]
     if not items:
         return None
-    work = ([(n, d) for n, d in items if not _NON_WORK_STEP_RE.match(n)]
-            or [(n, d) for n, d in items if not _CONTROL_STEP_NAME_RE.match(n)])
+    work = ([(n, d) for n, d in items if not _NON_WORK_STEP_RE.match(n)
+             and not _is_control_step_name(n)]
+            or [(n, d) for n, d in items if not _is_control_step_name(n)])
     if not work:
         return None
     cat_p50: dict[str, float] = {}
@@ -19685,6 +19687,31 @@ _NON_WORK_STEP_RE = _re.compile(
     r"|(?:wait|wait-all|cancel)\s*$|wait for all background steps)",
     _re.IGNORECASE)
 
+# A control step the author NAMED (`- name: Wait for lint` / `wait: lint`) may
+# render under that name, which `_CONTROL_STEP_NAME_RE` cannot see, while a
+# work step can legitimately be called `Wait for deployment`. So the repo's own
+# named control steps are read from its workflow YAML once per collection
+# (`_set_yaml_control_step_names`) and excluded by name, whitespace-collapsed
+# and case-folded. Empty for a repo with no named control step, so every
+# other repo's crown is unchanged.
+_YAML_CONTROL_STEP_NAMES: set[str] = set()
+
+
+def _set_yaml_control_step_names(wf_docs: dict[str, Any] | None) -> None:
+    _YAML_CONTROL_STEP_NAMES.clear()
+    for doc in (wf_docs or {}).values():
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        for spec in (jobs.values() if isinstance(jobs, dict) else ()):
+            for nm in job_walk(spec).control_names:
+                _YAML_CONTROL_STEP_NAMES.add(" ".join(nm.split()).lower())
+
+
+def _is_control_step_name(name: str) -> bool:
+    """A step that only waits on or stops background steps: a bare control name
+    (`_CONTROL_STEP_NAME_RE`) or one of the repo's named control steps."""
+    return bool(_CONTROL_STEP_NAME_RE.match(name)) or (
+        " ".join(str(name).split()).lower() in _YAML_CONTROL_STEP_NAMES)
+
 
 def _dominant_step_sample(
     timeline: dict[str, Any], qual: list[tuple[float, dict[str, Any]]],
@@ -19704,7 +19731,8 @@ def _dominant_step_sample(
         except (TypeError, ValueError):
             return None
     steps = [s for s in timeline.get("steps", [])
-             if _f(s.get("dur_s")) and not _NON_WORK_STEP_RE.match(str(s.get("name", "")))]
+             if _f(s.get("dur_s")) and not _NON_WORK_STEP_RE.match(str(s.get("name", "")))
+             and not _is_control_step_name(str(s.get("name", "")))]
     if not steps:
         return None
     # Validate the step the structural decomposition CROWNS — the lead step of the
@@ -21356,6 +21384,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 "contents API (default-branch HEAD)",
                 workflow_yaml_source.get("checkout", 0),
                 workflow_yaml_source.get("api", 0))
+    # The repo's NAMED control steps, so none is ever crowned a dominant step.
+    _set_yaml_control_step_names(_wf_docs)
     # Credited levers held back because their steps run side by side (OPT24,
     # the structural OPT70/72/75 route): `_PARALLEL_STEPS_WITHHELD_DOC_KEY`.
     _overlap_withheld: list[dict[str, Any]] = []

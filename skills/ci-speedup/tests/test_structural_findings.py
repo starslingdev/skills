@@ -5034,6 +5034,29 @@ def test_opt24_holds_back_a_test_payload_that_runs_in_a_group():
         ("test", "dominant_step_runs_inside_a_parallel_group")]
 
 
+def test_a_named_control_step_is_never_crowned_the_dominant_step():
+    """S8: `- name: Wait for lint` / `wait: lint` renders under its `name:`, which
+    the bare control-name pattern cannot see. The collector reads the repo's
+    named control steps from the workflow YAML and never crowns one. A work
+    step merely named "Wait for ..." in a repo without such a control step is
+    still work (`test_a_step_merely_named_like_wait_is_still_work`)."""
+    doc = {"jobs": {"it": {"steps": [
+        {"run": "npm run lint", "id": "lint", "background": True},
+        {"name": "Run tests", "run": "npm test"},
+        {"name": "Wait for  lint", "wait": "lint"}]}}}
+    steps = [("Checkout", 10), ("Run tests", 60), ("Wait for lint", 300)]
+    saved = set(cr._YAML_CONTROL_STEP_NAMES)
+    try:
+        cr._set_yaml_control_step_names({_PAR_WF: doc})
+        d = cr._decompose_job_steps([_job("it", steps)])
+        assert d is not None and d["dominant_step"] == "Run tests", d
+        lead = cr._dominant_category_lead([(n, float(p)) for n, p in steps])
+        assert lead is not None and lead[0] == "Run tests", lead
+    finally:
+        cr._YAML_CONTROL_STEP_NAMES.clear()
+        cr._YAML_CONTROL_STEP_NAMES.update(saved)
+
+
 def _load_vr():
     import importlib.util
     name = "ci_speedup_verify_report_structural"

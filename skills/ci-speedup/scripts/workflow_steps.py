@@ -109,6 +109,9 @@ class StepWalk:
     control_steps: int = 0      # `wait:` / `wait-all:` / `cancel:` skipped
     malformed_groups: int = 0   # not a list / contains itself / too deep: not read
     invalid_groups: int = 0     # beside `run:`/`uses:` on one step: read anyway
+    # The `name:` of each control step that has one: GitHub may render the step
+    # under it (`Wait for lint`), which no bare control-name pattern can see.
+    control_names: list[str] = field(default_factory=list)
 
     def steps(self) -> list[dict[str, Any]]:
         return [leaf.step for leaf in self.leaves]
@@ -209,6 +212,8 @@ def walk_steps(steps: Any) -> StepWalk:
                 continue
             if is_control_step(item):
                 walk.control_steps += 1
+                if isinstance(item.get("name"), str) and item["name"].strip():
+                    walk.control_names.append(item["name"])
                 continue
             _leaf(item, group, cond)
 
