@@ -188,6 +188,10 @@ def test_whole_corpus_reports_identically_when_wrapped(
         extra.remove(sig)
     assert sorted(s[0] for s in extra) == \
         _RACE_ONLY_WHEN_WRAPPED.get(fixture, []), extra
+    # Wrapping must not invent or lose a disclosure either: a gap the flat
+    # scan records, or a suppressed match, must read the same inside a group.
+    assert inside["dropped_matches"] == plain["dropped_matches"]
+    assert inside["coverage_notes"] == plain["coverage_notes"]
 
 
 # Fixtures whose steps, once they all start together, really do race: the
@@ -663,3 +667,194 @@ def test_p14_25_a_group_finishes_before_the_step_after_it(tmp_path: Path) -> Non
     head, (disable, install), tail, ind = _split_steps(_P14_25_VITE)
     text = _joined(head, _grouped([disable], ind), install, tail)
     assert _patterns(_pnpm10(tmp_path), text, "P14.25") == []
+
+
+# ---------------------------------------------------------------------------
+# Arms and facts the corpus wrap does not reach on its own.
+# ---------------------------------------------------------------------------
+
+def test_p14_24_checkout_of_another_repo_inside_a_group_fires_at_its_own_line(
+    tmp_path: Path,
+) -> None:
+    """The checkout arm of P14.24 (`_checkout_fetches`): a checkout of ANOTHER
+    repository written as a child of a group, executed by a top-level step
+    after the group. The group's implicit wait makes this plain order, so it
+    is the same finding as the flat workflow, one line down."""
+    head, (checkout, execute), tail, ind = _split_steps(_P14_24_CHECKOUT)
+    flat = _patterns(tmp_path / "flat", _joined(head, checkout, execute, tail),
+                     "P14.24")
+    assert len(flat) == 1, flat
+    grouped = _patterns(tmp_path / "grp",
+                        _joined(head, _grouped([checkout], ind), execute, tail),
+                        "P14.24")
+    assert [f["line"] for f in grouped] == [flat[0]["line"] + 1], grouped
+
+
+_P14_7_ACTIONS_CACHE = """\
+    name: ci
+    on: pull_request_target
+    jobs:
+      measure:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: {uses}
+            with:
+              path: ~/.npm
+              key: npm
+          - run: npm ci
+"""
+
+
+@pytest.mark.parametrize("uses", ["actions/cache@v4", "actions/cache/save@v4"])
+def test_p14_7_actions_cache_inside_a_group_is_a_cache_write(
+    tmp_path: Path, uses: str,
+) -> None:
+    """`_job_uses_cache` reads `actions/cache` through
+    `_job_step_uses_prefixes`, a separate loop from the `cache:` input arm the
+    corpus fixture exercises, so a group around it is pinned on its own."""
+    text = _P14_7_ACTIONS_CACHE.format(uses=uses)
+    head, items, tail, ind = _split_steps(text)
+    flat = _patterns(tmp_path / "flat", _joined(head, *items, tail), "P14.7")
+    assert len(flat) == 1, flat
+    grouped = _patterns(tmp_path / "grp",
+                        _joined(head, _grouped(items, ind), tail), "P14.7")
+    assert [f["line"] for f in grouped] == [flat[0]["line"]], grouped
+
+
+def test_test_failure_fact_names_a_child_step_as_group_dot_child() -> None:
+    """The test-failure-fatal fact names WHERE the suite's failure is
+    swallowed. A child of the group at step 2 is `step 2.2`, not `step 2`
+    (the group) and not `step 2` counted inside the group."""
+    facts = load_script("ci_secure_config_facts", "config_facts.py")
+    doc = {
+        "on": "pull_request",
+        "jobs": {"test": {"runs-on": "ubuntu-latest", "steps": [
+            {"run": "make"},
+            {"parallel": [{"run": "echo one"}, {"run": "pytest -q || true"}]},
+        ]}},
+    }
+    offences, saw_suite, _ = facts._suite_failure_swallowed(
+        ".github/workflows/ci.yml", doc)
+    assert saw_suite
+    assert len(offences) == 1, offences
+    assert "job `test` step 2.2 " in offences[0], offences
+
+
+# The workflow text of test_scan.test_a_step_level_gate_withdraws_the_job_level
+# _verdict, with the step's `if:` moved up onto a group around it.
+_P14_10_GATED_GROUP = """\
+on:
+  issues:
+    types: [opened]
+jobs:
+  create-issue:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    steps:
+      - parallel:
+          - run: echo '${{ github.event.issue.title }}'
+"""
+
+
+def _p14_10_note(root: Path, text: str) -> str:
+    hits = _patterns(root, text, "P14.10")
+    assert len(hits) == 1, hits
+    return hits[0].get("derived_note") or ""
+
+
+def test_p14_10_group_level_if_withdraws_the_job_gate_note(
+    tmp_path: Path,
+) -> None:
+    """The job's gate is provably dead on `issues`, so P14.10 carries the
+    informational INERT note. A group-level `if:` is the step's own guard, as
+    a step-level `if:` is, and withdraws the note. The group's `if:` never
+    suppresses the finding itself."""
+    assert "INERT" in _p14_10_note(tmp_path / "plain", _P14_10_GATED_GROUP)
+    gated = _P14_10_GATED_GROUP.replace(
+        "      - parallel:\n",
+        "      - if: github.event.issue.user.login == 'trusted-owner'\n"
+        "        parallel:\n")
+    assert gated != _P14_10_GATED_GROUP
+    assert _p14_10_note(tmp_path / "gated", gated) == ""
+
+
+def _wrap_tail_in_parallel(text: str) -> tuple[str, list[int]]:
+    """Like `_wrap_steps_in_parallel`, but each `steps:` list keeps its FIRST
+    step top-level and only the rest go into the group: a job holding plain
+    steps and a group side by side. A one-step list is left as written."""
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    inserted_after: list[int] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        m = _STEPS_KEY_RE.match(line.rstrip("\n"))
+        if not m:
+            i += 1
+            continue
+        indent = len(m.group(1))
+        j = i + 1
+        block: list[str] = []
+        while j < len(lines):
+            cur = lines[j]
+            stripped = cur.strip()
+            cur_indent = len(cur) - len(cur.lstrip(" "))
+            if not stripped or stripped.startswith("#") or cur_indent > indent \
+                    or (cur_indent == indent and stripped.startswith("- ")):
+                block.append(cur)
+                j += 1
+                continue
+            break
+        while block and (not block[-1].strip() or block[-1].strip().startswith("#")):
+            block.pop()
+            j -= 1
+        starts = [k for k, b in enumerate(block) if b.strip().startswith("- ")]
+        item_indent = (len(block[starts[0]]) - len(block[starts[0]].lstrip(" "))
+                       if starts else 0)
+        starts = [k for k in starts
+                  if len(block[k]) - len(block[k].lstrip(" ")) == item_indent]
+        if len(starts) < 2:
+            out.extend(block)
+            i = j
+            continue
+        cut = starts[1]
+        out.extend(block[:cut])
+        out.append(" " * item_indent + "- parallel:\n")
+        inserted_after.append(i + 1 + cut)
+        out.extend(("    " + b) if b.strip() else b for b in block[cut:])
+        i = j
+    return "".join(out), inserted_after
+
+
+# Fixtures whose steps race once all but the first share a group.
+_RACE_ONLY_WHEN_TAIL_WRAPPED: dict[str, list[str]] = {}
+
+
+@pytest.mark.parametrize(
+    "fixture", sorted(p.name for p in _CLOAKED.glob("*.yml.fixture")))
+def test_whole_corpus_reports_identically_with_plain_steps_beside_a_group(
+    tmp_path: Path, fixture: str,
+) -> None:
+    """The mixed shape: top-level steps and a group in the same job. The
+    walkers must interleave both, and the node walker must keep every line
+    attributed, so each flat finding reappears at its shifted line."""
+    text = (_CLOAKED / fixture).read_text(encoding="utf-8")
+    wrapped, inserted_after = _wrap_tail_in_parallel(text)
+    if not inserted_after:
+        pytest.skip(f"{fixture} has no step list of two or more steps")
+    name = fixture.removesuffix(".fixture")
+    _write(tmp_path / "plain", name, text)
+    _write(tmp_path / "mixed", name, wrapped)
+    plain = _scan_root(tmp_path / "plain")
+    inside = _scan_root(tmp_path / "mixed")
+    want = _signature(plain["findings"], inserted_after)
+    got = _signature(inside["findings"], None)
+    extra = list(got)
+    for sig in want:
+        assert sig in extra, f"{fixture}: {sig} lost beside a parallel: group"
+        extra.remove(sig)
+    assert sorted(s[0] for s in extra) == \
+        _RACE_ONLY_WHEN_TAIL_WRAPPED.get(fixture, []), extra
+    assert inside["dropped_matches"] == plain["dropped_matches"]
+    assert inside["coverage_notes"] == plain["coverage_notes"]
