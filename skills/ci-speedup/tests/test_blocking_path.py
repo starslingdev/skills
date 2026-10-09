@@ -9404,3 +9404,22 @@ def test_grouped_job_elsewhere_leaves_the_pole_text_byte_identical():
                        "2026-06-08", {"pipeline": _TIMELINE})
         assert _strip(md) == _strip(base), (path, job)
         assert "comes straight off the job's wall-clock" in md
+
+
+def test_the_drill_fallbacks_never_mark_a_control_step_as_dominant():
+    """D3: `_dom_index` (an aggregate dominant label that names no single step)
+    and `_dom_lead_idx` (no step of the dominant category in the top rows) fall
+    back to "the longest step" / row 0. A `wait-all` step only waits, so the
+    fallback skips control steps exactly as the collector's crown does."""
+    steps = [{"name": "wait-all", "dur_s": 300}, {"name": "Checkout", "dur_s": 5}]
+    assert bp._dom_index(steps, "Build + 2 more build steps") == 1
+    rows = [{"step": "wait-all", "category": "other", "p50_s": 300},
+            {"step": "Run tests", "category": "test", "p50_s": 60}]
+    assert bp._dom_lead_idx(rows, "build") == 1
+    assert bp._dom_lead_idx(rows, "") == 1
+    assert bp._dom_index([{"name": "wait", "dur_s": 9}], "x") == -1
+
+
+def test_control_step_pattern_is_identical_in_collector_and_renderer():
+    assert cr._CONTROL_STEP_NAME_RE.pattern == bp._CONTROL_STEP_NAME_RE.pattern
+    assert cr._CONTROL_STEP_NAME_RE.flags == bp._CONTROL_STEP_NAME_RE.flags

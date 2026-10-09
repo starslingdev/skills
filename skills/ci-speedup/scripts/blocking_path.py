@@ -3033,6 +3033,12 @@ _NON_WORK_STEP_RE = re.compile(
     r"^(set up job|complete job|post\b|checkout\b|set up |setup [a-z]*node"
     r"|(?:wait|wait-all|cancel)\s*$|wait for all background steps)",
     re.IGNORECASE)
+# The control names alone (collect_runs `_CONTROL_STEP_NAME_RE`, pinned equal by
+# a test): the drill's "longest step" fallbacks skip these even when every
+# other step is boilerplate, so a step that only waits is never marked.
+_CONTROL_STEP_NAME_RE = re.compile(
+    r"^(?:(?:wait|wait-all|cancel)\s*$|wait for all background steps)",
+    re.IGNORECASE)
 
 
 def _dominant_step_from_timeline(timeline: dict[str, Any] | None,
@@ -3754,7 +3760,12 @@ def _dom_index(steps: list[dict[str, Any]], dom_name: str) -> int:
         return -1
     work = [i for i, s in enumerate(steps)
             if not _NON_WORK_STEP_RE.match(_clean_label(str(s.get("name", ""))))]
-    pool = work or list(range(len(steps)))
+    # All boilerplate: any step but a control step (it only waits). Nothing
+    # but control steps: no step is the dominant one.
+    pool = work or [i for i, s in enumerate(steps) if not _CONTROL_STEP_NAME_RE.match(
+        _clean_label(str(s.get("name", ""))))]
+    if not pool:
+        return -1
     return max(pool, key=lambda i: _num(steps[i].get("dur_s")) or 0.0)
 
 
@@ -3772,18 +3783,21 @@ def _dom_lead_idx(steps: list[dict[str, Any]], dom_cat: str) -> int:
     boilerplate step that happens to share `dom_cat` — e.g. "Set up job" (category
     `setup`) or "Complete job" (`other`) outranking the real work lead — would be marked
     here while the prose/prompt named the work step, re-opening the very disagreement this
-    closes. Falls back to 0 (the longest step) when there's no category info or no
+    closes. Falls back to the longest step when there's no category info or no
     non-boilerplate row matches — degrading to the old behaviour rather than marking
-    nothing."""
-    if not dom_cat:
-        return 0
-    for i, s in enumerate(steps):
+    nothing. The fallback row is the first that is not a control step (`wait`,
+    `wait-all`, `cancel`): a step that only waits is never marked the lever."""
+    def _label(s: dict[str, Any]) -> str:
         # Pole steps key the label as "step"; some callers use "name" — accept either.
-        label = _clean_label(str(s.get("step") or s.get("name") or ""))
-        if (str(s.get("category", "")) == dom_cat
-                and not _NON_WORK_STEP_RE.match(label)):
-            return i
-    return 0
+        return _clean_label(str(s.get("step") or s.get("name") or ""))
+
+    if dom_cat:
+        for i, s in enumerate(steps):
+            if (str(s.get("category", "")) == dom_cat
+                    and not _NON_WORK_STEP_RE.match(_label(s))):
+                return i
+    return next((i for i, s in enumerate(steps)
+                 if not _CONTROL_STEP_NAME_RE.match(_label(s))), 0)
 
 
 def _collapse_timeline(steps: list[dict[str, Any]], dom_idx: int,
