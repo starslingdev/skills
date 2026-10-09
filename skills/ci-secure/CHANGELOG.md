@@ -141,6 +141,23 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-10-09** — **Steps inside a GitHub Actions `parallel:` group are
+  scanned.** Parallel steps (GitHub, 2026-06-25) let a job write
+  `- parallel:` followed by a list of ordinary steps, plus control steps
+  (`wait:`, `wait-all:`, `cancel:`) that carry no code. The group entry has
+  no `run:` and no `uses:`, and every detector walked a job's steps as a flat
+  list, so every child step was skipped in silence: template injection,
+  curl|bash, cache writes on an untrusted trigger, fork-code execution,
+  credential files in a cache or artifact path, and install scripts in a job
+  with secrets all read clean inside a group. Every detector and config fact
+  now reads steps through one shared walker that descends into `parallel:`
+  lists in declaration order, skips (and counts) control steps, and keeps
+  each child step's own source line. The report's provenance table gains a
+  `Parallel steps` row ("N step(s) inside `parallel:` groups scanned") and the
+  findings JSON a `parallel_steps` record; a `parallel:` whose value is not a
+  list is a coverage note, never a clean step. Every fixture in the corpus now
+  reports identically with its steps wrapped in a `parallel:` group.
+
 - **2026-09-03** — **A required check produced by a matrix-templated job name
   now resolves to its job.** `sec.required-checks.skippable` matched a job's
   display name only when that name was literal. A job named `build shard

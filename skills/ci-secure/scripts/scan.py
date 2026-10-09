@@ -919,12 +919,8 @@ def detect_yaml_run_injection(
     for job in jobs.values():
         if not isinstance(job, dict):
             continue
-        steps = job.get("steps")
-        if not isinstance(steps, list):
-            continue
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
+        for job_step in _iter_job_steps(job):
+            step = job_step.step
             run_text = step.get("run")
             if not isinstance(run_text, str):
                 continue
@@ -1019,7 +1015,7 @@ def detect_yaml_run_injection(
                 # step with its own `if:` withdraws the verdict entirely: the
                 # finding is the STEP, so a statement about who reaches the
                 # JOB would talk past the live control.
-                gate = "" if step.get("if") is not None else _gate_note(
+                gate = "" if job_step.gated else _gate_note(
                     job, triggers, dead_field_only=True,
                 )
                 yield RawHit(
@@ -1480,12 +1476,7 @@ def _path_matches_any_glob(rel_path: str, globs: list[str]) -> bool:
 def _job_step_uses_prefixes(job: dict[str, Any], prefixes: tuple[str, ...]) -> list[int]:
     """Return 1-based step indices whose `uses:` starts with any prefix."""
     hits: list[int] = []
-    steps = job.get("steps")
-    if not isinstance(steps, list):
-        return hits
-    for i, step in enumerate(steps, start=1):
-        if not isinstance(step, dict):
-            continue
+    for i, step in enumerate(_job_steps(job), start=1):
         uses = step.get("uses", "")
         if isinstance(uses, str) and any(uses.startswith(p) for p in prefixes):
             hits.append(i)
@@ -1504,12 +1495,7 @@ def _job_uses_cache(job: dict[str, Any]) -> bool:
         ("actions/cache@", "actions/cache/", "pnpm/action-setup", "gradle/actions/setup-gradle"),
     ):
         return True
-    steps = job.get("steps")
-    if not isinstance(steps, list):
-        return False
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
+    for step in _job_steps(job):
         uses = step.get("uses", "")
         if not isinstance(uses, str):
             continue
@@ -1537,6 +1523,155 @@ def _walk_jobs(doc: Any) -> Iterator[tuple[str, dict[str, Any]]]:
     for job_name, job in jobs.items():
         if isinstance(job, dict):
             yield str(job_name), job
+
+
+# --- the one step walker -----------------------------------------------------
+#
+# GitHub Actions parallel steps (2026-06-25): a step may be `- parallel:`
+# followed by a LIST of ordinary child steps, and a job may carry pure control
+# steps (`wait:`, `wait-all:`, `cancel:`) with no `run:` and no `uses:`. The
+# `parallel:` entry itself has neither key, so every detector that walked
+# `job.steps` as a flat list skipped every child step in silence — a template
+# injection or a curl|bash written inside a parallel group read as clean.
+# Every detector reads steps through `_iter_job_steps` so the next step syntax
+# is taught in one place, not twenty.
+_PARALLEL_KEY = "parallel"
+_PARALLEL_CONTROL_KEYS = frozenset({"wait", "wait-all", "cancel"})
+
+
+@dataclass(frozen=True)
+class _JobStep:
+    """One leaf step, as the job declares it."""
+    step: dict[str, Any]
+    path: tuple[int, ...]               # 0-based index at each nesting level
+    in_parallel_group: bool
+    background: bool
+    group: dict[str, Any] | None        # innermost enclosing `parallel:` entry
+
+    @property
+    def gated(self) -> bool:
+        """The step, or the parallel group holding it, has its own `if:`."""
+        return self.step.get("if") is not None or (
+            self.group is not None and self.group.get("if") is not None)
+
+    @property
+    def label(self) -> str:
+        """1-based position, dotted through groups: step 3.2 = group 3, child 2."""
+        return ".".join(str(i + 1) for i in self.path)
+
+
+@dataclass
+class _StepWalkStats:
+    """What the walker saw beyond plain steps, for the report to disclose."""
+    in_parallel: int = 0
+    control: int = 0
+    background: int = 0
+    malformed: list[str] | None = None
+
+
+def _is_parallel_group(step: dict[str, Any]) -> bool:
+    return _PARALLEL_KEY in step and "run" not in step and "uses" not in step
+
+
+def _is_control_step(step: dict[str, Any]) -> bool:
+    return ("run" not in step and "uses" not in step
+            and _PARALLEL_KEY not in step
+            and any(k in step for k in _PARALLEL_CONTROL_KEYS))
+
+
+def _iter_job_steps(
+    job: Any, stats: _StepWalkStats | None = None,
+) -> Iterator[_JobStep]:
+    """Every leaf step of a job, in declaration order.
+
+    Descends into `parallel:` lists (a nested `parallel:` is not valid GitHub
+    syntax, but it is descended anyway: skipping it would be the silent drop
+    this walker exists to end). Control steps carry nothing to scan and are
+    skipped, but counted in ``stats``. A `parallel:` whose value is not a list
+    cannot be read and is recorded in ``stats.malformed`` — the caller that
+    owns disclosure turns that into a coverage note, never a clean step.
+    """
+    steps = job.get("steps") if isinstance(job, dict) else None
+    if isinstance(steps, list):
+        yield from _iter_step_list(steps, (), None, stats, 0)
+
+
+def _iter_step_list(
+    steps: list[Any], prefix: tuple[int, ...], group: dict[str, Any] | None,
+    stats: _StepWalkStats | None, depth: int,
+) -> Iterator[_JobStep]:
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        path = prefix + (i,)
+        if _is_parallel_group(step):
+            children = step.get(_PARALLEL_KEY)
+            if not isinstance(children, list) or depth >= _WALK_MAX_DEPTH:
+                if stats is not None:
+                    if stats.malformed is None:
+                        stats.malformed = []
+                    stats.malformed.append(".".join(str(n + 1) for n in path))
+                continue
+            yield from _iter_step_list(children, path, step, stats, depth + 1)
+            continue
+        if _is_control_step(step):
+            if stats is not None:
+                stats.control += 1
+            continue
+        background = step.get("background") is True
+        if stats is not None:
+            stats.in_parallel += group is not None
+            stats.background += background
+        yield _JobStep(step=step, path=path, in_parallel_group=group is not None,
+                       background=background, group=group)
+
+
+def _job_steps(job: Any) -> list[dict[str, Any]]:
+    """The leaf step dicts of a job, for callers that need nothing else."""
+    return [s.step for s in _iter_job_steps(job)]
+
+
+def _iter_step_nodes(steps_node: Any, depth: int = 0) -> Iterator[Any]:
+    """The composed-node twin of `_iter_job_steps`: every leaf step MappingNode
+    of a `steps:` SequenceNode, in order, descending into `parallel:` lists, so
+    a child step's source line is the child's own."""
+    if not isinstance(steps_node, yaml.SequenceNode) or depth > _WALK_MAX_DEPTH:
+        return
+    for node in steps_node.value:
+        if not isinstance(node, yaml.MappingNode):
+            continue
+        keys = {getattr(k, "value", None): v for k, v in node.value}
+        if _PARALLEL_KEY in keys and "run" not in keys and "uses" not in keys:
+            yield from _iter_step_nodes(keys[_PARALLEL_KEY], depth + 1)
+            continue
+        if "run" not in keys and "uses" not in keys \
+                and any(k in keys for k in _PARALLEL_CONTROL_KEYS):
+            continue
+        yield node
+
+
+def _parallel_step_stats(
+    file_path: Path,
+) -> tuple[_StepWalkStats, list[str]]:
+    """One file's parallel-step census, and a sentence per unreadable group.
+
+    Run once per workflow by `scan()`, separately from the detectors, so the
+    counts are not multiplied by the number of detectors that walk steps.
+    """
+    stats = _StepWalkStats()
+    gaps: list[str] = []
+    text = _read_text_safe(file_path)
+    doc = _parse_yaml_text(text, file_path, quiet=True) if text else None
+    for job_name, job in _walk_jobs(doc):
+        before = len(stats.malformed or [])
+        for _ in _iter_job_steps(job, stats):
+            pass
+        for label in (stats.malformed or [])[before:]:
+            gaps.append(
+                f"jobs.{job_name} step {label} is a `parallel:` group whose "
+                f"value is not a list of steps, so the steps it holds were "
+                f"NOT scanned by any detector — review them manually")
+    return stats, gaps
 
 
 def _job_line_in_text(text: str, job_name: str) -> int:
@@ -1601,12 +1736,7 @@ def _correlation_credential_file_in_cache_or_artifact(
     if not isinstance(doc, dict):
         return
     for job_name, job in _walk_jobs(doc):
-        steps = job.get("steps")
-        if not isinstance(steps, list):
-            continue
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
+        for step in _job_steps(job):
             uses = step.get("uses", "")
             if not isinstance(uses, str) or not any(
                 uses.startswith(p) for p in _CACHE_UPLOAD_PREFIXES
@@ -2686,15 +2816,7 @@ def _manager_condition_note(
 
 
 def _job_run_texts(job: Any) -> list[str]:
-    if not isinstance(job, dict):
-        return []
-    steps = job.get("steps")
-    if not isinstance(steps, list):
-        return []
-    return [
-        s["run"] for s in steps
-        if isinstance(s, dict) and isinstance(s.get("run"), str)
-    ]
+    return [s["run"] for s in _job_steps(job) if isinstance(s.get("run"), str)]
 
 
 def _correlation_install_scripts_in_privileged_job(
@@ -3511,12 +3633,7 @@ def _step_marks(text: str) -> list[_StepMark] | None:
         return None
     out: list[_StepMark] = []
     for job_key, job_node in jobs.value:
-        steps = _child(job_node, "steps")
-        if not isinstance(steps, yaml.SequenceNode):
-            continue
-        for step in steps.value:
-            if not isinstance(step, yaml.MappingNode):
-                continue
+        for step in _iter_step_nodes(_child(job_node, "steps")):
             run = _child(step, "run")
             uses = _child(step, "uses")
             wd = _child(step, "working-directory")
@@ -3667,8 +3784,8 @@ def _checkout_fetches(
     own repository. Both are the overwhelmingly common case and neither is this
     vector.
     """
-    steps = job.get("steps") if isinstance(job, dict) else None
-    if not isinstance(steps, list):
+    steps = _job_steps(job)
+    if not steps:
         return []
     lines = text.splitlines()
     start, end = job_range if job_range else (1, len(lines))
@@ -3689,8 +3806,6 @@ def _checkout_fetches(
     out: list[_RemoteFetch] = []
     index = -1
     for step in steps:
-        if not isinstance(step, dict):
-            continue
         uses = step.get("uses")
         if not (isinstance(uses, str) and uses.startswith("actions/checkout")):
             continue
@@ -4409,14 +4524,9 @@ def _job_checkout_head_then_executes(job: dict[str, Any]) -> tuple[int, str] | N
     file it touches. A checkout with no `ref:` (base/merge ref) never
     qualifies. Returns (checkout_step_index, ref_text) or None.
     """
-    steps = job.get("steps")
-    if not isinstance(steps, list):
-        return None
     checkout_idx: int | None = None
     ref_text = ""
-    for i, step in enumerate(steps):
-        if not isinstance(step, dict):
-            continue
+    for i, step in enumerate(_job_steps(job)):
         uses = step.get("uses")
         if isinstance(uses, str) and uses.startswith("actions/checkout"):
             with_block = step.get("with")
@@ -5160,6 +5270,25 @@ def scan(
         len(catalog), len(workflow_files), root,
     )
 
+    # Parallel-step census, once per file. Every detector reads steps through
+    # `_iter_job_steps`, so children of a `parallel:` group ARE scanned; this
+    # records that they were, so the report can say so rather than leave a
+    # reader to wonder whether the newer syntax was understood. A group the
+    # walker could not read is a coverage gap, recorded as one.
+    parallel_steps: dict[str, Any] = {
+        "steps_scanned": 0, "control_steps": 0, "background_steps": 0,
+        "workflows": [],
+    }
+    for wf in workflow_files:
+        stats, gaps = _parallel_step_stats(wf)
+        parallel_steps["steps_scanned"] += stats.in_parallel
+        parallel_steps["control_steps"] += stats.control
+        parallel_steps["background_steps"] += stats.background
+        if stats.in_parallel or stats.control or stats.background or gaps:
+            parallel_steps["workflows"].append(_repo_relative(str(wf), root))
+        for reason in gaps:
+            _record_dropped_match(wf, reason, kind=_KIND_NOT_SCANNED)
+
     # Wall-clock anchor for end-to-end timing: report.py (always the last step)
     # computes total_run_s from this. It lives in scan.py — not just the run.py
     # driver — so the number is captured whether the orchestrator runs run.py or
@@ -5532,6 +5661,11 @@ def scan(
         # that would not parse. Its own key so the report can name it in its
         # own words instead of under a headline that misdescribes it.
         "coverage_notes": coverage_notes,
+        # Steps read inside GitHub Actions `parallel:` groups, plus the
+        # control (`wait:`/`wait-all:`/`cancel:`) and `background: true` steps
+        # seen. Informational: these steps were scanned like any other, and
+        # the count is disclosed so that is never left implicit.
+        "parallel_steps": parallel_steps,
         # Findings the scanner REACHED and deliberately did not report, above
         # all a fetch pinned to a full commit id. Informational: this must
         # never degrade coverage, or a repository that did exactly what the fix

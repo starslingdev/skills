@@ -75,6 +75,12 @@ The one non-scripted field. Written once per pattern group and merged onto
   its `Coverage:` line rather than recomputing one.
 - `suppressed_findings` — matches the engine deliberately withheld, with the
   reason each was withheld. Not a coverage gap, but not nothing either.
+- `parallel_steps` — `steps_scanned` (steps read inside GitHub Actions
+  `parallel:` groups), `control_steps` (`wait:` / `wait-all:` / `cancel:`,
+  which hold no code), `background_steps` and the `workflows` they sit in.
+  Informational, never a coverage gap: those steps were scanned like any
+  other. A `parallel:` that is not a list of steps lands in `coverage_notes`
+  instead.
 - `security_score` — present in the JSON and **never rendered**. Phase 3
   forbids a score, ratio or `N/100` anywhere the user sees. It is listed here
   so it is recognized as out of bounds rather than mistaken for a summary

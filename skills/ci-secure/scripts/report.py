@@ -1293,6 +1293,26 @@ def _finding_group_section(
 # =============================================================================
 
 
+def _parallel_steps_cell(parallel_steps: dict[str, Any] | None) -> str:
+    """The provenance line for GitHub Actions parallel steps, or "".
+
+    Steps inside a `parallel:` group are scanned like any other step; this
+    says so out loud, because a reader who knows the syntax is new has no other
+    way to tell it was understood rather than skipped.
+    """
+    stats = parallel_steps or {}
+    n = int(stats.get("steps_scanned") or 0)
+    n_control = int(stats.get("control_steps") or 0)
+    if not n and not n_control:
+        return ""
+    parts = [f"{n} step(s) inside `parallel:` groups scanned"]
+    if n_control:
+        parts.append(
+            f"{n_control} control step(s) (`wait:` / `wait-all:` / "
+            "`cancel:`) hold no code and were skipped")
+    return "; ".join(parts)
+
+
 def _header_table(
     findings: list[dict[str, Any]],
     scanned_workflows: int,
@@ -1304,6 +1324,7 @@ def _header_table(
     skill_tree_dirty: bool = False,
     repo_root: str | None = None,
     repo_tree_dirty: bool = False,
+    parallel_steps: dict[str, Any] | None = None,
 ) -> str:
     """H1-adjacent provenance table — first thing after the title.
 
@@ -1388,6 +1409,9 @@ def _header_table(
         else "⚠️ **PARTIAL** — not every workflow was fully scanned; see the "
         "Incomplete-coverage warning below",
     ))
+    parallel_row = _parallel_steps_cell(parallel_steps)
+    if parallel_row:
+        rows.append(("Parallel steps", parallel_row))
     if dormant_count:
         rows.append(
             (
@@ -2559,6 +2583,7 @@ def render(
         scanned_at, coverage_complete, skill_tree_dirty,
         repo_root=findings_json.get("repo_root"),
         repo_tree_dirty=bool(findings_json.get("repo_tree_dirty")),
+        parallel_steps=findings_json.get("parallel_steps"),
     ))
     out.append("")
 

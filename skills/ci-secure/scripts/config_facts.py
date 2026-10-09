@@ -464,12 +464,7 @@ def _jobs_checking_out_attacker_head(scan: ModuleType, doc: dict) -> list[str]:
     makes the trigger impossible to clear as inert, which is this fact's tier."""
     out = []
     for name, job in _jobs(doc):
-        steps = job.get("steps")
-        if not isinstance(steps, list):
-            continue
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
+        for step in _scan()._job_steps(job):
             uses = step.get("uses")
             if not (isinstance(uses, str) and uses.startswith("actions/checkout")):
                 continue
@@ -506,12 +501,7 @@ def _unpersisted_checkout_violations(doc: dict) -> list[str]:
     .git/config, where attacker-influenced later steps can read it."""
     out = []
     for name, job in _jobs(doc):
-        steps = job.get("steps")
-        if not isinstance(steps, list):
-            continue
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
+        for step in _scan()._job_steps(job):
             uses = step.get("uses")
             if not (isinstance(uses, str) and uses.startswith("actions/checkout")):
                 continue
@@ -929,13 +919,9 @@ def _suite_failure_swallowed(rel: str,
     if not _can_report_on_a_pull_request(doc):
         return offences, saw_suite, unidentified
     for job_name, job in _jobs(doc):
-        steps = job.get("steps")
-        if not isinstance(steps, list):
-            continue
         job_runs_suite = False
-        for position, step in enumerate(steps, 1):
-            if not isinstance(step, dict):
-                continue
+        for job_step in _scan()._iter_job_steps(job):
+            step, position = job_step.step, job_step.label
             run = step.get("run")
             if not isinstance(run, str):
                 continue
