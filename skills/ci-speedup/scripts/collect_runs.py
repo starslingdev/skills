@@ -5866,10 +5866,6 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
               "measured cache-block detector — basis is one job's restore + install "
               "+ post-save step timings split by the run log's own cache hit/miss "
               "line, not the per-job cost spine and not an eliminated-runs slice"),
-    # NOT DERIVABLE — OPT80's basis is one STEP's tail excess (mean - p50 of the
-    # checkout step), scaled by that job's own measured run frequency. It is
-    # neither the per-job cost spine nor an eliminated-runs slice, so the generic
-    # `measured` provenance text would misdescribe the number beside it.
     # NOT DERIVABLE — OPT82 credits nothing at all: its finding is uncredited by
     # design (the lint step's p50 — or the lint job's when the step was not
     # separately measured, `ceiling_basis` "lint_job" — is stamped as a CEILING,
@@ -5880,6 +5876,10 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
               "saving is credited; the lint step's measured p50 (the lint job's "
               "when the step was not separately measured) is stamped as a "
               "ceiling and the prompt requires a benchmark first"),
+    # NOT DERIVABLE — OPT80's basis is one STEP's tail excess (mean - p50 of the
+    # checkout step), scaled by that job's own measured run frequency. It is
+    # neither the per-job cost spine nor an eliminated-runs slice, so the generic
+    # `measured` provenance text would misdescribe the number beside it.
     "OPT80": (_RM_DOOR_NOT_DERIVABLE,
               "measured checkout tail-excess detector — basis is one step's "
               "mean-minus-p50 across the sample (jobs API steps[] timestamps), "

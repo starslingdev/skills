@@ -1353,7 +1353,16 @@ metric "uncredited, benchmark first". Being numberless by design, it is exempt
 from the valueless-pole exclusion (`_on_pole_job`), so a lint job that is also a
 drilled pole still gets its card, and from `_ALSO_NOTICED_CAP`, so it never
 falls into the "+N more" tail where its rules and ledger would not reach the
-reader. Cards are keyed per lint job (`_group_by_pattern_ranked` keys OPT82 by
+reader. A drilled pole whose job carries a non-advisory OPT82 finding whose
+lint step is the pole's dominant step (`_opt82_pole_for`,
+`_opt82_lint_is_dominant`; OPT82 itself fires whatever share of the job lint
+takes, so without that gate a slow test job with a short lint step would lose
+its gap analysis) counts it as that pole's catalog match at any size, unlike
+OPT79, which covers a pole only from 30s: OPT82 is uncredited by design and its
+claim is the named cause, so the pole never reads as a coverage gap, takes no
+gap-fill or gap capture, and its waterfall and prompt point at the card in Also
+noticed; the verifier's OPT82 check fails a covered pole that still renders
+the coverage-gap wording. Cards are keyed per lint job (`_group_by_pattern_ranked` keys OPT82 by
 pattern + workflow + jobs, like OPT73/OPT77/OPT79), because each job has its own
 configs, rules, ceiling and benchmark directory. The card has its own prompt, not the
 generic bill or off-path saving line: it carries the SIZING clause, tells the
@@ -1588,7 +1597,9 @@ JOB". The appendix
 never takes a pole-cache finding: one whose job is not a drilled pole (the
 slowest job of another pull-request workflow, or any in a static-only report)
 renders the same marked block in `_opt79_off_pole_block`, a short section
-before "Also noticed", so every pole-cache finding renders exactly once with
+with its own `##` heading, anchor and Contents entry before "Also noticed"
+(never under the checkout stall tails heading before it; the verifier fails a
+marker placed under any heading but a long pole or its own), so every pole-cache finding renders exactly once with
 its merge-wait seconds and the appendix never summarizes it as "no bill
 saving". Unless a leaf, structural or data-driven match fired first, and only
 when the figure clears the 30s long-pole floor, the pole's waterfall and agent

@@ -1786,3 +1786,125 @@ def test_eslint_invocation_forms_resolve_to_eslint(cmd, scripts, lint_command):
 def test_untraceable_lint_commands_are_unresolvable_never_eslint(cmd, scripts):
     res = cr._opt82_resolve_lint(cmd, "", {"": scripts})
     assert res is not None and res[0] == "unresolvable", res
+
+
+# --- an OPT82 finding on a drilled pole is that pole's catalog cover -----------
+
+_UNKNOWN_LOG = {"pipeline": "nothing any detector knows\n"}
+
+
+def _opt82_on_the_drilled_pole(tmp_path):
+    """The one-pole render fixture, with the lint finding routed to its job: a
+    captured log no detector recognises, and no other catalog match."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_blocking_path as tb  # noqa: E402
+
+    f = _detect(scan._read_type_aware_lint(_tree(tmp_path)))[0][0]
+    doc = tb._doc_one_pole()
+    pole = doc["pr_critical_path"]["poles"][0]
+    f = dict(f, workflow_file=pole["workflow_file"], affected_jobs=[pole["job"]])
+    # The pole's slow step IS the lint step OPT82 names (the cover gate).
+    lint = f["type_aware_lint"]["lint_step"]
+    pole["dominant_step"] = lint
+    pole["steps"] = [{"step": lint, "category": "lint", "p50_s": 91.0},
+                     *pole["steps"][1:]]
+    doc["findings"] = [f]
+    return doc, f
+
+
+def _render_pole(doc, **kw):
+    return bp.render(json.loads(json.dumps(doc)), dict(_UNKNOWN_LOG), {},
+                     {"pipeline": "https://github.com/o/r/actions/runs/123"},
+                     "2026-06-08", **kw)
+
+
+# A gap-fill analysis on offer for the pole: rendered only on a real gap.
+_GAP_FILL = {"pipeline": {
+    "cause": "The slow step spends its time in one serial phase.",
+    "breakdown": [["phase", "~60s"]], "evidence": ["one serial phase"],
+    "prompt": "REPO: o/r\nInvestigate the serial phase."}}
+
+
+def test_opt82_on_a_drilled_pole_is_its_catalog_cover_not_a_coverage_gap(tmp_path):
+    """OPT82 names the pole's cause and targets poles directly ("60s or more,
+    or the slowest job"), so the pole it sits on is covered: no coverage-gap
+    wording, the waterfall and the prompt point at its card, and the
+    maintainer gap loop is never sent to draft a detector for it. Uncredited
+    by design, so unlike OPT79 no magnitude gates the cover."""
+    doc, f = _opt82_on_the_drilled_pole(tmp_path)
+    assert not f.get("wall_clock_p50_s")
+    md = _render_pole(doc)
+    pole = md.split('<a id="pole-1"></a>', 1)[1].split("\n## ", 2)[1]
+    assert "NO CATALOG PATTERN MATCHED" not in pole, pole
+    assert "coverage gap" not in pole, pole
+    assert ("a **catalog pattern** (OPT82, lint builds the whole type graph; "
+            "uncredited) matched this pole's lint step - see its card in the **Also "
+            "noticed** section below" in pole), pole
+    prompt = pole.split("Prompt for your coding agent", 1)[1]
+    assert "OPT82" in prompt and "Also noticed" in prompt, prompt
+    assert "uncredited, benchmark first" in md          # the card it points at renders
+    assert "LLM root-cause analysis" not in _render_pole(doc, analyses=_GAP_FILL)
+    assert bp._gap_poles(doc, dict(_UNKNOWN_LOG)) == []
+    # an advisory OPT82 makes no claim, so the pole stays a gap
+    adv = json.loads(json.dumps(doc))
+    adv["findings"][0]["advisory"] = True
+    assert len(bp._gap_poles(adv, dict(_UNKNOWN_LOG))) == 1
+
+
+def test_opt82_on_a_pole_whose_slow_step_is_not_lint_stays_a_coverage_gap(tmp_path):
+    """OPT82 fires on a lint job at 60s or more, or on a workflow's slowest
+    job, whatever share of it lint takes. When the pole's slow step is
+    something else (a test run, with a 5s lint step beside it), OPT82 names
+    nothing about that step: the pole keeps its coverage-gap wording, its
+    gap-fill analysis and its place in the gap loop, and the verifier does
+    not fail that honest gap."""
+    doc, f = _opt82_on_the_drilled_pole(tmp_path)
+    pole = doc["pr_critical_path"]["poles"][0]
+    pole["dominant_step"] = "run tests"
+    pole["steps"] = [{"step": "run tests", "category": "test", "p50_s": 206.0},
+                     {"step": f["type_aware_lint"]["lint_step"], "category": "lint",
+                      "p50_s": 5.0}]
+    md = _render_pole(doc)
+    sect = md.split('<a id="pole-1"></a>', 1)[1].split("\n## ", 2)[1]
+    assert "NO CATALOG PATTERN MATCHED" in sect, sect
+    assert "matched this pole's lint step" not in sect
+    assert len(bp._gap_poles(doc, dict(_UNKNOWN_LOG))) == 1
+    assert "LLM root-cause analysis" in _render_pole(doc, analyses=_GAP_FILL)
+    p = tmp_path / "findings.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    c = _vr().check_opt82_type_aware_lint_uncredited(md, p)
+    assert c.ok, c.detail
+
+
+def test_verifier_fails_a_covered_pole_whose_header_check_is_not_its_job_name(tmp_path):
+    """The engine joins the finding to the pole's check OR job; a header check
+    that carries the workflow prefix (`Pipeline / tests-web`) is still the
+    covered pole, so the gap wording there must fail."""
+    doc, _f = _opt82_on_the_drilled_pole(tmp_path)
+    doc["pr_critical_path"]["poles"][0]["check"] = "Pipeline / tests-web"
+    md = _render_pole(doc)
+    assert "matched this pole's lint step" in md
+    p = tmp_path / "findings.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    vr = _vr()
+    assert vr.check_opt82_type_aware_lint_uncredited(md, p).ok
+    head = md.index('<a id="pole-1"></a>')
+    bad = md[:head] + md[head:].replace("```text", "NO CATALOG PATTERN MATCHED\n\n```text", 1)
+    c = vr.check_opt82_type_aware_lint_uncredited(bad, p)
+    assert not c.ok and "coverage gap" in c.detail, c.detail
+
+
+def test_verifier_fails_an_opt82_pole_that_renders_the_coverage_gap(tmp_path):
+    doc, _f = _opt82_on_the_drilled_pole(tmp_path)
+    md = _render_pole(doc)
+    p = tmp_path / "findings.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    vr = _vr()
+    c = vr.check_opt82_type_aware_lint_uncredited(md, p)
+    assert c.ok, c.detail
+    head = md.index('<a id="pole-1"></a>')
+    for wording in ("NO CATALOG PATTERN MATCHED",
+                    "this is a coverage gap, not a clean job"):
+        bad = md[:head] + md[head:].replace("```text", f"{wording}\n\n```text", 1)
+        c = vr.check_opt82_type_aware_lint_uncredited(bad, p)
+        assert not c.ok and "coverage gap" in c.detail, (wording, c.detail)
