@@ -36,7 +36,8 @@ from typing import Any, Callable, NamedTuple
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
-from workflow_steps import parallel_steps_disclosure  # same-skill module; step walker
+from workflow_steps import (  # same-skill module; step walker
+    parallel_steps_disclosure, parallel_steps_used)
 
 _LBLW = 33
 _BARW = 22
@@ -9353,9 +9354,15 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # something to say too: without counting it, an OPT81-only doc collapsed to
     # the one-line note and its "Runner class comparisons" section was dropped.
     opt81_n = len(_opt81_findings(all_findings))
+    # The scan's `parallel_steps` stamp (the repo uses `parallel:` groups or
+    # control steps) is a disclosure the verifier REQUIRES as a Data sources
+    # row. A quiet repo with the stamp and nothing else collapsed to the
+    # one-line note, dropping the footer and failing its own verifier.
+    parallel_n = parallel_steps_used(doc.get("parallel_steps"))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
-            and not withheld_n and not opt79_off_pole and not opt81_n):
+            and not withheld_n and not opt79_off_pole and not opt81_n
+            and not parallel_n):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")

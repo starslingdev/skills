@@ -11293,6 +11293,30 @@ def test_parallel_steps_row_is_rendered_and_required(tmp_path):
     assert vr._parallel_steps_violation(hidden, fp)[0], "a hidden malformed group must fail"
 
 
+def test_quiet_repo_with_parallel_steps_still_renders_the_required_row(tmp_path):
+    """Valid `parallel:` groups, no findings, no measured jobs: the scan stamps
+    `parallel_steps`, and the verifier requires its Data sources row. The
+    static-only body did not count that disclosure, returned "", and `render`
+    fell back to the one-line no-timing note with no footer, so the report
+    failed its own verifier."""
+    vr = _load_verify_report()
+    bp = _load_blocking_path()
+    doc = {"repo": "o/r", "findings": [], "data_sources": {},
+           "pr_critical_path": {"poles": []},
+           "parallel_steps": {"groups": 1, "steps_in_groups": 2, "control_steps": 1,
+                              "malformed_groups": 0, "malformed_files": [],
+                              "malformed_jobs": []}}
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    md = bp.render(doc, {}, {}, {}, "2026-10-09")
+    assert "| Parallel steps |" in md, md
+    chk = vr.check_coverage_disclosed(md, fp)
+    assert chk.ok, chk
+    # control: the same quiet repo WITHOUT the stamp keeps the one-line note
+    bare = {k: v for k, v in doc.items() if k != "parallel_steps"}
+    assert "| Parallel steps |" not in bp.render(bare, {}, {}, {}, "2026-10-09")
+
+
 def test_no_parallel_steps_row_without_the_stamp(tmp_path):
     vr = _load_verify_report()
     bp = _load_blocking_path()
