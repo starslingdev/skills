@@ -785,6 +785,10 @@ _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
         "the cache restore runs side by side with other steps (in a parallel "
         "step group or in the background), so its time does not simply add "
         "to the install's and could not be priced",
+    "install_runs_in_a_parallel_group_or_background":
+        "the install runs side by side with other steps (in a parallel step "
+        "group or in the background), so its time does not simply follow the "
+        "cache restore and could not be priced",
     "no_install_step_after_the_cache_step":
         "no dependency install follows the cache, so the cache is not shown to "
         "speed anything up",

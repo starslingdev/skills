@@ -17681,6 +17681,7 @@ _OPT79_EARLY_HELD_BACK_GATES = frozenset({
     "install_step_also_runs_non_install_commands",
     "cache_and_install_run_in_the_same_parallel_group",
     "cache_restore_runs_in_a_parallel_group_or_background",
+    "install_runs_in_a_parallel_group_or_background",
     "no_install_step_after_the_cache_step",
     "first_step_after_cache_is_not_a_recognised_install",
     "cache_path_names_no_known_package_store",
@@ -17981,6 +17982,12 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
         is not a sequential block. Held until a jobs-API probe shows how
         overlapping steps are timed. A sibling of the cache in its own group is
         never counted as a step "between" the cache and the install.
+      * `install_runs_in_a_parallel_group_or_background` — the restore runs in
+        sequence but the install runs in a later `parallel:` group or with
+        `background: true`, so it overlaps other steps: held back the same way.
+        The overlap reasons are checked before the install's own shape
+        (`install_step_also_runs_non_install_commands`), and an install
+        declared BEFORE the cache in its own group is a same-group case too.
       * `first_step_after_cache_is_not_a_recognised_install` — a `run:` step the
         install matcher does not recognise (`cd web && npm ci`, `corepack enable`
         then `pnpm install`) sits between the cache and the install chosen. It
@@ -18068,7 +18075,22 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
         return None, "cache_step_has_no_renderable_name"
     install = None
     install_cmd: str | None = None
+    install_j: int | None = None
     unrecognised_between = False
+
+    def _is_install_step(j: int) -> bool:
+        d = displays[j]
+        if not d:
+            return False
+        cmd = _opt79_yaml_step_command(steps[j])
+        return bool(_OPT79_INSTALL_RE.match(cmd)) if cmd \
+            else bool(_OPT79_INSTALL_RE.match(d))
+
+    # An install declared BEFORE the cache but in the cache's own group runs
+    # beside the restore: name that overlap, not "no install after the cache".
+    if groups[ci] is not None and any(
+            groups[j] == groups[ci] and _is_install_step(j) for j in range(ci)):
+        return None, "cache_and_install_run_in_the_same_parallel_group"
     for j in range(ci + 1, len(steps)):
         d = displays[j]
         if not d:
@@ -18092,16 +18114,15 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
                     and not str(step_j.get("uses") or "").strip():
                 unrecognised_between = True
             continue
-        if _opt79_run_is_only_installs(steps[j]) is False:
-            return None, "install_step_also_runs_non_install_commands"
         if sibling:
             # Siblings in one `parallel:` group run at the same time: the
             # restore does not happen BEFORE the install, so the restore-then-
-            # install block this pattern prices does not exist.
+            # install block this pattern prices does not exist. Checked before
+            # the install's own shape, so the overlap is the reason named.
             return None, "cache_and_install_run_in_the_same_parallel_group"
-        install, install_cmd = d, cmd or d
+        install, install_cmd, install_j = d, cmd or d, j
         break
-    if not install:
+    if not install or install_j is None:
         return None, "no_install_step_after_the_cache_step"
     if leaves[ci].background:
         # The restore runs in a `parallel:` group (beside siblings that may be
@@ -18111,6 +18132,12 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
         # closed until a jobs-API timing probe shows how overlapping steps are
         # recorded.
         return None, "cache_restore_runs_in_a_parallel_group_or_background"
+    if leaves[install_j].background:
+        # The same, on the install's side: an install in a later `parallel:`
+        # group or with `background: true` overlaps other steps.
+        return None, "install_runs_in_a_parallel_group_or_background"
+    if _opt79_run_is_only_installs(steps[install_j]) is False:
+        return None, "install_step_also_runs_non_install_commands"
     if unrecognised_between:
         return None, "first_step_after_cache_is_not_a_recognised_install"
     cache_eco = _opt79_cache_ecosystem(steps[ci])

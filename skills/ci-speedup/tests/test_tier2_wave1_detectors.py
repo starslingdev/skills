@@ -9974,6 +9974,49 @@ def test_opt79_withholds_a_cache_and_install_that_run_side_by_side():
     assert block is None and gate == "cache_and_install_run_in_the_same_parallel_group"
 
 
+@pytest.mark.parametrize("label, install_steps", [
+    ("install in a group after the cache",
+     [{"parallel": [{"run": "npm ci"}, {"run": "./long-build.sh"}]}]),
+    ("install in the background",
+     [{"run": "npm ci", "background": True}, {"run": "./long-build.sh"}]),
+    ("install in the background (quoted)",
+     [{"run": "npm ci", "background": "true"}, {"run": "./long-build.sh"}]),
+])
+def test_opt79_holds_back_an_install_that_runs_side_by_side(label, install_steps):
+    """The restore is sequential, but the INSTALL runs in a `parallel:` group or
+    with `background: true`: it overlaps other steps, so restore-then-install is
+    not the sequential block this pattern prices. Held back, never priced."""
+    wf = _opt79_steps(dict(_OPT79_NODE_CACHE), *install_steps)
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None, (label, block)
+    assert gate == "install_runs_in_a_parallel_group_or_background", (label, gate)
+    assert gate in cr._OPT79_EARLY_HELD_BACK_GATES
+    phrase = bp._OPT79_HELD_BACK_REASONS.get(gate)
+    assert phrase and "_" not in phrase, phrase
+    assert _load_verify_report_for_opt79()._VR_OPT79_HELD_BACK_REASONS.get(gate) == phrase
+
+
+def test_opt79_the_side_by_side_reason_wins_over_the_install_shape_reasons():
+    """A grouped install that ALSO runs other commands, and a sibling install
+    declared BEFORE the cache in its group, are side-by-side cases first: the
+    reason names the overlap, not a masking shape gate."""
+    wf = _opt79_steps(
+        {"parallel": [dict(_OPT79_NODE_CACHE), {"run": "npm ci\nnpm run build"}]},
+        {"run": "npm test"})
+    _block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert gate == "cache_and_install_run_in_the_same_parallel_group", gate
+    wf = _opt79_steps(
+        {"parallel": [{"run": "npm ci"}, dict(_OPT79_NODE_CACHE)]},
+        {"run": "npm test"})
+    _block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert gate == "cache_and_install_run_in_the_same_parallel_group", gate
+    wf = _opt79_steps(dict(_OPT79_NODE_CACHE),
+                      {"run": "npm ci\nnpm run build", "background": True},
+                      {"run": "npm test"})
+    _block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert gate == "install_runs_in_a_parallel_group_or_background", gate
+
+
 def test_opt80_finds_the_checkout_step_inside_a_parallel_group():
     wf = _opt80_wf(steps=[{"parallel": [{"uses": "actions/checkout@v4"},
                                         {"run": "echo warm"}]},
