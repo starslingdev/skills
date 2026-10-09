@@ -401,37 +401,62 @@ _CONTROL_STEP_KEYS = ("wait", "wait-all", "cancel")
 
 
 def _new_step_stats() -> dict[str, Any]:
+    """`groups` counts groups whose children were READ; `malformed_groups`
+    counts groups that could not be read (value not a list, or a list that
+    contains itself through a YAML alias); `invalid_groups` counts groups
+    GitHub rejects but whose children were read anyway (a `parallel:` inside a
+    composite action, or beside `run:`/`uses:` on one step). Each unreadable
+    or rejected group's file is named once."""
     return {"groups": 0, "steps_in_groups": 0, "control_steps": 0,
-            "malformed_groups": 0, "malformed_files": []}
+            "malformed_groups": 0, "malformed_files": [],
+            "invalid_groups": 0, "invalid_files": []}
+
+
+def _note(stats: dict[str, Any] | None, kind: str, rel: str) -> None:
+    if stats is None:
+        return
+    stats[f"{kind}_groups"] += 1
+    files = stats[f"{kind}_files"]
+    if rel and rel not in files:
+        files.append(rel)
 
 
 def _walk_steps(steps: Any, stats: dict[str, Any] | None = None,
-                rel: str = "", _depth: int = 0) -> list[dict]:
+                rel: str = "", _depth: int = 0, *, in_composite: bool = False,
+                _path: frozenset[int] = frozenset()) -> list[dict]:
     """Every LEAF step (a mapping with `run:`/`uses:`/... of its own) in
     declaration order, descending into `parallel:` lists. Control steps
     (`wait:` / `wait-all:` / `cancel:` without `run`/`uses`) are skipped but
-    counted. A `parallel:` whose value is not a list is malformed: its contents
-    are not read, and it is COUNTED and its file named in `stats` so the report
-    discloses it — never a silent skip."""
+    counted. Never a silent skip: a `parallel:` that cannot be read (not a
+    list, or a list containing itself) is counted and its file named; a
+    `parallel:` GitHub rejects (inside a composite action, or on a step that
+    also has `run:`/`uses:`) is read anyway — defensively, the same verdict as
+    if its steps were written flat — and counted and named as rejected."""
     out: list[dict] = []
-    if not isinstance(steps, list):
+    if not isinstance(steps, list) or id(steps) in _path:
         return out
+    path = _path | {id(steps)}
     for step in steps:
         if not isinstance(step, dict):
             continue
-        if _PARALLEL_KEY in step and "run" not in step and "uses" not in step:
+        is_leaf = "run" in step or "uses" in step
+        if _PARALLEL_KEY in step:
             group = step.get(_PARALLEL_KEY)
+            if is_leaf:
+                out.append(step)
+                if stats is not None and _depth > 0:
+                    stats["steps_in_groups"] += 1
+            if not isinstance(group, list) or id(group) in path:
+                _note(stats, "malformed", rel)
+                continue
             if stats is not None:
                 stats["groups"] += 1
-            if isinstance(group, list):
-                out.extend(_walk_steps(group, stats, rel, _depth + 1))
-            elif stats is not None:
-                stats["malformed_groups"] += 1
-                if rel and rel not in stats["malformed_files"]:
-                    stats["malformed_files"].append(rel)
+            if in_composite or is_leaf:
+                _note(stats, "invalid", rel)
+            out.extend(_walk_steps(group, stats, rel, _depth + 1,
+                                   in_composite=in_composite, _path=path))
             continue
-        if ("run" not in step and "uses" not in step
-                and any(k in step for k in _CONTROL_STEP_KEYS)):
+        if not is_leaf and any(k in step for k in _CONTROL_STEP_KEYS):
             if stats is not None:
                 stats["control_steps"] += 1
             continue
@@ -445,39 +470,37 @@ def _job_steps(job: dict) -> list[dict]:
     return _walk_steps(job.get("steps"))
 
 
-def _composite_steps(doc: dict) -> list[dict]:
+def _composite_steps(doc: dict, stats: dict[str, Any] | None = None,
+                     rel: str = "") -> list[dict]:
     runs = doc.get("runs")
-    return _walk_steps(runs.get("steps")) if isinstance(runs, dict) else []
+    if not isinstance(runs, dict):
+        return []
+    return _walk_steps(runs.get("steps"), stats, rel, in_composite=True)
 
 
 def _step_sources(parsed: list[tuple[str, dict, str]],
-                  composites: list[tuple[str, dict]]) -> list[tuple[str, list[dict]]]:
+                  composites: list[tuple[str, dict]],
+                  stats: dict[str, Any] | None = None) -> list[tuple[str, list[dict]]]:
     """Steps everywhere the repo's own files define them — workflow jobs plus
-    local composite actions (the `runs.steps` shape) — leaf steps only."""
+    local composite actions (the `runs.steps` shape) — leaf steps only. With
+    `stats`, the same walk records what it read (see `_new_step_stats`)."""
     out: list[tuple[str, list[dict]]] = []
     for rel, doc, _raw in parsed:
         for job in _wf_jobs(doc).values():
-            out.append((rel, _job_steps(job)))
+            out.append((rel, _walk_steps(job.get("steps"), stats, rel)))
     for rel, doc in composites:
         if isinstance(doc.get("runs"), dict):
-            out.append((rel, _composite_steps(doc)))
+            out.append((rel, _composite_steps(doc, stats, rel)))
     return out
 
 
 def _step_walk_stats(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str, Any]:
-    """What the walker found across workflows + local composite actions: how
-    many `parallel:` groups and steps inside them were read, how many control
-    steps were skipped, and which files carry a malformed `parallel:` (not a
-    list). The collector records this as provenance; the report header
-    discloses it."""
+    """What the walker found across workflows + local composite actions — the
+    very walk `_step_sources` does, so the provenance can never describe a
+    different read than the checks made. The collector records this; the
+    report header discloses it."""
     stats = _new_step_stats()
-    for rel, doc, _raw in parsed:
-        for job in _wf_jobs(doc).values():
-            _walk_steps(job.get("steps"), stats, rel)
-    for rel, doc in _composite_action_docs(root):
-        runs = doc.get("runs")
-        if isinstance(runs, dict):
-            _walk_steps(runs.get("steps"), stats, rel)
+    _step_sources(parsed, _composite_action_docs(root), stats)
     return stats
 
 
@@ -497,6 +520,12 @@ def _step_uses(step: dict) -> tuple[str, str] | None:
 # `_HISTORY_JOB_NAME_RE`, `_LINE_CONTINUATION_RE`, `_has_git_history_op`,
 # `_index_local_git_actions` and `_job_needs_git_history`. What follows is a
 # deliberate VERBATIM COPY of that predicate, not an import.
+#
+# ONE KNOWN DIVERGENCE: the step reader is NOT part of the copy. Here
+# `_job_steps` routes through `_walk_steps`, so a history op inside a GitHub
+# Actions `parallel:` group counts; ci-speedup still reads `steps:` flat. The
+# parity test pins that gap as a strict xfail until ci-speedup reads
+# `parallel:` groups too, at which point it goes red and the xfail comes off.
 #
 # WHY A COPY. Every skill in this repo installs and runs standalone, so
 # ci-score may not import ci-speedup at runtime (the same rule that made this

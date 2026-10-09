@@ -352,25 +352,45 @@ def _handoff_prompt(rec_no: int, chk: dict, meta: dict, url: str,
 def parallel_steps_disclosure(doc: dict[str, Any]) -> str | None:
     """The provenance cell for GitHub Actions `parallel:` step groups, read off
     `data_sources.parallel_steps` (the collector's record of what the step
-    walker read). None when the repo uses no parallel/control steps. A
-    malformed group (a `parallel:` that is not a list) is named, never
-    silently skipped: its steps were not read, so the maintainer is told."""
+    walker read). None when the repo has no `parallel:` group. A group that
+    could not be read, or one GitHub rejects, is counted and its files named
+    (the first three, then how many more), so the maintainer is told. verify_report.py
+    re-derives this row with its own wording, so changing one means changing
+    both."""
     rec = (doc.get("data_sources") or {}).get("parallel_steps")
     if not isinstance(rec, dict):
         return None
-    n = rec.get("steps_in_groups", 0)
+    parts: list[str] = []
     groups = rec.get("groups", 0)
-    parts = [f"{n} step(s) inside `parallel:` groups read ({groups} group(s))"]
+    if groups:
+        parts.append(f"{rec.get('steps_in_groups', 0)} step(s) in {groups} `parallel:` "
+                     "group(s) checked like any other step (steps in a group run side by side)")
     control = rec.get("control_steps", 0)
     if control:
-        parts.append(f"{control} `wait`/`wait-all`/`cancel` control step(s) skipped "
-                     "(they run nothing)")
+        parts.append(f"{control} `wait`/`wait-all`/`cancel` step(s) skipped: they only "
+                     "coordinate the side-by-side steps and run no code of their own")
+    invalid = rec.get("invalid_groups", 0)
+    if invalid:
+        parts.append(f"**{invalid} `parallel:` group(s) GitHub would reject were checked "
+                     "anyway** (inside a composite action, or on a step that also has "
+                     f"`run:`/`uses:`){_files_clause(rec.get('invalid_files'))}")
     bad = rec.get("malformed_groups", 0)
     if bad:
-        files = ", ".join(f"`{f}`" for f in (rec.get("malformed_files") or [])[:3])
-        parts.append(f"**{bad} malformed `parallel:` group(s) not read** (the value "
-                     f"is not a list of steps){' in ' + files if files else ''}")
-    return " · ".join(parts)
+        parts.append(f"**{bad} `parallel:` group(s) could not be read, so their steps were "
+                     "not checked** (not a list of steps, or a group that contains itself)"
+                     f"{_files_clause(rec.get('malformed_files'))}")
+    return " · ".join(parts) or None
+
+
+def _files_clause(files: Any) -> str:
+    """`: in `a`, `b`, `c` and N more file(s)` — table-safe (a `|` in a file
+    name is escaped so it cannot split the row)."""
+    names = [str(f).replace("|", "\\|") for f in (files or [])]
+    if not names:
+        return ""
+    shown = ", ".join(f"`{n}`" for n in names[:3])
+    more = f" and {len(names) - 3} more file(s)" if len(names) > 3 else ""
+    return f": in {shown}{more}"
 
 
 def _render_header(doc: dict[str, Any]) -> list[str]:

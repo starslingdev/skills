@@ -49,6 +49,41 @@ def _load_sibling(mod_name: str, filename: str):
     return mod
 
 
+def _expected_parallel_row(rec: Any) -> str | None:
+    """The exact "Parallel steps" header row a faithful report carries for
+    this `data_sources.parallel_steps` record, derived independently of
+    render_report.py. None when there is no record."""
+    if not isinstance(rec, dict):
+        return None
+
+    def files(key: str) -> str:
+        names = [str(f).replace("|", "\\|") for f in (rec.get(key) or [])]
+        if not names:
+            return ""
+        extra = len(names) - 3
+        tail = f" and {extra} more file(s)" if extra > 0 else ""
+        return ": in " + ", ".join("`" + n + "`" for n in names[:3]) + tail
+
+    cells = []
+    if rec.get("groups"):
+        cells.append("%d step(s) in %d `parallel:` group(s) checked like any other step "
+                     "(steps in a group run side by side)"
+                     % (rec.get("steps_in_groups", 0), rec["groups"]))
+    if rec.get("control_steps"):
+        cells.append("%d `wait`/`wait-all`/`cancel` step(s) skipped: they only coordinate "
+                     "the side-by-side steps and run no code of their own"
+                     % rec["control_steps"])
+    if rec.get("invalid_groups"):
+        cells.append("**%d `parallel:` group(s) GitHub would reject were checked anyway** "
+                     "(inside a composite action, or on a step that also has `run:`/`uses:`)"
+                     % rec["invalid_groups"] + files("invalid_files"))
+    if rec.get("malformed_groups"):
+        cells.append("**%d `parallel:` group(s) could not be read, so their steps were not "
+                     "checked** (not a list of steps, or a group that contains itself)"
+                     % rec["malformed_groups"] + files("malformed_files"))
+    return "| **Parallel steps** | " + " · ".join(cells) + " |" if cells else None
+
+
 def verify(doc: dict[str, Any], report: str, registry: dict[str, Any]) -> list[str]:
     """All violated invariants, empty when the report is faithful."""
     rr = _load_sibling("ci_score_render_report", "render_report.py")
@@ -78,13 +113,20 @@ def verify(doc: dict[str, Any], report: str, registry: dict[str, Any]) -> list[s
             problems.append("HEADER: header claims a dirty tree but commit_sha is clean")
 
     # 0b. PARALLEL STEPS — when the collector recorded `parallel:` groups, the
-    # header carries exactly the rendered disclosure (counts and any malformed
-    # group), so a report can never hide that steps were read from (or could
-    # not be read from) parallel groups.
-    par = rr.parallel_steps_disclosure(doc)
-    if par and par not in header:
-        problems.append("HEADER: data_sources.parallel_steps recorded but the "
-                        "header does not disclose the parallel-step read")
+    # provenance header carries exactly one "Parallel steps" row, and it is
+    # the row re-derived HERE from `data_sources.parallel_steps` (counts, every
+    # unreadable or GitHub-rejected group and its files) — built by this
+    # module's own code, not the renderer's, so a renderer bug cannot pass by
+    # construction. No record → no row: a header cannot claim a read the
+    # document does not carry.
+    want_row = _expected_parallel_row((doc.get("data_sources") or {}).get("parallel_steps"))
+    got_rows = [l for l in header.splitlines() if l.startswith("| **Parallel steps** |")]
+    if want_row is None and got_rows:
+        problems.append("HEADER: a Parallel steps row is rendered but the document "
+                        "records no data_sources.parallel_steps")
+    elif want_row is not None and got_rows != [want_row]:
+        problems.append("HEADER: data_sources.parallel_steps recorded but the header's "
+                        f"Parallel steps row is {got_rows!r}, expected {want_row!r}")
 
     if "collection_refusal" in doc:
         want = str(doc["collection_refusal"].get("human_reason", ""))
