@@ -10941,6 +10941,9 @@ _FEEDS_BY_KEY = {
         "whose step timings could not be read, produced no runner-class finding",
     "opt82_withheld_candidates":
         "Why a slow lint job with type-aware ESLint produced no finding",
+    "parallel_steps_withheld_candidates":
+        "Why a lever priced from step times on a job that runs steps side by "
+        "side claims no saving",
 }
 
 

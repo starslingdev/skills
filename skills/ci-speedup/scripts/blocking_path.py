@@ -5304,6 +5304,7 @@ _OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 _OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
 _OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 _OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
+_PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
 class WithheldRow(NamedTuple):
     """One pattern's whole registration in the held-back disclosure.
 
@@ -5344,6 +5345,13 @@ _WITHHELD_ROWS: tuple[WithheldRow, ...] = (
     WithheldRow(_OPT82_WITHHELD_DOC_KEY, "type-aware lint: held back",
                 "candidate lint job(s)",
                 "Why a slow lint job with type-aware ESLint produced no finding",
+                "job"),
+    # A credited lever (OPT24 sharding, the structural OPT70/72/75 route) whose
+    # saving is priced from step medians on a job whose steps overlap.
+    WithheldRow(_PARALLEL_STEPS_WITHHELD_DOC_KEY, "parallel steps: held back",
+                "candidate lever(s)",
+                "Why a lever priced from step times on a job that runs steps side by "
+                "side claims no saving",
                 "job"),
 )
 
@@ -5485,8 +5493,17 @@ _OPT82_WITHHOLD_PHRASES: dict[str, str] = {
 # Every pattern's gate→phrase table, by doc key. OPT79's table is defined with
 # the rest of its code further down and registers itself there, so this one dict
 # is the single place the renderer looks a reason up.
+# The one reason a credited lever is held back on a job whose steps overlap
+# (collect_runs `_DOMINANT_STEP_OVERLAP_GATE`); verify_report carries an equal copy.
+_PARALLEL_STEPS_WITHHOLD_PHRASES: dict[str, str] = {
+    "dominant_step_runs_inside_a_parallel_group":
+        "the job's slowest steps run side by side with other steps (in a "
+        "parallel step group or in the background), so their times overlap and "
+        "cutting one does not come straight off the job; no saving is claimed",
+}
 _WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
     _OPT77_WITHHELD_DOC_KEY: _OPT77_WITHHOLD_PHRASES,
+    _PARALLEL_STEPS_WITHHELD_DOC_KEY: _PARALLEL_STEPS_WITHHOLD_PHRASES,
     _OPT80_WITHHELD_DOC_KEY: _OPT80_WITHHOLD_PHRASES,
     _OPT81_WITHHELD_DOC_KEY: _OPT81_WITHHOLD_PHRASES,
     _OPT82_WITHHELD_DOC_KEY: _OPT82_WITHHOLD_PHRASES,

@@ -8402,6 +8402,51 @@ def _consolidation_yaml_key(job_name: str, wf_doc: dict[str, Any]) -> str | None
     return hits[0] if len(hits) == 1 else None
 
 
+# A credited wall-clock lever priced from a job's per-step medians assumes the
+# steps run one after another, so a step's saving comes straight off the job.
+# GitHub documents that steps in a `parallel:` group (and `background: true`
+# steps) overlap, so that assumption is broken for them whatever the jobs API
+# records. Such a lever is HELD BACK under this list and reason, rendered as the
+# "parallel steps: held back" Data sources row (blocking_path `_WITHHELD_ROWS`,
+# mirrored in verify_report).
+_PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
+_DOMINANT_STEP_OVERLAP_GATE = "dominant_step_runs_inside_a_parallel_group"
+
+
+def _steps_overlap_in_yaml(wf_doc: dict[str, Any] | None, job_name: str,
+                           step_names: "list[str] | tuple[str, ...]") -> bool:
+    """Whether any of `step_names` (run-data step names of the observed job
+    `job_name`) may run side by side with other steps: inside a `parallel:`
+    group or with `background: true`.
+
+    False whenever the workflow runs nothing side by side, so a repo without the
+    syntax is unchanged. Otherwise FAIL CLOSED: True when the observed job cannot
+    be pinned to one YAML job (a templated matrix name, a reusable-workflow
+    callee), or a named step matches no step run in sequence."""
+    jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
+    if not isinstance(jobs, dict):
+        return False
+    overlapping = {str(k) for k, spec in jobs.items()
+                   if any(lf.background for lf in job_walk(spec).leaves)}
+    if not overlapping:
+        return False
+    key = _consolidation_yaml_key(job_name, wf_doc)
+    if key is None:
+        base = re.sub(r"\s*\(.*\)\s*$", "", job_name).strip()
+        key = _consolidation_yaml_key(base, wf_doc) if base != job_name else None
+    if key is None:
+        return True
+    if key not in overlapping:
+        return False
+    seq: set[str] = set()
+    over: set[str] = set()
+    for lf in job_walk(jobs.get(key)).leaves:
+        d = _opt79_yaml_step_display(lf.step)
+        if d:
+            (over if lf.background else seq).add(d)
+    return any(n in over or n not in seq for n in step_names)
+
+
 def _consolidation_group_is_independent(keys: list[str],
                                         wf_doc: dict[str, Any]) -> str | None:
     """None when the group is safe to consolidate, else the NAME of the gate that
@@ -15523,6 +15568,8 @@ def _detect_structural_candidates(
     chain_win_s: float = 0.0,
     check_pole_freq: dict[str, int] | None = None,
     triaged_fast_workflows: "set[str] | list[str] | None" = None,
+    wf_docs: "dict[str, dict[str, Any]] | None" = None,
+    overlap_withheld: "list[dict[str, Any]] | None" = None,
 ) -> list[dict[str, Any]]:
     """Route the top measured critical-path checks into STRUCTURAL candidates
     instead of the old inherent-cost dead-end. For each top check: map it to its
@@ -15636,8 +15683,18 @@ def _detect_structural_candidates(
                 # OPT70's "scope/drop your tests" + HIGH coverage-loss framing when
                 # the real fix is, e.g., turning on intra-shard parallelism.
                 sp = "OPT75"
-            raw_s, assum_s = _structural_raw_estimate(decomp)
-            picks.append((sp, raw_s, assum_s, "cascade"))
+            dom_names = [n for n, c, _p in decomp["steps"] if c == dom]
+            if _steps_overlap_in_yaml((wf_docs or {}).get(wf_path), job_name, dom_names):
+                # The dominant step runs side by side with other steps, so its
+                # saving does not come straight off the job: HELD BACK, listed.
+                # The pole keeps the renderer's generic dominant-step hand-off.
+                if overlap_withheld is not None:
+                    overlap_withheld.append({
+                        "workflow_file": wf_path, "job": job_name, "pattern": sp,
+                        "gate": _DOMINANT_STEP_OVERLAP_GATE})
+            else:
+                raw_s, assum_s = _structural_raw_estimate(decomp)
+                picks.append((sp, raw_s, assum_s, "cascade"))
         elif mapping is None:
             # No SAMPLED job/steps for this check (`_map_check_to_job` returned None).
             # STILL route a speed-up by the check NAME's category, and let the user's
@@ -16396,6 +16453,7 @@ def _detect_opt24_long_test_no_sharding(
     wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
     monthly_volume: int | None = None, sharded_bases: "set[str] | None" = None,
     wf_doc: "dict[str, Any] | None" = None,
+    overlap_withheld: "list[dict[str, Any]] | None" = None,
 ) -> list[dict[str, Any]]:
     """Long test jobs with no sharding — catalog body OPT24.
 
@@ -16489,6 +16547,19 @@ def _detect_opt24_long_test_no_sharding(
         short = [d for d in durs if d < max(90.0, 0.25 * p50)]
         if len(short) >= max(2, round(0.2 * len(durs))):
             continue
+        decomp = _decompose_job_steps(inst_by_base.get(base, []))
+        # The saving below halves the test payload's summed step medians, which
+        # assumes the steps run one after another. A payload step inside a
+        # `parallel:` group (or `background: true`) overlaps others, so the
+        # saving is HELD BACK and listed (unknown steps fail closed).
+        _payload = ([n for n, c, _p in decomp["steps"] if c in _PAYLOAD_CATEGORIES]
+                    if decomp is not None else ["(no step timings)"])
+        if _steps_overlap_in_yaml(wf_doc, base, _payload):
+            if overlap_withheld is not None:
+                overlap_withheld.append({"workflow_file": wf_path, "job": base,
+                                         "pattern": "OPT24",
+                                         "gate": _DOMINANT_STEP_OVERLAP_GATE})
+            continue
         idx += 1
         # Wall-clock saving from sharding: split the job across N shards (assume
         # N=2 conservative). Sharding does not save runner-min (catalog body
@@ -16503,7 +16574,6 @@ def _detect_opt24_long_test_no_sharding(
         # payload (never more than half the whole job). Falls back to p50/2 only
         # when there are no step timings to decompose.
         wc = round(p50 / 2.0, 1)
-        decomp = _decompose_job_steps(inst_by_base.get(base, []))
         if decomp is not None and decomp["payload_s"] > 0:
             shardable = min(decomp["payload_s"], p50)
             wc = round(shardable / 2.0, 1)
@@ -21259,6 +21329,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 "contents API (default-branch HEAD)",
                 workflow_yaml_source.get("checkout", 0),
                 workflow_yaml_source.get("api", 0))
+    # Credited levers held back because their steps run side by side (OPT24,
+    # the structural OPT70/72/75 route): `_PARALLEL_STEPS_WITHHELD_DOC_KEY`.
+    _overlap_withheld: list[dict[str, Any]] = []
     # The job keys each workflow DECLARES, stamped straight off the parsed YAML
     # here — once, before any detector runs, and independent of all of them.
     # OPT77's whole-workflow gate rests entirely on "these are every job the
@@ -21988,7 +22061,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         new = _detect_opt24_long_test_no_sharding(
             wf_path, jobs_per_run, next_id, monthly,
             sharded_bases=_sharded_bases(_wf_docs.get(wf_path, {})),
-            wf_doc=_wf_docs.get(wf_path, {}))
+            wf_doc=_wf_docs.get(wf_path, {}),
+            overlap_withheld=_overlap_withheld)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
@@ -22525,7 +22599,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         check_pole_freq=check_pole_freq,
         triaged_fast_workflows=triaged_fast_workflows,
         chain_members=_chain_ctx_members, chain_p50_s=_chain_ctx_p50,
-        chain_win_s=_chain_ctx_win)
+        chain_win_s=_chain_ctx_win,
+        wf_docs=_wf_docs, overlap_withheld=_overlap_withheld)
+    # Stamped only when a lever was held back, so a repo without `parallel:`
+    # groups or background steps keeps a byte-identical findings document.
+    if _overlap_withheld:
+        findings_doc[_PARALLEL_STEPS_WITHHELD_DOC_KEY] = _overlap_withheld
     # Record the analysis depth so the report can distinguish a check that was
     # structurally analyzed and found genuinely inherent from one ranked below
     # this depth that was never examined (don't claim "inherent cost" for it).

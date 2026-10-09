@@ -903,6 +903,7 @@ _VR_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _VR_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
 _VR_OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 _VR_OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
+_VR_PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
 # (doc key, Data sources row label, counted noun, "Used for" cell) — as
 # blocking_path renders them. ONE re-derivation serves all three patterns.
 # The fourth field is carried HERE, not just pinned: it is the column that tells
@@ -945,6 +946,11 @@ _VR_WITHHELD_ROWS = (
     _VrWithheldRow(_VR_OPT82_WITHHELD_DOC_KEY, "type-aware lint: held back",
                    "candidate lint job(s)",
                    "Why a slow lint job with type-aware ESLint produced no finding",
+                   "job"),
+    _VrWithheldRow(_VR_PARALLEL_STEPS_WITHHELD_DOC_KEY, "parallel steps: held back",
+                   "candidate lever(s)",
+                   "Why a lever priced from step times on a job that runs steps side by "
+                   "side claims no saving",
                    "job"),
 )
 _VR_WITHHELD_SHAPE_BY_KEY = {r.doc_key: r.entry_shape for r in _VR_WITHHELD_ROWS}
@@ -1076,8 +1082,15 @@ _VR_OPT82_WITHHOLD_PHRASES = {
         "type-aware parsing is on, but no type-aware rule could be named from "
         "the config",
 }
+_VR_PARALLEL_STEPS_WITHHOLD_PHRASES = {
+    "dominant_step_runs_inside_a_parallel_group":
+        "the job's slowest steps run side by side with other steps (in a "
+        "parallel step group or in the background), so their times overlap and "
+        "cutting one does not come straight off the job; no saving is claimed",
+}
 _VR_WITHHELD_PHRASES_BY_KEY = {
     _VR_OPT77_WITHHELD_DOC_KEY: _VR_OPT77_WITHHOLD_PHRASES,
+    _VR_PARALLEL_STEPS_WITHHELD_DOC_KEY: _VR_PARALLEL_STEPS_WITHHOLD_PHRASES,
     _VR_OPT79_WITHHELD_DOC_KEY: _VR_OPT79_HELD_BACK_REASONS,
     _VR_OPT80_WITHHELD_DOC_KEY: _VR_OPT80_WITHHOLD_PHRASES,
     _VR_OPT81_WITHHELD_DOC_KEY: _VR_OPT81_WITHHOLD_PHRASES,
