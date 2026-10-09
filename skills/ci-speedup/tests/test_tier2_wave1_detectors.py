@@ -6007,6 +6007,34 @@ def test_opt79_counts_setup_node_s_automatic_cache_when_package_json_turns_it_on
     assert gate == "" and block["cache_ref"] == "actions/setup-node@v5", gate
 
 
+def test_opt79_a_checkout_running_beside_setup_node_leaves_its_cache_unknown():
+    """setup-node v5+ turns its automatic cache on from the checked-out
+    package.json. A checkout that runs BESIDE it (a sibling in one `parallel:`
+    group, or a top-level `background: true` checkout before it) may not have
+    landed when setup-node reads the file, so whether the cache is on is not
+    known from the YAML. The declaration-order walk read it as checked out and
+    counted (and priced) the cache; it must fail closed instead."""
+    npm = {"packageManager": "npm@10.8.2"}
+    want = "setup_action_cache_default_depends_on_repository_files"
+    for wf in (
+        _opt79_steps({"parallel": [_OPT79_CHECKOUT, {"uses": "actions/setup-node@v5"}]},
+                     {"run": "npm ci"}),
+        _opt79_steps(dict(_OPT79_CHECKOUT, background=True),
+                     {"uses": "actions/setup-node@v5"}, {"run": "npm ci"}),
+    ):
+        block, gate = cr._opt79_cache_block(_OPT79_JOB, wf, package_json=npm)
+        assert block is None and gate == want, (wf["jobs"], gate)
+        # and the per-repo package.json read is not spent on a job it cannot decide
+        assert cr._opt79_package_json_needed({"ci.yml": wf}) is False
+    # control: the checkout in a group that ENDS before setup-node (the group's
+    # implicit wait), so the file is known and the cache counts.
+    wf = _opt79_steps({"parallel": [_OPT79_CHECKOUT, {"run": "echo warm"}]},
+                      {"uses": "actions/setup-node@v5"}, {"run": "npm ci"})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf, package_json=npm)
+    assert gate == "" and block.get("setup_node_auto_cache") is True, gate
+    assert cr._opt79_package_json_needed({"ci.yml": wf}) is True
+
+
 def test_opt79_measures_setup_node_s_automatic_cache_from_its_own_log_lines():
     """End to end through the detector: the automatic cache prints setup-node's
     own hit / miss wording, is priced like any other cache, and the recipe says

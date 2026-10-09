@@ -17809,6 +17809,33 @@ def _opt79_checkout_state(state: str, step: dict[str, Any]) -> str:
     return "moved" if state == "moved" else "root"
 
 
+def _opt79_workspace_states(leaves: list[Any]) -> list[str]:
+    """`_opt79_checkout_state` as seen by EACH leaf step, honouring overlap: only
+    a checkout known to have FINISHED before the step counts (one earlier in
+    sequence, or in an earlier `parallel:` group, which ends in an implicit
+    wait). A checkout that may still be running beside the step (a sibling in
+    its own group, or a top-level `background: true` checkout before it) leaves
+    the workspace unknown, returned as `racing` (never `root`), so setup-node's
+    package.json read fails closed rather than trusting declaration order."""
+    states: list[str] = []
+    done = "none"
+    racing_bg = False
+    for i, lf in enumerate(leaves):
+        step = lf.step if isinstance(lf.step, dict) else {}
+        g = lf.group
+        racing = racing_bg or (g is not None and any(
+            o.group == g and o is not lf and isinstance(o.step, dict)
+            and _opt79_checkout_state("none", o.step) != "none" for o in leaves))
+        states.append("racing" if racing else done)
+        if _opt79_checkout_state("none", step) == "none":
+            continue
+        if g is None and lf.background:
+            racing_bg = True
+        else:
+            done = _opt79_checkout_state(done, step)
+    return states
+
+
 def _opt79_cache_ecosystem(step: dict[str, Any]) -> str | None:
     """The package-manager ecosystem a cache step serves, or None when the
     workflow does not say (an `actions/cache` path naming no known store, or
@@ -17920,11 +17947,13 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
     possible = 0
     other = 0
     cache_ref = ""
-    workspace = "none"
+    # Where the workspace stands as each step starts; a checkout that may still
+    # be running beside the step leaves it unknown (`_opt79_workspace_states`).
+    ws_states = _opt79_workspace_states(leaves)
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
             continue
-        workspace = _opt79_checkout_state(workspace, step)
+        workspace = ws_states[i]
         uses = str(step.get("uses") or "").strip()
         if not uses:
             continue
@@ -18460,9 +18489,9 @@ def _opt79_package_json_needed(wf_docs: dict[str, Any]) -> bool:
     for doc in (wf_docs or {}).values():
         jobs = doc.get("jobs") if isinstance(doc, dict) else None
         for spec in (jobs.values() if isinstance(jobs, dict) else ()):
-            workspace = "none"
-            for step in job_walk(spec).steps():
-                workspace = _opt79_checkout_state(workspace, step)
+            leaves = [lf for lf in job_walk(spec).leaves if isinstance(lf.step, dict)]
+            for lf, workspace in zip(leaves, _opt79_workspace_states(leaves)):
+                step = lf.step
                 uses = str(step.get("uses") or "").strip()
                 if workspace != "root" or not _OPT79_SETUP_USES_RE.match(uses):
                     continue
