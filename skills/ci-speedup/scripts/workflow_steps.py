@@ -39,7 +39,8 @@ only place in this skill that knows the shape:
     through a YAML alias (`steps: &s [{parallel: *s}]`), or a group nested
     deeper than `WALK_MAX_DEPTH` (ci-secure's cap) is MALFORMED: its contents
     are not read, and the walk counts it instead of treating the job as clean
-    (or recursing until Python gives up);
+    (or recursing until Python gives up). A group holding an item that is not
+    a step mapping is counted malformed too (its readable children are read);
   * a list REUSED through YAML aliases is not a cycle and is read again at
     each use, so sibling groups aliasing one list double the leaves per level
     (40 levels is 2**40 leaves). The walk therefore reads at most
@@ -151,8 +152,9 @@ def effective_if(leaf: LeafStep) -> str | None:
 
 def walk_steps(steps: Any) -> StepWalk:
     """Read a `steps:` value (whatever the YAML held) into a `StepWalk`.
-    Anything that is not a list reads as no steps, and a non-mapping item is
-    skipped, exactly as every flat reader already treated them."""
+    Anything that is not a list reads as no steps, and a non-mapping item at
+    the top level is skipped, exactly as every flat reader already treated
+    them; inside a group, one marks that group malformed."""
     walk = StepWalk()
     stopped = False  # the walk budget was reached: read nothing more
 
@@ -172,10 +174,17 @@ def walk_steps(steps: Any) -> StepWalk:
         if not isinstance(items, list):
             return
         path = path | {id(items)}  # the lists on THIS branch: a repeat is a cycle
+        dropped_child = False
         for item in items:
             if stopped:
                 return
             if not isinstance(item, dict):
+                # Skipped at the top level as every flat reader did; inside a
+                # group it is a child the walk could not read, so the group
+                # counts malformed once (its readable children are still read).
+                if depth > 0 and not dropped_child:
+                    dropped_child = True
+                    walk.malformed_groups += 1
                 continue
             if is_group_step(item):
                 if len(walk.leaves) + walk.groups >= WALK_MAX_NODES:

@@ -143,3 +143,18 @@ def test_a_small_alias_reuse_is_read_in_full_under_the_budget():
     doc = yaml.safe_load(_alias_fanout_doc(4))
     w = ws.job_walk(doc["jobs"]["j"])
     assert len(w.leaves) == 16 and w.malformed_groups == 0, w
+
+
+def test_a_non_mapping_child_inside_a_group_marks_the_group_malformed():
+    """A flat `steps:` list has always skipped a non-mapping item, but inside a
+    `parallel:` list a dropped child is a step the walk did not read: the group
+    is counted malformed (so the job is named), and its readable children are
+    still read."""
+    job = {"steps": [{"parallel": [{"run": "npm run lint"}, "npm run typecheck",
+                                   ["nested"]]},
+                     {"run": "npm test"}, "stray"]}
+    w = ws.job_walk(job)
+    assert w.malformed_groups == 1, w
+    assert [leaf.step["run"] for leaf in w.leaves] == ["npm run lint", "npm test"]
+    # A non-mapping item at the TOP level is skipped as before: not a group.
+    assert ws.job_walk({"steps": [{"run": "a"}, "stray"]}).malformed_groups == 0
