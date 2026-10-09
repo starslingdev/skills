@@ -17,8 +17,8 @@ license: MIT
 
 # ci-speedup — CI Optimization Audit for GitHub Actions
 
-Audits a repository's GitHub Actions workflows against a 79-pattern
-catalog — 72 **hygiene/data-driven** patterns plus 7 **structural /
+Audits a repository's GitHub Actions workflows against an 80-pattern
+catalog — 73 **hygiene/data-driven** patterns plus 7 **structural /
 critical-path** patterns routed from the measured long pole — and
 produces a **root-cause-analysis** report with measured impact on two
 axes — developer wall-clock wait and runner-minutes (cloud bill). The
@@ -47,7 +47,7 @@ findings with a stamped wall-clock-neutrality certificate promote into
 **"Runner-minute reductions (wall-clock-neutral)"**; they cut bill/capacity
 without touching the merge gate and must be source-backed. Everything else drops
 to **"Also noticed"**: modeled, uncertified, advisory, residual hygiene, or
-credited wall-clock levers flagged as on-path.
+credited wall-clock levers flagged as on-path (OPT81 and OPT79 pole findings render at their pole or in their own section, never there).
 
 The spine is **scoped to the merge-blocking checks**: when the data pass resolves
 a real required-check set (branch protection / rulesets, already fetched — read
@@ -97,7 +97,7 @@ that has produced confident-but-wrong findings before; they surface as a
 
 ## Structural / critical-path findings (the high-leverage track)
 
-On real repos almost every hygiene hit (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT82 — mostly declarative)
+On real repos almost every hygiene hit (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82 — mostly declarative)
 moves **~0 developer wall-clock** — the true bottleneck is usually a check working
 as intended that is simply the slowest thing gating the merge, with no catalog
 match. The **structural track** (category 14, OPT70–OPT75 plus OPT78) attacks that: a second
@@ -417,7 +417,7 @@ agreement. A finding only one pass would defend is cut or escalated, not kept.
 
 ## Pattern catalog
 
-`references/optimization-patterns.md` declares all 79 patterns across 14
+`references/optimization-patterns.md` declares all 80 patterns across 14
 categories (Caching, Redundancy, Docker, Parallelization, Actions and
 Checkout, Conditional Execution, Trigger and Scope, Release Workflow, Queue
 Times and Concurrency, Timing Anomalies, Stack-Specific, Build Caching,

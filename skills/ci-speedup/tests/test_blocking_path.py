@@ -3090,6 +3090,70 @@ def test_every_recordable_withhold_gate_has_a_plain_english_phrase():
         assert phrase and "_" not in phrase and "$" not in phrase, phrase
 
 
+def test_opt81_every_recordable_withhold_gate_has_a_plain_english_phrase():
+    """OPT81's two detectors list a candidate only through `_no(gate, job)` —
+    a gate passed WITH a job name. Read every such call off both detectors'
+    source: each non-verdict gate needs a phrase, and every phrase must be a
+    gate something can record."""
+    import ast
+    tree = ast.parse((_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8"))
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    found: set[str] = set()
+    for fname in ("_detect_opt81_measured_runner_gap",
+                  "_detect_opt81_runner_size_advisory"):
+        for c in ast.walk(fns[fname]):
+            if (isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                    and c.func.id == "_no" and len(c.args) >= 2
+                    and isinstance(c.args[0], ast.Constant)):
+                found.add(c.args[0].value)
+    found -= set(cr._OPT81_VERDICT_GATES)
+    assert {"step_lists_differ", "fewer_than_min_samples_on_two_labels",
+            "runner_label_not_classifiable_by_size"} <= found, found
+    assert found == set(bp._OPT81_WITHHOLD_PHRASES), (
+        sorted(found ^ set(bp._OPT81_WITHHOLD_PHRASES)))
+    assert not set(bp._OPT81_WITHHOLD_PHRASES) & set(cr._OPT81_VERDICT_GATES)
+    for phrase in bp._OPT81_WITHHOLD_PHRASES.values():
+        assert phrase and "_" not in phrase and "$" not in phrase, phrase
+
+
+def test_opt81_held_back_row_renders_in_plain_english():
+    rows = [{"workflow_file": ".github/workflows/ci.yml", "job": "bench",
+             "gate": "step_lists_differ", "half": "A1"}]
+    line = bp._withheld_candidates_line(
+        {bp._OPT81_WITHHELD_DOC_KEY: rows}, bp._OPT81_WITHHELD_DOC_KEY,
+        "candidate job(s)")
+    assert line == ("1 candidate job(s) held back (bench): the job did not run the "
+                    "same steps on both runner labels, so it is not the same job on "
+                    "both."), line
+    assert any(r.doc_key == bp._OPT81_WITHHELD_DOC_KEY for r in bp._WITHHELD_ROWS)
+
+
+def test_opt81_pole_join_agrees_with_the_data_driven_join_on_a_sibling_matrix_leg():
+    """A credited OPT81 finding on a SIBLING leg of the pole's matrix (same base,
+    different params) does not render at this pole (`_opt81_for_pole` matches only
+    the exact job or its unexpanded base), so the data-driven join must not claim
+    it either: otherwise `_dd_where` points the reader to an OPT81 card "below this
+    pole's prompt" that renders in the unrouted section instead."""
+    wf = ".github/workflows/bench.yml"
+    pole = {"check": "bench (ubuntu-latest)", "job": "bench (ubuntu-latest)",
+            "workflow_file": wf}
+    sibling = {"pattern": "OPT81", "workflow_file": wf, "wall_clock_p50_s": 60.0,
+               "affected_jobs": ["bench (ubuntu-24.04)"],
+               "faster_runner": {"half": "A1"}}
+    assert bp._saves_wall_clock(sibling)
+    assert bp._opt81_for_pole(pole, [sibling]) == []
+    assert bp._data_driven_for_pole(pole, [sibling]) == []
+    # The exact leg and the unexpanded base still join both ways.
+    for job in ("bench (ubuntu-latest)", "bench"):
+        own = dict(sibling, affected_jobs=[job])
+        assert bp._opt81_for_pole(pole, [own]) == [own]
+        assert bp._data_driven_for_pole(pole, [own]) == [own]
+    # A non-OPT81 credited finding keeps the same-matrix sibling fold.
+    other = dict(sibling, pattern="OPT24")
+    other.pop("faster_runner")
+    assert bp._data_driven_for_pole(pole, [other]) == [other]
+
+
 def _opt82_gates_recorded_in_the_detector():
     """Every gate literal OPT82's detector hands to its `_no(...)` recorder,
     read from the detector's own source."""
@@ -8859,10 +8923,10 @@ def test_no_collector_path_can_record_a_held_back_entry_with_no_job():
         elif (isinstance(n, ast.Assign)
               and any(_is_target(t) for t in n.targets)):
             writes.append(("=", n))
-    # 77, 79 pre-probe, 79 post-probe, 80, 82 (guarded by `and job` in its
-    # `_no` helper) — and every one of them an `append(<dict literal>)`, never
-    # an `extend`, an `insert` or a `+=`.
-    assert len(writes) == 5, [(k, ast.dump(n)[:60]) for k, n in writes]
+    # 77, 79 pre-probe, 79 post-probe, 80, 81 A1, 81 A2, 82 (guarded by `and job`
+    # in its `_no` helper) — and every one of them an `append(<dict literal>)`,
+    # never an `extend`, an `insert` or a `+=`.
+    assert len(writes) == 7, [(k, ast.dump(n)[:60]) for k, n in writes]
     for kind, n in writes:
         assert kind == "append", (kind, ast.dump(n)[:80])
         d = n.args[0]

@@ -64,6 +64,7 @@ _FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "gh_replay"
 
 sys.path.insert(0, str(_SCRIPTS))
 import collect_runs as cr  # noqa: E402
+import blocking_path as bp  # noqa: E402
 import run as _run_py  # noqa: E402
 
 # The synthetic repo/workflow the committed fixture corpus was recorded
@@ -115,7 +116,7 @@ _JOB_ID = 9001
 #            pins `setup-node@v4`, so the read never happens here (asserted via
 #            `data_sources.setup_node_package_json.needed`), and on a repo that
 #            needs it the cost is +0 with a checkout, +1 without.)
-#   68  now  (+12 for the two OPT77 whole-workflow workflows added to the corpus,
+#   68  then (+12 for the two OPT77 whole-workflow workflows added to the corpus,
 #            `checks.yml` (1004) and `gates.yml` (1005) — SIX calls each, and the
 #            same six any workflow costs: one all-status run-list page, three
 #            `runs/{id}/jobs` pages (three sampled runs each), one `per_page=1`
@@ -156,10 +157,18 @@ _JOB_ID = 9001
 #            replay fixture costs +0 as well: the required-checks endpoint it
 #            answers was already called, so the fixture only supplies the
 #            response for an existing call.)
-#   88  now  (main merged into the OPT82 branch again, after #114: 82 + 6 for
+#   88  then (main merged into the OPT82 branch again, after #114: 82 + 6 for
 #            `lint.yml` (OPT82). OPT80's five calls are `ci.yml` runs and
 #            their checkout logs; `lint.yml` reads no logs, so they add.)
-_GOLDEN_GH_QUERY_COUNT = 88
+#   99  now  (main merged into the OPT81 branch, after #117: 88 + 11 for
+#            OPT81's measured half: `bench.yml` (1007), a push-only
+#            runner-comparison matrix. Its cost is the same any workflow pays: one
+#            all-status run-list page, EIGHT `runs/{id}/jobs` pages (eight sampled
+#            runs, two `bench` legs each), one `per_page=1` monthly-volume count and
+#            one `commits?path=<wf>&per_page=2` config-era lookup. OPT81 itself adds
+#            ZERO calls: both halves read only the jobs payloads and the critical
+#            path already in hand, with no log, no billing endpoint and no rate table.)
+_GOLDEN_GH_QUERY_COUNT = 99
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).
@@ -563,6 +572,46 @@ export default {
 """
 
 
+# OPT81 A1 (wf id 1007, runs 8301-8308; these never collide with OPT82's
+# `lint.yml`, which holds 1006 / 8201-8203).
+# A runner-comparison matrix: one job, `bench`, with a
+# STATIC display name, run on a standard GitHub-hosted label and on a larger
+# GitHub-hosted size in every one of eight push runs (the workflow is
+# `on: push`) — the same steps on both, 150s at the median on `ubuntu-latest`
+# and 90s on `ubuntu-latest-8-cores`.
+# The repo's own history therefore already holds both distributions, eight
+# successful samples each, which is exactly what A1 compares; nothing is
+# projected.
+#
+# Blast radius, chosen deliberately: `bench` is this workflow's long pole, but
+# both labels run in every one of the eight runs, so A1 reads it as a runner
+# matrix: the gap is measured and stated, and no wall-clock is credited (every
+# run executes both legs). The workflow is push-only, so even a credited gap
+# would be floored to 0 by `bound_developer_facing` (not a pull-request wait).
+# The headline, the chain and every pole assertion above stay exactly as they
+# were. Making it the pole would have rewritten the headline to prove nothing
+# A1's own unit tests do not.
+# `timeout-minutes` is declared so OPT57 plans no extra event-scoped run list.
+_WF7_ID = 1007
+_WF7_YAML = """name: Bench
+on:
+  push:
+
+jobs:
+  bench:
+    name: bench
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-latest-8-cores]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run benchmarks
+        run: npm run bench
+"""
+
+
 def _init_repo(root: Path, origin: str | None = _REPO,
                eslint_config: str = _ESLINT_CONFIG_TYPE_AWARE) -> None:
     """A one-commit git checkout carrying just the workflows the fixture corpus
@@ -581,6 +630,7 @@ def _init_repo(root: Path, origin: str | None = _REPO,
     (root / ".github" / "workflows" / "checks.yml").write_text(_WF4_YAML, encoding="utf-8")
     (root / ".github" / "workflows" / "gates.yml").write_text(_WF5_YAML, encoding="utf-8")
     (root / ".github" / "workflows" / "lint.yml").write_text(_WF6_YAML, encoding="utf-8")
+    (root / ".github" / "workflows" / "bench.yml").write_text(_WF7_YAML, encoding="utf-8")
     (root / "package.json").write_text(_PACKAGE_JSON, encoding="utf-8")
     (root / "eslint.config.mjs").write_text(eslint_config, encoding="utf-8")
     (root / "eslint-rules").mkdir()
@@ -631,7 +681,7 @@ def _monthly_volume_endpoints_bracket() -> list[str]:
     for off in range(-1, 31):
         since = ((now + _dt.timedelta(seconds=off)) - _dt.timedelta(days=30)
                  ).strftime("%Y-%m-%dT%H:%M:%SZ")
-        for wf_id in (_WF_ID, _WF2_ID, _WF3_ID, _WF4_ID, _WF5_ID, _WF6_ID):
+        for wf_id in (_WF_ID, _WF2_ID, _WF3_ID, _WF4_ID, _WF5_ID, _WF6_ID, _WF7_ID):
             out.append(f"repos/{_REPO}/actions/workflows/{wf_id}/runs"
                        f"?per_page=1&created=>={since}")
             out.append(f"repos/{_REPO}/actions/workflows/{wf_id}/runs"
@@ -1238,7 +1288,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # Which YAML source fed the detectors is a fact ABOUT the report, so it is stamped.
     # `--root` is a real checkout of the synthetic repo here, so every workflow is read
     # off disk and none over the API.
-    assert ds.get("workflow_yaml_source") == {"checkout": 6, "api": 0}, (
+    assert ds.get("workflow_yaml_source") == {"checkout": 7, "api": 0}, (
         f"workflow YAML provenance not stamped as expected: {ds.get('workflow_yaml_source')!r}")
 
     render = subprocess.run(
@@ -1313,7 +1363,9 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # The tail is never summed into a total: the replay corpus's runner-minute
     # total and its sample size are pinned to the exact figures, so a tail that
     # leaks into the credited minutes (or the sample count) moves a number here.
-    assert "| **Runs analyzed** | 32 runs / 163 jobs across 6 workflows |" in report, (
+    # 40 runs / 179 jobs / 7 workflows: main's 32 / 163 / 6 plus OPT81's push-only
+    # `bench.yml` (1007: 8 sampled runs, two `bench` legs each = 16 jobs).
+    assert "| **Runs analyzed** | 40 runs / 179 jobs across 7 workflows |" in report, (
         _head)
     assert ("423 min/mo of wall-clock-neutral runner minutes is recoverable "
             "(8 neutral findings; none can slow a merge)") in _head, _head
@@ -1485,6 +1537,107 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
         # the FULL problem phrase, not just its last word: a different check
         # failing on an unrelated field would otherwise satisfy this
         assert _check in _v.stdout, (_check, _v.stdout)
+
+    # ---- OPT81, both halves, end to end ---------------------------------------
+    # A1 (bench.yml, wf 1007): one job measured on two runner classes in runs the
+    # repo already made. Every number is the corpus's own: 150s median on eight
+    # `ubuntu-latest` runs, 90s on eight `ubuntu-latest-8-cores` runs, the same
+    # five steps on both. Both labels run in every run (a runner matrix), so the
+    # 60s gap is stated and never credited.
+    o81 = [f for f in data["findings"] if f.get("pattern") == "OPT81"]
+    o81_a1 = [f for f in o81 if (f.get("faster_runner") or {}).get("half") == "A1"]
+    o81_a2 = [f for f in o81 if (f.get("faster_runner") or {}).get("half") == "A2"]
+    assert len(o81_a1) == 1, [f.get("affected_jobs") for f in o81_a1]
+    fr = o81_a1[0]["faster_runner"]
+    assert o81_a1[0]["workflow_file"] == ".github/workflows/bench.yml", o81_a1[0]
+    assert o81_a1[0]["affected_jobs"] == ["bench"], o81_a1[0]
+    assert {k: v for k, v in fr["slow"].items() if not k.endswith("_run_at")} == {"label": "ubuntu-latest", "class": "github-standard",
+                          "os": "linux", "arch": "x64", "size": "",
+                          "p50_s": 150.0, "n": 8}, fr["slow"]
+    assert {k: v for k, v in fr["fast"].items() if not k.endswith("_run_at")} == {"label": "ubuntu-latest-8-cores", "class": "github-larger",
+                          "os": "linux", "arch": "x64", "size": "8",
+                          "p50_s": 90.0, "n": 8}, fr["fast"]
+    assert fr["gap_s"] == 60.0 and fr["floor_s"] == 37.5, fr
+    assert fr["slow"]["first_run_at"] and fr["fast"]["last_run_at"], fr
+    assert len(fr["rows"]) == 16, fr["rows"]
+    assert fr["job_is_workflow_long_pole"] is True, fr
+    assert fr["runner_matrix"] is True, fr
+    assert fr["credited_pre_cascade_s"] == 0.0, fr
+    assert "every run executes both legs" in fr["credit_reason"], fr
+    assert o81_a1[0]["wall_clock_p50_s"] in (0, 0.0), o81_a1[0]
+    assert o81_a1[0]["runner_min_saving"] is None, o81_a1[0]
+    assert "runs this repository already made" in o81_a1[0]["evidence"]
+    assert cr._OPT81_DISCLOSURE in o81_a1[0]["evidence"]
+    # A2 (ci.yml `test`): the merge-gating long pole, dominant step `Run tests`
+    # (compute), on `ubuntu-latest`, with only the generic OPT75 decompose lever
+    # beside it. The advisory fires with no number anywhere.
+    assert len(o81_a2) == 1, [(f.get("workflow_file"), f.get("affected_jobs"))
+                              for f in o81_a2]
+    a2 = o81_a2[0]
+    assert a2["workflow_file"] == ".github/workflows/ci.yml", a2
+    assert a2["affected_jobs"] == ["test"], a2
+    assert a2.get("advisory") is True, a2
+    assert a2.get("wall_clock_p50_s") is None and a2.get("runner_min_saving") is None, a2
+    assert a2["faster_runner"]["dominant_step"] == "Run tests", a2["faster_runner"]
+    assert a2["faster_runner"]["benchmark_required"] is True
+    assert a2["faster_runner"]["cheaper_levers_checked"], a2["faster_runner"]
+    # …and NOT on chained.yml's `prep`: that pole already carries OPT72, a cheaper
+    # structural lever, so the last-resort advisory is suppressed and counted.
+    assert not [f for f in o81_a2 if "chained.yml" in f["workflow_file"]]
+    _g81 = data.get("opt81_withheld_by_gate")
+    assert isinstance(_g81, dict), data.get("opt81_withheld_by_gate")
+    assert _g81.get("a2_cheaper_structural_lever_on_the_pole") == 1, _g81
+    assert data.get("opt81_withheld_candidates") == [], data.get(
+        "opt81_withheld_candidates")
+    # The reader sees both: the measured A1 card in the runner-class section (its
+    # job is not a rendered pole) and the A2 advisory inside the `CI / test`
+    # pole's section, after its OPT75 block, each carrying the disclosure line.
+    assert report.count(cr._OPT81_DISCLOSURE) >= 2, report.count(cr._OPT81_DISCLOSURE)
+    _ci_pole = next(sec for sec in report.split("\n## ")
+                    if "Long pole" in sec.splitlines()[0]
+                    and "CI / test" in sec.splitlines()[0])
+    assert "OPT81" in _ci_pole, _ci_pole[:600]
+    assert _ci_pole.index("OPT75") < _ci_pole.index("OPT81"), (
+        "the advisory must render AFTER the pole's OPT75 decomposition")
+    # This render reads no job log, so the advisory's render-time log-level check
+    # cannot run: it fails closed to a held-back line, never a full recipe.
+    assert bp._OPT81_A2_HELD_NO_LOG in _ci_pole, _ci_pole[-1500:]
+    assert "installing the StarSling GitHub app" not in report
+    # With the pole's log read (and matching no log-level lever), the full
+    # advisory renders, states that the check passed, and still verifies.
+    _o81_log = tmp_path / "ci_test.log"
+    _o81_log.write_text("##[group]Run tests\nall tests passed\n##[endgroup]\n",
+                        encoding="utf-8")
+    _o81_report = tmp_path / "report_opt81_with_log.md"
+    _r = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "blocking_path.py"), "--in", str(findings_path),
+         "--out", str(_o81_report), "--log", f"ci.yml={_o81_log}"],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert _r.returncode == 0, _r.stderr
+    _logged = _o81_report.read_text(encoding="utf-8")
+    _ci_pole_logged = next(sec for sec in _logged.split("\n## ")
+                           if "Long pole" in sec.splitlines()[0]
+                           and "CI / test" in sec.splitlines()[0])
+    assert "installing the StarSling GitHub app" in _ci_pole_logged
+    assert bp._OPT81_A2_LOG_CHECKED in _ci_pole_logged
+    _v = subprocess.run(
+        [sys.executable, str(_SKILL_DIR / "tests" / "verify_report.py"),
+         "--report", str(_o81_report), "--findings", str(findings_path)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert "OPT81 runner-class comparisons" in _v.stdout, _v.stdout
+    assert not [l for l in _v.stdout.splitlines()
+                if "OPT81" in l and "FAIL" in l], _v.stdout
+    # A tampered A1 median must redden the report's own self-check.
+    _bad = json.loads(findings_path.read_text(encoding="utf-8"))
+    [f for f in _bad["findings"] if f.get("pattern") == "OPT81"
+     and f["faster_runner"]["half"] == "A1"][0]["faster_runner"]["fast"]["p50_s"] = 80.0
+    _bad_path = tmp_path / "findings_tampered_opt81.json"
+    _bad_path.write_text(json.dumps(_bad), encoding="utf-8")
+    _v = subprocess.run(
+        [sys.executable, str(_SKILL_DIR / "tests" / "verify_report.py"),
+         "--report", str(report_path), "--findings", str(_bad_path)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert _v.returncode != 0 and "OPT81" in _v.stdout, _v.stdout
 
     # ---- PR-H1 (G5): the promoted-path backstop — UNCONDITIONAL. -------------
     # Before this, the replay corpus promoted nothing, so the Tier-2 render

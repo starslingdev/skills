@@ -893,6 +893,7 @@ def _detectors_skipped_violation(report: str,
 # coupling test pins all three equal).
 _VR_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _VR_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
+_VR_OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 _VR_OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
 # (doc key, Data sources row label, counted noun, "Used for" cell) — as
 # blocking_path renders them. ONE re-derivation serves all three patterns.
@@ -926,6 +927,12 @@ _VR_WITHHELD_ROWS = (
     _VrWithheldRow(_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back",
                    "candidate checkout(s)",
                    "Why a checkout with a slow tail produced no finding",
+                   "job"),
+    _VrWithheldRow(_VR_OPT81_WITHHELD_DOC_KEY, "runner class: held back",
+                   "candidate job(s)",
+                   "Why a job that ran on more than one runner label, or a long pole "
+                   "whose step timings could not be read, produced no runner-class "
+                   "finding",
                    "job"),
     _VrWithheldRow(_VR_OPT82_WITHHELD_DOC_KEY, "type-aware lint: held back",
                    "candidate lint job(s)",
@@ -991,6 +998,26 @@ _VR_OPT80_WITHHOLD_PHRASES = {
         "there were more slow runs than the audit reads logs for, and the rest "
         "were never read",
 }
+_VR_OPT81_WITHHOLD_PHRASES = {
+    "runner_label_not_classifiable_by_size":
+        "a runner label could not be classified by size (a self-hosted or custom "
+        "label), so no runner-class comparison could be made",
+    "fewer_than_min_samples_on_two_labels":
+        "the job ran on more than one runner label, but not often enough on two "
+        "of them to compare their medians",
+    "more_than_two_qualifying_runner_labels":
+        "the job ran often enough on three or more runner labels, so there is no "
+        "single pair to compare",
+    "step_lists_differ":
+        "the job did not run the same steps on both runner labels, so it is not "
+        "the same job on both",
+    "not_interleaved":
+        "the two labels ran in different periods (a runner switch), so the gap "
+        "could come from code changes made in between, not the runner",
+    "a2_dominant_step_unresolved":
+        "the long pole's step timings could not be read, so whether its time is "
+        "compute could not be established",
+}
 _VR_OPT82_WITHHOLD_PHRASES = {
     "lint_step_uses_runtime_expression":
         "the lint step's command or working directory is only known when the "
@@ -1045,6 +1072,7 @@ _VR_WITHHELD_PHRASES_BY_KEY = {
     _VR_OPT77_WITHHELD_DOC_KEY: _VR_OPT77_WITHHOLD_PHRASES,
     _VR_OPT79_WITHHELD_DOC_KEY: _VR_OPT79_HELD_BACK_REASONS,
     _VR_OPT80_WITHHELD_DOC_KEY: _VR_OPT80_WITHHOLD_PHRASES,
+    _VR_OPT81_WITHHELD_DOC_KEY: _VR_OPT81_WITHHOLD_PHRASES,
     _VR_OPT82_WITHHELD_DOC_KEY: _VR_OPT82_WITHHOLD_PHRASES,
 }
 _VR_WITHHELD_JOBS_SHOWN = 5
@@ -11220,6 +11248,411 @@ _SANCTIONED_PRICING_PHRASE = "multiply by your runner's per-minute rate to get d
 _BACKTICK_SPAN_RE = re.compile(r"`[^`]*`")
 
 
+# =============================================================================
+# OPT81 — the same job, measurably faster on another runner class
+# =============================================================================
+# This file's OWN copies of the engine's constants and runner-class taxonomy
+# (`collect_runs._OPT81_*`, `blocking_path._OPT81_*`), all pinned in
+# tests/test_opt81_faster_runner.py:
+# `test_opt81_verifier_constants_stay_coupled_to_the_engine` pins the thresholds
+# (MIN_SAMPLES_PER_LABEL, MIN_GAP_S, MIN_GAP_FRAC, COVERED_FRAC,
+# CACHE_LEVER_MIN_S), CHEAPER_STRUCTURAL, PRESTART_PATTERNS, DISCLOSURE,
+# RUNNER_MIN_UNKNOWN, LOG_CHECKED, WITHHELD_DOC_KEY and INSTALL_SENTENCE (a
+# substring of the rendered StarSling option);
+# `test_opt81_taxonomy_is_a_named_table_with_a_verifier_twin` pins RUNNER_CLASSES
+# and RUNNER_ARCH. NUMBER_RE, RUNNER_MIN_LINE and CODE_SPAN_RE are the verifier's
+# own and have no engine twin. Every A1 number is re-derived from the stamped
+# per-run rows, never read back.
+_VR_OPT81_MIN_SAMPLES_PER_LABEL = 8
+_VR_OPT81_MIN_GAP_S = 30.0
+_VR_OPT81_MIN_GAP_FRAC = 0.25
+_VR_OPT81_COVERED_FRAC = 0.5
+_VR_OPT81_CACHE_LEVER_MIN_S = 30.0
+_VR_OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "OPT74",
+                                           "OPT78"})
+# Pre-start findings (queue wait) shorten no step of the job, so they never count
+# as a credited lever covering it (`collect_runs._PRESTART_AXIS_PATTERNS`).
+_VR_OPT81_PRESTART_PATTERNS = frozenset({"OPT43"})
+_VR_OPT81_DISCLOSURE = (
+    "The publisher of this skill sells CI runners. This finding compares your own "
+    "runs on runner classes you already use (A1), or names a class of lever and asks "
+    "you to benchmark before believing any number (A2); it never prices a runner.")
+_VR_OPT81_RUNNER_CLASSES = (
+    (re.compile(r"^starsling-(ubuntu|linux)(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", re.I),
+     "starsling", "linux"),
+    (re.compile(r"^starsling-windows(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", re.I),
+     "starsling", "windows"),
+    (re.compile(r"^starsling-macos(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", re.I),
+     "starsling", "macos"),
+    (re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?-(?P<size>\d+)-?cores?$", re.I),
+     "github-larger", "linux"),
+    (re.compile(r"^windows-(latest|\d{4}|11)(-arm)?-(?P<size>\d+)-?cores?$", re.I),
+     "github-larger", "windows"),
+    (re.compile(r"^macos-(latest|\d+)-(?P<size>x?large)$", re.I), "github-larger", "macos"),
+    (re.compile(r"^ubuntu-slim$", re.I), "github-slim", "linux"),
+    (re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?$", re.I),
+     "github-standard", "linux"),
+    (re.compile(r"^windows-(latest|\d{4}|11-arm)$", re.I), "github-standard", "windows"),
+    (re.compile(r"^macos-(latest|\d+)(-intel)?$", re.I), "github-standard", "macos"),
+)
+_VR_OPT81_RUNNER_ARCH = (
+    (re.compile(r"(^|-)arm(64)?(-|$)", re.I), "arm64"),
+    (re.compile(r"^macos-(latest|\d+)-xlarge$", re.I), "arm64"),
+    (re.compile(r"^macos-(latest|\d+)-(large|intel)$", re.I), "x64"),
+    (re.compile(r"^macos-([0-9]|1[0-3])$", re.I), "x64"),
+    (re.compile(r"^macos-(latest|\d+)$", re.I), "arm64"),
+)
+# Duration / saving / money tokens an A2 rendering must never carry. A label such
+# as `ubuntu-latest-8-cores` or the id OPT81 is not a number in this sense.
+_VR_OPT81_NUMBER_RE = re.compile(
+    r"(?<![\w-])\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds|m|min|mins|minutes|h|hours|%)"
+    r"(?![\w-])|runner-min|~\s*\d|\$\s*\d", re.I)
+_VR_OPT81_INSTALL_SENTENCE = "installing the StarSling GitHub app"
+# A full A2 card renders only after its render-time log-level sub-gate passed,
+# and says so; a card without this phrase skipped the check (fail-open).
+_VR_OPT81_LOG_CHECKED = "no log-level lever matched this pole's log"
+# The A1 card's runner-minute line may state only that the effect is unknown: a
+# different runner class bills differently and the audit carries no rate table.
+_VR_OPT81_RUNNER_MIN_LINE = "**Runner-minute effect:**"
+_VR_OPT81_RUNNER_MIN_UNKNOWN = (
+    "unknown: a different runner class bills differently and this audit carries no "
+    "rate table")
+# Inline-code spans hold repo-controlled names (a job, a step, a label). A step
+# called `Run tests (30s timeout)` is a name, not a promised saving, so the
+# number ban reads only the advisory's own prose.
+_VR_OPT81_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+
+
+def _vr_opt81_number_in(text: str) -> "re.Match[str] | None":
+    return _VR_OPT81_NUMBER_RE.search(_VR_OPT81_CODE_SPAN_RE.sub("``", text or ""))
+
+
+def _vr_opt81_label_arch(tok: str) -> str:
+    for rx, arch in _VR_OPT81_RUNNER_ARCH:
+        if rx.search(tok):
+            return arch
+    return "x64"
+
+
+def _vr_opt81_runner_class(label: object) -> "tuple[str, str, str, str] | None":
+    toks = [t for t in str(label or "").split() if t]
+    if not toks:
+        return None
+    found: set = set()
+    for tok in toks:
+        for rx, cls, os_ in _VR_OPT81_RUNNER_CLASSES:
+            m = rx.match(tok)
+            if m:
+                size = str(m.groupdict().get("size") or "").lower()
+                found.add((cls, os_, _vr_opt81_label_arch(tok), size))
+                break
+    if "self-hosted" in {t.lower() for t in toks} and not any(
+            f[0] == "starsling" for f in found):
+        return None
+    if len(found) != 1:
+        return None
+    return next(iter(found))
+
+
+def _vr_opt81_utc(value: str):
+    from datetime import datetime, timezone
+    if not value:
+        return None
+    try:
+        t = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
+
+
+def _vr_opt81_step_sha(names: list) -> str:
+    import hashlib
+    return hashlib.sha256("\n".join(str(n) for n in names).encode("utf-8")).hexdigest()[:16]
+
+
+def _vr_opt81_toks(s: str) -> frozenset:
+    return frozenset(t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t)
+
+
+def _opt81_a1_rederived(f: dict, data: "dict | None" = None) -> list[str]:
+    """Every number an A1 finding states, re-derived from its own stamped rows.
+    A credit additionally needs the slow label to be the population the pole's
+    p50 describes: the stamped `pole_runner_label`, and (when the findings doc is
+    given and carries it) `per_workflow_timing[wf].job_runner[job]`."""
+    fid = str(f.get("id") or "?")
+    fr = _as_dict(f.get("faster_runner"))
+    out: list[str] = []
+    rows = [r for r in _as_list(fr.get("rows")) if isinstance(r, dict)]
+    by_label: dict[str, list[dict]] = {}
+    for r in rows:
+        by_label.setdefault(str(r.get("label") or ""), []).append(r)
+    slow, fast = _as_dict(fr.get("slow")), _as_dict(fr.get("fast"))
+    ls, lf = str(slow.get("label") or ""), str(fast.get("label") or "")
+    if set(by_label) != {ls, lf} or ls == lf:
+        return [f"OPT81 {fid}: the stamped rows carry labels {sorted(by_label)}, not the "
+                f"two compared labels `{ls}` and `{lf}`"]
+    p50: dict[str, float] = {}
+    for side, lb in (("slow", ls), ("fast", lf)):
+        durs = [_num(r.get("duration_s")) for r in by_label[lb]]
+        if any(d is None or d <= 0 for d in durs):
+            out.append(f"OPT81 {fid}: a `{lb}` row has no positive duration")
+            continue
+        n = len(durs)
+        st = slow if side == "slow" else fast
+        if st.get("n") != n:
+            out.append(f"OPT81 {fid}: {side} n is {st.get('n')!r}, the rows give {n}")
+        if n < _VR_OPT81_MIN_SAMPLES_PER_LABEL:
+            out.append(f"OPT81 {fid}: `{lb}` has {n} sample(s), below the "
+                       f"{_VR_OPT81_MIN_SAMPLES_PER_LABEL} the comparison requires")
+        p = round(_vr_percentile([float(d) for d in durs], 50), 1)
+        p50[side] = p
+        if abs((_num(st.get("p50_s")) or -1.0) - p) > 0.05:
+            out.append(f"OPT81 {fid}: {side} p50_s {st.get('p50_s')!r} does not "
+                       f"re-derive (the rows give {p})")
+        rc = _vr_opt81_runner_class(lb)
+        if rc is None:
+            out.append(f"OPT81 {fid}: `{lb}` cannot be classified by size, so it "
+                       "cannot be compared")
+        elif (st.get("class"), st.get("os"), st.get("arch"), st.get("size")) != rc:
+            out.append(f"OPT81 {fid}: `{lb}` is stamped {st.get('class')}/{st.get('os')}/"
+                       f"{st.get('arch')}/{st.get('size')!r} but classifies as "
+                       f"{rc[0]}/{rc[1]}/{rc[2]}/{rc[3]!r}")
+    if out:
+        return out
+    cs, cf = _vr_opt81_runner_class(ls), _vr_opt81_runner_class(lf)
+    if cs[1] != cf[1]:
+        out.append(f"OPT81 {fid}: `{ls}` and `{lf}` run different operating systems")
+    if cs[2] != cf[2]:
+        out.append(f"OPT81 {fid}: `{ls}` and `{lf}` use different processor "
+                   f"architectures ({cs[2]}, {cf[2]}); the gap would measure the "
+                   "architecture, not the runner")
+    if (cs[0], cs[3]) == (cf[0], cf[3]):
+        out.append(f"OPT81 {fid}: `{ls}` and `{lf}` are the same runner class "
+                   f"({cs[0]}); that is an image-version comparison")
+    names = [str(n) for n in _as_list(fr.get("step_names"))]
+    sha = _vr_opt81_step_sha(names)
+    if fr.get("step_list_sha") != sha:
+        out.append(f"OPT81 {fid}: step_list_sha does not match the stamped step names")
+    if any(r.get("step_list_sha") != sha for r in rows):
+        out.append(f"OPT81 {fid}: not every compared run executed the same step list")
+    if p50["slow"] <= p50["fast"]:
+        out.append(f"OPT81 {fid}: `{ls}` is stamped slower but its median is not")
+    gap = round(p50["slow"] - p50["fast"], 1)
+    floor = round(max(_VR_OPT81_MIN_GAP_S, _VR_OPT81_MIN_GAP_FRAC * p50["slow"]), 1)
+    if abs((_num(fr.get("gap_s")) or -1.0) - gap) > 0.05:
+        out.append(f"OPT81 {fid}: gap_s {fr.get('gap_s')!r} does not re-derive ({gap})")
+    if abs((_num(fr.get("floor_s")) or -1.0) - floor) > 0.05:
+        out.append(f"OPT81 {fid}: floor_s {fr.get('floor_s')!r} does not re-derive ({floor})")
+    if gap < floor:
+        out.append(f"OPT81 {fid}: the {gap}s gap is below its {floor}s floor")
+    for key, want in (("min_samples_per_label", _VR_OPT81_MIN_SAMPLES_PER_LABEL),
+                      ("min_gap_s", _VR_OPT81_MIN_GAP_S),
+                      ("min_gap_frac", _VR_OPT81_MIN_GAP_FRAC)):
+        if _num(fr.get(key)) != float(want):
+            out.append(f"OPT81 {fid}: stamped {key} {fr.get(key)!r} is not {want}")
+    # Runner matrix (the two labels co-occur in at least half of the smaller
+    # population's runs) or, otherwise, the two populations must overlap in time.
+    ids = {lb: {r.get("run_id") for r in by_label[lb] if r.get("run_id") is not None}
+           for lb in (ls, lf)}
+    shared = ids[ls] & ids[lf]
+    matrix = bool(shared) and 2 * len(shared) >= min(len(ids[ls]), len(ids[lf]))
+    if fr.get("runner_matrix") is not matrix:
+        out.append(f"OPT81 {fid}: runner_matrix {fr.get('runner_matrix')!r} does not "
+                   f"re-derive from the rows' run ids ({matrix})")
+    spans: dict[str, tuple] = {}
+    for lb in (ls, lf):
+        ts = [_vr_opt81_utc(str(r.get("at") or "")) for r in by_label[lb]]
+        spans[lb] = (None, None) if (not ts or None in ts) else (min(ts), max(ts))
+    if not matrix:
+        (s0, s1), (f0, f1) = spans[ls], spans[lf]
+        if None in (s0, s1, f0, f1) or not (s0 <= f1 and f0 <= s1):
+            out.append(f"OPT81 {fid}: `{ls}` and `{lf}` ran in different periods (or "
+                       "a run time is missing), so the gap is not a runner comparison")
+    for side, lb in (("slow", ls), ("fast", lf)):
+        st = slow if side == "slow" else fast
+        lo, hi = spans[lb]
+        if lo is not None and (_vr_opt81_utc(str(st.get("first_run_at") or "")) != lo
+                               or _vr_opt81_utc(str(st.get("last_run_at") or "")) != hi):
+            out.append(f"OPT81 {fid}: {side} first_run_at/last_run_at do not re-derive "
+                       "from the rows")
+    pre = _num(fr.get("credited_pre_cascade_s"))
+    n_slow, n_fast = len(by_label[ls]), len(by_label[lf])
+    if pre is None or pre < 0 or pre > gap + 0.05:
+        out.append(f"OPT81 {fid}: credited_pre_cascade_s {fr.get('credited_pre_cascade_s')!r} "
+                   f"exceeds the measured {gap}s gap")
+    elif pre > 0 and matrix:
+        out.append(f"OPT81 {fid}: wall-clock pre-credited on a runner matrix (both legs "
+                   "run in every run)")
+    elif pre > 0 and not (fr.get("job_is_workflow_long_pole") is True
+                          and n_slow > n_fast):
+        out.append(f"OPT81 {fid}: wall-clock pre-credited on a job that is not its "
+                   "workflow's long pole on the slower label (strictly more runs on "
+                   "the slower label)")
+    elif pre > 0:
+        pole_label = str(fr.get("pole_runner_label") or "")
+        timing = _as_dict(_as_dict(_as_dict(_as_dict(data).get("per_workflow_timing"))
+                                   .get(str(f.get("workflow_file") or "")))
+                          .get("job_runner"))
+        job = str(fr.get("job") or "")
+        if pole_label != ls:
+            out.append(f"OPT81 {fid}: wall-clock pre-credited, but the stamped pole "
+                       f"label `{pole_label}` is not the slower label `{ls}`; the gap "
+                       "does not describe the population the pole's median is "
+                       "measured on")
+        elif job in timing and str(timing[job]) != ls:
+            out.append(f"OPT81 {fid}: wall-clock pre-credited, but per_workflow_timing "
+                       f"measures the pole on `{timing[job]}`, not the slower label "
+                       f"`{ls}`; the gap does not describe that population")
+    wc = _num(f.get("wall_clock_p50_s")) or 0.0
+    if wc > (pre or 0.0) + 0.05:
+        out.append(f"OPT81 {fid}: wall_clock_p50_s {wc} exceeds its pre-cascade credit")
+    if f.get("runner_min_saving") is not None:
+        out.append(f"OPT81 {fid}: an A1 finding carries a runner-minute saving; a "
+                   "different runner class bills differently and none may be stated")
+    return out
+
+
+def _opt81_a2_rederived(f: dict, data: dict) -> list[str]:
+    """An A2 advisory carries no number, and gate (d) holds on the findings doc."""
+    fid = str(f.get("id") or "?")
+    fr = _as_dict(f.get("faster_runner"))
+    out: list[str] = []
+    if (_num(f.get("wall_clock_p50_s")) or 0.0) > 0:
+        out.append(f"OPT81 {fid}: an A2 advisory carries wall_clock_p50_s > 0")
+    if f.get("runner_min_saving") is not None:
+        out.append(f"OPT81 {fid}: an A2 advisory carries a runner_min_saving")
+    if not f.get("advisory"):
+        out.append(f"OPT81 {fid}: an A2 advisory is not marked advisory")
+    if _vr_opt81_number_in(str(f.get("evidence") or "")):
+        out.append(f"OPT81 {fid}: an A2 advisory's evidence states a number")
+    rc = _vr_opt81_runner_class(fr.get("runner_label"))
+    if rc is None or rc[0] != "github-standard":
+        out.append(f"OPT81 {fid}: A2 fires only on a standard GitHub-hosted label, not "
+                   f"`{fr.get('runner_label')}`")
+    job = str(fr.get("job") or "")
+    wf = _wf_base(str(f.get("workflow_file") or ""))
+    jt = _vr_opt81_toks(job)
+    timing = _as_dict(_as_dict(data.get("per_workflow_timing")).get(
+        str(f.get("workflow_file") or "")))
+    job_p50 = _num(_as_dict(timing.get("job_p50")).get(job)) or 0.0
+    for g in _as_list(data.get("findings")):
+        if not isinstance(g, dict) or g is f or g.get("pattern") == "OPT81":
+            continue
+        if _wf_base(str(g.get("workflow_file") or "")) != wf:
+            continue
+        if not any(str(j) == job or _vr_opt81_toks(str(j)) == jt
+                   for j in _as_list(g.get("affected_jobs"))):
+            continue
+        pat = str(g.get("pattern") or "")
+        if pat in _VR_OPT81_CHEAPER_STRUCTURAL:
+            out.append(f"OPT81 {fid}: {pat} already addresses `{job}`, so the "
+                       "last-resort advisory must not fire")
+        if pat == "OPT24":
+            out.append(f"OPT81 {fid}: a sharding finding already addresses `{job}`")
+        wc = _num(g.get("wall_clock_p50_s")) or 0.0
+        if (pat not in _VR_OPT81_PRESTART_PATTERNS and not g.get("advisory")
+                and job_p50 > 0
+                and wc >= _VR_OPT81_COVERED_FRAC * job_p50):
+            out.append(f"OPT81 {fid}: {pat} already credits {wc}s on `{job}`, at least "
+                       "half its median")
+        if pat == "OPT79" and wc >= _VR_OPT81_CACHE_LEVER_MIN_S:
+            out.append(f"OPT81 {fid}: a net-negative cache already addresses `{job}`")
+    # …and the uncredited net-negative caches, where a cache on a long pole lives.
+    for r in _as_list(data.get(_VR_OPT79_UNCREDITED_DOC_KEY)):
+        if not isinstance(r, dict):
+            continue
+        if _wf_base(str(r.get("workflow_file") or "")) != wf:
+            continue
+        rj = str(r.get("job") or "")
+        if not (rj == job or _vr_opt81_toks(rj) == jt):
+            continue
+        if (_num(r.get("waste_s")) or 0.0) >= _VR_OPT81_CACHE_LEVER_MIN_S:
+            out.append(f"OPT81 {fid}: a net-negative cache ({r.get('waste_s')}s per "
+                       f"hit) already addresses `{job}`")
+    return out
+
+
+def _opt81_rendered_block(report: str, fid: str) -> "tuple[int, str]":
+    anchor = f'<a id="opt81-{re.sub(r"[^A-Za-z0-9_.:-]+", "_", fid)}"></a>'
+    n = report.count(anchor)
+    if not n:
+        return 0, ""
+    start = report.index(anchor) + len(anchor)
+    nxt = [i for i in (report.find('<a id="', start), report.find("\n## ", start))
+           if i >= 0]
+    return n, report[start:min(nxt) if nxt else len(report)]
+
+
+def check_opt81_runner_comparison_rederived(report: str,
+                                            findings_path: Path | None) -> Check:
+    """OPT81: every A1 number re-derives from its stamped per-run rows; every A2
+    advisory carries no number and its last-resort gate holds on the findings doc;
+    every OPT81 finding renders exactly one anchored card that carries the
+    publisher disclosure, and a full A2 card names the app-install prerequisite (a
+    held-back A2 note renders no recipe, so it carries no install sentence)."""
+    name = "OPT81 runner-class comparisons re-derive and carry the publisher disclosure"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    found = [f for f in _as_list(data.get("findings"))
+             if isinstance(f, dict) and f.get("pattern") == "OPT81"]
+    if not found:
+        if '<a id="opt81-' in report:
+            return Check(name, False, "the report renders an OPT81 card, but the run "
+                         "recorded no OPT81 finding")
+        return Check(name, True, "no OPT81 findings")
+    bad: list[str] = []
+    for f in found:
+        fid = str(f.get("id") or "?")
+        fr = _as_dict(f.get("faster_runner"))
+        half = fr.get("half")
+        if fr.get("disclosure") != _VR_OPT81_DISCLOSURE:
+            bad.append(f"OPT81 {fid}: the stamped disclosure is missing or altered")
+        if half == "A1":
+            bad.extend(_opt81_a1_rederived(f, data))
+            if _VR_OPT81_DISCLOSURE not in str(f.get("evidence") or ""):
+                bad.append(f"OPT81 {fid}: the evidence does not carry the disclosure")
+        elif half == "A2":
+            bad.extend(_opt81_a2_rederived(f, data))
+        else:
+            bad.append(f"OPT81 {fid}: neither the measured (A1) nor the advisory (A2) half")
+            continue
+        n, block = _opt81_rendered_block(report, fid)
+        if n != 1:
+            bad.append(f"OPT81 {fid}: rendered {n} time(s), not exactly once")
+            continue
+        card, _sep, fence = block.partition("```text")
+        if _VR_OPT81_DISCLOSURE not in card:
+            bad.append(f"OPT81 {fid}: its rendered card does not carry the disclosure line")
+        held = "advisory held back" in block
+        if not held and _VR_OPT81_DISCLOSURE not in fence:
+            bad.append(f"OPT81 {fid}: its agent prompt does not carry the disclosure line")
+        if half == "A1":
+            s, q = _as_dict(fr.get("slow")), _as_dict(fr.get("fast"))
+            for st in (s, q):
+                want = f"at p50 {(_num(st.get('p50_s')) or 0):.0f}s"
+                if want not in block:
+                    bad.append(f"OPT81 {fid}: the card does not state `{want}` for "
+                               f"`{st.get('label')}`")
+            rm_lines = [ln for ln in card.splitlines() if _VR_OPT81_RUNNER_MIN_LINE in ln]
+            if len(rm_lines) != 1 or rm_lines[0].split(_VR_OPT81_RUNNER_MIN_LINE, 1)[1] \
+                    .strip() != f"{_VR_OPT81_RUNNER_MIN_UNKNOWN}.":
+                bad.append(f"OPT81 {fid}: the A1 card's runner-minute line must say only "
+                           f"\"{_VR_OPT81_RUNNER_MIN_UNKNOWN}\" ({rm_lines!r})")
+        elif not held:
+            if _VR_OPT81_INSTALL_SENTENCE not in block:
+                bad.append(f"OPT81 {fid}: the A2 recipe omits the app-install prerequisite")
+            if _VR_OPT81_LOG_CHECKED not in block:
+                bad.append(f"OPT81 {fid}: the A2 card renders without its log-level "
+                           "check having passed")
+            m = _vr_opt81_number_in(block)
+            if m:
+                bad.append(f"OPT81 {fid}: the A2 card states a number (`{m.group(0)}`)")
+    return Check(name, not bad,
+                 f"{len(found)} OPT81 finding(s) re-derived and paired with the disclosure"
+                 if not bad else "; ".join(bad[:6]))
+
+
 def check_no_rate_derived_dollars(report: str, findings_path: Path | None = None) -> Check:
     name = "no rate-derived dollars on the minutes surfaces"
     hits: list[str] = []
@@ -11277,6 +11710,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_opt79_uncredited_rows_rederived(report, findings_path),
         check_opt82_type_aware_lint_uncredited(report, findings_path),
         check_opt79_findings_rederived(report, findings_path),
+        check_opt81_runner_comparison_rederived(report, findings_path),
         check_tier2_total_deoverlapped(report, findings_path, report_path),
         check_no_timing_endpoint_citation(report, report_path),
         check_tier2_claims_derivation_basis(report, findings_path, report_path),

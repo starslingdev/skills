@@ -4760,8 +4760,9 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         "job_p50": job_p50,
         "job_bimodal": job_bimodal,
         # Per-job dominant runner label string (job name -> sorted labels, e.g.
-        # "ubuntu-latest"). Kept so OPT65's same-runner rounding check can resolve
-        # a finding's runner from its affected job; additive, read only there.
+        # "ubuntu-latest"): the population each job's p50 above describes. Read by
+        # OPT65's same-runner rounding check, the billed-runner lookup, and OPT81
+        # (A1's credit requires its slow label to be this one; A2's label gate).
         "job_runner": job_runner,
         # The long-pole job's runner — the population that gates the wait.
         "runner_scope": lp_runner if lp_runner and lp_runner != "?" else "all-runners",
@@ -11087,6 +11088,737 @@ def _post_failure_waste_s(legs: list[dict[str, Any]]) -> tuple[float, str, list[
             if name:
                 sibling_names.append(name)
     return wasted, fail_name, sibling_names, fail_end.isoformat()
+
+
+# =============================================================================
+# OPT81 — The Same Job Is Measurably Faster on Another Runner
+# =============================================================================
+# Two halves, kept apart on purpose.
+#
+# A1 (MEASURED). The repository's OWN sampled history already ran one job on two
+# runner CLASSES or size tiers — a standard GitHub-hosted label and a larger
+# GitHub-hosted size, GitHub's slim image and a standard one, two sizes of one
+# vendor, or a GitHub-hosted label and a StarSling one — enough times on each, with
+# the same steps, for the two medians to be compared. The gap is a fact about runs
+# the repo already made; nothing is projected. It is credited as wall-clock only
+# when the job is its workflow's long pole, the two labels are not a runner matrix,
+# the job ran on the slow label STRICTLY more often than on the fast one over the
+# two compared (successful) populations, AND the slow label is `_critical_path`'s
+# dominant label for the job (the population the long pole's p50 describes, counted
+# over every run and outcome); the generic cascade then floors it like any other
+# credited saving. Runner-minutes are NEVER credited: a different runner class
+# bills differently and this audit carries no rate table.
+#
+# A2 (ADVISORY). The lever of LAST RESORT on a merge-gating long pole that runs on
+# a standard GitHub-hosted label, whose dominant step is compute, whose job did not
+# run on two or more labels (A1 data), and for which no cheaper lever exists: no
+# OPT70–OPT74 or OPT78 on the pole; no credited non-advisory, non-pre-start finding
+# (any pattern, OPT75 included) of at least half the job's p50; no sharding finding
+# (OPT24); no net-negative cache (OPT79) of 30s or more; and, at render time, no
+# log-level leaf on the pole's log. It carries no number at all: it names a class
+# of lever and asks for a benchmark.
+#
+# The publisher of this skill sells CI runners. That is why the disclosure below is
+# stamped onto every OPT81 finding and rendered on every OPT81 surface, why the
+# advisory names exactly two options (a larger GitHub-hosted size, or StarSling
+# runners) and nothing else, and why no OPT81 text ever prices a runner.
+#
+# The constants the verifier re-derives with have a `_VR_OPT81_*` twin in
+# `tests/verify_report.py`, pinned in tests/test_opt81_faster_runner.py:
+# `test_opt81_verifier_constants_stay_coupled_to_the_engine` pins MIN_SAMPLES_PER_LABEL,
+# MIN_GAP_S, MIN_GAP_FRAC, COVERED_FRAC, CACHE_LEVER_MIN_S, CHEAPER_STRUCTURAL,
+# DISCLOSURE, RUNNER_MIN_UNKNOWN and WITHHELD_DOC_KEY (and `_PRESTART_AXIS_PATTERNS`);
+# `test_opt81_taxonomy_is_a_named_table_with_a_verifier_twin` pins RUNNER_CLASSES and
+# RUNNER_ARCH. COMPUTE_CATEGORIES, NON_COMPUTE_STEP_RE, VERDICT_GATES,
+# CLASS_DISPLAY, TITLE and FIX_STRATEGY are engine-only. The thresholds are written
+# out in the catalog's "### OPT81" entry.
+
+# Successful samples required on EACH of the two labels compared. Below this the
+# median of the smaller population is too easily one unusual run.
+_OPT81_MIN_SAMPLES_PER_LABEL = 8
+# The gap floor: p50(slow) - p50(fast) must reach max(30s, 25% of p50(slow)).
+# The absolute half keeps second-scale jitter on short jobs out; the relative
+# half keeps a 30s wobble on a 40-minute job out.
+_OPT81_MIN_GAP_S = 30.0
+_OPT81_MIN_GAP_FRAC = 0.25
+# A2: the dominant step categories that count as compute.
+_OPT81_COMPUTE_CATEGORIES = frozenset({"build", "test"})
+# A2: a dominant step whose NAME says it is waiting, sleeping or moving bytes is not
+# compute, whatever category the name also matched — more cores do not shorten it.
+_OPT81_NON_COMPUTE_STEP_RE = _re.compile(
+    r"\b(sleep|wait|waits|waiting|poll|polling|download|upload|fetch|pull|push|"
+    r"deploy|publish|curl|wget)\b", _re.I)
+# A2 (d): any credited wall-clock saving on the pole (pre-start patterns and other
+# advisories aside) at or above this share of the job's p50 is a cheaper lever.
+# This is A2's own rule, not the structural router's suppression (which reads
+# hygiene-only findings keyed on token sets); it applies to every pattern,
+# including the generic decompose lever OPT75 when OPT75 credits that much.
+_OPT81_COVERED_FRAC = 0.5
+# A2 (d): a net-negative cache (OPT79) costing at least this much per run on the
+# pole is a cheaper lever.
+_OPT81_CACHE_LEVER_MIN_S = 30.0
+# A2 (d): levers that are cheaper than hardware and suppress A2 by being present
+# on the pole: scope, de-trigger, warm build cache, shared step (OPT70-OPT73),
+# trust-boundary-forced cold work (OPT74) and per-file test isolation (OPT78).
+# OPT75 ("decompose the dominant step") is NOT in the set: it is what the router
+# says when nothing more specific applies, so its presence alone does not
+# suppress A2 (it renders first); an OPT75 credit of half the pole's median or
+# more still does, through the credited-lever rule above.
+_OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "OPT74",
+                                       "OPT78"})
+
+# The one line every OPT81 rendering carries. A STRING CONTRACT: blocking_path and
+# verify_report hold equal copies, pinned by a coupling test.
+_OPT81_DISCLOSURE = (
+    "The publisher of this skill sells CI runners. This finding compares your own "
+    "runs on runner classes you already use (A1), or names a class of lever and asks "
+    "you to benchmark before believing any number (A2); it never prices a runner.")
+_OPT81_RUNNER_MIN_UNKNOWN = (
+    "unknown: a different runner class bills differently and this audit carries no "
+    "rate table")
+_OPT81_TITLE = "The Same Job Is Measurably Faster on Another Runner"
+_OPT81_FIX_STRATEGY = "same-job-faster-on-another-runner"
+# The findings-doc key OPT81's held-back candidates go under (shared
+# `_WITHHELD_ROWS` registry in blocking_path; mirrored in verify_report).
+_OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
+# Gates that are a VERDICT on a measured candidate, not "could not tell". They are
+# tallied but never listed as held back.
+_OPT81_VERDICT_GATES = frozenset({
+    "gap_below_floor",
+    # Not this lever by design: two operating systems or two processor
+    # architectures would measure the platform, and one runner class (an image
+    # version change) is not a runner-class comparison.
+    "different_operating_system",
+    "different_architecture",
+    "same_runner_class",
+    # A2 verdicts: a cheaper lever exists, or the shape is not this lever's.
+    "a2_not_a_pull_request_workflow",
+    "a2_not_on_the_merge_gating_critical_path",
+    "a2_measured_runner_data_exists",
+    "a2_not_on_a_standard_github_hosted_label",
+    "a2_dominant_step_is_not_compute",
+    "a2_dominant_step_waits_or_moves_bytes",
+    "a2_cheaper_structural_lever_on_the_pole",
+    "a2_credited_lever_covers_the_pole",
+    "a2_sharding_lever_on_the_pole",
+    "a2_cache_lever_on_the_pole",
+})
+
+# The runner-class taxonomy. Each row: (label regex, class, operating system).
+# Matched against each individual runner label (the jobs API `labels[]`), first
+# match wins. A label no row matches cannot be classified by size and is EXCLUDED
+# from both halves (owner decision 4), counted, never guessed. A row's optional
+# `size` group is the label's size tier, so two sizes of one vendor are two
+# tiers (an A1 comparison), not one class:
+#   github-standard — a GitHub-hosted default image label.
+#   github-slim     — GitHub's single-CPU `ubuntu-slim` image.
+#   github-larger   — a larger GitHub-hosted size (named `<image>-<N>-cores`,
+#                     `<image>-<N>core`, or macOS `-large` / `-xlarge`); the
+#                     size tier is N, `large` or `xlarge`.
+#   starsling       — a StarSling runner label (`starsling-<os>-<image>[-<N>]`);
+#                     the size tier is a trailing N AFTER the image segment, so
+#                     `starsling-windows-2022` is the 2022 image, not size 2022.
+_OPT81_RUNNER_CLASSES: tuple[tuple["_re.Pattern[str]", str, str], ...] = (
+    (_re.compile(r"^starsling-(ubuntu|linux)(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", _re.I),
+     "starsling", "linux"),
+    (_re.compile(r"^starsling-windows(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", _re.I),
+     "starsling", "windows"),
+    (_re.compile(r"^starsling-macos(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", _re.I),
+     "starsling", "macos"),
+    (_re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?-(?P<size>\d+)-?cores?$", _re.I),
+     "github-larger", "linux"),
+    (_re.compile(r"^windows-(latest|\d{4}|11)(-arm)?-(?P<size>\d+)-?cores?$", _re.I),
+     "github-larger", "windows"),
+    (_re.compile(r"^macos-(latest|\d+)-(?P<size>x?large)$", _re.I), "github-larger", "macos"),
+    (_re.compile(r"^ubuntu-slim$", _re.I), "github-slim", "linux"),
+    (_re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?$", _re.I),
+     "github-standard", "linux"),
+    (_re.compile(r"^windows-(latest|\d{4}|11-arm)$", _re.I), "github-standard", "windows"),
+    (_re.compile(r"^macos-(latest|\d+)(-intel)?$", _re.I), "github-standard", "macos"),
+)
+# The processor architecture of a runner label, first match wins, else x64.
+# GitHub's macOS images: plain `macos-14` and later (and `macos-latest`) are
+# Apple silicon (arm64), `macos-13` and earlier are Intel; the `-large` sizes are
+# Intel and the `-xlarge` sizes Apple silicon; `-intel` names an Intel image. An
+# `-arm` / `arm64` label part is arm64 on every vendor. Two labels on one
+# operating system but two architectures are never compared (`different_architecture`):
+# the gap would measure the architecture, not the runner. The macOS rules are
+# derived from GitHub's image names and are anchored on `^macos-`, so they apply
+# to GitHub images only: a StarSling macOS label (`starsling-macos-14`) falls
+# through to x64 and is treated as x64 until the product documents otherwise.
+_OPT81_RUNNER_ARCH:tuple[tuple["_re.Pattern[str]", str], ...] = (
+    (_re.compile(r"(^|-)arm(64)?(-|$)", _re.I), "arm64"),
+    (_re.compile(r"^macos-(latest|\d+)-xlarge$", _re.I), "arm64"),
+    (_re.compile(r"^macos-(latest|\d+)-(large|intel)$", _re.I), "x64"),
+    (_re.compile(r"^macos-([0-9]|1[0-3])$", _re.I), "x64"),
+    (_re.compile(r"^macos-(latest|\d+)$", _re.I), "arm64"),
+)
+# Human-readable class names, for evidence prose.
+_OPT81_CLASS_DISPLAY = {
+    "github-standard": "standard GitHub-hosted",
+    "github-slim": "GitHub-hosted slim",
+    "github-larger": "larger GitHub-hosted size",
+    "starsling": "StarSling",
+}
+
+
+def _opt81_label_arch(tok: str) -> str:
+    for rx, arch in _OPT81_RUNNER_ARCH:
+        if rx.search(tok):
+            return arch
+    return "x64"
+
+
+def _opt81_class_display(cls: str, size: str) -> str:
+    base = _OPT81_CLASS_DISPLAY.get(cls, cls)
+    if not size:
+        return base
+    return f"{base}, {size}" + (" cores" if size.isdigit() and cls == "github-larger"
+                                else "")
+
+
+def _opt81_runner_class(label: str | None) -> "tuple[str, str, str, str] | None":
+    """(class, os, arch, size) for a job's runner label string (the space-joined,
+    sorted `labels[]` `_job_runner_label` returns), or None when it cannot be
+    classified by size. A `self-hosted` label set is unclassifiable unless it
+    carries a StarSling label; a set whose labels classify to two different
+    answers is unclassifiable rather than resolved by picking one."""
+    toks = [t for t in str(label or "").split() if t]
+    if not toks:
+        return None
+    found: set[tuple[str, str, str, str]] = set()
+    for tok in toks:
+        for rx, cls, os_ in _OPT81_RUNNER_CLASSES:
+            m = rx.match(tok)
+            if m:
+                size = str(m.groupdict().get("size") or "").lower()
+                found.add((cls, os_, _opt81_label_arch(tok), size))
+                break
+    if "self-hosted" in {t.lower() for t in toks} and not any(
+            f[0] == "starsling" for f in found):
+        return None
+    if len(found) != 1:
+        return None
+    return next(iter(found))
+
+
+def _opt81_executed_steps(job: dict[str, Any]) -> list[str]:
+    """The names of the steps this job occurrence actually executed, in order.
+    A step GitHub reports as skipped did not run, so a job that skips steps on
+    one label is visibly not the same job."""
+    out: list[str] = []
+    for s in job.get("steps") or []:
+        if not isinstance(s, dict):
+            continue
+        if str(s.get("conclusion") or "").lower() == "skipped":
+            continue
+        out.append(str(s.get("name") or ""))
+    return out
+
+
+def _opt81_step_sha(names: list[str]) -> str:
+    """A short, stable digest of an executed-step list. `verify_report` recomputes
+    it from the stamped `step_names` with the same encoding."""
+    import hashlib as _hashlib
+    blob = "\n".join(names).encode("utf-8")
+    return _hashlib.sha256(blob).hexdigest()[:16]
+
+
+def _opt81_round(x: float) -> float:
+    return round(float(x), 1)
+
+
+def _opt81_is_runner_matrix(rows_a: list[dict[str, Any]],
+                            rows_b: list[dict[str, Any]]) -> bool:
+    """True when the two label populations co-occur in the same runs: at least
+    half of the smaller population's runs also ran the other label."""
+    ids_a = {r.get("run_id") for r in rows_a if r.get("run_id") is not None}
+    ids_b = {r.get("run_id") for r in rows_b if r.get("run_id") is not None}
+    shared = ids_a & ids_b
+    return bool(shared) and 2 * len(shared) >= min(len(ids_a), len(ids_b))
+
+
+def _opt81_utc(value: str) -> "_dt.datetime | None":
+    t = _parse_dt(value) if value else None
+    if t is not None and t.tzinfo is None:
+        t = t.replace(tzinfo=_dt.timezone.utc)
+    return t
+
+
+def _opt81_time_span(rows: list[dict[str, Any]]) -> "tuple[str, str]":
+    """(earliest, latest) run time of a population, as stamped; ("", "") when
+    any row's time cannot be read (then the overlap cannot be shown)."""
+    timed = [(_opt81_utc(str(r.get("at") or "")), str(r.get("at") or "")) for r in rows]
+    if not timed or any(t is None for t, _s in timed):
+        return ("", "")
+    timed.sort(key=lambda ts: ts[0])
+    return (timed[0][1], timed[-1][1])
+
+
+def _opt81_spans_overlap(a: "tuple[str, str]", b: "tuple[str, str]") -> bool:
+    """The two [first, last] ranges intersect: each population's first run is no
+    later than the other's last run."""
+    a0, a1, b0, b1 = (_opt81_utc(x) for x in (*a, *b))
+    if None in (a0, a1, b0, b1):
+        return False
+    return a0 <= b1 and b0 <= a1
+
+
+def _detect_opt81_measured_runner_gap(
+    wf_path: str,
+    jobs_per_run: list[list[dict[str, Any]]],
+    crit: dict[str, Any],
+    start_idx: int,
+    withheld: dict[str, int] | None = None,
+    withheld_candidates: list[dict[str, Any]] | None = None,
+    multi_label_jobs: "set[tuple[str, str]] | None" = None,
+) -> list[dict[str, Any]]:
+    """OPT81 A1: the same job, run on two runner classes in this repo's own sampled
+    history, is measurably faster on one of them.
+
+    Every exit is COUNTED into `withheld` (`{gate: count}`); a candidate — a job
+    that ran on at least two runner labels — that exits on anything but a verdict
+    (`_OPT81_VERDICT_GATES`) is appended to `withheld_candidates` as
+    `{workflow_file, job, gate, half}` and rendered as the report's held-back row.
+    `multi_label_jobs` collects every `(workflow_file, job)` that ran on two or more
+    labels in the sample, which is what makes A1 data "exist" for A2's supersede."""
+    def _no(gate: str, job: str | None = None, **ctx: Any) -> None:
+        if withheld is not None:
+            withheld[gate] = withheld.get(gate, 0) + 1
+        if (job and withheld_candidates is not None
+                and gate not in _OPT81_VERDICT_GATES):
+            withheld_candidates.append({"workflow_file": wf_path, "job": job,
+                                        "gate": gate, "half": "A1"})
+        logger.debug("OPT81 A1 %s %s: withheld by %s%s", wf_path, job or "", gate,
+                     (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items())) if ctx else "")
+
+    if not jobs_per_run:
+        _no("no_sampled_runs")
+        return []
+    # name -> label -> [row]
+    by_job: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for run_jobs in jobs_per_run:
+        for job in run_jobs or []:
+            if not isinstance(job, dict):
+                continue
+            name = str(job.get("name") or "").strip()
+            if not name:
+                continue
+            if str(job.get("conclusion") or "").lower() != "success":
+                continue
+            d = _job_duration_s(job)
+            if d is None or d <= 0:
+                continue
+            label = _job_runner_label(job)
+            if not label:
+                continue
+            steps = _opt81_executed_steps(job)
+            by_job.setdefault(name, {}).setdefault(label, []).append({
+                "run_id": job.get("run_id"),
+                "job_id": job.get("id"),
+                "label": label,
+                "duration_s": _opt81_round(d),
+                "step_list_sha": _opt81_step_sha(steps),
+                # When the run was triggered (the run's created_at, else the job's
+                # own timestamps): what the interleaving gate compares.
+                "at": str(job.get("_run_created_at") or job.get("created_at")
+                          or job.get("started_at") or ""),
+                "_steps": steps,
+            })
+
+    long_pole_job = str(crit.get("long_pole_job") or "")
+    out: list[dict[str, Any]] = []
+    for name in sorted(by_job):
+        labels = by_job[name]
+        if len(labels) < 2:
+            _no("job_ran_on_one_runner_label")
+            continue
+        if multi_label_jobs is not None:
+            multi_label_jobs.add((wf_path, name))
+        classified: dict[str, tuple[str, str, str, str]] = {}
+        excluded: dict[str, int] = {}
+        for label, rows in labels.items():
+            rc = _opt81_runner_class(label)
+            if rc is None:
+                excluded[label] = len(rows)
+                if withheld is not None:
+                    withheld["unclassifiable_label_population_excluded"] = (
+                        withheld.get("unclassifiable_label_population_excluded", 0) + 1)
+            else:
+                classified[label] = rc
+        if len(classified) < 2:
+            _no("runner_label_not_classifiable_by_size", name, excluded=excluded)
+            continue
+        qualifying = sorted(
+            (lb for lb in classified
+             if len(labels[lb]) >= _OPT81_MIN_SAMPLES_PER_LABEL),
+            key=lambda lb: (-len(labels[lb]), lb))
+        if len(qualifying) < 2:
+            _no("fewer_than_min_samples_on_two_labels", name,
+                n={lb: len(labels[lb]) for lb in classified})
+            continue
+        if len(qualifying) > 2:
+            _no("more_than_two_qualifying_runner_labels", name, labels=qualifying)
+            continue
+        a, b = qualifying
+        (cls_a, os_a, arch_a, size_a) = classified[a]
+        (cls_b, os_b, arch_b, size_b) = classified[b]
+        if os_a != os_b:
+            _no("different_operating_system", name, a=a, b=b)
+            continue
+        if arch_a != arch_b:
+            _no("different_architecture", name, a=a, b=b)
+            continue
+        if (cls_a, size_a) == (cls_b, size_b):
+            _no("same_runner_class", name, a=a, b=b, cls=cls_a)
+            continue
+        # A runner matrix: the two labels co-occur in the same runs (one display
+        # name, both legs per run). Otherwise the two populations must overlap in
+        # time; two disjoint periods are a `runs-on` switch, and code changed in
+        # between could explain the gap.
+        matrix = _opt81_is_runner_matrix(labels[a], labels[b])
+        span = {lb: _opt81_time_span(labels[lb]) for lb in (a, b)}
+        if not matrix and not _opt81_spans_overlap(span[a], span[b]):
+            _no("not_interleaved", name, a=span[a], b=span[b])
+            continue
+        shas = {r["step_list_sha"] for lb in (a, b) for r in labels[lb]}
+        if len(shas) != 1:
+            _no("step_lists_differ", name, distinct=len(shas))
+            continue
+        p50 = {lb: _percentile([r["duration_s"] for r in labels[lb]], 50)
+               for lb in (a, b)}
+        slow, fast = (a, b) if (p50[a], a) >= (p50[b], b) else (b, a)
+        if p50[slow] == p50[fast]:
+            _no("gap_below_floor", name)
+            continue
+        gap = p50[slow] - p50[fast]
+        floor = max(_OPT81_MIN_GAP_S, _OPT81_MIN_GAP_FRAC * p50[slow])
+        if gap < floor:
+            _no("gap_below_floor", name, gap=round(gap, 1), floor=round(floor, 1))
+            continue
+
+        # Credit. Only the workflow's long pole carries a merge wait, and the pole's
+        # p50 is `_critical_path`'s, measured on the job's DOMINANT label counted
+        # over every conclusion and every label (unclassifiable ones included). So
+        # the gap credits only when the slow label IS that dominant label (the
+        # population the pole's p50 describes) AND, on the successful populations
+        # compared here, the job runs on the slow label STRICTLY more often than on
+        # the fast one (an exact tie is not dominant). A runner matrix runs both
+        # legs in every run, so it is never credited. Pre-capped at the
+        # within-workflow headroom here; the generic cascade in `collect()` then
+        # applies the cross-workflow floors.
+        is_pole = name == long_pole_job
+        pole_label = str((crit.get("job_runner") or {}).get(name) or "")
+        n_slow, n_fast = len(labels[slow]), len(labels[fast])
+        if matrix:
+            credited = 0.0
+            credit_reason = ("a runner matrix: every run executes both legs; the "
+                             "slower leg sets this workflow's wait, and the audit "
+                             "does not know why the matrix runs both")
+        elif not is_pole:
+            credited = 0.0
+            credit_reason = "the job is not this workflow's long pole"
+        elif n_slow == n_fast:
+            credited = 0.0
+            credit_reason = ("the job is this workflow's long pole, but neither label "
+                             "runs it more often (an exact tie), so its median is not "
+                             "the slower label's")
+        elif n_slow < n_fast:
+            credited = 0.0
+            credit_reason = ("the job is this workflow's long pole, but it already runs "
+                             "on the faster label more often, so its median does not "
+                             "move")
+        elif slow != pole_label:
+            # More successful slow runs than fast ones, yet the pole's p50 is
+            # measured elsewhere: an unclassifiable label, or failed runs, make
+            # another label the job's dominant one. The gap is stated, not credited.
+            credited = 0.0
+            credit_reason = (
+                f"the job is this workflow's long pole, but its median is measured on "
+                f"`{pole_label or '?'}`, the label it runs on most across every run "
+                f"and outcome; `{slow}` is not the population the pole's median "
+                "describes, so moving its runs does not move the wait")
+            if withheld is not None:
+                withheld["slow_label_is_not_the_poles_population"] = (
+                    withheld.get("slow_label_is_not_the_poles_population", 0) + 1)
+        else:
+            pre = bound_within_workflow(
+                gap, WallClockContext(workflow=wf_path, crit=crit,
+                                      affected_jobs=(name,)))
+            credited = float(pre.value)
+            credit_reason = (pre.reason or
+                             "the job is this workflow's long pole and runs on the "
+                             "slower label more often than on the faster one")
+        credited = round(max(credited, 0.0), 1)
+
+        steps = labels[slow][0]["_steps"]
+        rows = [{k: v for k, v in r.items() if k != "_steps"}
+                for lb in (slow, fast) for r in labels[lb]]
+        cs, cf = classified[slow], classified[fast]
+        evidence = (
+            f"`{name}` ran on two runner classes in runs this repository already made: "
+            f"{n_fast} successful run(s) on `{fast}` ({_opt81_class_display(cf[0], cf[3])}) "
+            f"at p50 {p50[fast]:.0f}s, and {n_slow} on `{slow}` "
+            f"({_opt81_class_display(cs[0], cs[3])}) at p50 {p50[slow]:.0f}s, executing the "
+            f"same {len(steps)} step(s) on both. The `{fast}` runs are {gap:.0f}s "
+            f"faster at the median (floor: the larger of {_OPT81_MIN_GAP_S:.0f}s and "
+            f"{_OPT81_MIN_GAP_FRAC:.0%} of the slower median). Runner-minute effect: "
+            f"{_OPT81_RUNNER_MIN_UNKNOWN}. {_OPT81_DISCLOSURE}")
+        me = _measured_evidence(
+            ["Runner label", "Class", "Successful runs (n)", "p50", "Steps executed"],
+            [[f"`{slow}`", _opt81_class_display(cs[0], cs[3]), str(n_slow),
+              f"{p50[slow]:.0f}s", str(len(steps))],
+             [f"`{fast}`", _opt81_class_display(cf[0], cf[3]), str(n_fast),
+              f"{p50[fast]:.0f}s", str(len(steps))]],
+            summary=evidence,
+            note=("Both distributions come from this repository's own sampled "
+                  "successful runs; nothing is projected or benchmarked by the audit. "
+                  "GUARDRAIL: before moving the job, find out why some runs used "
+                  f"`{slow}` (a fork pull request, an event or a matrix condition can "
+                  "select the label on purpose), keep every step the job runs today, "
+                  "and confirm the faster class is available to every event that "
+                  "runs this job. A different runner class bills differently and this "
+                  "audit carries no rate table, so check the cost with whoever pays "
+                  f"for CI. {_OPT81_DISCLOSURE}"))
+        f = _new_finding(
+            "OPT81", "MEDIUM", _OPT81_TITLE, wf_path, name, evidence,
+            _OPT81_FIX_STRATEGY, _catalog_anchor("OPT81", _OPT81_TITLE),
+            start_idx + len(out) + 1, wc_p50=credited, rm=None,
+            size_note=(f"wall-clock: {credit_reason}; runner-minutes: "
+                       f"{_OPT81_RUNNER_MIN_UNKNOWN}"),
+            realization="direct" if credited > 0 else "none",
+            measured_evidence=me)
+        f["sizing_basis"] = "measured"
+        f["faster_runner"] = {
+            "kind": "opt81_measured",
+            "half": "A1",
+            "job": name,
+            "workflow_file": wf_path,
+            "slow": {"label": slow, "class": cs[0], "os": cs[1], "arch": cs[2],
+                     "size": cs[3], "p50_s": _opt81_round(p50[slow]), "n": n_slow,
+                     "first_run_at": span[slow][0], "last_run_at": span[slow][1]},
+            "fast": {"label": fast, "class": cf[0], "os": cf[1], "arch": cf[2],
+                     "size": cf[3], "p50_s": _opt81_round(p50[fast]), "n": n_fast,
+                     "first_run_at": span[fast][0], "last_run_at": span[fast][1]},
+            "gap_s": _opt81_round(gap),
+            "floor_s": _opt81_round(floor),
+            "min_gap_s": _OPT81_MIN_GAP_S,
+            "min_gap_frac": _OPT81_MIN_GAP_FRAC,
+            "min_samples_per_label": _OPT81_MIN_SAMPLES_PER_LABEL,
+            "step_list_sha": next(iter(shas)),
+            "step_names": list(steps),
+            "rows": rows,
+            "excluded_labels": dict(sorted(excluded.items())),
+            "job_is_workflow_long_pole": is_pole,
+            # The label the pole's p50 is measured on (`_critical_path`'s dominant
+            # label, `per_workflow_timing[wf].job_runner[job]`); credit requires
+            # it to be the slow label.
+            "pole_runner_label": pole_label,
+            "runner_matrix": matrix,
+            "credited_pre_cascade_s": credited,
+            "credit_reason": credit_reason,
+            "runner_min_saving_basis": _OPT81_RUNNER_MIN_UNKNOWN,
+            "disclosure": _OPT81_DISCLOSURE,
+        }
+        out.append(f)
+    return out
+
+
+def _opt81_jobs_match(job: str, target: str) -> bool:
+    return bool(job) and bool(target) and (
+        job == target or _struct_toks(job) == _struct_toks(target))
+
+
+def _detect_opt81_runner_size_advisory(
+    wf_path: str,
+    jobs_per_run: list[list[dict[str, Any]]],
+    crit: dict[str, Any],
+    is_pr: bool,
+    poles: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    opt79_uncredited: list[dict[str, Any]],
+    multi_label_jobs: "set[tuple[str, str]]",
+    start_idx: int,
+    withheld: dict[str, int] | None = None,
+    withheld_candidates: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """OPT81 A2: the lever of last resort on a merge-gating long pole.
+
+    Fires only when (a) the job is the long pole of a pull-request workflow and a
+    pole of the measured merge-gating critical path, and the job did not run on two
+    or more runner labels in the sample (`a2_measured_runner_data_exists`: A1
+    reports on those), (b) its dominant step is compute, (c) it runs on a standard
+    GitHub-hosted label, and (d) no cheaper lever already addresses it.
+    Uncredited: no wall-clock, no runner-minutes, no number anywhere.
+    `cheaper_levers_checked` stamps what (d) examined. Its last entry, the
+    log-level leaves, is decided at render time: any leaf matched on the pole's
+    log holds the advisory back, and the three leaf kinds that entry names (cache
+    miss, isolation, shard imbalance) are examples, not the whole list."""
+    def _no(gate: str, job: str | None = None, **ctx: Any) -> None:
+        if withheld is not None:
+            withheld[gate] = withheld.get(gate, 0) + 1
+        if (job and withheld_candidates is not None
+                and gate not in _OPT81_VERDICT_GATES):
+            withheld_candidates.append({"workflow_file": wf_path, "job": job,
+                                        "gate": gate, "half": "A2"})
+        logger.debug("OPT81 A2 %s %s: withheld by %s%s", wf_path, job or "", gate,
+                     (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items())) if ctx else "")
+
+    name = str(crit.get("long_pole_job") or "")
+    if not name or not jobs_per_run:
+        _no("a2_no_long_pole")
+        return []
+    if not is_pr:
+        _no("a2_not_a_pull_request_workflow")
+        return []
+    wf_base = _wf_basename(wf_path)
+    on_path = any(
+        _wf_basename(str(p.get("workflow_file") or "")) == wf_base
+        and _opt81_jobs_match(str(p.get("job") or ""), name)
+        for p in poles or [])
+    if not on_path:
+        _no("a2_not_on_the_merge_gating_critical_path")
+        return []
+    if (wf_path, name) in multi_label_jobs:
+        _no("a2_measured_runner_data_exists")
+        return []
+    instances = [j for run in jobs_per_run for j in (run or [])
+                 if isinstance(j, dict) and str(j.get("name") or "") == name]
+    decomp = _decompose_job_steps(instances,
+                                  bimodal=(crit.get("job_bimodal") or {}).get(name))
+    if decomp is None:
+        _no("a2_dominant_step_unresolved", name)
+        return []
+    dom_step = str(decomp.get("dominant_step") or "")
+    dom_cat = str(decomp.get("dominant_category") or "")
+    if dom_cat not in _OPT81_COMPUTE_CATEGORIES:
+        _no("a2_dominant_step_is_not_compute", category=dom_cat)
+        return []
+    if _OPT81_NON_COMPUTE_STEP_RE.search(dom_step):
+        _no("a2_dominant_step_waits_or_moves_bytes", step=dom_step)
+        return []
+    # (c) — after the shape gates, so a pole whose time is not compute is reported
+    # as that. A2 names a larger GitHub-hosted size or StarSling for a STANDARD
+    # GitHub-hosted label only, so any other label (larger, slim, StarSling,
+    # self-hosted or custom) is a verdict, counted and never listed.
+    label = str((crit.get("job_runner") or {}).get(name) or "")
+    rc = _opt81_runner_class(label)
+    if rc is None or rc[0] != "github-standard":
+        _no("a2_not_on_a_standard_github_hosted_label", label=label)
+        return []
+
+    # (d) — no cheaper lever already addresses this pole.
+    job_p50 = float((crit.get("job_p50") or {}).get(name) or 0.0)
+
+    def _on_job(f: dict[str, Any]) -> bool:
+        if _wf_basename(str(f.get("workflow_file") or "")) != wf_base:
+            return False
+        return any(_opt81_jobs_match(str(j), name) for j in (f.get("affected_jobs") or []))
+
+    others = [f for f in findings if str(f.get("pattern")) != "OPT81" and _on_job(f)]
+    structural = sorted({str(f.get("pattern")) for f in others
+                         if str(f.get("pattern")) in _OPT81_CHEAPER_STRUCTURAL})
+    if structural:
+        _no("a2_cheaper_structural_lever_on_the_pole", patterns=structural)
+        return []
+    best = 0.0
+    best_pat = ""
+    for f in others:
+        if f.get("pattern") in _PRESTART_AXIS_PATTERNS or f.get("advisory"):
+            continue
+        try:
+            s = float(f.get("wall_clock_p50_s") or 0.0)
+        except (TypeError, ValueError):
+            s = 0.0
+        if s > best:
+            best, best_pat = s, str(f.get("pattern"))
+    if job_p50 > 0 and best >= _OPT81_COVERED_FRAC * job_p50:
+        _no("a2_credited_lever_covers_the_pole", pattern=best_pat, saving=best)
+        return []
+    if any(str(f.get("pattern")) == "OPT24" for f in others):
+        _no("a2_sharding_lever_on_the_pole")
+        return []
+    cache_hits = [f for f in others if str(f.get("pattern")) == "OPT79"
+                  and float(f.get("wall_clock_p50_s") or 0.0) >= _OPT81_CACHE_LEVER_MIN_S]
+    cache_hits += [r for r in (opt79_uncredited or [])
+                   if isinstance(r, dict)
+                   and _wf_basename(str(r.get("workflow_file") or "")) == wf_base
+                   and _opt81_jobs_match(str(r.get("job") or ""), name)
+                   and float(r.get("waste_s") or 0.0) >= _OPT81_CACHE_LEVER_MIN_S]
+    if cache_hits:
+        _no("a2_cache_lever_on_the_pole")
+        return []
+
+    has_opt75 = any(str(f.get("pattern")) == "OPT75" for f in others)
+    checked = [
+        {"lever": ("structural: scope, de-trigger, warm build cache, shared step, "
+                   "trust-boundary cold work, per-file test isolation ("
+                   + ", ".join(sorted(_OPT81_CHEAPER_STRUCTURAL)) + ")"),
+         "patterns": sorted(_OPT81_CHEAPER_STRUCTURAL), "applies": False,
+         "why": ("no finding of these patterns is on this job"
+                 + ("; only the generic decompose lever (OPT75) applies, and it "
+                    "renders first" if has_opt75 else ""))},
+        {"lever": "a credited fix already on this job", "patterns": [],
+         "applies": False,
+         "why": "no finding credits wall-clock on this job at half its median or more"},
+        {"lever": "sharding", "patterns": ["OPT24"], "applies": False,
+         "why": "no sharding finding fired on this job"},
+        {"lever": "a cache that costs more than it saves", "patterns": ["OPT79"],
+         "applies": False,
+         "why": "no net-negative cache measured on this job at the cache-lever bar"},
+        {"lever": "log-level leaves (cache miss, isolation, shard imbalance)",
+         "patterns": [], "applies": None,
+         "why": ("decided when the report is rendered, against the drilled pole's "
+                 "log; a matched leaf holds this advisory back")},
+    ]
+    evidence = (
+        f"`{name}` is the merge-gating long pole of this pull-request workflow; its "
+        f"dominant step `{dom_step}` is compute ({dom_cat}); it runs on the standard "
+        f"GitHub-hosted label `{label}`. No cheaper lever found: no structural scope, "
+        "de-trigger, cache-warm, shared-step, trust-boundary or test-isolation "
+        "lever, no sharding finding, no net-negative cache, and no credited fix on "
+        "this job at half its median or more; the remaining cost is compute. A "
+        "different or larger runner class is the lever left (benchmark required), "
+        f"and this audit attaches no number to it. {_OPT81_DISCLOSURE}")
+    me = _measured_evidence(
+        ["Job", "Runner label", "Class", "Dominant step", "Category"],
+        [[f"`{name}`", f"`{label}`", _OPT81_CLASS_DISPLAY["github-standard"],
+          f"`{dom_step}`", dom_cat]],
+        summary=evidence,
+        note=("GUARDRAIL: benchmark on a branch before believing any speed-up, and "
+              "keep every step the job runs today. " + _OPT81_DISCLOSURE))
+    f = _new_finding(
+        "OPT81", "LOW", _OPT81_TITLE, wf_path, name, evidence,
+        _OPT81_FIX_STRATEGY, _catalog_anchor("OPT81", _OPT81_TITLE),
+        start_idx + 1, wc_p50=None, rm=None,
+        size_note="advisory, uncredited: benchmark required; this audit attaches no number",
+        realization="none", measured_evidence=me)
+    f["advisory"] = True
+    f["sizing_basis"] = "advisory"
+    f["risk"] = "MEDIUM"
+    f["guardrail"] = (
+        "Benchmark on a branch before believing any speed-up. Keep every step the "
+        "job runs today: the comparison is only meaningful if the work is identical. "
+        "A different runner class bills differently; check the cost with whoever "
+        "pays for CI before switching.")
+    f["rollout"] = (
+        "Run the job on the candidate runner on a branch for several runs beside the "
+        "current label, compare the medians, and switch only the jobs the benchmark "
+        "shows are faster. Keep the old label one revert away.")
+    f["faster_runner"] = {
+        "kind": "opt81_advisory",
+        "half": "A2",
+        "job": name,
+        "workflow_file": wf_path,
+        "runner_label": label,
+        "runner_class": rc[0],
+        "dominant_step": dom_step,
+        "dominant_category": dom_cat,
+        "benchmark_required": True,
+        "cheaper_levers_checked": checked,
+        "disclosure": _OPT81_DISCLOSURE,
+    }
+    return [f]
 
 
 # =============================================================================
@@ -21169,6 +21901,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             "workflow returned content")
 
     next_id = max((int(f["id"][1:]) for f in findings if f.get("id", "").startswith("f") and f["id"][1:].isdigit()), default=0)
+    # (workflow_file, job) pairs OPT81 A1 saw on two or more runner labels.
+    _opt81_multi_label_jobs: set[tuple[str, str]] = set()
     for wf_path, jobs_per_run in jobs_per_run_by_wf.items():
         if not jobs_per_run:
             continue
@@ -21293,6 +22027,20 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             merge_gating_jobs=_opt80_merge_gating_jobs(
                 wf_path, required_checks, findings_doc.get("workflow_job_graph"),
                 crit_by_wf, workflow_names=findings_doc.get("workflow_names")))
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+
+        # OPT81 A1: the same job, measured on two runner classes in this repo's own
+        # sampled runs. No gh call of its own (it reads the jobs payloads already in
+        # hand). Every gate is counted onto the findings doc, and a candidate it
+        # could not decide is listed for the report's held-back row. The jobs that
+        # ran on two or more labels are remembered: A2 never fires where A1 data
+        # exists.
+        new = _detect_opt81_measured_runner_gap(
+            wf_path, jobs_per_run, crit, next_id,
+            withheld=findings_doc.setdefault("opt81_withheld_by_gate", {}),
+            withheld_candidates=findings_doc.setdefault(_OPT81_WITHHELD_DOC_KEY, []),
+            multi_label_jobs=_opt81_multi_label_jobs)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
@@ -21728,6 +22476,32 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         if act is not None:
             f["workflow_activity"] = act
     findings.extend(structural)
+
+    # OPT81 A2: the runner-size advisory, the lever of LAST RESORT on a
+    # merge-gating compute pole. It runs only now, because one of its gates is
+    # "the structural router produced no cheaper lever for this pole", and every
+    # credited hygiene saving has been through the cascade. Uncredited and
+    # advisory: it never reaches a total or the headline.
+    _o81_poles = list((findings_doc.get("pr_critical_path") or {}).get("poles") or [])
+    _o81_unc = list(findings_doc.get(_OPT79_UNCREDITED_DOC_KEY) or [])
+    _o81_next = max((int(f["id"][1:]) for f in findings
+                     if f.get("id", "").startswith("f") and f["id"][1:].isdigit()),
+                    default=0)
+    for wf_path, jobs_per_run in jobs_per_run_by_wf.items():
+        if not jobs_per_run:
+            continue
+        new = _detect_opt81_runner_size_advisory(
+            wf_path, jobs_per_run, crit_by_wf.get(wf_path, {}),
+            wf_path in _pr_workflows, _o81_poles, findings, _o81_unc,
+            _opt81_multi_label_jobs, _o81_next,
+            withheld=findings_doc.setdefault("opt81_withheld_by_gate", {}),
+            withheld_candidates=findings_doc.setdefault(_OPT81_WITHHELD_DOC_KEY, []))
+        for f in new:
+            act = activity_by_wf.get(wf_path)
+            if act is not None:
+                f["workflow_activity"] = act
+        _o81_next = max(_o81_next, max((int(f["id"][1:]) for f in new), default=_o81_next))
+        findings.extend(new)
     findings_doc["findings"] = findings
 
     # encord §6 Cause 2: stamp `off_spine` on findings whose job was DROPPED from the
