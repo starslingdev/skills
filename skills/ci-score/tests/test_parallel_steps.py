@@ -70,12 +70,16 @@ def _roots(tmp_path: Path, files: tuple[str, ...]) -> Path:
 CHECKOUT_DEEP = {"uses": "actions/checkout@v4", "with": {"fetch-depth": 0}}
 
 # (case id, check id, root files, flat steps, index of the decisive step, verdict)
+# Every row's step is DECISIVE (the test asserts removing it changes the
+# verdict). A build-cache FAIL and a shallow-checkout PASS have no such row:
+# the first is decided by the root build-tool config alone, the second holds
+# with no checkout step at all, so wrapping a step could prove nothing.
 CASES = [
     ("dep-cache pass: cache action", "ci.cache.dependency-cache", ("package.json",),
      [{"run": "npm ci"}, {"uses": "actions/cache@v4"}], 1, "pass"),
     ("dep-cache pass: setup-* cache input", "ci.cache.dependency-cache", ("package.json",),
      [{"uses": "actions/setup-node@v4", "with": {"cache": "pnpm"}}], 0, "pass"),
-    ("dep-cache fail: install, no cache", "ci.cache.dependency-cache", ("package.json",),
+    ("dep-cache fail: install, no cache", "ci.cache.dependency-cache", (),
      [{"run": "pnpm install"}], 0, "fail"),
     ("dep-cache applicable: inline install is the only signal", "ci.cache.dependency-cache", (),
      [{"run": "pip install pytest"}], 0, "fail"),
@@ -83,16 +87,12 @@ CASES = [
      [{"uses": "actions/setup-python@v5"}], 0, "fail"),
     ("build-cache pass: cache action", "ci.cache.build-cache", ("turbo.json",),
      [{"run": "turbo build"}, {"uses": "actions/cache@v4"}], 1, "pass"),
-    ("build-cache fail: no cache", "ci.cache.build-cache", ("turbo.json",),
-     [{"run": "turbo build"}], 0, "fail"),
     ("shallow fail: fetch-depth 0", "ci.checkout.shallow-clone", (),
      [CHECKOUT_DEEP, {"run": "npm test"}], 0, "fail"),
     ("shallow pass: history op exempts the job", "ci.checkout.shallow-clone", (),
      [CHECKOUT_DEEP, {"run": "git log --oneline"}], 1, "pass"),
     ("shallow pass: history action exempts the job", "ci.checkout.shallow-clone", (),
      [CHECKOUT_DEEP, {"uses": "tj-actions/changed-files@v45"}], 1, "pass"),
-    ("shallow pass: shallow checkout", "ci.checkout.shallow-clone", (),
-     [{"uses": "actions/checkout@v4"}], 0, "pass"),
     ("change-scoped pass: --filter", "ci.build.change-scoped", ("turbo.json",),
      [{"run": "pnpm turbo run build --filter=...[origin/main]"}], 0, "pass"),
     ("change-scoped pass: changed-files action", "ci.build.change-scoped", ("turbo.json",),
@@ -101,7 +101,7 @@ CASES = [
      [{"uses": "actions/github-script@v7", "with": {"script": "const affected = 1"}}], 0, "pass"),
     ("change-scoped applicable: nx command is the only task-graph signal",
      "ci.build.change-scoped", (), [{"run": "npx nx affected -t test"}], 0, "pass"),
-    ("change-scoped fail: unscoped", "ci.build.change-scoped", ("turbo.json",),
+    ("change-scoped fail: unscoped", "ci.build.change-scoped", (),
      [{"run": "pnpm turbo run build"}], 0, "fail"),
     ("pinned pass: every action pinned", "ci.security.pinned-action-shas", (),
      [{"uses": f"actions/checkout@{SHA}"}], 0, "pass"),
@@ -117,6 +117,12 @@ def test_wrapping_the_decisive_step_in_parallel_never_changes_the_verdict(tmp_pa
     flat = _wf(steps)
     assert pf_mod._practice_facts(_parsed(flat), root)[check]["state"] == want, \
         "fixture precondition: the flat workflow must give the pinned verdict"
+    # The step must be DECISIVE: with it gone the verdict changes, so a walker
+    # that dropped the group's children could not pass this case by accident.
+    without = copy.deepcopy(flat)
+    del without["jobs"]["b"]["steps"][idx]
+    assert pf_mod._practice_facts(_parsed(without), root)[check]["state"] != want, \
+        "fixture precondition: the wrapped step must decide the verdict"
     wrapped = _wrap(flat, idx)
     got = pf_mod._practice_facts(_parsed(wrapped), root)[check]
     assert got["state"] == want, (
@@ -682,3 +688,109 @@ def test_readable_step_lists_and_composites_add_no_record(tmp_path):
         ".github/actions/ok/action.yml": "runs:\n  using: composite\n  steps: []\n"}))
     assert "unreadable_step_lists" not in doc["data_sources"]
     assert "composite_parse_errors" not in doc["data_sources"]
+
+
+# --- coverage pins (test review) ----------------------------------------------
+
+def test_no_step_list_is_read_outside_the_walker():
+    """Every `X.get("steps")` / `X["steps"]` in the skill's scripts is an
+    argument of `_walk_steps(...)`, or sits in `_unreadable_step_sources`,
+    which only checks the list's TYPE. A new flat read of a step list (the bug
+    class this change fixed) fails here."""
+    import ast
+    offenders = []
+    for path in sorted((_SKILL_DIR / "scripts").glob("*.py")):
+        tree = ast.parse(path.read_text())
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+        def is_steps_read(n) -> bool:
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
+                    and n.func.attr == "get" and n.args \
+                    and isinstance(n.args[0], ast.Constant) and n.args[0].value == "steps":
+                return True
+            return (isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant)
+                    and n.slice.value == "steps")
+
+        for node in ast.walk(tree):
+            if not is_steps_read(node):
+                continue
+            parent = parents.get(node)
+            if isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name) \
+                    and parent.func.id == "_walk_steps":
+                continue
+            fn = node
+            while fn is not None and not isinstance(fn, ast.FunctionDef):
+                fn = parents.get(fn)
+            if fn is not None and fn.name == "_unreadable_step_sources":
+                continue
+            offenders.append(f"{path.name}:{node.lineno}")
+    assert not offenders, f"step list read outside the walker: {offenders}"
+
+
+def _n_entries(n: int) -> list[dict]:
+    return [_entry(f".github/workflows/w{i}.yml", "t", "2", "cyclic") for i in range(n)]
+
+
+@pytest.mark.parametrize("n,tail", [(3, "`.github/workflows/w2.yml` job `t` step 2 (contains itself) |"),
+                                    (4, "(contains itself) and 1 more |")])
+def test_the_and_more_tail_starts_after_exactly_three_names(tmp_path, n, tail):
+    doc, _registry, _report = _parallel_doc(tmp_path)
+    doc["data_sources"]["parallel_steps"].update(malformed_groups=n, malformed=_n_entries(n))
+    row = _row(_render_and_verify(doc))
+    assert row.endswith(tail), row
+    assert ("more" in row) is (n > 3)
+
+
+def test_verify_goes_red_on_a_duplicated_row(tmp_path):
+    doc, registry, report = _parallel_doc(tmp_path)
+    row = _row(report)
+    assert _red(doc, report.replace(row, row + "\n" + row), registry)
+
+
+def test_a_run_and_parallel_step_inside_a_group_counts_once_as_a_side_by_side_step():
+    stats = pf_mod._new_step_stats()
+    steps = [{"parallel": [{"run": "a", "parallel": [{"run": "b"}]}]}]
+    leaves = pf_mod._walk_steps(steps, stats, "ci.yml", job="t")
+    assert [s["run"] for s in leaves] == ["a", "b"]
+    assert stats["groups"] == 1 and stats["steps_in_groups"] == 1   # a, not b
+    assert stats["invalid"] == [_entry("ci.yml", "t", "1.1", "nested", "beside_run_uses")]
+
+
+def test_wait_or_cancel_without_a_group_reads_every_check_as_the_flat_workflow(tmp_path):
+    """No group: the `wait:` / `cancel:` steps run no code, so every check
+    reads exactly what the same workflow without them reads."""
+    def facts(steps):
+        return pf_mod._practice_facts(_parsed(_wf(steps, job_id="test")), tmp_path)
+    (tmp_path / "package.json").write_text("{}\n")
+    base = [{"id": "srv", "run": "./serve", "background": True},
+            {"uses": "actions/checkout@v4", "with": {"fetch-depth": 0}}, {"run": "npm ci"}]
+    assert facts(base[:1] + [{"wait": "srv"}] + base[1:] + [{"cancel": "srv"}]) == facts(base)
+
+
+_AUTOMATION_WF = ("on:\n  push:\njobs:\n  triage:\n    runs-on: ubuntu-latest\n    steps:\n"
+                  "      - parallel:\n          - run: echo hi\n"
+                  "          - uses: actions/labeler@v5\n")
+
+
+def test_an_automation_only_refusal_report_carries_the_verified_row(tmp_path):
+    doc, code = cc_mod.collect(_repo(tmp_path, _AUTOMATION_WF))
+    assert code == 0 and doc["ci_score"].get("refusal"), doc.get("ci_score")
+    assert "Parallel steps" in _row(_render_and_verify(doc))
+
+
+def test_a_scoring_error_report_carries_the_verified_row(tmp_path, monkeypatch):
+    real = cc_mod._load_sibling
+
+    def load(mod_name, filename):
+        mod = real(mod_name, filename)
+        if filename == "ci_score.py":
+            monkeypatch.setattr(mod, "compute_ci_score",
+                                lambda *_a: (_ for _ in ()).throw(ValueError("boom")))
+        return mod
+
+    monkeypatch.setattr(cc_mod, "_load_sibling", load)
+    doc, code = cc_mod.collect(_repo(tmp_path, PARALLEL_WF))
+    assert code == 3 and "parallel_steps" in doc["data_sources"]
+    report = _render_and_verify(doc)
+    assert "```" not in report or "Parallel steps" in report.split("```", 1)[0]
+    _row(report)
