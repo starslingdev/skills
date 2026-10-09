@@ -735,6 +735,7 @@ unversioned and updates by reinstall from `main`.
   is an upper bound until benchmarked. OPT24 and OPT73 name in-job parallel
   steps as the alternative when the pieces are few and the setup is large;
   OPT17 notes that a `background:` service step still needs a readiness probe.
+  (#122)
 
 - **2026-10-07** — **A slow cache on a job that is not the workflow's slowest is
   now priced in runner-minutes.** When the cache check (OPT79) measured a cache
@@ -961,6 +962,12 @@ unversioned and updates by reinstall from `main`.
   waiting on other steps. **Not changed yet:** how the run timing records
   overlapping steps is undocumented, so the per-step decomposition still adds
   step times as if they ran one after another; that needs a live probe first.
+  Also: a step that has `parallel:` plus `run:` / `uses:` is now read (its
+  command and its children) and reported as incomplete coverage; OPT2 no longer
+  counts a cache that runs alongside the install as covering it; OPT79 holds
+  back a cache restore that runs in a group or in the background; a group-level
+  `if:` is read as gating its steps; and the pole drill no longer says a job
+  with a parallel group runs its steps one after another. (#122)
 
 - **2026-10-07** — **A slow lint job flagged by OPT82 no longer reads as a
   coverage gap, and a cache cost off the long poles no longer lands inside the

@@ -3024,6 +3024,29 @@ step carry `background: true`, and add control steps (`wait:`, `wait-all:`,
   is time spent blocked on other steps. The names are in `_NON_WORK_STEP_RE` in
   both `collect_runs.py` and `blocking_path.py`, and the decomposition's
   all-boilerplate fallback still excludes them.
+- **Known limits.** Static detectors read a group's children in declaration
+  order; apart from OPT79's and OPT2's sibling / background gates, none reasons
+  about them running at once. OPT77's setup fingerprint sums setup seconds that
+  may overlap in a group, so it can overstate. Timing (step-sum p50, timeline)
+  is unchanged and needs the live probe. Until then OPT79 holds back a cache
+  restore in a group or in the background
+  (`cache_restore_runs_in_a_parallel_group_or_background`), and the pole drill
+  says when a pole job has a group whose step times overlap.
+- **Group-level keys are an assumption.** GitHub does not document `if:`,
+  `continue-on-error` or `timeout-minutes` on a `parallel:` group. The walker
+  treats a group-level `if:` as inherited by its children — an ASSUMPTION,
+  marked unverified — so an install in a gated group is not reported as
+  unconditional. ci-secure reads a group `if:` only as gating its own
+  informational note.
+- **A step with `parallel:` and `run:` / `uses:`** is still read: its own
+  command counts as a step, its children are walked, and it is counted
+  malformed (named in `scan_incomplete`).
+- **Never-dominant guard limits.** An unnamed `wait: server` may show up in run
+  data under a generated name such as "Wait for server"; that is unprobed, so it
+  can still be picked as dominant. Conversely a user step literally named
+  `Wait`, `Cancel` or `wait-all` is excluded from dominant-step picking.
+- **Independent check.** `verify_report` re-derives the Parallel steps row on
+  its own; it imports nothing from the skill.
 
 ## 12. The blocking-path report (`blocking_path.py`)
 

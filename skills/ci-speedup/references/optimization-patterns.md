@@ -1465,6 +1465,20 @@ steps:
 - **Limits.** At most 10 background steps run at once in a job (more queue for
   a free slot), and `parallel:` / `background:` cannot be used inside a
   composite action.
+- **Keep a verifying check waited on.** Run a check that must gate the job in a
+  `parallel:` group (or cover it with `wait-all:`); never as a bare
+  `background:` step that no wait covers, and never with `continue-on-error`.
+
+**What the audit does and does not see in a group (known limits).** The static
+detectors read a group's children in declaration order. Apart from OPT79's (and
+OPT2's) sibling and background gates, none reasons about the children running
+at once. OPT77's setup fingerprint adds up setup seconds that may overlap inside
+a group, so it can overstate. Run timing (the step-sum p50 and the step
+timeline) is unchanged and still lays steps end to end; fixing that needs a
+live probe of how GitHub records overlapping steps. Until that probe, OPT79
+holds back a cache restore that runs in a group or in the background
+(`cache_restore_runs_in_a_parallel_group_or_background`), and the pole drill
+says when a pole job has a group whose step times overlap.
 
 **Failure-isolation cost (a real cost, not a footnote)**: N separate checks give
 N independently-red checks and N independently re-runnable units. One
@@ -1572,7 +1586,7 @@ grep -rn 'sleep [0-9]' .github/workflows/
 grep -rn 'sleep [0-9]' docker-compose*.yml
 ```
 
-**Fix**: Add healthchecks to `docker-compose.yml` services and use `--wait` flag with `docker compose up`. Starting the service as a `background: true` step and stopping it with a `cancel:` step is a native pattern for a service the job runs itself (OPT77's fix covers the runner requirement), but it does not make the service ready: the steps that use it still need a readiness probe, not a fixed `sleep`.
+**Fix**: Add healthchecks to `docker-compose.yml` services and use `--wait` flag with `docker compose up`. Starting the service as a `background: true` step and stopping it with a `cancel:` step is a native pattern for a service the job runs itself (self-hosted runners: 2.336.0 or later; OPT77's fix covers the runner requirement), but it does not make the service ready: the steps that use it still need a readiness probe, not a fixed `sleep`.
 
 **Real-world example (better-auth)**: PR #8010 replaced `sleep 10` with Docker healthchecks across all adapter integration jobs.
 
@@ -1799,7 +1813,7 @@ title_template: "Long Test Job Without Sharding"
 - Check if the test framework supports sharding (Playwright `--shard`, vitest `--shard`)
 - Check if sharding is configured
 
-**Fix**: Add matrix-based sharding. E.g., Playwright: `--shard=${{ matrix.shard }}/${{ strategy.job-total }}`. When the split pieces are few and each leg would repeat a large setup, running the shards as a `parallel:` step group inside the one job is the alternative: setup is paid once and no new check names appear (OPT77's fix covers the syntax and runner requirement; OPT75's covers the independence checklist and why the saving is an upper bound until benchmarked).
+**Fix**: Add matrix-based sharding. E.g., Playwright: `--shard=${{ matrix.shard }}/${{ strategy.job-total }}`. When the split pieces are few and each leg would repeat a large setup, running the shards as a `parallel:` step group inside the one job is the alternative: setup is paid once and no new check names appear. But in-job shards share one runner's cores, and most test runners already use every core, so the saving is often near zero; separate jobs or a matrix are what add machines (OPT77's fix covers the syntax and runner requirement; OPT75's covers the independence checklist and why the saving is an upper bound until benchmarked).
 
 **Required-checks caveat**: if the job you're sharding is a **required status check** (a merge gate — which the long pole usually is), the new shard jobs must be added to branch protection as required checks (or the ruleset equivalent), or the sharded-out test work silently stops gating merges — everything stays green while the gate no longer actually runs it. The split isn't complete until the new jobs gate the merge, and re-establishing that gating is usually an admin-only step. If the split routes the old check's work behind a `needs:` edge and an aggregator, see OPT75's [dependency-failure skip caveat](#opt75--long-pole-optimize-or-relocate-the-dominant-step) — a dependent skipped by a failed dependency reports skipped, not failed, so the aggregator must run with `always()` (or `!cancelled()`) and propagate every `needs.<job>.result`, and keeping the required check name on that aggregator re-gates the merge without an admin.
 
@@ -4686,11 +4700,15 @@ title_template: "The long pole's time is one addressable step — speed it up or
   them as a `parallel:` group **inside the same job** (syntax, runner
   requirement and limits: OPT77's fix). No extra checkout or setup is paid and no
   new check name appears, so no required-check edit is needed. Treat steps as
-  independent only when all three hold:
-  1. no sibling reads what another sibling writes to `GITHUB_ENV`,
-     `GITHUB_OUTPUT` or `GITHUB_PATH`;
+  independent only when all four hold:
+  1. no sibling reads any file or output another sibling produces (not only
+     what it writes to `GITHUB_ENV`, `GITHUB_OUTPUT` or `GITHUB_PATH`);
   2. no two siblings write the same cache, lockfile or build-output directory;
-  3. the runner has the memory and CPU for them all at once.
+  3. the runner has the memory and CPU for them all at once;
+  4. no sibling relies on another having succeeded first. The default
+     `if: success()` ordering disappears inside a group, so never put a deploy,
+     upload, publish or any other step with side effects in a group with the
+     check that should gate it.
 
   **Honesty note**: the saving is "sum of the steps minus the slowest one" only
   if each sibling keeps its solo speed. Siblings share one runner's CPU, memory
