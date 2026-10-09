@@ -690,8 +690,6 @@ def detect_yaml_on_trigger(
         yield RawHit(line=located, evidence=evidence, match_text=trigger)
 
 
-_RUN_KEY_RE = re.compile(r"^\s*-?\s*run\s*:", re.MULTILINE)
-
 # Context fields GitHub generates itself, whose VALUE SHAPE cannot carry shell
 # metacharacters: integers (`.number`, `.id`), 40-hex object ids (`.sha`,
 # `.head_sha`, `.merge_commit_sha`) and booleans (`.repo.fork`, `.merged`).
@@ -892,20 +890,21 @@ def detect_yaml_run_injection(
     — those don't expose shell. The regex is meant for shell-injection
     sinks, and only ``run:`` scalars are shell.
 
-    Line numbers are computed by walking a forward-only cursor through
-    the file: for each step's run scalar, the cursor advances past the
-    next ``run:`` key in the file before snippet search starts. This
-    keeps the same template expression appearing earlier (in ``env:``
-    or ``with:``) from stealing the line attribution of the real
-    shell sink.
+    Line numbers come from the composed YAML: each leaf step is paired, by
+    position, with its node from `_iter_step_nodes` (the lockstep twin of
+    `_iter_job_steps`), and a snippet is searched for only inside that step's
+    own ``run:`` scalar span. The same template expression appearing earlier
+    (in ``env:`` or ``with:``) cannot steal the attribution, and neither can
+    a flow-style ``{run: ...}`` child, a group the walker could not read, or
+    a ``parallel:`` key written above its step's own ``run:`` — the raw-text
+    cursor this replaced was misled by all three.
 
-    The parsed step list can be LONGER than the file's raw ``run:`` tokens —
-    a YAML alias (``steps: *common``) expands into as many parsed steps as the
-    anchor holds while contributing no new raw ``run:`` line. Once the cursor
-    passes the last raw token, every remaining run scalar is unanchorable, so
-    those steps are recorded as dropped matches (a coverage gap the report
-    names) rather than skipped in silence — silence rendered as complete
-    coverage over steps nothing ever scanned.
+    A YAML alias (``steps: *common``) expands into parsed steps whose ``run:``
+    node is one an earlier step already used: that node is attributed once,
+    and every later use is recorded as a dropped match (a coverage gap the
+    report names) rather than skipped in silence — silence rendered as
+    complete coverage over steps nothing ever scanned. A step whose node
+    cannot be found at all is recorded the same way.
     """
     text = _read_text_safe(file_path)
     if not text:
@@ -919,24 +918,35 @@ def detect_yaml_run_injection(
     compiled = re.compile(pattern)
     lines = text.splitlines()
     triggers = _on_trigger_names(_get_on_node(doc))
-    file_cursor = 0
+    job_nodes = _job_nodes(text)
+    seen_runs: set[int] = set()
     unanchored_reported = False
-    for job in jobs.values():
+    for job_key, job in jobs.items():
         if not isinstance(job, dict):
             continue
-        for job_step in _iter_job_steps(job):
+        leaves = list(_iter_job_steps(job))
+        nodes = list(_iter_step_nodes(
+            _node_keys(job_nodes[job_key]).get("steps")
+            if job_key in job_nodes else None))
+        if len(nodes) != len(leaves):
+            nodes = []                      # unpaired: anchor nothing
+        for k, job_step in enumerate(leaves):
             step = job_step.step
             run_text = step.get("run")
             if not isinstance(run_text, str):
                 continue
-            run_anchor = _RUN_KEY_RE.search(text, file_cursor)
-            if run_anchor is None:
-                # Unable to locate the run: key textually — we cannot scan
-                # this step's shell without risking attribution to an earlier
-                # non-run occurrence. This is a HOLE, not a clean step, so it
-                # is recorded as a coverage gap. Once per file: after the
-                # cursor runs past the last raw `run:` token every remaining
-                # parsed step lands here, and one honest line beats a hundred.
+            run_node = _node_keys(nodes[k]).get("run") if nodes else None
+            if not isinstance(run_node, yaml.ScalarNode) \
+                    or id(run_node) in seen_runs:
+                run_node = None
+            if run_node is None:
+                # No source line of its own for this run: scalar (an alias
+                # re-use of a node already attributed, or no node found) — we
+                # cannot scan this step's shell without risking attribution to
+                # another step. This is a HOLE, not a clean step, so it is
+                # recorded as a coverage gap. Once per file: an alias can
+                # expand into many such steps, and one honest line beats a
+                # hundred.
                 if not unanchored_reported:
                     unanchored_reported = True
                     logger.warning(
@@ -955,8 +965,12 @@ def detect_yaml_run_injection(
                         "step manually",
                     )
                 continue
-            file_cursor = run_anchor.end()
-            search_cursor = file_cursor
+            seen_runs.add(id(run_node))
+            # Search only the scalar's own source span: a snippet that is not
+            # there verbatim is a drop, never a match borrowed from a later
+            # step.
+            search_cursor = run_node.start_mark.index
+            run_end = run_node.end_mark.index
             for m in compiled.finditer(run_text):
                 snippet = m.group(0)
                 if _is_shape_safe_expression(snippet):
@@ -966,7 +980,7 @@ def detect_yaml_run_injection(
                         snippet, file_path,
                     )
                     continue
-                idx = text.find(snippet, search_cursor)
+                idx = text.find(snippet, search_cursor, run_end)
                 if idx < 0:
                     # The match exists in the parsed scalar but not
                     # verbatim in the raw file. This happens with YAML
@@ -1827,6 +1841,45 @@ def _node_keys(node: Any) -> dict[Any, Any]:
         else:
             own[key] = v
     merged.update(own)
+    return merged
+
+
+def _job_nodes(text: str) -> dict[Any, Any]:
+    """Each job's composed node, keyed exactly as `yaml.safe_load` keys the
+    job (a `yes:` job is `True`, not "yes"), with `<<:` merges and duplicate
+    keys resolved the way the loader resolves them. Empty when the text does
+    not compose."""
+    try:
+        root = yaml.compose(text)
+    except yaml.YAMLError:
+        return {}
+    jobs = _node_keys(root).get("jobs") if isinstance(
+        root, yaml.MappingNode) else None
+    if not isinstance(jobs, yaml.MappingNode):
+        return {}
+    loader = yaml.SafeLoader("")
+    own: dict[Any, Any] = {}
+    merged: dict[Any, Any] = {}
+
+    def _key(k: Any) -> Any:
+        try:
+            key = loader.construct_object(k, deep=True)
+            hash(key)
+            return key
+        except Exception:                       # unhashable or unconstructable
+            return None
+
+    for k, v in jobs.value:
+        if getattr(k, "tag", "") == "tag:yaml.org,2002:merge":
+            sources = v.value if isinstance(v, yaml.SequenceNode) else [v]
+            for src in sources:
+                if isinstance(src, yaml.MappingNode):
+                    for mk, mv in src.value:
+                        merged.setdefault(_key(mk), mv)
+            continue
+        own[_key(k)] = v
+    merged.update(own)
+    merged.pop(None, None)
     return merged
 
 

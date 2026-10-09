@@ -858,3 +858,83 @@ def test_whole_corpus_reports_identically_with_plain_steps_beside_a_group(
         _RACE_ONLY_WHEN_TAIL_WRAPPED.get(fixture, []), extra
     assert inside["dropped_matches"] == plain["dropped_matches"]
     assert inside["coverage_notes"] == plain["coverage_notes"]
+
+
+# ---------------------------------------------------------------------------
+# P14.10 takes each `run:` scalar's line from the parsed node, not from a raw
+# text cursor: a cursor cannot see a flow-style `{run: ...}`, and it walks
+# straight through a group it could not read, so the next block `run:` (in
+# another step, or another job) was blamed for the injection.
+# ---------------------------------------------------------------------------
+
+_ISSUE_TITLE = "echo ${{ github.event.issue.title }}"
+
+
+def _p14_10_lines(root: Path, text: str) -> tuple[list[int], list[str]]:
+    _write(root, "a.yml", text)
+    data = _scan_root(root)
+    lines = sorted(f["line"] for f in data["findings"]
+                   if f["pattern"] == "P14.10")
+    return lines, [d["reason"] for d in data["dropped_matches"]]
+
+
+def test_p14_10_a_flow_style_group_child_is_reported_at_its_own_line(
+    tmp_path: Path,
+) -> None:
+    text = textwrap.dedent(f"""\
+        on: issues
+        jobs:
+          a:
+            runs-on: ubuntu-latest
+            steps:
+              - parallel: [{{run: "{_ISSUE_TITLE}"}}, {{run: "echo ok"}}]
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: {_ISSUE_TITLE}
+        """)
+    lines, dropped = _p14_10_lines(tmp_path, text)
+    assert lines == [6, 10], lines
+    assert dropped == [], dropped
+
+
+def test_p14_10_a_group_it_cannot_read_does_not_shift_later_lines(
+    tmp_path: Path,
+) -> None:
+    """The group's value is not a list: its `run:` is not a step. The two
+    real steps after it are reported at their own lines, not one line up."""
+    text = textwrap.dedent(f"""\
+        on: issues
+        jobs:
+          a:
+            runs-on: ubuntu-latest
+            steps:
+              - name: broken group
+                parallel:
+                  run: {_ISSUE_TITLE}
+              - run: {_ISSUE_TITLE}
+              - run: {_ISSUE_TITLE}
+        """)
+    lines, _ = _p14_10_lines(tmp_path, text)
+    assert lines == [9, 10], lines
+
+
+def test_p14_10_a_child_written_above_its_parents_run_is_not_dropped(
+    tmp_path: Path,
+) -> None:
+    """`parallel:` written before `run:` on one step: the walker yields the
+    step before its children, so a cursor anchored the parent at the child's
+    line and then lost the child's injection as a "folded scalar"."""
+    text = textwrap.dedent(f"""\
+        on: issues
+        jobs:
+          t:
+            runs-on: ubuntu-latest
+            steps:
+              - parallel:
+                  - run: {_ISSUE_TITLE}
+                run: echo hi
+        """)
+    lines, dropped = _p14_10_lines(tmp_path, text)
+    assert lines == [7], lines
+    assert dropped == [], dropped
