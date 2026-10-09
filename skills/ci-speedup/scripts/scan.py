@@ -45,6 +45,18 @@ except ImportError:  # pragma: no cover — surfaced loudly if missing
           file=sys.stderr)
     sys.exit(1)
 
+# The ONE reader for a job's `steps:` list (descends `parallel:` groups, skips
+# `wait:`/`wait-all:`/`cancel:` control steps). Loaded by file path when this
+# module is itself loaded by path (the repo-root parity test), so it never
+# depends on the caller's sys.path.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workflow_steps import (  # noqa: E402
+    job_leaf_steps,
+    parallel_steps_stats,
+    parallel_steps_used,
+)
+
 
 # =============================================================================
 # Catalog parsing
@@ -546,9 +558,7 @@ def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
         if _job_needs_git_history(job, job_name):
             continue  # depth:0 is load-bearing here — removing it breaks the job
         checkout_index = 0  # Track which checkout step this is (1-based)
-        for step in (job.get("steps") or []):
-            if not isinstance(step, dict):
-                continue
+        for step in _steps(job):
             uses = str(step.get("uses") or "")
             if not uses.startswith("actions/checkout"):
                 continue
@@ -1231,7 +1241,7 @@ def _detect_opt17(doc: dict, raw: str) -> list[Hit]:
         # Job-level docker context: has `services:` block OR any step starts a
         # container OR runs docker compose / docker run.
         job_has_services = isinstance(job.get("services"), dict) and job.get("services")
-        steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+        steps = _steps(job)
         run_blobs = " ".join(
             s.get("run") for s in steps if isinstance(s.get("run"), str)
         )
@@ -1378,7 +1388,8 @@ def _on_schedules(on: Any) -> list[dict]:
 # =============================================================================
 
 def _steps(job: dict) -> list[dict]:
-    return [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+    # Leaf steps in declaration order, children of `parallel:` groups included.
+    return job_leaf_steps(job)
 
 
 def _uses(step: dict) -> str:
@@ -4424,7 +4435,7 @@ def _wf_jobs(doc: dict) -> dict[str, dict]:
 
 
 def _job_steps(job: dict) -> list[dict]:
-    return [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+    return job_leaf_steps(job)
 
 
 def _step_uses(step: dict) -> tuple[str, str] | None:
@@ -4545,6 +4556,16 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
             continue
         parsed.append((rel, doc, raw))
 
+    # What the step walker read inside GitHub Actions `parallel:` groups, and
+    # the control steps it skipped. A malformed group (its `parallel:` value is
+    # not a list) could not be read, so its file is a coverage gap — never clean.
+    parallel_stats = parallel_steps_stats((rel, doc) for rel, doc, _raw in parsed)
+    for mj in parallel_stats["malformed_jobs"]:
+        scan_incomplete.append({
+            "path": mj["path"],
+            "reason": (f"job `{mj['job']}`: {mj['count']} `parallel:` group(s) whose "
+                       "value is not a list of steps, so the steps inside were not read")})
+
     findings: list[dict[str, Any]] = []
     finding_idx = 0
 
@@ -4641,7 +4662,15 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
     # install seconds / runner-minutes are credited once, not double-counted.
     findings = _reconcile_opt1_opt2(findings)
 
+    extra: dict[str, Any] = {}
+    if parallel_steps_used(parallel_stats):
+        # Stamped only when the syntax is used, so every other findings
+        # document is byte-identical to before. Rendered as the "Parallel steps"
+        # row of the report's Data sources table.
+        extra["parallel_steps"] = parallel_stats
+
     return {
+        **extra,
         "findings": findings,
         "scanned_workflows": len(files),
         "scan_incomplete": scan_incomplete,

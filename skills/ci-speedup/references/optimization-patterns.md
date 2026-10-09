@@ -1429,6 +1429,43 @@ setup cheap instead of merging: bake the recurring `apt` / toolchain installs in
 a base image, as [OPT73](#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever)
 describes.
 
+**Prefer GitHub's native `parallel:` steps over shell `&`.** Since 2026-06-25 a
+step may be a `- parallel:` group: a list of ordinary `run:`/`uses:` steps that
+run at the same time, with an implicit wait at the end of the group
+([workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsparallel),
+[changelog](https://github.blog/changelog/2026-06-25-actions-steps-can-now-be-run-in-parallel/)).
+For the collapsed tasks this beats shell backgrounding:
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+  - run: npm ci
+  - parallel:
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Licence audit
+        run: npm run audit:licences
+```
+
+- **Separate logs.** Each task keeps its own step and log, where shell `&`
+  interleaves them — which also recovers part of the failure-isolation cost below.
+- **A failing task fails the job automatically.** A failed background step fails
+  the job at the next `wait` / `wait-all` that includes it (the end of a
+  `parallel:` group is one), unless it sets `continue-on-error`. That keeps the
+  no-weakening rule for free; with shell `&` the job must collect and check every
+  task's exit code itself, or a red task silently reads as green.
+- **Runner requirement.** GitHub-hosted runners update themselves. Self-hosted
+  runners need `actions/runner` **2.335.0** or later (the release that added the
+  background-step engine), ideally **2.336.0** or later (it stops a cancelled
+  background step from affecting the job result). The syntax is documented for
+  github.com and GitHub Enterprise Cloud; GitHub Enterprise Server's docs do not
+  carry it, so do not use it there.
+- **Limits.** At most 10 background steps run at once in a job (more queue for
+  a free slot), and `parallel:` / `background:` cannot be used inside a
+  composite action.
+
 **Failure-isolation cost (a real cost, not a footnote)**: N separate checks give
 N independently-red checks and N independently re-runnable units. One
 consolidated job gives one red check and re-runs everything, and a reviewer
@@ -1535,7 +1572,7 @@ grep -rn 'sleep [0-9]' .github/workflows/
 grep -rn 'sleep [0-9]' docker-compose*.yml
 ```
 
-**Fix**: Add healthchecks to `docker-compose.yml` services and use `--wait` flag with `docker compose up`.
+**Fix**: Add healthchecks to `docker-compose.yml` services and use `--wait` flag with `docker compose up`. Starting the service as a `background: true` step and stopping it with a `cancel:` step is a native pattern for a service the job runs itself (OPT77's fix covers the runner requirement), but it does not make the service ready: the steps that use it still need a readiness probe, not a fixed `sleep`.
 
 **Real-world example (better-auth)**: PR #8010 replaced `sleep 10` with Docker healthchecks across all adapter integration jobs.
 
@@ -1762,7 +1799,7 @@ title_template: "Long Test Job Without Sharding"
 - Check if the test framework supports sharding (Playwright `--shard`, vitest `--shard`)
 - Check if sharding is configured
 
-**Fix**: Add matrix-based sharding. E.g., Playwright: `--shard=${{ matrix.shard }}/${{ strategy.job-total }}`.
+**Fix**: Add matrix-based sharding. E.g., Playwright: `--shard=${{ matrix.shard }}/${{ strategy.job-total }}`. When the split pieces are few and each leg would repeat a large setup, running the shards as a `parallel:` step group inside the one job is the alternative: setup is paid once and no new check names appear (OPT77's fix covers the syntax and runner requirement; OPT75's covers the independence checklist and why the saving is an upper bound until benchmarked).
 
 **Required-checks caveat**: if the job you're sharding is a **required status check** (a merge gate — which the long pole usually is), the new shard jobs must be added to branch protection as required checks (or the ruleset equivalent), or the sharded-out test work silently stops gating merges — everything stays green while the gate no longer actually runs it. The split isn't complete until the new jobs gate the merge, and re-establishing that gating is usually an admin-only step. If the split routes the old check's work behind a `needs:` edge and an aggregator, see OPT75's [dependency-failure skip caveat](#opt75--long-pole-optimize-or-relocate-the-dominant-step) — a dependent skipped by a failed dependency reports skipped, not failed, so the aggregator must run with `always()` (or `!cancelled()`) and propagate every `needs.<job>.result`, and keeping the required check name on that aggregator re-gates the merge without an admin.
 
@@ -4574,7 +4611,7 @@ title_template: "A shared step recurs across the whole cluster — fix it once, 
 
 **Detection heuristic** (routed): across the cluster jobs (the long pole plus every job within striking distance of it — the floor band), normalize step names (strip matrix args, lowercase, category-classify) and find a step category that recurs in ≥2 cluster jobs with material p50 in each. That step is a floor-lowering candidate.
 
-**Fix recipe**: Make the shared step cheap **in every job that runs it** — a warm dependency/build cache keyed so all cluster jobs hit it, a prebuilt base image they all pull, or a `setup-*` `cache:` shared across jobs. The saving is credited across **every** cluster job containing the step (the floor drops by the per-job saving), not just the long pole — that's what makes it beat the floor. (Avoid the serial-gate trap: do NOT consolidate the shared step into one upstream job the others `needs:` — that adds wall-clock behind a serial gate, see OPT14/§4. Lower the floor by making each parallel copy cheap, not by serializing.)
+**Fix recipe**: Make the shared step cheap **in every job that runs it** — a warm dependency/build cache keyed so all cluster jobs hit it, a prebuilt base image they all pull, or a `setup-*` `cache:` shared across jobs. The saving is credited across **every** cluster job containing the step (the floor drops by the per-job saving), not just the long pole — that's what makes it beat the floor. (Avoid the serial-gate trap: do NOT consolidate the shared step into one upstream job the others `needs:` — that adds wall-clock behind a serial gate, see OPT14/§4. Lower the floor by making each parallel copy cheap, not by serializing.) When the jobs repeating the step are few and the shared setup is large, the opposite move can win: merge them into one job and run their payloads as a `parallel:` step group inside it, so the setup is paid once (OPT77's fix covers the syntax, the runner requirement and the limits).
 
 **Risk**: **LOW** — caching a shared setup step is mechanical and reversible, and changes no test/build semantics. (Escalates only if the "shared step" is itself a build whose caching could serve stale outputs — then carry a cache-key-correctness check.)
 
@@ -4644,6 +4681,21 @@ title_template: "The long pole's time is one addressable step — speed it up or
 - dominant = **build** → warm the build cache, or scope the build (OPT70/OPT72).
 - dominant = **test** → shard it (OPT24), or scope it to changed targets (OPT70).
 - dominant = **scan / package** → cache the scan DB / incremental scan, or move it advisory-async if non-required (OPT71).
+- dominant cost is **several independent steps** run one after another (say a
+  build, a docs build and a scan, none of which reads another's output) → run
+  them as a `parallel:` group **inside the same job** (syntax, runner
+  requirement and limits: OPT77's fix). No extra checkout or setup is paid and no
+  new check name appears, so no required-check edit is needed. Treat steps as
+  independent only when all three hold:
+  1. no sibling reads what another sibling writes to `GITHUB_ENV`,
+     `GITHUB_OUTPUT` or `GITHUB_PATH`;
+  2. no two siblings write the same cache, lockfile or build-output directory;
+  3. the runner has the memory and CPU for them all at once.
+
+  **Honesty note**: the saving is "sum of the steps minus the slowest one" only
+  if each sibling keeps its solo speed. Siblings share one runner's CPU, memory
+  and disk, so that figure is an **upper bound** until a benchmark run measures
+  the job with the group in place.
 
 Report the dominant step, its category, and its share so the reader sees *why* the inherent-cost pole is actually addressable.
 

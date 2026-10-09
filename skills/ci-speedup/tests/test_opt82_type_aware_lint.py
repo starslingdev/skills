@@ -1908,3 +1908,26 @@ def test_verifier_fails_an_opt82_pole_that_renders_the_coverage_gap(tmp_path):
         bad = md[:head] + md[head:].replace("```text", f"{wording}\n\n```text", 1)
         c = vr.check_opt82_type_aware_lint_uncredited(bad, p)
         assert not c.ok and "coverage gap" in c.detail, (wording, c.detail)
+
+
+# ---- parallel steps: a lint step inside a `parallel:` group is still read ----
+
+def test_detector_reads_a_lint_step_inside_a_parallel_group(tmp_path):
+    """The same lint job, with `npm run lint` written as one child of a
+    `parallel:` group beside a typecheck. A flat reader saw the group as one
+    step with no `run:` and never found the lint command."""
+    import copy
+    wf = copy.deepcopy(_WF)
+    wf["jobs"]["eslint"]["steps"] = [
+        {"uses": "actions/checkout@v4"},
+        {"run": "npm ci"},
+        {"parallel": [{"name": "Lint", "run": "npm run lint"},
+                      {"name": "Typecheck", "run": "npx tsc --noEmit"}]},
+    ]
+    block = scan._read_type_aware_lint(_tree(tmp_path))
+    flat, _w, _c = _detect(block, lint_s=95, unit_s=20)
+    out, withheld, _cands = _detect(block, lint_s=95, unit_s=20, wf=wf)
+    assert len(out) == 1, withheld
+    assert out[0]["affected_jobs"] == flat[0]["affected_jobs"] == ["eslint"]
+    assert (out[0]["type_aware_lint"]["lint_command"]
+            == flat[0]["type_aware_lint"]["lint_command"])

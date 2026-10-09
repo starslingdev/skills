@@ -4007,3 +4007,168 @@ jobs:
                       if ln.strip() == "fetch-depth: 0")
     assert len(opt28) == 1, opt28
     assert opt28[0]["line"] == depth_line
+
+
+# =============================================================================
+# Parallel steps (GitHub Actions `parallel:` groups, `background:`, `wait:`)
+#
+# A `- parallel:` item holds a LIST of ordinary child steps. A reader that walks
+# `job.steps` as a flat list sees that item as one step with no `run:`/`uses:`,
+# so every child is invisible. Each test below takes an existing fixture, wraps
+# the DECISIVE step in a `parallel:` group, and asserts the finding is unchanged.
+# =============================================================================
+
+def test_opt16_duplicate_command_inside_a_parallel_group_is_read(tmp_path: Path):
+    pos = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm run build:packages
+      - parallel:
+          - run: pnpm run build:packages
+          - run: pnpm run lint
+"""
+    assert "OPT16" in _scan_one(tmp_path, pos)
+
+
+def test_opt2_uncached_install_inside_a_parallel_group_is_read(tmp_path: Path):
+    pos = """name: CI
+on: push
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - parallel:
+          - run: npx playwright install
+          - run: pnpm run build
+      - run: npx playwright test
+"""
+    assert "OPT2" in _scan_one(tmp_path, pos)
+
+
+def test_opt5_cache_inside_a_parallel_group_still_counts_as_configured(tmp_path: Path):
+    neg = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: pnpm/action-setup@v4
+      - parallel:
+          - uses: actions/setup-node@v4
+            with:
+              node-version: 20
+              cache: pnpm
+          - run: echo warming
+      - run: pnpm install
+"""
+    assert "OPT5" not in _scan_one(tmp_path, neg)
+
+
+def test_opt28_full_history_checkout_inside_a_parallel_group_is_read(tmp_path: Path):
+    pos = """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - uses: actions/checkout@v4
+            with:
+              fetch-depth: 0
+          - run: echo prepare
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", pos)
+    opt28 = [f for f in _scan(tmp_path)["findings"] if f["pattern"] == "OPT28"]
+    assert len(opt28) == 1, opt28
+    depth_line = next(i + 1 for i, ln in enumerate(pos.split("\n"))
+                      if ln.strip() == "fetch-depth: 0")
+    assert opt28[0]["line"] == depth_line
+
+
+def test_control_steps_never_crash_the_scan_and_are_counted(tmp_path: Path):
+    """`wait:` / `wait-all:` / `cancel:` steps carry no `run:`/`uses:`. The
+    scan must read straight past them, and say how many it skipped."""
+    yml = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start db
+        id: db
+        run: docker run -d postgres:15
+        background: true
+      - wait: db
+      - wait-all:
+      - cancel: db
+      - run: pnpm run build:packages
+      - run: pnpm run build:packages
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    assert "OPT16" in _patterns(data)
+    ps = data["parallel_steps"]
+    assert ps["control_steps"] == 3 and ps["groups"] == 0, ps
+    assert ps["steps_in_groups"] == 0 and ps["malformed_groups"] == 0, ps
+
+
+def test_steps_read_inside_parallel_groups_are_disclosed(tmp_path: Path):
+    yml = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - run: pnpm run lint
+          - run: pnpm run typecheck
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    ps = data["parallel_steps"]
+    assert ps["steps_in_groups"] == 2 and ps["groups"] == 1, ps
+    assert ps["malformed_files"] == [], ps
+    assert data["scan_incomplete"] == []
+
+
+def test_no_parallel_stamp_when_the_repo_does_not_use_the_syntax(tmp_path: Path):
+    """Recorded only when the syntax is used, so every other findings document
+    is byte-identical to before."""
+    _write_workflow(tmp_path, "ci.yml", """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm test
+""")
+    assert "parallel_steps" not in _scan(tmp_path)
+
+
+def test_a_malformed_parallel_group_is_disclosed_not_read_as_clean(tmp_path: Path):
+    """A `parallel:` that is not a list of steps cannot be read. Its children
+    are unknown, so the file is a coverage gap — never a clean scan."""
+    yml = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          run: pnpm run lint
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    ps = data["parallel_steps"]
+    assert ps["malformed_groups"] == 1, ps
+    assert ps["malformed_files"] == [".github/workflows/ci.yml"], ps
+    assert ps["malformed_jobs"][0]["job"] == "build", ps
+    gaps = [g for g in data["scan_incomplete"] if g["path"] == ".github/workflows/ci.yml"]
+    assert gaps and "parallel" in gaps[0]["reason"], data["scan_incomplete"]

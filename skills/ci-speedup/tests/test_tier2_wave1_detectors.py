@@ -9842,3 +9842,81 @@ def test_opt79_off_pole_block_does_not_claim_its_job_is_not_a_long_pole():
     out = "\n".join(bp._opt79_off_pole_block([f], "https://example.invalid/c"))
     assert "<!-- opt79-pole:f9 -->" in out
     assert "not one of the long poles drilled above" not in out, out
+
+
+# ============ parallel steps: the YAML readers see inside `parallel:` groups ============
+#
+# A `- parallel:` item holds a LIST of child steps. Each test wraps the decisive
+# step of an existing fixture in a group and asserts the result is unchanged.
+
+def test_opt77_reads_setup_steps_inside_a_parallel_group():
+    """Every job runs setup-python + the install as a `parallel:` group. A flat
+    reader stopped at the group (no `run:`/`uses:`), so all three fingerprints
+    read as `checkout` only and AGREED, crediting a consolidation across three
+    different Python versions. Reading inside the group must withhold it."""
+    names = ("lint", "typecheck", "audit")
+    steps = [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+             ("Run actions/setup-python@v5", 15.0), ("Run pip install -r r.txt", 50.0)]
+    runs = [[_setup_job_named(n, steps, 10.0) for n in names] for _ in range(2)]
+    crit = _opt77_crit(names=names, setup_s=80.0, work_s=10.0)
+
+    def _job_steps(py):
+        return [{"uses": "actions/checkout@v4"},
+                {"parallel": [
+                    {"uses": "actions/setup-python@v5", "with": {"python-version": py}},
+                    {"run": "pip install -r r.txt"}]}]
+
+    def _wf(by_job):
+        wf = _opt77_wf(names=names)
+        for k, v in by_job.items():
+            wf["jobs"][k]["steps"] = v
+        return wf
+
+    same = {n: _job_steps("3.12") for n in names}
+    assert len(_opt77(jpr=runs, crit=crit, wf=_wf(same))) == 1, "control"
+    diverged = dict(same, audit=_job_steps("3.9"))
+    assert _opt77(jpr=runs, crit=crit, wf=_wf(diverged)) == [], "input inside the group"
+    fp = cr._consolidation_yaml_setup_fingerprint("audit", _wf(diverged))
+    assert fp is not None and len(fp) == 3, fp
+
+
+def test_opt79_reads_a_cache_step_inside_a_parallel_group():
+    """The cache restore runs in a `parallel:` group beside an unrelated step,
+    then the install follows the group. Same block as the flat fixture."""
+    wf = _opt79_steps(
+        {"parallel": [{"run": "npm run lint:md"}, dict(_OPT79_NODE_CACHE)]},
+        {"run": "npm ci"}, {"run": "npm test"})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert gate == "", gate
+    assert block["restore"] == "Run actions/cache@v4" and block["install"] == "Run npm ci"
+
+
+def test_opt79_withholds_a_cache_and_install_that_run_side_by_side():
+    """Siblings in one `parallel:` group run at the same time: the restore does
+    not happen BEFORE the install, so the restore-then-install block this
+    pattern prices does not exist. Withhold rather than price it."""
+    wf = _opt79_steps(
+        {"parallel": [dict(_OPT79_NODE_CACHE), {"run": "npm ci"}]},
+        {"run": "npm test"})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None and gate == "cache_and_install_run_in_the_same_parallel_group"
+
+
+def test_opt80_finds_the_checkout_step_inside_a_parallel_group():
+    wf = _opt80_wf(steps=[{"parallel": [{"uses": "actions/checkout@v4"},
+                                        {"run": "echo warm"}]},
+                          {"run": "npm test"}])
+    out, _gh = _opt80(wf=wf)
+    assert len(out) == 1, out
+    assert out[0]["affected_jobs"] == ["build"]
+
+
+def test_a_control_step_only_job_never_crashes_the_yaml_readers():
+    """`wait:` / `wait-all:` / `cancel:` steps carry no `run:`/`uses:`."""
+    wf = _opt79_steps({"wait-all": None}, {"cancel": "db"}, {"wait": ["a", "b"]})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    # No step does any work, so there is no candidate to hold back.
+    assert block is None and gate == "job_has_no_yaml_steps"
+    assert gate in cr._OPT79_NOT_A_CANDIDATE_GATES
+    assert cr._consolidation_yaml_setup_fingerprint(_OPT79_JOB, wf) is None
+    assert cr._opt80_checkout_step(wf["jobs"][_OPT79_JOB], None) is None

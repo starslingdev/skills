@@ -11261,3 +11261,43 @@ def test_opt82_check_is_registered_and_skips_cleanly_without_findings():
     bp = _load_blocking_path()
     assert vr._VR_OPT82_LEDGER_SENTENCE == bp._OPT82_LEDGER_SENTENCE
     assert vr._VR_OPT82_WITHHOLD_PHRASES == bp._OPT82_WITHHOLD_PHRASES
+
+
+# ---- parallel steps: the Data sources row the scan's stamp requires ----
+
+_PARALLEL_STAMP = {"groups": 2, "steps_in_groups": 5, "control_steps": 1,
+                   "malformed_groups": 1, "malformed_files": [".github/workflows/ci.yml"],
+                   "malformed_jobs": [{"path": ".github/workflows/ci.yml", "job": "build",
+                                       "count": 1}]}
+
+
+def test_parallel_steps_row_is_rendered_and_required(tmp_path):
+    """The scan stamps `parallel_steps` only when the repo uses the syntax. The
+    Data sources table then carries a "Parallel steps" row, and the verifier
+    fails a report that drops it or under-states a malformed group."""
+    vr = _load_verify_report()
+    bp = _load_blocking_path()
+    doc = {"parallel_steps": dict(_PARALLEL_STAMP), "data_sources": {}}
+    footer = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    row = next(ln for ln in footer.splitlines() if ln.startswith("| Parallel steps |"))
+    assert "5 step(s) inside `parallel:` groups read (2 group(s))" in row
+    assert "**1 malformed `parallel:` group(s) not read**" in row
+    assert "`.github/workflows/ci.yml`" in row
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    assert vr._parallel_steps_violation(footer, fp)[0] is None
+    without = "\n".join(ln for ln in footer.splitlines()
+                        if not ln.startswith("| Parallel steps |"))
+    assert "no Parallel steps row" in (vr._parallel_steps_violation(without, fp)[0] or "")
+    hidden = footer.replace("**1 malformed `parallel:` group(s) not read**", "")
+    assert vr._parallel_steps_violation(hidden, fp)[0], "a hidden malformed group must fail"
+
+
+def test_no_parallel_steps_row_without_the_stamp(tmp_path):
+    vr = _load_verify_report()
+    bp = _load_blocking_path()
+    footer = "\n".join(bp._data_sources_footer({"data_sources": {}}, "o/r"))
+    assert "| Parallel steps |" not in footer
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps({"data_sources": {}}), encoding="utf-8")
+    assert vr._parallel_steps_violation(footer, fp) == (None, "")

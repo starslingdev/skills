@@ -66,6 +66,12 @@ from wall_clock import (  # noqa: E402
     size_wall_clock,
 )
 
+# Every read of a job's YAML `steps:` list goes through the one walker, so the
+# children of a GitHub Actions `parallel:` group are seen and `wait:` /
+# `wait-all:` / `cancel:` control steps are skipped. (The RUN-DATA side — the
+# jobs API's `steps` with timestamps — is a different list and is not walked.)
+from workflow_steps import job_walk  # noqa: E402
+
 
 # =============================================================================
 # gh client — minimal wrapper around the gh CLI
@@ -6677,7 +6683,10 @@ def _decompose_job_steps(
     # 4s). Boilerplate still counts toward `setup_build_s` / `redundant_ratio`
     # below — it's real cost — just not an addressable dominant lever. Fall back to
     # the full set only when a job is ALL boilerplate (nothing else to crown).
-    sel = [s for s in steps if not _NON_WORK_STEP_RE.match(s[0])] or steps
+    sel = ([s for s in steps if not _NON_WORK_STEP_RE.match(s[0])]
+           or [s for s in steps if not _CONTROL_STEP_NAME_RE.match(s[0])])
+    if not sel:
+        return None  # nothing but control steps: no step does the work
     cat_p50: dict[str, float] = {}
     for _n, c, p in sel:
         cat_p50[c] = cat_p50.get(c, 0.0) + p
@@ -6725,7 +6734,10 @@ def _dominant_category_lead(named_durs: "list[tuple[str, float]]") -> "tuple[str
     items = [(n, d) for n, d in named_durs if isinstance(d, (int, float)) and d > 0]
     if not items:
         return None
-    work = [(n, d) for n, d in items if not _NON_WORK_STEP_RE.match(n)] or items
+    work = ([(n, d) for n, d in items if not _NON_WORK_STEP_RE.match(n)]
+            or [(n, d) for n, d in items if not _CONTROL_STEP_NAME_RE.match(n)])
+    if not work:
+        return None
     cat_p50: dict[str, float] = {}
     for n, d in work:
         cat_p50[_step_category(n)] = cat_p50.get(_step_category(n), 0.0) + d
@@ -8491,8 +8503,8 @@ def _consolidation_yaml_setup_fingerprint(
     divergence."""
     jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
     spec = jobs.get(key) if isinstance(jobs, dict) else None
-    steps = (spec if isinstance(spec, dict) else {}).get("steps")
-    if not isinstance(steps, list) or not steps:
+    steps = job_walk(spec).steps()
+    if not steps:
         return None
     defaults = (spec.get("defaults") if isinstance(spec.get("defaults"), dict) else {}) or {}
     drun = defaults.get("run") if isinstance(defaults.get("run"), dict) else {}
@@ -9452,13 +9464,10 @@ def _opt80_checkout_step(job_spec: dict[str, Any],
     A `git clone` in a `run:` block is deliberately NOT matched: its fix is a
     different edit (flags on the user's own command), and `actions/checkout` is
     what the recipe below configures."""
-    steps = job_spec.get("steps")
-    if not isinstance(steps, list):
+    if not isinstance(job_spec.get("steps"), list):
         return "job_declares_no_steps"
     found: list[tuple[str, str, str, dict[str, Any]]] = []
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
+    for step in job_walk(job_spec).steps():
         uses = str(step.get("uses") or "").strip()
         if not uses:
             continue
@@ -9541,12 +9550,9 @@ def _opt80_retry_already_configured(wf_doc: dict[str, Any], job_spec: dict[str, 
         if isinstance(env_block, dict) and any(
                 str(k).upper() in _OPT80_RETRY_ENV_KEYS for k in env_block):
             return True
-    steps = job_spec.get("steps")
-    if not isinstance(steps, list):
+    if not isinstance(job_spec.get("steps"), list):
         return None
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
+    for step in job_walk(job_spec).steps():
         is_checkout = checkout_step is not None and step is checkout_step
         # Step-level env is scoped to its own step: only the checkout's counts.
         env_reaches_checkout = is_checkout or checkout_step is None
@@ -12398,9 +12404,7 @@ def _detect_opt82_type_aware_lint(
         found: "tuple[str, str, list[str]] | None" = None
         lint_step: dict[str, Any] = {}
         wd = ""
-        for step in spec["steps"]:
-            if not isinstance(step, dict):
-                continue
+        for step in job_walk(spec).steps():
             if not isinstance(step.get("run"), str):
                 # An action step that lints: one whose name or reference says
                 # ESLint, or a LOCAL action named lint. What it runs lives in
@@ -16996,8 +17000,8 @@ def _sharded_bases(doc: dict[str, Any]) -> set[str]:
             _SPLIT_AXIS_RE.search(str(k)) for k in matrix
             if k not in ("include", "exclude"))
         cmd_sharded = any(
-            isinstance(s, dict) and _SHARD_CMD_RE.search(str(s.get("run", "") or ""))
-            for s in (job.get("steps") or []))
+            _SHARD_CMD_RE.search(str(s.get("run", "") or ""))
+            for s in job_walk(job).steps())
         if not (axis_sharded or cmd_sharded):
             continue
         name = job.get("name")
@@ -17605,6 +17609,7 @@ _OPT79_EARLY_HELD_BACK_GATES = frozenset({
     "cache_action_is_not_one_this_pattern_measures",
     "cache_step_has_no_renderable_name",
     "install_step_also_runs_non_install_commands",
+    "cache_and_install_run_in_the_same_parallel_group",
     "no_install_step_after_the_cache_step",
     "first_step_after_cache_is_not_a_recognised_install",
     "cache_path_names_no_known_package_store",
@@ -17892,8 +17897,12 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
     """
     jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
     spec = jobs.get(key) if isinstance(jobs, dict) else None
-    steps = (spec if isinstance(spec, dict) else {}).get("steps")
-    if not isinstance(steps, list) or not steps:
+    # Leaf steps, children of `parallel:` groups included; `groups[i]` is the
+    # group a step runs in (None when it runs in sequence).
+    leaves = job_walk(spec).leaves
+    steps = [lf.step for lf in leaves]
+    groups = [lf.group for lf in leaves]
+    if not steps:
         return None, "job_has_no_yaml_steps"
 
     displays: list[str | None] = [_opt79_yaml_step_display(s) for s in steps]
@@ -17972,6 +17981,11 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
             continue
         if _opt79_run_is_only_installs(steps[j]) is False:
             return None, "install_step_also_runs_non_install_commands"
+        if groups[ci] is not None and groups[j] == groups[ci]:
+            # Siblings in one `parallel:` group run at the same time: the
+            # restore does not happen BEFORE the install, so the restore-then-
+            # install block this pattern prices does not exist.
+            return None, "cache_and_install_run_in_the_same_parallel_group"
         install, install_cmd = d, cmd or d
         break
     if not install:
@@ -18424,11 +18438,8 @@ def _opt79_package_json_needed(wf_docs: dict[str, Any]) -> bool:
     for doc in (wf_docs or {}).values():
         jobs = doc.get("jobs") if isinstance(doc, dict) else None
         for spec in (jobs.values() if isinstance(jobs, dict) else ()):
-            steps = spec.get("steps") if isinstance(spec, dict) else None
             workspace = "none"
-            for step in (steps if isinstance(steps, list) else ()):
-                if not isinstance(step, dict):
-                    continue
+            for step in job_walk(spec).steps():
                 workspace = _opt79_checkout_state(workspace, step)
                 uses = str(step.get("uses") or "").strip()
                 if workspace != "root" or not _OPT79_SETUP_USES_RE.match(uses):
@@ -19512,8 +19523,18 @@ def _opt79_pole_finding(
 
 # Setup/teardown step names that are NOT the load-bearing work, so they don't get
 # picked as a pole's "dominant step" for the generic cross-run check.
+# GitHub Actions parallel-step CONTROL steps (`wait:`, `wait-all:`, `cancel:`,
+# and the implicit wait GitHub may render for a group) run nothing: a `wait`
+# step's duration is time spent BLOCKED on background steps. How the jobs API
+# records overlapping steps has not been probed yet, so this is a guard only —
+# such a step is never crowned the dominant step. (`Wait for deployment` is
+# work and stays eligible: only the exact control names match.)
+_CONTROL_STEP_NAME_RE = _re.compile(
+    r"^(?:(?:wait|wait-all|cancel)\s*$|wait for all background steps)",
+    _re.IGNORECASE)
 _NON_WORK_STEP_RE = _re.compile(
-    r"^(set up job|complete job|post\b|checkout\b|set up |setup [a-z]*node)",
+    r"^(set up job|complete job|post\b|checkout\b|set up |setup [a-z]*node"
+    r"|(?:wait|wait-all|cancel)\s*$|wait for all background steps)",
     _re.IGNORECASE)
 
 

@@ -2983,6 +2983,48 @@ present; OPT75's presence does not (it renders first), though an OPT75 credit of
 half the pole's median or more does, like any credited finding. It renders after
 the pole's own prompt and its OPT75 block. See [§5.4](#54-opt81--a-runner-class-gap-measured-from-the-repos-own-runs-and-the-last-resort-runner-advisory).
 
+### Parallel steps: the YAML side is walked, the run-data side is not (yet)
+
+GitHub Actions parallel steps (2026-06-25) let a step be a `- parallel:` group
+(a list of ordinary child steps run concurrently, then an implicit wait), let a
+step carry `background: true`, and add control steps (`wait:`, `wait-all:`,
+`cancel:`) that run nothing.
+
+- **YAML side — fixed.** `scripts/workflow_steps.py` is the one reader of a
+  job's `steps:` list. It returns every leaf step in declaration order with each
+  group's children spliced in (nested groups too), skips-but-counts control
+  steps, tags each leaf `in_parallel_group` / `background`, and counts a
+  malformed group (a `parallel:` that is not a list). Every static reader goes
+  through it: `scan.py`'s `_steps` / `_job_steps` (so every per-job detector,
+  OPT28's checkout loop, OPT17's sleep loop, `_job_needs_git_history` and
+  `_index_local_git_actions`), and in `collect_runs.py` the OPT77 setup
+  fingerprint, OPT79's cache block and its `package.json` probe, OPT80's
+  checkout and retry readers, OPT82's lint-step read and the OPT24 shard check.
+  OPT79 adds one gate from the tags: a cache restore and an install that are
+  siblings in one group run side by side, so the restore-then-install block it
+  prices does not exist (`cache_and_install_run_in_the_same_parallel_group`).
+  The semantics mirror ci-score's `_walk_steps`, and the repo-root
+  git-history parity test pins the two engines' verdicts on parallel shapes.
+- **Provenance.** When a repo uses the syntax, `scan.py` stamps
+  `parallel_steps` {groups, steps_in_groups, control_steps, malformed_groups,
+  malformed_files, malformed_jobs}; otherwise the key is absent and the findings
+  document is byte-identical to before. The report's Data sources table renders
+  a "Parallel steps" row from it (`workflow_steps.parallel_steps_disclosure`),
+  `verify_report` requires that row whenever the stamp is present, and a
+  malformed group also lands in `scan_incomplete`, so its file reads as a
+  coverage gap, never as clean.
+- **Run-data side — NOT changed.** `_decompose_job_steps` still sums per-step
+  p50s into the job p50, and `_step_timeline` still lays steps out end to end.
+  With overlapping steps both are wrong (the sum over-counts, the timeline
+  draws concurrent steps in sequence), but how the jobs API records a parallel
+  child, a background step or the implicit group wait is not documented, so it
+  needs a live probe before the model changes. Until then there is one guard:
+  a step named exactly `wait`, `wait-all` or `cancel`, or starting with "Wait
+  for all background steps", is never crowned the dominant step. Its duration
+  is time spent blocked on other steps. The names are in `_NON_WORK_STEP_RE` in
+  both `collect_runs.py` and `blocking_path.py`, and the decomposition's
+  all-boilerplate fallback still excludes them.
+
 ## 12. The blocking-path report (`blocking_path.py`)
 
 `blocking_path.py` is the skill's **single, data-first renderer** (§2) — answering

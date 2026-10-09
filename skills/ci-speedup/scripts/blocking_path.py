@@ -36,6 +36,7 @@ from typing import Any, Callable, NamedTuple
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
+from workflow_steps import parallel_steps_disclosure  # same-skill module; step walker
 
 _LBLW = 33
 _BARW = 22
@@ -3025,8 +3026,11 @@ def _addressable_plain(pole: dict[str, Any], candidates: list[dict[str, Any]]) -
 # Setup/teardown step names that are NOT the load-bearing work, so they're skipped
 # when picking a pole's "dominant step" for the generic hand-off (mirrors the same
 # constant in collect_runs - kept in sync, not cross-imported, per the skill layout).
+# Includes the parallel-step control names (`wait`, `wait-all`, `cancel`, the
+# implicit group wait): they run nothing and are never the dominant step.
 _NON_WORK_STEP_RE = re.compile(
-    r"^(set up job|complete job|post\b|checkout\b|set up |setup [a-z]*node)",
+    r"^(set up job|complete job|post\b|checkout\b|set up |setup [a-z]*node"
+    r"|(?:wait|wait-all|cancel)\s*$|wait for all background steps)",
     re.IGNORECASE)
 
 
@@ -5695,6 +5699,16 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
             _parts.append(f"{_api} from the gh contents API (default branch HEAD)")
         rows.append(("workflow YAML", " / ".join(_parts),
                      "`on:` triggers, matrix/shard axes, job timeouts (detector inputs)"))
+    # GitHub Actions `parallel:` step groups: every static detector read the
+    # steps inside them through one walker (`workflow_steps`). Stamped by the
+    # scan only when the repo uses the syntax, so every other report is
+    # unchanged; a malformed group (not a list) is named here as not read.
+    # `verify_report` requires this row whenever the stamp is present.
+    _par = parallel_steps_disclosure(doc.get("parallel_steps"))
+    if _par:
+        rows.append(("Parallel steps", _par,
+                     "Static detectors read each step inside a `parallel:` group "
+                     "as its own step"))
     # Candidates a pattern measured and then HELD BACK because it could not
     # decide them — a candidate cache (OPT79), a group of small jobs sharing one
     # setup (OPT77), a checkout with a slow tail (OPT80). Without these rows the
@@ -6171,6 +6185,9 @@ _OPT79_HELD_BACK_REASONS: dict[str, str] = {
     "install_step_also_runs_non_install_commands":
         "the install step also runs other commands, so its time is not just "
         "the install",
+    "cache_and_install_run_in_the_same_parallel_group":
+        "the cache and the install run side by side in one parallel step "
+        "group, so the restore does not happen before the install",
     "no_install_step_after_the_cache_step":
         "no dependency install follows the cache, so the cache is not shown to "
         "speed anything up",

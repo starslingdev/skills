@@ -778,6 +778,9 @@ _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
     "install_step_also_runs_non_install_commands":
         "the install step also runs other commands, so its time is not just "
         "the install",
+    "cache_and_install_run_in_the_same_parallel_group":
+        "the cache and the install run side by side in one parallel step "
+        "group, so the restore does not happen before the install",
     "no_install_step_after_the_cache_step":
         "no dependency install follows the cache, so the cache is not shown to "
         "speed anything up",
@@ -1231,6 +1234,38 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
     return None, note
 
 
+def _parallel_steps_violation(report: str, findings_path: Path | None
+                              ) -> tuple[str | None, str]:
+    """When the scan stamped `parallel_steps` (the repo uses GitHub Actions
+    `parallel:` groups or `wait`/`wait-all`/`cancel` control steps), the Data
+    sources table must carry a "Parallel steps" row naming how many steps were
+    read inside groups, and naming any malformed group as not read. Re-derived
+    from the stamp's own counts; standalone (no import of the renderer)."""
+    if not findings_path:
+        return None, ""
+    try:
+        data = json.loads(Path(findings_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, ""  # unreadable findings are reported by the other re-derivations
+    stamp = data.get("parallel_steps") if isinstance(data, dict) else None
+    if not isinstance(stamp, dict) or not (stamp.get("groups") or stamp.get("control_steps")):
+        return None, ""
+    row = next((ln for ln in report.splitlines() if ln.startswith("| Parallel steps |")), None)
+    if row is None:
+        return ("findings carry a `parallel_steps` stamp but the Data sources table "
+                "has no Parallel steps row"), ""
+    want = [f"{int(stamp.get('steps_in_groups') or 0)} step(s) inside `parallel:` groups "
+            f"read ({int(stamp.get('groups') or 0)} group(s))"]
+    if stamp.get("control_steps"):
+        want.append(f"{int(stamp['control_steps'])} `wait`/`wait-all`/`cancel` control step(s)")
+    if stamp.get("malformed_groups"):
+        want.append(f"**{int(stamp['malformed_groups'])} malformed `parallel:` group(s) not read**")
+    missing = [w for w in want if w not in row]
+    if missing:
+        return f"Parallel steps row does not say {missing[0]!r}: {row!r}", ""
+    return None, "; parallel-step read disclosed"
+
+
 def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> Check:
     """The report must disclose its data basis (a provenance block or the Data
     sources footer), any incomplete-coverage banner must name the unscanned file(s)
@@ -1261,6 +1296,10 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
     if withheld_violation:
         return Check(name, False, withheld_violation)
     skip_note += withheld_note
+    par_violation, par_note = _parallel_steps_violation(report, findings_path)
+    if par_violation:
+        return Check(name, False, par_violation)
+    skip_note += par_note
     if "Incomplete coverage" in report:
         banner = _section_quote(report, "Incomplete coverage")
         if "**" not in banner:

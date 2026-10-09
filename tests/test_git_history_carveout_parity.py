@@ -219,3 +219,55 @@ def test_the_copy_stays_a_copy_and_never_becomes_an_import():
         if stripped.startswith(("import ", "from ")):
             assert "ci_speedup" not in stripped and "ci-speedup" not in stripped and \
                 "scan" not in stripped, stripped
+
+
+# GitHub Actions parallel steps: a history op (or a local action that runs one)
+# written as a child of a `- parallel:` group is still a history op. A flat read
+# of `steps:` saw the group as one step with no `run:`/`uses:` and missed it, so
+# the job's `fetch-depth: 0` read as removable. Each engine reads steps through
+# its own walker; these rows pin the verdict, and the agreement test pins the two
+# engines to each other.
+_PARALLEL_JOB_BATTERY = [
+    ("par-run", {"steps": [{"parallel": [{"run": "npm test"},
+                                           {"run": "git log --oneline"}]}]}),
+    ("par-uses", {"steps": [{"parallel": [{"uses": "tj-actions/changed-files@v45"}]}]}),
+    ("par-nested", {"steps": [{"parallel": [{"parallel": [
+        {"run": "git describe --tags"}]}]}]}),
+    ("par-wait", {"steps": [{"wait-all": None},
+                                  {"run": "git diff origin/main...HEAD"}]}),
+]
+
+
+def test_a_history_op_inside_a_parallel_group_needs_history(sides):
+    speed, _score = sides
+    speed._GIT_HISTORY_LOCAL_ACTIONS = set()
+    wrong = [name for name, job in _PARALLEL_JOB_BATTERY
+             if speed._job_needs_git_history(job, name) is not True]
+    assert not wrong, f"ci-speedup missed a history op inside a parallel group: {wrong!r}"
+
+
+def test_parallel_group_rows_agree_across_the_two_engines(sides):
+    speed, score = sides
+    if not hasattr(score, "_walk_steps"):
+        pytest.skip("ci-score's step walker has not landed on this base yet")
+    speed._GIT_HISTORY_LOCAL_ACTIONS = set()
+    mismatches = [name for name, job in _PARALLEL_JOB_BATTERY
+                  if speed._job_needs_git_history(job, name)
+                  != score._job_needs_git_history(job, name)]
+    assert not mismatches, mismatches
+
+
+def test_a_local_action_inside_a_parallel_group_is_indexed(sides, tmp_path: Path):
+    speed, _score = sides
+    act = tmp_path / ".github" / "actions" / "changed"
+    act.mkdir(parents=True)
+    act.joinpath("action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - run: git diff origin/main...HEAD\n"
+        "      shell: bash\n")
+    job = {"steps": [{"parallel": [{"uses": "./.github/actions/changed"},
+                                   {"run": "npm test"}]}]}
+    parsed = [(".github/workflows/ci.yml", {"jobs": {"a": job}}, "")]
+    idx = speed._index_local_git_actions(tmp_path, parsed)
+    assert "./.github/actions/changed" in idx
+    speed._GIT_HISTORY_LOCAL_ACTIONS = idx
+    assert speed._job_needs_git_history(job, "a") is True

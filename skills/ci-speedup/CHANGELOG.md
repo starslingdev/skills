@@ -724,6 +724,18 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-10-09** — **The fix recipes now name GitHub's native parallel steps.**
+  OPT77 (repeated setup across small jobs) prefers a `parallel:` step group over
+  shell `&` (separate logs, and a failing task fails the job on its own) and
+  states the runner requirement (self-hosted `actions/runner` 2.335.0 or later,
+  ideally 2.336.0; documented for github.com and GitHub Enterprise Cloud, not
+  Enterprise Server) and the 10-concurrent-background-step limit. OPT75 gains an
+  in-job `parallel:` route for a slow job made of several independent steps,
+  with an independence checklist and the note that "sum minus the slowest step"
+  is an upper bound until benchmarked. OPT24 and OPT73 name in-job parallel
+  steps as the alternative when the pieces are few and the setup is large;
+  OPT17 notes that a `background:` service step still needs a readiness probe.
+
 - **2026-10-07** — **A slow cache on a job that is not the workflow's slowest is
   now priced in runner-minutes.** When the cache check (OPT79) measured a cache
   that costs more than it saves on a job at or above the workflow's
@@ -926,6 +938,29 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
+  no longer invisible to the audit.** Since 2026-06-25 a step may be a
+  `- parallel:` group holding a list of ordinary steps, and `wait:`,
+  `wait-all:` and `cancel:` steps run nothing. Every static reader treated a
+  job's steps as a flat list, so a duplicate build, an uncached install, a
+  `fetch-depth: 0` checkout, a lint command, a cache step or the git-history
+  command that makes `fetch-depth: 0` necessary went unread whenever it sat
+  inside a group. One shared step walker (`scripts/workflow_steps.py`) now feeds
+  every static detector and every YAML step read in the collector (OPT16, OPT2,
+  OPT5, OPT28 and the other per-job detectors; OPT77's setup comparison, OPT79's
+  cache block, OPT80's checkout, OPT82's lint step, the OPT24 shard check). A
+  cache restore and an install that run side by side in one group are held back
+  by OPT79 with their own reason, since the restore no longer happens first. A
+  repo that uses the syntax gets a "Parallel steps" row in Data sources (steps
+  read inside groups, control steps skipped, and any malformed group named as
+  not read, which also shows as incomplete coverage); `verify_report` requires
+  the row. A repo that does not use it gets a byte-identical findings document.
+  A step named `wait`, `wait-all` or `cancel`, or "Wait for all background
+  steps…", is never crowned a slow job's dominant step: its time is spent
+  waiting on other steps. **Not changed yet:** how the run timing records
+  overlapping steps is undocumented, so the per-step decomposition still adds
+  step times as if they ran one after another; that needs a live probe first.
 
 - **2026-10-07** — **A slow lint job flagged by OPT82 no longer reads as a
   coverage gap, and a cache cost off the long poles no longer lands inside the

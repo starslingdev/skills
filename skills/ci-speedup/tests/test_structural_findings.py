@@ -4913,3 +4913,39 @@ def test_cache_distribution_keeps_warm_runs_reaches_mostly_warm(tmp_path: Path):
     # churn. That demotion is the whole point of F2.
     assert cd["pr"]["upstream_median"] < 40.0
     assert cd["verdict"] in ("miss-tail", "mostly-warm") and cd["verdict"] != "churn", cd["verdict"]
+
+
+# --------------------------------------------------------------------------- #
+# Parallel steps: a `wait` step blocks on background work and does none itself
+# --------------------------------------------------------------------------- #
+
+def test_a_wait_step_is_never_crowned_the_dominant_step():
+    """With `background:` steps, a `wait` / `wait-all` step's duration is the
+    time it spent BLOCKED on other steps. Crowning it would hand the agent a
+    step that does no work. How the jobs API records overlapping steps is not
+    yet probed, so this is a guard only: the name is excluded from the crown."""
+    for wait_name in ("wait", "wait-all", "cancel", "Wait",
+                      "Wait for all background steps to complete"):
+        steps = [("Checkout", 10), ("Start db", 5), ("Run tests", 60),
+                 (wait_name, 300)]
+        d = cr._decompose_job_steps([_job("integration", steps)])
+        assert d is not None
+        assert d["dominant_step"] == "Run tests", (wait_name, d)
+        lead = cr._dominant_category_lead([(n, float(p)) for n, p in steps])
+        assert lead is not None and lead[0] == "Run tests", (wait_name, lead)
+        dom = bp._dominant_step_from_timeline(
+            {"job_dur_s": 375, "steps": [{"name": n, "dur_s": p} for n, p in steps]})
+        assert dom is not None and dom[0] == "Run tests", (wait_name, dom)
+
+
+def test_a_wait_step_is_not_crowned_even_in_an_all_boilerplate_job():
+    steps = [("Set up job", 3), ("wait-all", 90), ("Checkout", 5)]
+    d = cr._decompose_job_steps([_job("noop", steps)])
+    assert d is not None and d["dominant_step"] == "Checkout", d
+
+
+def test_a_step_merely_named_like_wait_is_still_work():
+    steps = [("Checkout", 10), ("Wait for deployment to be healthy", 120),
+             ("Run tests", 60)]
+    d = cr._decompose_job_steps([_job("deploy", steps)])
+    assert d is not None and d["dominant_step"] == "Wait for deployment to be healthy", d
