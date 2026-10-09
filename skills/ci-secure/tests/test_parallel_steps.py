@@ -168,8 +168,9 @@ def test_vector_fires_the_same_inside_a_parallel_group(
 def test_whole_corpus_reports_identically_when_wrapped(
     tmp_path: Path, fixture: str,
 ) -> None:
-    """Every fixture, positive and negative: wrapping must neither lose a
-    finding nor invent one."""
+    """Every fixture, positive and negative: wrapping must never lose a
+    finding, and may add one only where the wrap really changes what runs
+    first — every such fixture is listed in `_RACE_ONLY_WHEN_WRAPPED`."""
     text = (_CLOAKED / fixture).read_text(encoding="utf-8")
     wrapped, inserted_after = _wrap_steps_in_parallel(text)
     if not inserted_after:
@@ -179,8 +180,23 @@ def test_whole_corpus_reports_identically_when_wrapped(
     _write(tmp_path / "wrapped", name, wrapped)
     plain = _scan_root(tmp_path / "plain")
     inside = _scan_root(tmp_path / "wrapped")
-    assert _signature(inside["findings"], None) == \
-        _signature(plain["findings"], inserted_after)
+    want = _signature(plain["findings"], inserted_after)
+    got = _signature(inside["findings"], None)
+    extra = list(got)
+    for sig in want:
+        assert sig in extra, f"{fixture}: {sig} lost inside a parallel: group"
+        extra.remove(sig)
+    assert sorted(s[0] for s in extra) == \
+        _RACE_ONLY_WHEN_WRAPPED.get(fixture, []), extra
+
+
+# Fixtures whose steps, once they all start together, really do race: the
+# extra finding is the scanner reading concurrency, not a wrapping artifact.
+_RACE_ONLY_WHEN_WRAPPED = {
+    # The clone is pinned to a full commit id in step 1 before step 2 runs it.
+    # As siblings, `python3 tools/setup.py` may run before the pin lands.
+    "p14_24_negative_sha_pinned_fetch.yml.fixture": ["P14.24"],
+}
 
 
 def test_wrapped_scan_discloses_the_parallel_steps_it_read(tmp_path: Path) -> None:
@@ -437,3 +453,213 @@ def test_parallel_row_never_opens_with_a_zero_and_names_background_steps() -> No
     assert background_only == "2 `background: true` step(s) scanned"
     assert report._parallel_steps_cell(
         {"steps_scanned": 0, "control_steps": 0, "background_steps": 0}) == ""
+
+
+# ---------------------------------------------------------------------------
+# Declaration order is not execution order.
+#
+# Siblings in one `parallel:` group run at the same time, and a
+# `background: true` step keeps running past the steps declared after it. The
+# three detectors that reason about ORDER (P14.9 "checkout, then execute",
+# P14.24 "fetch, then execute", P14.25 "builds disabled, then install") must
+# treat such steps as possibly concurrent and over-report rather than miss.
+# Every input below is an existing fixture (or an existing test's workflow
+# text) with its steps reordered, grouped or backgrounded; no new workflow
+# content is invented.
+# ---------------------------------------------------------------------------
+
+def _split_steps(text: str) -> tuple[list[str], list[list[str]], list[str], int]:
+    """(lines up to `steps:`, the step items as line lists, the rest, item
+    indent) for a workflow with ONE job."""
+    lines = textwrap.dedent(text).splitlines(keepends=True)
+    at = next(i for i, ln in enumerate(lines)
+              if _STEPS_KEY_RE.match(ln.rstrip("\n")))
+    body = lines[at + 1:]
+    indent = next(len(ln) - len(ln.lstrip(" ")) for ln in body
+                  if ln.strip().startswith("- "))
+    items: list[list[str]] = []
+    end = len(body)
+    for k, ln in enumerate(body):
+        cur = len(ln) - len(ln.lstrip(" "))
+        if ln.strip() and cur < indent:
+            end = k
+            break
+        if ln.strip().startswith("- ") and cur == indent:
+            items.append([ln])
+        elif items:
+            items[-1].append(ln)
+    return lines[:at + 1], items, body[end:], indent
+
+
+def _grouped(items: list[list[str]], indent: int) -> list[str]:
+    out = [" " * indent + "- parallel:\n"]
+    for item in items:
+        out.extend(("    " + ln) if ln.strip() else ln for ln in item)
+    return out
+
+
+def _backgrounded(item: list[str], indent: int, step_id: str | None = None,
+                  ) -> list[str]:
+    extra = [" " * (indent + 2) + "background: true\n"]
+    if step_id is not None:
+        extra.append(" " * (indent + 2) + f"id: {step_id}\n")
+    return [item[0], *extra, *item[1:]]
+
+
+def _joined(*parts: list[str]) -> str:
+    return "".join(ln for part in parts for ln in part)
+
+
+def _patterns(root: Path, text: str, pattern: str) -> list[dict]:
+    _write(root, "a.yml", text)
+    return [f for f in _scan_root(root)["findings"] if f["pattern"] == pattern]
+
+
+_P14_9 = (_CLOAKED / "p14_7_pr_target_writes_cache.yml.fixture").read_text()
+
+
+def test_p14_9_a_sibling_declared_before_the_head_checkout_still_runs_it(
+    tmp_path: Path,
+) -> None:
+    """The run steps share the checkout's group but are written above it: in a
+    group they all start together, so they can execute the fork's tree."""
+    head, items, tail, ind = _split_steps(_P14_9)
+    checkout, setup, *runs = items
+    # Negative control: the same reordering WITHOUT a group is ordinary
+    # sequential order, the runs finish before the checkout lands.
+    flat = _joined(head, *runs, checkout, setup, tail)
+    assert _patterns(tmp_path / "flat", flat, "P14.9") == []
+    grouped = _joined(head, _grouped([*runs, checkout, setup], ind), tail)
+    assert len(_patterns(tmp_path / "grp", grouped, "P14.9")) == 1
+
+
+def test_p14_9_a_background_step_started_before_the_checkout_still_runs(
+    tmp_path: Path,
+) -> None:
+    head, (checkout, setup, first_run, _), tail, ind = _split_steps(_P14_9)
+    text = _joined(head, _backgrounded(first_run, ind), checkout, setup, tail)
+    assert len(_patterns(tmp_path, text, "P14.9")) == 1
+
+
+_P14_24_CLONE = (_CLOAKED / "p14_24_mutable_fetch_exec.yml.fixture").read_text()
+
+
+def test_p14_24_execution_in_the_fetchs_group_declared_first_still_fires(
+    tmp_path: Path,
+) -> None:
+    head, (clone, execute), tail, ind = _split_steps(_P14_24_CLONE)
+    assert _patterns(tmp_path / "flat", _joined(head, execute, clone, tail),
+                     "P14.24") == []
+    grouped = _joined(head, _grouped([execute, clone], ind), tail)
+    assert len(_patterns(tmp_path / "grp", grouped, "P14.24")) == 1
+
+
+# The checkout spelling of the same fetch: the workflow text of
+# test_chain_detectors.test_p1424_checkout_of_another_repo_at_a_branch_then_execution.
+_P14_24_CHECKOUT = """\
+    name: ci
+    on: push
+    jobs:
+      b:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v4
+            with:
+              repository: acme/tools
+              ref: main
+              path: tools
+          - run: bash tools/run.sh
+"""
+
+
+def test_p14_24_checkout_and_execution_racing_in_one_group_fires(
+    tmp_path: Path,
+) -> None:
+    head, (checkout, execute), tail, ind = _split_steps(_P14_24_CHECKOUT)
+    assert _patterns(tmp_path / "flat", _joined(head, execute, checkout, tail),
+                     "P14.24") == []
+    grouped = _joined(head, _grouped([execute, checkout], ind), tail)
+    assert len(_patterns(tmp_path / "grp", grouped, "P14.24")) == 1
+
+
+@pytest.mark.parametrize("shape",
+                         ["in-order", "working-directory", "inline-quoted"])
+def test_p14_24_mutable_fetch_arm_reads_children_of_a_group(
+    tmp_path: Path, shape: str,
+) -> None:
+    """The mutable-fetch arm (`_checkout_fetches`, `_step_marks`) reads a
+    group's children like top-level steps: plain order, a child's own
+    `working-directory:`, and a single-line quoted `run:`."""
+    if shape == "inline-quoted":
+        head, (clone, execute), tail, ind = _split_steps(_P14_24_CLONE)
+        one = (clone[0].strip().split("run: ", 1)[1] + " && "
+               + execute[0].strip().split("run: ", 1)[1])
+        items = [[" " * ind + "- run: '" + one + "'\n"]]
+    else:
+        head, (checkout, execute), tail, ind = _split_steps(_P14_24_CHECKOUT)
+        if shape == "working-directory":
+            execute = [execute[0].replace("tools/run.sh", "run.sh"),
+                       " " * (ind + 2) + "working-directory: tools\n"]
+        items = [checkout, execute]
+    assert len(_patterns(tmp_path / "flat", _joined(head, *items, tail),
+                         "P14.24")) == 1
+    grouped = _joined(head, _grouped(items, ind), tail)
+    assert len(_patterns(tmp_path / "grp", grouped, "P14.24")) == 1
+
+
+# The workflow text of test_chain_detectors.
+# test_p1425_vite_in_job_yq_disabling_allowbuilds_silences_the_finding: builds
+# disabled in the step above the install, on a repo pinning pnpm 10.
+_P14_25_VITE = """\
+    name: publish
+    on: push
+    jobs:
+      publish:
+        runs-on: ubuntu-latest
+        permissions:
+          id-token: write
+        steps:
+          - name: Disallow installation scripts
+            run: yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+          - name: Install deps
+            run: pnpm install
+"""
+
+
+def _pnpm10(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "package.json").write_text(
+        '{"name": "x", "packageManager": "pnpm@10.34.5"}\n')
+    (root / "pnpm-workspace.yaml").write_text("allowBuilds:\n  core-js: true\n")
+    return root
+
+
+def test_p14_25_disable_racing_the_install_in_one_group_is_no_protection(
+    tmp_path: Path,
+) -> None:
+    head, (disable, install), tail, ind = _split_steps(_P14_25_VITE)
+    assert _patterns(_pnpm10(tmp_path / "flat"),
+                     _joined(head, disable, install, tail), "P14.25") == []
+    grouped = _joined(head, _grouped([disable, install], ind), tail)
+    assert len(_patterns(_pnpm10(tmp_path / "grp"), grouped, "P14.25")) == 1
+
+
+def test_p14_25_a_background_disable_protects_only_once_waited_for(
+    tmp_path: Path,
+) -> None:
+    head, (disable, install), tail, ind = _split_steps(_P14_25_VITE)
+    bg = _backgrounded(disable, ind, step_id="a")
+    assert len(_patterns(_pnpm10(tmp_path / "bg"),
+                         _joined(head, bg, install, tail), "P14.25")) == 1
+    # Waited for by id, or by `wait-all:`, the disable has finished first.
+    for name, wait in (("id", "- wait: a\n"), ("all", "- wait-all:\n")):
+        joined = _joined(head, bg, [" " * ind + wait], install, tail)
+        assert _patterns(_pnpm10(tmp_path / name), joined, "P14.25") == [], wait
+
+
+def test_p14_25_a_group_finishes_before_the_step_after_it(tmp_path: Path) -> None:
+    """A group ends with an implicit wait: a disable inside it protects an
+    install written AFTER the group."""
+    head, (disable, install), tail, ind = _split_steps(_P14_25_VITE)
+    text = _joined(head, _grouped([disable], ind), install, tail)
+    assert _patterns(_pnpm10(tmp_path), text, "P14.25") == []

@@ -1666,6 +1666,126 @@ def _job_steps(job: Any) -> list[dict[str, Any]]:
     return [s.step for s in _iter_job_steps(job)]
 
 
+# Declaration order is not execution order once a job uses `parallel:` or
+# `background:`. Siblings in one group run at the same time (the group ends
+# with an implicit wait, so they are finished before the next top-level step),
+# and a `background: true` step keeps running past the steps declared after it
+# until a top-level `wait-all:` or a `wait:` naming its `id` (anything else,
+# `cancel:` included, is treated as still running: fail safe). The detectors
+# that reason about ORDER answer with this, and over-report rather than miss:
+# "did X run after the checkout/fetch?" counts a concurrent X as after, and
+# "did protection P finish before the install?" counts P only when it is
+# declared earlier AND not concurrent with the install. With neither syntax
+# present nothing is concurrent and every answer is the declaration order.
+@dataclass(frozen=True)
+class _StepTiming:
+    top: int                    # index of the top-level `steps:` entry
+    grouped: bool               # a child of a `parallel:` group
+    until: int | None           # background: top index of the joining wait
+
+
+def _step_timing(job_step: _JobStep, steps: list[Any]) -> _StepTiming:
+    top = job_step.path[0]
+    until: int | None = None
+    if job_step.background:
+        until = len(steps)
+        sid = job_step.step.get("id")
+        for j in range(top + 1, len(steps)):
+            s = steps[j]
+            if not (isinstance(s, dict) and _is_control_step(s)):
+                continue
+            waits = s.get("wait")
+            waits = waits if isinstance(waits, list) else [waits]
+            if "wait-all" in s or (
+                    sid is not None and str(sid) in [str(w) for w in waits]):
+                until = j
+                break
+    return _StepTiming(top, job_step.in_parallel_group, until)
+
+
+def _steps_concurrent(a: _StepTiming, b: _StepTiming) -> bool:
+    """Two DIFFERENT leaf steps of one job may be running at the same time."""
+    if a.top > b.top:
+        a, b = b, a
+    if a.top == b.top:
+        return a.grouped and b.grouped
+    return a.until is not None and b.top < a.until
+
+
+def _job_step_timings(job: Any) -> list[tuple[_JobStep, _StepTiming]]:
+    steps = job.get("steps") if isinstance(job, dict) else None
+    if not isinstance(steps, list):
+        return []
+    return [(s, _step_timing(s, steps)) for s in _iter_job_steps(job)]
+
+
+@dataclass(frozen=True)
+class _StepSpan:
+    """A leaf step's source lines, with its timing, for line-based detectors."""
+    job: str
+    start_line: int
+    end_line: int
+    timing: _StepTiming
+
+
+def _step_spans(text: str) -> list[_StepSpan]:
+    """Every leaf step that may run concurrently with another, by source line.
+
+    Empty (and nothing is parsed) unless the text uses `parallel:` or
+    `background:` at all, so plain workflows keep their exact behaviour.
+    The parsed and the composed documents are walked by the same index path.
+    """
+    if "parallel" not in text and "background" not in text:
+        return []
+    try:
+        doc = yaml.safe_load(text)
+        root = yaml.compose(text)
+    except yaml.YAMLError:
+        return []
+    if not (isinstance(doc, dict) and isinstance(doc.get("jobs"), dict)
+            and isinstance(root, yaml.MappingNode)):
+        return []
+
+    def _child(node: Any, key: str) -> Any:
+        if isinstance(node, yaml.MappingNode):
+            for k, v in node.value:
+                if getattr(k, "value", None) == key:
+                    return v
+        return None
+
+    jobs_node = _child(root, "jobs")
+    out: list[_StepSpan] = []
+    for name, job in doc["jobs"].items():
+        timings = _job_step_timings(job)
+        if not any(t.grouped or t.until is not None for _, t in timings):
+            continue
+        for js, timing in timings:
+            node = _child(_child(jobs_node, str(name)), "steps")
+            try:
+                for depth, i in enumerate(js.path):
+                    if depth:
+                        node = _child(node, _PARALLEL_KEY)
+                    node = node.value[i]
+            except (AttributeError, IndexError, TypeError):
+                continue
+            out.append(_StepSpan(str(name), node.start_mark.line + 1,
+                                 node.end_mark.line + 1, timing))
+    return out
+
+
+def _lines_concurrent(spans: list[_StepSpan], a: int, b: int) -> bool:
+    """The steps holding source lines `a` and `b` may run at the same time.
+    Lines of ONE step are ordered by line as before."""
+    def _at(line: int) -> _StepSpan | None:
+        # A node's end mark can sit on the next step's first line, so the
+        # LAST span starting at or above the line is the one holding it.
+        return next((s for s in reversed(spans)
+                     if s.start_line <= line <= s.end_line), None)
+    sa, sb = _at(a), _at(b)
+    return (sa is not None and sb is not None and sa is not sb
+            and sa.job == sb.job and _steps_concurrent(sa.timing, sb.timing))
+
+
 def _iter_step_nodes(steps_node: Any, depth: int = 0) -> Iterator[Any]:
     """The composed-node twin of `_iter_job_steps`: every leaf step MappingNode
     of a `steps:` SequenceNode, in order, descending into `parallel:` lists, so
@@ -2745,11 +2865,20 @@ def _allowlist_writes(
 
 
 def _builds_disabled_at(
-    writes: list[tuple[int, bool, str]], install_line: int
+    writes: list[tuple[int, bool, str]], install_line: int,
+    concurrent: Callable[[int, int], bool] | None = None,
 ) -> str | None:
     """The verbatim line that leaves builds disabled at `install_line`, if the
-    LAST allowlist write above it is a disable."""
-    prior = [w for w in writes if w[0] < install_line]
+    LAST allowlist write above it is a disable.
+
+    A write in a step that may run at the same time as the install (see
+    `_StepTiming`) is not known to land before it: it never counts as the
+    protecting write, and if it re-enables builds the install is exposed."""
+    def _racing(w: tuple[int, bool, str]) -> bool:
+        return concurrent is not None and concurrent(w[0], install_line)
+    if any(_racing(w) and not w[1] for w in writes):
+        return None
+    prior = [w for w in writes if w[0] < install_line and not _racing(w)]
     if prior and prior[-1][1]:
         return prior[-1][2]
     return None
@@ -2962,6 +3091,7 @@ def _correlation_install_scripts_in_privileged_job(
         # here would be a false positive against the repo's own mitigation.
         if manager == "pnpm" and pin and pin[0] == "pnpm" and pin[1] >= 10:
             allowlist_writes = _allowlist_writes(text, ranges.get(job_name))
+            spans = _step_spans(text)
             # Mitigation is decided PER INSTALL, by the last allowlist write
             # above it — a job can turn builds off, install, put them back and
             # install again. Report the first install that is exposed, so the
@@ -2972,7 +3102,9 @@ def _correlation_install_scripts_in_privileged_job(
             exposed = next(
                 (c for c in candidates
                  if _install_manager(c[2]) != "pnpm"
-                 or _builds_disabled_at(allowlist_writes, c[0]) is None),
+                 or _builds_disabled_at(
+                     allowlist_writes, c[0],
+                     lambda a, b: _lines_concurrent(spans, a, b)) is None),
                 None,
             )
             if exposed is None:
@@ -4166,6 +4298,15 @@ def _mutable_fetch_executions(
                 f"visible in this YAML, so whether it runs out of a fetched "
                 f"tree was NOT checked — review it by hand")
 
+    # Steps that may run at the same time (`_StepTiming`): an execution racing
+    # the fetch counts as after it, and a pin racing either half pins nothing
+    # knowably in between.
+    spans = _step_spans(text)
+    pos_line = dict(command_lines)
+
+    def _racing(a: int, b: int) -> bool:
+        return _lines_concurrent(spans, a, b)
+
     pairs: list[tuple[_RemoteFetch, int, str]] = []
     for dest, fetch in fetches.items():
         # The last unpinned fetch into a destination is the tree that ran — but
@@ -4186,7 +4327,8 @@ def _mutable_fetch_executions(
                     # A shell fetch is ordered by position in the command stream
                     # (both halves can share a line); a checkout step has no
                     # position there, so it is ordered by line.
-                    if (line > cand.line if cand.pos < 0 else at > cand.pos)
+                    if ((line > cand.line if cand.pos < 0 else at > cand.pos)
+                        or _racing(cand.line, line))
                     and _under(dest, resolved)
                 ),
                 None,
@@ -4213,7 +4355,10 @@ def _mutable_fetch_executions(
                     (at for at, line in command_lines if line > cand.line),
                     hit[0] + 1) - 1
             pin_at = next((p for p in pinned.get(dest, ())
-                           if window_start < p < hit[0]), None)
+                           if window_start < p < hit[0]
+                           and not _racing(pos_line.get(p, -1), hit[1])
+                           and not _racing(pos_line.get(p, -1), cand.line)),
+                          None)
             if pin_at is not None:
                 suppressed_line = cand.line
                 continue
@@ -4618,6 +4763,25 @@ def _job_checkout_head_then_executes(job: dict[str, Any]) -> tuple[int, str] | N
             )
             if executes:
                 return checkout_idx, ref_text
+    # Declared after is not the only "after": a step that may run at the same
+    # time as the head checkout (a `parallel:` sibling written above it, a
+    # `background:` step still running) can execute the fork's tree too.
+    timed = _job_step_timings(job)
+    for i, (c, c_timing) in enumerate(timed):
+        uses, with_block = c.step.get("uses"), c.step.get("with")
+        if not (isinstance(uses, str) and uses.startswith("actions/checkout")
+                and isinstance(with_block, dict)):
+            continue
+        ref = next((with_block.get(k) for k in ("ref", "repository")
+                    if _attacker_head_ref(with_block.get(k))), None)
+        if ref is None:
+            continue
+        for e, e_timing in timed:
+            e_uses = e.step.get("uses")
+            if e is not c and ("run" in e.step or (
+                    isinstance(e_uses, str) and e_uses.startswith("./"))) \
+                    and _steps_concurrent(c_timing, e_timing):
+                return i, str(ref)
     return None
 
 

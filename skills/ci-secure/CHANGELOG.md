@@ -158,8 +158,16 @@ entries are dated (UTC). Format loosely follows
   findings JSON a `parallel_steps` record; a `parallel:` whose value is not a
   list is a coverage note, never a clean step. A `parallel:` entry that also
   carries `run:` or `uses:` (a shape GitHub rejects) has its own command and
-  its child steps scanned, and is named in a coverage note too. Every fixture in the corpus now
-  reports identically with its steps wrapped in a `parallel:` group.
+  its child steps scanned, and is named in a coverage note too. Steps in one
+  group, and a `background: true` step until a `wait:` naming it or a
+  `wait-all:`, are treated as possibly running at the same time, so the
+  checks that depend on order (fork code run after its checkout, a fetched
+  tree run after the fetch, builds disabled before an install) over-report
+  rather than miss: a step written above the checkout in the same group still
+  counts as running after it, and a disable racing the install no longer
+  silences the finding. Every fixture in the corpus keeps its findings with
+  its steps wrapped in a `parallel:` group; the one that gains a finding is a
+  pinned clone whose run step, as a sibling, can start before the pin lands.
 
 - **2026-09-03** — **A required check produced by a matrix-templated job name
   now resolves to its job.** `sec.required-checks.skippable` matched a job's
