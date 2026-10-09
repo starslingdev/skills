@@ -211,8 +211,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build
-        run: npm run build
+      # A GitHub Actions `parallel:` group: the static detectors read both
+      # children through the step walker, and the findings carry the
+      # `parallel_steps` stamp that the report's "Parallel steps" row renders.
+      - parallel:
+          - name: Build
+            run: npm run build
+          - name: Build docs
+            run: npm run docs
   unit:
     runs-on: ubuntu-latest
     strategy:
@@ -1313,6 +1319,11 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert verify.returncode == 0, (
         "verify_report rejected the offline-replayed report:\n"
         f"{verify.stdout}\n{verify.stderr}")
+    # The corpus's `parallel:` group reaches the stamp, the row and the verifier.
+    _par = data.get("parallel_steps") or {}
+    assert _par.get("groups") == 1 and _par.get("steps_in_groups") == 2, _par
+    assert ("| Parallel steps | 2 step(s) inside `parallel:` groups read "
+            "(1 group(s)) |") in report
 
     # OPT82 reaches the READER as its own card: the ledger requirement, the
     # SIZING ceiling, the benchmark, and never "disable" about rules.
