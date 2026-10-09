@@ -231,29 +231,50 @@ def parallel_steps_stats(docs: Iterable[tuple[str, Any]]) -> dict[str, Any]:
     """Repo-wide provenance for the step walk (key names shared with ci-score,
     see the module docstring): `parallel:` groups, steps read inside them, control steps skipped, malformed groups
     (with their files and jobs) whose contents could not be read, invalid
-    groups (read anyway, with their files and jobs), and `jobs_with_groups` —
-    every job holding at least one `parallel:` group, so a renderer never says
-    that job's steps run one after another."""
+    groups (read anyway, with their files and jobs), and the three job lists a
+    renderer needs to word a pole's step drill honestly:
+
+      * `jobs_with_groups` — every job holding at least one `parallel:` group;
+      * `jobs_with_background` — every job with a `background: true` step
+        outside any group (`background_steps` counts those steps);
+      * `sequential_jobs` — in a file holding either kind, every OTHER job, so
+        a pole on one of them keeps "its steps run one after another" while a
+        pole that matches no list in such a file is worded as uncertain.
+
+    A step in either of the first two lists overlaps other steps, so a renderer
+    never says that job's steps run one after another."""
     out: dict[str, Any] = {"groups": 0, "steps_in_groups": 0, "control_steps": 0,
+                           "background_steps": 0,
                            "malformed_groups": 0, "malformed_files": [],
                            "malformed_jobs": [], "invalid_groups": 0,
                            "invalid_files": [], "invalid_jobs": [],
-                           "jobs_with_groups": []}
+                           "jobs_with_groups": [], "jobs_with_background": [],
+                           "sequential_jobs": []}
     for rel, doc in docs:
         jobs = doc.get("jobs") if isinstance(doc, dict) else None
         if not isinstance(jobs, dict):
             continue
+        plain: list[dict[str, Any]] = []
+        overlapping = False
         for key, job in jobs.items():
             w = job_walk(job)
             out["groups"] += w.groups
             out["steps_in_groups"] += w.steps_in_groups
             out["control_steps"] += w.control_steps
+            row = {"path": rel, "job": str(key)}
+            # The display name, when set, so a pole labelled by it matches.
+            if isinstance(job, dict) and isinstance(job.get("name"), str) and job["name"]:
+                row["name"] = job["name"]
+            bg_only = sum(1 for lf in w.leaves if lf.background and not lf.in_parallel_group)
+            out["background_steps"] += bg_only
             if w.groups:
-                row = {"path": rel, "job": str(key)}
-                # The display name, when set, so a pole labelled by it matches.
-                if isinstance(job, dict) and isinstance(job.get("name"), str) and job["name"]:
-                    row["name"] = job["name"]
                 out["jobs_with_groups"].append(row)
+            if bg_only:
+                out["jobs_with_background"].append(dict(row))
+            if w.groups or bg_only:
+                overlapping = True
+            else:
+                plain.append(row)
             for kind, n in (("malformed", w.malformed_groups),
                             ("invalid", w.invalid_groups)):
                 if not n:
@@ -262,13 +283,16 @@ def parallel_steps_stats(docs: Iterable[tuple[str, Any]]) -> dict[str, Any]:
                 out[f"{kind}_jobs"].append({"path": rel, "job": str(key), "count": n})
                 if rel not in out[f"{kind}_files"]:
                     out[f"{kind}_files"].append(rel)
+        if overlapping:
+            out["sequential_jobs"].extend(plain)
     return out
 
 
 def parallel_steps_used(stats: dict[str, Any] | None) -> bool:
     """Whether the repo uses the syntax at all — the stamp is recorded only
     then, so every other findings document is byte-identical to before."""
-    return isinstance(stats, dict) and bool(stats.get("groups") or stats.get("control_steps"))
+    return isinstance(stats, dict) and bool(stats.get("groups") or stats.get("control_steps")
+                                            or stats.get("background_steps"))
 
 
 def parallel_steps_disclosure(stats: Any) -> str | None:
@@ -280,6 +304,10 @@ def parallel_steps_disclosure(stats: Any) -> str | None:
     n = int(stats.get("steps_in_groups") or 0)
     groups = int(stats.get("groups") or 0)
     parts = [f"{n} step(s) inside `parallel:` groups read ({groups} group(s))"]
+    bg = int(stats.get("background_steps") or 0)
+    if bg:
+        parts.append(f"{bg} `background: true` step(s) read (they run beside the "
+                     "steps after them)")
     control = int(stats.get("control_steps") or 0)
     if control:
         parts.append(f"{control} `wait`/`wait-all`/`cancel` control step(s) skipped "

@@ -89,6 +89,27 @@ def test_jobs_with_groups_carries_the_display_name_when_the_job_has_one():
                                           "name": "Unit tests"}], stats
 
 
+def test_a_job_with_only_background_steps_is_stamped_too():
+    """`background: true` alone (no group) also makes step times overlap: the
+    job is recorded under `jobs_with_background`, the repo counts as using the
+    syntax, the row says so, and the other jobs in that file are recorded as
+    running in sequence (so a pole on one of them keeps its sequential wording,
+    while a pole matching neither list is hedged)."""
+    docs = [("ci.yml", {"jobs": {
+        "it": {"name": "Integration", "steps": [
+            {"run": "./start-db.sh", "background": True}, {"run": "npm test"}]},
+        "lint": {"steps": [{"run": "npm run lint"}]}}}),
+        ("other.yml", {"jobs": {"x": {"steps": [{"run": "make"}]}}})]
+    stats = ws.parallel_steps_stats(docs)
+    assert stats["jobs_with_background"] == [
+        {"path": "ci.yml", "job": "it", "name": "Integration"}], stats
+    assert stats["background_steps"] == 1, stats
+    assert stats["sequential_jobs"] == [{"path": "ci.yml", "job": "lint"}], stats
+    assert ws.parallel_steps_used(stats)
+    row = ws.parallel_steps_disclosure(stats)
+    assert row is not None and "1 `background: true` step(s)" in row, row
+
+
 def test_invalid_groups_are_recorded_per_job():
     docs = [("c.yml", {"jobs": {"j": {"steps": [{"run": "a", "parallel": [{"run": "b"}]}]}}})]
     stats = ws.parallel_steps_stats(docs)

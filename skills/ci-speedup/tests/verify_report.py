@@ -1269,7 +1269,8 @@ def _parallel_steps_violation(report: str, findings_path: Path | None
     except (OSError, json.JSONDecodeError):
         return None, ""  # unreadable findings are reported by the other re-derivations
     stamp = data.get("parallel_steps") if isinstance(data, dict) else None
-    if not isinstance(stamp, dict) or not (stamp.get("groups") or stamp.get("control_steps")):
+    if not isinstance(stamp, dict) or not (stamp.get("groups") or stamp.get("control_steps")
+                                           or stamp.get("background_steps")):
         return None, ""
     row = next((ln for ln in report.splitlines() if ln.startswith("| Parallel steps |")), None)
     if row is None:
@@ -1277,6 +1278,8 @@ def _parallel_steps_violation(report: str, findings_path: Path | None
                 "has no Parallel steps row"), ""
     want = [f"{int(stamp.get('steps_in_groups') or 0)} step(s) inside `parallel:` groups "
             f"read ({int(stamp.get('groups') or 0)} group(s))"]
+    if stamp.get("background_steps"):
+        want.append(f"{int(stamp['background_steps'])} `background: true` step(s) read")
     if stamp.get("control_steps"):
         want.append(f"{int(stamp['control_steps'])} `wait`/`wait-all`/`cancel` control step(s)")
     if stamp.get("malformed_groups"):
