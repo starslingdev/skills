@@ -9266,13 +9266,90 @@ _SEQ_PHRASES = ("one after another", "straight off the job's wall-clock",
                 "they run in sequence and roughly add up to the job")
 
 
-def _with_groups(doc: dict, path: str, job: str) -> dict:
+def _with_groups(doc: dict, path: str, job: str, sequential: list | None = None) -> dict:
     doc = dict(doc)
     doc["parallel_steps"] = {"groups": 1, "steps_in_groups": 2, "control_steps": 0,
                              "malformed_groups": 0, "malformed_files": [],
                              "malformed_jobs": [],
-                             "jobs_with_groups": [{"path": path, "job": job}]}
+                             "jobs_with_groups": [{"path": path, "job": job}],
+                             "sequential_jobs": list(sequential or [])}
     return doc
+
+
+_PL = ".github/workflows/pipeline.yml"
+
+
+def _ps_doc(**stamp) -> dict:
+    base = {"groups": 1, "steps_in_groups": 1, "control_steps": 0,
+            "jobs_with_groups": [], "jobs_with_background": [], "sequential_jobs": []}
+    base.update(stamp)
+    return {"parallel_steps": base}
+
+
+def test_pole_overlap_join_matches_display_names_matrix_legs_templates_and_callees():
+    """T1/S3: the pole's check or job is joined to the stamp by job key, display
+    name, matrix leg, a `${{ }}`-templated name, and a reusable-workflow callee's
+    trailing ` / <job>` segment."""
+    cases = [
+        ({"job": "test", "name": "Unit tests"}, {"check": "Unit tests"}),
+        ({"job": "test"}, {"check": "test (ubuntu-latest, 3.12)"}),
+        ({"job": "test", "name": "Test ${{ matrix.os }}"}, {"check": "Test ubuntu-latest"}),
+        ({"job": "build"}, {"check": "caller / build"}),
+    ]
+    for row, pole in cases:
+        doc = _ps_doc(jobs_with_groups=[dict(row, path=_PL)])
+        assert bp._pole_steps_overlap(dict(pole, workflow_file=_PL), doc) == "group", (row, pole)
+
+
+def test_pole_overlap_join_fails_closed_when_the_job_cannot_be_matched():
+    """S3: a workflow that holds a group, and a pole matching neither the
+    grouped jobs nor the jobs recorded as sequential, is worded as uncertain,
+    never "one after another". A recorded sequential job keeps its wording."""
+    doc = _ps_doc(jobs_with_groups=[{"path": _PL, "job": "lint"}],
+                  sequential_jobs=[{"path": _PL, "job": "tests-web"}])
+    assert bp._pole_steps_overlap({"check": "tests-web", "workflow_file": _PL}, doc) is None
+    assert bp._pole_steps_overlap({"check": "Tests ${{ x }}", "workflow_file": _PL},
+                                  doc) == "maybe"
+    assert bp._pole_steps_overlap({"check": "e2e", "workflow_file": _PL}, doc) == "maybe"
+    # another workflow's group says nothing about this pole
+    assert bp._pole_steps_overlap(
+        {"check": "e2e", "workflow_file": ".github/workflows/other.yml"}, doc) is None
+
+
+def test_pole_overlap_join_with_no_workflow_file_is_wording_only():
+    """Item 6: a pole with no known workflow file cannot be pinned to a YAML
+    job, so a name match only hedges the wording ("maybe"), never asserts it."""
+    doc = _ps_doc(jobs_with_groups=[{"path": _PL, "job": "test"}])
+    assert bp._pole_steps_overlap({"check": "test", "workflow_file": ""}, doc) == "maybe"
+    assert bp._pole_steps_overlap({"check": "lint", "workflow_file": ""}, doc) is None
+
+
+def test_pole_overlap_join_reads_background_only_jobs():
+    doc = _ps_doc(groups=0, steps_in_groups=0, background_steps=1,
+                  jobs_with_background=[{"path": _PL, "job": "it"}])
+    assert bp._pole_steps_overlap({"check": "it", "workflow_file": _PL}, doc) == "background"
+
+
+def test_pole_with_only_background_steps_drops_the_sequential_claim():
+    doc = _doc_one_pole()
+    doc["parallel_steps"] = {"groups": 0, "steps_in_groups": 0, "control_steps": 0,
+                             "background_steps": 1, "jobs_with_groups": [],
+                             "jobs_with_background": [{"path": _PL, "job": "tests-web"}],
+                             "sequential_jobs": []}
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {}, {},
+                   "2026-06-08", {"pipeline": _TIMELINE})
+    for ph in _SEQ_PHRASES:
+        assert ph not in md, ph
+    assert "runs some steps in the background" in md, md
+
+
+def test_unmatched_pole_in_a_grouped_workflow_is_worded_as_uncertain():
+    doc = _with_groups(_doc_one_pole(), _PL, "lint")
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {}, {},
+                   "2026-06-08", {"pipeline": _TIMELINE})
+    for ph in _SEQ_PHRASES:
+        assert ph not in md, ph
+    assert "may overlap" in md, md
 
 
 def test_pole_with_parallel_steps_timeline_drops_the_sequential_claim():
@@ -9319,7 +9396,10 @@ def test_grouped_job_elsewhere_leaves_the_pole_text_byte_identical():
                      "2026-06-08", {"pipeline": _TIMELINE})
     for path, job in ((".github/workflows/other.yml", "tests-web"),
                       (".github/workflows/pipeline.yml", "lint")):
-        md = bp.render(_with_groups(_doc_one_pole(), path, job),
+        # The pole's own job is recorded as running in sequence (the scan lists
+        # every other job of a file that holds a group).
+        md = bp.render(_with_groups(_doc_one_pole(), path, job,
+                                    [{"path": path, "job": "tests-web"}]),
                        {"pipeline": _IMPORT_BOUND_LOG}, {}, {},
                        "2026-06-08", {"pipeline": _TIMELINE})
         assert _strip(md) == _strip(base), (path, job)

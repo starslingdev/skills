@@ -3851,34 +3851,92 @@ _OPT82_POLE_POINTER = ("(no log-level detector fired, but a **catalog pattern** 
                        "lint step - see its card in the **Also noticed** section below.)")
 
 
-def _pole_runs_parallel_steps(pole: dict[str, Any] | None,
-                              doc: dict[str, Any] | None) -> bool:
-    """Whether this pole's job runs some steps side by side in a `parallel:`
-    group (`doc["parallel_steps"]["jobs_with_groups"]`, stamped by the scan).
+def _stamp_job_matches(row: dict[str, Any], targets: list[str]) -> bool:
+    """Whether a stamped job row (`{"job", "name"?}`) is the job behind any of
+    the pole's labels: the YAML key or display name exactly or label-cleaned, a
+    matrix leg of it (`test (ubuntu, 3.12)`), a display name templated with
+    `${{ }}` (`Test ${{ matrix.os }}` is the check `Test ubuntu-latest`), or a
+    reusable-workflow callee (`caller / build` is the job `build`)."""
+    expanded: list[str] = []
+    for t in targets:
+        expanded.append(t)
+        if " / " in t:
+            expanded.append(t.rsplit(" / ", 1)[-1])
+    for j in (str(row.get("job") or ""), str(row.get("name") or "")):
+        if not j:
+            continue
+        if "${{" in j:
+            parts = re.split(r"\$\{\{.*?\}\}", j)
+            pat = re.compile(".+?".join(re.escape(_clean_label(x)) for x in parts),
+                             re.IGNORECASE)
+            if any(pat.fullmatch(_clean_label(t)) for t in expanded):
+                return True
+            continue
+        if any(j == t or _matrix_base(t) == j.lower()
+               or _clean_label(j).lower() == _clean_label(t).lower()
+               for t in expanded):
+            return True
+    return False
+
+
+# How the step drill words a pole whose steps may overlap, by the kind
+# `_pole_steps_overlap` returns. Each clause ends where the caller adds ":".
+_STEPS_OVERLAP_CLAUSE: dict[str, str] = {
+    "group": ("This job runs some steps side by side in a `parallel:` group, so step "
+              "times overlap and do not add up to the job time, and time cut from a "
+              "step comes off the job only if it is on the slowest branch"),
+    "background": ("This job runs some steps in the background (`background: true`), "
+                   "so step times overlap and do not add up to the job time, and time "
+                   "cut from a step comes off the job only if it is on the slowest branch"),
+    "maybe": ("This job's workflow runs some steps side by side (a `parallel:` group or "
+              "`background: true`) and this job could not be matched to its YAML, so "
+              "its step times may overlap and need not add up to the job time, and time "
+              "cut from a step may come off the job only if it is on the slowest branch"),
+}
+
+
+def _pole_steps_overlap(pole: dict[str, Any] | None,
+                        doc: dict[str, Any] | None) -> str | None:
+    """Whether this pole's job may run steps side by side, from the scan's
+    `parallel_steps` stamp: `"group"` (a `parallel:` group, `jobs_with_groups`),
+    `"background"` (`background: true`, `jobs_with_background`), `"maybe"`, or
+    None (its steps run one after another, as before the syntax existed).
+
     Then its step times overlap: they do not add up to the job, and time cut
     from a step comes off the job only if it is on the slowest branch, so the
-    step drill must not say the steps run one after another. Joined like
-    `_opt79_pole_for`: the YAML job key (or a `name`, when stamped) against the
-    pole's check/job, matrix legs folded, never across workflow files."""
+    step drill must not say the steps run one after another. Joined by
+    `_stamp_job_matches`, never across workflow files. FAIL CLOSED: a pole in a
+    workflow holding an overlapping job that matches neither that job nor one
+    the stamp records as sequential (`sequential_jobs`) is `"maybe"`. A pole
+    with no known workflow file cannot be pinned to a YAML job, so a name match
+    there only hedges the wording (`"maybe"`), it never asserts the overlap."""
     if not isinstance(pole, dict) or not isinstance(doc, dict):
-        return False
+        return None
     stats = doc.get("parallel_steps")
-    rows = (stats.get("jobs_with_groups") or []) if isinstance(stats, dict) else []
+    if not isinstance(stats, dict):
+        return None
     targets = [t for t in (str(pole.get("check") or ""), str(pole.get("job") or "")) if t]
-    if not targets or not isinstance(rows, list):
-        return False
+
+    def _rows(key: str) -> list[dict[str, Any]]:
+        v = stats.get(key)
+        return [r for r in v if isinstance(r, dict)] if isinstance(v, list) else []
+
+    over = [("group", r) for r in _rows("jobs_with_groups")] + [
+        ("background", r) for r in _rows("jobs_with_background")]
+    if not over or not targets:
+        return None
     pole_wf = str(pole.get("workflow_file") or "")
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        if _wf_conflict(pole_wf, str(r.get("path") or "")):
-            continue
-        for j in (str(r.get("job") or ""), str(r.get("name") or "")):
-            if j and any(j == t or _matrix_base(t) == j.lower()
-                         or _clean_label(j).lower() == _clean_label(t).lower()
-                         for t in targets):
-                return True
-    return False
+    if not pole_wf:
+        return ("maybe" if any(_stamp_job_matches(r, targets) for _k, r in over)
+                else None)
+    here = [(k, r) for k, r in over if not _wf_conflict(pole_wf, str(r.get("path") or ""))]
+    for kind, r in here:
+        if _stamp_job_matches(r, targets):
+            return kind
+    if any(not _wf_conflict(pole_wf, str(r.get("path") or ""))
+           and _stamp_job_matches(r, targets) for r in _rows("sequential_jobs")):
+        return None
+    return "maybe" if here else None
 
 
 def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
@@ -3891,7 +3949,7 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                      data_driven_patterns: "tuple[str, ...] | list[str]" = (),
                      opt79_present: bool = False,
                      opt82_present: bool = False,
-                     steps_overlap: bool = False) -> list[str]:
+                     steps_overlap: "str | None" = None) -> list[str]:
     """The ASCII waterfall for one pole (no code fence): the blocking job's steps,
     then - when a log was captured - the dominant step's internals down to the
     root cause.
@@ -3902,9 +3960,10 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
     the concurrent jobs in level 1) do not overlap. Without one it falls back to
     P50 bars sorted by duration.
 
-    `steps_overlap` (`_pole_runs_parallel_steps`): the job runs some steps side by
-    side in a `parallel:` group, so the "one after another / sums to the job /
-    comes straight off the wall-clock" lead is replaced by its honest form.
+    `steps_overlap` (`_pole_steps_overlap`): the job runs, or may run, some steps
+    side by side, so the "one after another / sums to the job / comes straight
+    off the wall-clock" lead is replaced by its honest form
+    (`_STEPS_OVERLAP_CLAUSE`).
 
     `data_driven_on_path` mirrors the appendix: a data-driven catalog match on a pole the spine
     DEMOTES as opt-in/rare (`spine_rare`) is still catalog coverage (never a gap), but the
@@ -3977,10 +4036,9 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
             lines = [
                 f"Level 2 — inside that one job, {_steps_noun} on this run - {_rep2} "
                 f"(← {_mmss(0)} job start … {_mmss(tl_dur)} → ; `░` = time already "
-                f"elapsed, `█` = the step running; job wall **{_clock(tl_dur)}**). This "
-                "job runs some steps side by side in a `parallel:` group, so step times "
-                "overlap and do not add up to the job time, and time cut from a step "
-                "comes off the job only if it is on the slowest branch:", ""]
+                f"elapsed, `█` = the step running; job wall **{_clock(tl_dur)}**). "
+                f"{_STEPS_OVERLAP_CLAUSE.get(steps_overlap, _STEPS_OVERLAP_CLAUSE['maybe'])}:",
+                ""]
         else:
             lines = [
                 f"Level 2 — inside that one job, {_steps_phrase} "
@@ -4080,9 +4138,8 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
     # every step at once). Say so rather than claiming a clean "adds up to the job".
     gap = step_total and abs(step_total - job_total) > max(3.0, 0.04 * job_total)
     if steps_overlap:
-        recon = ("; this job runs some steps side by side in a `parallel:` group, so "
-                 "step times overlap and do not add up to the job time, and time cut "
-                 "from a step comes off the job only if it is on the slowest branch")
+        _clause = _STEPS_OVERLAP_CLAUSE.get(steps_overlap, _STEPS_OVERLAP_CLAUSE["maybe"])
+        recon = "; " + _clause[0].lower() + _clause[1:]
     else:
         recon = (f" — each step's P50 is measured on its own, so they sum to "
                  f"~{_clock(step_total)} vs the job's own {_clock(job_total)} P50; "
@@ -10659,8 +10716,11 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                            _HIERARCHY_GLOSSARY, "",
                            "```text"]
         if _cascade:
-            _l2_lead = (f"Level 2 — inside {_dcheck}, some steps run side by side:"
-                        if _pole_runs_parallel_steps(_descent, doc) else
+            _ov = _pole_steps_overlap(_descent, doc)
+            _l2_lead = (f"Level 2 — inside {_dcheck}, some steps may run side by side:"
+                        if _ov == "maybe" else
+                        f"Level 2 — inside {_dcheck}, some steps run side by side:"
+                        if _ov else
                         f"Level 2 — inside {_dcheck}, steps run one after another:")
             _fence: list[str] = []
             if len(_rows1) >= 2 and _d_idx is not None:
@@ -11216,7 +11276,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                                                  for f in data_driven})),
                                             opt79_present=bool(_opt79_pole_covers(opt79_pole)),
                                             opt82_present=bool(opt82_pole),
-                                            steps_overlap=_pole_runs_parallel_steps(
+                                            steps_overlap=_pole_steps_overlap(
                                                 p, doc)),
                 "```", ""]
         # The cross-run magnitude check (rendered below) - compute now so the footer
