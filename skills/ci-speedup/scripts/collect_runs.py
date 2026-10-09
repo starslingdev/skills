@@ -17610,6 +17610,7 @@ _OPT79_EARLY_HELD_BACK_GATES = frozenset({
     "cache_step_has_no_renderable_name",
     "install_step_also_runs_non_install_commands",
     "cache_and_install_run_in_the_same_parallel_group",
+    "cache_restore_runs_in_a_parallel_group_or_background",
     "no_install_step_after_the_cache_step",
     "first_step_after_cache_is_not_a_recognised_install",
     "cache_path_names_no_known_package_store",
@@ -17875,6 +17876,14 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
         `run:` block runs more than the install.
       * `no_install_step_after_the_cache_step` — the cache is not paying for an
         install, so the two-path model does not describe it.
+      * `cache_and_install_run_in_the_same_parallel_group` — the cache and the
+        install are siblings in one `parallel:` group, so they run together.
+      * `cache_restore_runs_in_a_parallel_group_or_background` — the restore
+        runs in a `parallel:` group (install after the group) or with
+        `background: true`, so it overlaps other steps and restore-then-install
+        is not a sequential block. Held until a jobs-API probe shows how
+        overlapping steps are timed. A sibling of the cache in its own group is
+        never counted as a step "between" the cache and the install.
       * `first_step_after_cache_is_not_a_recognised_install` — a `run:` step the
         install matcher does not recognise (`cd web && npm ci`, `corepack enable`
         then `pnpm install`) sits between the cache and the install chosen. It
@@ -17965,6 +17974,11 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
         d = displays[j]
         if not d:
             continue
+        # A sibling of the cache in its own `parallel:` group runs BESIDE the
+        # restore, not between it and a step after the group: it is never an
+        # "unrecognised step between". (A sibling that is the install still
+        # reaches the same-group exit below.)
+        sibling = groups[ci] is not None and groups[j] == groups[ci]
         # Classify on the COMMAND, and ONLY on the command when there is one: a
         # named step (`name: Install dependencies`) hides its verb, an unnamed
         # one is its verb — but a step NAMED `npm ci` that RUNS `npm run build`
@@ -17975,13 +17989,13 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
             else bool(_OPT79_INSTALL_RE.match(d))
         if not is_install:
             step_j = steps[j] if isinstance(steps[j], dict) else {}
-            if str(step_j.get("run") or "").strip() \
+            if not sibling and str(step_j.get("run") or "").strip() \
                     and not str(step_j.get("uses") or "").strip():
                 unrecognised_between = True
             continue
         if _opt79_run_is_only_installs(steps[j]) is False:
             return None, "install_step_also_runs_non_install_commands"
-        if groups[ci] is not None and groups[j] == groups[ci]:
+        if sibling:
             # Siblings in one `parallel:` group run at the same time: the
             # restore does not happen BEFORE the install, so the restore-then-
             # install block this pattern prices does not exist.
@@ -17990,6 +18004,14 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
         break
     if not install:
         return None, "no_install_step_after_the_cache_step"
+    if leaves[ci].background:
+        # The restore runs in a `parallel:` group (beside siblings that may be
+        # longer) or with `background: true` (while the next steps start), so
+        # restore-then-install is not the sequential block this pattern prices:
+        # its seconds would overstate what removing the cache saves. Fail
+        # closed until a jobs-API timing probe shows how overlapping steps are
+        # recorded.
+        return None, "cache_restore_runs_in_a_parallel_group_or_background"
     if unrecognised_between:
         return None, "first_step_after_cache_is_not_a_recognised_install"
     cache_eco = _opt79_cache_ecosystem(steps[ci])

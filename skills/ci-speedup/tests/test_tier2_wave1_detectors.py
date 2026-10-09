@@ -9882,13 +9882,57 @@ def test_opt77_reads_setup_steps_inside_a_parallel_group():
 
 def test_opt79_reads_a_cache_step_inside_a_parallel_group():
     """The cache restore runs in a `parallel:` group beside an unrelated step,
-    then the install follows the group. Same block as the flat fixture."""
+    then the install follows the group. The reader SEES the cache (it is not
+    "no cache"), but the restore runs beside a sibling that may be longer, so
+    pricing restore-then-install in sequence would overstate the block until a
+    jobs-API timing probe shows how overlapping steps are recorded: held back."""
     wf = _opt79_steps(
         {"parallel": [{"run": "npm run lint:md"}, dict(_OPT79_NODE_CACHE)]},
         {"run": "npm ci"}, {"run": "npm test"})
     block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
-    assert gate == "", gate
-    assert block["restore"] == "Run actions/cache@v4" and block["install"] == "Run npm ci"
+    assert block is None
+    assert gate == "cache_restore_runs_in_a_parallel_group_or_background", gate
+    assert gate in cr._OPT79_EARLY_HELD_BACK_GATES
+
+
+def test_opt79_withholds_a_background_cache_restore_before_the_install():
+    """`background: true` at top level (no group): the restore runs while the
+    following steps start, so restore-then-install is not a sequential block.
+    The walker tags it `background`; the block used to ignore that and price it."""
+    bg = dict(_OPT79_NODE_CACHE, background=True)
+    wf = _opt79_steps(bg, {"run": "npm ci"}, {"run": "npm test"})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None
+    assert gate == "cache_restore_runs_in_a_parallel_group_or_background", gate
+    # control: the same job without the flag still prices
+    block, gate = cr._opt79_cache_block(
+        _OPT79_JOB, _opt79_steps(dict(_OPT79_NODE_CACHE), {"run": "npm ci"},
+                                 {"run": "npm test"}))
+    assert gate == "" and block["install"] == "Run npm ci", gate
+
+
+def test_opt79_a_sibling_of_the_cache_in_its_group_is_not_a_step_between():
+    """Cache first in a group, an unrelated sibling after it IN the group, the
+    install after the group's implicit wait. The sibling runs beside the
+    restore, not between it and the install, so it must not trip the
+    "first step after the cache is not an install" exit: the true reason is
+    that the restore runs in a parallel group."""
+    wf = _opt79_steps(
+        {"parallel": [dict(_OPT79_NODE_CACHE), {"run": "npm run lint:md"}]},
+        {"run": "npm ci"}, {"run": "npm test"})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None
+    assert gate == "cache_restore_runs_in_a_parallel_group_or_background", gate
+
+
+def test_opt79_parallel_or_background_hold_back_renders_a_plain_english_line():
+    gate = "cache_restore_runs_in_a_parallel_group_or_background"
+    phrase = bp._OPT79_HELD_BACK_REASONS.get(gate)
+    assert phrase and "_" not in phrase, phrase
+    vr = _load_verify_report_for_opt79()
+    assert vr._VR_OPT79_HELD_BACK_REASONS.get(gate) == phrase
+    line = bp._WITHHELD_PHRASES_BY_KEY[bp._OPT79_WITHHELD_DOC_KEY].get(gate)
+    assert line == phrase
 
 
 def test_opt79_withholds_a_cache_and_install_that_run_side_by_side():
