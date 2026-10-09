@@ -1457,9 +1457,10 @@ steps:
   no-weakening rule for free; with shell `&` the job must collect and check every
   task's exit code itself, or a red task silently reads as green.
 - **Runner requirement.** GitHub-hosted runners update themselves. Self-hosted
-  runners need `actions/runner` **2.335.0** or later (the release that added the
-  background-step engine), ideally **2.336.0** or later (it stops a cancelled
-  background step from affecting the job result). The syntax is documented for
+  runners: the runner release notes list the background-step engine in
+  `actions/runner` **2.335.0** and a fix that stops a cancelled background step
+  from affecting the job result in **2.336.0**, so run **2.336.0** or later.
+  GitHub publishes no minimum runner version for the feature itself. The syntax is documented for
   github.com and GitHub Enterprise Cloud; GitHub Enterprise Server's docs do not
   carry it, so do not use it there.
 - **Limits.** At most 10 background steps run at once in a job (more queue for

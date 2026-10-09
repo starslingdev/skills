@@ -727,8 +727,9 @@ unversioned and updates by reinstall from `main`.
 - **2026-10-09** — **The fix recipes now name GitHub's native parallel steps.**
   OPT77 (repeated setup across small jobs) prefers a `parallel:` step group over
   shell `&` (separate logs, and a failing task fails the job on its own) and
-  states the runner requirement (self-hosted `actions/runner` 2.335.0 or later,
-  ideally 2.336.0; documented for github.com and GitHub Enterprise Cloud, not
+  states what the runner release notes show (the background-step engine in
+  self-hosted `actions/runner` 2.335.0, the cancelled-step fix in 2.336.0, so
+  2.336.0 or later; documented for github.com and GitHub Enterprise Cloud, not
   Enterprise Server) and the 10-concurrent-background-step limit. OPT75 gains an
   in-job `parallel:` route for a slow job made of several independent steps,
   with an independence checklist and the note that "sum minus the slowest step"
@@ -958,7 +959,8 @@ unversioned and updates by reinstall from `main`.
   not read, which also shows as incomplete coverage); `verify_report` requires
   the row. A repo that does not use it gets a byte-identical findings document.
   A step named `wait`, `wait-all` or `cancel`, or "Wait for all background
-  steps…", is never crowned a slow job's dominant step: its time is spent
+  steps…" (names assumed for the run data, unverified until a live probe), is
+  never crowned a slow job's dominant step: its time is spent
   waiting on other steps. **Not changed yet:** how the run timing records
   overlapping steps is undocumented, so the per-step decomposition still adds
   step times as if they ran one after another; that needs a live probe first.

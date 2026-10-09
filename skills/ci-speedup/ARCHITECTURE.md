@@ -3020,7 +3020,10 @@ step carry `background: true`, and add control steps (`wait:`, `wait-all:`,
   child, a background step or the implicit group wait is not documented, so it
   needs a live probe before the model changes. Until then there is one guard:
   a step named exactly `wait`, `wait-all` or `cancel`, or starting with "Wait
-  for all background steps", is never crowned the dominant step. Its duration
+  for all background steps", is never crowned the dominant step. These names
+  are an assumption about how run data labels control steps and the implicit
+  group wait; no GitHub source states them, so they stay unverified until the
+  live probe. Its duration
   is time spent blocked on other steps. The names are in `_NON_WORK_STEP_RE` in
   both `collect_runs.py` and `blocking_path.py`, and the decomposition's
   all-boilerplate fallback still excludes them.
