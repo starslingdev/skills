@@ -25,19 +25,39 @@ only place in this skill that knows the shape:
     not address nesting, and reading more is the safe direction);
   * control steps are skipped but counted, because they run nothing;
   * each leaf is tagged `in_parallel_group` (with its top-level group's ordinal)
-    and `background` (`background: true`, or any child of a group, which GitHub
-    runs as a background step), so a reader whose rule depends on ORDER can tell
-    two siblings run at the same time rather than one after the other;
-  * a `parallel:` whose value is not a list is MALFORMED: its contents cannot be
-    read, and the walk counts it instead of treating the job as clean.
+    and `background`, so a reader whose rule depends on ORDER can tell two
+    siblings run at the same time rather than one after the other. Here
+    `background` is true for any child of a group (GitHub runs those as
+    background steps) and for `background: true` or the STRING "true";
+    ci-secure's walker tags only a literal `background: true`. The flag feeds
+    only order gates (OPT2, OPT79), never a rendered count;
+  * each leaf carries `inherited_if`, the `if:` of the group(s) it sits in.
+    GitHub documents no group-level `if:`; treating one as gating the group's
+    children is an ASSUMPTION, made so a hygiene rule never calls a step
+    "unconditional" when the author wrote a condition around it;
+  * a `parallel:` whose value is not a list, a list that contains itself
+    through a YAML alias (`steps: &s [{parallel: *s}]`), or a group nested
+    deeper than `WALK_MAX_DEPTH` (ci-secure's cap) is MALFORMED: its contents
+    are not read, and the walk counts it instead of treating the job as clean
+    (or recursing until Python gives up);
+  * a `parallel:` on a step that also has `run:` or `uses:` (GitHub rejects
+    it) is INVALID: the step's own command is still a leaf, its children are
+    read anyway — the same verdict as if they were written flat — and the
+    group is counted so the scan names the job as a coverage gap.
 
-The step/group/control/malformed semantics and the stats keys mirror ci-score's
-`_walk_steps` (skills/ci-score/scripts/practice_facts.py) so the two engines read
-one repository's steps the same way; the repo-root parity test pins the
-git-history verdicts that depend on it.
+The leaf/group/control/malformed/invalid semantics are written to match
+ci-score's `_walk_steps` (PR #120, skills/ci-score/scripts/practice_facts.py)
+so the two engines read one repository's steps the same way; the repo-root
+parity test pins the git-history verdicts that depend on it. The stats share
+ci-score's key names (`groups`, `steps_in_groups`, `control_steps`,
+`malformed_groups`/`_files`, `invalid_groups`/`_files`) and add three of their
+own (`malformed_jobs`, `invalid_jobs`, `jobs_with_groups`). One count differs:
+ci-score's `groups` counts only groups whose children were read, while here
+`groups` also counts malformed ones (it is the count of `parallel:` keys seen).
 
-The returned step mappings are the ORIGINAL objects from the parsed YAML, so a
-caller comparing by identity (`step is checkout_step`) keeps working.
+The returned step mappings are the ORIGINAL objects from the parsed YAML (never
+copied or mutated), so a caller comparing by identity (`step is checkout_step`)
+keeps working.
 Stdlib only; callers pass what they already parsed.
 """
 
@@ -50,6 +70,9 @@ PARALLEL_KEY = "parallel"
 # A step carrying one of these keys and neither `run:` nor `uses:` is a control
 # step: it blocks on, or stops, a background step and runs no command itself.
 CONTROL_KEYS: tuple[str, ...] = ("wait", "wait-all", "cancel")
+# Groups nested deeper than this are counted malformed and not read — the same
+# cap as ci-secure's `_WALK_MAX_DEPTH`, so the engines agree on what is read.
+WALK_MAX_DEPTH = 64
 
 
 @dataclass(frozen=True)
@@ -60,6 +83,10 @@ class LeafStep:
     in_parallel_group: bool
     group: int | None           # ordinal of the enclosing top-level group
     background: bool            # `background: true`, or a child of a group
+    # The enclosing groups' `if:` — undocumented by GitHub; inherited as an
+    # assumption. Nested groups are AND-ed outermost first, `(outer) && (inner)`,
+    # so no written gate is dropped. None when no enclosing group has one.
+    inherited_if: str | None = None
 
 
 @dataclass
@@ -70,15 +97,21 @@ class StepWalk:
     steps_in_groups: int = 0    # leaf steps read from inside a group
     background: int = 0         # leaf steps that run in the background
     control_steps: int = 0      # `wait:` / `wait-all:` / `cancel:` skipped
-    malformed_groups: int = 0   # `parallel:` values that are not a list
+    malformed_groups: int = 0   # not a list / contains itself / too deep: not read
+    invalid_groups: int = 0     # beside `run:`/`uses:` on one step: read anyway
 
     def steps(self) -> list[dict[str, Any]]:
         return [leaf.step for leaf in self.leaves]
 
 
 def is_group_step(step: Any) -> bool:
-    return (isinstance(step, dict) and PARALLEL_KEY in step
-            and "run" not in step and "uses" not in step)
+    """Any step carrying `parallel:`. One that also has `run:`/`uses:` is a
+    group AND a leaf (counted invalid); with a control key, the group wins."""
+    return isinstance(step, dict) and PARALLEL_KEY in step
+
+
+def _is_leaf(step: dict[str, Any]) -> bool:
+    return "run" in step or "uses" in step
 
 
 def is_control_step(step: Any) -> bool:
@@ -88,7 +121,23 @@ def is_control_step(step: Any) -> bool:
 
 
 def _truthy(v: Any) -> bool:
+    # A `${{ ... }}` expression reads as foreground, so a background count may understate.
     return v is True or (isinstance(v, str) and v.strip().lower() == "true")
+
+
+def _and_if(outer: str | None, inner: Any) -> str | None:
+    """`outer` AND a step's own `if:` (None / blank adds nothing)."""
+    if inner is None or (isinstance(inner, str) and not inner.strip()):
+        return outer
+    if outer is None:  # a flat step's own `if:` comes back exactly as written
+        return inner if isinstance(inner, str) else str(inner)
+    return f"({outer}) && ({str(inner).strip()})"
+
+
+def effective_if(leaf: LeafStep) -> str | None:
+    """The condition a leaf runs under: its groups' inherited `if:` AND its
+    own, or None when neither is written. Never mutates the step."""
+    return _and_if(leaf.inherited_if, leaf.step.get("if"))
 
 
 def walk_steps(steps: Any) -> StepWalk:
@@ -97,33 +146,44 @@ def walk_steps(steps: Any) -> StepWalk:
     skipped, exactly as every flat reader already treated them."""
     walk = StepWalk()
 
-    def _visit(items: Any, group: int | None) -> None:
+    def _leaf(item: dict[str, Any], group: int | None, cond: str | None) -> None:
+        bg = group is not None or _truthy(item.get("background"))
+        walk.leaves.append(LeafStep(step=item, index=len(walk.leaves),
+                                    in_parallel_group=group is not None,
+                                    group=group, background=bg, inherited_if=cond))
+        if group is not None:
+            walk.steps_in_groups += 1
+        if bg:
+            walk.background += 1
+
+    def _visit(items: Any, group: int | None, cond: str | None,
+               path: frozenset[int], depth: int) -> None:
         if not isinstance(items, list):
             return
+        path = path | {id(items)}  # the lists on THIS branch: a repeat is a cycle
         for item in items:
             if not isinstance(item, dict):
                 continue
             if is_group_step(item):
                 walk.groups += 1
+                if _is_leaf(item):
+                    _leaf(item, group, cond)
                 children = item.get(PARALLEL_KEY)
-                if not isinstance(children, list):
+                if (not isinstance(children, list) or id(children) in path
+                        or depth >= WALK_MAX_DEPTH):
                     walk.malformed_groups += 1
                     continue
-                _visit(children, group if group is not None else walk.groups)
+                if _is_leaf(item):
+                    walk.invalid_groups += 1
+                _visit(children, group if group is not None else walk.groups,
+                       _and_if(cond, item.get("if")), path, depth + 1)
                 continue
             if is_control_step(item):
                 walk.control_steps += 1
                 continue
-            bg = group is not None or _truthy(item.get("background"))
-            walk.leaves.append(LeafStep(step=item, index=len(walk.leaves),
-                                        in_parallel_group=group is not None,
-                                        group=group, background=bg))
-            if group is not None:
-                walk.steps_in_groups += 1
-            if bg:
-                walk.background += 1
+            _leaf(item, group, cond)
 
-    _visit(steps, None)
+    _visit(steps, None, None, frozenset(), 0)
     return walk
 
 
@@ -139,12 +199,17 @@ def job_leaf_steps(job: Any) -> list[dict[str, Any]]:
 
 
 def parallel_steps_stats(docs: Iterable[tuple[str, Any]]) -> dict[str, Any]:
-    """Repo-wide provenance for the step walk, in ci-score's shape: `parallel:`
-    groups, steps read inside them, control steps skipped, and malformed groups
-    (with their files and jobs) whose contents could not be read."""
+    """Repo-wide provenance for the step walk (key names shared with ci-score,
+    see the module docstring): `parallel:` groups, steps read inside them, control steps skipped, malformed groups
+    (with their files and jobs) whose contents could not be read, invalid
+    groups (read anyway, with their files and jobs), and `jobs_with_groups` —
+    every job holding at least one `parallel:` group, so a renderer never says
+    that job's steps run one after another."""
     out: dict[str, Any] = {"groups": 0, "steps_in_groups": 0, "control_steps": 0,
                            "malformed_groups": 0, "malformed_files": [],
-                           "malformed_jobs": []}
+                           "malformed_jobs": [], "invalid_groups": 0,
+                           "invalid_files": [], "invalid_jobs": [],
+                           "jobs_with_groups": []}
     for rel, doc in docs:
         jobs = doc.get("jobs") if isinstance(doc, dict) else None
         if not isinstance(jobs, dict):
@@ -154,12 +219,16 @@ def parallel_steps_stats(docs: Iterable[tuple[str, Any]]) -> dict[str, Any]:
             out["groups"] += w.groups
             out["steps_in_groups"] += w.steps_in_groups
             out["control_steps"] += w.control_steps
-            if w.malformed_groups:
-                out["malformed_groups"] += w.malformed_groups
-                out["malformed_jobs"].append({"path": rel, "job": str(key),
-                                              "count": w.malformed_groups})
-                if rel not in out["malformed_files"]:
-                    out["malformed_files"].append(rel)
+            if w.groups:
+                out["jobs_with_groups"].append({"path": rel, "job": str(key)})
+            for kind, n in (("malformed", w.malformed_groups),
+                            ("invalid", w.invalid_groups)):
+                if not n:
+                    continue
+                out[f"{kind}_groups"] += n
+                out[f"{kind}_jobs"].append({"path": rel, "job": str(key), "count": n})
+                if rel not in out[f"{kind}_files"]:
+                    out[f"{kind}_files"].append(rel)
     return out
 
 
@@ -171,7 +240,8 @@ def parallel_steps_used(stats: dict[str, Any] | None) -> bool:
 
 def parallel_steps_disclosure(stats: Any) -> str | None:
     """The Data sources cell for the step walk, or None when nothing to say.
-    The renderer and `verify_report` both call this, so they cannot drift."""
+    The renderer calls this; `verify_report` re-derives the same row with its
+    own code and imports nothing from the skill, so a drift fails the check."""
     if not parallel_steps_used(stats):
         return None
     n = int(stats.get("steps_in_groups") or 0)
@@ -185,5 +255,5 @@ def parallel_steps_disclosure(stats: Any) -> str | None:
     if bad:
         files = ", ".join(f"`{f}`" for f in (stats.get("malformed_files") or [])[:3])
         parts.append(f"**{bad} malformed `parallel:` group(s) not read** (the value "
-                     f"is not a list of steps){' in ' + files if files else ''}")
+                     f"is not a readable list of steps){' in ' + files if files else ''}")
     return " · ".join(parts)

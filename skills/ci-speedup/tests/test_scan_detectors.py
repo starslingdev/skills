@@ -4172,3 +4172,144 @@ jobs:
     assert ps["malformed_jobs"][0]["job"] == "build", ps
     gaps = [g for g in data["scan_incomplete"] if g["path"] == ".github/workflows/ci.yml"]
     assert gaps and "parallel" in gaps[0]["reason"], data["scan_incomplete"]
+
+
+def test_opt28_reads_a_history_op_in_a_group_written_on_a_run_step(tmp_path: Path):
+    """`parallel:` beside `run:` on one step is rejected by GitHub, but the walk
+    reads its children anyway: the `git log` inside makes `fetch-depth: 0`
+    load-bearing, so OPT28 must stay silent, and the job is named as a gap."""
+    yml = """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: pnpm test
+        parallel:
+          - run: git log --oneline -5
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    assert "OPT28" not in _patterns(data)
+    gaps = [g for g in data["scan_incomplete"] if g["path"] == ".github/workflows/ci.yml"]
+    assert gaps and "`test`" in gaps[0]["reason"], data["scan_incomplete"]
+
+
+def test_a_parallel_group_that_contains_itself_never_stops_the_scan(tmp_path: Path):
+    """A YAML alias can make a `parallel:` list contain itself. The scan must
+    finish, and name the file as a coverage gap rather than crash."""
+    yml = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: &s
+      - parallel: *s
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    gaps = [g for g in data["scan_incomplete"] if g["path"] == ".github/workflows/ci.yml"]
+    assert gaps and "`build`" in gaps[0]["reason"], data["scan_incomplete"]
+
+
+def test_opt31_install_in_a_gated_group_is_not_unconditional(tmp_path: Path):
+    """GitHub documents no group-level `if:`; the walk treats one as inherited
+    by the group's children, so an install inside a gated group is not
+    reported as running unconditionally."""
+    neg = """name: CI
+on: pull_request
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event_name == 'push'
+        parallel:
+          - run: npx playwright install --with-deps chromium
+          - run: pnpm run build
+      - if: env.CLERK_SECRET_KEY != ''
+        run: npx playwright test smoke
+"""
+    assert "OPT31" not in _scan_one(tmp_path, neg)
+
+
+def test_opt29_reads_a_merge_group_skip_written_on_a_group(tmp_path: Path):
+    pos = """name: CI
+on:
+  pull_request:
+  merge_group:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event_name != 'merge_group'
+        parallel:
+          - run: pnpm test
+          - run: pnpm lint
+"""
+    assert "OPT29" in _scan_one(tmp_path, pos)
+
+
+def test_opt2_cache_beside_the_install_in_one_group_does_not_precede_it(tmp_path: Path):
+    """Siblings in a `parallel:` group run at the same time: the cache has not
+    been restored when the install starts, so it is not a preceding cache."""
+    pos = """name: CI
+on: push
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - parallel:
+          - uses: actions/cache@v4
+            with:
+              path: ~/.cache/ms-playwright
+              key: pw-${{ hashFiles('pnpm-lock.yaml') }}
+          - run: npx playwright install
+      - run: npx playwright test
+"""
+    assert "OPT2" in _scan_one(tmp_path, pos)
+
+
+def test_opt2_background_cache_does_not_precede_the_install(tmp_path: Path):
+    pos = """name: CI
+on: push
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        background: true
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ hashFiles('pnpm-lock.yaml') }}
+      - run: npx playwright install
+      - run: npx playwright test
+"""
+    assert "OPT2" in _scan_one(tmp_path, pos)
+
+
+def test_opt2_cache_in_an_earlier_group_still_precedes_the_install(tmp_path: Path):
+    """A group ends with an implicit wait, so a cache in an EARLIER group has
+    finished before a later install starts."""
+    neg = """name: CI
+on: push
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - parallel:
+          - uses: actions/cache@v4
+            with:
+              path: ~/.cache/ms-playwright
+              key: pw-${{ hashFiles('pnpm-lock.yaml') }}
+          - run: pnpm run build
+      - run: npx playwright install
+      - run: npx playwright test
+"""
+    assert "OPT2" not in _scan_one(tmp_path, neg)

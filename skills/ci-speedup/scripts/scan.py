@@ -52,7 +52,9 @@ except ImportError:  # pragma: no cover — surfaced loudly if missing
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workflow_steps import (  # noqa: E402
+    effective_if,
     job_leaf_steps,
+    job_walk,
     parallel_steps_stats,
     parallel_steps_used,
 )
@@ -1392,6 +1394,15 @@ def _steps(job: dict) -> list[dict]:
     return job_leaf_steps(job)
 
 
+def _steps_with_if(job: dict) -> list[tuple[dict, str | None]]:
+    """Leaf steps paired with the condition each runs under: its own `if:`
+    AND any enclosing `parallel:` group's `if:` (an assumption — GitHub
+    documents no group-level `if:`; see `workflow_steps`). A hygiene rule that
+    asks "is this step unconditional?" reads this, never `step.get("if")`
+    alone. The parsed YAML is not mutated."""
+    return [(leaf.step, effective_if(leaf)) for leaf in job_walk(job).leaves]
+
+
 def _uses(step: dict) -> str:
     return str(step.get("uses") or "")
 
@@ -1489,12 +1500,18 @@ def _detect_opt2(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        steps = _steps(job)
-        install_idx = next(
-            (i for i, s in enumerate(steps) if _PW_INSTALL_RE.search(_run(s))), None)
-        if install_idx is None:
+        leaves = job_walk(job).leaves
+        install = next((lf for lf in leaves if _PW_INSTALL_RE.search(_run(lf.step))), None)
+        if install is None:
             continue
-        if any("actions/cache" in _uses(s) for s in steps[:install_idx]):
+        # A cache precedes the install only if it has FINISHED when the install
+        # starts: declared before it, not `background: true` (still running),
+        # and not a sibling in the install's own `parallel:` group (concurrent).
+        # A cache in an EARLIER group counts: a group ends with an implicit wait.
+        if any("actions/cache" in _uses(lf.step)
+               and lf.step.get("background") not in (True, "true")
+               and not (install.group is not None and lf.group == install.group)
+               for lf in leaves[:install.index]):
             continue  # cached already
         hits.append(Hit(
             line=_line_of_in_job(raw, job_name, "playwright install"),
@@ -1852,8 +1869,8 @@ def _detect_opt29(doc: dict, raw: str) -> list[Hit]:
         if not isinstance(job, dict) or "if" in job:
             continue
         step_skips = any(
-            isinstance(s.get("if"), str) and _MERGE_GROUP_REF_RE.search(s.get("if"))
-            for s in _steps(job))
+            cond is not None and _MERGE_GROUP_REF_RE.search(cond)
+            for _s, cond in _steps_with_if(job))
         if step_skips:
             hits.append(Hit(
                 # Anchor on the job's OWN header, not the file-global first
@@ -1898,29 +1915,29 @@ def _detect_opt31(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        steps = _steps(job)
-        for i, s in enumerate(steps):
-            if "if" in s:
-                continue
+        steps = _steps_with_if(job)
+        for i, (s, s_if) in enumerate(steps):
+            if "if" in s or s_if is not None:
+                continue  # gated, on the step or on its enclosing group
             run = _run(s)
             if not _OPT31_INSTALL_RE.search(run):
                 continue
             tokens = _opt31_tokens(run)
             if not tokens:
                 continue
-            consumer = next(
-                (c for c in steps[i + 1:]
-                 if isinstance(c.get("if"), str) and _OPT31_GATE_RE.search(c.get("if"))
+            consumer_if = next(
+                (c_if for c, c_if in steps[i + 1:]
+                 if c_if is not None and _OPT31_GATE_RE.search(c_if)
                  and any(tok in _run(c).lower() for tok in tokens)),
                 None)
-            if consumer is not None:
+            if consumer_if is not None:
                 first = (run.splitlines() or [""])[0].strip()
                 hits.append(Hit(
                     line=_line_of_in_job(raw, job_name, first),
                     affected_jobs=[job_name],
                     evidence=(f"job `{job_name}` runs an unconditional install "
                               f"step (`{first[:60]}`) whose only consumer is a "
-                              f"later step gated on `{consumer.get('if')[:50]}` — "
+                              f"later step gated on `{consumer_if[:50]}` — "
                               f"the install runs even when the consumer is skipped"),
                     match_text=job_name,
                 ))
@@ -4558,13 +4575,24 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
 
     # What the step walker read inside GitHub Actions `parallel:` groups, and
     # the control steps it skipped. A malformed group (its `parallel:` value is
-    # not a list) could not be read, so its file is a coverage gap — never clean.
+    # not a list, contains itself through a YAML alias, or is nested too deep)
+    # could not be read, so its file is a coverage gap — never clean. An invalid
+    # group (`parallel:` beside `run:`/`uses:` on one step, which GitHub
+    # rejects) was read anyway, but the job is not one GitHub would run as
+    # written, so it is named too.
     parallel_stats = parallel_steps_stats((rel, doc) for rel, doc, _raw in parsed)
     for mj in parallel_stats["malformed_jobs"]:
         scan_incomplete.append({
             "path": mj["path"],
             "reason": (f"job `{mj['job']}`: {mj['count']} `parallel:` group(s) whose "
-                       "value is not a list of steps, so the steps inside were not read")})
+                       "value is not a readable list of steps (not a list, nested in "
+                       "itself, or nested too deep), so the steps inside were not read")})
+    for ij in parallel_stats["invalid_jobs"]:
+        scan_incomplete.append({
+            "path": ij["path"],
+            "reason": (f"job `{ij['job']}`: {ij['count']} `parallel:` group(s) on a step "
+                       "that also has `run:` or `uses:`, which GitHub rejects; the "
+                       "steps inside were read anyway, as if written flat")})
 
     findings: list[dict[str, Any]] = []
     finding_idx = 0

@@ -233,8 +233,17 @@ _PARALLEL_JOB_BATTERY = [
     ("par-uses", {"steps": [{"parallel": [{"uses": "tj-actions/changed-files@v45"}]}]}),
     ("par-nested", {"steps": [{"parallel": [{"parallel": [
         {"run": "git describe --tags"}]}]}]}),
-    ("par-wait", {"steps": [{"wait-all": None},
-                                  {"run": "git diff origin/main...HEAD"}]}),
+    # A control step inside the group, then the history op beside it: only a
+    # walker that descends the group and steps past `wait-all:` reaches it (a
+    # flat read sees one step with neither `run:` nor `uses:`).
+    ("par-wait", {"steps": [{"parallel": [{"wait-all": None},
+                                          {"run": "git diff origin/main...HEAD"}]}]}),
+    # `parallel:` beside `run:` / `uses:` on one step: GitHub rejects it, the
+    # walker reads the children anyway, so the history op inside still counts.
+    ("par-on-run", {"steps": [{"run": "npm test",
+                               "parallel": [{"run": "git log --oneline"}]}]}),
+    ("par-on-uses", {"steps": [{"uses": "actions/setup-node@v4",
+                                "parallel": [{"run": "git describe --tags"}]}]}),
 ]
 
 
@@ -255,6 +264,17 @@ def test_parallel_group_rows_agree_across_the_two_engines(sides):
                   if speed._job_needs_git_history(job, name)
                   != score._job_needs_git_history(job, name)]
     assert not mismatches, mismatches
+
+
+def test_ci_speedup_records_every_step_stat_ci_score_records(sides):
+    """The two engines describe one walk with the same key names, so a reader
+    of either findings document finds the same provenance fields."""
+    speed, score = sides
+    if not hasattr(score, "_new_step_stats"):
+        pytest.skip("ci-score's step walker has not landed on this base yet")
+    speed_keys = set(speed.parallel_steps_stats([]))
+    missing = set(score._new_step_stats()) - speed_keys
+    assert not missing, f"ci-speedup's parallel_steps lacks ci-score keys: {missing}"
 
 
 def test_a_local_action_inside_a_parallel_group_is_indexed(sides, tmp_path: Path):
