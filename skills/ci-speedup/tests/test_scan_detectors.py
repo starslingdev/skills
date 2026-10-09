@@ -4299,8 +4299,20 @@ jobs:
     assert "OPT2" in _scan_one(tmp_path, pos)
 
 
-def test_opt2_background_cache_does_not_precede_the_install(tmp_path: Path):
-    pos = """name: CI
+@pytest.mark.parametrize("bg, wait", [
+    ("true", "      - wait-all:\n"),
+    ("true", "      - wait: pwcache\n"),
+    ('"True"', ""),
+    ("true", ""),
+])
+def test_opt2_a_background_cache_declared_before_the_install_counts_as_cached(
+        tmp_path: Path, bg: str, wait: str):
+    """OPT2 claims "no preceding `actions/cache`". A `background: true` cache
+    declared before the install is usually awaited (`wait-all:` / `wait:`) before
+    it, and whether the restore has finished cannot be shown from the YAML
+    either way, so the claim fails CLOSED: any declared cache before the install
+    counts. (Only a sibling in the install's own group is excluded.)"""
+    neg = f"""name: CI
 on: push
 jobs:
   e2e:
@@ -4308,14 +4320,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
-        background: true
+        id: pwcache
+        background: {bg}
         with:
           path: ~/.cache/ms-playwright
-          key: pw-${{ hashFiles('pnpm-lock.yaml') }}
-      - run: npx playwright install
+          key: pw-${{{{ hashFiles('pnpm-lock.yaml') }}}}
+{wait}      - run: npx playwright install
       - run: npx playwright test
 """
-    assert "OPT2" in _scan_one(tmp_path, pos)
+    assert "OPT2" not in _scan_one(tmp_path, neg)
+
+
+def test_opt2_cache_in_one_group_and_install_in_the_next_counts_as_cached(tmp_path: Path):
+    neg = """name: CI
+on: push
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - uses: actions/cache@v4
+            with:
+              path: ~/.cache/ms-playwright
+              key: pw-${{ hashFiles('pnpm-lock.yaml') }}
+          - run: pnpm run build
+      - parallel:
+          - run: npx playwright install
+          - run: pnpm run lint
+      - run: npx playwright test
+"""
+    assert "OPT2" not in _scan_one(tmp_path, neg)
 
 
 def test_opt2_cache_in_an_earlier_group_still_precedes_the_install(tmp_path: Path):

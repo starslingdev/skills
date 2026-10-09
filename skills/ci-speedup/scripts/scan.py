@@ -1504,12 +1504,13 @@ def _detect_opt2(doc: dict, raw: str) -> list[Hit]:
         install = next((lf for lf in leaves if _PW_INSTALL_RE.search(_run(lf.step))), None)
         if install is None:
             continue
-        # A cache precedes the install only if it has FINISHED when the install
-        # starts: declared before it, not `background: true` (still running),
-        # and not a sibling in the install's own `parallel:` group (concurrent).
-        # A cache in an EARLIER group counts: a group ends with an implicit wait.
+        # The claim is "no preceding cache", so it fails CLOSED: any cache
+        # declared before the install counts, `background: true` included (it is
+        # usually awaited by a `wait:` / `wait-all:` before the install, and the
+        # YAML cannot show otherwise). Only a sibling in the install's own
+        # `parallel:` group is excluded: those two run at the same time, so the
+        # restore cannot have happened first. A cache in an EARLIER group counts.
         if any("actions/cache" in _uses(lf.step)
-               and lf.step.get("background") not in (True, "true")
                and not (install.group is not None and lf.group == install.group)
                for lf in leaves[:install.index]):
             continue  # cached already
