@@ -421,22 +421,50 @@ def _note(stats: dict[str, Any] | None, kind: str, rel: str) -> None:
         files.append(rel)
 
 
+# Bounds on one walk, so a hostile or broken workflow cannot stall or crash
+# the scorer. YAML aliases let a few lines build a group nested 1,000 deep
+# (Python's recursion limit) or one that fans out to a billion entries
+# (`lK: [{parallel: *lK-1}, {parallel: *lK-1}]`). Depth matches ci-secure's
+# and ci-speedup's walker cap. The budget counts every entry visited — steps,
+# control steps and groups alike, so a chain of empty groups is bounded too —
+# per top-level walk; GitHub allows at most 1,000 steps per job, so no real
+# job comes near it. A group past either bound is counted as unreadable and
+# named, never silently dropped. Shared (aliased) groups are NOT deduplicated:
+# a step reused twice through an alias counts twice, exactly as the same steps
+# written out flat would.
+_MAX_PARALLEL_DEPTH = 64
+_MAX_WALK_STEPS = 10_000
+
+
 def _walk_steps(steps: Any, stats: dict[str, Any] | None = None,
                 rel: str = "", _depth: int = 0, *, in_composite: bool = False,
-                _path: frozenset[int] = frozenset()) -> list[dict]:
+                _path: frozenset[int] = frozenset(),
+                _budget: list[int] | None = None) -> list[dict]:
     """Every LEAF step (a mapping with `run:`/`uses:`/... of its own) in
     declaration order, descending into `parallel:` lists. Control steps
     (`wait:` / `wait-all:` / `cancel:` without `run`/`uses`) are skipped but
     counted. Never a silent skip: a `parallel:` that cannot be read (not a
-    list, or a list containing itself) is counted and its file named; a
-    `parallel:` GitHub rejects (inside a composite action, or on a step that
-    also has `run:`/`uses:`) is read anyway — defensively, the same verdict as
-    if its steps were written flat — and counted and named as rejected."""
+    list, a list containing itself, nested past `_MAX_PARALLEL_DEPTH`, or the
+    group the walk was in when it spent `_MAX_WALK_STEPS`) is counted and its
+    file named; a `parallel:` GitHub rejects (inside a composite action, or on
+    a step that also has `run:`/`uses:`) is read anyway — defensively, the
+    same verdict as if its steps were written flat — and counted and named as
+    rejected."""
     out: list[dict] = []
-    if not isinstance(steps, list) or id(steps) in _path:
+    if not isinstance(steps, list):
         return out
+    if _budget is None:
+        _budget = [_MAX_WALK_STEPS]
     path = _path | {id(steps)}
     for step in steps:
+        if _budget[0] <= 0:
+            # Spent: stop here and count the group being read as unreadable
+            # (the top-level list when the budget ran out outside any group).
+            if _budget[0] == 0:
+                _note(stats, "malformed", rel)
+                _budget[0] = -1  # noted once; every enclosing level just stops
+            break
+        _budget[0] -= 1
         if not isinstance(step, dict):
             continue
         is_leaf = "run" in step or "uses" in step
@@ -446,7 +474,8 @@ def _walk_steps(steps: Any, stats: dict[str, Any] | None = None,
                 out.append(step)
                 if stats is not None and _depth > 0:
                     stats["steps_in_groups"] += 1
-            if not isinstance(group, list) or id(group) in path:
+            if (not isinstance(group, list) or id(group) in path
+                    or _depth + 1 > _MAX_PARALLEL_DEPTH):
                 _note(stats, "malformed", rel)
                 continue
             if stats is not None:
@@ -454,7 +483,8 @@ def _walk_steps(steps: Any, stats: dict[str, Any] | None = None,
             if in_composite or is_leaf:
                 _note(stats, "invalid", rel)
             out.extend(_walk_steps(group, stats, rel, _depth + 1,
-                                   in_composite=in_composite, _path=path))
+                                   in_composite=in_composite, _path=path,
+                                   _budget=_budget))
             continue
         if not is_leaf and any(k in step for k in _CONTROL_STEP_KEYS):
             if stats is not None:

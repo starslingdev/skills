@@ -452,3 +452,96 @@ def test_no_parallel_syntax_leaves_the_document_and_header_unchanged(tmp_path):
     doc, _code = cc_mod.collect(_repo(tmp_path, flat))
     assert "parallel_steps" not in doc["data_sources"]
     assert "Parallel steps" not in _render_and_verify(doc)
+
+
+# --- bounded walk: depth cap + per-walk step budget ---------------------------
+
+def _alias_chain(depth: int) -> str:
+    """`a{depth}` is a `parallel:` nested `depth` levels deep through YAML
+    aliases (PyYAML builds it without deep recursion)."""
+    lines = ["a0: &a0\n  - run: git log\n"]
+    lines += [f"a{i}: &a{i}\n  - parallel: *a{i - 1}\n" for i in range(1, depth + 1)]
+    return "".join(lines)
+
+
+def _doubling_chain(levels: int, bottom: str = "\n  - run: x\n") -> str:
+    """Each level holds the level below twice: 2**levels entries in all."""
+    lines = [f"l0: &l0{bottom}"]
+    lines += [f"l{i}: &l{i}\n  - parallel: *l{i - 1}\n  - parallel: *l{i - 1}\n"
+              for i in range(1, levels + 1)]
+    return "".join(lines)
+
+
+def test_a_deep_alias_chain_is_capped_and_counted_never_a_crash():
+    """1,200 nested groups used to raise RecursionError out of the walk."""
+    steps = yaml.safe_load(_alias_chain(1200))["a1200"]
+    stats = pf_mod._new_step_stats()
+    leaves = pf_mod._walk_steps(steps, stats, "ci.yml")
+    assert leaves == []
+    assert stats["groups"] == pf_mod._MAX_PARALLEL_DEPTH
+    assert stats["malformed_groups"] == 1 and stats["malformed_files"] == ["ci.yml"]
+
+
+def test_a_group_at_the_depth_cap_is_still_read():
+    cap = getattr(pf_mod, "_MAX_PARALLEL_DEPTH", 64)
+    steps = yaml.safe_load(_alias_chain(cap))[f"a{cap}"]
+    stats = pf_mod._new_step_stats()
+    assert [s["run"] for s in pf_mod._walk_steps(steps, stats, "ci.yml")] == ["git log"]
+    assert stats["malformed_groups"] == 0
+
+
+@pytest.mark.parametrize("bottom", ["\n  - run: x\n", " []\n"], ids=["leaves", "empty-groups"])
+def test_an_alias_doubling_chain_stops_at_the_step_budget(bottom):
+    """`lK: [{parallel: *lK-1}, {parallel: *lK-1}]` fans out to 2**K entries
+    (K≈30 is ~1e9). The walk stops at its step budget and counts the group it
+    stopped in as unreadable, whether the bottom holds steps or nothing."""
+    steps = yaml.safe_load(_doubling_chain(16, bottom))["l16"]
+    stats = pf_mod._new_step_stats()
+    leaves = pf_mod._walk_steps(steps, stats, "ci.yml")
+    assert len(leaves) <= getattr(pf_mod, "_MAX_WALK_STEPS", 10_000)
+    assert stats["malformed_groups"] == 1 and stats["malformed_files"] == ["ci.yml"]
+
+
+def _wf_text(steps_yaml_anchor_block: str, ref: str) -> str:
+    return ("x-anchors:\n" + "".join("  " + l + "\n" for l in steps_yaml_anchor_block.splitlines())
+            + "on:\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+            f"    steps: *{ref}\n")
+
+
+@pytest.mark.parametrize("anchors,ref", [
+    (_alias_chain(1200), "a1200"),
+    (_doubling_chain(16), "l16"),
+    ("s: &s\n  - run: npm test\n  - parallel:\n      - parallel: *s\n", "s"),
+], ids=["deep-chain", "doubling-chain", "two-hop-cycle"])
+def test_a_pathological_group_is_scored_and_counted_end_to_end(tmp_path, anchors, ref):
+    doc, code = cc_mod.collect(_repo(tmp_path, _wf_text(anchors, ref)))
+    assert code == 0, doc["data_sources"].get("ci_score_error")
+    assert doc["data_sources"]["parallel_steps"]["malformed_groups"] == 1
+    _render_and_verify(doc)
+
+
+def test_a_two_hop_cycle_is_counted_once_at_walker_level():
+    steps = yaml.safe_load("s: &s\n  - run: a\n  - parallel:\n      - parallel: *s\n")["s"]
+    stats = pf_mod._new_step_stats()
+    assert [s["run"] for s in pf_mod._walk_steps(steps, stats, "ci.yml")] == ["a"]
+    assert stats["groups"] == 1 and stats["malformed_groups"] == 1
+
+
+@pytest.mark.parametrize("exc", [RecursionError, MemoryError])
+def test_a_walk_failure_is_a_scoring_error_marker_never_a_traceback(tmp_path, monkeypatch, exc):
+    real = cc_mod._load_sibling
+
+    def boom(*_a, **_k):
+        raise exc("walk blew up")
+
+    def load(mod_name, filename):
+        mod = real(mod_name, filename)
+        if filename == "practice_facts.py":
+            monkeypatch.setattr(mod, "_practice_facts", boom)
+        return mod
+
+    monkeypatch.setattr(cc_mod, "_load_sibling", load)
+    doc, code = cc_mod.collect(_repo(tmp_path, PARALLEL_WF))
+    assert code == 3
+    assert doc["data_sources"]["ci_score_error"] == f"{exc.__name__}: walk blew up"
+    assert "ci_score" not in doc
