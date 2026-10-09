@@ -11,8 +11,9 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
-- **2026-10-09** — **Fixed**: steps inside a GitHub Actions `parallel:` group
-  (shipped by GitHub 2026-06-25) were invisible to every check that reads
+- **2026-10-09** — **Fixed** (#120): steps inside a GitHub Actions
+  `parallel:` group (shipped by GitHub 2026-06-25 on github.com and GHEC; not
+  GHES) were invisible to every check that reads
   steps. A `- parallel:` entry carries neither `run:` nor `uses:`, so its
   child steps were skipped: the only cache step, an unpinned action, a
   `fetch-depth: 0` checkout, the history op that exempts it, a `--filter`
@@ -23,13 +24,25 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   checkout (and its git-history exemption), change-scoped builds, pinned
   action SHAs, and the automation-only refusal's test/build/install signals.
   The `wait:` / `wait-all:` / `cancel:` steps are skipped and counted;
-  `background: true` steps are ordinary steps and were already read. Never a
-  silent skip: a `parallel:` that cannot be read (not a list, or a group that
-  contains itself through a YAML alias) is counted and its file named, and
-  one GitHub rejects — inside a local composite action, or beside `run:` /
-  `uses:` on one step — is read anyway, defensively, and named as such. The
+  `background: true` steps are ordinary steps and were already read. Inside
+  `parallel:` groups nothing is skipped without being counted and named by
+  file, job, step position and reason: a group in a shape GitHub does not
+  document (inside a local composite action, a group inside a group, beside
+  `run:` / `uses:` on one step, or a single step where a list belongs) is
+  read anyway, defensively, and kept out of the side-by-side count; a group
+  that cannot be read (not a list, empty, contains itself through a YAML
+  alias, nested more than 64 deep, or past a 10,000-entry read limit per
+  job) is counted as unread; a non-step entry inside a group is counted. The
+  depth cap and read limit mean a hostile alias chain can neither crash the
+  run nor stall it, and any failure in the step walk is now a
+  `data_sources.ci_score_error` marker (exit 3), never a traceback. Unread
+  groups are disclosed, not scored around, matching how an unparseable
+  workflow file is handled. A job whose `steps:` is not a list and a local
+  composite action that fails to parse are now recorded by name too
+  (`data_sources.unreadable_step_lists`, `data_sources.composite_parse_errors`,
+  present only when non-empty). The
   findings document records `data_sources.parallel_steps` whenever a repo has
-  a `parallel:` group, and the report header carries a "Parallel steps" row;
+  a `parallel:` key, readable or not, and the report header carries a "Parallel steps" row;
   `verify_report.py` re-derives that row on its own and fails a report whose
   row is missing, altered, or present without the record. Repos with no
   `parallel:` group (including ones using only `background:` with `wait:` /

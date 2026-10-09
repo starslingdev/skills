@@ -618,8 +618,9 @@ def _step_uses(step: dict) -> tuple[str, str] | None:
 # ONE KNOWN DIVERGENCE: the step reader is NOT part of the copy. Here
 # `_job_steps` routes through `_walk_steps`, so a history op inside a GitHub
 # Actions `parallel:` group counts; ci-speedup still reads `steps:` flat. The
-# parity test pins that gap as a strict xfail until ci-speedup reads
-# `parallel:` groups too, at which point it goes red and the xfail comes off.
+# parity test pins that gap as a non-strict xfail (non-strict on purpose: the
+# ci-speedup `parallel:` change, PR #122, is in flight too); delete the marker
+# once both are merged.
 #
 # WHY A COPY. Every skill in this repo installs and runs standalone, so
 # ci-score may not import ci-speedup at runtime (the same rule that made this

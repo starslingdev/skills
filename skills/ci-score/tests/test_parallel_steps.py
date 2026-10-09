@@ -1,4 +1,5 @@
-"""GitHub Actions parallel steps (shipped 2026-06-25): a step may be
+"""GitHub Actions parallel steps (shipped by GitHub 2026-06-25 on github.com
+and GHEC; not GHES): a step may be
 `- parallel:` holding a LIST of ordinary child steps, and the control steps
 `- wait:` / `- wait-all:` / `- cancel:` carry no `run:`/`uses:`.
 
@@ -7,8 +8,11 @@ inside a `parallel:` group was invisible and a verdict could flip on a step the
 engine never saw. The invariant pinned here: wrapping the DECISIVE step of a
 check's positive or negative fixture in `- parallel:` never changes the
 verdict. Plus: a control step never crashes a check, the checks that read no
-steps are unaffected, and a malformed `parallel:` (not a list) is disclosed in
-the findings document and the report header, never silently skipped.
+steps are unaffected, and every `parallel:` group that could not be read, is
+in a shape GitHub does not document, or holds a non-step entry is counted and
+named (file, job, step, reason) in the findings document and the report
+header. The walk is bounded (depth 64, 10,000 entries) and a walk failure is a
+scoring-error marker, never a traceback.
 """
 from __future__ import annotations
 

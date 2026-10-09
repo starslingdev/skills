@@ -7,7 +7,9 @@ verdict. Invariants (each failure is a named, quoted message):
 
 0. HEADER — the provenance table quotes the document's own commit (short SHA
    present; a -dirty run is labelled dirty; a clean run never claims dirt),
-   and discloses any `parallel:` step groups the collector recorded.
+   and carries exactly the "Parallel steps" row re-derived from
+   `data_sources.parallel_steps` (whose counts and entry lists are
+   type-checked first); no row when there is no record.
 1. STAMP↔CARD — the headline value/grade/passed/applicable on the card are
    the stamp's own numbers (nothing recomputes), and every stamp check row
    appears on the card. The score gauge on the card shows the stamp's value,
@@ -174,8 +176,9 @@ def verify(doc: dict[str, Any], report: str, registry: dict[str, Any]) -> list[s
 
     # 0b. PARALLEL STEPS — when the collector recorded `parallel:` groups, the
     # provenance header carries exactly one "Parallel steps" row, and it is
-    # the row re-derived HERE from `data_sources.parallel_steps` (counts, every
-    # unreadable or GitHub-rejected group and its files) — built by this
+    # the row re-derived HERE from `data_sources.parallel_steps` (counts, and
+    # every undocumented, unreadable or non-step entry by file, job, step and
+    # reason) — built by this
     # module's own code, not the renderer's, so a renderer bug cannot pass by
     # construction. No record → no row: a header cannot claim a read the
     # document does not carry.
