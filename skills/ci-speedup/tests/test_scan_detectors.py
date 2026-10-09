@@ -4174,6 +4174,31 @@ jobs:
     assert gaps and "parallel" in gaps[0]["reason"], data["scan_incomplete"]
 
 
+def test_a_job_with_an_unreadable_group_gets_no_absence_finding(tmp_path: Path):
+    """A malformed group's steps were never read, so "the job does X nowhere"
+    cannot be known for that job. Here the unread group runs `git describe`,
+    which needs full history: OPT28's "drop `fetch-depth: 0`" would break it.
+    Every finding for the job is held back with a listed reason instead."""
+    yml = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - parallel:
+          run: git describe --tags
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    assert "OPT28" not in _patterns(data), [f["pattern"] for f in data["findings"]]
+    gaps = [g for g in data["scan_incomplete"] if g["path"] == ".github/workflows/ci.yml"]
+    assert gaps and "job_has_an_unreadable_parallel_group" in gaps[0]["reason"], gaps
+
+
 def test_opt28_reads_a_history_op_in_a_group_written_on_a_run_step(tmp_path: Path):
     """`parallel:` beside `run:` on one step is rejected by GitHub, but the walk
     reads its children anyway: the `git log` inside makes `fetch-depth: 0`

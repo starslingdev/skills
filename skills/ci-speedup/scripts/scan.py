@@ -2235,6 +2235,41 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 
 # Dispatch table — OPT-id → detector function. Patterns declared in the catalog
 # but missing here are logged at scan time and skipped (no fabrication).
+# Detectors whose claim rests on a step being ABSENT from the job ("no cache
+# precedes the install", "no step reads the history", "no step uses the
+# payload"). A job with a malformed `parallel:` group has steps that were never
+# read, so absence cannot be known there: these patterns' findings for that job
+# are held back, and the job's scan_incomplete record names them with the
+# reason below. Presence-based and job-config patterns (a duplicate build, a
+# missing concurrency group) stay true whatever the unread group holds.
+_ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
+    "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
+    "OPT39", "OPT76"})
+UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
+
+
+def _hold_back_unreadable(pattern: str, hits: list[Hit], rel: str,
+                          unreadable_jobs: dict[tuple[str, str], dict[str, Any]]
+                          ) -> list[Hit]:
+    """Drop the hits naming a job whose `parallel:` group could not be read,
+    recording each on that job's scan_incomplete record (never silent)."""
+    kept: list[Hit] = []
+    for hit in hits:
+        recs = [unreadable_jobs[(rel, j)] for j in hit.affected_jobs
+                if (rel, j) in unreadable_jobs]
+        if not recs:
+            kept.append(hit)
+            continue
+        for rec in recs:
+            held = rec.setdefault("held_back", [])
+            if pattern not in held:
+                held.append(pattern)
+                rec["reason"] = rec["reason"].split("; held back:")[0] + (
+                    f"; held back: {', '.join(held)} "
+                    f"({UNREADABLE_GROUP_HELD_BACK_REASON})")
+    return kept
+
+
 _DETECTORS: dict[str, Any] = {
     "OPT1": _detect_opt1,
     "OPT6": _detect_opt6,
@@ -4587,12 +4622,18 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
     # rejects) was read anyway, but the job is not one GitHub would run as
     # written, so it is named too.
     parallel_stats = parallel_steps_stats((rel, doc) for rel, doc, _raw in parsed)
+    # (file, job key) → its scan_incomplete record, so a finding held back for
+    # that job (see _ABSENCE_STEP_PATTERNS) is named on the job's own record.
+    unreadable_jobs: dict[tuple[str, str], dict[str, Any]] = {}
     for mj in parallel_stats["malformed_jobs"]:
-        scan_incomplete.append({
+        rec = {
             "path": mj["path"],
             "reason": (f"job `{mj['job']}`: {mj['count']} `parallel:` group(s) whose "
                        "value is not a readable list of steps (not a list, nested in "
-                       "itself, or nested too deep), so the steps inside were not read")})
+                       "itself, nested too deep, or too many steps to read), so the "
+                       "steps inside were not read")}
+        scan_incomplete.append(rec)
+        unreadable_jobs[(mj["path"], mj["job"])] = rec
     for ij in parallel_stats["invalid_jobs"]:
         scan_incomplete.append({
             "path": ij["path"],
@@ -4648,6 +4689,8 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
                     hits = list(_declarative_hits(entry, doc, raw))
             else:
                 continue
+            if unreadable_jobs and entry.pattern in _ABSENCE_STEP_PATTERNS:
+                hits = _hold_back_unreadable(entry.pattern, hits, rel, unreadable_jobs)
             for hit in hits:
                 finding_idx += 1
                 f = _emit(entry, hit, rel, finding_idx)
