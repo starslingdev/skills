@@ -25,6 +25,11 @@ repo's own workflow files, verifiable by the maintainer in under a minute.
 Pass or fail; a check whose subject doesn't exist in the repo (no build tool,
 no dependency manifest to cache, no test job to shard, no OIDC use, no
 third-party actions) is **not applicable** and leaves the denominator.
+Steps inside a GitHub Actions `parallel:` group are read exactly like any
+other step (the `wait:` / `wait-all:` / `cancel:` control steps run nothing
+and are skipped), and the report header states how many steps were read
+from parallel groups, naming any `parallel:` that is not a list of steps
+and so could not be read.
 
 ```
 score = round-half-up( 100 × checks passed ÷ checks applicable )

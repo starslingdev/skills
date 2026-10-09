@@ -6,7 +6,8 @@ the dogfood sweep, and a human all run the same checks and get the same
 verdict. Invariants (each failure is a named, quoted message):
 
 0. HEADER — the provenance table quotes the document's own commit (short SHA
-   present; a -dirty run is labelled dirty; a clean run never claims dirt).
+   present; a -dirty run is labelled dirty; a clean run never claims dirt),
+   and discloses any `parallel:` step groups the collector recorded.
 1. STAMP↔CARD — the headline value/grade/passed/applicable on the card are
    the stamp's own numbers (nothing recomputes), and every stamp check row
    appears on the card. The score gauge on the card shows the stamp's value,
@@ -75,6 +76,15 @@ def verify(doc: dict[str, Any], report: str, registry: dict[str, Any]) -> list[s
             problems.append("HEADER: commit_sha is -dirty but the header does not say the tree was dirty")
         if not dirty and "tree was dirty" in header:
             problems.append("HEADER: header claims a dirty tree but commit_sha is clean")
+
+    # 0b. PARALLEL STEPS — when the collector recorded `parallel:` groups, the
+    # header carries exactly the rendered disclosure (counts and any malformed
+    # group), so a report can never hide that steps were read from (or could
+    # not be read from) parallel groups.
+    par = rr.parallel_steps_disclosure(doc)
+    if par and par not in header:
+        problems.append("HEADER: data_sources.parallel_steps recorded but the "
+                        "header does not disclose the parallel-step read")
 
     if "collection_refusal" in doc:
         want = str(doc["collection_refusal"].get("human_reason", ""))

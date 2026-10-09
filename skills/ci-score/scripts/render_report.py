@@ -349,6 +349,30 @@ def _handoff_prompt(rec_no: int, chk: dict, meta: dict, url: str,
     ]
 
 
+def parallel_steps_disclosure(doc: dict[str, Any]) -> str | None:
+    """The provenance cell for GitHub Actions `parallel:` step groups, read off
+    `data_sources.parallel_steps` (the collector's record of what the step
+    walker read). None when the repo uses no parallel/control steps. A
+    malformed group (a `parallel:` that is not a list) is named, never
+    silently skipped: its steps were not read, so the maintainer is told."""
+    rec = (doc.get("data_sources") or {}).get("parallel_steps")
+    if not isinstance(rec, dict):
+        return None
+    n = rec.get("steps_in_groups", 0)
+    groups = rec.get("groups", 0)
+    parts = [f"{n} step(s) inside `parallel:` groups read ({groups} group(s))"]
+    control = rec.get("control_steps", 0)
+    if control:
+        parts.append(f"{control} `wait`/`wait-all`/`cancel` control step(s) skipped "
+                     "(they run nothing)")
+    bad = rec.get("malformed_groups", 0)
+    if bad:
+        files = ", ".join(f"`{f}`" for f in (rec.get("malformed_files") or [])[:3])
+        parts.append(f"**{bad} malformed `parallel:` group(s) not read** (the value "
+                     f"is not a list of steps){' in ' + files if files else ''}")
+    return " · ".join(parts)
+
+
 def _render_header(doc: dict[str, Any]) -> list[str]:
     """Title + provenance table, ci-speedup-house-style: `# <repo> — how does
     your CI configuration score?` over a metadata table naming exactly what
@@ -389,6 +413,9 @@ def _render_header(doc: dict[str, Any]) -> list[str]:
     if "scanned_workflows" in doc:
         n = doc.get("scanned_workflows")
         lines += [f"| **Workflows scanned** | {n} workflow file(s) under `.github/workflows/` |"]
+    par = parallel_steps_disclosure(doc)
+    if par:
+        lines += [f"| **Parallel steps** | {par} |"]
     stamp = doc.get("ci_score")
     if isinstance(stamp, dict) and stamp.get("spec_version"):
         n_checks = len(stamp.get("checks") or [])

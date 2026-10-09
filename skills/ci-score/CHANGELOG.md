@@ -11,6 +11,25 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-09** — **Fixed**: steps inside a GitHub Actions `parallel:` group
+  (shipped by GitHub 2026-06-25) were invisible to every check that reads
+  steps. A `- parallel:` entry carries neither `run:` nor `uses:`, so its
+  child steps were skipped: the only cache step, an unpinned action, a
+  `fetch-depth: 0` checkout, the history op that exempts it, a `--filter`
+  build or a test command could sit inside a group unseen, and the check
+  passed or failed on a step it never read. One step walker now yields every
+  leaf step in declaration order (nested groups included, `wait:` /
+  `wait-all:` / `cancel:` control steps skipped and counted), and every step
+  read routes through it: dependency caching (and its applicability signal),
+  build caching, shallow checkout (and its git-history exemption), change-
+  scoped builds, pinned action SHAs, and the automation-only refusal's
+  test/build/install signals — across workflows and local composite actions.
+  The findings document records `data_sources.parallel_steps` and the report
+  header discloses "N step(s) inside `parallel:` groups read", naming any
+  malformed `parallel:` (not a list) whose steps could not be read;
+  `verify_report.py` fails a report that drops that disclosure. Repos with no
+  parallel steps produce byte-identical output. No `spec_version` bump: no
+  gate moved, the checks now see the steps their facts were always about.
 - **2026-09-30** — **Changed**: the Dependency caching check's "Why it matters" text (engine, methodology, example report) now states its exception: a cache that measurably costs more than it saves should be removed, this check reads configuration only and cannot see that measurement, and a repo that removed such a cache still loses the point. Documentation only; no scoring change, no `spec_version` bump.
 - **2026-09-02** — **Changed**: the CI Score registry is bumped to
   `ci-score-v0.1.4` (OD-CS22). The two shallow-clone exemptions below move a

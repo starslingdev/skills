@@ -252,6 +252,18 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
     cs_mod = _load_sibling("ci_score_ci_score", "ci_score.py")
 
     doc["practice_facts"] = pf_mod._practice_facts(parsed, root)
+    # Parallel steps (GitHub Actions `parallel:` groups and their wait/cancel
+    # control steps): every check reads the child steps through one walker;
+    # record what it read so the report header can disclose it — including a
+    # malformed `parallel:` (not a list) whose contents could not be read.
+    # Recorded only when the repo uses the syntax, so every other document is
+    # byte-identical to before.
+    walk = pf_mod._step_walk_stats(parsed, root)
+    if walk["groups"] or walk["control_steps"]:
+        doc["data_sources"]["parallel_steps"] = walk
+        logger.debug("parallel steps: %d group(s), %d child step(s), %d control "
+                     "step(s), %d malformed", walk["groups"], walk["steps_in_groups"],
+                     walk["control_steps"], walk["malformed_groups"])
     if logger.isEnabledFor(logging.DEBUG):
         states = {k: v.get("state") for k, v in doc["practice_facts"].items()}
         logger.debug("practice facts: %s", states)
