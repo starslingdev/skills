@@ -3356,6 +3356,21 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
             + _fence_body(out) + "\n```\n")
 
 
+def _dd_where(patterns: "tuple[str, ...] | list[str]", entry: bool = False) -> str:
+    """Where a pole's data-driven catalog match renders. OPT81 renders at its own
+    pole (never in the Also-noticed appendix), so a pointer to the appendix would
+    send the reader to a finding that is not there."""
+    pats = set(patterns or ())
+    appendix = ("its entry in the **Also noticed** section below" if entry
+                else "the **Also noticed** section below")
+    if "OPT81" not in pats:
+        return appendix
+    card = "its **OPT81** runner-class card below this pole's prompt"
+    if pats == {"OPT81"}:
+        return card
+    return f"{appendix} (and {card})"
+
+
 def _build_generic_agent_prompt(pole: dict[str, Any],
                                 candidates: list[dict[str, Any]], run_url: str | None,
                                 repo: str, sha: str | None, gate_count: int,
@@ -3436,11 +3451,16 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 f"({', '.join(struct_pats)}) matched this pole (see the **structural "
                 f"root-cause** section above for the measured lever + its risk axis); the "
                 f"dominant step below is where that lever's time is spent.")
+    elif dd_pats == ["OPT81"]:
+        lead = ("starslingdev/ci-speedup measured where the time goes below but does NOT "
+                "prescribe the fix - a measured runner-class comparison (OPT81) matched "
+                "this pole: the same job ran faster on another runner class this "
+                "repository already uses (see its **OPT81** card below this prompt).")
     elif dd_pats:
         lead = (f"starslingdev/ci-speedup measured where the time goes below but does NOT "
                 f"prescribe the fix - a data-driven catalog pattern "
-                f"({', '.join(dd_pats)}) matched this pole (see the **Also noticed** "
-                f"section below for the measured lever + its fix recipe); the dominant "
+                f"({', '.join(dd_pats)}) matched this pole (see "
+                f"{_dd_where(dd_pats)} for the measured lever + its fix recipe); the dominant "
                 f"step below is where that lever's time is spent.")
     elif opt79:
         lead = ("starslingdev/ci-speedup measured where the time goes below but does NOT "
@@ -3501,10 +3521,16 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 "lever, its risk / guardrail / rollout, and the catalog fix recipe. The "
                 "step above is the load-bearing one that lever targets; open its log (the "
                 "Audit link) to see exactly what inside it the lever reshapes.", ""]
+    elif dd_pats == ["OPT81"]:
+        out += ["RUNNER-CLASS COMPARISON MATCHED",
+                "- A measured runner-class comparison (OPT81) matched this pole - see its "
+                "**OPT81** card below this prompt for both measured medians and why some "
+                "runs use the slower runner class. It is about where the job runs, not "
+                "about the step above.", ""]
     elif dd_pats:
         out += ["DATA-DRIVEN CATALOG PATTERN MATCHED",
                 f"- A data-driven catalog pattern ({', '.join(dd_pats)}) matched this "
-                "pole - see the **Also noticed** section below for the measured lever and "
+                f"pole - see {_dd_where(dd_pats)} for the measured lever and "
                 "its catalog fix recipe (it sits ON the critical path, so it shrinks this "
                 "pole's wall time). The step above is the load-bearing one that lever "
                 "targets; open its log (the Audit link) to see what inside it the lever "
@@ -3827,8 +3853,9 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                     structural_present: bool = False,
                     data_driven_present: bool = False,
                     data_driven_on_path: bool = True,
-                    opt79_present: bool = False,
-                    opt82_present: bool = False) -> list[str]:
+                     data_driven_patterns: "tuple[str, ...] | list[str]" = (),
+                     opt79_present: bool = False,
+                     opt82_present: bool = False) -> list[str]:
     """The ASCII waterfall for one pole (no code fence): the blocking job's steps,
     then - when a log was captured - the dominant step's internals down to the
     root cause.
@@ -3845,6 +3872,8 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
     while the spine footnote demotes it (the paradedb `Test pg_search` double-framing)."""
     # The pointer tail for a data-driven catalog match — on-path for a typical pole, opt-in/rare
     # for a `spine_rare` pole. Never a coverage gap either way (a measured catalog lever matched).
+    # Where the data-driven match renders: OPT81 renders at its pole, not in the appendix.
+    _dd_where_wf = _dd_where(data_driven_patterns, entry=True)
     _dd_tail = ("flagged as sitting ON the critical path.)" if data_driven_on_path
                 else "flagged as opt-in / rare — its fix helps the minority of PRs that run "
                      "it, not the typical merge path.)")
@@ -3958,8 +3987,7 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
             # point there rather than re-render; `_dd_tail` matches the appendix's on-path vs
             # opt-in/rare framing so the pointer can't contradict the spine footnote.
             lines += ["", "   (no log-level detector fired, but a measured **catalog "
-                      "pattern** matched this pole - see its entry in the **Also noticed** "
-                      "section below, " + _dd_tail]
+                      "pattern** matched this pole - see " + _dd_where_wf + ", " + _dd_tail]
         elif log_present and leaf is None and opt79_present:
             # OPT79's pole cache fired ON this pole and renders in its own block below
             # (`_opt79_pole_block`) - a catalog match, not a coverage gap.
@@ -4031,8 +4059,7 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
             # gap; it's sized in the 'Also noticed' appendix. `_dd_tail` matches the appendix's
             # on-path vs opt-in/rare framing so the pointer can't contradict the spine footnote.
             lines += ["", "(no log-level detector fired, but a measured **catalog "
-                      "pattern** matched this pole - see its entry in the **Also noticed** "
-                      "section below, " + _dd_tail]
+                      "pattern** matched this pole - see " + _dd_where_wf + ", " + _dd_tail]
         elif opt79_present and leaf is None:
             # OPT79's pole cache fired ON this pole; its block renders below.
             lines += ["", "(no log-level detector fired, but a measured **catalog "
@@ -5219,6 +5246,7 @@ def _coverage_note(ds: dict[str, Any]) -> str:
 _OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 _OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
+_OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 _OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
 class WithheldRow(NamedTuple):
     """One pattern's whole registration in the held-back disclosure.
@@ -5250,6 +5278,12 @@ _WITHHELD_ROWS: tuple[WithheldRow, ...] = (
     WithheldRow(_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back",
                 "candidate checkout(s)",
                 "Why a checkout with a slow tail produced no finding",
+                "job"),
+    WithheldRow(_OPT81_WITHHELD_DOC_KEY, "runner class: held back",
+                "candidate job(s)",
+                "Why a job that ran on more than one runner label, or a long pole "
+                "whose step timings could not be read, produced no runner-class "
+                "finding",
                 "job"),
     WithheldRow(_OPT82_WITHHELD_DOC_KEY, "type-aware lint: held back",
                 "candidate lint job(s)",
@@ -5319,6 +5353,26 @@ _OPT80_WITHHOLD_PHRASES: dict[str, str] = {
         "there were more slow runs than the audit reads logs for, and the rest "
         "were never read",
 }
+_OPT81_WITHHOLD_PHRASES: dict[str, str] = {
+    "runner_label_not_classifiable_by_size":
+        "a runner label could not be classified by size (a self-hosted or custom "
+        "label), so no runner-class comparison could be made",
+    "fewer_than_min_samples_on_two_labels":
+        "the job ran on more than one runner label, but not often enough on two "
+        "of them to compare their medians",
+    "more_than_two_qualifying_runner_labels":
+        "the job ran often enough on three or more runner labels, so there is no "
+        "single pair to compare",
+    "step_lists_differ":
+        "the job did not run the same steps on both runner labels, so it is not "
+        "the same job on both",
+    "not_interleaved":
+        "the two labels ran in different periods (a runner switch), so the gap "
+        "could come from code changes made in between, not the runner",
+    "a2_dominant_step_unresolved":
+        "the long pole's step timings could not be read, so whether its time is "
+        "compute could not be established",
+}
 # OPT82: a slow lint job whose ESLint config the audit could not decide. Every
 # gate in `collect_runs._OPT82_HELD_BACK_GATES`, and only those (a verdict is
 # never held back); a test pins the two sets equal.
@@ -5378,6 +5432,7 @@ _OPT82_WITHHOLD_PHRASES: dict[str, str] = {
 _WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
     _OPT77_WITHHELD_DOC_KEY: _OPT77_WITHHOLD_PHRASES,
     _OPT80_WITHHELD_DOC_KEY: _OPT80_WITHHOLD_PHRASES,
+    _OPT81_WITHHELD_DOC_KEY: _OPT81_WITHHOLD_PHRASES,
     _OPT82_WITHHELD_DOC_KEY: _OPT82_WITHHOLD_PHRASES,
 }
 # What the row says for a gate with no phrase. Never the code; `verify_report`
@@ -7727,6 +7782,270 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
     return lines
 
 
+# =============================================================================
+# OPT81 — The Same Job Is Measurably Faster on Another Runner
+# =============================================================================
+# Every OPT81 finding renders exactly ONCE, as an anchored card
+# (`<a id="opt81-<id>"></a>`): at its pole when its job is a rendered long pole
+# (after that pole's own prompt and any OPT75 decomposition — the last option),
+# otherwise in the "Runner class comparisons" section below the spine. It never
+# reaches the headline, the Tier-2 section, the Also-noticed appendix or any total.
+# `verify_report.check_opt81_runner_comparison_rederived` re-derives every number
+# A1 states and pairs the disclosure line with every card.
+
+# A STRING CONTRACT with collect_runs and verify_report (coupling test).
+_OPT81_DISCLOSURE = (
+    "The publisher of this skill sells CI runners. This finding compares your own "
+    "runs on runner classes you already use (A1), or names a class of lever and asks "
+    "you to benchmark before believing any number (A2); it never prices a runner.")
+_OPT81_RUNNER_MIN_UNKNOWN = (
+    "unknown: a different runner class bills differently and this audit carries no "
+    "rate table")
+# The advisory's recipe: exactly two options, and nothing else. A StarSling number
+# cannot be measured before the app is installed, and the recipe says so.
+# GitHub defines no larger-runner label for Linux or Windows: an organisation
+# admin creates the runner and its name is the label (only macOS larger sizes are
+# GitHub-defined labels). Each option is stored as (lead-in, rest) so the card can
+# bold only the lead-in.
+_OPT81_A2_OPTION_LARGER_PARTS = (
+    "Option 1, a larger GitHub-hosted runner (same vendor):",
+    "an organisation admin creates the larger runner first (this needs a paid "
+    "GitHub plan, and larger runners are billed per minute even where standard "
+    "runners are free; on macOS the larger sizes are GitHub-defined labels such as "
+    "`macos-14-xlarge`). Then change only the job's `runs-on` to that runner's name "
+    "on a branch and run the benchmark there. A runner name the organisation "
+    "chooses cannot be classified by size by this audit unless it follows GitHub's "
+    "`<image>-<N>core(s)` naming.")
+_OPT81_A2_OPTION_STARSLING_PARTS = (
+    "Option 2, StarSling runners:",
+    "the benchmark can only be run after installing the StarSling GitHub app on the "
+    "repository; the audit has no StarSling measurement for this job.")
+_OPT81_A2_OPTION_LARGER = " ".join(_OPT81_A2_OPTION_LARGER_PARTS)
+_OPT81_A2_OPTION_STARSLING = " ".join(_OPT81_A2_OPTION_STARSLING_PARTS)
+# The render-time log-level sub-gate. A full A2 card states it passed (the
+# verifier keys on this phrase); when it could not run, the advisory is held back.
+_OPT81_A2_LOG_CHECKED = "no log-level lever matched this pole's log"
+_OPT81_A2_HELD_NO_LOG = ("advisory held back: this pole's log was not read, so the "
+                         "log-level check did not run")
+_OPT81_A2_HELD_UNROUTED = ("advisory held back: its pole is not one of the long poles "
+                           "this report renders")
+_OPT81_A2_BENCHMARK = (
+    "Benchmark required: run the job on the candidate runner beside its current label "
+    "for several runs on a branch, compare the medians, and switch only if the "
+    "measured result says so. This audit attaches no number to either option.")
+
+
+def _opt81_half(f: dict[str, Any]) -> str:
+    fr = f.get("faster_runner") if isinstance(f.get("faster_runner"), dict) else {}
+    return str(fr.get("half") or "")
+
+
+def _opt81_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [f for f in findings if str(f.get("pattern", "")) == "OPT81"
+            and _opt81_half(f) in ("A1", "A2")]
+
+
+def _opt81_for_pole(pole: dict[str, Any],
+                    findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The OPT81 findings whose job IS this pole (same workflow file; the job or
+    check name exact, or the unexpanded matrix base of this pole's leg)."""
+    targets = [t for t in (str(pole.get("check", "")), str(pole.get("job", ""))) if t]
+    pole_wf = str(pole.get("workflow_file") or "")
+    out = []
+    for f in _opt81_findings(findings):
+        if not pole_wf or _wf_conflict(pole_wf, str(f.get("workflow_file") or "")):
+            continue
+        jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
+        if any(j == t or _matrix_base(t) == j or _matrix_base(j) == t
+               for j in jobs for t in targets):
+            out.append(f)
+    return out
+
+
+def _opt81_holding_leaf(leaf: "dict[str, Any] | None",
+                        offcat_leaf: "dict[str, Any] | None") -> "dict[str, Any] | None":
+    """The log leaf that holds the A2 advisory back, if any. A leaf demoted
+    off-category (issue #16) still matched the pole's own log, so it is a
+    cheaper lever than a different or larger runner class even though it is not
+    the dominant work."""
+    return leaf if leaf is not None else offcat_leaf
+
+
+def _opt81_leaf_name(leaf: dict[str, Any]) -> str:
+    """A matched log leaf's name, for the advisory's held-back note."""
+    return str(leaf.get("fix_key") or leaf.get("kind") or leaf.get("pattern")
+               or "a log-level lever")
+
+
+def _opt81_evidence(f: dict[str, Any]) -> str:
+    """The finding's evidence without its trailing disclosure: every card and
+    prompt states the disclosure once, on its own line, so it is not repeated."""
+    return _fence_safe(str(f.get("evidence") or "").replace(_OPT81_DISCLOSURE, "")
+                       .strip())
+
+
+def _opt81_levers_checked(fr: dict[str, Any]) -> list[tuple[str, str]]:
+    """The finding's stamped `cheaper_levers_checked`, rendered literally: each
+    lever (with the patterns it examined) and its outcome. The log-level entry is
+    stamped as pending because that sub-gate runs at render time; a full A2 card
+    renders only after it passed, so it reads as passed here, and it is added when
+    the engine did not stamp it, because the card always ran it."""
+    out: list[tuple[str, str]] = []
+    saw_log = False
+    for c in fr.get("cheaper_levers_checked") or []:
+        if not isinstance(c, dict):
+            continue
+        lever = _flatten_cell(str(c.get("lever") or ""))
+        pats = [str(x) for x in (c.get("patterns") or []) if str(x) and str(x) not in lever]
+        if pats:
+            lever += f" ({', '.join(pats)})"
+        why = _flatten_cell(str(c.get("why") or ""))
+        if lever.lower().startswith("log-level"):
+            saw_log, why = True, _OPT81_A2_LOG_CHECKED
+        out.append((lever, why))
+    if not saw_log:
+        out.append(("log-level leaves", _OPT81_A2_LOG_CHECKED))
+    return out
+
+
+def _opt81_prompt(f: dict[str, Any], url: str) -> list[str]:
+    half = _opt81_half(f)
+    fr = f["faster_runner"]
+    job = str(fr.get("job") or "")
+    wf = _wf_base(str(f.get("workflow_file") or ""))
+    if half == "A1":
+        pattern = (f"Pattern: OPT81 - {_flatten_cell(str(f.get('title') or 'OPT81'))}"
+                   " (measured).")
+    else:
+        # The A2 half measured nothing, so it never carries the A1 title.
+        pattern = ("Pattern: OPT81 (advisory) - a different or larger runner class is "
+                   "the last lever this audit can name; benchmark required.")
+    body = ["ci-speedup measured the pattern below but does NOT prescribe the fix -",
+            "investigate it in the repo and apply a safe change.", "",
+            pattern,
+            f"Where: {wf} ({job}).",
+            f"What ci-speedup saw: {_opt81_evidence(f)}"]
+    if half == "A1":
+        body += ["", "Do: find out why some runs of this job use the slower label (a fork "
+                 "pull request, an event or a matrix condition can select it on "
+                 "purpose); if nothing requires it, move the job to the faster label it "
+                 "already uses, keeping every step it runs today. Check the cost with "
+                 "whoever pays for CI first: the two classes bill differently. If this "
+                 "is a matrix whose legs differ in more than their runner (an include: "
+                 "leg, a tool version), the gap is not the runner's alone."]
+    else:
+        # Never empty: `_opt81_levers_checked` always carries the log-level entry.
+        names = "; ".join(lv for lv, _why in _opt81_levers_checked(fr))
+        body += ["", "This is the last option the audit can name for this job: none of "
+                 f"the cheaper levers it checks for fired here ({names}). Before "
+                 "benchmarking a different or larger runner class, check whether the dominant step can be "
+                 "cached or split; this audit did not prove it cannot.",
+                 _OPT81_A2_OPTION_LARGER, _OPT81_A2_OPTION_STARSLING,
+                 _OPT81_A2_BENCHMARK]
+    body += ["", "Read the catalog entry (background, fix recipe, and guardrail):",
+             f"  {url}", "", *_NO_WEAKENING_LINES, "", _OPT81_DISCLOSURE]
+    return ["#### 🤖 Prompt for your coding agent", "", "```text",
+            *[_fence_safe(l) for l in body], "```"]
+
+
+def _opt81_card(f: dict[str, Any], catalog_url: str,
+                held_back_by: str | None = None, *, log_read: bool = True,
+                unrouted: bool = False) -> list[str]:
+    """One OPT81 finding as an anchored card. An A2 advisory renders in full only
+    after its render-time log-level sub-gate PASSED; otherwise it is a one-line
+    held-back note that still carries the disclosure:
+    - `held_back_by` (a matched log-leaf kind): a cheaper lever matched the pole's
+      own log, so a different or larger runner class is not the next move;
+    - `log_read=False`: the pole's log was not read, so the check could not run
+      (fail closed, never as if it had passed);
+    - `unrouted=True`: its pole is not a rendered long pole, so there is no log
+      check and no pole section to anchor the advisory to."""
+    half = _opt81_half(f)
+    fr = f["faster_runner"]
+    fid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(f.get("id") or "x"))
+    anchor = f'<a id="opt81-{fid}"></a>'
+    title = _flatten_cell(str(f.get("title") or "OPT81"))
+    url = f"{catalog_url}#{f.get('fix_recipe_anchor')}" if f.get(
+        "fix_recipe_anchor") else catalog_url
+    job = _flatten_cell(str(fr.get("job") or ""))
+    if half == "A2" and held_back_by:
+        return [anchor, "",
+                f"**🏎️ OPT81 runner-class advisory held back** for `{job}`: a log-level "
+                f"lever (`{_flatten_cell(held_back_by)}`) matched this pole's own log, "
+                "and acting on it is cheaper than a different or larger runner class. "
+                "Act on that first.",
+                "", f"_{_OPT81_DISCLOSURE}_", ""]
+    if half == "A2" and (unrouted or not log_read):
+        why = _OPT81_A2_HELD_UNROUTED if unrouted else _OPT81_A2_HELD_NO_LOG
+        return [anchor, "", f"**🏎️ OPT81 for `{job}`:** runner-class {why}.",
+                "", f"_{_OPT81_DISCLOSURE}_", ""]
+    out = [anchor, ""]
+    if half == "A1":
+        out += [f"**🏎️ OPT81 · {title}** - measured from runs this repository already "
+                "made", ""]
+        # `n` counts SUCCESSFUL runs only (A1 compares success-only populations).
+        s, q = fr.get("slow") or {}, fr.get("fast") or {}
+        out += [f"- **Measured:** `{job}` ran {s.get('n')} time(s) on "
+                f"`{_flatten_cell(str(s.get('label')))}` at p50 "
+                f"{_num(s.get('p50_s')) or 0:.0f}s and {q.get('n')} time(s) on "
+                f"`{_flatten_cell(str(q.get('label')))}` at p50 "
+                f"{_num(q.get('p50_s')) or 0:.0f}s, with the same steps on both: "
+                f"{_num(fr.get('gap_s')) or 0:.0f}s faster at the median on "
+                f"`{_flatten_cell(str(q.get('label')))}`.",
+                f"- **Runner-minute effect:** {_OPT81_RUNNER_MIN_UNKNOWN}."]
+        wc = _num(f.get("wall_clock_p50_s")) or 0.0
+        if wc > 0:
+            out.append(f"- **Merge wait:** this job is on the merge-gating path; the "
+                       f"credited wall-clock is {_clock(wc)} after the critical-path "
+                       "floors.")
+        else:
+            derivation = [d for d in (f.get("wall_clock_derivation") or [])
+                          if isinstance(d, dict) and d.get("reason")]
+            why = (str(derivation[-1]["reason"]) if derivation
+                   else str(fr.get("credit_reason") or ""))
+            # The generic developer-facing bound ends its reason with a bill-saving
+            # clause; OPT81's runner-minute effect is unknown (stated above), so
+            # that clause would contradict the card.
+            why = re.sub(r";\s*runner-minute \(bill\) saving only\s*$", "", why)
+            out.append(f"- **Merge wait:** not credited ({_flatten_cell(why)}).")
+    else:
+        out += ["**🏎️ OPT81 · a different or larger runner class, the last lever this "
+                "audit can name for this pole** - advisory, benchmark required, no "
+                "number attached", ""]
+        out += [f"- **What ci-speedup saw:** {_flatten_cell(_opt81_evidence(f))}"]
+        out.append("- **Cheaper levers checked (none fired):** " + "; ".join(
+            f"{lv}: {why}" for lv, why in _opt81_levers_checked(fr)) + ".")
+        lead1, rest1 = _OPT81_A2_OPTION_LARGER_PARTS
+        lead2, rest2 = _OPT81_A2_OPTION_STARSLING_PARTS
+        out += [f"- **{lead1}** {rest1}",
+                f"- **{lead2}** {rest2}",
+                f"- {_OPT81_A2_BENCHMARK}"]
+        if f.get("guardrail"):
+            out.append(f"- **Guardrail:** {_flatten_cell(str(f['guardrail']))}")
+        if f.get("rollout"):
+            out.append(f"- **Rollout:** {_flatten_cell(str(f['rollout']))}")
+    out += [f"- **Catalog (background + fix recipe):** {url}", "",
+            f"_{_OPT81_DISCLOSURE}_", "", *_opt81_prompt(f, url), ""]
+    return out
+
+
+def _opt81_unrouted_block(findings: list[dict[str, Any]], catalog_url: str) -> list[str]:
+    """OPT81 findings whose job is not a rendered pole. Their own section, so a
+    measured runner-class gap is never dropped and never dressed as hygiene. An
+    A2 advisory here is only a held-back line: the render-time log-level check
+    needs the pole's drilled log, and there is no pole section to anchor it."""
+    if not findings:
+        return []
+    out = ['<a id="runner-class"></a>', "",
+           "## 🏎️ Runner class comparisons", "",
+           "> OPT81 findings whose job is not one of the long poles above: a "
+           "comparison measured from runs this repository already made, or a "
+           "runner-class advisory held back. Not part of any total above.", ""]
+    for f in findings:
+        out += _opt81_card(f, catalog_url, unrouted=True)
+    return out
+
+
 def _also_noticed_block(findings: list[dict[str, Any]],
                         catalog_url: str,
                         shallow_note: str = "",
@@ -7824,6 +8143,7 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             and not _is_tier2_superseded(f)
             and not _tier2_owned_here(f)                          # Tier-2-owned → own section
             and str(f.get("pattern", "")) not in _WAIT_PATTERNS  # → its own §
+            and str(f.get("pattern", "")) != "OPT81"             # → its pole / own §
             and not _on_pole_job(f)                               # valueless + all-pole-job → already AS a pole (#5)
             and not _is_opt79_pole_finding(f)]                    # OPT79 pole cache → its own block (at its pole, or `_opt79_off_pole_block`)
     if not elig:
@@ -8373,7 +8693,12 @@ def _data_driven_for_pole(pole: dict[str, Any],
     unexpanded matrix base (a finding routed to job id `pytest-torch` covers the rendered
     leg `pytest-torch (ubuntu-latest, 3.10)`). A finding from a DIFFERENT workflow file
     never joins (`_wf_conflict`), so a cross-workflow check-name collision (`Python 3.13` in
-    two workflows) can't mis-attribute a credited finding to the wrong pole."""
+    two workflows) can't mis-attribute a credited finding to the wrong pole.
+    EXCEPTION, OPT81: a credited OPT81 finding is not an appendix finding; it renders AT
+    its pole as its own card and is excluded from Also noticed. So it joins on
+    `_opt81_for_pole`'s rule (exact job, or the unexpanded matrix base; never a sibling
+    leg), the same rule that places the card, so `_dd_where`'s "card below this pole's
+    prompt" pointer always names a card that renders there."""
     targets = [t for t in (str(pole.get("check", "")), str(pole.get("job", ""))) if t]
     if not targets:
         return []
@@ -8401,6 +8726,12 @@ def _data_driven_for_pole(pole: dict[str, Any],
         jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
         if not jobs:
             continue  # an unrouted finding can't anchor to a pole
+        if str(f.get("pattern", "")) == "OPT81":
+            # OPT81 renders AT the pole `_opt81_for_pole` picks (no sibling-leg
+            # fold), and `_dd_where` points the reader there: join on that rule.
+            if _opt81_for_pole(pole, [f]):
+                out.append(f)
+            continue
         if any(_job_targets_pole(j, t) for j in jobs for t in targets):
             out.append(f)
     return out
@@ -8946,9 +9277,13 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # "measured, could not tell" read as "nothing found".
     withheld_n = sum(1 for _r in _WITHHELD_ROWS
                      if _withheld_candidates_line(doc, _r.doc_key, _r.noun))
+    # An OPT81 finding (a measured runner-class comparison, or a held-back A2) is
+    # something to say too: without counting it, an OPT81-only doc collapsed to
+    # the one-line note and its "Runner class comparisons" section was dropped.
+    opt81_n = len(_opt81_findings(all_findings))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
-            and not withheld_n and not opt79_off_pole):
+            and not withheld_n and not opt79_off_pole and not opt81_n):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")
@@ -9114,6 +9449,9 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     out += _opt80_off_pole_tail_block(all_findings, catalog_url, drilled=False)
     if opt79_off_pole:
         out += ["---", "", *opt79_off_pole]
+    _o81_lines = _opt81_unrouted_block(_opt81_findings(all_findings), catalog_url)
+    if _o81_lines:
+        out += ["---", "", *_o81_lines]
     if also_lines:
         out += ["---", "", *also_lines]
     # Measured net-negative caches that could not be PRICED (three cases: the
@@ -10321,6 +10659,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # out of the critical-path list (e.g. a turbo-cache-dependent job fast on cache hits).
     out += _bimodal_note(src, _num(blocker.get("p50_s")))
 
+    opt81_rendered: set[int] = set()
     opt79_at_pole: set[str] = set()
     for i, p in enumerate(pole_wfs, 1):
         check = _clean_label(str(p.get("check", "")))
@@ -10770,6 +11109,9 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                                             structural_present=bool(structural),
                                             data_driven_present=bool(data_driven),
                                             data_driven_on_path=dd_on_path,
+                                            data_driven_patterns=tuple(sorted(
+                                                {str(f.get("pattern", ""))
+                                                 for f in data_driven})),
                                             opt79_present=bool(_opt79_pole_covers(opt79_pole)),
                                             opt82_present=bool(opt82_pole)),
                 "```", ""]
@@ -10905,6 +11247,23 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # observation below the prompt — never a silent drop of a real (if minority) finding.
         if offcat_leaf is not None:
             out += _offcategory_note_block(offcat_leaf, p)
+        # OPT81 on THIS pole: the measured runner-class gap, or the runner-size
+        # advisory as the LAST option — after the pole's own prompt and any OPT75
+        # decomposition, never above a credited lever. A log-level leaf that
+        # matched this pole is a cheaper lever, so it holds the advisory back.
+        # A leaf demoted off-category (`offcat_leaf`) still matched this pole's log:
+        # it is a cheaper lever than hardware even when it is not the dominant work.
+        _o81_leaf = _opt81_holding_leaf(leaf, offcat_leaf)
+        for _o81 in _opt81_for_pole(p, all_findings):
+            if id(_o81) in opt81_rendered:
+                continue
+            opt81_rendered.add(id(_o81))
+            out += _opt81_card(
+                _o81, catalog_url,
+                held_back_by=_opt81_leaf_name(_o81_leaf)
+                if (_o81_leaf is not None and _opt81_half(_o81) == "A2") else None,
+                # No log read means the leaf sub-gate never ran: fail closed.
+                log_read=bool(log_text))
 
     # Disclose per-pole structural levers (OPT70/71/72/74/75) on checks ranked below the
     # top-N spine: collect_runs analyses the top 5 critical-path checks but the spine shows
@@ -10966,6 +11325,12 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
             # Same splice as the tails pointer, after it (the sections' order).
             out[_toc_at + _also_at:_toc_at + _also_at] = _opt79_off_pole_toc_entry(
                 sum(1 for ln in opt79_off_pole if ln.startswith("<!-- opt79-pole:")))
+    # OPT81 runner-class comparisons not already rendered at their pole.
+    _o81_lines = _opt81_unrouted_block(
+        [f for f in _opt81_findings(all_findings) if id(f) not in opt81_rendered],
+        catalog_url)
+    if _o81_lines:
+        out += ["---", "", *_o81_lines]
     if also_lines:
         out += ["---", "", *also_lines]
     if shallow_note and not queue_lines and not also_lines:

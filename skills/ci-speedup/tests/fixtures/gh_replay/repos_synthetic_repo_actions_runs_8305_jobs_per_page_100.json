@@ -1,0 +1,115 @@
+{
+ "total_count": 2,
+ "jobs": [
+  {
+   "id": 83051,
+   "run_id": 8305,
+   "name": "bench",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-26T08:00:00Z",
+   "completed_at": "2026-06-26T08:02:31Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/8305/job/83051",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-26T08:00:00Z",
+     "completed_at": "2026-06-26T08:00:02Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-26T08:00:02Z",
+     "completed_at": "2026-06-26T08:00:10Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run benchmarks",
+     "number": 3,
+     "started_at": "2026-06-26T08:00:10Z",
+     "completed_at": "2026-06-26T08:02:30Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Post Run actions/checkout@v4",
+     "number": 4,
+     "started_at": "2026-06-26T08:02:30Z",
+     "completed_at": "2026-06-26T08:02:31Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Complete job",
+     "number": 5,
+     "started_at": "2026-06-26T08:02:31Z",
+     "completed_at": "2026-06-26T08:02:31Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 83052,
+   "run_id": 8305,
+   "name": "bench",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-26T08:00:00Z",
+   "completed_at": "2026-06-26T08:01:31Z",
+   "labels": [
+    "ubuntu-latest-8-cores"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/8305/job/83052",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-26T08:00:00Z",
+     "completed_at": "2026-06-26T08:00:02Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-26T08:00:02Z",
+     "completed_at": "2026-06-26T08:00:10Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run benchmarks",
+     "number": 3,
+     "started_at": "2026-06-26T08:00:10Z",
+     "completed_at": "2026-06-26T08:01:30Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Post Run actions/checkout@v4",
+     "number": 4,
+     "started_at": "2026-06-26T08:01:30Z",
+     "completed_at": "2026-06-26T08:01:31Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Complete job",
+     "number": 5,
+     "started_at": "2026-06-26T08:01:31Z",
+     "completed_at": "2026-06-26T08:01:31Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  }
+ ]
+}

@@ -14,7 +14,7 @@ developer's wait. It gets its own prominent section below.
 2. Pipeline overview (scan → collect_runs → render → gap-fill → verify) — incl. §2.1 adaptive run sampling, §2.1a config-era boundary, §2.2 fetch orchestration
 3. Data model — findings.json
 4. The two metric axes
-5. The wall-clock lever model — a cascade of physical bounds
+5. The wall-clock lever model — a cascade of physical bounds — incl. §5.4 OPT81, a runner-class gap and the last-resort runner advisory
 6. Admission gate & advisory routing
 7. Evidence, provenance & verification
 8. Reproducibility & determinism — incl. §8.1 what the data pass does NOT re-fetch
@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 79-pattern
-catalog — 72 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80 and OPT82) plus 7 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against an 80-pattern
+catalog — 73 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81 and OPT82) plus 7 **structural /
 critical-path** patterns (OPT70–OPT75 and OPT78, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -1132,10 +1132,10 @@ undecided tail runs could still have supplied the missing proof, named by their
 commonest reason). The per-gate tallies (`opt77_withheld_by_gate`,
 `opt80_withheld_by_gate`) are for maintainers; these lists reach the reader.
 
-The held-back disclosure is ONE mechanism shared by OPT77, OPT79, OPT80 and OPT82.
+The held-back disclosure is ONE mechanism shared by OPT77, OPT79, OPT80, OPT81 and OPT82.
 `blocking_path._WITHHELD_ROWS` is a `WithheldRow` per pattern — findings-doc
 key, Data sources row label, counted noun, "Used for" cell, and `entry_shape`
-(`"job"` for OPT79 / OPT80 / OPT82, `"group"` for OPT77). The shape is registered
+(`"job"` for OPT79 / OPT80 / OPT81 / OPT82, `"group"` for OPT77). The shape is registered
 rather than inferred: both twins used to decide it by comparing the key against
 OPT77's, so a fourth group-shaped pattern would have rendered `(unnamed job)`
 for every candidate in the renderer AND been re-derived the same wrong way in
@@ -1164,7 +1164,7 @@ the names and the "and K more" overflow come from; counted over raw rows it
 disagreed with its own job list whenever two rows deduplicated into one. A pattern contributes only its key, its
 row text and its gate→phrase table (registered in `_WITHHELD_PHRASES_BY_KEY`),
 never its own row builder. The phrase tables (`_OPT77_WITHHOLD_PHRASES`,
-`_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`, and `_OPT82_WITHHOLD_PHRASES`) map EVERY withhold gate
+`_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`, `_OPT81_WITHHOLD_PHRASES`, and `_OPT82_WITHHOLD_PHRASES`) map EVERY withhold gate
 their collector can record. What a test actually guarantees is narrower than
 "a new gate cannot ship without a phrase": it enumerates the gates it can READ
 from FOUR sources in the detectors' own code — the literals handed to
@@ -1178,7 +1178,14 @@ in the test: listed, a renamed accumulator silently took its gates out of the
 scan's reach while the scan went on reporting the ones it still saw. A gate
 recorded in some other shape is still invisible: assembled at runtime, passed
 to `_drop_group` by keyword instead of positionally, or recorded in a helper
-other than the four functions the scan reads. The
+other than the four functions the scan reads. OPT81's two detectors record a
+listable gate only through `_no(gate, job)`, a shape the four-source scan does
+not read, so a separate AST scan
+(`test_opt81_every_recordable_withhold_gate_has_a_plain_english_phrase` in
+`tests/test_blocking_path.py`) reads every `_no(...)` call that passes a job in
+`_detect_opt81_measured_runner_gap` and `_detect_opt81_runner_size_advisory`,
+drops the verdict gates, and requires the rest to equal
+`_OPT81_WITHHOLD_PHRASES` exactly. The
 backstop for that one is `verify_report`, which fails the report closed rather
 than printing a code. `verify_report.py`'s `check_coverage_disclosed` carries
 its own copy of the tables (pinned equal by a coupling test) and re-derives the
@@ -2147,6 +2154,90 @@ addable: the stamped artifact carries no run event / queue-branch provenance to 
 from, precisely because the fix removes the signature before stamping.) Red-proofed by
 `tests/test_mergequeue_presence_dedup.py`.
 
+### 5.4 OPT81 — a runner-class gap measured from the repo's own runs, and the last-resort runner advisory
+
+`_critical_path` is unchanged: it keeps each job's DOMINANT runner population
+(the p50 the long pole is ranked on) and nothing else. A1 builds its own
+success-only split per label and decides the comparison (gates, medians, gap)
+from it. The credit reads both: it needs the slower label to be the one the job
+runs on most in that split AND to be `_critical_path`'s dominant label for the job
+(counted over every conclusion and every label, unclassifiable ones included),
+because that label's population is what the pole's p50 describes.
+
+**A1 (measured).** `_detect_opt81_measured_runner_gap` runs in the per-workflow
+detector loop beside OPT77/79/80. It groups each job's successful occurrences by
+runner label and classifies each label through two named tables:
+`_OPT81_RUNNER_CLASSES` gives the class (standard GitHub-hosted, GitHub-hosted
+slim, larger GitHub-hosted size, StarSling), the operating system and the size
+tier (`-N-cores`, macOS `large` / `xlarge`, a StarSling `-N` suffix), and
+`_OPT81_RUNNER_ARCH` gives the processor architecture (`-arm` is arm64; macOS
+`-xlarge` and plain `macos-14`+ are Apple silicon; macOS `-large`, `-intel` and
+`macos-13` and older are Intel; everything else x64). Anything else, including a
+generic self-hosted label, is unclassifiable and dropped from the comparison
+with a count. Two labels are compared only when: each has at least
+`_OPT81_MIN_SAMPLES_PER_LABEL` (8) samples; they share an operating system AND a
+processor architecture (otherwise the gap would measure the platform:
+`different_operating_system` / `different_architecture`, verdicts); they differ in
+class or size tier (two image versions of one class are `same_runner_class`, a
+verdict); the two populations either co-occur in the same runs (a runner matrix:
+at least half of the smaller population's runs also ran the other label) or
+overlap in time (each label's first run is no later than the other's last run;
+two disjoint periods are a `runs-on` switch, where code changed in between could
+explain the gap: `not_interleaved`, held back and listed); every compared run
+executed the same step list (a 16-hex digest of the executed step names, skipped
+steps excluded); and the median gap reaches `max(30s, 25% of the slower median)`.
+The credit is the measured gap only when the job is its workflow's long pole, the
+two labels are not a runner matrix (a matrix runs both legs in every run, so it
+is stated, never credited), and the job ran on the slower label strictly more
+often than on the faster one (an exact tie is not dominant), and the slower label
+is the pole's own population: `_critical_path`'s dominant label for the job
+(stamped as `faster_runner.pole_runner_label`). When an unclassifiable label or
+failed runs make another label dominant, the gap is stated and the credit held,
+counted as `slow_label_is_not_the_poles_population`. It is pre-capped
+with `bound_within_workflow` (CAP 1) inside the detector and then flows through
+the generic cascade like any credited saving. `runner_min_saving` is always
+`None`: a different runner class bills differently and the skill carries no rate
+table (the 2026-07-20 pricing punt; OPT66 stays retired). Every number is stamped
+with the per-run rows it came from (`faster_runner.rows`: run id, label, run
+time, duration, step-list digest), and
+`verify_report.check_opt81_runner_comparison_rederived` re-derives both medians,
+both counts, the class / operating-system / architecture / size decision, the
+matrix-or-overlap decision, the step-list equality, the gap, the floor and the
+credit rule from those rows, and re-reads the pole's population from
+`per_workflow_timing[wf].job_runner`. The detector costs no gh call.
+
+**A2 (advisory).** `_detect_opt81_runner_size_advisory` runs once, AFTER the
+structural track, because its last gate is about the levers the rest of the
+pipeline produced. It fires only on a merge-gating pole (`pr_critical_path.poles`)
+of a pull-request workflow, whose dominant step category is compute (`build` /
+`test`) and not a wait or a byte move, on a standard GitHub-hosted label (checked
+after the shape gates; any other label, self-hosted included, is a verdict and
+never a held-back row), whose job did not run on two or more runner labels in the
+sample (A1 reports on those), and when no cheaper lever addresses the pole: no
+OPT70-74 or OPT78 on it, no finding (OPT75 included) crediting at least half its
+p50 (A2's own rule, not the structural router's suppression), no OPT24, no OPT79
+of 30s or more (credited or uncredited).
+The facts the gate examined are stamped as `cheaper_levers_checked` and rendered.
+It is `advisory: true`, carries no `wall_clock_p50_s` and no `runner_min_saving`,
+has no `_SIZING` key, and is stamped `risk` / `guardrail` / `rollout`; the
+verifier fails it if it ever carries a number or if gate (d) does not hold on the
+findings doc. The log-level leaves are only known at render time, so the
+renderer applies the last sub-gate: a pole whose own log matched a leaf renders
+the advisory as a one-line "held back" note instead of a recipe.
+
+**Rendering and the conflict, stated plainly.** The publisher of this skill sells
+CI runners. Every OPT81 finding renders exactly once as an anchored card
+(`<a id="opt81-<id>">`): at its pole, after the pole's own prompt and any OPT75
+decomposition, when its job is a rendered pole; otherwise in a "Runner class
+comparisons" section. It is excluded from the Also-noticed appendix, the Tier-2
+section, the headline and every total. Each card and each prompt carries the
+same one-line disclosure (`_OPT81_DISCLOSURE`, three equal copies pinned by a
+test). The advisory names exactly two options, a larger GitHub-hosted size or
+StarSling runners, and says plainly that the StarSling benchmark can only run
+after the StarSling GitHub app is installed; a string-level test fails if any
+OPT81 text contains a name from a deny-list of common runner vendors and hosted CI systems or
+a domain other than github.com / starsling.dev.
+
 ## 6. Admission gate & advisory routing
 
 A finding is emitted ONLY when all three of `SKILL.md`'s admission criteria
@@ -2629,7 +2720,7 @@ wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT82) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -2683,7 +2774,7 @@ reported by `scan.py` as having no critical-path router.
   (dominant step/category, redundancy ratio, required-status, shared substep)
   annotate the pole they came from; the catalog OPT70–OPT75 findings are
   therefore **excluded** from the off-path "Also noticed" appendix
-  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76/OPT77/OPT79/OPT80/OPT82 only) since the pole already
+  (`_also_noticed_block`, which is hygiene OPT1–OPT69/OPT76/OPT77/OPT79/OPT80/OPT82 only; OPT81 renders at its pole or in its own section) since the pole already
   represents them. Like every pole, a structural lever carries an agent prompt
   rather than a prescribed fix; for a HIGH-risk lever (e.g. OPT70 scope-to-
   changed) the prompt's failure-mode/guard section tells the agent to state the
@@ -2883,6 +2974,14 @@ HIGH-risk lever (e.g. OPT70 scope-to-changed) is never handed over as a safe
 quick win. (The pole's 🔴/🟠/🟡 dot is a wall-clock duration tier, not the risk
 rating.) The catalog body for each structural pattern is the long-form risk
 profile; `_STRUCTURAL_META` is its structured form.
+
+**OPT81's advisory half rides at the END of a pole, not in this track.** It is
+not a structural finding (it carries no OPT70-75 id and joins no
+`_structural_for_pole`), but it is routed off the same measured pole and only
+after this track has run: OPT70-74 and OPT78 on the pole suppress it by being
+present; OPT75's presence does not (it renders first), though an OPT75 credit of
+half the pole's median or more does, like any credited finding. It renders after
+the pole's own prompt and its OPT75 block. See [§5.4](#54-opt81--a-runner-class-gap-measured-from-the-repos-own-runs-and-the-last-resort-runner-advisory).
 
 ## 12. The blocking-path report (`blocking_path.py`)
 
@@ -3571,7 +3670,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 79-pattern catalog (METADATA + body per pattern); the source of truth for
+  the 80-pattern catalog (METADATA + body per pattern); the source of truth for
   detection and the report's TL;DR / pattern background.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.
