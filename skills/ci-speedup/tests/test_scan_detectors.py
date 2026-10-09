@@ -4313,3 +4313,56 @@ jobs:
       - run: npx playwright test
 """
     assert "OPT2" not in _scan_one(tmp_path, neg)
+
+
+def test_opt12_preamble_stops_at_the_first_parallel_group(tmp_path: Path):
+    """A composite action cannot hold a `parallel:` group, so a "shared
+    preamble" that reaches into one is not extractable as written: the
+    preamble is the leading steps BEFORE the first group."""
+    neg = """name: CI
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - parallel:
+          - uses: actions/setup-node@v4
+          - run: pnpm install
+      - run: pnpm build
+      - run: pnpm test
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - parallel:
+          - uses: actions/setup-node@v4
+          - run: pnpm install
+      - run: pnpm build
+      - run: pnpm lint
+"""
+    assert "OPT12" not in _scan_one(tmp_path, neg)
+
+
+def test_opt12_flat_preamble_still_fires(tmp_path: Path):
+    pos = """name: CI
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm build
+      - run: pnpm test
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm build
+      - run: pnpm lint
+"""
+    assert "OPT12" in _scan_one(tmp_path, pos)

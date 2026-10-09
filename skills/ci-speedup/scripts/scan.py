@@ -2167,7 +2167,13 @@ def _detect_opt12(doc: dict, raw: str) -> list[Hit]:
     for name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        steps = _steps(job)[:4]
+        # The preamble ends at the first `parallel:` group: a composite action
+        # cannot hold one, so a "shared preamble" reaching into a group is not
+        # extractable as written (and a flat read never counted its children).
+        leaves = job_walk(job).leaves
+        flat = next((i for i, lf in enumerate(leaves) if lf.in_parallel_group),
+                    len(leaves))
+        steps = [lf.step for lf in leaves[:flat]][:4]
         if len(steps) < 2:
             continue
         sig = tuple(_step_sig(s) for s in steps)
