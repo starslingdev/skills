@@ -653,3 +653,32 @@ def test_a_walk_failure_is_a_scoring_error_marker_never_a_traceback(tmp_path, mo
     assert code == 3
     assert doc["data_sources"]["ci_score_error"] == f"{exc.__name__}: walk blew up"
     assert "ci_score" not in doc
+
+
+# --- step lists that cannot be read at all: recorded like workflow parse errors
+
+def test_a_step_list_that_is_not_a_list_is_recorded_by_name(tmp_path):
+    wf = ("on:\n  pull_request:\njobs:\n  a:\n    runs-on: x\n    steps:\n      run: npm ci\n"
+          "  b:\n    runs-on: x\n    steps: npm test\n  c:\n    uses: ./.github/workflows/r.yml\n")
+    doc, code = cc_mod.collect(_repo(tmp_path, wf, {
+        ".github/actions/s/action.yml": "runs:\n  using: composite\n  steps: echo\n"}))
+    assert code == 0
+    assert doc["data_sources"]["unreadable_step_lists"] == [
+        ".github/workflows/ci.yml: jobs.a.steps", ".github/workflows/ci.yml: jobs.b.steps",
+        ".github/actions/s/action.yml: runs.steps"]
+
+
+def test_a_composite_action_that_fails_to_parse_is_recorded_by_name(tmp_path):
+    doc, code = cc_mod.collect(_repo(tmp_path, PARALLEL_WF, {
+        ".github/actions/bad/action.yml": "runs: [unclosed\n",
+        ".github/actions/list/action.yaml": "- not a mapping\n"}))
+    assert code == 0
+    assert doc["data_sources"]["composite_parse_errors"] == [
+        ".github/actions/bad/action.yml", ".github/actions/list/action.yaml"]
+
+
+def test_readable_step_lists_and_composites_add_no_record(tmp_path):
+    doc, _code = cc_mod.collect(_repo(tmp_path, PARALLEL_WF, {
+        ".github/actions/ok/action.yml": "runs:\n  using: composite\n  steps: []\n"}))
+    assert "unreadable_step_lists" not in doc["data_sources"]
+    assert "composite_parse_errors" not in doc["data_sources"]

@@ -273,6 +273,14 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
                          "entr(ies)", walk["groups"], walk["steps_in_groups"],
                          walk["control_steps"], walk["invalid_groups"],
                          walk["malformed_groups"], walk["skipped_children"])
+        # Step lists that are not lists and composite actions that do not
+        # parse read as "no steps"; recorded by name exactly like
+        # workflow_parse_errors, and only when there are any.
+        bad_lists, composite_errors = pf_mod._unreadable_step_sources(parsed, root)
+        if bad_lists:
+            doc["data_sources"]["unreadable_step_lists"] = bad_lists
+        if composite_errors:
+            doc["data_sources"]["composite_parse_errors"] = composite_errors
         if logger.isEnabledFor(logging.DEBUG):
             states = {k: v.get("state") for k, v in doc["practice_facts"].items()}
             logger.debug("practice facts: %s", states)

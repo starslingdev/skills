@@ -918,19 +918,51 @@ def _job_if_excludes_pull_requests(job: dict, doc: dict) -> bool:
         return False
 
 
-def _composite_action_docs(root: Path) -> list[tuple[str, dict]]:
+def _composite_action_docs(root: Path,
+                           errors: list[str] | None = None) -> list[tuple[str, dict]]:
     """Local composite actions' parsed action.yml files - setup (and its
-    caching / pinning) frequently lives there rather than in the workflow."""
+    caching / pinning) frequently lives there rather than in the workflow.
+    With `errors`, an action file that cannot be read or parsed, or is not a
+    mapping, is appended by name (the collector records them as
+    `data_sources.composite_parse_errors`, the way it records
+    `workflow_parse_errors`)."""
     out: list[tuple[str, dict]] = []
     for pattern in ("action.yml", "action.yaml"):
         for path in sorted((root / ".github" / "actions").rglob(pattern)):
+            rel = str(path.relative_to(root))
             try:
                 doc = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace"))
             except (OSError, yaml.YAMLError):
+                if errors is not None:
+                    errors.append(rel)
                 continue
             if isinstance(doc, dict):
-                out.append((str(path.relative_to(root)), doc))
+                out.append((rel, doc))
+            elif errors is not None:
+                errors.append(rel)
     return out
+
+
+def _unreadable_step_sources(parsed: list[tuple[str, dict, str]],
+                             root: Path) -> tuple[list[str], list[str]]:
+    """(step lists that are not lists, composite action files that did not
+    parse), by name. A job whose `steps:` is a mapping or a string, or a
+    composite whose `runs.steps` is, reads as having no steps at all; neither
+    may go unrecorded. An absent or empty `steps:` is not listed (a job that
+    calls a reusable workflow has none)."""
+    bad_lists: list[str] = []
+    for rel, doc, _raw in parsed:
+        for jid, job in _wf_jobs(doc).items():
+            steps = job.get("steps")
+            if steps is not None and not isinstance(steps, list):
+                bad_lists.append(f"{rel}: jobs.{jid}.steps")
+    parse_errors: list[str] = []
+    for rel, doc in _composite_action_docs(root, parse_errors):
+        runs = doc.get("runs")
+        steps = runs.get("steps") if isinstance(runs, dict) else None
+        if steps is not None and not isinstance(steps, list):
+            bad_lists.append(f"{rel}: runs.steps")
+    return bad_lists, parse_errors
 
 
 def _conc_cancels_basic(conc: Any) -> bool:
