@@ -3850,6 +3850,36 @@ _OPT82_POLE_POINTER = ("(no log-level detector fired, but a **catalog pattern** 
                        "lint step - see its card in the **Also noticed** section below.)")
 
 
+def _pole_runs_parallel_steps(pole: dict[str, Any] | None,
+                              doc: dict[str, Any] | None) -> bool:
+    """Whether this pole's job runs some steps side by side in a `parallel:`
+    group (`doc["parallel_steps"]["jobs_with_groups"]`, stamped by the scan).
+    Then its step times overlap: they do not add up to the job, and time cut
+    from a step comes off the job only if it is on the slowest branch, so the
+    step drill must not say the steps run one after another. Joined like
+    `_opt79_pole_for`: the YAML job key (or a `name`, when stamped) against the
+    pole's check/job, matrix legs folded, never across workflow files."""
+    if not isinstance(pole, dict) or not isinstance(doc, dict):
+        return False
+    stats = doc.get("parallel_steps")
+    rows = (stats.get("jobs_with_groups") or []) if isinstance(stats, dict) else []
+    targets = [t for t in (str(pole.get("check") or ""), str(pole.get("job") or "")) if t]
+    if not targets or not isinstance(rows, list):
+        return False
+    pole_wf = str(pole.get("workflow_file") or "")
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if _wf_conflict(pole_wf, str(r.get("path") or "")):
+            continue
+        for j in (str(r.get("job") or ""), str(r.get("name") or "")):
+            if j and any(j == t or _matrix_base(t) == j.lower()
+                         or _clean_label(j).lower() == _clean_label(t).lower()
+                         for t in targets):
+                return True
+    return False
+
+
 def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                     timeline: dict[str, Any] | None = None,
                     log_present: bool = False,
@@ -3859,7 +3889,8 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                     data_driven_on_path: bool = True,
                      data_driven_patterns: "tuple[str, ...] | list[str]" = (),
                      opt79_present: bool = False,
-                     opt82_present: bool = False) -> list[str]:
+                     opt82_present: bool = False,
+                     steps_overlap: bool = False) -> list[str]:
     """The ASCII waterfall for one pole (no code fence): the blocking job's steps,
     then - when a log was captured - the dominant step's internals down to the
     root cause.
@@ -3869,6 +3900,10 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
     each bar offset to when it actually starts - making explicit that steps (unlike
     the concurrent jobs in level 1) do not overlap. Without one it falls back to
     P50 bars sorted by duration.
+
+    `steps_overlap` (`_pole_runs_parallel_steps`): the job runs some steps side by
+    side in a `parallel:` group, so the "one after another / sums to the job /
+    comes straight off the wall-clock" lead is replaced by its honest form.
 
     `data_driven_on_path` mirrors the appendix: a data-driven catalog match on a pole the spine
     DEMOTES as opt-in/rare (`spine_rare`) is still catalog coverage (never a gap), but the
@@ -3935,13 +3970,24 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
         _steps_phrase = ("its **steps** (not checks) run one after another"
                          if _check_step_collision(pole, timeline)[0]
                          else "its steps run **one after another**")
-        lines = [
-            f"Level 2 — inside that one job, {_steps_phrase} "
-            f"(← {_mmss(0)} job start … {_mmss(tl_dur)} → ; `░` = time already elapsed, "
-            f"`█` = the step running) and sum to the job's **{_clock(tl_dur)}** wall "
-            f"time on this run - {_rep2}. Because "
-            "they're sequential, time cut from any step comes straight off the job's "
-            "wall-clock (and off the merge wait, down to the next concurrent check):", ""]
+        if steps_overlap:
+            _steps_noun = ("its **steps** (not checks)"
+                           if _check_step_collision(pole, timeline)[0] else "its steps")
+            lines = [
+                f"Level 2 — inside that one job, {_steps_noun} on this run - {_rep2} "
+                f"(← {_mmss(0)} job start … {_mmss(tl_dur)} → ; `░` = time already "
+                f"elapsed, `█` = the step running; job wall **{_clock(tl_dur)}**). This "
+                "job runs some steps side by side in a `parallel:` group, so step times "
+                "overlap and do not add up to the job time, and time cut from a step "
+                "comes off the job only if it is on the slowest branch:", ""]
+        else:
+            lines = [
+                f"Level 2 — inside that one job, {_steps_phrase} "
+                f"(← {_mmss(0)} job start … {_mmss(tl_dur)} → ; `░` = time already elapsed, "
+                f"`█` = the step running) and sum to the job's **{_clock(tl_dur)}** wall "
+                f"time on this run - {_rep2}. Because "
+                "they're sequential, time cut from any step comes straight off the job's "
+                "wall-clock (and off the merge wait, down to the next concurrent check):", ""]
         # Reconcile with the check-gate clock (the Contents critical-path value, which
         # excludes the runner setup/teardown steps) up front, before the bars, so it
         # doesn't break the connector wire that hangs off the dominant step.
@@ -4032,10 +4078,15 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
     # which rarely equals the job's own P50 (no single run sits at the median of
     # every step at once). Say so rather than claiming a clean "adds up to the job".
     gap = step_total and abs(step_total - job_total) > max(3.0, 0.04 * job_total)
-    recon = (f" — each step's P50 is measured on its own, so they sum to "
-             f"~{_clock(step_total)} vs the job's own {_clock(job_total)} P50; "
-             "read the bars as proportions, not an exact sum" if gap else
-             "; they run in sequence and roughly add up to the job")
+    if steps_overlap:
+        recon = ("; this job runs some steps side by side in a `parallel:` group, so "
+                 "step times overlap and do not add up to the job time, and time cut "
+                 "from a step comes off the job only if it is on the slowest branch")
+    else:
+        recon = (f" — each step's P50 is measured on its own, so they sum to "
+                 f"~{_clock(step_total)} vs the job's own {_clock(job_total)} P50; "
+                 "read the bars as proportions, not an exact sum" if gap else
+                 "; they run in sequence and roughly add up to the job")
     lines = [f"Where the job's ~{_clock(job_total)} goes - every step, slowest "
              f"first{recon}:", ""]
     if not deeper:
@@ -10580,7 +10631,9 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                            _HIERARCHY_GLOSSARY, "",
                            "```text"]
         if _cascade:
-            _l2_lead = f"Level 2 — inside {_dcheck}, steps run one after another:"
+            _l2_lead = (f"Level 2 — inside {_dcheck}, some steps run side by side:"
+                        if _pole_runs_parallel_steps(_descent, doc) else
+                        f"Level 2 — inside {_dcheck}, steps run one after another:")
             _fence: list[str] = []
             if len(_rows1) >= 2 and _d_idx is not None:
                 _fence += [_l1_lead, ""]
@@ -11134,7 +11187,9 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                                                 {str(f.get("pattern", ""))
                                                  for f in data_driven})),
                                             opt79_present=bool(_opt79_pole_covers(opt79_pole)),
-                                            opt82_present=bool(opt82_pole)),
+                                            opt82_present=bool(opt82_pole),
+                                            steps_overlap=_pole_runs_parallel_steps(
+                                                p, doc)),
                 "```", ""]
         # The cross-run magnitude check (rendered below) - compute now so the footer
         # only promises it when it actually appears (a categorical finding has none).
