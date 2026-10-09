@@ -265,6 +265,120 @@ def test_malformed_parallel_is_disclosed_not_skipped(tmp_path: Path) -> None:
                if e["workflow_file"].endswith("bad.yml")]
     assert any("parallel:" in r and "NOT scanned" in r for r in reasons), reasons
 
+    # The banner headline must say what happened to this step: it was NOT
+    # scanned. The headline written for steps that WERE read ("carry a value
+    # this scan cannot know") would contradict the bullet underneath it.
+    report = load_script("ci_secure_report", "report.py")
+    md = report.render(data)
+    assert "carry a value this scan cannot know" not in md, md
+    assert "1 `parallel:` group(s) in 1 workflow(s)" in md, md
+
+
+def _give_each_group_a_run(wrapped: str) -> str:
+    """Turn every `- parallel:` entry into one that ALSO carries `run:`.
+
+    GitHub does not accept that shape. The command added is the inert `make`
+    already used in this file, so the only findings are the fixture's own."""
+    return re.sub(r"^(\s*)- parallel:$",
+                  lambda m: f"{m.group(1)}- run: make\n{m.group(1)}  parallel:",
+                  wrapped, flags=re.MULTILINE)
+
+
+def test_a_parallel_group_that_also_carries_run_is_scanned_and_disclosed(
+    tmp_path: Path,
+) -> None:
+    """A `parallel:` entry that ALSO has `run:` (or `uses:`) used to be read as
+    an ordinary step: its own command was scanned, its children never were,
+    and nothing said so. Its children must be scanned at their own lines, and
+    the shape must surface as a coverage note so the report is not clean."""
+    fixture = "p14_10_template_injection.yml.fixture"
+    text = (_CLOAKED / fixture).read_text(encoding="utf-8")
+    wrapped, inserted_after = _wrap_steps_in_parallel(text)
+    mixed = _give_each_group_a_run(wrapped)
+    assert mixed.count("- run: make") == len(inserted_after) > 0
+    name = fixture.removesuffix(".fixture")
+    _write(tmp_path / "plain", name, text)
+    _write(tmp_path / "mixed", name, mixed)
+    plain = _scan_root(tmp_path / "plain")
+    inside = _scan_root(tmp_path / "mixed")
+    # Two lines inserted per group (`- run: make` + `parallel:`).
+    shifted_twice = sorted(inserted_after + inserted_after)
+    want = [s for s in _signature(plain["findings"], shifted_twice)
+            if s[0] == "P14.10"]
+    got = [s for s in _signature(inside["findings"], None) if s[0] == "P14.10"]
+    assert want and got == want, (want, got)
+    notes = [e["reason"] for e in inside["coverage_notes"]]
+    assert len(notes) == len(inserted_after), notes
+    assert all("also carries `run:`" in r for r in notes), notes
+
+
+def _node_get(node, key: str):
+    """A scalar child of a composed mapping node, through `<<:` merges."""
+    for k, v in node.value:
+        if k.value == key:
+            return v.value
+    for k, v in node.value:
+        if k.value == "<<":
+            return _node_get(v, key)
+    return None
+
+
+def _lockstep_shapes() -> list:
+    deep: list = [{"run": "deepest"}]
+    for _ in range(scan._WALK_MAX_DEPTH + 2):
+        deep = [{"parallel": deep}]
+    return [
+        [{"run": "own", "parallel": [{"run": "child"}, {"uses": "x/y@v1"}]}],
+        [{"uses": "x/y@v1", "parallel": "not-a-list"}, {"run": "after"}],
+        deep,
+    ]
+
+
+@pytest.mark.parametrize("steps", _lockstep_shapes())
+def test_node_walker_stays_in_lockstep_with_the_step_walker(steps) -> None:
+    """Line attribution pairs the two walkers' outputs by position, so they
+    must yield the same leaves in the same order — for every shape, including
+    one nested past the depth cap and one carrying `run:` beside `parallel:`."""
+    import yaml
+    text = yaml.safe_dump({"jobs": {"j": {"steps": steps}}})
+    leaves = [s.step for s in scan._iter_job_steps(
+        yaml.safe_load(text)["jobs"]["j"])]
+    node = yaml.compose(text)
+    jobs = dict((k.value, v) for k, v in node.value)["jobs"]
+    steps_node = dict((k.value, v) for k, v in
+                      dict((k.value, v) for k, v in jobs.value)["j"].value)["steps"]
+    nodes = list(scan._iter_step_nodes(steps_node))
+    assert len(nodes) == len(leaves), (len(nodes), len(leaves))
+    assert [_node_get(n, "run") or _node_get(n, "uses")
+            for n in nodes] == \
+        [s.get("run") or s.get("uses") for s in leaves]
+
+
+def test_node_walker_follows_a_merge_key_holding_a_group() -> None:
+    """`- <<: *grp` resolves to a `parallel:` group when loaded, so the node
+    walker must see the same group, or every later step's line shifts."""
+    import yaml
+    text = textwrap.dedent("""\
+        x-grp: &grp
+          parallel:
+            - run: one
+            - run: two
+        jobs:
+          j:
+            steps:
+              - <<: *grp
+              - run: three
+        """)
+    leaves = [s.step["run"] for s in scan._iter_job_steps(
+        yaml.safe_load(text)["jobs"]["j"])]
+    assert leaves == ["one", "two", "three"]
+    root = yaml.compose(text)
+    jobs = dict((k.value, v) for k, v in root.value)["jobs"]
+    steps_node = dict((k.value, v) for k, v in
+                      dict((k.value, v) for k, v in jobs.value)["j"].value)["steps"]
+    assert [_node_get(n, "run")
+            for n in scan._iter_step_nodes(steps_node)] == leaves
+
 
 def test_impostor_pin_collector_sees_a_pin_inside_a_parallel_group(
     tmp_path: Path,
@@ -279,11 +393,11 @@ def test_impostor_pin_collector_sees_a_pin_inside_a_parallel_group(
             steps:
               - parallel:
                   - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
-                  - uses: evil/fork-action@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+                  - uses: example-org/some-action@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         """))
     pins = scan._collect_sha_pins(tmp_path, scan.all_workflow_files(tmp_path))
     assert [(line, repo) for _, line, repo, _ in pins] == [
-        (7, "actions/checkout"), (8, "evil/fork-action")]
+        (7, "actions/checkout"), (8, "example-org/some-action")]
 
 
 def test_config_facts_read_checkouts_inside_a_parallel_group() -> None:
@@ -298,3 +412,28 @@ def test_config_facts_read_checkouts_inside_a_parallel_group() -> None:
     }
     assert facts._unpersisted_checkout_violations(doc) == ["t"]
     assert facts._jobs_checking_out_attacker_head(scan, doc) == ["t"]
+
+
+def test_a_group_past_the_depth_cap_is_not_called_a_non_list() -> None:
+    """A valid list nested too deep is a coverage gap, but saying its value
+    "is not a list of steps" would be false."""
+    stats = scan._StepWalkStats()
+    job = {"steps": _lockstep_shapes()[2]}
+    assert list(scan._iter_job_steps(job, stats)) == []
+    assert stats.malformed and stats.malformed[0][1] == scan._GROUP_TOO_DEEP
+    sentence = scan._GROUP_GAP_SENTENCE[scan._GROUP_TOO_DEEP].format(
+        depth=scan._WALK_MAX_DEPTH)
+    assert "not a list" not in sentence
+    assert f"more than {scan._WALK_MAX_DEPTH} groups deep" in sentence
+
+
+def test_parallel_row_never_opens_with_a_zero_and_names_background_steps() -> None:
+    report = load_script("ci_secure_report", "report.py")
+    control_only = report._parallel_steps_cell(
+        {"steps_scanned": 0, "control_steps": 1, "background_steps": 0})
+    assert control_only and not control_only.startswith("0 "), control_only
+    background_only = report._parallel_steps_cell(
+        {"steps_scanned": 0, "control_steps": 0, "background_steps": 2})
+    assert background_only == "2 `background: true` step(s) scanned"
+    assert report._parallel_steps_cell(
+        {"steps_scanned": 0, "control_steps": 0, "background_steps": 0}) == ""

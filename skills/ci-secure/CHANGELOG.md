@@ -150,12 +150,15 @@ entries are dated (UTC). Format loosely follows
   curl|bash, cache writes on an untrusted trigger, fork-code execution,
   credential files in a cache or artifact path, and install scripts in a job
   with secrets all read clean inside a group. Every detector and config fact
-  now reads steps through one shared walker that descends into `parallel:`
+  that walks a job's steps (the raw-text checks never depended on step shape)
+  now reads them through one shared walker that descends into `parallel:`
   lists in declaration order, skips (and counts) control steps, and keeps
   each child step's own source line. The report's provenance table gains a
   `Parallel steps` row ("N step(s) inside `parallel:` groups scanned") and the
   findings JSON a `parallel_steps` record; a `parallel:` whose value is not a
-  list is a coverage note, never a clean step. Every fixture in the corpus now
+  list is a coverage note, never a clean step. A `parallel:` entry that also
+  carries `run:` or `uses:` (a shape GitHub rejects) has its own command and
+  its child steps scanned, and is named in a coverage note too. Every fixture in the corpus now
   reports identically with its steps wrapped in a `parallel:` group.
 
 - **2026-09-03** — **A required check produced by a matrix-templated job name

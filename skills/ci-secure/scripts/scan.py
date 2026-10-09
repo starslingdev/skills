@@ -794,6 +794,11 @@ _ATTACKER_FILLED_PREFIXES = (
 _KIND_UNANCHORED = "unanchored-run-step"
 _KIND_NOT_SCANNED = "not-scanned"
 _KIND_SUPPRESSED = "suppressed"
+#   PARALLEL_GROUP  a `parallel:` group the step walker could not read as
+#               written. A coverage note, but tagged `scope: parallel-group` so
+#               the report headlines it as a group, not as a step that "was
+#               read but carries a value this scan cannot know".
+_KIND_PARALLEL_GROUP = "parallel-group"
 
 _DROPPED_MATCHES: list[dict[str, str]] = []
 
@@ -1566,11 +1571,33 @@ class _StepWalkStats:
     in_parallel: int = 0
     control: int = 0
     background: int = 0
-    malformed: list[str] | None = None
+    # (dotted step label, shape) per group the walker could not read as
+    # written; shape is one of the _GROUP_* constants below.
+    malformed: list[tuple[str, str]] | None = None
+
+
+_GROUP_NOT_A_LIST = "not-a-list"
+_GROUP_TOO_DEEP = "too-deep"
+_GROUP_ALSO_A_STEP = "also-a-step"
 
 
 def _is_parallel_group(step: dict[str, Any]) -> bool:
     return _PARALLEL_KEY in step and "run" not in step and "uses" not in step
+
+
+def _is_step_with_group(step: dict[str, Any]) -> bool:
+    """`parallel:` beside `run:` / `uses:` — not a shape GitHub accepts. Its
+    own command is scanned as a step AND its children are walked, so neither
+    half hides behind the other."""
+    return _PARALLEL_KEY in step and ("run" in step or "uses" in step)
+
+
+def _note_malformed(stats: _StepWalkStats | None, path: tuple[int, ...],
+                    shape: str) -> None:
+    if stats is not None:
+        if stats.malformed is None:
+            stats.malformed = []
+        stats.malformed.append((".".join(str(n + 1) for n in path), shape))
 
 
 def _is_control_step(step: dict[str, Any]) -> bool:
@@ -1587,9 +1614,11 @@ def _iter_job_steps(
     Descends into `parallel:` lists (a nested `parallel:` is not valid GitHub
     syntax, but it is descended anyway: skipping it would be the silent drop
     this walker exists to end). Control steps carry nothing to scan and are
-    skipped, but counted in ``stats``. A `parallel:` whose value is not a list
-    cannot be read and is recorded in ``stats.malformed`` — the caller that
-    owns disclosure turns that into a coverage note, never a clean step.
+    skipped, but counted in ``stats``. A `parallel:` whose value is not a list,
+    or that sits ``_WALK_MAX_DEPTH`` groups deep, cannot be read; a `parallel:`
+    beside `run:` / `uses:` is read both ways (the step itself, then its
+    children). All three are recorded in ``stats.malformed`` — the caller that
+    owns disclosure turns each into a coverage note, never a clean step.
     """
     steps = job.get("steps") if isinstance(job, dict) else None
     if isinstance(steps, list):
@@ -1606,13 +1635,13 @@ def _iter_step_list(
         path = prefix + (i,)
         if _is_parallel_group(step):
             children = step.get(_PARALLEL_KEY)
-            if not isinstance(children, list) or depth >= _WALK_MAX_DEPTH:
-                if stats is not None:
-                    if stats.malformed is None:
-                        stats.malformed = []
-                    stats.malformed.append(".".join(str(n + 1) for n in path))
-                continue
-            yield from _iter_step_list(children, path, step, stats, depth + 1)
+            if not isinstance(children, list):
+                _note_malformed(stats, path, _GROUP_NOT_A_LIST)
+            elif depth >= _WALK_MAX_DEPTH:
+                _note_malformed(stats, path, _GROUP_TOO_DEEP)
+            else:
+                yield from _iter_step_list(children, path, step, stats,
+                                           depth + 1)
             continue
         if _is_control_step(step):
             if stats is not None:
@@ -1624,6 +1653,12 @@ def _iter_step_list(
             stats.background += background
         yield _JobStep(step=step, path=path, in_parallel_group=group is not None,
                        background=background, group=group)
+        if _is_step_with_group(step):
+            _note_malformed(stats, path, _GROUP_ALSO_A_STEP)
+            children = step.get(_PARALLEL_KEY)
+            if isinstance(children, list) and depth < _WALK_MAX_DEPTH:
+                yield from _iter_step_list(children, path, step, stats,
+                                           depth + 1)
 
 
 def _job_steps(job: Any) -> list[dict[str, Any]]:
@@ -1634,20 +1669,61 @@ def _job_steps(job: Any) -> list[dict[str, Any]]:
 def _iter_step_nodes(steps_node: Any, depth: int = 0) -> Iterator[Any]:
     """The composed-node twin of `_iter_job_steps`: every leaf step MappingNode
     of a `steps:` SequenceNode, in order, descending into `parallel:` lists, so
-    a child step's source line is the child's own."""
-    if not isinstance(steps_node, yaml.SequenceNode) or depth > _WALK_MAX_DEPTH:
+    a child step's source line is the child's own. Must yield exactly the
+    leaves `_iter_step_list` yields, in the same order, with the same depth
+    cap: line attribution pairs the two by position."""
+    if not isinstance(steps_node, yaml.SequenceNode):
         return
     for node in steps_node.value:
         if not isinstance(node, yaml.MappingNode):
             continue
-        keys = {getattr(k, "value", None): v for k, v in node.value}
+        keys = _node_keys(node)
         if _PARALLEL_KEY in keys and "run" not in keys and "uses" not in keys:
-            yield from _iter_step_nodes(keys[_PARALLEL_KEY], depth + 1)
+            if depth < _WALK_MAX_DEPTH:
+                yield from _iter_step_nodes(keys[_PARALLEL_KEY], depth + 1)
             continue
         if "run" not in keys and "uses" not in keys \
                 and any(k in keys for k in _PARALLEL_CONTROL_KEYS):
             continue
         yield node
+        if _PARALLEL_KEY in keys and depth < _WALK_MAX_DEPTH:
+            yield from _iter_step_nodes(keys[_PARALLEL_KEY], depth + 1)
+
+
+def _node_keys(node: Any) -> dict[Any, Any]:
+    """A composed mapping's keys, with `<<:` merges resolved the way the
+    loader resolves them (own keys win, then earlier merge sources), so the
+    node walker sees the same shape as the loaded dict."""
+    own: dict[Any, Any] = {}
+    merged: dict[Any, Any] = {}
+    for k, v in node.value:
+        key = getattr(k, "value", None)
+        if key == "<<" and getattr(k, "tag", "") == "tag:yaml.org,2002:merge":
+            sources = v.value if isinstance(v, yaml.SequenceNode) else [v]
+            for src in sources:
+                if isinstance(src, yaml.MappingNode):
+                    for mk, mv in _node_keys(src).items():
+                        merged.setdefault(mk, mv)
+        else:
+            own[key] = v
+    merged.update(own)
+    return merged
+
+
+_GROUP_GAP_SENTENCE = {
+    _GROUP_NOT_A_LIST: (
+        "is a `parallel:` group whose value is not a list of steps, so the "
+        "steps it holds were NOT scanned by any detector — review them "
+        "manually"),
+    _GROUP_TOO_DEEP: (
+        "is a `parallel:` group nested more than {depth} groups "
+        "deep, so the steps it holds were NOT scanned by any detector — "
+        "review them manually"),
+    _GROUP_ALSO_A_STEP: (
+        "is a `parallel:` group that also carries `run:`/`uses:`, which "
+        "GitHub does not accept; its own command and its child steps were "
+        "scanned, but review it manually"),
+}
 
 
 def _parallel_step_stats(
@@ -1666,11 +1742,10 @@ def _parallel_step_stats(
         before = len(stats.malformed or [])
         for _ in _iter_job_steps(job, stats):
             pass
-        for label in (stats.malformed or [])[before:]:
-            gaps.append(
-                f"jobs.{job_name} step {label} is a `parallel:` group whose "
-                f"value is not a list of steps, so the steps it holds were "
-                f"NOT scanned by any detector — review them manually")
+        for label, shape in (stats.malformed or [])[before:]:
+            gaps.append(f"jobs.{job_name} step {label} "
+                        + _GROUP_GAP_SENTENCE[shape].format(
+                            depth=_WALK_MAX_DEPTH))
     return stats, gaps
 
 
@@ -5284,10 +5359,10 @@ def scan(
         parallel_steps["steps_scanned"] += stats.in_parallel
         parallel_steps["control_steps"] += stats.control
         parallel_steps["background_steps"] += stats.background
-        if stats.in_parallel or stats.control or stats.background or gaps:
+        if stats.in_parallel or stats.control or stats.background:
             parallel_steps["workflows"].append(_repo_relative(str(wf), root))
         for reason in gaps:
-            _record_dropped_match(wf, reason, kind=_KIND_NOT_SCANNED)
+            _record_dropped_match(wf, reason, kind=_KIND_PARALLEL_GROUP)
 
     # Wall-clock anchor for end-to-end timing: report.py (always the last step)
     # computes total_run_s from this. It lives in scan.py — not just the run.py
@@ -5588,6 +5663,7 @@ def scan(
     _by_kind = {
         _KIND_UNANCHORED: dropped_matches,
         _KIND_NOT_SCANNED: coverage_notes,
+        _KIND_PARALLEL_GROUP: coverage_notes,
         _KIND_SUPPRESSED: suppressed_findings,
     }
     for dropped in _DROPPED_MATCHES:
@@ -5599,6 +5675,8 @@ def scan(
         else:
             logger.debug("suppressed finding: %s — %s", rel, dropped["reason"])
         entry = {"workflow_file": rel, "reason": dropped["reason"]}
+        if kind == _KIND_PARALLEL_GROUP:
+            entry["scope"] = _KIND_PARALLEL_GROUP
         bucket = _by_kind.get(kind, dropped_matches)
         if entry not in bucket:
             bucket.append(entry)

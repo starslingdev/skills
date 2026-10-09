@@ -1303,9 +1303,15 @@ def _parallel_steps_cell(parallel_steps: dict[str, Any] | None) -> str:
     stats = parallel_steps or {}
     n = int(stats.get("steps_scanned") or 0)
     n_control = int(stats.get("control_steps") or 0)
-    if not n and not n_control:
-        return ""
-    parts = [f"{n} step(s) inside `parallel:` groups scanned"]
+    n_background = int(stats.get("background_steps") or 0)
+    # One clause per non-zero count, so the row covers exactly the files the
+    # JSON's `workflows` lists — and never opens with "0 step(s) … scanned",
+    # which reads as "nothing was scanned".
+    parts: list[str] = []
+    if n:
+        parts.append(f"{n} step(s) inside `parallel:` groups scanned")
+    if n_background:
+        parts.append(f"{n_background} `background: true` step(s) scanned")
     if n_control:
         parts.append(
             f"{n_control} control step(s) (`wait:` / `wait-all:` / "
@@ -2427,6 +2433,21 @@ def _coverage_gap_banner(
             "could not be anchored to raw lines and were NOT scanned for "
             "injection sinks"
         )
+    # A `parallel:` group the walker could not read as written is a coverage
+    # note too, but "were read but carry a value this scan cannot know" is
+    # false for it (its bullet may say its steps were NOT scanned), so it
+    # gets its own sentence and its own bullet list.
+    group_notes = [e for e in coverage_notes
+                   if e.get("scope") == "parallel-group"]
+    coverage_notes = [e for e in coverage_notes
+                      if e.get("scope") != "parallel-group"]
+    if group_notes:
+        n_wf = len({str(e.get("workflow_file", "?")) for e in group_notes})
+        parts.append(
+            f"{len(group_notes)} `parallel:` group(s) in {n_wf} workflow(s) "
+            "are not written in a shape GitHub accepts, so the scan could not "
+            "read them as written"
+        )
     if coverage_notes:
         # Its OWN sentence: these steps were read. What went unchecked is a
         # value the YAML does not contain — where a step ran, which ref a
@@ -2448,6 +2469,13 @@ def _coverage_gap_banner(
     if scan_incomplete:
         lines += [">", "> _Static scan could not read/parse:_"]
         for entry in scan_incomplete:
+            lines.append(
+                f"> - **{_flatten_scanned(entry.get('workflow_file', '?'))}**: "
+                f"{_flatten_scanned(entry.get('reason', 'unknown'))}"
+            )
+    if group_notes:
+        lines += [">", "> _A `parallel:` group not read as written:_"]
+        for entry in group_notes:
             lines.append(
                 f"> - **{_flatten_scanned(entry.get('workflow_file', '?'))}**: "
                 f"{_flatten_scanned(entry.get('reason', 'unknown'))}"

@@ -77,10 +77,16 @@ The one non-scripted field. Written once per pattern group and merged onto
   reason each was withheld. Not a coverage gap, but not nothing either.
 - `parallel_steps` — `steps_scanned` (steps read inside GitHub Actions
   `parallel:` groups), `control_steps` (`wait:` / `wait-all:` / `cancel:`,
-  which hold no code), `background_steps` and the `workflows` they sit in.
+  which hold no code), `background_steps` (steps written with an explicit
+  `background: true`; children of a `parallel:` group also run in the
+  background, but they are counted in `steps_scanned`, not here) and the
+  `workflows` holding at least one of those counted steps.
   Informational, never a coverage gap: those steps were scanned like any
-  other. A `parallel:` that is not a list of steps lands in `coverage_notes`
-  instead.
+  other. A `parallel:` group the walker cannot read as written (its value is
+  not a list, it is nested past the depth cap, or it also carries `run:` /
+  `uses:`) lands in `coverage_notes` instead, tagged
+  `scope: "parallel-group"`, and its file is not listed in `workflows`
+  unless it also holds counted steps.
 - `security_score` — present in the JSON and **never rendered**. Phase 3
   forbids a score, ratio or `N/100` anywhere the user sees. It is listed here
   so it is recognized as out of bounds rather than mistaken for a summary
