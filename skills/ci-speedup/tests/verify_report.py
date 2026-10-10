@@ -11316,6 +11316,194 @@ def check_structural_pole_has_measured_step(findings_path: Path | None) -> Check
                  + "; ".join(offenders))
 
 
+# --- The out-of-window step class (curl/curl, run 38018162993) ---------------------------
+# The jobs API reports a SKIPPED step as `started_at: 0001-01-01T00:00:00Z` with a real
+# `completed_at`. Read naively that is a ~63.9-billion-second step, and on curl it crowned a
+# HIGH OPT73 "shared step recurs across the cluster" finding for a step that never ran. A single
+# step can never outlast the job that contains it, so every step figure the findings cite is
+# bounded by its job's MEASURED window: the job's p50 from `per_workflow_timing`, or the slow
+# mode's p50 when the job is bimodal (a slow-mode decomposition is drilled against the slow
+# mode). A job with no measured window is still bounded by the longest a GitHub Actions job may
+# run at all (`_VR_JOB_RUN_MAX_S`), which is what catches the year-1 sentinel on any job.
+_VR_JOB_RUN_MAX_S = 5 * 86400.0   # the self-hosted job execution limit; hosted jobs stop at 6h
+_VR_STEP_ROUNDING_S = 1.0          # stamps round to 0.1s / whole seconds; never a real overrun
+_VR_DUR_TOKEN_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(h|m|s)\b")
+_VR_AGGREGATE_STEP_RE = re.compile(r" \+ \d+ more \S+ steps?$")
+
+
+def _vr_dur_cell_s(cell: object) -> float | None:
+    """Seconds in a rendered duration cell (`277s`, `4m 37s`, `1h 02m`), else None."""
+    parts = _VR_DUR_TOKEN_RE.findall(str(cell or ""))
+    if not parts:
+        return None
+    mult = {"h": 3600.0, "m": 60.0, "s": 1.0}
+    return sum(float(v) * mult[u] for v, u in parts)
+
+
+def _vr_job_window_s(data: dict, wf: object, job: object) -> float | None:
+    """The job's measured p50 window (the slow mode's p50 when bimodal), else None."""
+    pwt = _as_dict(_as_dict(data.get("per_workflow_timing")).get(str(wf or "")))
+    vals = [_num(_as_dict(pwt.get("job_p50")).get(str(job or ""))),
+            _num(_as_dict(_as_dict(pwt.get("job_bimodal")).get(str(job or ""))).get("high_p50_s"))]
+    vals = [v for v in vals if v is not None and v > 0]
+    return max(vals) if vals else None
+
+
+def _vr_step_overrun(value: float | None, window: float | None) -> str | None:
+    """Why a step figure is out of its job's window, else None."""
+    if value is None:
+        return None
+    if value > _VR_JOB_RUN_MAX_S:
+        return f"{value:.0f}s is longer than any GitHub Actions job may run"
+    if window is not None and value > window + _VR_STEP_ROUNDING_S:
+        return f"{value:.0f}s outlasts the job's measured {window:.0f}s window"
+    return None
+
+
+def check_step_cited_within_job_window(findings_path: Path | None) -> Check:
+    """**The out-of-window step class (curl `test-linter`).** No finding may cite a step
+    duration longer than its job's measured window. Covers the three places a finding cites a
+    step: the `measured_evidence.waterfall` step list, the `measured_evidence.table` step
+    column (a `<step> p50` header next to a job column), and a structural `decomposition`'s
+    `dominant_p50_s`. Job-level sums the same evidence prints (a decomposition's summed
+    `job_p50_s`, the table's `Job p50` column) are a sum of per-step medians, not one step, so
+    they are bounded only by `_VR_JOB_RUN_MAX_S`. Re-derived from `per_workflow_timing`, not
+    from the finding's own figures (those are what went wrong)."""
+    name = "no finding cites a step longer than its job's measured window"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    cited = 0
+    offenders: list[str] = []
+
+    def _cite(f: dict, job: object, label: str, value: float | None, step: bool) -> None:
+        nonlocal cited
+        if value is None:
+            return
+        cited += 1
+        window = _vr_job_window_s(data, f.get("workflow_file"), job) if step else None
+        why = _vr_step_overrun(value, window)
+        if why:
+            offenders.append(f"{f.get('id') or f.get('pattern')} ({f.get('pattern')}) "
+                             f"`{job}` {label}: {why}")
+
+    for f in _as_list(data.get("findings")):
+        if not isinstance(f, dict):
+            continue
+        me = _as_dict(f.get("measured_evidence"))
+        wfall = _as_dict(me.get("waterfall"))
+        wjob = wfall.get("job")
+        for s in _as_list(wfall.get("steps")):
+            s = _as_dict(s)
+            _cite(f, wjob, f"step `{s.get('step')}`", _num(s.get("p50_s")), True)
+        _cite(f, wjob, "summed job p50", _num(wfall.get("job_p50_s")), False)
+        table = _as_dict(me.get("table"))
+        headers = [str(h) for h in _as_list(table.get("headers"))]
+        if headers and "job" in headers[0].lower():
+            step_cols = [i for i, h in enumerate(headers)
+                         if i > 0 and h.strip().endswith(" p50") and "`" in h]
+            job_cols = [i for i, h in enumerate(headers)
+                        if i > 0 and h.strip().lower() == "job p50"]
+            for row in _as_list(table.get("rows")):
+                row = _as_list(row)
+                if not row:
+                    continue
+                rjob = str(row[0]).strip().strip("`")
+                for i in step_cols:
+                    if i < len(row):
+                        _cite(f, rjob, f"{headers[i]} cell", _vr_dur_cell_s(row[i]), True)
+                for i in job_cols:
+                    if i < len(row):
+                        _cite(f, rjob, "Job p50 cell", _vr_dur_cell_s(row[i]), False)
+        dec = _as_dict(f.get("decomposition"))
+        jobs = _as_list(f.get("affected_jobs"))
+        if dec and len(jobs) == 1:
+            # `<step> + N more <cat> steps` is a CATEGORY aggregate (a sum of step
+            # medians), so it is bounded like the other sums, not as one step.
+            dom = str(dec.get("dominant_step") or "")
+            _cite(f, jobs[0], f"dominant step `{dom}`", _num(dec.get("dominant_p50_s")),
+                  not _VR_AGGREGATE_STEP_RE.search(dom))
+    if not cited:
+        return Check(name, True, "no finding cites a step duration", skipped=True)
+    return Check(name, not offenders,
+                 f"{cited} cited step figure(s), all inside their job's measured window"
+                 if not offenders else
+                 "finding(s) cite a step longer than the job that contains it (a skipped step's "
+                 "year-1 `started_at`, or a span outside its job, read as a duration): "
+                 + "; ".join(offenders[:8])
+                 + (f"; +{len(offenders) - 8} more" if len(offenders) > 8 else ""))
+
+
+def check_stamped_decomposition_within_job(findings_path: Path | None) -> Check:
+    """**The out-of-window step class, stamp side.** No per-step duration the engine stamps
+    may exceed its job: each `pr_critical_path.poles[].steps[].p50_s` is bounded by that pole
+    job's measured window (`_vr_job_window_s`, falling back to the pole's own `p50_s`), and
+    each drilled run's per-step timeline (`data_bundle.logs[].steps_file`) is bounded by that
+    ONE run's `job_dur_s`, both as a duration and as `start_s + dur_s`."""
+    name = "no stamped step decomposition outlasts its job"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    seen = 0
+    offenders: list[str] = []
+    for p in _as_list(_as_dict(data.get("pr_critical_path")).get("poles")):
+        p = _as_dict(p)
+        window = (_vr_job_window_s(data, p.get("workflow_file"), p.get("job"))
+                  or _num(p.get("p50_s")))
+        for s in _as_list(p.get("steps")):
+            s = _as_dict(s)
+            v = _num(s.get("p50_s"))
+            if v is None:
+                continue
+            seen += 1
+            why = _vr_step_overrun(v, window)
+            if why:
+                offenders.append(f"pole `{p.get('job') or p.get('check')}` step "
+                                 f"`{s.get('step')}`: {why}")
+    db = _as_dict(data.get("data_bundle"))
+    logs_dir = db.get("logs_dir")
+    for e in _as_list(db.get("logs")):
+        e = _as_dict(e)
+        sf = e.get("steps_file")
+        if not sf:
+            continue
+        cands = [Path(str(logs_dir)) / str(sf)] if logs_dir else []
+        if findings_path is not None:
+            cands.append(findings_path.parent / (findings_path.name.rsplit(".", 1)[0] + ".data")
+                         / str(sf))
+        tl = None
+        for c in cands:
+            try:
+                tl = _as_dict(json.loads(c.read_text(encoding="utf-8")))
+                break
+            except (OSError, json.JSONDecodeError):
+                continue
+        if not tl:
+            continue
+        jd = _num(tl.get("job_dur_s"))
+        for s in _as_list(tl.get("steps")):
+            s = _as_dict(s)
+            d = _num(s.get("dur_s"))
+            if d is None:
+                continue
+            seen += 1
+            end = d + (_num(s.get("start_s")) or 0.0)
+            why = _vr_step_overrun(d, jd) or (
+                _vr_step_overrun(end, jd) and f"it ends at {end:.0f}s, after the "
+                f"job's {jd:.0f}s run")
+            if why:
+                offenders.append(f"timeline `{tl.get('job') or e.get('job')}` step "
+                                 f"`{s.get('name')}`: {why}")
+    if not seen:
+        return Check(name, True, "no stamped step decomposition or timeline", skipped=True)
+    return Check(name, not offenders,
+                 f"{seen} stamped step figure(s), all inside their job"
+                 if not offenders else
+                 "stamped step(s) outlast the job that contains them: "
+                 + "; ".join(offenders[:8])
+                 + (f"; +{len(offenders) - 8} more" if len(offenders) > 8 else ""))
+
+
 # --- The payload-binned-as-build class (nrwl/nx `Run Checks/Lint/Test/Build`) --------
 # A COMBINED step whose name carries a PAYLOAD token (test/lint/spec/e2e/…) is the work
 # the job exists for, even when the name ALSO carries the broad `build` token. Binning it
@@ -12271,6 +12459,8 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_opt80_tail_lines(report, findings_path),
         check_opt80_tail_withheld_reasons(report, findings_path),
         check_structural_pole_has_measured_step(findings_path),
+        check_step_cited_within_job_window(findings_path),
+        check_stamped_decomposition_within_job(findings_path),
         check_structural_step_category_not_payload_binned_as_build(findings_path),
         check_detector_leaf_agrees_with_dominant_category(report, findings_path),
         check_pole_ceiling_within_cooccurrence(report, findings_path),

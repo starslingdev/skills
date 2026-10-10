@@ -11434,3 +11434,121 @@ def test_parallel_steps_row_twin_matches_the_walker(tmp_path):
     for stamp in (_FULL_STAMP, many, _PARALLEL_STAMP,
                   {"groups": 0, "steps_in_groups": 0, "background_steps": 2}):
         assert vr._vr_parallel_steps_cell(stamp) == ws.parallel_steps_disclosure(stamp)
+
+
+# --------------------------------------------------------------------------- #
+# Step durations stay inside their job (curl/curl, run 38018162993): a skipped
+# step carries `started_at: 0001-01-01T00:00:00Z`, and reading it naively cited a
+# ~63.9-billion-second `test-linter` step in a HIGH OPT73 finding.
+# --------------------------------------------------------------------------- #
+
+_STEP_CITE = "no finding cites a step longer than its job's measured window"
+_STEP_STAMP = "no stamped step decomposition outlasts its job"
+_SENTINEL_S = 63927167070.0
+_LINUX = ".github/workflows/linux.yml"
+
+
+def _step_window_doc(*findings: dict, bimodal: dict | None = None, **extra) -> dict:
+    doc = {"pr_critical_path": {},
+           "per_workflow_timing": {_LINUX: {
+               "job_p50": {"CM clang-tidy": 277.0, "CM openssl torture 2": 277.0},
+               "job_bimodal": bimodal or {}}},
+           "findings": list(findings)}
+    doc.update(extra)
+    return doc
+
+
+def _opt73(step_s: float, job_s: float | None = None, job: str = "CM clang-tidy",
+           table_step_s: float | None = None) -> dict:
+    job_s = job_s if job_s is not None else step_s + 200.0
+    tstep = table_step_s if table_step_s is not None else step_s
+    return {"id": "f148", "pattern": "OPT73", "workflow_file": _LINUX,
+            "affected_jobs": [job],
+            "measured_evidence": {
+                "summary": "...",
+                "table": {"headers": ["Cluster job", "Job p50", "`test-linter` p50",
+                                      "Share of job"],
+                          "rows": [[f"`{job}`", f"{job_s:.0f}s", f"{tstep:.0f}s", "33%"]]},
+                "waterfall": {"job": job, "job_p50_s": job_s, "shared_step": "test-linter",
+                              "steps": [{"step": "test-linter", "category": "test",
+                                         "p50_s": step_s, "shared": True},
+                                        {"step": "build", "category": "build",
+                                         "p50_s": 121.0, "shared": False}]}}}
+
+
+def test_step_cited_beyond_its_job_window_fails(tmp_path: Path):
+    rep = _good()
+    # FAIL: the curl shape, a year-1 sentinel step cited in the waterfall + table.
+    assert _tag_for(rep, _STEP_CITE, tmp_path,
+                    findings=_step_window_doc(_opt73(_SENTINEL_S))) == "FAIL"
+    # FAIL: an ordinary-looking step that still outlasts the measured 277s job.
+    assert _tag_for(rep, _STEP_CITE, tmp_path,
+                    findings=_step_window_doc(_opt73(400.0, job_s=500.0))) == "FAIL"
+    # FAIL: only the evidence table carries the bogus figure.
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        _opt73(60.0, job_s=250.0, table_step_s=_SENTINEL_S))) == "FAIL"
+    # FAIL: a job with no measured window still cannot cite a step longer than
+    # any GitHub job may run.
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        _opt73(_SENTINEL_S, job="unmeasured job"))) == "FAIL"
+    # PASS: in-window figures.
+    assert _tag_for(rep, _STEP_CITE, tmp_path,
+                    findings=_step_window_doc(_opt73(60.0, job_s=250.0))) == "PASS"
+    # PASS: a bimodal job's slow-mode step is bounded by the slow mode's p50.
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        _opt73(300.0, job_s=330.0),
+        bimodal={"CM clang-tidy": {"high_p50_s": 340.0, "low_p50_s": 200.0}})) == "PASS"
+    # A structural decomposition's dominant figure: one step is bounded by the job's
+    # window, a `+ N more <cat> steps` category aggregate (a sum of step medians, as on
+    # pallets/flask `PyPy`) only by the absolute job limit.
+    def decomp(dom: str, p50: float) -> dict:
+        return {"id": "f7", "pattern": "OPT75", "workflow_file": _LINUX,
+                "affected_jobs": ["CM clang-tidy"],
+                "decomposition": {"dominant_step": dom, "dominant_p50_s": p50}}
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        decomp("run tests", 300.0))) == "FAIL"
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        decomp("run tests + 1 more test step", 300.0))) == "PASS"
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        decomp("run tests + 1 more test step", _SENTINEL_S))) == "FAIL"
+    # SKIP: no finding cites a step.
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        {"id": "f1", "pattern": "OPT12", "workflow_file": _LINUX})) == "SKIP"
+
+
+def test_stamped_decomposition_step_beyond_its_job_fails(tmp_path: Path):
+    rep = _good()
+
+    def pole(step_s: float) -> dict:
+        return {"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                           "job": "CM clang-tidy", "p50_s": 277.0,
+                           "steps": [{"step": "test-linter", "category": "test",
+                                      "p50_s": step_s},
+                                     {"step": "build", "category": "build",
+                                      "p50_s": 121.0}]}]}
+
+    assert _tag_for(rep, _STEP_STAMP, tmp_path, findings=_step_window_doc(
+        pr_critical_path=pole(_SENTINEL_S))) == "FAIL"
+    assert _tag_for(rep, _STEP_STAMP, tmp_path, findings=_step_window_doc(
+        pr_critical_path=pole(120.0))) == "PASS"
+
+    # The drilled run's per-step timeline (`data_bundle.logs[].steps_file`).
+    data = tmp_path / "findings.data"
+    data.mkdir()
+
+    def timeline(dur_s: float) -> dict:
+        (data / "t.steps.json").write_text(json.dumps({
+            "job": "CM clang-tidy", "job_dur_s": 209.0,
+            "steps": [{"name": "build", "number": 38, "start_s": 57.0, "dur_s": 121.0},
+                      {"name": "test-linter", "number": 44, "start_s": 0.0,
+                       "dur_s": dur_s}]}), encoding="utf-8")
+        return {"logs_dir": str(data),
+                "logs": [{"job": "CM clang-tidy", "check": "CM clang-tidy",
+                          "workflow_file": _LINUX, "steps_file": "t.steps.json"}]}
+
+    assert _tag_for(rep, _STEP_STAMP, tmp_path, findings=_step_window_doc(
+        data_bundle=timeline(_SENTINEL_S))) == "FAIL"
+    assert _tag_for(rep, _STEP_STAMP, tmp_path, findings=_step_window_doc(
+        data_bundle=timeline(30.0))) == "PASS"
+    assert _tag_for(rep, _STEP_STAMP, tmp_path,
+                    findings=_step_window_doc()) == "SKIP"
