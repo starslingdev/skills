@@ -12666,16 +12666,136 @@ def _resolve_run_leaves(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, s
     return acc
 
 
+# The all-leaves read (OPT84, `relevant=None`) is about JS tooling only. `make`
+# is a native build tool, not a JS task runner: for that read it is a plain
+# leaf, so a C build reads as "no table tool" rather than as an unfollowed
+# delegation. OPT82's lint read keeps it in `_OPT82_DELEGATORS`, unchanged.
+_RL_NON_JS_DELEGATORS = frozenset({"make"})
+# Shell keywords that can lead a segment once `;` / newlines split it
+# (`if x; then npx eslint .; fi`): dropped by the all-leaves read only.
+_RL_SHELL_KEYWORDS = frozenset({"if", "then", "else", "elif", "do", "while",
+                                "until", "!"})
+# JS task runners the all-leaves read expands through the workspace's package
+# scripts, and the flags of each that take a separate value (never a task).
+_RL_TASK_RUNNER_VALUE_FLAGS: dict[str, frozenset[str]] = {
+    "turbo": frozenset({"--filter", "-F", "--scope", "--ignore", "--concurrency",
+                        "--cache-dir", "--output-logs", "--log-order", "--log-prefix",
+                        "--env-mode", "--team", "--token", "--global-deps",
+                        "--remote-cache-timeout", "--cache-workers", "--cache",
+                        "--ui", "--since"}),
+    "lerna": frozenset({"--scope", "--ignore", "--concurrency", "--since",
+                        "--npm-client", "--profile-location"}),
+    "pnpm": frozenset({"--filter", "-F", "--workspace-concurrency", "--reporter",
+                       "--test-pattern", "--changed-files-ignore-pattern"}),
+}
+
+
+def _rl_task_runner(toks: list[str]
+                    ) -> "tuple[str, list[str] | None, list[str]] | None":
+    """`(tool, tasks, forwarded args)` when `toks` hands package-script tasks to a
+    JS task runner across the workspace: `turbo [run] <task…>`, `nx run-many` /
+    `nx affected` `-t <task…>`, `lerna run <task…>`, `pnpm -r` / `pnpm --filter …`
+    `[run] <task>`. `tasks` is None for a task-runner call whose tasks this
+    read cannot name (`nx format:check`, `nx run proj:target`, `pnpm -r exec`).
+    None when `toks` is not a task-runner call. Filters are never applied."""
+    t = list(toks)
+    pm = t[0] if t else ""
+    for prefix in (["npm", "exec", "--"], ["npm", "exec"], ["pnpm", "exec"],
+                   ["pnpm", "dlx"], ["yarn", "exec"], ["yarn", "dlx"],
+                   ["bun", "x"], ["npx"], ["bunx"], ["yarn"], ["pnpm"]):
+        if t[:len(prefix)] == prefix:
+            t = t[len(prefix):]
+            if prefix in (["yarn"], ["pnpm"]):
+                break                      # a flag here is the package manager's
+            while t and t[0].startswith("-") and t[0] != "--":
+                t = t[1:]
+            if t[:1] == ["--"]:
+                t = t[1:]
+            break
+    tool = t[0].rsplit("/", 1)[-1].split("@", 1)[0] if t else ""
+    if tool in ("turbo", "nx", "lerna"):
+        rest = t[1:]
+    elif pm == "pnpm" and any(a.split("=", 1)[0] in ("-r", "--recursive", "--filter",
+                                                     "-F") for a in toks[1:]):
+        rest, tool = list(toks[1:]), "pnpm"
+    else:
+        return None
+    fwd: list[str] = []
+    if "--" in rest:
+        i = rest.index("--")
+        rest, fwd = rest[:i], rest[i + 1:]
+    if tool == "nx":
+        if not rest or rest[0] not in ("run-many", "affected"):
+            return tool, None, fwd
+        tasks: list[str] = []
+        grab = False
+        for a in rest[1:]:
+            key, eq, val = a.partition("=")
+            if key in ("-t", "--target", "--targets"):
+                if eq:
+                    tasks += [x for x in val.split(",") if x]
+                    grab = False
+                else:
+                    grab = True
+                continue
+            if a.startswith("-"):
+                grab = False
+                continue
+            if grab:
+                tasks += [x for x in a.split(",") if x]
+        return tool, (tasks or None), fwd
+    flags = _RL_TASK_RUNNER_VALUE_FLAGS[tool]
+    pos: list[str] = []
+    skip = False
+    for a in rest:
+        if skip:
+            skip = False
+            continue
+        if a.startswith("-"):
+            if a in flags:
+                skip = True
+            if tool == "pnpm" and a.split("=", 1)[0] in ("-C", "--dir", "--prefix"):
+                return tool, None, fwd           # moves to another directory
+            continue
+        pos.append(a)
+    if tool == "lerna":
+        if pos[:1] != ["run"]:
+            return tool, None, fwd
+        pos = pos[1:]
+    elif tool == "turbo":
+        if pos[:1] == ["run"]:
+            pos = pos[1:]
+    else:                                         # pnpm -r / --filter
+        if pos[:1] in (["run"], ["run-script"]):
+            pos = pos[1:2]
+        elif pos and pos[0] in _OPT82_PM_BUILTINS:
+            return tool, None, fwd               # `exec`, `test`, `install` ...
+        else:
+            pos = pos[:1]
+    if not pos or any(p.startswith("/") or "$" in p for p in pos):
+        return tool, None, fwd
+    return tool, pos, fwd
+
+
 def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
              scripts_unreadable: "frozenset[str]",
              relevant: "Callable[[str], bool] | None",
              stop: "Callable[..., tuple | None] | None",
              bin_names: "frozenset[str]",
              chain: "list[str] | None", depth: int, runner: str,
-             acc: ResolvedLeaves) -> "tuple | None":
+             acc: ResolvedLeaves, in_runner: "str | None" = None,
+             stack: "frozenset[tuple[str, str]]" = frozenset()) -> "tuple | None":
     """One level of `_resolve_run_leaves`. Control flow is OPT82's original
     resolver, verbatim, so its verdict is byte-identical (a snapshot test pins
-    it); the leaves and unresolved records are collected beside it."""
+    it); the leaves and unresolved records are collected beside it.
+
+    The all-leaves read (`relevant` None) adds three things OPT82 never sees:
+    `make` is a leaf, leading shell keywords are dropped, and a JS task runner
+    (`_rl_task_runner`) is expanded over every package whose scripts define
+    its task (`in_runner` names it below that point, where any segment the read
+    cannot follow is recorded as delegated to it; `stack` holds the
+    `(dir, script)` pairs being followed, so the script that called the task
+    runner is never re-entered)."""
     import shlex
     chain = list(chain or [])
     unresolvable: "tuple[str, str, list[str]] | None" = None
@@ -12687,6 +12807,9 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
             else res
 
     def _note(kind: str, reason: str, seg: str, tool: "str | None" = None) -> None:
+        if in_runner:
+            kind, tool = "delegated", in_runner
+            reason = f"a package script `{in_runner}` runs: {reason}"
         acc.unresolved.append({"kind": kind, "reason": reason, "segment": seg,
                                "chain": list(chain), "tool": tool,
                                "wd": None if lost is not None else wd})
@@ -12711,10 +12834,14 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
                 unresolvable = unresolvable or ("unresolvable", "expression", chain)
             continue
         toks = _opt82_tokens(seg)
+        if relevant is None:
+            while toks and toks[0] in _RL_SHELL_KEYWORDS:
+                toks = toks[1:]
         rest, seg_runner, call = _opt82_exec_call(toks, runner)
         if call is not None:               # `npx -c '<command>'`
             sub = _rl_walk(call, wd, scripts_by_dir, scripts_unreadable, relevant,
-                           stop, bin_names, chain, depth + 1, seg_runner, acc)
+                           stop, bin_names, chain, depth + 1, seg_runner, acc,
+                           in_runner, stack)
             if sub is not None and sub[0] != "unresolvable":
                 return _found(sub)
             if sub is not None:
@@ -12724,7 +12851,54 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
             hit = stop(rest, wd, seg_runner, chain)
             if hit is not None:
                 return _found(hit)
+        tr = _rl_task_runner(toks) if relevant is None else None
+        if tr is not None:
+            tool, tasks, tr_fwd = tr
+            if tasks is None or in_runner:
+                _note("delegated", f"handed to `{tool}`, whose tasks this read "
+                      "cannot name" if tasks is None else
+                      f"hands work on to `{tool}` again", seg, tool)
+                continue
+            if scripts_unreadable:
+                _note("package_json", "a workspace package.json could not be read, so "
+                      f"which packages define the `{tool}` task is unknown", seg, tool)
+                continue
+            if depth >= _OPT82_MAX_SCRIPT_DEPTH:
+                _note("delegated", "past the script depth cap", seg, tool)
+                continue
+            def _wrapper(body: str, task: str, tool: str = tool) -> bool:
+                # a script that hands this same task to this same runner (the
+                # root `lint: turbo run lint`) is the entry point, not a task
+                # the runner runs: entering it would recurse.
+                for s in _OPT82_SEGMENT_SPLIT_RE.split(body or ""):
+                    w = _rl_task_runner(_opt82_tokens(s.strip()))
+                    if w is not None and w[0] == tool and task in (w[1] or []):
+                        return True
+                return False
+
+            targets: list[tuple[str, str]] = []
+            for task in tasks:
+                dirs = sorted(d for d, s in scripts_by_dir.items()
+                              if isinstance(s, dict) and task in s
+                              and (d, task) not in stack
+                              and not _wrapper(str(s[task]), task))
+                if not dirs:
+                    targets = []
+                    _note("delegated", f"`{tool}` runs `{task}`, which no package.json "
+                          "this read found defines", seg, tool)
+                    break
+                targets += [(d, task) for d in dirs]
+            pm_runner = _OPT82_RUNNER_BY_PM.get(toks[0] if toks else "", runner)
+            for d, task in targets:
+                body = scripts_by_dir[d][task]
+                _rl_walk(body + (" " + shlex.join(tr_fwd) if tr_fwd else ""), d,
+                         scripts_by_dir, scripts_unreadable, relevant, stop, bin_names,
+                         chain + [f"{tool} run {task} ({d or '.'})"], depth + 1,
+                         pm_runner, acc, tool, stack | {(d, task)})
+            continue
         dlg = _opt82_delegator(toks)
+        if relevant is None and dlg in _RL_NON_JS_DELEGATORS:
+            dlg = None
         if lintish and dlg:
             _note("delegated", f"handed to `{dlg}`, whose own configuration decides "
                   "what runs", seg, dlg)
@@ -12737,7 +12911,9 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
             if rest:
                 acc.leaves.append({"command": shlex.join(rest), "tokens": list(rest),
                                    "wd": None if lost is not None else wd,
-                                   "runner": seg_runner, "chain": list(chain)})
+                                   "runner": seg_runner, "chain": list(chain),
+                                   **({"task_runner": {"tool": in_runner}}
+                                      if in_runner else {})})
             continue
         name, scoped = ref
         lint_named = rel(name)
@@ -12759,7 +12935,8 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
         sub = _rl_walk(body + (" " + shlex.join(fwd) if fwd else ""),
                        wd, scripts_by_dir, scripts_unreadable, relevant, stop,
                        bin_names, chain + [f"{toks[0]} run {name}"], depth + 1,
-                       _OPT82_RUNNER_BY_PM.get(toks[0], "npx"), acc)
+                       _OPT82_RUNNER_BY_PM.get(toks[0], "npx"), acc, in_runner,
+                       stack | {(wd, name)})
         if sub is not None and sub[0] != "unresolvable":
             return _found(sub)
         if sub is not None and lint_named:
@@ -16815,13 +16992,21 @@ def _opt84_classify(tokens: list[str]) -> "tuple[str | None, str | None]":
 
 def _opt84_version(block: dict[str, Any], wd: str, package: str) -> "str | None":
     """The `package` version spec the package.json nearest at or above `wd`
-    declares, or None when none does."""
+    declares, or None when none does. A pnpm catalog reference (`catalog:` =
+    the default catalog, `catalog:<name>` = that named one) is resolved through
+    the scan's `pnpm_catalogs`; one that names no catalog entry is None."""
     versions = block.get("tool_versions") or {}
     d = wd
     while True:
         spec = (versions.get(d) or {}).get(package) if isinstance(
             versions.get(d), dict) else None
         if isinstance(spec, str):
+            if spec.strip().startswith("catalog:"):
+                name = spec.strip()[len("catalog:"):].strip() or "default"
+                cats = block.get("pnpm_catalogs")
+                cat = cats.get(name) if isinstance(cats, dict) else None
+                got = cat.get(package) if isinstance(cat, dict) else None
+                return got if isinstance(got, str) else None
             return spec
         if not d:
             return None
@@ -16830,9 +17015,17 @@ def _opt84_version(block: dict[str, Any], wd: str, package: str) -> "str | None"
 
 def _opt84_major(spec: "str | None") -> "int | None":
     """The major of a plain semver spec (`^5.6.2`, `~7.0`, `5.6.2`, `>=5`), or None
-    for `workspace:*`, `catalog:`, a tag, a URL."""
+    for `workspace:*`, `catalog:`, a tag, a URL. An npm alias reads the aliased
+    version (`npm:@typescript/typescript6@6.0.2` is 6); one with no version is
+    None."""
     if not isinstance(spec, str):
         return None
+    if spec.strip().startswith("npm:"):
+        aliased = spec.strip()[len("npm:"):]
+        at = aliased.rfind("@")
+        if at <= 0:
+            return None
+        spec = aliased[at + 1:]
     m = _re.fullmatch(r"\s*(?:\^|~|>=|=|v)?\s*(\d+)(?:\.[\dx*]+){0,2}"
                       r"(?:-[\w.]+)?\s*", spec)
     return int(m.group(1)) if m else None
@@ -17101,6 +17294,15 @@ def _detect_opt84_tool_swap(
                     targets.add(str(row))
                 elif kind == "emits":
                     emits = True
+                elif kind == "row" and lf.get("task_runner"):
+                    # Every package a task runner reaches with this row's tool is
+                    # ONE tool entry (the verifier names each row once).
+                    grp = next((x for r, x in found
+                                if r == row and x.get("task_runner")), None)
+                    if grp is None:
+                        found.append((str(row), {**lf, "group": [lf]}))
+                    else:
+                        grp["group"].append(lf)
                 elif kind == "row" and not any(r == row and x["command"] == lf["command"]
                                                and x["wd"] == lf["wd"] for r, x in found):
                     found.append((str(row), lf))
@@ -17111,34 +17313,55 @@ def _detect_opt84_tool_swap(
             held: "str | None" = None
             for row, lf in found:
                 spec_row = _OPT84_TABLE[row]
+                group = lf.get("group") or [lf]
+                lwds = list(dict.fromkeys(str(g["wd"] or "") for g in group))
                 lwd = str(lf["wd"] or "")
                 version = _opt84_version(tal, lwd, spec_row["package"])
                 fit, reasons = "drop-in", []
                 if row == "tsc":
-                    major = _opt84_major(version)
-                    if major is None:
+                    majors = [(g, _opt84_major(_opt84_version(
+                        tal, str(g["wd"] or ""), spec_row["package"]))) for g in group]
+                    if any(m is None for _g, m in majors):
                         held = held or "typescript_version_unreadable"
                         continue
-                    if major >= spec_row["target_major"]:
+                    below = [g for g, m in majors if m < spec_row["target_major"]]
+                    if not below:
                         silenced.append(row)
                         continue
+                    lf = below[0]
+                    lwd = str(lf["wd"] or "")
+                    version = _opt84_version(tal, lwd, spec_row["package"])
                 elif row == "eslint":
                     if deferred:
                         fit = "deferred_to_opt82"
                         reasons = ["OPT82 reports this ESLint run's type-aware rules "
                                    "on the same step"]
                     else:
-                        eslint_cmd = shlex.join(lf["tokens"])
-                        configs, bad = ([], []) if tal.get("error") else \
-                            _opt82_applicable_configs(tal, lwd,
-                                                      _opt82_config_flag(eslint_cmd))
-                        if (tal.get("error") or bad or not configs
-                                or (_opt82_walk_missed_dir(tal, lwd)
-                                    and not _opt82_config_flag(eslint_cmd))):
+                        configs = []
+                        unreadable_cfg = bool(tal.get("error"))
+                        for g in group:
+                            if unreadable_cfg:
+                                break
+                            gwd = str(g["wd"] or "")
+                            eslint_cmd = shlex.join(g["tokens"])
+                            cfgs, bad = _opt82_applicable_configs(
+                                tal, gwd, _opt82_config_flag(eslint_cmd))
+                            if (bad or not cfgs
+                                    or (_opt82_walk_missed_dir(tal, gwd)
+                                        and not _opt82_config_flag(eslint_cmd))):
+                                unreadable_cfg = True
+                                break
+                            configs += [c for c in cfgs if c not in configs]
+                        if unreadable_cfg:
                             held = held or "eslint_config_unreadable"
                             continue
                         reasons = _opt84_eslint_fit(tal, configs)
                         fit = "dual-run" if reasons else "drop-in"
+                if lf.get("task_runner") or len(group) > 1:
+                    n = len(lwds)
+                    reasons = [*reasons, f"across {n} workspace package"
+                               f"{'' if n == 1 else 's'}; task-runner filters not "
+                               "applied"]
                 t = {"row": row, "leaf_command": lf["command"],
                      "source_tool": spec_row["source_tool"],
                      "target": spec_row["target"], "fit": fit,
@@ -17150,6 +17373,8 @@ def _detect_opt84_tool_swap(
                      "migration_docs_url": _OPT84_DOCS[row]["migration_docs_url"]}
                 if row == "tsc":
                     t["typescript6_alias_needed"] = alias_needed
+                if lf.get("task_runner") or len(group) > 1:
+                    t["packages"] = len(lwds)
                 tools.append(t)
             if held:
                 _no(held, wf, job, name)
@@ -17166,7 +17391,8 @@ def _detect_opt84_tool_swap(
                 continue
             out.append(_opt84_finding(
                 p, wf, job, yaml_key, name, category, p50, job_p50, wd, run,
-                [lf["command"] for lf in res.leaves], tools, start_idx + len(out) + 1))
+                list(dict.fromkeys(lf["command"] for lf in res.leaves)), tools,
+                start_idx + len(out) + 1))
     return out
 
 

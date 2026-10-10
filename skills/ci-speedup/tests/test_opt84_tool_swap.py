@@ -640,3 +640,196 @@ def test_collect_wires_opt84_after_opt83_with_its_own_counters():
     assert '"opt84_withheld_by_gate"' in tail
     assert "_OPT84_WITHHELD_DOC_KEY" in tail
     assert '_skip_detectors(' in tail and '"OPT84"' in tail
+
+
+# ---- only JS tooling is in OPT84's world (curl: a C build is never a swap) -------
+
+_CURL_BUILD = ("if [ \"${MATRIX_BUILD}\" = 'cmake' ]; then\n  cmake --build bld\n"
+               "else\n  make -C bld V=1\nfi\n")
+
+
+@pytest.mark.parametrize("run", [
+    _CURL_BUILD, "make -C bld", "make lint", "./configure && make -j4",
+    "cargo build --release", "go build ./...", "mvn -B verify", "gradle build",
+    "for d in a b; do make -C $d; done", "case $X in a) cmake --build bld;; esac",
+])
+def test_a_non_js_build_is_a_tool_not_in_the_table_never_held_back(run):
+    out, withheld, cands = _run({"run": run}, pole=_pole(category="build"),
+                                block=_block(scripts={}))
+    assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
+    assert cands == []
+
+
+def test_make_is_a_leaf_for_the_all_leaves_read_and_a_delegator_for_opt82():
+    res = cr._resolve_run_leaves("make -C bld V=1", "", {})
+    assert res.unresolved == [] and [lf["command"] for lf in res.leaves] == [
+        "make -C bld V=1"]
+    assert cr._opt82_resolve_lint("make lint", "", {}) == (
+        "unresolvable", "delegated", [])
+
+
+def test_shell_control_flow_around_js_tooling_still_reaches_the_tool():
+    out, withheld, _c = _run(
+        {"run": "if [ -n \"$CI\" ]; then\n  npx prettier --check .\nfi"})
+    assert len(out) == 1 and _rows(out[0]) == ["prettier"], withheld
+
+
+def test_a_node_script_stays_script_unresolvable():
+    out, withheld, cands = _run({"run": "node ./script/lint.js"})
+    assert withheld == {"script_unresolvable": 1} and _held(cands, "script_unresolvable")
+
+
+# ---- JS task runners resolve through the workspace's package scripts -------------
+
+# mastra's real shape (census of its package.json `lint` scripts): the root `lint`
+# hands `lint` and `lint:format` to turbo; most packages run oxlint then ESLint, a
+# few ESLint or Prettier alone; the root `lint:format` is oxfmt.
+_MASTRA_REAL = {
+    "": {"lint": 'pnpm turbo --filter "!./examples/**/*" --filter "!./docs/**/*" '
+                 '--filter "!@internal/playground" lint lint:format',
+         "lint:format": "oxfmt --check . '!docs/**/*' '!examples/**/*'",
+         "typecheck": 'pnpm --filter "!./explorations/**/*" -r typecheck'},
+    "packages/core": {"lint": "oxlint . && eslint ."},
+    "packages/cli": {"lint": "oxlint . && eslint --no-warn-ignored ."},
+    "stores/pg": {"lint": "eslint ."},
+    "client-sdks/js": {"lint": "prettier --check '**/*.{js,ts}'"},
+    "packages/_internals/x": {"lint": "oxlint --deny-warnings src test"},
+}
+
+
+def test_mastra_turbo_lint_resolves_and_both_rows_are_already_swapped():
+    out, withheld, cands = _run({"run": "pnpm lint"}, block=_block(scripts=_MASTRA_REAL))
+    assert out == [] and withheld == {"target_already_in_use": 1}, withheld
+    assert cands == []
+
+
+def test_resolver_expands_a_task_runner_over_every_package_defining_the_task():
+    res = cr._resolve_run_leaves("pnpm lint", "", _MASTRA_REAL,
+                                 bin_names=cr._OPT84_BIN_NAMES)
+    assert res.unresolved == [], res.unresolved
+    got = sorted((lf["wd"], lf["command"]) for lf in res.leaves)
+    assert ("", "oxfmt --check . '!docs/**/*' '!examples/**/*'") in got
+    assert ("stores/pg", "eslint .") in got and ("packages/core", "oxlint .") in got
+    # the root `lint` is the script that called turbo: never re-entered
+    assert not any(lf["command"].startswith("pnpm turbo") for lf in res.leaves)
+    assert all(lf.get("task_runner", {}).get("tool") == "turbo" for lf in res.leaves)
+
+
+_TURBO_ESLINT = {"": {"lint": "turbo run lint --filter=web"},
+                 "apps/web": {"lint": "eslint ."},
+                 "apps/docs": {"lint": "eslint src"},
+                 "packages/ui": {"build": "tsup"}}
+
+
+@pytest.mark.parametrize("run", ["pnpm lint", "pnpm turbo run lint --filter=web",
+                                 "npx turbo lint --filter web"])
+def test_turbo_eslint_across_packages_is_one_row_with_the_package_count(run):
+    out, withheld, cands = _run({"run": run}, block=_block(scripts=_TURBO_ESLINT))
+    assert len(out) == 1, (withheld, cands)
+    assert _rows(out[0]) == ["eslint"]
+    t = _tool(out[0], "eslint")
+    assert t["packages"] == 2
+    assert "across 2 workspace packages; task-runner filters not applied" in t[
+        "fit_reasons"]
+    assert t["fit"] == "drop-in"
+
+
+@pytest.mark.parametrize("run,scripts", [
+    ("pnpm -r typecheck", {"": {}, "a": {"typecheck": "tsc --noEmit"},
+                           "b": {"typecheck": "tsc --noEmit -p ."}}),
+    ("pnpm --filter ./packages/** run typecheck",
+     {"": {}, "a": {"typecheck": "tsc --noEmit"}, "b": {"typecheck": "tsc --noEmit"}}),
+    ("npx nx run-many -t typecheck", {"": {}, "a": {"typecheck": "tsc --noEmit"},
+                                      "b": {"typecheck": "tsc --noEmit"}}),
+    ("npx lerna run typecheck", {"": {}, "a": {"typecheck": "tsc --noEmit"},
+                                 "b": {"typecheck": "tsc --noEmit"}}),
+])
+def test_every_task_runner_form_expands_through_the_workspace(run, scripts):
+    out, withheld, _c = _run({"run": run}, block=_block(scripts=scripts))
+    assert len(out) == 1, withheld
+    assert _rows(out[0]) == ["tsc"] and _tool(out[0], "tsc")["packages"] == 2
+
+
+@pytest.mark.parametrize("scripts", [
+    {"": {}, "a": {"lint": "turbo run lint:inner"}, "b": {"lint": "eslint ."}},
+    {"": {}, "a": {"lint": "node ./tools/lint.js"}, "b": {"lint": "eslint ."}},
+    {"": {}, "a": {"lint": "pnpm run lint:missing"}},
+    {"": {}},
+])
+def test_task_runner_leaves_the_read_cannot_follow_hold_the_step(scripts):
+    out, withheld, cands = _run({"run": "pnpm turbo run lint"},
+                                block=_block(scripts=scripts))
+    assert out == [] and withheld == {"delegated_script_unresolved": 1}, withheld
+    assert _held(cands, "delegated_script_unresolved")
+
+
+def test_task_runner_with_an_unreadable_workspace_package_json_is_held_back():
+    out, withheld, cands = _run({"run": "pnpm turbo run lint"},
+                                block=_block(scripts={"": {}, "a": {"lint": "eslint ."}},
+                                             unreadable_pkgs=["b"]))
+    assert out == [] and withheld == {"package_json_unreadable": 1}, withheld
+    assert _held(cands, "package_json_unreadable")
+
+
+# ---- pnpm catalogs and npm aliases in the typescript version ---------------------
+
+_CATALOGS = {"default": {"typescript": "^7.0.2", "oxfmt": "0.59.0"},
+             "ts6": {"typescript": "^6.0.3"}}
+
+
+def _cat_block(tv):
+    b = _block(tool_versions=tv)
+    b["pnpm_catalogs"] = _CATALOGS
+    return b
+
+
+def test_scan_reads_pnpm_workspace_catalogs(tmp_path):
+    root = _repo(tmp_path, {"devDependencies": {"typescript": "catalog:"}},
+                 {"pnpm-workspace.yaml":
+                  "packages:\n  - packages/*\ncatalog:\n  typescript: ^7.0.2\n"
+                  "  oxfmt: 0.59.0\ncatalogs:\n  ts6:\n    typescript: ^6.0.3\n"})
+    block = scan._read_type_aware_lint(root)
+    assert block["pnpm_catalogs"] == _CATALOGS
+
+
+def test_scan_block_defaults_carry_pnpm_catalogs():
+    assert scan._tal_block()["pnpm_catalogs"] == {}
+
+
+def test_default_catalog_typescript_7_is_already_in_use():
+    out, withheld, _c = _run({"run": "npx tsc --noEmit"},
+                             block=_cat_block({"": {"typescript": "catalog:"}}))
+    assert out == [] and withheld == {"target_already_in_use": 1}, withheld
+
+
+def test_named_catalog_typescript_6_fires_the_tsc_row():
+    out, withheld, _c = _run(
+        {"run": "npx tsc --noEmit", "working-directory": "packages/x"},
+        block=_cat_block({"": {"typescript": "catalog:"},
+                          "packages/x": {"typescript": "catalog:ts6"}}))
+    assert len(out) == 1, withheld
+    assert _rows(out[0]) == ["tsc"]
+    assert _tool(out[0], "tsc")["source_version"] == "^6.0.3"
+
+
+@pytest.mark.parametrize("spec", ["catalog:missing", "catalog:"])
+def test_an_unresolvable_catalog_ref_stays_unreadable(spec):
+    b = _block(tool_versions={"": {"typescript": spec}})
+    b["pnpm_catalogs"] = {"ts6": {"typescript": "^6.0.3"}}
+    out, withheld, _c = _run({"run": "npx tsc --noEmit"}, block=b)
+    assert out == [] and withheld == {"typescript_version_unreadable": 1}, withheld
+
+
+@pytest.mark.parametrize("spec,major", [
+    ("npm:@typescript/typescript6@6.0.2", 6), ("npm:typescript@^7.0.2", 7),
+    ("npm:typescript", None), ("npm:@typescript/typescript6", None), ("^5.6.2", 5)])
+def test_npm_alias_specs_read_the_aliased_version(spec, major):
+    assert cr._opt84_major(spec) == major
+
+
+def test_mastodon_npm_alias_to_typescript6_fires_the_tsc_row():
+    out, withheld, _c = _run(
+        {"run": "npx tsc --noEmit"},
+        block=_block(tool_versions={"": {"typescript":
+                                         "npm:@typescript/typescript6@6.0.2"}}))
+    assert len(out) == 1 and _rows(out[0]) == ["tsc"], withheld
