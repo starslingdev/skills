@@ -767,6 +767,13 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-10-10** — **The "Parallel steps" Data sources row says what the repo
+  actually uses.** Its "Used for" cell always described `parallel:` groups, so
+  a repo with `background: true` steps and no group read as though the
+  detectors had walked groups it does not have. The cell now names groups,
+  background steps, or both, from the scan's own counts; the report verifier
+  re-derives the same text and fails a row that does not match.
+
 - **2026-10-09** — **The fix recipes now name GitHub's native parallel steps.**
   OPT77 (repeated setup across small jobs) prefers a `parallel:` step group over
   shell `&` (separate logs, and a failing task fails the job on its own) and
@@ -983,6 +990,26 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-10-10** — **`STARSLING_LOG_LEVEL=DEBUG` now prints the debug trace.**
+  The variable was documented as the opt-in for the scripts' diagnostic output,
+  but no script read it, so every debug line was unreachable and stderr stayed
+  empty. Each program the skill runs (`run.py`, `scan.py`, `collect_runs.py`,
+  `blocking_path.py`, `summary.py`, `record_timing.py`) now sets its log level
+  from the variable through one shared helper (`scripts/log_level.py`). Level
+  names are read in any case; `WARN` and `FATAL` are accepted as aliases and
+  `NOTSET` shows everything. Unset means WARNING, as before; a name that is not
+  a log level also means WARNING, with one line per program saying the value
+  was ignored (a `run.py` audit starts three programs, so three lines). What is
+  logged is unchanged: endpoints, sizes and pattern / workflow names, not gh
+  response bodies, except that a failed gh call's DEBUG line prints up to the
+  first 200 characters of gh's own error text and an unparsable workflow file's
+  DEBUG line prints the YAML parser's error, which can quote the file. Warnings
+  that already printed now carry a `WARNING <module>:` prefix (the collector's
+  read `WARNING collect_runs:`), except the `CI_SPEEDUP_FETCH_CONCURRENCY`
+  warning, which fires while the collector module is still loading, before
+  logging is configured, and prints bare as before. `summary.py` and
+  `record_timing.py` still start under `python -P` (PYTHONSAFEPATH).
 
 - **2026-10-10** — **Actions and reusable workflows referenced with GitHub's
   self-repository prefix (`uses: $/path`, shipped 2026-07-30) are read as the

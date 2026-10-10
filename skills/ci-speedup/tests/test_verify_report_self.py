@@ -11467,6 +11467,47 @@ def test_parallel_steps_row_twin_matches_the_walker(tmp_path):
         assert vr._vr_parallel_steps_cell(stamp) == ws.parallel_steps_disclosure(stamp)
 
 
+# The "Used for" cell names what the repo actually uses: a repo with
+# `background: true` steps and no `parallel:` group must not read as though the
+# detectors walked groups it does not have.
+_GROUPS_FEEDS = ("Static detectors read each step inside a `parallel:` group "
+                 "as its own step")
+_BACKGROUND_FEEDS = ("Static detectors read `background: true` steps, which run "
+                     "beside the steps after them, as ordinary steps")
+_BOTH_FEEDS = ("Static detectors read each step inside a `parallel:` group as its "
+               "own step; `background: true` steps, which run beside the steps "
+               "after them, are read as ordinary steps")
+_BACKGROUND_ONLY_STAMP = {"groups": 0, "steps_in_groups": 0, "background_steps": 3,
+                          "control_steps": 1}
+
+
+@pytest.mark.parametrize("stamp,feeds", [
+    (_BACKGROUND_ONLY_STAMP, _BACKGROUND_FEEDS),
+    (_PARALLEL_STAMP, _GROUPS_FEEDS),
+    (_FULL_STAMP, _BOTH_FEEDS),
+])
+def test_parallel_steps_used_for_names_what_was_read(tmp_path, stamp, feeds):
+    vr = _load_verify_report()
+    footer, fp = _row_and_path(tmp_path, stamp)
+    row = next(ln for ln in footer.splitlines() if ln.startswith("| Parallel steps |"))
+    assert row.endswith(f"| {feeds} |"), row
+    assert vr._parallel_steps_violation(footer, fp)[0] is None, footer
+    # the verifier compares the whole row: another stamp's Used-for text fails
+    for other in {_GROUPS_FEEDS, _BACKGROUND_FEEDS, _BOTH_FEEDS} - {feeds}:
+        bad = footer.replace(f"| {feeds} |", f"| {other} |")
+        assert vr._parallel_steps_violation(bad, fp)[0], other
+
+
+def test_parallel_steps_used_for_twin_matches_the_walker():
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SCRIPTS))
+    import workflow_steps as ws
+    for stamp in (_FULL_STAMP, _PARALLEL_STAMP, _BACKGROUND_ONLY_STAMP,
+                  {"groups": 0, "steps_in_groups": 0, "control_steps": 2},
+                  {"groups": 1, "steps_in_groups": 0, "malformed_groups": 1}):
+        assert vr._vr_parallel_steps_feeds(stamp) == ws.parallel_steps_used_for(stamp)
+
+
 # --------------------------------------------------------------------------- #
 # Step durations stay inside their job (curl/curl, run 38018162993): a skipped
 # step carries `started_at: 0001-01-01T00:00:00Z`, and reading it naively cited a

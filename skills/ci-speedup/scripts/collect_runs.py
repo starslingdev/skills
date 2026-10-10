@@ -44,11 +44,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-# Module logger — inherits the entry point's logging config (INFO by default,
+# Module logger — inherits the entry point's logging config (WARNING by default,
 # DEBUG under STARSLING_LOG_LEVEL). Used for diagnosable-but-non-fatal gh paths
 # (e.g. an expected-absent rulesets endpoint) so a real collection failure is
-# traceable without spamming the default run.
-logger = logging.getLogger(__name__)
+# traceable without spamming the default run. Named, not `__name__`: run as a
+# program, `__name__` is "__main__", and every line would read `__main__:`.
+logger = logging.getLogger("collect_runs")
 
 # The wall-clock lever model (critical-path / cross-workflow bound cascade)
 # lives in its own leaf module so the bounds are unit-testable in isolation.
@@ -24451,4 +24452,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    from log_level import configure_logging  # STARSLING_LOG_LEVEL opt-in
+    configure_logging()
     sys.exit(main())

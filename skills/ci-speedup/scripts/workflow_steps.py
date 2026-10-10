@@ -352,6 +352,27 @@ def _files_cell(files: Any) -> str:
     return shown
 
 
+_GROUPS_FEEDS = ("Static detectors read each step inside a `parallel:` group "
+                 "as its own step")
+_BACKGROUND_FEEDS = ("Static detectors read `background: true` steps, which run "
+                     "beside the steps after them, as ordinary steps")
+_BOTH_FEEDS = (_GROUPS_FEEDS + "; `background: true` steps, which run beside the "
+               "steps after them, are read as ordinary steps")
+
+
+def parallel_steps_used_for(stats: Any) -> str:
+    """The Data sources "Used for" cell beside `parallel_steps_disclosure`,
+    naming what the repo actually uses: `parallel:` groups (any seen, malformed
+    and invalid included), `background: true` steps, or both. A repo with only
+    control steps keeps the group sentence. `verify_report` re-derives it."""
+    stats = stats if isinstance(stats, dict) else {}
+    groups = int(stats.get("groups") or 0)
+    bg = int(stats.get("background_steps") or 0)
+    if not bg:
+        return _GROUPS_FEEDS
+    return _BOTH_FEEDS if groups else _BACKGROUND_FEEDS
+
+
 def parallel_steps_disclosure(stats: Any) -> str | None:
     """The Data sources cell for the step walk, or None when nothing to say.
     The renderer calls this; `verify_report` re-derives the WHOLE cell with its

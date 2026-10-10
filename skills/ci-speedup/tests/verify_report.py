@@ -1350,6 +1350,20 @@ _VR_MALFORMED_KINDS = {
 }
 _VR_PARALLEL_STEPS_FEEDS = ("Static detectors read each step inside a `parallel:` group "
                             "as its own step")
+_VR_BACKGROUND_STEPS_FEEDS = ("Static detectors read `background: true` steps, which "
+                              "run beside the steps after them, as ordinary steps")
+_VR_BOTH_STEPS_FEEDS = (_VR_PARALLEL_STEPS_FEEDS + "; `background: true` steps, which "
+                        "run beside the steps after them, are read as ordinary steps")
+
+
+def _vr_parallel_steps_feeds(stamp: Any) -> str:
+    """The row's "Used for" cell, re-derived from the stamp (twin of
+    `workflow_steps.parallel_steps_used_for`): groups, background steps, or both."""
+    stamp = stamp if isinstance(stamp, dict) else {}
+    if not int(stamp.get("background_steps") or 0):
+        return _VR_PARALLEL_STEPS_FEEDS
+    return _VR_BOTH_STEPS_FEEDS if int(stamp.get("groups") or 0) else \
+        _VR_BACKGROUND_STEPS_FEEDS
 # What the step drill says only of a job whose steps run one after another.
 _VR_SEQUENTIAL_STEP_PHRASES = ("run **one after another**", "run one after another",
                                "they run in sequence and roughly add up",
@@ -1430,7 +1444,8 @@ def _parallel_steps_violation(report: str, findings_path: Path | None
     if row is None:
         return ("findings carry a `parallel_steps` stamp but the Data sources table "
                 "has no Parallel steps row"), ""
-    want = f"| Parallel steps | {_vr_parallel_steps_cell(stamp)} | {_VR_PARALLEL_STEPS_FEEDS} |"
+    want = (f"| Parallel steps | {_vr_parallel_steps_cell(stamp)} | "
+            f"{_vr_parallel_steps_feeds(stamp)} |")
     if row.strip() != want:
         return f"Parallel steps row is not the one the stamp derives: {row!r} != {want!r}", ""
     over = [r for key in ("jobs_with_groups", "jobs_with_background")
