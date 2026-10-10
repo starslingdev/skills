@@ -2606,6 +2606,37 @@ def test_opt77_promotes_measured_setup_consolidation():
     assert "required status check" in f["guardrail"]
 
 
+def _opt77_node_run(node_has_time: bool):
+    """`_opt77_run` with a `setup-node` step after checkout; when `node_has_time` is
+    False its start is the year-1 placeholder (no in-window time: 0s paid). When True
+    it sits in the window at checkout's end (an in-window, sub-second step)."""
+    run = _opt77_run()
+    for job in run:
+        steps = job["steps"]
+        end = steps[1]["completed_at"]
+        steps.insert(2, {"name": "Run actions/setup-node@v4", "number": 99,
+                         "started_at": end if node_has_time else "0001-01-01T00:00:00Z",
+                         "completed_at": end})
+    return run
+
+
+def test_opt77_evidence_omits_a_setup_step_with_no_time_in_any_run():
+    """A setup step with no in-window time in every sampled run adds 0s to the
+    measured prefix, so the evidence does not name it as part of what is re-paid."""
+    out = _opt77(jpr=[_opt77_node_run(False), _opt77_node_run(False)])
+    assert len(out) == 1, out
+    assert "setup-node" not in out[0]["evidence"], out[0]["evidence"]
+    assert "checkout" in out[0]["evidence"], out[0]["evidence"]
+
+
+def test_opt77_evidence_names_the_fullest_setup_prefix_seen():
+    """The first sampled run gave `setup-node` no time and a later one measured it:
+    the evidence names the fullest prefix, not the first run's."""
+    out = _opt77(jpr=[_opt77_node_run(False), _opt77_node_run(True)])
+    assert len(out) == 1, out
+    assert "setup-node" in out[0]["evidence"], out[0]["evidence"]
+
+
 def test_opt77_needs_at_least_three_independent_jobs():
     two = ("lint", "typecheck")
     assert _opt77(
@@ -9268,6 +9299,21 @@ def test_opt79_a_pole_finding_the_cascade_zeroed_is_demoted_to_an_uncredited_row
             ) in rendered
     assert vr._opt79_uncredited_rows_rendered(rendered, rows) == []
     assert rendered.isascii(), rendered
+
+
+def test_opt79_a_demoted_pole_row_keeps_its_excluded_runs_by_gate():
+    """The runs a pole finding set aside, per gate, stay on the uncredited row it is
+    demoted to; a finding that set none aside stamps none."""
+    f = _opt79_zeroed_pole()
+    f["cache_net_negative"]["excluded_runs_by_gate"] = {
+        "step_has_no_in_window_time": 2}
+    rows: list = []
+    cr._opt79_demote_uncredited_poles([f], rows)
+    assert rows[0].get("excluded_runs_by_gate") == {
+        "step_has_no_in_window_time": 2}, rows[0]
+    rows = []
+    cr._opt79_demote_uncredited_poles([_opt79_zeroed_pole()], rows)
+    assert "excluded_runs_by_gate" not in rows[0], rows[0]
 
 
 def test_opt79_a_pole_finding_off_the_merge_gating_spine_is_demoted():

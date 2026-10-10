@@ -9054,7 +9054,9 @@ def _detect_opt77_repeated_setup_across_small_jobs(
     present_per_run: list[set[str]] = []
     observed_runner: dict[str, set[str]] = {}
     observed_setup_sig: dict[str, set[tuple[str, ...]]] = {}
-    observed_setup_display: dict[str, tuple[str, ...]] = {}
+    # Per job, the setup identities some sampled run PAID (had an in-window span for):
+    # a run that skipped a setup step names fewer, so the union keeps the fullest.
+    observed_setup_paid: dict[str, set[str]] = {}
     # A display name carried by MORE THAN ONE job in a single run is not one job.
     # The usual cause is a matrix that declares a static `name:` (no ${{ matrix.* }}
     # in it), so every leg renders under that one name — which then resolves to
@@ -9094,9 +9096,8 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             observed_runner.setdefault(name, set()).add(
                 _occurrence_runner_label(job) or "")
             observed_setup_sig.setdefault(name, set()).add(sig)
-            # The fullest display seen: a run that skipped a setup step names fewer.
-            if len(shown) > len(observed_setup_display.get(name, ())):
-                observed_setup_display[name] = shown
+            observed_setup_paid.setdefault(name, set()).update(
+                _setup_step_identity(n) for n in shown)
         per_run.append(split)
         present_per_run.append(present)
 
@@ -9149,7 +9150,7 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                 setup_p50=round(setup_p50, 1), useful_p50=round(useful_p50, 1))
             continue
         candidates[name] = {"key": key, "runner": declared, "setup_sig": setup_sig,
-                            "setup_display": observed_setup_display.get(name, ()),
+                            "setup_paid": observed_setup_paid.get(name, set()),
                             "setup_p50": setup_p50, "useful_p50": useful_p50}
 
     # Group by runner AND by the setup prefix itself, never by runner alone. The
@@ -9378,13 +9379,18 @@ def _detect_opt77_repeated_setup_across_small_jobs(
         # Render the NORMALIZED identities, never one arbitrary member's names as
         # written. The group tolerates a version bump, so showing `setup-node@v4`
         # for a group that also contains `@v3` invites an agent to "make them
-        # match" by silently bumping the other job.
-        prefix_render = (" → ".join(setup_sig[:4])
-                         + ("…" if len(setup_sig) > 4 else ""))
+        # match" by silently bumping the other job. Only the identities some member
+        # paid for in some sampled run are named: a setup step with no in-window
+        # time in every run adds 0s to the measured prefix, so naming it would
+        # describe a step the seconds leave out.
+        paid = set().union(*(candidates[n]["setup_paid"] for n in names))
+        shown_sig = [i for i in setup_sig if i in paid] or list(setup_sig)
+        prefix_render = (" → ".join(shown_sig[:4])
+                         + ("…" if len(shown_sig) > 4 else ""))
         max_useful = max(float(candidates[n]["useful_p50"]) for n in names)
         evidence = (
             f"{n_jobs} independent same-runner (`{runner}`) jobs each re-pay the same "
-            f"measured setup prefix ({len(setup_sig)} step(s): {prefix_render}) "
+            f"measured setup prefix ({len(shown_sig)} step(s): {prefix_render}) "
             f"before at most {max_useful:.0f}s of useful work; the smallest "
             f"measured setup p50 across them is {setup_p50:.0f}s. Consolidating them "
             f"into one job removes {removed} setup payment(s) per run — "
@@ -20446,6 +20452,11 @@ def _opt79_demote_uncredited_poles(
             long_pole_p50_s=cn.get("long_pole_p50_s"),
             job_p50_s=cn.get("job_p50_s"), floor_p50_s=cn.get("floor_p50_s"),
             declares_pr=cn.get("declares_pull_request"))
+        # The runs set aside per gate travel with the row, carried explicitly: it is
+        # stamped only when non-empty, so it is not one of the required
+        # `_OPT79_STAMP_KEYS` the verifier checks for.
+        if cn.get("excluded_runs_by_gate"):
+            row["excluded_runs_by_gate"] = dict(cn["excluded_runs_by_gate"])
         if zeroed:
             row["uncredited_reason"] = _OPT79_REASON_ZEROED
             reasons = [
