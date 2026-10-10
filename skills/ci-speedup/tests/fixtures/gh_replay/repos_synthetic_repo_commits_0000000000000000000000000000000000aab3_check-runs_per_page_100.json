@@ -1,5 +1,5 @@
 {
-  "total_count": 4,
+  "total_count": 5,
   "check_runs": [
     {
       "name": "CI / test",
@@ -28,6 +28,13 @@
       "conclusion": "success",
       "started_at": "2026-06-25T12:00:00Z",
       "completed_at": "2026-06-25T12:01:36Z"
+    },
+    {
+      "name": "style",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-06-25T12:00:00Z",
+      "completed_at": "2026-06-25T12:01:32Z"
     }
   ]
 }

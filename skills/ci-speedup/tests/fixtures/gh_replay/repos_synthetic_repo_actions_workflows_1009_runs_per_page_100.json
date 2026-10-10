@@ -1,0 +1,47 @@
+{
+  "total_count": 3,
+  "workflow_runs": [
+    {
+      "id": 8503,
+      "event": "pull_request",
+      "head_sha": "0000000000000000000000000000000000aab3",
+      "head_branch": "chore/style-3",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-06-25T12:00:00Z",
+      "updated_at": "2026-06-25T12:01:32Z",
+      "run_started_at": "2026-06-25T12:00:00Z",
+      "head_repository": {
+        "full_name": "synthetic/repo"
+      }
+    },
+    {
+      "id": 8502,
+      "event": "pull_request",
+      "head_sha": "0000000000000000000000000000000000aab2",
+      "head_branch": "chore/style-2",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-06-25T11:00:00Z",
+      "updated_at": "2026-06-25T11:01:32Z",
+      "run_started_at": "2026-06-25T11:00:00Z",
+      "head_repository": {
+        "full_name": "synthetic/repo"
+      }
+    },
+    {
+      "id": 8501,
+      "event": "pull_request",
+      "head_sha": "0000000000000000000000000000000000aaaa",
+      "head_branch": "chore/style-1",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-06-25T10:00:00Z",
+      "updated_at": "2026-06-25T10:01:32Z",
+      "run_started_at": "2026-06-25T10:00:00Z",
+      "head_repository": {
+        "full_name": "synthetic/repo"
+      }
+    }
+  ]
+}
