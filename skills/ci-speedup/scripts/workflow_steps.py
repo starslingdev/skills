@@ -23,44 +23,54 @@ only place in this skill that knows the shape:
   * every LEAF step is returned once, in declaration order, with a group's
     children spliced in where the group stands (nested groups too — the docs do
     not address nesting, and reading more is the safe direction);
-  * control steps are skipped but counted, because they run nothing;
-  * each leaf is tagged `in_parallel_group` (with its top-level group's ordinal)
-    and `background`, so a reader whose rule depends on ORDER can tell two
-    siblings run at the same time rather than one after the other. Here
-    `background` is true for any child of a group (GitHub runs those as
-    background steps) and for `background: true` or the STRING "true";
-    ci-secure's walker tags only a literal `background: true`. The flag feeds
-    only order gates (OPT2, OPT79), never a rendered count;
+  * control steps are skipped but counted (a named one keeps its `name:` in
+    `control_names`), because they run nothing;
+  * each leaf is tagged `in_parallel_group`, `group` and `background`, so a
+    reader whose rule depends on ORDER can tell two siblings run at the same
+    time rather than one after the other. `group` is a running id shared by
+    every leaf under one top-level group (it is the `groups` count when that
+    group was entered, so it is not a 1-based ordinal of top-level groups), and
+    None for a step outside any group. `background` is true for any child of a
+    group (GitHub runs those as background steps) and for `background: true`
+    or a string "true" in any case;
   * each leaf carries `inherited_if`, the `if:` of the group(s) it sits in.
     GitHub documents no group-level `if:`; treating one as gating the group's
     children is an ASSUMPTION, made so a hygiene rule never calls a step
     "unconditional" when the author wrote a condition around it;
-  * a `parallel:` whose value is not a list, a list that contains itself
-    through a YAML alias (`steps: &s [{parallel: *s}]`), or a group nested
-    deeper than `WALK_MAX_DEPTH` (ci-secure's cap) is MALFORMED: its contents
-    are not read, and the walk counts it instead of treating the job as clean
-    (or recursing until Python gives up). A group holding an item that is not
-    a step mapping is counted malformed too (its readable children are read);
+  * a group is MALFORMED, its contents not read, when its `parallel:` value is
+    not a list (`not_a_list`), the list contains itself through a YAML alias
+    (`contains_itself`, e.g. `steps: &s [{parallel: *s}]`), or it is nested
+    more than `WALK_MAX_DEPTH` groups deep (`nested_too_deep`). A group holding
+    an item that is not a step mapping is malformed too (`non_mapping_step`;
+    its readable children are still read). Each kind is recorded in
+    `malformed_reasons` (`MALFORMED_KINDS` words it), and the walk counts the
+    group instead of treating the job as clean (or recursing until Python
+    gives up);
   * a list REUSED through YAML aliases is not a cycle and is read again at
     each use, so sibling groups aliasing one list double the leaves per level
     (40 levels is 2**40 leaves). The walk therefore reads at most
     `WALK_MAX_NODES` leaves and groups per job: on reaching it, the group it
-    was about to enter is counted MALFORMED and the walk stops, so the job is
-    a named coverage gap instead of a scan that never returns;
+    was about to enter is counted MALFORMED (`too_many_steps`) and the walk
+    stops, so the job is a named coverage gap instead of a scan that never
+    returns;
   * a `parallel:` on a step that also has `run:` or `uses:` (GitHub rejects
-    it) is INVALID: the step's own command is still a leaf, its children are
-    read anyway — the same verdict as if they were written flat — and the
-    group is counted so the scan names the job as a coverage gap.
+    it) is INVALID: the step's own command is still a leaf, and its children
+    are read as the group's children (tagged in-group), so an order-free
+    verdict such as the git-history check matches a flat read. The group is
+    counted under `invalid_*`, which the Data sources row names; it is not a
+    coverage gap, since its steps were read.
 
-The leaf/group/control/malformed/invalid semantics are written to match
-ci-score's `_walk_steps` (PR #120, skills/ci-score/scripts/practice_facts.py)
-so the two engines read one repository's steps the same way; the repo-root
-parity test pins the git-history verdicts that depend on it. The stats share
-ci-score's key names (`groups`, `steps_in_groups`, `control_steps`,
-`malformed_groups`/`_files`, `invalid_groups`/`_files`) and add three of their
-own (`malformed_jobs`, `invalid_jobs`, `jobs_with_groups`). One count differs:
-ci-score's `groups` counts only groups whose children were read, while here
-`groups` also counts malformed ones (it is the count of `parallel:` keys seen).
+The leaf/group/control/malformed/invalid semantics follow ci-score's
+`_walk_steps` from PR #120 (skills/ci-score/scripts/practice_facts.py, not yet
+on `main`) so the two engines read one repository's steps the same way; the
+repo-root parity test pins the git-history verdicts that depend on it. The
+stats share ci-score's key names (`groups`, `steps_in_groups`, `control_steps`,
+`malformed_groups`/`_files`, `invalid_groups`/`_files`) and add their own
+(`background_steps`, `malformed_jobs`, `malformed_reasons`, `invalid_jobs`,
+`jobs_with_groups`, `jobs_with_background`, `sequential_jobs`). One count
+differs: ci-score's `groups` counts only groups whose children were read, while
+here `groups` also counts malformed ones (it is the count of `parallel:` keys
+seen).
 
 The returned step mappings are the ORIGINAL objects from the parsed YAML (never
 copied or mutated), so a caller comparing by identity (`step is checkout_step`)
@@ -77,8 +87,10 @@ PARALLEL_KEY = "parallel"
 # A step carrying one of these keys and neither `run:` nor `uses:` is a control
 # step: it blocks on, or stops, a background step and runs no command itself.
 CONTROL_KEYS: tuple[str, ...] = ("wait", "wait-all", "cancel")
-# Groups nested deeper than this are counted malformed and not read — the same
-# cap as ci-secure's `_WALK_MAX_DEPTH`, so the engines agree on what is read.
+# Groups nested deeper than this are counted malformed and not read. ci-secure's
+# walker (PR #121) uses the same number in different units: it counts every
+# YAML node with `> 64`, this counts `parallel:` nesting with `>= 64`, so the
+# two do not promise to agree on what is read.
 WALK_MAX_DEPTH = 64
 # Leaves + groups one job's walk reads before it stops (see the module
 # docstring): far above any real job, far below an alias fan-out's 2**n.
@@ -102,7 +114,7 @@ class LeafStep:
     step: dict[str, Any]
     index: int                  # position among the job's leaf steps, 0-based
     in_parallel_group: bool
-    group: int | None           # ordinal of the enclosing top-level group
+    group: int | None           # running id shared under one top-level group
     background: bool            # `background: true`, or a child of a group
     # The enclosing groups' `if:` — undocumented by GitHub; inherited as an
     # assumption. Nested groups are AND-ed outermost first, `(outer) && (inner)`,

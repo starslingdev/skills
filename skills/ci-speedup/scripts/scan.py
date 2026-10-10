@@ -46,9 +46,9 @@ except ImportError:  # pragma: no cover — surfaced loudly if missing
     sys.exit(1)
 
 # The ONE reader for a job's `steps:` list (descends `parallel:` groups, skips
-# `wait:`/`wait-all:`/`cancel:` control steps). Loaded by file path when this
-# module is itself loaded by path (the repo-root parity test), so it never
-# depends on the caller's sys.path.
+# `wait:`/`wait-all:`/`cancel:` control steps). This directory goes first on
+# sys.path so `workflow_steps` imports even when scan.py is itself loaded by
+# file path (the repo-root parity test).
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workflow_steps import (  # noqa: E402

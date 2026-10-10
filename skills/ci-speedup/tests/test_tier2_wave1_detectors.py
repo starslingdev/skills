@@ -9974,6 +9974,18 @@ def test_opt79_withholds_a_cache_and_install_that_run_side_by_side():
     assert block is None and gate == "cache_and_install_run_in_the_same_parallel_group"
 
 
+def test_opt79_a_background_checkout_leaves_later_steps_racing_even_after_wait_all():
+    """T10: control steps are not surfaced to the leaf list, so a `wait-all:`
+    after a `background: true` checkout cannot clear the race: every later
+    step stays `racing` (fail closed: setup-node's package.json is unknown)."""
+    from workflow_steps import job_walk
+    job = {"steps": [{"uses": "actions/checkout@v4", "background": True},
+                     {"wait-all": None},
+                     {"uses": "actions/setup-node@v5"}]}
+    leaves = job_walk(job).leaves
+    assert cr._opt79_workspace_states(leaves) == ["none", "racing"]
+
+
 _OPT79_CACHE_STEP = {"uses": "actions/cache@v4",
                      "with": {"path": "node_modules",
                               "key": "node-modules-${{ hashFiles('**/package-lock.json') }}"}}

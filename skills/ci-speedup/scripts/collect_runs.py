@@ -6627,7 +6627,10 @@ def _decompose_job_steps(
     lever (sizing/evidence/audit would scale to one 23%-of-job step instead of the
     ~77% test phase), so comparable same-category steps are aggregated.
 
-    Returns None when there are no step timings. Otherwise a dict:
+    Returns None when there are no step timings, or when every timed step is a
+    control step (`wait` / `wait-all` / `cancel` or a named one): no step does
+    the work, so the WHOLE decomposition is dropped, not just the crown.
+    Otherwise a dict:
       dominant_step (the slowest step in the dominant category, OR an aggregate label
         "<step> + N more <cat> steps" when the category spans several comparable steps)
       dominant_category / dominant_p50 (the category aggregate) / dominant_share
@@ -6682,7 +6685,9 @@ def _decompose_job_steps(
     # `Title Check`: setup 5s out-aggregated the addressable `Install commitlint`
     # 4s). Boilerplate still counts toward `setup_build_s` / `redundant_ratio`
     # below — it's real cost — just not an addressable dominant lever. Fall back to
-    # the full set only when a job is ALL boilerplate (nothing else to crown).
+    # every NON-CONTROL step only when a job is ALL boilerplate (nothing else to
+    # crown); a control step (`_is_control_step_name`) only waits, so it is never
+    # in either set, and a job of nothing but control steps has no decomposition.
     sel = ([s for s in steps if not _NON_WORK_STEP_RE.match(s[0])
             and not _is_control_step_name(s[0])]
            or [s for s in steps if not _is_control_step_name(s[0])])
@@ -6722,9 +6727,10 @@ def _decompose_job_steps(
 def _dominant_category_lead(named_durs: "list[tuple[str, float]]") -> "tuple[str, float] | None":
     """The LEAD step (name, dur) of the dominant CATEGORY — the SAME crown
     `_decompose_job_steps` uses (the category with the largest non-boilerplate aggregate
-    p50, then its slowest step; boilerplate `_NON_WORK_STEP_RE` excluded; fall back to
-    the full set only when a job is all-boilerplate). Returns None when there are no
-    positive-duration steps.
+    p50, then its slowest step; boilerplate `_NON_WORK_STEP_RE` and control steps
+    excluded; fall back to every non-control step only when a job is
+    all-boilerplate). Returns None when there are no positive-duration steps, or
+    when only control steps remain.
 
     Single source of truth so the cross-run magnitude check (`_dominant_step_sample`) and
     the agent prompt validate/name the SAME step the structural decomposition crowns —
@@ -17895,7 +17901,10 @@ def _opt79_workspace_states(leaves: list[Any]) -> list[str]:
     wait). A checkout that may still be running beside the step (a sibling in
     its own group, or a top-level `background: true` checkout before it) leaves
     the workspace unknown, returned as `racing` (never `root`), so setup-node's
-    package.json read fails closed rather than trusting declaration order."""
+    package.json read fails closed rather than trusting declaration order. A
+    background checkout leaves EVERY later step racing, even after a
+    `wait-all:`: control steps are not in the leaf list, so the wait that would
+    end the race cannot be seen."""
     states: list[str] = []
     done = "none"
     racing_bg = False
@@ -18021,7 +18030,8 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
     jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
     spec = jobs.get(key) if isinstance(jobs, dict) else None
     # Leaf steps, children of `parallel:` groups included; `groups[i]` is the
-    # group a step runs in (None when it runs in sequence).
+    # id of the group a step runs in (None when it is not inside a `parallel:`
+    # group).
     walk = job_walk(spec)
     if walk.malformed_groups:
         # Some steps were never read (a malformed `parallel:` group), so "no
@@ -19688,11 +19698,13 @@ def _opt79_pole_finding(
 # Setup/teardown step names that are NOT the load-bearing work, so they don't get
 # picked as a pole's "dominant step" for the generic cross-run check.
 # GitHub Actions parallel-step CONTROL steps (`wait:`, `wait-all:`, `cancel:`,
-# and the implicit wait GitHub may render for a group) run nothing: a `wait`
-# step's duration is time spent BLOCKED on background steps. How the jobs API
-# records overlapping steps has not been probed yet, so this is a guard only —
-# such a step is never crowned the dominant step. (`Wait for deployment` is
-# work and stays eligible: only the exact control names match.)
+# and the implicit wait GitHub may render for a group, matched by a name that
+# STARTS "Wait for all background steps") run nothing: a `wait` step's duration
+# is time spent BLOCKED on background steps. How the jobs API records
+# overlapping steps has not been probed yet, so this is a guard only — such a
+# step is never crowned the dominant step. (`Wait for deployment` is work and
+# stays eligible: only these names, and the repo's own named control steps
+# below, match.)
 _CONTROL_STEP_NAME_RE = _re.compile(
     r"^(?:(?:wait|wait-all|cancel)\s*$|wait for all background steps)",
     _re.IGNORECASE)

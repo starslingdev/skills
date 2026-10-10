@@ -6337,8 +6337,8 @@ _OPT79_HELD_BACK_REASONS: dict[str, str] = {
         "group, so the restore does not happen before the install",
     "cache_restore_runs_in_a_parallel_group_or_background":
         "the cache restore runs side by side with other steps (in a parallel "
-        "step group or in the background), so its time does not simply add "
-        "to the install's and could not be priced",
+        "step group or in the background), so restore-then-install is not one "
+        "sequential block and its saving could not be priced",
     "install_runs_in_a_parallel_group_or_background":
         "the install runs side by side with other steps (in a parallel step "
         "group or in the background), so its time does not simply follow the "

@@ -1463,23 +1463,25 @@ steps:
   GitHub publishes no minimum runner version for the feature itself. The syntax is documented for
   github.com and GitHub Enterprise Cloud; GitHub Enterprise Server's docs do not
   carry it, so do not use it there.
-- **Limits.** At most 10 background steps run at once in a job (more queue for
-  a free slot), and `parallel:` / `background:` cannot be used inside a
-  composite action.
+- **Limits.** At most 10 background steps run at once in a job, and
+  `parallel:` / `background:` cannot be used inside a composite action.
 - **Keep a verifying check waited on.** Run a check that must gate the job in a
   `parallel:` group (or cover it with `wait-all:`); never as a bare
-  `background:` step that no wait covers, and never with `continue-on-error`.
+  `background:` step that later steps do not wait on: the job still fails at
+  the implicit wait before cleanup, but a deploy or publish after it can run
+  before the check finishes. And never with `continue-on-error`.
 
 **What the audit does and does not see in a group (known limits).** The static
-detectors read a group's children in declaration order. Apart from OPT79's (and
-OPT2's) sibling and background gates, none reasons about the children running
-at once. OPT77's setup fingerprint adds up setup seconds that may overlap inside
-a group, so it can overstate. Run timing (the step-sum p50 and the step
-timeline) is unchanged and still lays steps end to end; fixing that needs a
-live probe of how GitHub records overlapping steps. Until that probe, OPT79
-holds back a cache restore that runs in a group or in the background
-(`cache_restore_runs_in_a_parallel_group_or_background`), and the pole drill
-says when a pole job has a group whose step times overlap.
+detectors read a group's children in declaration order; the order-aware ones
+(OPT2, OPT5, OPT12, OPT79) use the group and background tags. OPT77's setup
+fingerprint adds up setup seconds that may overlap inside a group, so it can
+overstate. Run timing (the step-sum p50 and the step timeline) is unchanged and
+still lays steps end to end; fixing that needs a live probe of how GitHub
+records overlapping steps. Until that probe, OPT79 holds back a cache whose
+restore or install runs in a group or in the background, OPT24 and the
+long-pole lever hold back a saving priced from a step that runs side by side
+(`dominant_step_runs_inside_a_parallel_group`), and the pole drill says when a
+pole job's step times overlap.
 
 **Failure-isolation cost (a real cost, not a footnote)**: N separate checks give
 N independently-red checks and N independently re-runnable units. One
@@ -1587,7 +1589,7 @@ grep -rn 'sleep [0-9]' .github/workflows/
 grep -rn 'sleep [0-9]' docker-compose*.yml
 ```
 
-**Fix**: Add healthchecks to `docker-compose.yml` services and use `--wait` flag with `docker compose up`. Starting the service as a `background: true` step and stopping it with a `cancel:` step is a native pattern for a service the job runs itself (self-hosted runners: 2.336.0 or later; OPT77's fix covers the runner requirement), but it does not make the service ready: the steps that use it still need a readiness probe, not a fixed `sleep`.
+**Fix**: Add healthchecks to `docker-compose.yml` services and use `--wait` flag with `docker compose up`. Starting the service as a `background: true` step and stopping it with a `cancel:` step is a native pattern for a service the job runs itself (the `cancel:` is needed because the job waits for every background step before cleanup, so a service that never exits would hold the job open) (self-hosted runners: 2.336.0 or later; OPT77's fix covers the runner requirement), but it does not make the service ready: the steps that use it still need a readiness probe, not a fixed `sleep`.
 
 **Real-world example (better-auth)**: PR #8010 replaced `sleep 10` with Docker healthchecks across all adapter integration jobs.
 
@@ -4703,11 +4705,14 @@ title_template: "The long pole's time is one addressable step — speed it up or
   new check name appears, so no required-check edit is needed. Treat steps as
   independent only when all four hold:
   1. no sibling reads any file or output another sibling produces (not only
-     what it writes to `GITHUB_ENV`, `GITHUB_OUTPUT` or `GITHUB_PATH`);
+     what it writes to `GITHUB_ENV`, `GITHUB_OUTPUT` or `GITHUB_PATH`); a
+     background step's outputs reach later steps only after a wait that
+     covers it;
   2. no two siblings write the same cache, lockfile or build-output directory;
   3. the runner has the memory and CPU for them all at once;
-  4. no sibling relies on another having succeeded first. The default
-     `if: success()` ordering disappears inside a group, so never put a deploy,
+  4. no sibling relies on another having succeeded first. Siblings start
+     together, so none waits for another's result: the default `if: success()`
+     ordering disappears inside a group, so never put a deploy,
      upload, publish or any other step with side effects in a group with the
      check that should gate it.
 
