@@ -9513,8 +9513,13 @@ def _opt80_checkout_step(job_spec: dict[str, Any],
     what the recipe below configures."""
     if not isinstance(job_spec.get("steps"), list):
         return "job_declares_no_steps"
+    walk = job_walk(job_spec)
+    if walk.malformed_groups:
+        # A checkout inside the unread group cannot be ruled out (nor its
+        # settings read): never "no checkout step".
+        return "job_has_an_unreadable_parallel_group"
     found: list[tuple[str, str, str, dict[str, Any]]] = []
-    for step in job_walk(job_spec).steps():
+    for step in walk.steps():
         uses = str(step.get("uses") or "").strip()
         if not uses:
             continue
@@ -17674,6 +17679,7 @@ _OPT79_NOT_A_CANDIDATE_GATES = frozenset({"job_has_no_yaml_steps",
 # Candidates held back BEFORE any log is read: the job's YAML shows a cache, and
 # the job then falls out on its shape, runner, or the per-workflow probe budget.
 _OPT79_EARLY_HELD_BACK_GATES = frozenset({
+    "job_has_an_unreadable_parallel_group",
     "cache_is_saved_by_a_separate_step",
     "setup_cache_input_is_an_unevaluated_expression",
     "job_declares_more_than_one_cache_restore_step",
@@ -17951,6 +17957,8 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
     Fail-closed at each of the following, each its own gate so a zero firing
     rate is attributable:
 
+      * `job_has_an_unreadable_parallel_group` — a malformed `parallel:` group's
+        steps were never read, so no absence below can be known.
       * `job_has_no_yaml_steps` — nothing to read the block from.
       * `cache_is_saved_by_a_separate_step` — an `actions/cache/save` step. Its
         save runs on the miss path but is not the restore's post phase, so the
@@ -18014,7 +18022,13 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
     spec = jobs.get(key) if isinstance(jobs, dict) else None
     # Leaf steps, children of `parallel:` groups included; `groups[i]` is the
     # group a step runs in (None when it runs in sequence).
-    leaves = job_walk(spec).leaves
+    walk = job_walk(spec)
+    if walk.malformed_groups:
+        # Some steps were never read (a malformed `parallel:` group), so "no
+        # cache", "no install after it" or "no steps" cannot be known: held
+        # back with the scan's reason, never an absence verdict.
+        return None, "job_has_an_unreadable_parallel_group"
+    leaves = walk.leaves
     steps = [lf.step for lf in leaves]
     groups = [lf.group for lf in leaves]
     if not steps:

@@ -10066,6 +10066,27 @@ def test_non_work_step_pattern_is_identical_in_collector_and_renderer():
     assert cr._NON_WORK_STEP_RE.flags == bp._NON_WORK_STEP_RE.flags
 
 
+@pytest.mark.parametrize("steps", [
+    ({"parallel": {"uses": "actions/checkout@v4"}},),
+    ({"uses": "actions/checkout@v4"}, dict(_OPT79_NODE_CACHE), {"parallel": "npm ci"},
+     {"run": "npm ci"}),
+])
+def test_a_job_with_an_unreadable_group_is_held_back_not_called_empty(steps):
+    """S17/S1: the steps inside a malformed `parallel:` group were never read,
+    so "the job has no YAML steps" / "no checkout step" / "no install after the
+    cache" may all be false. OPT79 holds the candidate back, and OPT80 records
+    the same reason, rather than an absence verdict."""
+    wf = _opt79_steps(*steps)
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None and gate == "job_has_an_unreadable_parallel_group", gate
+    assert gate in cr._OPT79_EARLY_HELD_BACK_GATES
+    phrase = bp._OPT79_HELD_BACK_REASONS.get(gate)
+    assert phrase and "_" not in phrase, phrase
+    assert _load_verify_report_for_opt79()._VR_OPT79_HELD_BACK_REASONS.get(gate) == phrase
+    got = cr._opt80_checkout_step(wf["jobs"][_OPT79_JOB], None)
+    assert got == "job_has_an_unreadable_parallel_group", got
+
+
 def test_a_control_step_only_job_never_crashes_the_yaml_readers():
     """`wait:` / `wait-all:` / `cancel:` steps carry no `run:`/`uses:`."""
     wf = _opt79_steps({"wait-all": None}, {"cancel": "db"}, {"wait": ["a", "b"]})

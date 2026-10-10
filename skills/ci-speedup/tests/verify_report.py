@@ -758,6 +758,9 @@ _VR_OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 # A recorded gate with no phrase FAILS the check: the report may never print a
 # raw gate name, and a fallback here would let it.
 _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
+    "job_has_an_unreadable_parallel_group":
+        "some of the job's steps sit in a parallel step group that could not be "
+        "read, so whether a cache feeds an install could not be told",
     "cache_is_saved_by_a_separate_step":
         "the cache is saved by its own separate step, so one restore-and-save "
         "measurement can't cover it",

@@ -6308,6 +6308,9 @@ def _opt79_uncredited_row_is_renderable(r: Any) -> bool:
 # checker) and a test pins the two equal and complete. An unmapped gate renders
 # the shared fallback phrase and FAILS `verify_report`: a code is never printed.
 _OPT79_HELD_BACK_REASONS: dict[str, str] = {
+    "job_has_an_unreadable_parallel_group":
+        "some of the job's steps sit in a parallel step group that could not be "
+        "read, so whether a cache feeds an install could not be told",
     # held back before any log was read
     "cache_is_saved_by_a_separate_step":
         "the cache is saved by its own separate step, so one restore-and-save "
