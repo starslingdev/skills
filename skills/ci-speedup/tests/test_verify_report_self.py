@@ -11852,10 +11852,11 @@ def test_pole_omitted_steps_line_names_steps_timed_in_only_some_runs(tmp_path: P
     that leaves it out FAILs."""
     doc = _omitted_doc(skipped_steps=2, partially_measured_steps=1)
     plain = "(2 declared step(s) skipped on every sampled run are not timed here)"
-    full = plain[:-1] + "; 1 step(s) were timed in only some sampled runs)"
+    full = plain[:-1] + ("; 1 step(s) were timed in some sampled runs and skipped or "
+                         "untimeable in others)")
     assert _run_omitted_check(tmp_path, full, doc).ok
     assert not _run_omitted_check(tmp_path, plain, doc).ok
-    only = "(1 step(s) were timed in only some sampled runs)"
+    only = "(1 step(s) were timed in some sampled runs and skipped or untimeable in others)"
     assert _run_omitted_check(tmp_path, only, _omitted_doc(partially_measured_steps=1)).ok
     assert not _run_omitted_check(tmp_path, None, _omitted_doc(partially_measured_steps=1)).ok
 

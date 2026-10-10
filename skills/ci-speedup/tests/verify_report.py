@@ -11640,15 +11640,18 @@ def check_stamped_decomposition_within_job(findings_path: Path | None) -> Check:
 # --- The omitted-steps line on a pole's step list ----------------------------------------
 # A pole's step list leaves out the declared steps GitHub skipped on every sampled run
 # (`skipped_steps`), those with no usable time (`unmeasured_steps`) and, for a job whose
-# every step was dropped, all of them (`step_decomposition_reason`); it times steps
-# measured in only some runs from those runs (`partially_measured_steps`) and steps that
+# every step was dropped, all of them (`step_decomposition_reason`); it times a step
+# timed in some sampled runs and skipped or untimeable in others it appeared in from the
+# runs that timed it (`partially_measured_steps`; a step absent from a run's step list is
+# not counted) and steps that
 # ran past the job's end only up to it (`trimmed_steps`). The renderer says so in one line
 # (`blocking_path._omitted_steps_note`, of which `_vr_omitted_steps_note` is the verbatim
 # twin, pinned by `test_omitted_steps_line_twin_matches_the_renderer`).
 _VR_NO_STEP_MEASURED_REASON = "no_step_measured_in_sample"
 _VR_OMITTED_LINE_RE = re.compile(
     r"^(?:\(\d+ declared step\(s\) |"
-    r"\(\d+ step\(s\) (?:ran past the job's end|were timed in only some sampled runs)|"
+    r"\(\d+ step\(s\) (?:ran past the job's end|"
+    r"were timed in some sampled runs and skipped or untimeable in others)|"
     r"No step could be measured: )")
 
 
@@ -11672,7 +11675,8 @@ def _vr_omitted_steps_note(pole: dict) -> str | None:
     if parts:
         out.append(" and ".join(parts) + " are not timed here")
     if pm:
-        out.append(f"{pm} step(s) were timed in only some sampled runs")
+        out.append(f"{pm} step(s) were timed in some sampled runs and skipped "
+                   "or untimeable in others")
     if tr:
         out.append(f"{tr} step(s) ran past the job's end in some run and are timed only "
                    "up to it")

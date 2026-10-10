@@ -23,9 +23,10 @@ job. These tests pin the rule every step-timing reader shares:
   - the per-run timeline the report draws applies the same rule, and keeps a
     skipped step whose timestamps sit inside the job in its place at 0s;
   - every skipped or untimeable declared step left out is counted
-    (`skipped_steps`, `unmeasured_steps`), a step measured in only some runs is
-    counted (`partially_measured_steps`), each drop is logged at DEBUG, and the
-    counts are named in one line on the pole (a step that measured 0s in every
+    (`skipped_steps`, `unmeasured_steps`), a step timed in some runs and skipped
+    or untimeable in others it appeared in is counted
+    (`partially_measured_steps`), each drop is logged at DEBUG, and the counts
+    are named in one line on the pole (a step that measured 0s in every
     run it ran in took no time and is in no count);
   - a step that only carries the sentinel can never become a cluster finding.
 
@@ -38,6 +39,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -676,10 +678,12 @@ def test_a_step_skipped_in_one_run_and_untimed_in_another_is_not_called_skipped(
 def test_pole_note_names_steps_timed_in_only_some_runs():
     pole = dict(_POLE, skipped_steps=0, partially_measured_steps=1)
     lines = _bp()._pole_waterfall(pole, leaf=None, timeline=None, log_present=False)
-    assert "(1 step(s) were timed in only some sampled runs)" in lines, lines
+    assert ("(1 step(s) were timed in some sampled runs and skipped or "
+            "untimeable in others)") in lines, lines
     pole = dict(_POLE, skipped_steps=2, unmeasured_steps=1, partially_measured_steps=1)
     lines = _bp()._pole_waterfall(pole, leaf=None, timeline=None, log_present=False)
-    assert (_NOTE[:-1] + "; 1 step(s) were timed in only some sampled runs)") in lines, lines
+    assert (_NOTE[:-1] + "; 1 step(s) were timed in some sampled runs and skipped "
+            "or untimeable in others)") in lines, lines
 
 
 def test_step_trimmed_to_nothing_has_no_span_and_counts_as_unmeasured():
@@ -689,3 +693,34 @@ def test_step_trimmed_to_nothing_has_no_span_and_counts_as_unmeasured():
     d = cr._decompose_job_steps([_late_job(i) for i in range(1, 4)])
     assert d is not None
     assert d.get("unmeasured_steps") == 1 and "trimmed_steps" not in d, d
+
+
+def test_all_dropped_pole_shows_step_scaled_level_as_shares_without_seconds():
+    """A drill level scaled to the step's wall (`scale_to_step`, the istanbul-style
+    summed-worker phases) has no wall to scale to when no step was measured. Its raw
+    values are summed across workers, so printing them as seconds would overstate the
+    job, and the stock header ("the step's wall … apportioned by share") would describe
+    seconds the drill never had. It shows shares only, under a header that says so."""
+    leaf = {"unit_label": "slowest packages", "search": [],
+            "deeper": [{"header": "pkgs", "blocker_note": "", "pct_of": "max",
+                        "rows": [("pkg-a", 300.0, "5m 0s"), ("pkg-b", 120.0, "2m 0s")]},
+                       {"header": "Level 4 — the step's wall split by each phase's share "
+                                  "(these seconds are the wall apportioned by share, not "
+                                  "measured directly)",
+                        "rows": [("transform + import", 900.0, None),
+                                 ("actual test assertions", 100.0, None)],
+                        "blocker_note": "BIGGEST LEVER", "pct_of": "sum",
+                        "scale_to_step": True}]}
+    lines = _bp()._pole_waterfall(_dropped_pole(), leaf=leaf, timeline=None,
+                                  log_present=True)
+    text = "\n".join(lines)
+    assert "apportioned by share" not in text, text
+    hdr = [ln for ln in lines if ln.startswith("   ▼ Level 4")]
+    assert hdr and "unknown" in hdr[0] and "without seconds" in hdr[0], lines
+    rows = [ln for ln in lines if "transform + import" in ln
+            or "actual test assertions" in ln]
+    assert len(rows) == 2 and "90%" in rows[0] and "10%" in rows[1], rows
+    # No duration on the share-only rows (raw summed-worker 900s would read as 15m 0s).
+    assert not [r for r in rows if re.search(r"\d+m \d+s|\b\d+s\b", r)], rows
+    # The level above it (not scaled to the step) keeps its seconds.
+    assert any("pkg-a" in ln and "5m 0s" in ln for ln in lines), lines

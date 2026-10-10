@@ -3962,8 +3962,9 @@ def _omitted_steps_note(pole: dict[str, Any]) -> str | None:
     """The one line a pole's step list carries when declared steps are left out of it:
     `skipped_steps` (GitHub skipped them on every sampled run), `unmeasured_steps` (not
     skipped, but no usable time: a placeholder start, a start outside the job, reversed
-    or unparseable timestamps), `partially_measured_steps` (timed only from the runs
-    that measured them) and `trimmed_steps` (timed only up to the job's end). For
+    or unparseable timestamps), `partially_measured_steps` (timed in some sampled runs
+    and skipped or untimeable in others it appeared in, so timed only from the runs
+    that measured them; a step absent from a run's step list is not counted) and `trimmed_steps` (timed only up to the job's end). For
     a pole whose every step was dropped, the "no step could be measured" line. None when
     nothing is left out. `verify_report._vr_omitted_steps_note` is its verbatim twin."""
     def _n(key: str) -> int:
@@ -3984,7 +3985,8 @@ def _omitted_steps_note(pole: dict[str, Any]) -> str | None:
     if parts:
         out.append(" and ".join(parts) + " are not timed here")
     if pm:
-        out.append(f"{pm} step(s) were timed in only some sampled runs")
+        out.append(f"{pm} step(s) were timed in some sampled runs and skipped "
+                   "or untimeable in others")
     if tr:
         out.append(f"{tr} step(s) ran past the job's end in some run and are timed only "
                    "up to it")
@@ -4276,8 +4278,18 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
     # above it in the bars).
     if steps_dropped:
         # No step was measured, so there is no step row to hang the drill off: the
-        # log drill is headed by the job itself, and a level scaled to the step's wall
-        # stays unscaled (that wall is unknown).
+        # log drill is headed by the job itself. A level scaled to the step's wall has
+        # no wall to scale to, and its raw values are summed across workers (they
+        # exceed any wall), so it shows shares only, without seconds, under a header
+        # that says why. Copies, so the shared leaf keeps its stock header and rows.
+        deeper = [dict(lvl) for lvl in deeper]
+        for lvl in deeper:
+            if lvl.get("scale_to_secs") is None and lvl.get("scale_to_step"):
+                _lvl_no = str(lvl.get("header", "")).split(" — ", 1)[0] or "Level 4"
+                lvl["header"] = (f"{_lvl_no} — each phase's share of the summed worker "
+                                 "time; the step's own time is unknown (no step was "
+                                 "measured), so the shares are shown without seconds")
+                lvl["rows"] = [(lb, s, "") for lb, s, _d in lvl["rows"]]
         deeper[0]["header"] = f"Level 3 — inside this job's log: {leaf['unit_label']}"
         lines += ["", f"   ▼ {deeper[0]['header']}", ""]
     else:

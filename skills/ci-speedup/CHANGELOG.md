@@ -1010,17 +1010,24 @@ unversioned and updates by reinstall from `main`.
   runs: those GitHub skipped on every sampled run they appeared in
   (`skipped_steps`), those never measured with no usable time in some run
   (`unmeasured_steps`; a step skipped in one run and untimeable in another
-  counts here, not as skipped), those measured in only some runs, whose figure
-  comes from those runs (`partially_measured_steps`), and those timed only up
-  to the job's end (`trimmed_steps`), each stamped only when non-zero. A step
-  that measured 0s in every run it ran in took no time and is in no count. The
-  pole's step list in the report says so in one line (for example "2 declared
-  step(s) skipped on every sampled run and 1 with no usable time are not timed
-  here; 1 step(s) were timed in only some sampled runs"). A job whose every step
-  was dropped now says "No step could be measured: N skipped, M with no usable
-  time" instead of quietly having no step breakdown, and the coverage-gap,
-  LLM-analysis and catalog pointers, the `--log` hint and any log drill still
-  follow that line. The per-run step timeline the report draws keeps a
+  counts here, not as skipped), those timed in some sampled runs and skipped
+  or untimeable in others they appeared in, whose figure comes from the runs
+  that timed them (`partially_measured_steps`; a step missing from some runs'
+  step lists is not counted), and those timed only up to the job's end
+  (`trimmed_steps`), each stamped only when non-zero. A step that measured 0s
+  in every run it ran in took no time and is in no count. The pole's step list
+  in the report says so in one line (for example "2 declared step(s) skipped
+  on every sampled run and 1 with no usable time are not timed here; 1 step(s)
+  were timed in some sampled runs and skipped or untimeable in others"). A job
+  whose every step was dropped now says "No step could be measured: N skipped,
+  M with no usable time" instead of quietly having no step breakdown, and the
+  coverage-gap, LLM-analysis and catalog pointers, the `--log` hint and any
+  log drill still follow that line. In that log drill, a level that splits the
+  step's time by each phase's share of summed worker time (the vitest coverage
+  compile/test split) shows the shares without seconds, under a header saying
+  the step's own time is unknown, instead of printing the summed worker
+  seconds as if they were the step's time.
+  The per-run step timeline the report draws keeps a
   skipped step in its place at 0s and drops one with no usable time. A
   repeated-setup (OPT77) finding no longer names a setup step that had no time
   in every sampled run while adding 0s for it. The cross-run check on a pole's
