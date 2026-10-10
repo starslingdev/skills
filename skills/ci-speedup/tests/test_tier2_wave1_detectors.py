@@ -2606,6 +2606,37 @@ def test_opt77_promotes_measured_setup_consolidation():
     assert "required status check" in f["guardrail"]
 
 
+def _opt77_node_run(node_has_time: bool):
+    """`_opt77_run` with a `setup-node` step after checkout; when `node_has_time` is
+    False its start is the year-1 placeholder (no in-window time: 0s paid). When True
+    it sits in the window at checkout's end (an in-window, sub-second step)."""
+    run = _opt77_run()
+    for job in run:
+        steps = job["steps"]
+        end = steps[1]["completed_at"]
+        steps.insert(2, {"name": "Run actions/setup-node@v4", "number": 99,
+                         "started_at": end if node_has_time else "0001-01-01T00:00:00Z",
+                         "completed_at": end})
+    return run
+
+
+def test_opt77_evidence_omits_a_setup_step_with_no_time_in_any_run():
+    """A setup step with no in-window time in every sampled run adds 0s to the
+    measured prefix, so the evidence does not name it as part of what is re-paid."""
+    out = _opt77(jpr=[_opt77_node_run(False), _opt77_node_run(False)])
+    assert len(out) == 1, out
+    assert "setup-node" not in out[0]["evidence"], out[0]["evidence"]
+    assert "checkout" in out[0]["evidence"], out[0]["evidence"]
+
+
+def test_opt77_evidence_names_the_fullest_setup_prefix_seen():
+    """The first sampled run gave `setup-node` no time and a later one measured it:
+    the evidence names the fullest prefix, not the first run's."""
+    out = _opt77(jpr=[_opt77_node_run(False), _opt77_node_run(True)])
+    assert len(out) == 1, out
+    assert "setup-node" in out[0]["evidence"], out[0]["evidence"]
+
+
 def test_opt77_needs_at_least_three_independent_jobs():
     two = ("lint", "typecheck")
     assert _opt77(
@@ -3169,6 +3200,20 @@ def test_leading_setup_prefix_counts_only_the_leading_run():
     sig, _shown, total = cr._leading_setup_prefix(job)
     assert total == 15.0, total
     assert list(sig) == ["set up job", "actions/checkout"], sig
+
+
+def test_leading_setup_prefix_skips_a_year_one_skipped_setup_step():
+    """A setup step GitHub skipped carries `started_at: 0001-01-01T00:00:00Z`. It
+    stays in the prefix's SHAPE (the job declares it) but adds no seconds: read as a
+    duration it would price the prefix at ~63.9 billion seconds."""
+    job = _jitter_job("lint", [
+        ("Set up job", 2.0), ("Run actions/setup-node@v4", 0.0),
+        ("Run actions/checkout@v4", 3.0), ("Run tests", 5.0)])
+    job["steps"][1]["conclusion"] = "skipped"
+    job["steps"][1]["started_at"] = "0001-01-01T00:00:00Z"
+    sig, _shown, total = cr._leading_setup_prefix(job)
+    assert list(sig) == ["set up job", "actions/setup-node", "actions/checkout"], sig
+    assert total == 5.0, total
 
 
 def test_opt77_prefix_of_purely_human_authored_names_is_not_evidence():
@@ -6472,6 +6517,55 @@ def test_opt79_withholds_a_step_whose_timestamps_do_not_parse():
     assert out == []
 
 
+def _opt79_sentinel_restore(run_jobs: list) -> None:
+    for st in run_jobs[0]["steps"]:
+        if st["name"] == "Run actions/cache@v4":
+            st["started_at"] = "0001-01-01T00:00:00Z"
+
+
+def test_opt79_withholds_a_restore_step_with_a_placeholder_start():
+    """A restore step GitHub did not skip, stamped with the year-1 placeholder
+    start, has no in-window time: the occurrence is withheld under its own gate,
+    never read as a 63.9-billion-second (or 0s) restore."""
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr[:2]:
+        _opt79_sentinel_restore(run_jobs)
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("step_has_no_in_window_time") == 2, w
+    assert out == []
+
+
+def test_opt79_names_step_times_when_they_thin_the_population():
+    """When runs set aside for step times that did not measure are what left too
+    few hits, the withhold says so, not that the logs could not tell a hit from
+    a miss."""
+    jpr, logs = _opt79_sample(hits=4, misses=4)
+    for run_jobs in jpr[:4]:
+        _opt79_sentinel_restore(run_jobs)
+    withheld_candidates: list = []
+    w: dict = {}
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), _opt79_wf(), 100, 0,
+        logs_by_job_id=logs, withheld=w, withheld_candidates=withheld_candidates)
+    assert out == []
+    assert w.get("population_truncated_by_unmeasurable_step_times") == 1, w
+    assert w.get("population_truncated_by_excluded_runs") is None, w
+    assert [c["gate"] for c in withheld_candidates] == [
+        "population_truncated_by_unmeasurable_step_times"]
+
+
+def test_opt79_stamps_the_runs_it_set_aside_per_gate():
+    """A surviving population thinned on one side is auditable from the stamp."""
+    jpr, logs = _opt79_sample(hits=5, misses=4)
+    _opt79_sentinel_restore(jpr[0])
+    out, _w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert len(out) == 1, _w
+    cn = out[0]["cache_net_negative"]
+    assert cn.get("excluded_runs_by_gate") == {"step_has_no_in_window_time": 1}, cn
+    out, _w = _opt79_withheld()
+    assert "excluded_runs_by_gate" not in out[0]["cache_net_negative"]
+
+
 def test_opt79_classifies_only_occurrences_that_succeeded():
     """`actions/cache` saves in a post step that runs only on success, so a
     failed occurrence's miss path is missing its save — a shorter miss path
@@ -6867,9 +6961,9 @@ _OPT80_WIDE = (_dt.datetime(2026, 6, 1, 0, 0, 0, tzinfo=_dt.timezone.utc),
                _dt.datetime(2026, 6, 1, 23, 59, 0, tzinfo=_dt.timezone.utc))
 
 
-def _opt80_stamp(offset):
+def _opt80_stamp(offset, day="2026-06-01"):
     m, s = divmod(int(offset), 60)
-    return f"2026-06-01T00:{m:02d}:{s:02d}Z"
+    return f"{day}T00:{m:02d}:{s:02d}Z"
 
 
 def _opt80_job(job_id, checkout_s, runner="ubuntu-latest", name="build",
@@ -6880,15 +6974,17 @@ def _opt80_job(job_id, checkout_s, runner="ubuntu-latest", name="build",
     `started_at` is the job's own clock time (an ISO stamp). It defaults to the
     same instant for every job, which is what most cases want; the probe-order
     case passes distinct values, because ordering is only observable when the
-    jobs do not all start together."""
+    jobs do not all start together. The steps run inside that job's own window,
+    as they do in the jobs API (a step that starts before its job is not timed)."""
+    day = (started_at or "2026-06-01")[:10]
     t = 0.0
     steps = []
     for step_name, dur in (("Set up job", 1.0),
                            (checkout_step, float(checkout_s)),
                            ("Run tests", float(work_s))):
         steps.append({"name": step_name, "number": len(steps) + 1,
-                      "started_at": _opt80_stamp(t),
-                      "completed_at": _opt80_stamp(t + dur)})
+                      "started_at": _opt80_stamp(t, day),
+                      "completed_at": _opt80_stamp(t + dur, day)})
         t += dur
     return {
         "id": job_id,
@@ -6896,7 +6992,7 @@ def _opt80_job(job_id, checkout_s, runner="ubuntu-latest", name="build",
         "status": "completed",
         "conclusion": "success",
         "started_at": started_at or _opt80_stamp(0),
-        "completed_at": _opt80_stamp(t),
+        "completed_at": _opt80_stamp(t, day),
         "labels": [runner],
         "html_url": f"https://github.com/acme/app/actions/runs/{job_id}/job/{job_id}",
         "steps": steps,
@@ -7427,7 +7523,9 @@ def test_opt80_probes_the_newest_tail_runs_first():
     runs += [[_opt80_job(8200 + d, 120.0,
                          started_at=f"2026-06-{10 + d:02d}T00:00:00Z")]
              for d in order]
-    logs = {r[0]["id"]: _OPT80_STALLED_LOG for r in runs}
+    # Each job's log is stamped on that job's own day, inside its checkout step.
+    logs = {r[0]["id"]: _OPT80_STALLED_LOG.replace("2026-06-01", r[0]["started_at"][:10])
+            for r in runs}
     out, gh = _opt80(jpr=runs, logs=logs)
     assert len(out) == 1, out
     newest_first = [8200 + d for d in sorted(order, reverse=True)][:cr._OPT80_LOG_PROBE_MAX]
@@ -8235,6 +8333,32 @@ def test_opt80_names_an_identity_that_matched_no_observed_step():
     assert counts.get("checkout_step_identity_never_matched_in_steps") == 1, counts
     assert counts.get("checkout_step_measured_on_no_sampled_run") == 1, counts
     assert "fewer_sampled_occurrences_than_the_minimum" not in counts, counts
+
+
+def test_opt80_names_a_skipped_or_out_of_window_checkout_as_its_own_reason():
+    """A checkout GitHub reports `skipped`, or one whose `started_at` is the
+    year-1 placeholder, did not run in that occurrence. Its timestamps parse
+    fine, so tallying it as "duration unparseable" names the wrong cause."""
+    runs = _opt80_runs()
+    runs[0][0]["steps"][1]["conclusion"] = "skipped"
+    runs[1][0]["steps"][1]["started_at"] = "0001-01-01T00:00:00Z"
+    counts: dict = {}
+    _opt80(jpr=runs, withheld=counts)
+    # One tally per job; the occurrence count rides in the debug context.
+    assert counts.get("checkout_step_skipped_or_out_of_window") == 1, counts
+    assert "checkout_step_duration_unparseable" not in counts, counts
+
+
+def test_opt80_names_a_reversed_checkout_span_as_unparseable():
+    """A checkout whose `completed_at` precedes its `started_at` (both parse) is a
+    broken duration, not a step that did not run: it keeps the unparseable reason."""
+    runs = _opt80_runs()
+    st = runs[0][0]["steps"][1]
+    st["started_at"], st["completed_at"] = st["completed_at"], st["started_at"]
+    counts: dict = {}
+    _opt80(jpr=runs, withheld=counts)
+    assert counts.get("checkout_step_duration_unparseable") == 1, counts
+    assert "checkout_step_skipped_or_out_of_window" not in counts, counts
 
 
 # ---- the "already configured" reader ------------------------------------------
@@ -9175,6 +9299,21 @@ def test_opt79_a_pole_finding_the_cascade_zeroed_is_demoted_to_an_uncredited_row
             ) in rendered
     assert vr._opt79_uncredited_rows_rendered(rendered, rows) == []
     assert rendered.isascii(), rendered
+
+
+def test_opt79_a_demoted_pole_row_keeps_its_excluded_runs_by_gate():
+    """The runs a pole finding set aside, per gate, stay on the uncredited row it is
+    demoted to; a finding that set none aside stamps none."""
+    f = _opt79_zeroed_pole()
+    f["cache_net_negative"]["excluded_runs_by_gate"] = {
+        "step_has_no_in_window_time": 2}
+    rows: list = []
+    cr._opt79_demote_uncredited_poles([f], rows)
+    assert rows[0].get("excluded_runs_by_gate") == {
+        "step_has_no_in_window_time": 2}, rows[0]
+    rows = []
+    cr._opt79_demote_uncredited_poles([_opt79_zeroed_pole()], rows)
+    assert "excluded_runs_by_gate" not in rows[0], rows[0]
 
 
 def test_opt79_a_pole_finding_off_the_merge_gating_spine_is_demoted():

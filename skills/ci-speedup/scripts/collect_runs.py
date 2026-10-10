@@ -38,7 +38,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -4748,6 +4748,12 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         bi = _bimodal_split(by_runner[dominant])
         if bi is not None:
             job_bimodal[name] = bi
+    # Each job's LONGEST sampled run, across every runner it ran on: the bound on any one
+    # step of that job. A step's p50 is taken over the runs it ran in, so a conditional
+    # step can legitimately exceed the job's all-runs p50, but never the job's longest
+    # sampled run (`_step_span` clamps a step to its own job). `verify_report` reads it.
+    job_max = {name: round(max(d for ds in by_runner.values() for d in ds), 1)
+               for name, by_runner in by_job_runner.items()}
     if not job_p50:
         return {"long_pole_job": "", "long_pole_p50": 0.0, "long_pole_p95": 0.0,
                 "floor_p50": 0.0, "job_p50": {}, "job_bimodal": {},
@@ -4765,6 +4771,7 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         "long_pole_p95": job_p95.get(long_pole[0], long_pole[1]),
         "floor_p50": floor,
         "job_p50": job_p50,
+        "job_max": job_max,
         "job_bimodal": job_bimodal,
         # Per-job dominant runner label string (job name -> sorted labels, e.g.
         # "ubuntu-latest"): the population each job's p50 above describes. Read by
@@ -6385,15 +6392,196 @@ def _classify_step(name: str) -> str:
     return "other"
 
 
+# A step `started_at` at or before this year is not a start time. The jobs API reports a
+# SKIPPED step (e.g. a `background: true` step whose `if:` was false) as
+# `started_at: 0001-01-01T00:00:00Z` beside a real `completed_at`; read naively that is a
+# ~63.9-billion-second step (curl/curl run 38018162993, `CM clang-tidy` / `test-linter`).
+_STEP_START_SENTINEL_MAX_YEAR = 1970
+# Step and job timestamps are both whole seconds; a step start this close before its job's
+# start is rounding, not a step that ran outside the job.
+_STEP_JOB_START_SLACK_S = 1.0
+
+
+def _utc(t: "_dt.datetime | None") -> "_dt.datetime | None":
+    """`t` as a UTC-aware datetime (a naive stamp is read as UTC), else None."""
+    if t is None:
+        return None
+    return t.replace(tzinfo=_dt.timezone.utc) if t.tzinfo is None else t
+
+
+# Why `_step_span` gave a step no span. `trimmed` is not a drop: the span exists but its end
+# was cut back to the job's `completed_at` by more than the rounding slack.
+_SPAN_SKIPPED = "skipped"
+_SPAN_UNPARSEABLE = "unparseable"
+_SPAN_REVERSED = "reversed"
+_SPAN_SENTINEL_START = "placeholder_start"
+_SPAN_STARTED_BEFORE_JOB = "started_before_job"
+_SPAN_STARTED_AFTER_JOB = "started_after_job"
+_SPAN_TRIMMED = "trimmed_to_job_end"
+
+
+def _step_span_verdict(step: dict[str, Any], job: dict[str, Any] | None
+                       ) -> "tuple[tuple[_dt.datetime, _dt.datetime] | None, str]":
+    """`(span, reason)`: the in-window `(start, end)` a step ran for (`_step_span`) and, when
+    there is none, why (`_SPAN_*`); `reason` is `_SPAN_TRIMMED` on a span whose end was cut
+    back to the job's end by more than `_STEP_JOB_START_SLACK_S`, else "". Every drop and
+    every trim is logged at DEBUG naming the job and the step, never a response body."""
+    span, why = _step_span_core(step, job)
+    if why:
+        # One line per reader per step: several readers (`_step_durations`, the
+        # verdict counts, the timeline, OPT79) judge the same step, so the number of
+        # these lines is not the number of dropped steps; the counts on the
+        # decomposition are.
+        logger.debug("step timing %s: job %r step %r (started_at=%s completed_at=%s)",
+                     "trimmed to its job's end" if span else f"dropped ({why})",
+                     str((job or {}).get("name", "")), str(step.get("name", "")),
+                     step.get("started_at"), step.get("completed_at"))
+    return span, why
+
+
+def _step_span_core(step: dict[str, Any], job: dict[str, Any] | None
+                    ) -> "tuple[tuple[_dt.datetime, _dt.datetime] | None, str]":
+    if str(step.get("conclusion") or "").lower() == "skipped":
+        return None, _SPAN_SKIPPED
+    st = _utc(_parse_dt(step.get("started_at")))
+    en = _utc(_parse_dt(step.get("completed_at")))
+    if not st or not en:
+        return None, _SPAN_UNPARSEABLE
+    if st.year <= _STEP_START_SENTINEL_MAX_YEAR:
+        return None, _SPAN_SENTINEL_START
+    if en < st:
+        return None, _SPAN_REVERSED
+    j0 = _utc(_parse_dt((job or {}).get("started_at")))
+    j1 = _utc(_parse_dt((job or {}).get("completed_at")))
+    if j0 and j0.year > _STEP_START_SENTINEL_MAX_YEAR:
+        if (j0 - st).total_seconds() > _STEP_JOB_START_SLACK_S:
+            return None, _SPAN_STARTED_BEFORE_JOB
+        if en < j0:
+            # Inside the rounding slack, but over before the job began: it lies before
+            # the job, so it is labelled that way, not as starting after the job ended.
+            return None, _SPAN_STARTED_BEFORE_JOB
+        st = max(st, j0)
+    why = ""
+    if j1 and j1.year > _STEP_START_SENTINEL_MAX_YEAR and en > j1:
+        if (en - j1).total_seconds() > _STEP_JOB_START_SLACK_S:
+            why = _SPAN_TRIMMED
+        en = j1
+    if en < st or (why == _SPAN_TRIMMED and en <= st):
+        # Raw timestamps run forward, but the step starts after its job ended, or in its
+        # last second with an end cut back by more than the slack: no time is left inside
+        # the job, so it has no span (a zero-length trimmed span would read as 0s).
+        return None, _SPAN_STARTED_AFTER_JOB
+    return (st, en), why
+
+
+def _step_span(step: dict[str, Any], job: dict[str, Any] | None
+               ) -> "tuple[_dt.datetime, _dt.datetime] | None":
+    """The `(start, end)` a step actually ran for, inside its job, else None.
+
+    The ONE rule every reader of jobs-API step timestamps shares:
+      - a step GitHub reports as `skipped` did not run: no span;
+      - a `started_at` in 1970 or earlier (the API's year-1 placeholder included) is not a
+        start: no span;
+      - reversed raw timestamps (`completed_at` before `started_at`, both parsing) or
+        unparseable / absent ones: no span;
+      - a `started_at` more than 1s (`_STEP_JOB_START_SLACK_S`, whole-second rounding)
+        before its job's own `started_at` is not a start inside this job: no span; within
+        that 1s it is clamped to the job's start;
+      - an end past the job's `completed_at` is clamped to it, so no step outlasts its job
+        (a cut of more than 1s is a trim, logged and counted by `_decompose_job_steps`);
+        a step that starts after its job ended has no span.
+    Job timestamps are optional (unit fixtures often omit them), and a job `started_at`
+    in 1970 or earlier is a placeholder and ignored; without a usable job window only
+    the skipped, placeholder, unparseable and reversed rules apply. A naive timestamp is
+    read as UTC, so a naive step beside an aware job (or the reverse) still compares.
+    `_step_span_verdict` returns the reason a span is missing."""
+    return _step_span_verdict(step, job)[0]
+
+
+def _step_duration_s(step: dict[str, Any], job: dict[str, Any] | None) -> float | None:
+    """Seconds a step ran inside its job (`_step_span`), else None."""
+    span = _step_span(step, job)
+    return (span[1] - span[0]).total_seconds() if span else None
+
+
 def _step_durations(job: dict[str, Any]) -> list[tuple[str, float]]:
+    """`(name, seconds)` for every step that ran a measurable span inside its job under
+    `_step_span`. Omitted: a skipped step, a step whose `started_at` is in 1970 or earlier,
+    one that started more than 1s before the job, one with reversed or unparseable
+    timestamps, one that starts after its job ended (or is left no time inside it once
+    its end is cut back), and a zero-length step. A step starting within 1s before its job is
+    clamped to the job's start, and one ending after its job is clamped to the job's end;
+    neither is omitted. `_decompose_job_steps` counts the declared steps omitted here."""
     out: list[tuple[str, float]] = []
     for s in job.get("steps") or []:
         if not isinstance(s, dict):
             continue
-        d = _duration_s(s.get("started_at"), s.get("completed_at"))
+        d = _step_duration_s(s, job)
         if d is not None and d > 0:
             out.append((str(s.get("name", "")), d))
     return out
+
+
+def _skipped_step_names(job: dict[str, Any]) -> set[str]:
+    """Names of the steps GitHub reports as `skipped` in this job occurrence."""
+    return {str(s.get("name", "")) for s in (job.get("steps") or [])
+            if isinstance(s, dict) and str(s.get("conclusion") or "").lower() == "skipped"}
+
+
+# `_step_span` reasons that mean a step GitHub did NOT skip still has no usable time.
+_SPAN_NO_USABLE_TIME = frozenset({_SPAN_UNPARSEABLE, _SPAN_REVERSED, _SPAN_SENTINEL_START,
+                                  _SPAN_STARTED_BEFORE_JOB, _SPAN_STARTED_AFTER_JOB})
+
+
+def _step_verdict_names(job: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """`(no_usable_time, trimmed)`: names of this occurrence's steps that GitHub did not
+    skip but that have no in-window span, and of those whose end `_step_span` cut back to
+    the job's end by more than the 1s slack."""
+    none: set[str] = set()
+    trimmed: set[str] = set()
+    for s in job.get("steps") or []:
+        if not isinstance(s, dict):
+            continue
+        _span, why = _step_span_verdict(s, job)
+        if why in _SPAN_NO_USABLE_TIME:
+            none.add(str(s.get("name", "")))
+        elif why == _SPAN_TRIMMED:
+            trimmed.add(str(s.get("name", "")))
+    return none, trimmed
+
+
+def _measured_decomposition(decomp: dict[str, Any] | None) -> dict[str, Any] | None:
+    """`decomp` when it measured at least one step, else None. `_decompose_job_steps`
+    returns a step-less decomposition (`reason: no_step_measured_in_sample`) for a job
+    whose every declared step was dropped; a caller that needs a dominant step reads
+    that the way it reads no decomposition at all."""
+    return decomp if decomp is not None and decomp.get("steps") else None
+
+
+def _stamp_pole_decomposition(entry: dict[str, Any], decomp: dict[str, Any] | None) -> None:
+    """Stamp a long pole's step breakdown from `_decompose_job_steps`: the dominant step
+    and the per-step p50s when a step was measured, or `step_decomposition_reason` when
+    none was; and `skipped_steps` / `unmeasured_steps` / `partially_measured_steps` /
+    `trimmed_steps` when non-zero, so the report can say how many declared steps the
+    list leaves out or times from fewer runs."""
+    if decomp is None:
+        return
+    if decomp.get("steps"):
+        entry["dominant_step"] = decomp["dominant_step"]
+        entry["dominant_category"] = decomp["dominant_category"]
+        entry["dominant_p50_s"] = decomp["dominant_p50"]
+        entry["dominant_share"] = decomp["dominant_share"]
+        entry["job_p50_s"] = decomp["job_p50"]
+        entry["steps"] = [{"step": n, "category": c, "p50_s": round(p, 1)}
+                          for n, c, p in decomp["steps"]]
+    elif decomp.get("reason"):
+        entry["step_decomposition_reason"] = decomp["reason"]
+    # Skipped and unmeasured steps are not in `steps`; partially measured and trimmed
+    # steps are, timed from fewer runs or only up to the job's end. Zeros are not stamped.
+    for key in ("skipped_steps", "unmeasured_steps", "partially_measured_steps",
+                "trimmed_steps"):
+        if decomp.get(key):
+            entry[key] = decomp[key]
 
 
 def _step_timeline(job: dict[str, Any], job_name: str,
@@ -6402,23 +6590,36 @@ def _step_timeline(job: dict[str, Any], job_name: str,
     offset (from job start) and its duration. This is what lets the report draw the
     step level as a succession timeline (steps run one after another) rather than
     left-aligned bars. The jobs listing already carries started_at/completed_at, so
-    this costs no extra gh call."""
-    j0 = _parse_dt(job.get("started_at"))
+    this costs no extra gh call. Each step lands in one of three states:
+      - a step with an in-window span (`_step_span`) is drawn at its measured length,
+        its end clamped to the job's completion so no drawn step outlasts the job;
+      - a step GitHub reports `skipped` whose timestamps would otherwise be in-window
+        keeps its place in the succession, drawn at 0s (it did not run);
+      - a step with no in-window span at all (a `started_at` in 1970 or earlier, a start
+        more than 1s before the job, a start after the job ended, reversed or
+        unparseable timestamps, skipped or not) is left off the timeline.
+    A job `started_at` in 1970 or earlier is a placeholder: offsets are then 0."""
+    j0 = _utc(_parse_dt(job.get("started_at")))
+    if j0 is not None and j0.year <= _STEP_START_SENTINEL_MAX_YEAR:
+        j0 = None
     steps: list[dict[str, Any]] = []
     for s in job.get("steps") or []:
         if not isinstance(s, dict):
             continue
-        st = _parse_dt(s.get("started_at"))
-        en = _parse_dt(s.get("completed_at"))
-        if not st or not en:
+        # A skipped step whose timestamps are otherwise in-window keeps its place in the
+        # succession at 0s (it did not run); one with no in-window span at all is dropped.
+        skipped = str(s.get("conclusion") or "").lower() == "skipped"
+        span = _step_span({**s, "conclusion": None} if skipped else s, job)
+        if span is None:
             continue
+        st, en = span
         start = (st - j0).total_seconds() if j0 else 0.0
         # `number` is GitHub's 1-based step index, used to deep-link the job log at
         # `…/job/<id>#step:<number>:1` so the report's drill is auditable to the step.
         steps.append({"name": str(s.get("name", "")),
                       "number": s.get("number"),
                       "start_s": round(max(start, 0.0), 1),
-                      "dur_s": round((en - st).total_seconds(), 1)})
+                      "dur_s": 0.0 if skipped else round((en - st).total_seconds(), 1)})
     job_url = str(job.get("html_url", ""))
     return {
         "job": job_name,
@@ -6634,15 +6835,26 @@ def _decompose_job_steps(
     lever (sizing/evidence/audit would scale to one 23%-of-job step instead of the
     ~77% test phase), so comparable same-category steps are aggregated.
 
-    Returns None when there are no step timings, or when every timed step is a
-    control step (`wait` / `wait-all` / `cancel` or a named one): no step does
-    the work, so the WHOLE decomposition is dropped, not just the crown.
+    Returns None when the job declares no step that ran or was dropped, or when every
+    timed step is a control step (`wait` / `wait-all` / `cancel` or a named one): no
+    step does the work, so the WHOLE decomposition is dropped, not just the crown.
+    When every declared step was dropped (skipped, or no usable time), a step-less
+    dict: `{steps: [], reason: "no_step_measured_in_sample", skipped_steps,
+    unmeasured_steps}` (`_measured_decomposition` reads it as no decomposition).
     Otherwise a dict:
       dominant_step (the slowest step in the dominant category, OR an aggregate label
         "<step> + N more <cat> steps" when the category spans several comparable steps)
       dominant_category / dominant_p50 (the category aggregate) / dominant_share
       setup_build_s / payload_s / redundant_ratio (setup+build ÷ payload)
-      steps: [(name, category, p50)] slowest-first, job_p50.
+      steps: [(name, category, p50)] slowest-first, job_p50;
+      skipped_steps: declared steps GitHub skipped on every sampled run they appeared in
+        (always stamped);
+      unmeasured_steps: declared steps never measured, with no usable time in at least
+        one run (stamped only when non-zero);
+      partially_measured_steps: measured steps skipped or with no usable time in another
+        run, so their p50 comes from fewer runs (stamped only when non-zero);
+      trimmed_steps: measured steps whose end was clamped to the job's end by more
+        than 1s in at least one run (stamped only when non-zero).
 
     When `bimodal` is supplied (the job's fast/slow split), the decomposition is
     computed over the SLOW-cluster instances only, so the dominant category it
@@ -6667,8 +6879,64 @@ def _decompose_job_steps(
             if current_steps is not None and sname not in current_steps:
                 continue
             by_step.setdefault(sname, []).append(d)
+    # Declared steps the step list leaves out or times from fewer runs, counted so it is
+    # never mistaken for every step the job has (`trimmed` = measured, with an end cut
+    # back to its job's end by more than the 1s slack in at least one run).
+    # Each run is judged per step NAME: measured (a positive in-window span), skipped
+    # (every occurrence in that run GitHub-skipped), or no usable time. A 0s span in a
+    # run is none of these: the step took no time there. Across runs, a name never
+    # measured counts as skipped only when it was skipped in EVERY run it appeared in;
+    # one with no usable time in any run counts as unmeasured; and a measured name that
+    # was skipped or had no usable time in another run is `partially_measured` (its p50
+    # comes from fewer runs). A name 0s in every run it ran (skipped in the others or
+    # not) is in no count: it took no time.
+    skip_runs: dict[str, int] = {}
+    none_runs: dict[str, int] = {}
+    seen_runs: dict[str, int] = {}
+    trimmed_names: set[str] = set()
+    for j in job_instances:
+        measured_here = {n for n, _d in _step_durations(j)}
+        skipped_here = _skipped_step_names(j)
+        ran_here = {str(s.get("name", "")) for s in (j.get("steps") or [])
+                    if isinstance(s, dict)
+                    and str(s.get("conclusion") or "").lower() != "skipped"}
+        none_here, trim_here = _step_verdict_names(j)
+        trimmed_names |= trim_here
+        for n in skipped_here | ran_here:
+            seen_runs[n] = seen_runs.get(n, 0) + 1
+            if n in measured_here:
+                continue
+            if n not in ran_here:
+                skip_runs[n] = skip_runs.get(n, 0) + 1
+            elif n in none_here:
+                none_runs[n] = none_runs.get(n, 0) + 1
+    names = set(seen_runs)
+    if current_steps is not None:
+        names &= current_steps
+        trimmed_names &= current_steps
+    measured_names = set(by_step)
+    skipped_names = {n for n in names - measured_names
+                     if skip_runs.get(n, 0) == seen_runs[n]}
+    none_names = {n for n in names - measured_names - skipped_names
+                  if none_runs.get(n, 0)}
+    partial_names = {n for n in names & measured_names
+                     if none_runs.get(n, 0) or skip_runs.get(n, 0)}
+    trimmed_names &= measured_names
+    counts = {"skipped_steps": len(skipped_names)}
+    if none_names:
+        counts["unmeasured_steps"] = len(none_names)
+    if partial_names:
+        counts["partially_measured_steps"] = len(partial_names)
+    if trimmed_names:
+        counts["trimmed_steps"] = len(trimmed_names)
     if not by_step:
-        return None
+        if not (skipped_names or none_names):
+            return None
+        # Every declared step was dropped: say so, with the two counts, rather than
+        # return nothing and leave the pole silently without steps.
+        return {"steps": [], "reason": "no_step_measured_in_sample",
+                "skipped_steps": len(skipped_names),
+                "unmeasured_steps": len(none_names)}
     steps = [
         (name, _step_category(name), _percentile(ds, 50))
         for name, ds in by_step.items()
@@ -6728,6 +6996,7 @@ def _decompose_job_steps(
         "redundant_ratio": (round(ratio, 2) if ratio != float("inf") else None),
         "steps": [(n, c, round(p, 1)) for n, c, p in steps],
         "job_p50": round(job_p50, 1),
+        **counts,
     }
 
 
@@ -8365,9 +8634,9 @@ def _leading_setup_prefix(
     inside it was reported as contiguous.
 
     The SIGNATURE is the ordered tuple of those steps' identities
-    (`_setup_step_identity`), used only for comparison and grouping; the display
-    names are the same steps as written, so the rendered evidence can name the
-    prefix without lowercasing it. It is what lets the caller show that two jobs
+    (`_setup_step_identity`), used for comparison and grouping; the display names
+    are the steps this occurrence paid for, as written, and the caller renders the
+    identities of the ones some sampled run paid for. The signature is what lets the caller show that two jobs
     re-pay the SAME setup rather than merely equally expensive ones. Duration alone
     cannot: a Node check, a Python check and a Go check can each spend 80s
     installing entirely different dependencies, and consolidating those removes
@@ -8383,9 +8652,18 @@ def _leading_setup_prefix(
         name = str(step.get("name", "") or "")
         if _classify_step(name) != "setup":
             break
-        shown.append(" ".join(name.split()))
+        # The SHAPE keeps every declared setup step (a step skipped by its `if:` in one
+        # run and run in the next is the same job), but the DISPLAY names only steps
+        # this occurrence paid: one skipped, placeholder-started, outside the job or
+        # with reversed timestamps adds 0s to the total, so naming it would describe
+        # steps the seconds omit. A step whose timestamps are absent or do not parse
+        # keeps its display name (its time is unknown, not known to be 0s).
         sig.append(_setup_step_identity(name))
-        d = _duration_s(step.get("started_at"), step.get("completed_at"))
+        span, why = _step_span_verdict(step, job)
+        if span is None and why != _SPAN_UNPARSEABLE:
+            continue
+        shown.append(" ".join(name.split()))
+        d = (span[1] - span[0]).total_seconds() if span else None
         if d is not None and d > 0:
             total += d
     # An identity that normalizes to the empty string carries no information, and
@@ -8786,7 +9064,9 @@ def _detect_opt77_repeated_setup_across_small_jobs(
     present_per_run: list[set[str]] = []
     observed_runner: dict[str, set[str]] = {}
     observed_setup_sig: dict[str, set[tuple[str, ...]]] = {}
-    observed_setup_display: dict[str, tuple[str, ...]] = {}
+    # Per job, the setup identities some sampled run PAID (had an in-window span for):
+    # a run that skipped a setup step names fewer, so the union keeps the fullest.
+    observed_setup_paid: dict[str, set[str]] = {}
     # A display name carried by MORE THAN ONE job in a single run is not one job.
     # The usual cause is a matrix that declares a static `name:` (no ${{ matrix.* }}
     # in it), so every leg renders under that one name — which then resolves to
@@ -8826,7 +9106,8 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             observed_runner.setdefault(name, set()).add(
                 _occurrence_runner_label(job) or "")
             observed_setup_sig.setdefault(name, set()).add(sig)
-            observed_setup_display.setdefault(name, shown)
+            observed_setup_paid.setdefault(name, set()).update(
+                _setup_step_identity(n) for n in shown)
         per_run.append(split)
         present_per_run.append(present)
 
@@ -8879,7 +9160,7 @@ def _detect_opt77_repeated_setup_across_small_jobs(
                 setup_p50=round(setup_p50, 1), useful_p50=round(useful_p50, 1))
             continue
         candidates[name] = {"key": key, "runner": declared, "setup_sig": setup_sig,
-                            "setup_display": observed_setup_display.get(name, ()),
+                            "setup_paid": observed_setup_paid.get(name, set()),
                             "setup_p50": setup_p50, "useful_p50": useful_p50}
 
     # Group by runner AND by the setup prefix itself, never by runner alone. The
@@ -9108,13 +9389,18 @@ def _detect_opt77_repeated_setup_across_small_jobs(
         # Render the NORMALIZED identities, never one arbitrary member's names as
         # written. The group tolerates a version bump, so showing `setup-node@v4`
         # for a group that also contains `@v3` invites an agent to "make them
-        # match" by silently bumping the other job.
-        prefix_render = (" → ".join(setup_sig[:4])
-                         + ("…" if len(setup_sig) > 4 else ""))
+        # match" by silently bumping the other job. Only the identities some member
+        # paid for in some sampled run are named: a setup step with no in-window
+        # time in every run adds 0s to the measured prefix, so naming it would
+        # describe a step the seconds leave out.
+        paid = set().union(*(candidates[n]["setup_paid"] for n in names))
+        shown_sig = [i for i in setup_sig if i in paid] or list(setup_sig)
+        prefix_render = (" → ".join(shown_sig[:4])
+                         + ("…" if len(shown_sig) > 4 else ""))
         max_useful = max(float(candidates[n]["useful_p50"]) for n in names)
         evidence = (
             f"{n_jobs} independent same-runner (`{runner}`) jobs each re-pay the same "
-            f"measured setup prefix ({len(setup_sig)} step(s): {prefix_render}) "
+            f"measured setup prefix ({len(shown_sig)} step(s): {prefix_render}) "
             f"before at most {max_useful:.0f}s of useful work; the smallest "
             f"measured setup p50 across them is {setup_p50:.0f}s. Consolidating them "
             f"into one job removes {removed} setup payment(s) per run — "
@@ -10210,6 +10496,7 @@ def _detect_opt80_checkout_tail_stall(
         # reads as a quiet repo rather than as an identity that never matched.
         unmatched = 0
         unparseable = 0
+        not_run = 0
         observed_names: set[str] = set()
         for job in instances:
             match = None
@@ -10226,10 +10513,20 @@ def _detect_opt80_checkout_tail_stall(
             if match is None:
                 unmatched += 1
                 continue
-            dur = _duration_s(match.get("started_at"), match.get("completed_at"))
-            if dur is None or dur < 0:
-                unparseable += 1
+            # `_step_span`: a skipped / placeholder-started / out-of-window checkout has
+            # no measurement in this occurrence. Its timestamps parse and run forward, so
+            # it is tallied apart from a checkout whose timestamps do not parse or are
+            # reversed.
+            span, why = _step_span_verdict(match, job)
+            if span is None:
+                # Unparseable or reversed timestamps are a broken duration; skipped,
+                # placeholder-started and out-of-window checkouts did not run here.
+                if why in (_SPAN_UNPARSEABLE, _SPAN_REVERSED):
+                    unparseable += 1
+                else:
+                    not_run += 1
                 continue
+            dur = (span[1] - span[0]).total_seconds()
             job_id = job.get("id")
             if job_id is None or job_id in step_window:
                 # Without a usable id the log probe cannot look this occurrence's
@@ -10243,8 +10540,7 @@ def _detect_opt80_checkout_tail_stall(
                    "checkout_s": round(float(dur), 1)}
             # Kept off the stamped row (see below) — it exists only to clamp the
             # log search to this step's own window.
-            step_window[job_id] = (_parse_dt(match.get("started_at")),
-                                   _parse_dt(match.get("completed_at")))
+            step_window[job_id] = span
             per_run.append(row)
         if unmatched:
             _no("checkout_step_identity_never_matched_in_steps", job=job_name,
@@ -10253,6 +10549,9 @@ def _detect_opt80_checkout_tail_stall(
         if unparseable:
             _no("checkout_step_duration_unparseable", job=job_name,
                 occurrences=unparseable)
+        if not_run:
+            _no("checkout_step_skipped_or_out_of_window", job=job_name,
+                occurrences=not_run)
         if not per_run and instances:
             # Its own gate: "the step was never found" is a different failure
             # from "the job did not run often enough", and only the second is a
@@ -11759,8 +12058,8 @@ def _detect_opt81_runner_size_advisory(
         return []
     instances = [j for run in jobs_per_run for j in (run or [])
                  if isinstance(j, dict) and str(j.get("name") or "") == name]
-    decomp = _decompose_job_steps(instances,
-                                  bimodal=(crit.get("job_bimodal") or {}).get(name))
+    decomp = _measured_decomposition(_decompose_job_steps(
+        instances, bimodal=(crit.get("job_bimodal") or {}).get(name)))
     if decomp is None:
         _no("a2_dominant_step_unresolved", name)
         return []
@@ -12629,7 +12928,7 @@ def _detect_opt82_type_aware_lint(
                     continue
                 for st in j.get("steps") or []:
                     if str(st.get("name") or "").strip() == step_name:
-                        d = _duration_s(st.get("started_at"), st.get("completed_at"))
+                        d = _step_duration_s(st, j)
                         if d is not None and d > 0:
                             step_durs.append(d)
         step_p50 = round(_percentile(step_durs, 50), 1) if step_durs else None
@@ -16230,8 +16529,8 @@ def _detect_structural_candidates(
             # (and thus the OPT70/72/75 route) agrees with the slow-mode run the
             # report drills — not a fast/slow-blended p50 that crowns the wrong
             # category and misroutes (e.g. OPT75 instead of OPT72 for a cold build).
-            decomp = _decompose_job_steps(
-                job_inst, bimodal=job_bimodal_all.get(check_name))
+            decomp = _measured_decomposition(_decompose_job_steps(
+                job_inst, bimodal=job_bimodal_all.get(check_name)))
             # Skip the structural lever ONLY if a hygiene fix already MATERIALLY
             # shortened this pole (>= half its measured p50). A trivial cache (e.g.
             # a 2s Playwright download on a 342s pole) must NOT suppress the
@@ -16714,7 +17013,8 @@ def _detect_shared_substep(
             # otherwise be floored by its blended (warm-dragged) p50 — under-crediting the
             # shared lever and, if blended < the material threshold, silently dropping a
             # step that is real in the slow mode it's drilled against.
-            d = _decompose_job_steps(inst, bimodal=job_bimodal_all.get(jname))
+            d = _measured_decomposition(
+                _decompose_job_steps(inst, bimodal=job_bimodal_all.get(jname)))
             if not d:
                 continue
             job_decomp[jname] = d
@@ -17154,7 +17454,7 @@ def _detect_opt24_long_test_no_sharding(
         short = [d for d in durs if d < max(90.0, 0.25 * p50)]
         if len(short) >= max(2, round(0.2 * len(durs))):
             continue
-        decomp = _decompose_job_steps(inst_by_base.get(base, []))
+        decomp = _measured_decomposition(_decompose_job_steps(inst_by_base.get(base, [])))
         # The saving below halves the test payload's summed step medians, which
         # assumes the steps run one after another. A payload step inside a
         # `parallel:` group (or `background: true`) overlaps others, so the
@@ -17981,6 +18281,19 @@ _CACHE_LEAF_KEYS = frozenset({
 # the floor the evidence guards impose on any two-population comparison: with
 # two, the "median" is an average of the only two values there are.
 _OPT79_MIN_HITS = 3
+# A cache block step GitHub did not skip whose timestamps parse and run forward but give
+# it no in-window time (`_step_span`): its occurrence is withheld under this gate.
+_OPT79_GATE_NO_IN_WINDOW_TIME = "step_has_no_in_window_time"
+# The per-occurrence gates that mean a block step's TIME did not measure (as opposed to a
+# log that could not tell a hit from a miss, or a run on another runner). When they are
+# the larger share of the runs set aside, a thinned population is withheld as
+# `population_truncated_by_unmeasurable_step_times`.
+_OPT79_STEP_TIME_GATES = frozenset({
+    _OPT79_GATE_NO_IN_WINDOW_TIME,
+    "step_timestamps_unparseable_in_this_occurrence",
+    "step_did_not_complete_in_this_occurrence",
+    "install_step_did_not_measure_in_this_occurrence",
+})
 _OPT79_MIN_MISSES = 3
 # The hit path has to be slower by more than measurement noise. GitHub stamps
 # step timestamps at ONE-SECOND granularity and this block sums up to three of
@@ -18305,6 +18618,7 @@ _OPT79_LATE_HELD_BACK_GATES = frozenset({
     "post_step_never_measured_in_any_occurrence",
     "population_truncated_by_unread_logs",
     "population_truncated_by_excluded_runs",
+    "population_truncated_by_unmeasurable_step_times",
     "fewer_than_min_hit_runs_classified",
     "fewer_than_min_miss_runs_classified",
     "no_monthly_volume",
@@ -18795,10 +19109,11 @@ def _opt79_block_durations(job: dict[str, Any], block: dict[str, Any]
     """`({restore, install, post}, {slot: present}, "")` in seconds for one job
     occurrence, else `({}, {}, gate)`.
 
-    A step the YAML declares that the run RENDERED but did not time measures
-    0.0s: `_step_durations` drops every 0-duration step, and letting that drop
-    change the block would make a sub-second restore look like a different job
-    shape. A name that appears TWICE in the timed list is unattributable and
+    A step the YAML declares that the run RENDERED with an in-window span stamped
+    with no measurable length (start and end in the same second), or that GitHub
+    reports as `skipped` with parseable timestamps, measures 0.0s: `_step_durations`
+    drops every zero-length span from the timed set, and letting that drop change the
+    block would make a sub-second restore look like a different job shape. A name that appears TWICE in the timed list is unattributable and
     withholds the occurrence rather than picking one.
 
     "Rendered but sub-second" and "not there at all" are DIFFERENT facts, and
@@ -18812,11 +19127,22 @@ def _opt79_block_durations(job: dict[str, Any], block: dict[str, Any]
     detector requires it to be true SOMEWHERE — and a step that started and never
     completed withholds the occurrence outright.
 
-    Likewise a rendered block step whose timestamps do not parse (or are absent)
-    did not measure 0s; it did not measure, and withholds the occurrence."""
+    Likewise a rendered block step whose timestamps do not parse (or are absent),
+    or run backwards (end before start), did not measure 0s; it did not measure,
+    and withholds as `step_timestamps_unparseable_in_this_occurrence`.
+
+    So does a step whose timestamps parse and run forward but carry no in-window
+    span under the shared rule (`_step_span`): a `started_at` in 1970 or earlier
+    (the year-1 placeholder included), more than 1s before the job's own start,
+    or after the job ended, on a step GitHub did NOT report as skipped. That step
+    may well have run; its time is simply unknown, and zeroing it would drop the
+    post save off the miss side. It withholds as `step_has_no_in_window_time`.
+    Only a step GitHub reports as `skipped` with parseable timestamps keeps 0s: it
+    genuinely ran nothing."""
     rendered: set[str] = set()
     incomplete: set[str] = set()
     unparseable: set[str] = set()
+    no_span: set[str] = set()
     for s in job.get("steps") or []:
         if not isinstance(s, dict):
             continue
@@ -18824,8 +19150,14 @@ def _opt79_block_durations(job: dict[str, Any], block: dict[str, Any]
         rendered.add(nm)
         if s.get("started_at") and not s.get("completed_at"):
             incomplete.add(nm)
-        elif _duration_s(s.get("started_at"), s.get("completed_at")) is None:
+            continue
+        _span, why = _step_span_verdict(s, job)
+        if why in (_SPAN_UNPARSEABLE, _SPAN_REVERSED) or (
+                why == _SPAN_SKIPPED
+                and _duration_s(s.get("started_at"), s.get("completed_at")) is None):
             unparseable.add(nm)
+        elif why in _SPAN_NO_USABLE_TIME:
+            no_span.add(nm)
     timed: dict[str, list[float]] = {}
     for name, dur in _step_durations(job):
         timed.setdefault(" ".join(str(name).split()), []).append(float(dur))
@@ -18844,6 +19176,8 @@ def _opt79_block_durations(job: dict[str, Any], block: dict[str, Any]
             return {}, {}, "step_did_not_complete_in_this_occurrence"
         if label in unparseable:
             return {}, {}, "step_timestamps_unparseable_in_this_occurrence"
+        if label in no_span:
+            return {}, {}, _OPT79_GATE_NO_IN_WINDOW_TIME
         vals = timed.get(label) or []
         if len(vals) > 1:
             return {}, {}, "step_measured_more_than_once_in_one_occurrence"
@@ -19348,6 +19682,7 @@ def _opt79_stamp(
     monthly_volume: int | None,
     effective: float | None,
     runner_min_saving: float | None,
+    excluded_by: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """THE measured block, built ONCE for all three of this detector's outputs.
 
@@ -19361,7 +19696,13 @@ def _opt79_stamp(
     be measured on a workflow whose monthly volume is unknown; it then stamps
     `monthly_volume` and `effective_monthly_volume` as null rather than as a
     zero that reads like a measured "never runs". A runner-minute finding
-    always has both volumes."""
+    always has both volumes.
+
+    `excluded_runs_by_gate` (stamped only when a run was set aside) counts the
+    sampled runs left out of the population per gate, so a population thinned
+    on one side is auditable from the stamp."""
+    extra = ({"excluded_runs_by_gate": dict(sorted(excluded_by.items()))}
+             if excluded_by else {})
     return {
         "kind": kind,
         "job": job,
@@ -19387,6 +19728,7 @@ def _opt79_stamp(
         "effective_monthly_volume": (round(effective, 3)
                                      if effective is not None else None),
         "runner_min_saving": runner_min_saving,
+        **extra,
     }
 
 
@@ -19513,6 +19855,8 @@ def _detect_opt79_net_negative_cache(
         # block that did not measure). Like `unread`, these are not evidence
         # that the cache rarely hits or misses.
         excluded = 0
+        # The same runs, per gate (stamped as `excluded_runs_by_gate`).
+        excluded_by: "defaultdict[str, int]" = defaultdict(int)
         # Mirrors `_opt79_log_plan`: the first `_OPT79_LOG_PROBE_MAX`
         # log-bearing occurrences are the ones a log was fetched for. An
         # occurrence past that window was never going to be read — a disclosed
@@ -19570,6 +19914,7 @@ def _detect_opt79_net_negative_cache(
                 # `cache miss, executing …` from Turborepo in the test step would
                 # otherwise classify a hit run as a two-cache job.
                 excluded += 1
+                excluded_by["restore_step_log_group_not_found_in_the_run_log"] += 1
                 _no("restore_step_log_group_not_found_in_the_run_log", job=name)
                 continue
             if status == "both":
@@ -19577,6 +19922,7 @@ def _detect_opt79_net_negative_cache(
                 # verdicts, so the block's cost cannot be attributed to one.
                 ambiguous += 1
                 excluded += 1
+                excluded_by["run_log_shows_both_a_hit_and_a_miss_line"] += 1
                 _no("run_log_shows_both_a_hit_and_a_miss_line", job=name)
                 continue
             if status == "partial_hit":
@@ -19584,22 +19930,26 @@ def _detect_opt79_net_negative_cache(
                 # key and a new one saved. Neither path of the comparison.
                 ambiguous += 1
                 excluded += 1
+                excluded_by["run_log_shows_a_partial_restore_keys_hit"] += 1
                 _no("run_log_shows_a_partial_restore_keys_hit", job=name)
                 continue
             if status == "none":
                 excluded += 1
+                excluded_by["run_log_shows_no_cache_hit_or_miss_line"] += 1
                 _no("run_log_shows_no_cache_hit_or_miss_line", job=name)
                 continue
             label = _occurrence_runner_label(job) or ""
             if label != declared:
                 other_runner.append(label)
                 excluded += 1
+                excluded_by["occurrence_ran_on_another_runner_label"] += 1
                 _no("occurrence_ran_on_another_runner_label", job=name,
                     declared=declared, observed=label)
                 continue
             durs, present, gate = _opt79_block_durations(job, block)
             if not durs:
                 excluded += 1
+                excluded_by[gate] += 1
                 _no(gate, job=name)
                 continue
             for _slot in ("restore", "post"):
@@ -19648,12 +19998,24 @@ def _detect_opt79_net_negative_cache(
             continue
         if excluded and (len(hits) < _OPT79_MIN_HITS
                          or len(misses) < _OPT79_MIN_MISSES):
-            # Same reasoning, for runs that WERE read: a log whose restore
-            # group is missing, or that shows a partial restore, says nothing
-            # about how often this cache hits.
-            _drop(name, "population_truncated_by_excluded_runs",
-                  excluded=excluded, classified=classified,
-                  hits=len(hits), misses=len(misses))
+            # Same reasoning, for runs that WERE read and then set aside: a log
+            # whose restore group is missing, shows no cache line, shows both a
+            # hit and a miss or a partial restore; a run on another runner label;
+            # or a block step whose time did not measure (no in-window time,
+            # unparseable or reversed timestamps, a step that never completed, an
+            # install that measured 0s). None of it says how often this cache
+            # hits. When the step-time gates set aside more runs than the rest
+            # together (log gates, another runner, and a step measured more than
+            # once in one occurrence, `step_measured_more_than_once_in_one_occurrence`),
+            # the withhold names them, not the logs; a tie names the excluded runs.
+            _step_time = sum(n for g, n in excluded_by.items()
+                             if g in _OPT79_STEP_TIME_GATES)
+            _ctx = {"excluded": excluded, "by_gate": dict(sorted(excluded_by.items())),
+                    "classified": classified, "hits": len(hits), "misses": len(misses)}
+            if _step_time > excluded - _step_time:
+                _drop(name, "population_truncated_by_unmeasurable_step_times", **_ctx)
+            else:
+                _drop(name, "population_truncated_by_excluded_runs", **_ctx)
             continue
         if len(hits) < _OPT79_MIN_HITS:
             _drop(name, "fewer_than_min_hit_runs_classified", hits=len(hits),
@@ -19722,9 +20084,14 @@ def _detect_opt79_net_negative_cache(
             "hit and a miss line, or restored a fallback key rather than the "
             "exact one (a partial restore-keys hit), is excluded, not guessed. "
             "Only successful runs are compared. Both paths measure the "
-            "SAME three steps, identified in the workflow file — a step the run "
-            "did not time counts as 0s, so GitHub's one-second step granularity "
-            "cannot change which steps are compared. ")
+            "SAME three steps, identified in the workflow file — a step stamped "
+            "with no measurable length (start and end in the same second), or a "
+            "skipped step with parseable timestamps, counts as 0s, so GitHub's "
+            "one-second step granularity cannot change which steps are compared; "
+            "a run where one of those steps has no usable time (timestamps "
+            "missing, unparseable or reversed, a step that never completed, a "
+            "placeholder start, a start before its job, or a start after its job "
+            "ended) is left out, not counted as 0s. ")
         _note_guardrail = (
             "GUARDRAIL: re-key or narrow the cache FIRST and re-measure — cache "
             f"`{ref}` on this job, scoped to the package manager's store or to "
@@ -19771,7 +20138,7 @@ def _detect_opt79_net_negative_cache(
                     monthly_volume=monthly_volume if has_volume else None,
                     effective=(_effective_volume(monthly_volume, job_runs, sampled)
                                if has_volume else None),
-                    runner_min_saving=None),
+                    runner_min_saving=None, excluded_by=excluded_by),
                 wf_path=wf_path, gates_pr=gates_pr, declares_pr=bool(is_pr),
                 long_pole_job=str(block.get("long_pole_job") or ""),
                 long_pole_p50_s=block.get("long_pole_p50_s"),
@@ -19797,7 +20164,7 @@ def _detect_opt79_net_negative_cache(
                     monthly_volume=monthly_volume if has_volume else None,
                     effective=(_effective_volume(monthly_volume, job_runs, sampled)
                                if has_volume else None),
-                    raw_wc=raw_wc, headroom=headroom,
+                    raw_wc=raw_wc, headroom=headroom, excluded_by=excluded_by,
                     capped=bool(sized.derivation),
                     measured_txt=_measured_txt, rows_render=rows_render,
                     note_head=_note_head, note_guardrail=_note_guardrail,
@@ -19989,7 +20356,7 @@ def _detect_opt79_net_negative_cache(
             hit_p50=hit_p50, miss_p50=miss_p50, waste=waste,
             waste_floor=waste_floor, hit_share=hit_share,
             job_runs=job_runs, sampled=sampled, monthly_volume=monthly_volume,
-            effective=effective, runner_min_saving=credited)
+            effective=effective, runner_min_saving=credited, excluded_by=excluded_by)
         # Whether a pull request waits on this workflow: the fact that decided
         # the `needs:`-chain exclusion above, so `verify_report` re-applies the
         # same gate (paired against the sampled events) rather than failing
@@ -20098,6 +20465,11 @@ def _opt79_demote_uncredited_poles(
             long_pole_p50_s=cn.get("long_pole_p50_s"),
             job_p50_s=cn.get("job_p50_s"), floor_p50_s=cn.get("floor_p50_s"),
             declares_pr=cn.get("declares_pull_request"))
+        # The runs set aside per gate travel with the row, carried explicitly: it is
+        # stamped only when non-empty, so it is not one of the required
+        # `_OPT79_STAMP_KEYS` the verifier checks for.
+        if cn.get("excluded_runs_by_gate"):
+            row["excluded_runs_by_gate"] = dict(cn["excluded_runs_by_gate"])
         if zeroed:
             row["uncredited_reason"] = _OPT79_REASON_ZEROED
             reasons = [
@@ -20158,6 +20530,7 @@ def _opt79_pole_finding(
     effective: float | None,
     raw_wc: float,
     headroom: float,
+    excluded_by: dict[str, int] | None = None,
     capped: bool,
     measured_txt: str,
     rows_render: list[list[str]],
@@ -20260,7 +20633,7 @@ def _opt79_pole_finding(
         hit_p50=hit_p50, miss_p50=miss_p50, waste=waste,
         waste_floor=waste_floor, hit_share=hit_share,
         job_runs=job_runs, sampled=sampled, monthly_volume=monthly_volume,
-        effective=effective, runner_min_saving=None)
+        effective=effective, runner_min_saving=None, excluded_by=excluded_by)
     cn["workflow_file"] = wf_path
     cn["long_pole_job"] = lp_job
     cn["long_pole_p50_s"] = lp50
@@ -20377,10 +20750,13 @@ def _dominant_step_sample(
         # the first textual match. Matching the first occurrence collapsed the cross-run
         # sample to the wrong (often zero-duration) leg, so the per-run values contradicted
         # this_run and the renderer wrongly reported the magnitude "stable across runs".
+        # A step GitHub reports `skipped` did not run in that occurrence: 0s, a truthful
+        # value. Only a step with no usable in-window span (`_step_span`) has none.
         best: float | None = None
         for s in job.get("steps") or []:
             if isinstance(s, dict) and str(s.get("name", "")) == name:
-                d = _duration_s(s.get("started_at"), s.get("completed_at"))
+                d = (0.0 if str(s.get("conclusion") or "").lower() == "skipped"
+                     else _step_duration_s(s, job))
                 if d is not None and (best is None or d > best):
                     best = d
         return best
@@ -20394,11 +20770,15 @@ def _dominant_step_sample(
         if not jid or jid in seen_ids:
             continue
         v = step_dur(job)
-        if v is None:
+        drilled = jid == repr_job.get("id")
+        if v is None and not drilled:
             continue
         seen_ids.add(jid)
+        # The drilled run stays in the sample even when its own dominant step has no
+        # usable time: listed with no value (`_mag_line` skips it), never omitted.
         values.append({"run_url": str(job.get("html_url", "")).split("/job/")[0],
-                       "value": round(v, 1), "drilled": jid == repr_job.get("id")})
+                       "value": round(v, 1) if v is not None else None,
+                       "drilled": drilled})
     if not values or this_run is None:
         return None
     return {"label": f"the `{name}` step (wall)", "unit": "s", "kind": "step-wall",
@@ -22431,19 +22811,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             # report drills below it, not a fast/slow-blended p50.
             decomp = _decompose_job_steps(
                 job_inst, bimodal=job_bimodal_all.get(check_name))
-            if decomp is not None:
-                entry["dominant_step"] = decomp["dominant_step"]
-                entry["dominant_category"] = decomp["dominant_category"]
-                entry["dominant_p50_s"] = decomp["dominant_p50"]
-                entry["dominant_share"] = decomp["dominant_share"]
-                entry["job_p50_s"] = decomp["job_p50"]
+            _stamp_pole_decomposition(entry, decomp)
+            if _measured_decomposition(decomp) is not None:
                 # Record the runner label the headline was measured on, so the drill's
                 # cross-run sample can be scoped to the same population.
                 crit = crit_by_wf.get(wf_path, {})
                 if job_name in crit.get("job_runner", {}):
                     entry["headline_runner"] = crit["job_runner"][job_name]
-                entry["steps"] = [{"step": n, "category": c, "p50_s": round(p, 1)}
-                                  for n, c, p in decomp["steps"]]
         else:
             # Job-backed but file-AMBIGUOUS (issue #118): the check maps to no single
             # workflow file, yet it is NOT fileless/external — MORE THAN ONE workflow

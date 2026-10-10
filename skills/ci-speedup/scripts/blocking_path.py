@@ -3953,8 +3953,69 @@ def _pole_steps_overlap(pole: dict[str, Any] | None,
     return "maybe" if here else None
 
 
+# The engine's reason for a pole whose every declared step was dropped
+# (`collect_runs._decompose_job_steps`).
+_NO_STEP_MEASURED_REASON = "no_step_measured_in_sample"
+
+
+def _omitted_steps_note(pole: dict[str, Any]) -> str | None:
+    """The one line a pole's step list carries when declared steps are left out of it:
+    `skipped_steps` (GitHub skipped them on every sampled run), `unmeasured_steps` (not
+    skipped, but no usable time: a placeholder start, a start outside the job, reversed
+    or unparseable timestamps), `partially_measured_steps` (timed in some sampled runs
+    and skipped or untimeable in others it appeared in, so timed only from the runs
+    that measured them; a step absent from a run's step list is not counted) and `trimmed_steps` (timed only up to the job's end). For
+    a pole whose every step was dropped, the "no step could be measured" line. None when
+    nothing is left out. `verify_report._vr_omitted_steps_note` is its verbatim twin."""
+    def _n(key: str) -> int:
+        v = pole.get(key)
+        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) \
+            and v > 0 else 0
+    sk, un, tr = _n("skipped_steps"), _n("unmeasured_steps"), _n("trimmed_steps")
+    pm = _n("partially_measured_steps")
+    if pole.get("step_decomposition_reason") == _NO_STEP_MEASURED_REASON:
+        return f"No step could be measured: {sk} skipped, {un} with no usable time."
+    parts: list[str] = []
+    if sk:
+        parts.append(f"{sk} declared step(s) skipped on every sampled run")
+    if un:
+        parts.append(f"{un} with no usable time" if parts
+                     else f"{un} declared step(s) with no usable time")
+    out: list[str] = []
+    if parts:
+        out.append(" and ".join(parts) + " are not timed here")
+    if pm:
+        out.append(f"{pm} step(s) were timed in some sampled runs and skipped "
+                   "or untimeable in others")
+    if tr:
+        out.append(f"{tr} step(s) ran past the job's end in some run and are timed only "
+                   "up to it")
+    return "(" + "; ".join(out) + ")" if out else None
+
+
 def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                     timeline: dict[str, Any] | None = None,
+                    *args: Any, **kwargs: Any) -> list[str]:
+    """`_pole_waterfall_body`, plus the line saying how many declared steps the step list
+    leaves out (`_omitted_steps_note`). A pole whose every declared step was dropped, with
+    no drilled timeline to draw, leads with that line in place of the step header and
+    rows (an empty "every step" list would read as a job with no steps); the body's
+    pointer lines (coverage gap, LLM analysis, catalog matches, the `--log` hint) and a
+    Level-3 log drill still follow it."""
+    note = _omitted_steps_note(pole)
+    if (pole.get("step_decomposition_reason") == _NO_STEP_MEASURED_REASON
+            and not pole.get("steps") and not pole.get("job_timing_unavailable")
+            and not ((timeline or {}).get("steps"))):
+        return ([note] if note else []) + _pole_waterfall_body(
+            pole, leaf, timeline, *args, steps_dropped=True, **kwargs)
+    lines = _pole_waterfall_body(pole, leaf, timeline, *args, **kwargs)
+    if note and not pole.get("job_timing_unavailable"):
+        lines += ["", note]
+    return lines
+
+
+def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
+                         timeline: dict[str, Any] | None = None,
                     log_present: bool = False,
                     analysis_present: bool = False,
                     structural_present: bool = False,
@@ -3963,7 +4024,8 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                      data_driven_patterns: "tuple[str, ...] | list[str]" = (),
                      opt79_present: bool = False,
                      opt82_present: bool = False,
-                     steps_overlap: "str | None" = None) -> list[str]:
+                     steps_overlap: "str | None" = None,
+                     steps_dropped: bool = False) -> list[str]:
     """The ASCII waterfall for one pole (no code fence): the blocking job's steps,
     then - when a log was captured - the dominant step's internals down to the
     root cause.
@@ -3982,7 +4044,10 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
     `data_driven_on_path` mirrors the appendix: a data-driven catalog match on a pole the spine
     DEMOTES as opt-in/rare (`spine_rare`) is still catalog coverage (never a gap), but the
     "no gap — see Also noticed" pointer must NOT claim the pole "sits ON the critical path"
-    while the spine footnote demotes it (the paradedb `Test pg_search` double-framing)."""
+    while the spine footnote demotes it (the paradedb `Test pg_search` double-framing).
+
+    `steps_dropped` (`_pole_waterfall`, a pole whose every step was dropped): no step
+    header and no step rows, only the pointer lines and a Level-3 log drill."""
     # The pointer tail for a data-driven catalog match — on-path for a typical pole, opt-in/rare
     # for a `spine_rare` pole. Never a coverage gap either way (a measured catalog lever matched).
     # Where the data-driven match renders: OPT81 renders at its pole, not in the appendix.
@@ -4159,8 +4224,9 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                  f"~{_clock(step_total)} vs the job's own {_clock(job_total)} P50; "
                  "read the bars as proportions, not an exact sum" if gap else
                  "; they run in sequence and roughly add up to the job")
-    lines = [f"Where the job's ~{_clock(job_total)} goes - every step, slowest "
-             f"first{recon}:", ""]
+    lines = ([] if steps_dropped else
+             [f"Where the job's ~{_clock(job_total)} goes - every step, slowest "
+              f"first{recon}:", ""])
     if not deeper:
         # No drill: no captured log, a captured-but-unrecognized log, or a step-level
         # root cause (categorical leaf - the fix follows below). Show the steps
@@ -4172,9 +4238,10 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
         # (the dominant_step-disagreement class). rows2 mirrors steps[:TOP], so the
         # lead's index in `steps` is its row; fall back to 0 if it's rolled into the
         # tail, mirroring the old single-longest-step behaviour.
-        _emit_level(lines, rows2, header_below=None,
-                    mark_idx=_dom_lead_idx(steps[:TOP],
-                                           str(pole.get("dominant_category", ""))))
+        if not steps_dropped:
+            _emit_level(lines, rows2, header_below=None,
+                        mark_idx=_dom_lead_idx(steps[:TOP],
+                                               str(pole.get("dominant_category", ""))))
         if structural_present and leaf is None:
             # A structural catalog pattern matched this pole even though no log-level
             # detector fired — not a coverage gap; the structural root-cause renders below.
@@ -4195,8 +4262,9 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
         elif opt82_present and leaf is None:
             lines += ["", _OPT82_POLE_POINTER]
         elif not log_present:
+            _target = "this job" if steps_dropped else f"`{dom}`"
             lines += ["", f"(no captured log for this job — run with `--log "
-                      f"{wf_base.split('.')[0]}=<job log>` to drill into `{dom}`.)"]
+                      f"{wf_base.split('.')[0]}=<job log>` to drill into {_target}.)"]
         elif leaf is None and analysis_present:
             lines += ["", "(no catalog pattern matched this job's log - see the **LLM "
                       "root-cause analysis** below, which reads the captured log "
@@ -4208,13 +4276,30 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
         return lines
     # Drill into the BIGGEST step (it's only part of the job - the other steps are
     # above it in the bars).
-    deeper[0]["header"] = f"Level 3 — inside `{_lbl(dom)}`: {leaf['unit_label']}"
-    _emit_level(lines, rows2, header_below=deeper[0]["header"])
+    if steps_dropped:
+        # No step was measured, so there is no step row to hang the drill off: the
+        # log drill is headed by the job itself. A level scaled to the step's wall has
+        # no wall to scale to, and its raw values are summed across workers (they
+        # exceed any wall), so it shows shares only, without seconds, under a header
+        # that says why. Copies, so the shared leaf keeps its stock header and rows.
+        deeper = [dict(lvl) for lvl in deeper]
+        for lvl in deeper:
+            if lvl.get("scale_to_secs") is None and lvl.get("scale_to_step"):
+                _lvl_no = str(lvl.get("header", "")).split(" — ", 1)[0] or "Level 4"
+                lvl["header"] = (f"{_lvl_no} — each phase's share of the summed worker "
+                                 "time; the step's own time is unknown (no step was "
+                                 "measured), so the shares are shown without seconds")
+                lvl["rows"] = [(lb, s, "") for lb, s, _d in lvl["rows"]]
+        deeper[0]["header"] = f"Level 3 — inside this job's log: {leaf['unit_label']}"
+        lines += ["", f"   ▼ {deeper[0]['header']}", ""]
+    else:
+        deeper[0]["header"] = f"Level 3 — inside `{_lbl(dom)}`: {leaf['unit_label']}"
+        _emit_level(lines, rows2, header_below=deeper[0]["header"])
     for i, lvl in enumerate(deeper):
         last = i == len(deeper) - 1
         scale = lvl.get("scale_to_secs")
         if scale is None and lvl.get("scale_to_step"):
-            scale = dom_p50
+            scale = None if steps_dropped else dom_p50
         _emit_level(lines, lvl["rows"],
                     header_below=None if last else deeper[i + 1]["header"],
                     blocker_note=lvl["blocker_note"] if last else "",
@@ -6451,8 +6536,14 @@ _OPT79_HELD_BACK_REASONS: dict[str, str] = {
         "too many of the sampled runs' logs could not be read to tell how often "
         "the cache hits",
     "population_truncated_by_excluded_runs":
-        "too many of the sampled runs had logs that could not tell a cache hit "
-        "from a miss",
+        "too many sampled runs had to be set aside (unreadable cache line, "
+        "another runner, or step times that did not measure) to compare a hit "
+        "against a miss",
+    "population_truncated_by_unmeasurable_step_times":
+        "too many sampled runs had a cache, install or save step whose time did "
+        "not measure (a placeholder start, a start outside its job, timestamps "
+        "that did not parse, a step that never completed, or an install that "
+        "measured 0 s) to compare a hit against a miss",
     "fewer_than_min_hit_runs_classified":
         "too few sampled runs hit the cache to compare a hit against a miss",
     "fewer_than_min_miss_runs_classified":
