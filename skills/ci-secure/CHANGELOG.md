@@ -141,17 +141,21 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
-- **2026-10-10** — **GitHub's self-repository prefix (`uses: $/path`, shipped
-  2026-07-30) is now documented and pinned by tests; no verdict changes.** A
+- **2026-10-10** — **A self-repository action (`uses: $/path`, GitHub
+  2026-07-30) run after a checkout of the fork's head now counts as fork code
+  executed with privileges, exactly like a `./` action or a `run:` step.** A
   `$/` reference loads the action's definition from the commit the workflow
-  runs at, not from the workspace, so on `pull_request_target` /
-  `workflow_run` the definition is the base repository's even after a
-  checkout of the fork's head. The fork-code-executed-with-privileges check
-  counts only `run:` steps and workspace (`./`) actions as the execution, so
-  a `$/` step is not counted today; its own `run:` steps may still execute the
-  fork's checked-out tree, and the check does not open composite actions. The
-  impostor-commit check never reads a `$/` reference as a pinned action, and
-  the report's "What is not scanned" row now names the `$/` spelling too.
+  runs at, so on `pull_request_target` / `workflow_run` the definition is the
+  base repository's even after the head checkout, but the action's own `run:`
+  steps execute in the job's working directory, where the fork's tree now
+  sits; where the definition loads from does not change what it runs on.
+  Verdict change: a repository that uses a `$/` action after a head checkout
+  on these triggers now gets this finding, and its evidence names the `$/`
+  action and why it runs on the fork's tree. Workflows written before July
+  2026 cannot use the syntax, so earlier results are unchanged. The
+  impostor-commit check still never reads a `$/` reference as a pinned
+  action, and the report's "What is not scanned" row now names the `$/`
+  spelling too.
 
 - **2026-10-09** — **Steps inside a GitHub Actions `parallel:` group are
   scanned.** (#121) Parallel steps (GitHub, 2026-06-25; github.com and

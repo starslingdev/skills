@@ -193,14 +193,16 @@ credentials.
 **Anti-pattern**: the three-condition chain in ONE job — (1) an
 untrusted-event trigger with elevated context, (2) `actions/checkout` whose
 `ref:`/`repository:` resolves to attacker-controlled head code, (3) any
-subsequent step that executes from the working tree (`run:` or `uses: ./…`).
-Each condition alone can be legitimate; together they hand the runner to the
-fork. A self-repository action (`uses: $/…`, GitHub 2026-07-30) is not
-counted as condition (3) today: its definition loads from the commit the
-workflow runs at, which on these triggers is the base repository's, so the
-head checkout does not change it. Its own `run:` steps may still execute the
-fork's checked-out tree, though, and this check does not open composite
-actions to tell.
+subsequent step that executes from the working tree (`run:`, `uses: ./…`,
+or `uses: $/…`). Each condition alone can be legitimate; together they hand
+the runner to the fork. A self-repository action (`uses: $/…`, GitHub
+2026-07-30) counts as condition (3) just like a `./` action: its definition
+loads from the commit the workflow runs at, which on these triggers is the
+base repository's, but its own `run:` steps execute in the job's working
+directory, where the fork's tree sits after the checkout. That is the same
+over-approximation the check makes for an inline `run:` step; where the
+definition loads from does not change what it runs on. The finding's
+evidence says so when a `$/` action is the step that executes.
 
 **Detection**: deterministic three-way correlation, per job. Condition (3) is
 a deliberate over-approximation stated honestly: a post-checkout `run:` step

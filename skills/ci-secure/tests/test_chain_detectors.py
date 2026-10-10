@@ -81,13 +81,12 @@ def test_fires_on_workflow_run_head_and_local_action(tmp_path):
     assert len(hits) == 1
 
 
-def test_silent_on_a_self_repository_action_after_a_head_checkout(tmp_path):
+def test_fires_on_a_self_repository_action_after_a_head_checkout(tmp_path):
     # `uses: $/path` (GitHub's self-repository prefix, 2026-07-30) loads the
-    # action's definition from the commit the WORKFLOW runs at, not from the
-    # workspace, and is not counted as the execution today (current behaviour,
-    # pinned here). Its own `run:` steps could still execute the checked-out
-    # tree; the check does not open composite actions. The same shape with
-    # `./` fires (test above).
+    # action's definition from the commit the WORKFLOW runs at (the base
+    # repository's here), but the action's own `run:` steps execute in the
+    # job's working directory, where the fork's tree sits after the checkout.
+    # Same over-approximation as a `run:` step; mirror of the `./` test above.
     hits = _hits(tmp_path, """\
         on:
           workflow_run:
@@ -102,7 +101,30 @@ def test_silent_on_a_self_repository_action_after_a_head_checkout(tmp_path):
                   ref: ${{ github.event.workflow_run.head_sha }}
               - uses: $/.github/actions/build
     """)
-    assert hits == []
+    assert len(hits) == 1
+    assert "`$/` action" in hits[0].evidence
+    assert "fork's checked-out tree" in hits[0].evidence
+
+
+def test_fires_on_pull_request_target_head_and_self_repository_action(tmp_path):
+    hits = _hits(tmp_path, """\
+        on: pull_request_target
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{ github.event.pull_request.head.sha }}
+              - uses: $/.github/actions/build
+    """)
+    assert len(hits) == 1
+
+
+def test_evidence_plain_for_a_run_step_after_a_head_checkout(tmp_path):
+    # The `$/` explanation is appended only when a `$/` step is the execution.
+    hits = _hits(tmp_path, VULNERABLE)
+    assert "`$/`" not in hits[0].evidence
 
 
 def test_fires_on_refs_pull_merge_ref(tmp_path):

@@ -4970,34 +4970,53 @@ def _attacker_head_ref(value: Any) -> bool:
     return any(n in value for n in needles)
 
 
-# The execution leg's local-action arm is `./` only. `uses: ./path` loads the
-# action's definition from the WORKSPACE, so after a head checkout that
-# definition is the fork's. The self-repository prefix `uses: $/path` (GitHub,
-# 2026-07-30) loads the definition from the commit the WORKFLOW runs at, which
-# under `pull_request_target` / `workflow_run` is the base repository's, so a
-# `$/` step is not counted as the execution today. That does not make it safe:
-# a `$/` composite action's own `run:` steps still run in the job's working
-# directory and may execute the fork's checked-out tree, and this check does
-# not open composite actions to see whether they do.
-_WORKSPACE_ACTION_PREFIX = "./"
+# The execution leg's local-action arm covers both repository-local prefixes.
+# `uses: ./path` loads the action's definition from the WORKSPACE, so after a
+# head checkout that definition is the fork's. The self-repository prefix
+# `uses: $/path` (GitHub, 2026-07-30) loads the definition from the commit the
+# WORKFLOW runs at, which under `pull_request_target` / `workflow_run` is the
+# base repository's, but the action's own `run:` steps still execute in the
+# job's working directory, where the fork's tree sits after the checkout. That
+# is the same over-approximation this check already makes for an inline `run:`
+# step: where the definition loads from does not change what it runs on. The
+# check does not open the action to prove which file its steps touch.
+_SELF_REPOSITORY_ACTION_PREFIX = "$/"
+_LOCAL_ACTION_PREFIXES = ("./", _SELF_REPOSITORY_ACTION_PREFIX)
+
+
+def _executes_from_tree(step: dict[str, Any]) -> bool:
+    """A `run:` step, or a repository-local action (`./` or `$/`)."""
+    uses = step.get("uses")
+    return "run" in step or (
+        isinstance(uses, str) and uses.startswith(_LOCAL_ACTION_PREFIXES))
+
+
+def _is_self_repository_action(step: dict[str, Any]) -> bool:
+    uses = step.get("uses")
+    return (isinstance(uses, str) and "run" not in step
+            and uses.startswith(_SELF_REPOSITORY_ACTION_PREFIX))
 
 
 def _job_checkout_head_then_executes(
     job: dict[str, Any],
-) -> tuple[int, str, bool] | None:
+) -> tuple[int, str, bool, bool] | None:
     """The load-bearing predicate of P14.9: within ONE job, an
     `actions/checkout` of the attacker's head ref FOLLOWED BY, or possibly
     running at the same time as (a `parallel:` sibling, a `background:` step
-    still running), a step that executes from the working tree (`run:` or a
-    local `./action`).
+    still running), a step that executes from the working tree (`run:`, a
+    local `./action`, or a self-repository `$/action`, whose own steps run in
+    the working directory the fork's tree now occupies).
 
     The execution leg is a deliberate, documented over-approximation: a
     post-checkout `run:` step almost always executes tree-controlled content
     (install scripts, Makefiles, test suites), so we do not try to prove which
     file it touches. A checkout with no `ref:` (base/merge ref) never
-    qualifies. Returns (checkout_step_index, ref_text, concurrent) or None;
-    `concurrent` is True when only the possibly-at-the-same-time reading
-    qualifies, so the evidence does not claim an order it cannot know.
+    qualifies. Returns (checkout_step_index, ref_text, concurrent,
+    self_repository) or None; `concurrent` is True when only the
+    possibly-at-the-same-time reading qualifies, so the evidence does not
+    claim an order it cannot know; `self_repository` is True when the
+    qualifying execution step is a `$/` action, so the evidence can say why
+    a base-repository definition still runs on the fork's tree.
     The index is a 0-based ordinal in walker (leaf) order, not a `steps:`
     position.
     """
@@ -5014,12 +5033,9 @@ def _job_checkout_head_then_executes(
                         ref_text = str(with_block.get(key))
                         break
         if checkout_idx is not None and i > checkout_idx:
-            executes = "run" in step or (
-                isinstance(step.get("uses"), str)
-                and step["uses"].startswith(_WORKSPACE_ACTION_PREFIX)
-            )
-            if executes:
-                return checkout_idx, ref_text, False
+            if _executes_from_tree(step):
+                return (checkout_idx, ref_text, False,
+                        _is_self_repository_action(step))
     # Declared after is not the only "after": a step that may run at the same
     # time as the head checkout (a `parallel:` sibling written above it, a
     # `background:` step still running) can execute the fork's tree too.
@@ -5034,12 +5050,9 @@ def _job_checkout_head_then_executes(
         if ref is None:
             continue
         for e, e_timing in timed:
-            e_uses = e.step.get("uses")
-            if e is not c and ("run" in e.step or (
-                    isinstance(e_uses, str)
-                    and e_uses.startswith(_WORKSPACE_ACTION_PREFIX))) \
+            if e is not c and _executes_from_tree(e.step) \
                     and _steps_concurrent(c_timing, e_timing):
-                return i, str(ref), True
+                return i, str(ref), True, _is_self_repository_action(e.step)
     return None
 
 
@@ -5071,11 +5084,15 @@ def _correlation_untrusted_checkout_executes(file_path: Path) -> Iterator[RawHit
         hit = _job_checkout_head_then_executes(job)
         if hit is None:
             continue
-        _, ref_text, concurrent = hit
+        _, ref_text, concurrent, self_repository = hit
         line = _job_line_in_text(text, job_name)
         then = ("and a step that may run after or alongside it executes "
                 "from the tree" if concurrent
                 else "then executes from the tree")
+        if self_repository:
+            then += (" (a `$/` action: its definition is the base "
+                     "repository's, but its own steps run in the working "
+                     "directory, on the fork's checked-out tree)")
         yield RawHit(
             line=line,
             evidence=(
