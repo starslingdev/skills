@@ -998,9 +998,9 @@ unversioned and updates by reinstall from `main`.
   `blocking_path.py`, `summary.py`, `record_timing.py`) now sets its log level
   from the variable through one shared helper (`scripts/log_level.py`). Unset
   means WARNING, as before; a name that is not a log level also means WARNING,
-  with one line saying the value was ignored. What is logged is unchanged:
+  with one line per program saying the value was ignored (a `run.py` audit starts three programs, so three lines). What is logged is unchanged:
   endpoints, sizes and pattern / workflow names, never gh response bodies.
-  Warnings that already printed now carry a `WARNING <module>:` prefix.
+  Warnings that already printed now carry a `WARNING <module>:` prefix, except one emitted while the collector module is still loading, before logging is configured.
 
 - **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
   no longer invisible to the audit.** Since 2026-06-25 a step may be a
