@@ -29,6 +29,7 @@ import json
 import logging
 import math
 import os
+import posixpath as _posixpath
 import random
 import re
 import shutil
@@ -70,7 +71,7 @@ from wall_clock import (  # noqa: E402
 # children of a GitHub Actions `parallel:` group are seen and `wait:` /
 # `wait-all:` / `cancel:` control steps are skipped. (The RUN-DATA side — the
 # jobs API's `steps` with timestamps — is a different list and is not walked.)
-from workflow_steps import job_walk  # noqa: E402
+from workflow_steps import is_group_step, job_walk  # noqa: E402
 
 
 # =============================================================================
@@ -5882,6 +5883,12 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
               "saving is credited; the lint step's measured p50 (the lint job's "
               "when the step was not separately measured) is stamped as a "
               "ceiling and the prompt requires a benchmark first"),
+    # NOT DERIVABLE — OPT83 credits nothing: the candidate steps' sum minus the
+    # slowest is stamped as an UPPER BOUND and a benchmark is required first.
+    "OPT83": (_RM_DOOR_NOT_DERIVABLE,
+              "uncredited parallel-steps detector — no runner-minute or wall-clock "
+              "saving is credited; the candidate steps' p50 sum minus the slowest is "
+              "stamped as an upper bound and the prompt requires a benchmark first"),
     # NOT DERIVABLE — OPT80's basis is one STEP's tail excess (mean - p50 of the
     # checkout step), scaled by that job's own measured run frequency. It is
     # neither the per-job cost spine nor an eliminated-runs slice, so the generic
@@ -11176,7 +11183,8 @@ def _post_failure_waste_s(legs: list[dict[str, Any]]) -> tuple[float, str, list[
 # A2 (ADVISORY). The lever of LAST RESORT on a merge-gating long pole that runs on
 # a standard GitHub-hosted label, whose dominant step is compute, whose job did not
 # run on two or more labels (A1 data), and for which no cheaper lever exists: no
-# OPT70–OPT74 or OPT78 on the pole; no credited non-advisory, non-pre-start finding
+# OPT70–OPT74 or OPT78 on the pole (the uncredited OPT75 and OPT83 render first
+# and do not hold it back); no credited non-advisory, non-pre-start finding
 # (any pattern, OPT75 included) of at least half the job's p50; no sharding finding
 # (OPT24); no net-negative cache (OPT79) of 30s or more; and, at render time, no
 # log-level leaf on the pole's log. It carries no number at all: it names a class
@@ -11224,10 +11232,13 @@ _OPT81_CACHE_LEVER_MIN_S = 30.0
 # A2 (d): levers that are cheaper than hardware and suppress A2 by being present
 # on the pole: scope, de-trigger, warm build cache, shared step (OPT70-OPT73),
 # trust-boundary-forced cold work (OPT74) and per-file test isolation (OPT78).
-# OPT75 ("decompose the dominant step") is NOT in the set: it is what the router
-# says when nothing more specific applies, so its presence alone does not
-# suppress A2 (it renders first); an OPT75 credit of half the pole's median or
-# more still does, through the credited-lever rule above.
+# Two uncredited levers are NOT in the set, and both render before A2:
+#   - OPT75 ("decompose the dominant step") is what the router says when nothing
+#     more specific applies, so its presence alone does not suppress A2; an OPT75
+#     credit of half the pole's median or more still does, through the
+#     credited-lever rule above.
+#   - OPT83 (the pole's independent steps side by side) needs a benchmark before
+#     any saving is known, so the reader sees both (owner decision 2026-10-09).
 _OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "OPT74",
                                        "OPT78"})
 
@@ -11814,6 +11825,7 @@ def _detect_opt81_runner_size_advisory(
         return []
 
     has_opt75 = any(str(f.get("pattern")) == "OPT75" for f in others)
+    has_opt83 = any(str(f.get("pattern")) == "OPT83" for f in others)
     checked = [
         {"lever": ("structural: scope, de-trigger, warm build cache, shared step, "
                    "trust-boundary cold work, per-file test isolation ("
@@ -11821,7 +11833,9 @@ def _detect_opt81_runner_size_advisory(
          "patterns": sorted(_OPT81_CHEAPER_STRUCTURAL), "applies": False,
          "why": ("no finding of these patterns is on this job"
                  + ("; only the generic decompose lever (OPT75) applies, and it "
-                    "renders first" if has_opt75 else ""))},
+                    "renders first" if has_opt75 else "")
+                 + ("; the uncredited independent-steps lever (OPT83) is on this "
+                    "job and renders first" if has_opt83 else ""))},
         {"lever": "a credited fix already on this job", "patterns": [],
          "applies": False,
          "why": "no finding credits wall-clock on this job at half its median or more"},
@@ -15461,6 +15475,586 @@ def _crown_recovery_wf(
     if isinstance(recoverable, dict):
         return wf if recoverable.get(wf) else None
     return wf if wf in set(recoverable or ()) else None
+
+
+# =============================================================================
+# OPT83 — Independent Steps on the Long Pole Run One After Another
+# (uncredited; benchmark first)
+# =============================================================================
+# GitHub Actions can run steps of one job at the same time: a `- parallel:`
+# group runs its child steps concurrently and waits for all of them before the
+# next step (https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsparallel,
+# https://github.blog/changelog/2026-06-25-actions-steps-can-now-be-run-in-parallel/).
+# On a measured long pole whose time is several compute steps written one after
+# another, that is a lever no other pattern names.
+#
+# ROUTED FROM THE MEASURED CRITICAL PATH, like the structural levers: only the
+# poles `collect()` drilled (`pr_critical_path.poles`), and only from each pole's
+# stamped per-step p50 decomposition (`steps`, `job_p50_s`). A step qualifies
+# when it is compute (`_OPT83_COMPUTE_CATEGORIES`), not boilerplate / a wait /
+# a sleep, at least `_OPT83_MIN_STEP_S` seconds and at least `_OPT83_MIN_SHARE`
+# of the pole's decomposed p50. `_opt83_step_qualifies` is that rule, and
+# `verify_report` carries a verbatim copy to re-check each listed step against
+# it, re-derive the upper bound and reject any other duration.
+#
+# INDEPENDENCE is read from the workflow YAML and never from timings, and fails
+# closed: every check below that cannot be passed holds the pole back (listed
+# under `opt83_withheld_candidates` with a plain-English reason), never fires.
+#
+# SIZING — uncredited by design. Siblings share one runner's CPU, memory and
+# disk, so how much of "the sum minus the slowest" survives is unknowable from
+# the sampled runs. The finding carries no wall-clock and no runner-minute
+# number and has no `_SIZING` row; it stamps `ceiling_s = sum − max` of the
+# candidate steps' p50s, labelled an UPPER BOUND, and the prompt asks for the
+# benchmark first. It never reaches a total, the headline or Tier 2.
+_OPT83_TITLE = "Independent Steps on the Long Pole Run One After Another"
+_OPT83_FIX_STRATEGY = "run-independent-pole-steps-in-parallel"
+# A candidate step's floor, as a share of the pole's decomposed p50 and in
+# seconds. Both must hold: a 20s step on a 60-minute job is noise, and 15% of a
+# 40s job is not worth a rewrite.
+_OPT83_MIN_SHARE = 0.15
+_OPT83_MIN_STEP_S = 20.0
+_OPT83_COMPUTE_CATEGORIES = frozenset({"build", "test", "scan", "package"})
+# A step whose NAME says it waits, sleeps or stops something is not compute,
+# whatever category its name also matched.
+_OPT83_NOT_COMPUTE_RE = _re.compile(
+    r"\b(sleep|sleeping|wait|waits|waiting|wait-all|cancel)\b", _re.I)
+_OPT83_CEILING_BASIS = (
+    "the sum of the candidate steps' p50s minus the slowest one: an upper bound "
+    "that assumes every step keeps its solo speed while sharing one runner")
+# The findings-doc key the collector writes OPT83's WITHHELD candidates under. A
+# STRING CONTRACT across the collector, the renderer and the verifier.
+_OPT83_WITHHELD_DOC_KEY = "opt83_withheld_candidates"
+# Exits that are a VERDICT about the pole (nothing to say), counted only.
+_OPT83_VERDICT_GATES = frozenset({
+    "pole_not_file_backed",
+    "fewer_than_two_qualifying_steps",
+    "qualifying_steps_not_adjacent",
+    "steps_already_run_in_parallel",
+})
+# Exits where the audit could not decide: counted AND listed with a phrase.
+_OPT83_HELD_BACK_GATES = frozenset({
+    "pole_step_timings_unavailable",
+    "pole_step_entries_unreadable",
+    "pole_workflow_ambiguous",
+    "workflow_yaml_unavailable",
+    "pole_job_not_matched_in_yaml",
+    "job_has_an_unreadable_parallel_group",
+    "measured_step_not_matched_in_yaml",
+    "background_is_an_expression",
+    "step_uses_runtime_expression",
+    "siblings_share_a_cache_or_artifact",
+    "sibling_is_an_action",
+    "candidate_publishes_deploys_or_uploads",
+    "sibling_reads_another_siblings_output",
+    "sibling_writes_env_output_or_path",
+    "step_changes_directory",
+    "siblings_share_a_build_tree",
+    "step_condition_depends_on_order",
+    "candidate_has_continue_on_error",
+    "siblings_share_tool_state",
+    "candidate_runs_an_install",
+    "job_starts_a_container_or_background_server",
+})
+# The independence facts every OPT83 finding stamps (all True, or it would not
+# exist). The verifier requires every key.
+_OPT83_INDEPENDENCE_KEYS = (
+    "no_runtime_expression",
+    "no_shared_cache_or_artifact",
+    "no_action_steps",
+    "no_publish_deploy_or_upload",
+    "no_step_output_reads",
+    "no_env_output_or_path_write_read_later",
+    "no_directory_change",
+    "no_shared_build_tree",
+    "no_order_dependent_condition",
+    "no_continue_on_error",
+    "no_shared_tool_state",
+    "no_install_in_a_candidate",
+    "no_container_or_background_server",
+)
+_OPT83_ENV_FILE_RE = _re.compile(r"\bGITHUB_(ENV|OUTPUT|PATH)\b")
+# A candidate that publishes, deploys or uploads (by its measured category
+# `package`, its name or any part of its command): it relies on the checks beside
+# it having passed first, and inside a `parallel:` group that ordering is gone.
+# A bare `release` is left out on purpose: `cargo build --release` and
+# `-c Release` are builds, not releases.
+_OPT83_PUBLISH_RE = _re.compile(
+    r"\b(publish|publishes|deploy|deploys|deployment|upload|uploads|push)\b"
+    r"|\b(gh|create|semantic)[-\s]release\b|\bgoreleaser\b"
+    r"|\b(s3|gsutil|azcopy)\b.*\b(cp|sync|copy)\b", _re.I)
+_OPT83_CD_RE = _re.compile(r"(^|[;&|(\s])(cd|pushd|popd)(\s|$|;)", _re.M)
+# A build command aimed at a directory other than its own working directory
+# (`--prefix`, `--cwd`, `--dir`, `-C`, `--outDir` / `--out-dir`, a `../` or
+# absolute path): where it writes is not
+# the step's tree, so it is treated as writing anywhere.
+_OPT83_BUILD_ELSEWHERE_RE = _re.compile(
+    r"--prefix\b|--cwd\b|--dir\b|--out-?dir\b|(^|\s)-C\s|(^|[\s=])\.\./|(^|[\s=])/[A-Za-z]",
+    _re.I)
+# Tools whose runs in one tree share hidden state: a build-output folder and its
+# lock (target/, bin/ and obj/, .build, _build, DerivedData), or one coverage
+# data file. Each of these builds before it tests. Two candidates of one family
+# in one tree could collide when run side by side.
+_OPT83_TOOL_STATE_RES = (
+    _re.compile(r"\bcargo\b"),
+    _re.compile(r"(^|[\s/])(mvn|mvnw)\b"),
+    _re.compile(r"(^|[\s/])(gradle|gradlew)\b"),
+    _re.compile(r"\bdotnet\s+(test|build|run|publish)\b"),
+    _re.compile(r"(^|[\s/])sbt\b"),
+    _re.compile(r"\bswift\s+(test|build)\b"),
+    _re.compile(r"\bmix\s+(test|compile)\b"),
+    _re.compile(r"\bxcodebuild\b"),
+    _re.compile(r"--cov\b|--coverage\b|-coverprofile\b|\bcoverage run\b|\bnyc\b"
+                r"|\bc8\b"),
+)
+_OPT83_DOCKER_RE = _re.compile(r"(^|[\s;&|(])(docker|podman|docker-compose)\b")
+# An action that starts or drives containers (`docker://` images, docker/*
+# actions, compose actions): treated like a `docker` command.
+_OPT83_CONTAINER_ACTION_RE = _re.compile(r"^docker://|docker|compose|podman", _re.I)
+_OPT83_CACHE_ARTIFACT_RE = _re.compile(
+    r"^actions/(cache|upload-artifact|download-artifact)(/(save|restore))?@", _re.I)
+
+
+def _opt83_step_qualifies(name: str, category: str, p50: float,
+                          job_p50: float) -> bool:
+    """The candidate rule, read from a pole's stamped decomposition only.
+    VERBATIM-SYNC: `verify_report._vr_opt83_step_qualifies` carries the same body
+    (a source-equality test pins it), so the verifier re-derives the set the
+    collector saw."""
+    if not name or job_p50 <= 0:
+        return False
+    if category not in _OPT83_COMPUTE_CATEGORIES:
+        return False
+    if _NON_WORK_STEP_RE.match(name) or _OPT83_NOT_COMPUTE_RE.search(name):
+        return False
+    return p50 >= _OPT83_MIN_STEP_S and p50 >= _OPT83_MIN_SHARE * job_p50
+
+
+def _opt83_may_write_build_output(measured_category: str, step: dict[str, Any]) -> bool:
+    """Whether a candidate step may write build output into its tree: its measured
+    category is build / package, or ANY line of its command reads as one. One
+    exception, because it is one by definition: a TypeScript compile that passes
+    `--noEmit` writes no output files (`tsc --noEmit` is a type-check)."""
+    if measured_category in ("build", "package"):
+        return True
+    if step.get("uses"):
+        return _step_category(f"Run {step.get('uses')}") in ("build", "package")
+    for ln in str(step.get("run") or "").splitlines():
+        ln = ln.strip()
+        if not ln or _step_category("Run " + ln) not in ("build", "package"):
+            continue
+        parts = [x for x in _re.split(r"&&|\|\||;|\|", ln) if x.strip()]
+        if all(_step_category("Run " + x) not in ("build", "package")
+               or (_re.search(r"\btsc\b", x) and "--noEmit" in x) for x in parts):
+            continue
+        return True
+    return False
+
+
+def _opt83_runs_an_install(step: dict[str, Any]) -> bool:
+    """Whether any line, or any `&&` / `||` / `;` / `|` part of a line, of a
+    candidate's command reads as a dependency install (`npm ci`, `pip install`,
+    `uv sync`, `bundle install`): it writes the dependency tree every other
+    candidate reads."""
+    for ln in str(step.get("run") or "").splitlines():
+        for x in [ln, *_re.split(r"&&|\|\||;|\|", ln)]:
+            if x.strip() and _step_category("Run " + x.strip()) == "install":
+                return True
+    return False
+
+
+def _opt83_ceiling(p50s: "list[float]") -> float:
+    """sum − max, rounded as stamped. Two or more steps, else 0."""
+    if len(p50s) < 2:
+        return 0.0
+    return round(sum(p50s) - max(p50s), 1)
+
+
+def _opt83_match_yaml_job(jobs: dict[str, Any], job_name: str
+                          ) -> "tuple[str, dict[str, Any]] | None":
+    """The YAML job a measured job name belongs to: its `name:` (or key), or a
+    matrix leg of it (`name (a, b)`). None when no job, or more than one, fits."""
+    hits: list[tuple[str, dict[str, Any]]] = []
+    for key, spec in jobs.items():
+        if not isinstance(spec, dict):
+            continue
+        display = str(spec.get("name") or key).strip()
+        if "${{" in display:
+            rx = _re.compile("^" + ".+".join(
+                _re.escape(p) for p in _re.split(r"\$\{\{.*?\}\}", display)) + "$")
+            ok = bool(rx.match(job_name))
+        else:
+            ok = job_name == display or job_name.startswith(display + " (")
+        if ok:
+            hits.append((str(key), spec))
+    return hits[0] if len(hits) == 1 else None
+
+
+def _opt83_effective_wd(step: dict[str, Any], spec: dict[str, Any],
+                        doc: dict[str, Any]) -> str:
+    def _d(m: Any) -> dict[str, Any]:
+        d = m.get("defaults") if isinstance(m, dict) else None
+        r = d.get("run") if isinstance(d, dict) else None
+        return r if isinstance(r, dict) else {}
+    raw = step.get("working-directory",
+                   _d(spec).get("working-directory", _d(doc).get("working-directory")))
+    if "${{" in str(raw or ""):
+        # Read on the RAW value: `${{ inputs.dir }}/..` normalizes to `.`, and the
+        # expression would vanish. The caller holds an expression back.
+        return str(raw).strip()
+    # Normalized, so `./web`, `web/` and `web/../web` read as the one tree they are.
+    # A directory outside the checkout (`..`, `../web`, an absolute path) cannot be
+    # compared with the others' trees, so it reads as the root: it overlaps all.
+    norm = _posixpath.normpath(str(raw or ".").strip())
+    if norm.startswith("/") or norm == ".." or norm.startswith("../"):
+        return "."
+    return norm.strip("/") or "."
+
+
+def _opt83_same_tree(a: str, b: str) -> bool:
+    """Two normalized working directories overlap: equal, or one inside the
+    other (a build at `.` writes into `web/`; one at `web` writes what a step
+    at `web/src` reads)."""
+    return a == b or a == "." or b == "." or b.startswith(a + "/") or a.startswith(b + "/")
+
+
+def _detect_opt83_parallel_steps(
+    poles: list[dict[str, Any]],
+    wf_docs: dict[str, Any],
+    crit_by_wf: dict[str, dict[str, Any]],
+    start_idx: int,
+    withheld: dict[str, int] | None = None,
+    withheld_candidates: list[dict[str, Any]] | None = None,
+    seen: "set[tuple[str, str]] | None" = None,
+) -> list[dict[str, Any]]:
+    """OPT83: on a drilled long pole, two or more compute steps that run one
+    after another and that the workflow YAML shows to be independent. Uncredited.
+
+    Every exit except a finding (and a pole already seen, which has its one
+    finding or verdict already) is counted into `withheld` (stamped as
+    `opt83_withheld_by_gate`).
+    A pole the audit could not decide (`_OPT83_HELD_BACK_GATES`) is also listed
+    in `withheld_candidates` for the shared held-back row; verdicts are not.
+    `crit_by_wf` keeps the call shape `collect()` shares; nothing in it is read."""
+    def _no(gate: str, wf: str = "", job: str = "",
+            steps: "list[str] | None" = None, **ctx: Any) -> None:
+        if withheld is not None:
+            withheld[gate] = withheld.get(gate, 0) + 1
+        if (withheld_candidates is not None and gate in _OPT83_HELD_BACK_GATES
+                and job):
+            # Decided on the chosen run: the held-back row names its steps too.
+            withheld_candidates.append({"workflow_file": wf, "job": job, "gate": gate,
+                                        **({"steps": list(steps)} if steps else {})})
+        logger.debug("OPT83 %s %s: withheld by %s%s", wf, job, gate,
+                     (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items())) if ctx else "")
+
+    out: list[dict[str, Any]] = []
+    # One finding per (workflow, job); `collect()` passes one set across its
+    # per-pole calls so a pole listed twice cannot yield two.
+    seen = set() if seen is None else seen
+    for p in poles or []:
+        if not isinstance(p, dict):
+            _no("pole_not_file_backed")
+            continue
+        wf = str(p.get("workflow_file") or "")
+        job = str(p.get("job") or "")
+        if not wf and p.get("ambiguous_workflows"):
+            # A real CI job that more than one workflow produces: which file's
+            # steps ran cannot be told. Not "no file": the audit could not decide.
+            name = job or str(p.get("check") or "")
+            if ("", name) in seen:
+                continue
+            seen.add(("", name))
+            _no("pole_workflow_ambiguous", "", name)
+            continue
+        if not wf or not job:
+            _no("pole_not_file_backed")
+            continue
+        if (wf, job) in seen:
+            continue
+        seen.add((wf, job))
+        raw_steps = p.get("steps")
+        steps = ([s for s in raw_steps if isinstance(s, dict)]
+                 if isinstance(raw_steps, list) else [])
+        _names = [str(s.get("step") or "").strip() for s in steps]
+        if steps and (len(steps) != len(raw_steps) or not all(_names)
+                      or len(set(_names)) != len(_names)
+                      or not all(str(s.get("category") or "").strip() for s in steps)):
+            # A non-object entry, a step with no name or no category, or one name
+            # twice: dropped or merged quietly, it would change which steps
+            # qualify. Held back, as an unreadable p50 is.
+            _no("pole_step_entries_unreadable", wf, job)
+            continue
+        def _finite(v: Any) -> "float | None":
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                return None
+            return x if math.isfinite(x) else None
+        job_p50 = _finite(p.get("job_p50_s")) or 0.0
+        measured: dict[str, tuple[str, float]] = {}
+        unreadable = False
+        for s in steps:
+            d = _finite(s.get("p50_s"))
+            if d is None:
+                unreadable = True
+                break
+            measured[str(s.get("step") or "")] = (str(s.get("category") or ""), d)
+        if not steps or job_p50 <= 0 or unreadable:
+            # A missing, non-numeric or non-finite p50 is not a zero: which steps
+            # qualify is unknown, so the pole is held back, never a quiet verdict.
+            _no("pole_step_timings_unavailable", wf, job)
+            continue
+        qualifying = {n for n, (c, d) in measured.items()
+                      if _opt83_step_qualifies(n, c, d, job_p50)}
+        if len(qualifying) < 2:
+            _no("fewer_than_two_qualifying_steps", wf, job, n=len(qualifying))
+            continue
+        doc = wf_docs.get(wf) if isinstance(wf_docs, dict) else None
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        if not isinstance(jobs, dict):
+            _no("workflow_yaml_unavailable", wf, job)
+            continue
+        hit = _opt83_match_yaml_job(jobs, job)
+        if hit is None:
+            _no("pole_job_not_matched_in_yaml", wf, job)
+            continue
+        yaml_key, spec = hit
+        walk = job_walk(spec)
+        if walk.malformed_groups:
+            # A malformed `parallel:` group's steps were never read, so whether
+            # one of them writes the build tree, starts a server or sets
+            # GITHUB_ENV cannot be ruled out: the independence read is
+            # incomplete. Held back with the scan's reason, never reported.
+            _no("job_has_an_unreadable_parallel_group", wf, job)
+            continue
+        names = [_opt79_yaml_step_display(lf.step) for lf in walk.leaves]
+        by_name: dict[str, list[int]] = {}
+        for i, n in enumerate(names):
+            if n:
+                by_name.setdefault(n, []).append(i)
+        if any(len(by_name.get(n, [])) != 1 for n in qualifying):
+            # Not found, or two YAML steps render the same name: which one ran
+            # when cannot be told, so neither order nor independence can.
+            _no("measured_step_not_matched_in_yaml", wf, job)
+            continue
+        cand_idx = {by_name[n][0]: n for n in qualifying}
+        # A `background:` written as an expression, on a candidate or on any step
+        # before the last one, may well be true: whether the steps already run
+        # side by side, or share a server started earlier, is only known at run
+        # time. Held back with its own reason, never read as a verdict.
+        if any("${{" in str(lf.step.get("background") or "")
+               for lf in walk.leaves[:max(cand_idx) + 1]):
+            _no("background_is_an_expression", wf, job)
+            continue
+        bg = {i for i in cand_idx if walk.leaves[i].background}
+        # Maximal runs of candidates that sit next to each other in the job's
+        # TOP-LEVEL `steps:` list. Anything else between two candidates breaks
+        # the run, because its effects (a tool install, a GITHUB_ENV write) are
+        # unknown: any other step, a `parallel:` group, and a `wait:` /
+        # `wait-all:` / `cancel:` control step, which runs nothing but is an
+        # order barrier `walk.leaves` does not keep. A step already in a group
+        # or in the background is not a candidate.
+        leaf_pos: dict[int, list[int]] = {}
+        for i, lf in enumerate(walk.leaves):
+            if not lf.in_parallel_group:
+                leaf_pos.setdefault(id(lf.step), []).append(i)
+        top = spec.get("steps") if isinstance(spec.get("steps"), list) else []
+        runs: list[list[int]] = []
+        cur: list[int] = []
+        for item in top:
+            pos = (leaf_pos.get(id(item)) if isinstance(item, dict)
+                   and not is_group_step(item) else None)
+            i = pos.pop(0) if pos else None
+            if i is not None and i in cand_idx and i not in bg:
+                cur.append(i)
+                continue
+            if len(cur) >= 2:
+                runs.append(cur)
+            cur = []
+        if len(cur) >= 2:
+            runs.append(cur)
+        if not runs:
+            if bg:
+                _no("steps_already_run_in_parallel", wf, job)
+            else:
+                _no("qualifying_steps_not_adjacent", wf, job)
+            continue
+        run = max(runs, key=lambda r: (_opt83_ceiling(
+            [measured[cand_idx[i]][1] for i in r]), -r[0]))
+        cands = [walk.leaves[i].step for i in run]
+        cand_names = [cand_idx[i] for i in run]
+        # ---- independence, from the YAML only; every check fails closed ----
+        # Keys stringified first: YAML 1.1 reads `on:` / `yes:` as booleans, and
+        # sorting a bool key against a string key raises.
+        texts = [json.dumps({str(k): v for k, v in s.items()}, sort_keys=True,
+                            default=str) for s in cands]
+        shared: dict[str, int] = {}
+        for s in cands:
+            uses = str(s.get("uses") or "")
+            if _OPT83_CACHE_ARTIFACT_RE.match(uses):
+                w = s.get("with") if isinstance(s.get("with"), dict) else {}
+                for k in ("path", "key", "name"):
+                    if w.get(k) is not None:
+                        v = f"{k}={w.get(k)}"
+                        shared[v] = shared.get(v, 0) + 1
+        if any(c > 1 for c in shared.values()):
+            _no("siblings_share_a_cache_or_artifact", wf, job, cand_names)
+            continue
+        if any(s.get("uses") for s in cands):
+            _no("sibling_is_an_action", wf, job, cand_names)
+            continue
+        if any(cats_k == "package" or _OPT83_PUBLISH_RE.search(n_k)
+               or _OPT83_PUBLISH_RE.search(str(s.get("run") or ""))
+               for s, n_k, cats_k in zip(cands, cand_names,
+                                         (measured[n][0] for n in cand_names))):
+            # A publish, deploy or upload relies on the checks beside it having
+            # passed first; inside a `parallel:` group the default `if: success()`
+            # ordering between them is gone.
+            _no("candidate_publishes_deploys_or_uploads", wf, job, cand_names)
+            continue
+        ids = [str(s.get("id")) for s in cands if s.get("id")]
+        if any(f"steps.{sid}." in texts[k] for k in range(len(cands))
+               for sid in ids if str(cands[k].get("id") or "") != sid):
+            _no("sibling_reads_another_siblings_output", wf, job, cand_names)
+            continue
+        if any(_OPT83_ENV_FILE_RE.search(str(s.get("run") or "")) for s in cands[:-1]):
+            # Written by a step a later sibling could have read. GitHub documents
+            # that a background step's OUTPUTS are visible only after a wait;
+            # that env and path writes behave the same is this audit's assumption.
+            _no("sibling_writes_env_output_or_path", wf, job, cand_names)
+            continue
+        # Any other `${{ }}` in a command or directory is only known at run
+        # time: what it reads or where it runs cannot be told.
+        # `env:`, `shell:` and the rest are evaluated as the step starts, so a
+        # `${{ }}` anywhere but the name (and `if:`, gated below) counts.
+        if any("${{" in json.dumps({k: v for k, v in s.items() if k not in ("name", "if")},
+                                   default=str) for s in cands):
+            _no("step_uses_runtime_expression", wf, job, cand_names)
+            continue
+        if any(_OPT83_CD_RE.search(str(s.get("run") or "")) for s in cands):
+            _no("step_changes_directory", wf, job, cand_names)
+            continue
+        wds = [_opt83_effective_wd(s, spec, doc) for s in cands]
+        if any("${{" in w for w in wds):
+            # A job- or workflow-level `defaults.run.working-directory` written as
+            # an expression: where the step runs is only known at run time.
+            _no("step_uses_runtime_expression", wf, job, cand_names)
+            continue
+        cats = [measured[n][0] for n in cand_names]
+        builds = [k for k in range(len(cands)) if _opt83_may_write_build_output(
+            cats[k], cands[k])]
+        if builds:
+            # Once a build is among them, any step whose command reaches outside
+            # its own tree (`../web/dist`, an absolute path, `--prefix`, `-C`)
+            # may read or write the build's output: it shares every tree.
+            for k in range(len(cands)):
+                if _OPT83_BUILD_ELSEWHERE_RE.search(str(cands[k].get("run") or "")):
+                    wds[k] = "."
+        if any(_opt83_same_tree(wds[b], wds[k]) for b in builds
+               for k in range(len(cands)) if k != b):
+            # A build writes into a tree another sibling reads or writes, before
+            # OR after it: run side by side, the build overwrites what the other
+            # step is reading. Only disjoint trees prove they do not depend.
+            _no("siblings_share_a_build_tree", wf, job, cand_names)
+            continue
+        if any(_opt83_runs_an_install(s) for s in cands):
+            # An install writes the dependency tree (node_modules, site-packages,
+            # vendor/) the other candidates read: it shares state with all of them.
+            _no("candidate_runs_an_install", wf, job, cand_names)
+            continue
+        if any("if" in s for s in cands):
+            _no("step_condition_depends_on_order", wf, job, cand_names)
+            continue
+        if any(s.get("continue-on-error", False) is not False for s in cands):
+            # A step allowed to fail changes what a failing parallel child does to
+            # the job: the group no longer fails on it. Anything but a literal
+            # `false` (a string, `yes`) holds the pole back.
+            _no("candidate_has_continue_on_error", wf, job, cand_names)
+            continue
+        runs_txt = [str(s.get("run") or "") for s in cands]
+        if (spec.get("services")
+                or sum(bool(_OPT83_DOCKER_RE.search(t)) for t in runs_txt) >= 2
+                or any(rx.search(runs_txt[a]) and rx.search(runs_txt[b])
+                       and _opt83_same_tree(wds[a], wds[b])
+                       for rx in _OPT83_TOOL_STATE_RES
+                       for a in range(len(cands)) for b in range(a + 1, len(cands)))):
+            # Service containers, one Docker daemon, or one tool's target/ or
+            # coverage file in one tree: state the workflow file does not show
+            # as a dependency, but that side-by-side steps would share.
+            _no("siblings_share_tool_state", wf, job, cand_names)
+            continue
+        # A container or a background server started earlier in the job (or by a
+        # candidate) is one shared database, port or daemon that side-by-side
+        # steps would all use. Every step up to the last candidate counts.
+        if any(_OPT83_DOCKER_RE.search(str(lf.step.get("run") or ""))
+               or _OPT83_CONTAINER_ACTION_RE.search(str(lf.step.get("uses") or ""))
+               for lf in walk.leaves[:max(run) + 1]) or any(
+                   lf.background for lf in walk.leaves[:min(run)]):
+            _no("job_starts_a_container_or_background_server", wf, job, cand_names)
+            continue
+        # ---- the finding --------------------------------------------------
+        p50s = [measured[n][1] for n in cand_names]
+        ceiling = _opt83_ceiling(p50s)
+        listing = ", ".join(f"`{n}` ({d:.0f}s)" for n, d in zip(cand_names, p50s))
+        evidence = (
+            f"`{job}` is a measured long pole ({job_p50:.0f}s across its steps at "
+            f"p50). {len(cands)} of its compute steps run one after another: "
+            f"{listing}. The workflow file shows none of them reads another's "
+            "outputs, environment or path changes, and none shares a cache, an "
+            "artifact or a build tree with another. Run side by side, the job could "
+            f"finish at most {ceiling:.0f}s sooner: an UPPER BOUND that assumes each "
+            "step keeps its solo speed on one runner. No saving is credited until a "
+            "benchmark measures it.")
+        me = _measured_evidence(
+            ["Step", "Category", "p50", "Working directory"],
+            [[f"`{n}`", measured[n][0], f"{measured[n][1]:.0f}s", f"`{wds[k]}`"]
+             for k, n in enumerate(cand_names)],
+            summary=evidence,
+            note=("Per-step p50s are the pole's own decomposition (jobs API steps[] "
+                  "timestamps). Independence is read from the workflow YAML, never "
+                  "from the timings."))
+        f = _new_finding(
+            "OPT83", "MEDIUM", _OPT83_TITLE, wf, job, evidence, _OPT83_FIX_STRATEGY,
+            _catalog_anchor("OPT83", _OPT83_TITLE), start_idx + len(out) + 1,
+            wc_p50=None, rm=None,
+            size_note=(f"uncredited. {ceiling:.0f}s (the candidate steps' p50s summed, "
+                       "minus the slowest) is an UPPER BOUND, not a forecast; the "
+                       "saving needs a benchmark of the job with the steps in a "
+                       "`parallel:` group before any number is claimed."),
+            realization="none", measured_evidence=me)
+        f["pattern_class"] = "structural"
+        f["sizing_basis"] = "uncredited"
+        f["risk"] = "MEDIUM"
+        f["guardrail"] = (
+            "Keep every step and what it checks. Re-confirm independence before the "
+            "rewrite: no step reads another's outputs, GITHUB_ENV / GITHUB_OUTPUT / "
+            "GITHUB_PATH changes, files or cache. Check the runner has the CPU and "
+            "memory for them all at once. Each step keeps its own log.")
+        f["rollout"] = (
+            "One PR that moves the steps into one `parallel:` group. Compare the "
+            "job's wall time over the next sampled runs against the serial form; "
+            "keep the change only if the measured gain holds, and keep the serial "
+            "form on the merge queue until it does.")
+        f["independent_steps"] = {
+            "kind": "opt83_independent_steps",
+            "job": job,
+            "yaml_job": yaml_key,
+            "workflow_file": wf,
+            "pole_check": str(p.get("check") or ""),
+            "job_p50_s": round(job_p50, 1),
+            "steps": [{"step": n, "category": measured[n][0],
+                       "p50_s": round(measured[n][1], 1),
+                       "working_directory": wds[k]}
+                      for k, n in enumerate(cand_names)],
+            "ceiling_s": ceiling,
+            "ceiling_basis": _OPT83_CEILING_BASIS,
+            "min_share": _OPT83_MIN_SHARE,
+            "min_step_s": _OPT83_MIN_STEP_S,
+            "independence": {k: True for k in _OPT83_INDEPENDENCE_KEYS},
+        }
+        out.append(f)
+    return out
 
 
 def _structural_pole_candidates(
@@ -22710,6 +23304,44 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         if act is not None:
             f["workflow_activity"] = act
     findings.extend(structural)
+
+    # OPT83: independent compute steps on a drilled long pole that run one after
+    # another. Routed from the poles only, read from each pole's stamped step
+    # decomposition and the workflow YAML; no gh call. Uncredited. Each pole is
+    # its own GUARDED call: a bug skips only that pole, disclosed under its
+    # workflow with the pole's job named, never the data pass.
+    _o83_next = max((int(f["id"][1:]) for f in findings
+                     if f.get("id", "").startswith("f") and f["id"][1:].isdigit()),
+                    default=0)
+    findings_doc.setdefault("opt83_withheld_by_gate", {})
+    findings_doc.setdefault(_OPT83_WITHHELD_DOC_KEY, [])
+    _o83_seen: set[tuple[str, str]] = set()
+    for _o83_pole in list((findings_doc.get("pr_critical_path") or {}).get("poles") or []):
+        try:
+            new = _detect_opt83_parallel_steps(
+                [_o83_pole], _wf_docs, crit_by_wf, _o83_next,
+                withheld=findings_doc.setdefault("opt83_withheld_by_gate", {}),
+                withheld_candidates=findings_doc.setdefault(_OPT83_WITHHELD_DOC_KEY, []),
+                seen=_o83_seen)
+        except Exception as e:  # noqa: BLE001 — never take the data pass down
+            _o83_p = _o83_pole if isinstance(_o83_pole, dict) else {}
+            _o83_wf = str(_o83_p.get("workflow_file") or "")
+            # Named, and made safe for the line it renders in (a backtick or a
+            # newline in a job name would break it).
+            _o83_job = _re.sub(r"[`\s]+", " ", str(_o83_p.get("job")
+                                                  or _o83_p.get("check") or "")).strip()
+            logger.warning("OPT83 detector failed on %s job %s: %s: %s",
+                           _o83_wf, _o83_job, type(e).__name__, e)
+            _skip_detectors(_o83_wf, ["OPT83"],
+                            f"the parallel-steps check failed on job `{_o83_job}` "
+                            f"({type(e).__name__})")
+            new = []
+        for f in new:
+            act = activity_by_wf.get(str(f.get("workflow_file") or ""))
+            if act is not None:
+                f["workflow_activity"] = act
+        _o83_next = max(_o83_next, max((int(f["id"][1:]) for f in new), default=_o83_next))
+        findings.extend(new)
 
     # OPT81 A2: the runner-size advisory, the lever of LAST RESORT on a
     # merge-gating compute pole. It runs only now, because one of its gates is

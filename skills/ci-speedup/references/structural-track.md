@@ -1,9 +1,16 @@
 # Structural / critical-path track — risk model & intent interrogation
 
 Depth for the structural finding class (catalog category 14, OPT70–OPT75 plus
-OPT78) — the findings routed from the measured critical path rather than a YAML
-match. OPT78 is routed by a drill-log leaf rather than the critical-path
-router, so it emits no finding dict and the render boundary below never sees it:
+OPT78 and OPT83) — the findings routed from the measured critical path rather than a YAML
+match. OPT83 is a finding dict (risk, guardrail and rollout on the record)
+rendered as its own card at the pole, uncredited: it does not rank in the
+findings table or get a `Risk` row, and its prompt carries an independence
+re-check rather than the history/intent interrogation below. Its gates fail
+closed: any fact the workflow file cannot prove, including a candidate step that
+sets `continue-on-error`, holds the pole back (the full list is in the OPT83
+catalog entry). OPT78 is routed by a drill-log leaf rather than the
+critical-path router, so it emits no finding dict and the render boundary below
+never sees it:
 it gets no `Risk` row or banner. Its HIGH risk is stamped on the pole's drill-down
 instead, and its intent check, guardrail and rollout ride in the agent prompt
 `blocking_path.py` builds for the `vitest-isolate-pool` leaf.

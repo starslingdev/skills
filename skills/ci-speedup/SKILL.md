@@ -17,8 +17,8 @@ license: MIT
 
 # ci-speedup — CI Optimization Audit for GitHub Actions
 
-Audits a repository's GitHub Actions workflows against an 80-pattern
-catalog — 73 **hygiene/data-driven** patterns plus 7 **structural /
+Audits a repository's GitHub Actions workflows against an 81-pattern
+catalog — 73 **hygiene/data-driven** patterns plus 8 **structural /
 critical-path** patterns routed from the measured long pole — and
 produces a **root-cause-analysis** report with measured impact on two
 axes — developer wall-clock wait and runner-minutes (cloud bill). The
@@ -100,7 +100,7 @@ that has produced confident-but-wrong findings before; they surface as a
 On real repos almost every hygiene hit (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82 — mostly declarative)
 moves **~0 developer wall-clock** — the true bottleneck is usually a check working
 as intended that is simply the slowest thing gating the merge, with no catalog
-match. The **structural track** (category 14, OPT70–OPT75 plus OPT78) attacks that: a second
+match. The **structural track** (category 14, OPT70–OPT75 plus OPT78 and OPT83) attacks that: a second
 finding class **routed from the measured critical path** in `collect_runs.py` (the
 long-pole job decomposed to steps, required checks cross-referenced, shared cluster
 work detected; OPT78 via a config-gated vitest log leaf), not a YAML match — still
@@ -417,7 +417,7 @@ agreement. A finding only one pass would defend is cut or escalated, not kept.
 
 ## Pattern catalog
 
-`references/optimization-patterns.md` declares all 80 patterns across 14
+`references/optimization-patterns.md` declares all 81 patterns across 14
 categories (Caching, Redundancy, Docker, Parallelization, Actions and
 Checkout, Conditional Execution, Trigger and Scope, Release Workflow, Queue
 Times and Concurrency, Timing Anomalies, Stack-Specific, Build Caching,
@@ -445,7 +445,7 @@ Reference docs (read on demand — each links one level deep from here; outside 
 - [references/spine-scoping.md](references/spine-scoping.md) — which checks
   form the spine (required-scoping, PR-floor fallback, one-path demotion).
 - [references/structural-track.md](references/structural-track.md) — the
-  OPT70–75 and OPT78 risk model + intent interrogation for structural prompts.
+  OPT70–75, OPT78 and OPT83 risk model + intent interrogation for structural prompts.
 - [references/gap-fill.md](references/gap-fill.md) — the coverage-gap
   fallback (4a/4b/4c) for poles the catalog can't analyse.
 - [references/adversarial-review-rubric.md](references/adversarial-review-rubric.md) — the hostile-review contract ("Quality review").
@@ -498,7 +498,7 @@ The scannable rule list; each is detailed in the section named in parentheses.
   "sampled 0/20 PRs", "found no drill logs", "the spine is empty", or "I couldn't X, so
   let me Y". A genuine coverage limit is stated once by the report's banners, not narrated.
 - **Emit a finding whose pattern id is not in the catalog** — both tracks emit only
-  catalog-declared OPT-ids (structural OPT70–75 and OPT78 are *routed* from the
+  catalog-declared OPT-ids (structural OPT70–75, OPT78, OPT83 are *routed* from the
   critical path but still catalog-declared).
 - **Emit a generic "slow step" finding** — a step taking N seconds is an observation;
   every finding names a specific root cause ("admission gate").

@@ -10941,6 +10941,9 @@ _FEEDS_BY_KEY = {
         "whose step timings could not be read, produced no runner-class finding",
     "opt82_withheld_candidates":
         "Why a slow lint job with type-aware ESLint produced no finding",
+    "opt83_withheld_candidates":
+        "Why a long pole whose compute steps run one after another produced "
+        "no parallel-steps finding",
     "parallel_steps_withheld_candidates":
         "Why a lever priced from step times on a job that runs steps side by "
         "side claims no saving",
@@ -11347,6 +11350,20 @@ def test_no_parallel_steps_row_without_the_stamp(tmp_path):
     fp = tmp_path / "findings.json"
     fp.write_text(json.dumps({"data_sources": {}}), encoding="utf-8")
     assert vr._parallel_steps_violation(footer, fp) == (None, "")
+
+
+
+def test_opt83_check_is_registered_and_mirrors_the_renderer():
+    """The OPT83 check runs in the verifier's check list, and its copies of the
+    renderer's card strings and held-back phrases are the renderer's own."""
+    import inspect as _inspect
+    vr = _load_verify_report()
+    bp = _load_blocking_path()
+    assert "check_opt83_parallel_steps(report, findings_path)," in _inspect.getsource(vr)
+    assert vr._VR_OPT83_WITHHOLD_PHRASES == bp._OPT83_WITHHOLD_PHRASES
+    assert vr._VR_OPT83_SIZING_LABEL == bp._OPT83_SIZING_LABEL
+    assert vr._VR_OPT83_RAIL == bp._OPT83_RAIL
+    assert vr._VR_OPT83_RUNNER_CAVEAT == bp._OPT83_RUNNER_CAVEAT
 
 
 _FULL_STAMP = {"groups": 4, "steps_in_groups": 2, "control_steps": 1,

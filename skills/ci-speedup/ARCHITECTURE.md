@@ -26,9 +26,9 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against an 80-pattern
-catalog — 73 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81 and OPT82) plus 7 **structural /
-critical-path** patterns (OPT70–OPT75 and OPT78, routed from the measured long pole; see
+ci-speedup audits a repository's GitHub Actions workflows against an 81-pattern
+catalog — 73 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81 and OPT82) plus 8 **structural /
+critical-path** patterns (OPT70–OPT75, OPT78 and OPT83, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
 runner-minutes (the cloud bill). Detection, ranking, and every measured number
@@ -1132,16 +1132,18 @@ undecided tail runs could still have supplied the missing proof, named by their
 commonest reason). The per-gate tallies (`opt77_withheld_by_gate`,
 `opt80_withheld_by_gate`) are for maintainers; these lists reach the reader.
 
-The held-back disclosure is ONE mechanism shared by OPT77, OPT79, OPT80, OPT81 and OPT82.
+The held-back disclosure is ONE mechanism shared by OPT77, OPT79, OPT80, OPT81, OPT82 and OPT83.
 `blocking_path._WITHHELD_ROWS` is a `WithheldRow` per pattern — findings-doc
 key, Data sources row label, counted noun, "Used for" cell, and `entry_shape`
-(`"job"` for OPT79 / OPT80 / OPT81 / OPT82, `"group"` for OPT77). The shape is registered
+(`"job"` for OPT79 / OPT80 / OPT81 / OPT82 / OPT83, `"group"` for OPT77). The shape is registered
 rather than inferred: both twins used to decide it by comparing the key against
 OPT77's, so a fourth group-shaped pattern would have rendered `(unnamed job)`
 for every candidate in the renderer AND been re-derived the same wrong way in
 `verify_report` — agreeing, and green. `verify_report` reads all five fields,
 including the "Used for" cell, which was previously carried on both sides and
-compared to the report by neither. `_withheld_candidates_line` builds the same
+compared to the report by neither. A job-shaped entry may also carry `steps`
+(OPT83, when the run was found before the gate): the entry then reads
+`job (step + step)`, in both twins. `_withheld_candidates_line` builds the same
 sentence for all three:
 "N candidate … held back (<jobs>): <reason>." — the entries distinct and sorted,
 workflow-qualified as `<workflow.yml> / <job>` when two workflows share a job
@@ -1164,7 +1166,7 @@ the names and the "and K more" overflow come from; counted over raw rows it
 disagreed with its own job list whenever two rows deduplicated into one. A pattern contributes only its key, its
 row text and its gate→phrase table (registered in `_WITHHELD_PHRASES_BY_KEY`),
 never its own row builder. The phrase tables (`_OPT77_WITHHOLD_PHRASES`,
-`_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`, `_OPT81_WITHHOLD_PHRASES`, and `_OPT82_WITHHOLD_PHRASES`) map EVERY withhold gate
+`_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`, `_OPT81_WITHHOLD_PHRASES`, `_OPT82_WITHHOLD_PHRASES`, and `_OPT83_WITHHOLD_PHRASES`) map EVERY withhold gate
 their collector can record. What a test actually guarantees is narrower than
 "a new gate cannot ship without a phrase": it enumerates the gates it can READ
 from FOUR sources in the detectors' own code — the literals handed to
@@ -2214,8 +2216,9 @@ of a pull-request workflow, whose dominant step category is compute (`build` /
 after the shape gates; any other label, self-hosted included, is a verdict and
 never a held-back row), whose job did not run on two or more runner labels in the
 sample (A1 reports on those), and when no cheaper lever addresses the pole: no
-OPT70-74 or OPT78 on it, no finding (OPT75 included) crediting at least half its
-p50 (A2's own rule, not the structural router's suppression), no OPT24, no OPT79
+OPT70-74 or OPT78 on it (the uncredited OPT75 and OPT83 are the two
+exceptions: present, they render first and do not hold it back), no finding
+(OPT75 included) crediting at least half its p50 (A2's own rule, not the structural router's suppression), no OPT24, no OPT79
 of 30s or more (credited or uncredited).
 The facts the gate examined are stamped as `cheaper_levers_checked` and rendered.
 It is `advisory: true`, carries no `wall_clock_p50_s` and no `runner_min_saving`,
@@ -2725,12 +2728,14 @@ static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
 catalog match. The old catalog-spine report used to dead-end there ("inherent
-cost, outside this catalog"). The **structural track** (catalog category 14, OPT70–OPT75 plus OPT78,
+cost, outside this catalog"). The **structural track** (catalog category 14, OPT70–OPT75 plus OPT78 and OPT83,
 `class: structural`) is a **second finding class that is not catalog-bound** —
 it is routed from the measured critical path instead of matched against YAML.
 OPT70–OPT75 are routed by the deterministic router described below; **OPT78** is
 routed by the drill-time `vitest-isolate-pool` leaf detector (§12.3) and is
-reported by `scan.py` as having no critical-path router.
+reported by `scan.py` as having no critical-path router. **OPT83** is routed by
+its own per-pole pass (`_detect_opt83_parallel_steps`) over each pole's step
+decomposition, then checked for independence against the workflow YAML.
 
 ### Where it lives
 
@@ -2979,9 +2984,11 @@ profile; `_STRUCTURAL_META` is its structured form.
 not a structural finding (it carries no OPT70-75 id and joins no
 `_structural_for_pole`), but it is routed off the same measured pole and only
 after this track has run: OPT70-74 and OPT78 on the pole suppress it by being
-present; OPT75's presence does not (it renders first), though an OPT75 credit of
-half the pole's median or more does, like any credited finding. It renders after
-the pole's own prompt and its OPT75 block. See [§5.4](#54-opt81--a-runner-class-gap-measured-from-the-repos-own-runs-and-the-last-resort-runner-advisory).
+present. The two uncredited exceptions are OPT75 and OPT83: their presence does
+not suppress it (both render first, OPT83 because it needs a benchmark before
+any saving is known), though an OPT75 credit of half the pole's median or more
+does, like any credited finding. It renders after the pole's own prompt, its
+OPT75 block and any OPT83 card. See [§5.4](#54-opt81--a-runner-class-gap-measured-from-the-repos-own-runs-and-the-last-resort-runner-advisory).
 
 ### Parallel steps: the YAML side is walked, the run-data side is not (yet)
 
@@ -2999,7 +3006,8 @@ step carry `background: true`, and add control steps (`wait:`, `wait-all:`,
   detector, OPT28's checkout loop, OPT17's sleep loop, `_job_needs_git_history`
   and `_index_local_git_actions`), and in `collect_runs.py` the OPT77 setup
   fingerprint, OPT79's cache block and its `package.json` probe, OPT80's
-  checkout and retry readers, OPT82's lint-step read and the OPT24 shard check.
+  checkout and retry readers, OPT82's lint-step read, the OPT24 shard check and
+  OPT83's candidate-run and independence reads.
 - **Malformed and invalid groups.** A group is MALFORMED, its steps not read,
   when its `parallel:` value is not a list, the list contains itself through a
   YAML alias, it is nested more than 64 groups deep, the walk has already read
@@ -3059,7 +3067,9 @@ step carry `background: true`, and add control steps (`wait:`, `wait-all:`,
     from the repo's YAML and excluded by that name. Both the collector's crown
     and the renderer's fallbacks skip them; a work step that merely starts
     "Wait for" stays eligible.
-- **Known limits.** OPT77's setup fingerprint sums setup seconds that may
+- **Known limits.** Apart from the order-aware readers above and OPT83 (which
+  asks whether steps could run at once), static detectors read a group's
+  children in declaration order. OPT77's setup fingerprint sums setup seconds that may
   overlap in a group, so it can overstate. An unnamed `wait: server` may show up
   in run data under a generated name such as "Wait for server"; that is
   unprobed, so it can still be picked as dominant. A user step literally named
@@ -3081,6 +3091,106 @@ step carry `background: true`, and add control steps (`wait:`, `wait-all:`,
   row with no stamp, and fails a pole whose `file ▸ check` heading the stamp names
   as overlapping when its drill says the steps run one after another; it imports
   nothing from the skill.
+
+### OPT83: independent steps on the long pole, from the step decomposition plus the workflow YAML
+
+OPT83 is the structural pattern for a drilled pole whose dominant cost is
+several independent compute steps run one after another. `collect()` runs
+`_detect_opt83_parallel_steps` once per drilled pole in `pr_critical_path.poles`,
+right after the structural router and before OPT81's A2 advisory.
+Each call is guarded: an exception skips OPT83 for that pole only, and is
+disclosed through `detectors_skipped` under its workflow with the pole's job
+named. It makes no gh call of its own; it reads
+the pole's stamped per-step p50 decomposition (`steps`, `job_p50_s`) and the
+workflow file. A step is a candidate when its category is compute (build, test,
+scan or package per `_step_category`), its name is not boilerplate and does not
+contain the word sleep, wait, wait-all or cancel, and it measures at least 20s
+(`_OPT83_MIN_STEP_S`) and at least 15% (`_OPT83_MIN_SHARE`) of the pole's
+decomposed p50. Two or more candidates that sit directly next to each other in
+the job's top-level `steps:` list form a run (steps are read through the shared
+`workflow_steps.job_walk`); any other step, a `parallel:` group, or a `wait` /
+`wait-all` / `cancel` control step between them breaks it, and such a pole is a
+verdict, counted only. The top-level list is read only to see control steps
+between candidates: `walk.leaves` drops them, and a control step is an order
+barrier. Steps already inside a `parallel:` group or marked `background: true`
+are not candidates. When several runs qualify, the largest-bound run is the only
+one checked; if it fails independence the pole is held back, and the held-back
+row names that run's steps.
+
+Independence is read from the workflow YAML, never from timings, and it fails
+closed. The pole is held back when any of these holds:
+
+- the step timings or the workflow file cannot be read, or a step record is
+  unreadable (not an object, no name, no category, or one name twice);
+- the pole's check is produced by more than one workflow file
+  (`ambiguous_workflows`); a check no workflow produces stays a verdict;
+- the pole or a qualifying step is not matched to exactly one YAML job or step;
+- a candidate, or any step before the last one, sets `background:` with a
+  `${{ }}` expression;
+- two candidates share a cache or artifact; a candidate is an action whose
+  effects are not read; a candidate publishes, deploys or uploads (measured
+  category `package`, or such a word or command in its name or command);
+- one candidate reads another's step outputs, or a non-final candidate writes
+  GITHUB_ENV, GITHUB_OUTPUT or GITHUB_PATH;
+- a `${{ }}` sits anywhere in a candidate but its name, or in an inherited
+  `defaults.run.working-directory` (checked on the raw value, before it is
+  normalized);
+- a candidate changes directory;
+- a candidate that may write build output shares, or nests with, another
+  candidate's working directory, in either order; a working directory outside
+  the checkout overlaps every tree, and with a build present any step aimed
+  outside its own tree (`--prefix`, `--cwd`, `--dir`, `-C`, `--outDir`, a `../`
+  or absolute path) shares every tree;
+- a candidate installs dependencies (any line, or any `&&` / `;` / `||` / `|`
+  part of a line);
+- a candidate carries a step-level `if:` or sets `continue-on-error` (a step
+  allowed to fail changes what a failing parallel child does to the job);
+- the steps share tool state: `services:` containers, two Docker-driving
+  steps, or two candidates in one tree running the same Cargo, Maven, Gradle,
+  .NET, sbt, Swift, Mix or Xcode build, or both running a recognised coverage
+  tool;
+- a Docker / Podman / Compose command or container action sits in any step up
+  to the last candidate, or a background step runs before the first;
+- the job holds a malformed `parallel:` group (`job_has_an_unreadable_parallel_group`,
+  the scan's own reason): that group's steps were never read, so independence
+  cannot be shown, whatever the candidates' own run looks like.
+
+OPT83 does NOT hold back OPT81's runner-size advisory on the same pole: it is
+uncredited and needs a benchmark, so the reader sees both, the OPT83 card first.
+Held-back poles are counted in `opt83_withheld_by_gate`, listed in
+`opt83_withheld_candidates`, and shown in the "independent steps: held back"
+Data sources row from the shared `blocking_path._WITHHELD_ROWS` registry, with plain
+reasons from `_OPT83_WITHHOLD_PHRASES`. That label is distinct from the
+"parallel steps: held back" row, which lists credited levers (OPT24, the
+OPT70/72/75 route) priced from step times that overlap: one row per doc key, so
+a reader never sees one label counting two different things. The verdict gates (pole not file-backed,
+fewer than two qualifying steps, steps not adjacent, steps already parallel) are
+counted only. The parallel-steps reader here is the shared `workflow_steps.py`
+described above; no second YAML walker was added.
+
+The finding is deliberately uncredited: no `_SIZING` key, `wall_clock_p50_s` and
+`runner_min_saving` are None, `sizing_basis` is `uncredited`, and the runner-minute
+door cannot derive it. It stamps `ceiling_s` (sum of the candidates' p50s minus
+the largest), labelled an upper bound that assumes each step keeps its solo speed
+on one runner. It never enters a total, Tier 2, the headline or Also noticed; the
+card tells the reader to benchmark first. The renderer places one anchored card
+(`opt83-<id>`) inside the pole's section after the pole's agent prompt (so after
+any OPT75 block) and before any OPT81 card, an aggregation-gate pole included; a
+finding whose pole is not rendered gets its own "Independent steps on other long
+poles" section.
+`verify_report.check_opt83_parallel_steps` re-checks each listed step against
+the candidate rule (a verbatim copy), re-derives the upper bound, rejects any
+other duration, and fails: a saving, a sizing basis other than uncredited, a
+ceiling that is not sum minus max, a missing or duplicated card, a card without
+the upper bound, its label, the no-weakening rail and the runner caveat, a card
+carrying a duration in any time unit other than the candidate steps' p50s, the
+pole's p50 and the upper bound, or any percentage, a step listing that differs
+from the finding's, an orphan card, a card outside its pole's section when the
+pole is rendered (or anywhere but the "other long poles" section when it is
+not), a finding anchor named outside its own section, a rendered card whose
+findings file cannot be read, and a held-back counter that disagrees, gate by
+gate, with the held-back list. The phrase table is mirrored in `verify_report`
+and pinned like its siblings.
 
 ## 12. The blocking-path report (`blocking_path.py`)
 
@@ -3769,7 +3879,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 80-pattern catalog (METADATA + body per pattern); the source of truth for
+  the 81-pattern catalog (METADATA + body per pattern); the source of truth for
   detection and the report's TL;DR / pattern background.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.

@@ -1,0 +1,68 @@
+{
+  "total_count": 1,
+  "jobs": [
+    {
+      "id": 8411,
+      "run_id": 8401,
+      "name": "quality",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-06-25T10:00:00Z",
+      "completed_at": "2026-06-25T10:01:36Z",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "html_url": "https://github.com/synthetic/repo/actions/runs/8401/job/8411",
+      "steps": [
+        {
+          "name": "Set up job",
+          "number": 1,
+          "started_at": "2026-06-25T10:00:00Z",
+          "completed_at": "2026-06-25T10:00:01Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Checkout",
+          "number": 2,
+          "started_at": "2026-06-25T10:00:01Z",
+          "completed_at": "2026-06-25T10:00:04Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run npm ci",
+          "number": 3,
+          "started_at": "2026-06-25T10:00:04Z",
+          "completed_at": "2026-06-25T10:00:16Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Lint",
+          "number": 4,
+          "started_at": "2026-06-25T10:00:16Z",
+          "completed_at": "2026-06-25T10:00:46Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Typecheck",
+          "number": 5,
+          "started_at": "2026-06-25T10:00:46Z",
+          "completed_at": "2026-06-25T10:01:11Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Unit tests",
+          "number": 6,
+          "started_at": "2026-06-25T10:01:11Z",
+          "completed_at": "2026-06-25T10:01:36Z",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    }
+  ]
+}

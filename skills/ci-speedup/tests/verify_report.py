@@ -910,9 +910,10 @@ _VR_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _VR_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
 _VR_OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 _VR_OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
+_VR_OPT83_WITHHELD_DOC_KEY = "opt83_withheld_candidates"
 _VR_PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
 # (doc key, Data sources row label, counted noun, "Used for" cell) — as
-# blocking_path renders them. ONE re-derivation serves all three patterns.
+# blocking_path renders them. ONE re-derivation serves every registered pattern.
 # The fourth field is carried HERE, not just pinned: it is the column that tells
 # the reader what the row is about, and while the verifier held only three
 # fields it could be replaced with arbitrary text and the whole suite stayed
@@ -953,6 +954,11 @@ _VR_WITHHELD_ROWS = (
     _VrWithheldRow(_VR_OPT82_WITHHELD_DOC_KEY, "type-aware lint: held back",
                    "candidate lint job(s)",
                    "Why a slow lint job with type-aware ESLint produced no finding",
+                   "job"),
+    _VrWithheldRow(_VR_OPT83_WITHHELD_DOC_KEY, "independent steps: held back",
+                   "candidate long pole(s)",
+                   "Why a long pole whose compute steps run one after another produced "
+                   "no parallel-steps finding",
                    "job"),
     _VrWithheldRow(_VR_PARALLEL_STEPS_WITHHELD_DOC_KEY, "parallel steps: held back",
                    "candidate lever(s)",
@@ -1089,6 +1095,67 @@ _VR_OPT82_WITHHOLD_PHRASES = {
         "type-aware parsing is on, but no type-aware rule could be named from "
         "the config",
 }
+_VR_OPT83_WITHHOLD_PHRASES = {
+    "pole_step_timings_unavailable":
+        "the long pole's per-step timings could not be read, so which steps "
+        "run one after another is unknown",
+    "workflow_yaml_unavailable":
+        "the long pole's workflow file could not be read, so whether its steps "
+        "depend on each other is unknown",
+    "pole_job_not_matched_in_yaml":
+        "the long pole could not be matched to one job in its workflow file",
+    "job_has_an_unreadable_parallel_group":
+        "some of the job's steps sit in a parallel step group that could not be "
+        "read, so whether the steps depend on each other could not be told",
+    "pole_step_entries_unreadable":
+        "the long pole's per-step records could not be read (a step with no "
+        "name or category, or one name twice), so which steps qualify is unknown",
+    "pole_workflow_ambiguous":
+        "the long pole's check is produced by more than one workflow file, so "
+        "which file's steps ran is unknown",
+    "measured_step_not_matched_in_yaml":
+        "a qualifying step could not be matched to exactly one step in the "
+        "workflow file, so the steps' order is unknown",
+    "background_is_an_expression":
+        "a step up to the last of them sets `background:` with an expression, so "
+        "whether it runs alongside them is only known when the workflow runs",
+    "step_uses_runtime_expression":
+        "a step's command, settings or working directory is only known when "
+        "the workflow runs",
+    "siblings_share_a_cache_or_artifact":
+        "two of the steps use the same cache or artifact",
+    "sibling_is_an_action":
+        "one of the steps is an action whose effects (files, environment, "
+        "outputs) this audit did not read",
+    "candidate_publishes_deploys_or_uploads":
+        "a step publishes, deploys or uploads, which relies on the steps beside "
+        "it having passed first",
+    "sibling_reads_another_siblings_output":
+        "one step reads another step's outputs, so they must run in order",
+    "sibling_writes_env_output_or_path":
+        "a step writes GITHUB_ENV, GITHUB_OUTPUT or GITHUB_PATH that a later step "
+        "could read",
+    "step_changes_directory":
+        "a step changes directory, so which files it touches could not be told",
+    "siblings_share_a_build_tree":
+        "a step builds into the same directory another step works in, so one "
+        "may read what the other writes",
+    "step_condition_depends_on_order":
+        "a step carries an `if:` condition, whose outcome can depend on the "
+        "steps before it",
+    "candidate_has_continue_on_error":
+        "a step is allowed to fail (`continue-on-error`), which changes what a "
+        "failing step does to the job once the steps run side by side",
+    "siblings_share_tool_state":
+        "the steps share a service container, the Docker daemon, or one tool's "
+        "output folder or coverage file, so they could collide",
+    "candidate_runs_an_install":
+        "a step installs dependencies, which the other steps read while it "
+        "writes them",
+    "job_starts_a_container_or_background_server":
+        "the job starts a container or a background server that the steps "
+        "would all use at once",
+}
 _VR_PARALLEL_STEPS_WITHHOLD_PHRASES = {
     "dominant_step_runs_inside_a_parallel_group":
         "the job's slowest steps run side by side with other steps (in a "
@@ -1102,6 +1169,7 @@ _VR_WITHHELD_PHRASES_BY_KEY = {
     _VR_OPT80_WITHHELD_DOC_KEY: _VR_OPT80_WITHHOLD_PHRASES,
     _VR_OPT81_WITHHELD_DOC_KEY: _VR_OPT81_WITHHOLD_PHRASES,
     _VR_OPT82_WITHHELD_DOC_KEY: _VR_OPT82_WITHHOLD_PHRASES,
+    _VR_OPT83_WITHHELD_DOC_KEY: _VR_OPT83_WITHHOLD_PHRASES,
 }
 _VR_WITHHELD_JOBS_SHOWN = 5
 # Prefixed to the reason when more than one gate held candidates back, and the
@@ -1153,7 +1221,9 @@ def _vr_withheld_entries(rows: list[dict], key: str) -> list[str]:
     return sorted({
         (f"{_vr_withheld_cell_text(_wf(r))} / {_vr_withheld_cell_text(r['job'])}"
          if len(wfs_of[r["job"].strip()]) > 1 and _wf(r)
-         else _vr_withheld_cell_text(r["job"])) for r in rows})
+         else _vr_withheld_cell_text(r["job"]))
+        + (" (" + " + ".join(_vr_withheld_cell_text(x) for x in r["steps"]) + ")"
+           if r.get("steps") else "") for r in rows})
 
 
 def _withheld_disclosure_violation(report: str, findings_path: Path | None
@@ -1200,6 +1270,11 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
                       and all(isinstance(j, str) and j.strip() for j in r["jobs"]))
             else:
                 ok = isinstance(r.get("job"), str) and bool(r["job"].strip())
+                # Named steps, when an entry carries them, are part of the line.
+                if "steps" in r:
+                    ok = ok and (isinstance(r["steps"], list) and bool(r["steps"])
+                                 and all(isinstance(x, str) and x.strip()
+                                         for x in r["steps"]))
             if not ok:
                 return (f"{key} carries an entry that names no job - the withheld "
                         "row cannot be re-derived"), ""
@@ -8602,6 +8677,275 @@ def _opt82_card_where_keys(card: str) -> set[tuple[str, str]]:
             for wf, job in (_APPENDIX_WHERE_PAIR_RE.findall(mw.group(1)) if mw else [])}
 
 
+# ---- OPT83: independent steps on the long pole run one after another --------
+# This verifier's OWN copies of the collector's candidate rule and the renderer's
+# card strings (it re-derives rather than importing either answer; coupling tests
+# pin every copy equal to its source).
+_VR_OPT83_MIN_SHARE = 0.15
+_VR_OPT83_MIN_STEP_S = 20.0
+_VR_OPT83_COMPUTE_CATEGORIES = frozenset({"build", "test", "scan", "package"})
+_VR_OPT83_NOT_COMPUTE_RE = re.compile(
+    r"\b(sleep|sleeping|wait|waits|waiting|wait-all|cancel)\b", re.I)
+_VR_NON_WORK_STEP_RE = re.compile(
+    r"^(set up job|complete job|post\b|checkout\b|set up |setup [a-z]*node"
+    r"|(?:wait|wait-all|cancel)\s*$|wait for all background steps)",
+    re.IGNORECASE)
+_VR_OPT83_INDEPENDENCE_KEYS = (
+    "no_runtime_expression",
+    "no_shared_cache_or_artifact",
+    "no_action_steps",
+    "no_publish_deploy_or_upload",
+    "no_step_output_reads",
+    "no_env_output_or_path_write_read_later",
+    "no_directory_change",
+    "no_shared_build_tree",
+    "no_order_dependent_condition",
+    "no_continue_on_error",
+    "no_shared_tool_state",
+    "no_install_in_a_candidate",
+    "no_container_or_background_server",
+)
+_VR_OPT83_SIZING_LABEL = ("an UPPER BOUND, not a forecast: it assumes each step keeps "
+                          "its solo speed while they share one runner, and CPU, memory "
+                          "or disk contention can erase it. Not credited, and not in "
+                          "any total")
+_VR_OPT83_RAIL = (
+    "Use a `parallel:` group, where a failing step fails the job at the group's "
+    "end, rather than bare `background: true`, unless every background step is "
+    "covered by a `wait` or `wait-all` and none sets `continue-on-error`. Never "
+    "`cancel:` a step that does real verification. Never drop, narrow or skip a "
+    "step to make the group fit")
+_VR_OPT83_RUNNER_CAVEAT = (
+    "GitHub-hosted runners support `parallel:`. On self-hosted runners, run "
+    "actions/runner 2.336.0 or later: its release notes list background steps in "
+    "2.335.0 and, in 2.336.0, a fix that stops a cancelled background step from "
+    "affecting the job result. It is documented for github.com and GitHub "
+    "Enterprise Cloud, not GitHub Enterprise Server")
+_VR_OPT83_CARD_RE = re.compile(r'<a id="opt83-([^"]+)"></a>')
+
+
+def _vr_opt83_step_qualifies(name: str, category: str, p50: float,
+                             job_p50: float) -> bool:
+    """VERBATIM-SYNC with `collect_runs._opt83_step_qualifies` (body pinned)."""
+    if not name or job_p50 <= 0:
+        return False
+    if category not in _VR_OPT83_COMPUTE_CATEGORIES:
+        return False
+    if _VR_NON_WORK_STEP_RE.match(name) or _VR_OPT83_NOT_COMPUTE_RE.search(name):
+        return False
+    return p50 >= _VR_OPT83_MIN_STEP_S and p50 >= _VR_OPT83_MIN_SHARE * job_p50
+
+
+def _vr_opt83_card_bodies(report: str) -> dict[str, str]:
+    """Each OPT83 card, by its anchor id: from its anchor to the next anchor, the
+    next `## ` heading or the next horizontal rule, whichever comes first."""
+    out: dict[str, str] = {}
+    for m in _VR_OPT83_CARD_RE.finditer(report):
+        rest = report[m.end():]
+        stop = len(rest)
+        for pat in (r'<a id="', r"^## ", r"^---$"):
+            n = re.search(pat, rest, re.MULTILINE)
+            if n:
+                stop = min(stop, n.start())
+        out.setdefault(m.group(1), "")
+        out[m.group(1)] += rest[:stop]
+    return out
+
+
+def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check:
+    """Every OPT83 finding sits on a drilled long pole, re-derives from that pole's
+    stamped step p50s, stamps its independence facts, carries no saving, and
+    renders exactly one card whose only duration claims are the candidate steps'
+    p50s, the pole's decomposed p50 and the labelled upper bound.
+
+    OPT83 is uncredited by design: the sum of the steps minus the slowest is a
+    ceiling that CPU, memory or disk contention can erase, so a number anywhere
+    else on the card, or on the finding, is a saving nobody measured."""
+    name = "parallel-step findings re-derive from the pole, stay uncredited and pair with their card"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        # A rendered card is a claim this check exists to re-derive: with the
+        # findings unreadable it cannot be, which is a failure, not a skip.
+        if findings_path is not None and _VR_OPT83_CARD_RE.search(report):
+            return Check(name, False, f"the report renders an OPT83 card, but {err}")
+        return Check(name, True, err, skipped=True)
+    found = [f for f in _as_list(_as_dict(data).get("findings"))
+             if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT83"]
+    cards = _vr_opt83_card_bodies(report)
+    bad: list[str] = []
+    # Every held-back gate is counted once AND listed once: the counter and the
+    # list the held-back row is drawn from must agree gate by gate (verdicts are
+    # counted only, so they are not in the list).
+    counter = _as_dict(_as_dict(data).get("opt83_withheld_by_gate"))
+    listed = [r for r in _as_list(_as_dict(data).get(_VR_OPT83_WITHHELD_DOC_KEY))
+              if isinstance(r, dict)]
+    for g in sorted(_VR_OPT83_WITHHOLD_PHRASES):
+        n_listed = sum(1 for r in listed if r.get("gate") == g)
+        n_counted = int(_num(counter.get(g)) or 0)
+        if n_counted != n_listed:
+            bad.append(f"held-back gate {g}: counted {n_counted}, listed {n_listed}")
+    if not found:
+        if cards:
+            bad.append("the report renders an OPT83 card, but the run recorded no "
+                       "OPT83 finding")
+        return Check(name, not bad, "; ".join(bad) if bad
+                     else "no parallel-step findings")
+    poles = [p for p in _as_list(_as_dict(_as_dict(data).get("pr_critical_path"))
+                                 .get("poles")) if isinstance(p, dict)]
+    rendered = {(w, c) for w, c, _b in _pole_header_sections(report)}
+    heads = [m.start() for m in re.finditer(r"^## ", report, re.MULTILINE)]
+    ids: set[str] = set()
+    for f in found:
+        fid = str(f.get("id") or "?")
+        cid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", fid)
+        ids.add(cid)
+        wc = _num(f.get("wall_clock_p50_s"))
+        if wc:
+            bad.append(f"{fid}: OPT83 carries wall_clock_p50_s {wc} - it is uncredited")
+        if f.get("runner_min_saving") is not None:
+            bad.append(f"{fid}: OPT83 carries runner_min_saving "
+                       f"{f.get('runner_min_saving')!r} - it is uncredited")
+        if f.get("sizing_basis") != "uncredited":
+            bad.append(f"{fid}: OPT83 sizing_basis {f.get('sizing_basis')!r}, "
+                       "not 'uncredited'")
+        st = _as_dict(f.get("independent_steps"))
+        if st.get("kind") != "opt83_independent_steps":
+            bad.append(f"{fid}: missing its opt83_independent_steps block")
+            continue
+        ind = _as_dict(st.get("independence"))
+        missing = [k for k in _VR_OPT83_INDEPENDENCE_KEYS if ind.get(k) is not True]
+        if missing:
+            bad.append(f"{fid}: independence facts not stamped true: {missing}")
+        wfb = Path(str(f.get("workflow_file") or "")).name
+        job = str(st.get("job") or "")
+        pole = next((p for p in poles if Path(str(p.get("workflow_file") or "")).name
+                     == wfb and str(p.get("job") or "") == job), None)
+        if pole is None:
+            bad.append(f"{fid}: OPT83 on `{wfb}` ▸ `{job}`, which is not a drilled "
+                       "long pole")
+            continue
+        job_p50 = _num(pole.get("job_p50_s")) or 0.0
+        stamped = {str(_as_dict(s).get("step") or ""): _as_dict(s)
+                   for s in _as_list(pole.get("steps"))}
+        cand = [_as_dict(s) for s in _as_list(st.get("steps"))]
+        if len(cand) < 2:
+            bad.append(f"{fid}: OPT83 names {len(cand)} step(s); it needs two or more")
+        names = [str(s.get("step") or "") for s in cand]
+        repeated = sorted({n for n in names if names.count(n) > 1})
+        if repeated:
+            # The pole measured each step once; a repeat inflates the bound.
+            bad.append(f"{fid}: step(s) {repeated} named more than once")
+            continue
+        p50s: list[float] = []
+        for s in cand:
+            sn = str(s.get("step") or "")
+            ps = stamped.get(sn)
+            if ps is None:
+                bad.append(f"{fid}: step `{sn}` is not in the pole's measured steps")
+                continue
+            d = _num(ps.get("p50_s")) or 0.0
+            if _num(s.get("p50_s")) != d:
+                bad.append(f"{fid}: step `{sn}` p50 {s.get('p50_s')!r} != the pole's "
+                           f"measured {d}")
+            if not _vr_opt83_step_qualifies(sn, str(ps.get("category") or ""), d,
+                                            job_p50):
+                bad.append(f"{fid}: step `{sn}` ({ps.get('category')}, {d}s of "
+                           f"{job_p50}s) does not qualify as a candidate")
+            p50s.append(d)
+        want = round(sum(p50s) - max(p50s), 1) if len(p50s) >= 2 else 0.0
+        if _num(st.get("ceiling_s")) != want:
+            bad.append(f"{fid}: ceiling_s {st.get('ceiling_s')!r} != re-derived "
+                       f"{want} (sum of the steps' p50s minus the slowest)")
+        body = cards.get(cid)
+        if body is None:
+            bad.append(f"{fid}: OPT83 finding with no card in the report")
+            continue
+        if report.count(f'<a id="opt83-{cid}"></a>') != 1:
+            bad.append(f"{fid}: OPT83 card rendered more than once")
+        # PLACEMENT: inside its pole's section when that pole is rendered, else in
+        # the "other long poles" section. Never under Also noticed, Tier 2, a
+        # total or another pole; and its anchor is named nowhere outside it.
+        at = report.index(f'<a id="opt83-{cid}"></a>')
+        h0 = max((h for h in heads if h < at), default=-1)
+        h1 = min((h for h in heads if h > at), default=len(report))
+        head = report[h0:report.find("\n", h0)] if h0 >= 0 else ""
+        mine = {(Path(str(p.get("workflow_file") or "")).name,
+                 _strip_scope(str(p.get("check") or ""))) for p in poles
+                if Path(str(p.get("workflow_file") or "")).name == wfb
+                and str(p.get("job") or "") == job}
+        under = {(w, c) for w, c, _b in _pole_header_sections(head + "\n")}
+        if mine & rendered:
+            placed = bool(under & mine)
+        else:
+            placed = head.startswith("## ") and "Independent steps on other long poles" in head
+        if not placed:
+            bad.append(f"{fid}: card renders outside its pole's section (under "
+                       f"{head.strip()[:80]!r})")
+        sec_lo, sec_hi = max(h0, 0), h1
+        for m in re.finditer(rf"opt83-{re.escape(cid)}(?![\w.:-])", report):
+            if not sec_lo <= m.start() < sec_hi:
+                bad.append(f"{fid}: its anchor is named outside its own section")
+                break
+        flat = " ".join(body.split())
+        # The label sits on the line that states the bound: the prompt's copy of
+        # it does not label a bare number on the card.
+        bound_line = next((" ".join(ln.split()) for ln in body.splitlines()
+                           if f"up to {want:.0f}s sooner" in ln), "")
+        if bound_line and " ".join(_VR_OPT83_SIZING_LABEL.split()) not in bound_line:
+            bad.append(f"{fid}: card is missing its label beside the upper bound")
+        for need, what in ((f"up to {want:.0f}s sooner", "the upper bound"),
+                           (" ".join(_VR_OPT83_SIZING_LABEL.split()), "its label"),
+                           (" ".join(_VR_OPT83_RAIL.split()), "the parallel: rail"),
+                           (" ".join(_VR_OPT83_RUNNER_CAVEAT.split()),
+                            "the runner caveat")):
+            if need not in flat:
+                bad.append(f"{fid}: card is missing {what}")
+        # The measured facts the card restates (each step's p50, the pole's own
+        # decomposed p50) and the labelled upper bound. Anything else is a number
+        # nobody measured.
+        listing = next((ln for ln in body.splitlines()
+                        if ln.startswith("- **Steps that run one after another**")), "")
+        listed = re.findall(r"`([^`]*)` \d", listing)
+        # The card renders names through `_flatten_cell` (a `|` is escaped).
+        shown = [_flatten_cell(sn) for sn in names]
+        if listed != shown:
+            bad.append(f"{fid}: card does not list step(s) {names} (it lists {listed})")
+        # A step name may carry a flag such as `-timeout 300s`: a measured name,
+        # not a duration claim, so the names come out before the scan. Any other
+        # number with a time unit must be a seconds value the run measured;
+        # minutes and hours are always rejected.
+        # The job, YAML job and workflow file names are names too (`e2e-30m`,
+        # `nightly-24h.yml`), so they come out with the step names.
+        unquoted = flat
+        literal = set(names) | set(shown) | {
+            str(st.get("job") or ""), str(st.get("yaml_job") or ""),
+            Path(str(f.get("workflow_file") or "")).name}
+        for nm in sorted((" ".join(x.split()) for x in literal if x.strip()),
+                         key=len, reverse=True):
+            unquoted = unquoted.replace(nm, " ")
+        allowed = {f"{d:.0f}" for d in p50s} | {f"{want:.0f}", f"{job_p50:.0f}"}
+        dur = (r"(?<![\w.])(\d+(?:\.\d+)?)\s?"
+               r"(s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)\b")
+        others = sorted({m for m, unit in re.findall(dur, unquoted, re.I)
+                         if unit.lower() not in ("s", "sec", "secs", "second", "seconds")
+                         or f"{float(m):.0f}" not in allowed})
+        if others:
+            bad.append(f"{fid}: card carries duration(s) {others} other than the "
+                       f"candidate steps' p50s, the pole's {job_p50:.0f}s and the {want:.0f}s upper bound")
+        if re.search(r"\bsaves?\b|\*\*Saving:\*\*|min/mo|runner-minute", flat, re.I):
+            bad.append(f"{fid}: card claims a saving")
+        # A share is a saving claim too ("~40% faster"), and none is measured.
+        pct = re.findall(r"(?<![\w.])\d+(?:\.\d+)?\s?%", unquoted)
+        if pct:
+            bad.append(f"{fid}: card carries a percentage {sorted(set(pct))}, a "
+                       "saving nobody measured")
+    orphans = sorted(set(cards) - ids)
+    if orphans:
+        bad.append(f"OPT83 card(s) with no OPT83 finding: {orphans}")
+    return Check(name, not bad, "; ".join(bad) if bad
+                 else f"{len(found)} OPT83 finding(s), {len(cards)} card(s) checked")
+
+
 def check_opt82_type_aware_lint_uncredited(report: str,
                                            findings_path: Path | None) -> Check:
     """Every OPT82 finding is UNCREDITED and names its rules, and every OPT82
@@ -11914,6 +12258,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_measured_basis(report, findings_path),
         check_opt79_uncredited_rows_rederived(report, findings_path),
         check_opt82_type_aware_lint_uncredited(report, findings_path),
+        check_opt83_parallel_steps(report, findings_path),
         check_opt79_findings_rederived(report, findings_path),
         check_opt81_runner_comparison_rederived(report, findings_path),
         check_tier2_total_deoverlapped(report, findings_path, report_path),

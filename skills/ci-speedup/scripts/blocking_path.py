@@ -5375,6 +5375,7 @@ _OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 _OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
 _OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 _OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
+_OPT83_WITHHELD_DOC_KEY = "opt83_withheld_candidates"
 _PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
 class WithheldRow(NamedTuple):
     """One pattern's whole registration in the held-back disclosure.
@@ -5416,6 +5417,11 @@ _WITHHELD_ROWS: tuple[WithheldRow, ...] = (
     WithheldRow(_OPT82_WITHHELD_DOC_KEY, "type-aware lint: held back",
                 "candidate lint job(s)",
                 "Why a slow lint job with type-aware ESLint produced no finding",
+                "job"),
+    WithheldRow(_OPT83_WITHHELD_DOC_KEY, "independent steps: held back",
+                "candidate long pole(s)",
+                "Why a long pole whose compute steps run one after another produced "
+                "no parallel-steps finding",
                 "job"),
     # A credited lever (OPT24 sharding, the structural OPT70/72/75 route) whose
     # saving is priced from step medians on a job whose steps overlap.
@@ -5561,6 +5567,70 @@ _OPT82_WITHHOLD_PHRASES: dict[str, str] = {
         "type-aware parsing is on, but no type-aware rule could be named from "
         "the config",
 }
+# OPT83: a long pole with two or more qualifying compute steps whose
+# independence the audit could not establish from the workflow file. Every gate
+# in `collect_runs._OPT83_HELD_BACK_GATES`, and only those; a test pins them.
+_OPT83_WITHHOLD_PHRASES: dict[str, str] = {
+    "pole_step_timings_unavailable":
+        "the long pole's per-step timings could not be read, so which steps "
+        "run one after another is unknown",
+    "workflow_yaml_unavailable":
+        "the long pole's workflow file could not be read, so whether its steps "
+        "depend on each other is unknown",
+    "pole_job_not_matched_in_yaml":
+        "the long pole could not be matched to one job in its workflow file",
+    "job_has_an_unreadable_parallel_group":
+        "some of the job's steps sit in a parallel step group that could not be "
+        "read, so whether the steps depend on each other could not be told",
+    "pole_step_entries_unreadable":
+        "the long pole's per-step records could not be read (a step with no "
+        "name or category, or one name twice), so which steps qualify is unknown",
+    "pole_workflow_ambiguous":
+        "the long pole's check is produced by more than one workflow file, so "
+        "which file's steps ran is unknown",
+    "measured_step_not_matched_in_yaml":
+        "a qualifying step could not be matched to exactly one step in the "
+        "workflow file, so the steps' order is unknown",
+    "background_is_an_expression":
+        "a step up to the last of them sets `background:` with an expression, so "
+        "whether it runs alongside them is only known when the workflow runs",
+    "step_uses_runtime_expression":
+        "a step's command, settings or working directory is only known when "
+        "the workflow runs",
+    "siblings_share_a_cache_or_artifact":
+        "two of the steps use the same cache or artifact",
+    "sibling_is_an_action":
+        "one of the steps is an action whose effects (files, environment, "
+        "outputs) this audit did not read",
+    "candidate_publishes_deploys_or_uploads":
+        "a step publishes, deploys or uploads, which relies on the steps beside "
+        "it having passed first",
+    "sibling_reads_another_siblings_output":
+        "one step reads another step's outputs, so they must run in order",
+    "sibling_writes_env_output_or_path":
+        "a step writes GITHUB_ENV, GITHUB_OUTPUT or GITHUB_PATH that a later step "
+        "could read",
+    "step_changes_directory":
+        "a step changes directory, so which files it touches could not be told",
+    "siblings_share_a_build_tree":
+        "a step builds into the same directory another step works in, so one "
+        "may read what the other writes",
+    "step_condition_depends_on_order":
+        "a step carries an `if:` condition, whose outcome can depend on the "
+        "steps before it",
+    "candidate_has_continue_on_error":
+        "a step is allowed to fail (`continue-on-error`), which changes what a "
+        "failing step does to the job once the steps run side by side",
+    "siblings_share_tool_state":
+        "the steps share a service container, the Docker daemon, or one tool's "
+        "output folder or coverage file, so they could collide",
+    "candidate_runs_an_install":
+        "a step installs dependencies, which the other steps read while it "
+        "writes them",
+    "job_starts_a_container_or_background_server":
+        "the job starts a container or a background server that the steps "
+        "would all use at once",
+}
 # Every pattern's gate→phrase table, by doc key. OPT79's table is defined with
 # the rest of its code further down and registers itself there, so this one dict
 # is the single place the renderer looks a reason up.
@@ -5578,6 +5648,7 @@ _WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
     _OPT80_WITHHELD_DOC_KEY: _OPT80_WITHHOLD_PHRASES,
     _OPT81_WITHHELD_DOC_KEY: _OPT81_WITHHOLD_PHRASES,
     _OPT82_WITHHELD_DOC_KEY: _OPT82_WITHHOLD_PHRASES,
+    _OPT83_WITHHELD_DOC_KEY: _OPT83_WITHHOLD_PHRASES,
 }
 # What the row says for a gate with no phrase. Never the code; `verify_report`
 # fails on the same gate, so this text cannot reach a verified report.
@@ -5679,8 +5750,14 @@ def _withheld_entries(rows: list[dict[str, Any]], key: str) -> list[str]:
         raw = str(r.get("job") or "").strip()
         wf = _wf(r)
         shown = _withheld_cell_text(raw or "(unnamed job)")
-        out.add(f"{_withheld_cell_text(wf)} / {shown}"
-                if len(wfs_of[raw]) > 1 and wf else shown)
+        shown = (f"{_withheld_cell_text(wf)} / {shown}"
+                 if len(wfs_of[raw]) > 1 and wf else shown)
+        # An entry decided on named steps (OPT83's chosen run) names them, so
+        # the reader can tell which steps were held back, not only the job.
+        steps = r.get("steps")
+        if isinstance(steps, list) and steps:
+            shown += " (" + " + ".join(_withheld_cell_text(x) for x in steps) + ")"
+        out.add(shown)
     return sorted(out)
 
 
@@ -8218,6 +8295,164 @@ def _opt81_unrouted_block(findings: list[dict[str, Any]], catalog_url: str) -> l
     return out
 
 
+# =============================================================================
+# OPT83 — Independent Steps on the Long Pole Run One After Another
+# =============================================================================
+# Every OPT83 finding renders exactly ONCE, as an anchored card
+# (`<a id="opt83-<id>"></a>`): inside its pole's section, after the pole's prompt
+# (and so after any OPT75 decomposition) and before any OPT81 card, or — when its
+# pole is not one of the rendered long poles — in its own section below the
+# poles. Never in Also noticed, never in Tier 2, never in a total: it is
+# uncredited, and its one number is an upper bound.
+# `verify_report.check_opt83_parallel_steps` re-checks each listed step against
+# the candidate rule, re-derives the upper bound, rejects any other duration or
+# percentage, and checks the card sits in its pole's section.
+# STRING CONTRACTS with verify_report (a coupling test pins the copies equal):
+_OPT83_SIZING_LABEL = ("an UPPER BOUND, not a forecast: it assumes each step keeps "
+                       "its solo speed while they share one runner, and CPU, memory "
+                       "or disk contention can erase it. Not credited, and not in "
+                       "any total")
+_OPT83_RAIL = (
+    "Use a `parallel:` group, where a failing step fails the job at the group's "
+    "end, rather than bare `background: true`, unless every background step is "
+    "covered by a `wait` or `wait-all` and none sets `continue-on-error`. Never "
+    "`cancel:` a step that does real verification. Never drop, narrow or skip a "
+    "step to make the group fit")
+_OPT83_RUNNER_CAVEAT = (
+    "GitHub-hosted runners support `parallel:`. On self-hosted runners, run "
+    "actions/runner 2.336.0 or later: its release notes list background steps in "
+    "2.335.0 and, in 2.336.0, a fix that stops a cancelled background step from "
+    "affecting the job result. It is documented for github.com and GitHub "
+    "Enterprise Cloud, not GitHub Enterprise Server")
+_OPT83_BENCHMARK = (
+    "Benchmark first: on a branch, rewrite only these steps as one `parallel:` "
+    "group, compare the job's wall time over the next sampled runs against the "
+    "serial form, and keep the change only if the measured gain holds")
+_OPT83_SUMMARY = "uncredited, benchmark first"
+
+
+def _opt83_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [f for f in findings if str(f.get("pattern", "")) == "OPT83"
+            and isinstance(f.get("independent_steps"), dict)]
+
+
+def _opt83_for_pole(pole: dict[str, Any],
+                    findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The OPT83 findings whose job IS this pole: same workflow file and the
+    pole's own job (OPT83 is stamped from that pole, so the join is exact)."""
+    pole_wf = str(pole.get("workflow_file") or "")
+    job = str(pole.get("job") or "")
+    if not pole_wf or not job:
+        return []
+    return [f for f in _opt83_findings(findings)
+            if _wf_base(str(f.get("workflow_file") or "")) == _wf_base(pole_wf)
+            and str(f["independent_steps"].get("job") or "") == job]
+
+
+def _opt83_prompt(f: dict[str, Any], url: str) -> list[str]:
+    st = f["independent_steps"]
+    wf = _wf_base(str(f.get("workflow_file") or ""))
+    job = str(st.get("job") or "")
+    steps = [s for s in st.get("steps") or [] if isinstance(s, dict)]
+    names = ", ".join(f"`{s.get('step')}`" for s in steps)
+    ceiling = _num(st.get("ceiling_s")) or 0.0
+    body = ["ci-speedup measured the pattern below but does NOT prescribe the fix -",
+            "investigate it in the repo and apply a safe change.", "",
+            f"Pattern: OPT83 - {_flatten_cell(str(f.get('title') or 'OPT83'))} "
+            f"({_OPT83_SUMMARY}).",
+            f"Where: {wf} (job `{job}`, YAML job `{st.get('yaml_job')}`).",
+            f"What ci-speedup saw: {_flatten_cell(str(f.get('evidence') or ''))}",
+            "",
+            "FIRST, re-check independence in the workflow and the scripts each step "
+            "runs (the audit read only the YAML):",
+            f"- no step among {names} reads another's `steps.<id>.outputs`, or what "
+            "another writes to GITHUB_ENV, GITHUB_OUTPUT or GITHUB_PATH (inside a "
+            "group, outputs are visible only after the group ends; assume the same "
+            "of the environment and path);",
+            "- no two of them write the same files, cache, lockfile, coverage or "
+            "build-output directory, and none reads a file another one writes;",
+            "- no two of them use the same service container, port, database or "
+            "Docker image;",
+            "- none publishes, deploys or uploads, or relies on another having "
+            "succeeded first; inside a group the default `if: success()` ordering "
+            "between them is gone;",
+            "- the runner has the CPU and memory to run them all at once (a step "
+            "that already uses every core gains nothing by sharing them).",
+            "If any of these fails, stop and say which.",
+            "",
+            f"{_OPT83_BENCHMARK}. The audit's {ceiling:.0f}s is {_OPT83_SIZING_LABEL}.",
+            "",
+            "The change: move exactly these steps, unchanged and in the same order, "
+            "into one `parallel:` group in the job, keeping every step before and "
+            "after it where it is. Each step keeps its own log.",
+            f"{_OPT83_RAIL}.",
+            f"Runner: {_OPT83_RUNNER_CAVEAT}.",
+            "",
+            "Read the catalog entry (background, fix recipe, and guardrail):",
+            f"  {url}", "", *_NO_WEAKENING_LINES]
+    return ["#### 🤖 Prompt for your coding agent (OPT83)", "", "```text",
+            *[_fence_safe(l) for l in body], "```"]
+
+
+def _opt83_card(f: dict[str, Any], catalog_url: str) -> list[str]:
+    """One OPT83 finding as an anchored card: the candidate steps, why they look
+    independent, the labelled upper bound, the rail, the runner caveat, and its
+    own prompt. No other duration renders here."""
+    st = f["independent_steps"]
+    fid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(f.get("id") or "x"))
+    title = _flatten_cell(str(f.get("title") or "OPT83"))
+    url = f"{catalog_url}#{f.get('fix_recipe_anchor')}" if f.get(
+        "fix_recipe_anchor") else catalog_url
+    job = _flatten_cell(str(st.get("job") or ""))
+    wf = _wf_base(str(f.get("workflow_file") or ""))
+    steps = [s for s in st.get("steps") or [] if isinstance(s, dict)]
+    listing = " · ".join(f"`{_flatten_cell(str(s.get('step')))}` "
+                         f"{_num(s.get('p50_s')) or 0:.0f}s" for s in steps)
+    ceiling = _num(st.get("ceiling_s")) or 0.0
+    out = [f'<a id="opt83-{fid}"></a>', "",
+           f"**🔀 OPT83 · {title}** - risk **{_flatten_cell(str(f.get('risk') or 'MEDIUM'))}**"
+           f" · {_OPT83_SUMMARY}", "",
+           f"- **Where:** `{wf}` ▸ `{job}`",
+           f"- **Steps that run one after another** (workflow order, p50): {listing}",
+           "- **Why they look independent** (read from the workflow file, never from "
+           "the timings): no step reads another's `steps.<id>.outputs`; none writes "
+           "GITHUB_ENV, GITHUB_OUTPUT or GITHUB_PATH for a later one; no two share a "
+           "cache, an artifact, a build tree or a service container, or runs the "
+           "same Cargo, Maven, Gradle, .NET, sbt, Swift, Mix or Xcode build or "
+           "coverage tool in one folder; none installs dependencies; none "
+           "publishes, deploys or uploads; no step up to "
+           "the last of them runs Docker, Podman or Compose, and none before them "
+           "runs in the background; none changes directory, runs a "
+           "`${{ }}` expression or carries a step-level `if:`; none is allowed to fail "
+           "(`continue-on-error`); none is an action.",
+           f"- **SIZING:** up to {ceiling:.0f}s sooner (the steps' p50s summed, minus "
+           f"the slowest) - {_OPT83_SIZING_LABEL}.",
+           f"- **{_OPT83_BENCHMARK}.**",
+           f"- **Rail:** {_OPT83_RAIL}."]
+    if f.get("guardrail"):
+        out.append(f"- **Guardrail:** {_flatten_cell(str(f['guardrail']))}")
+    if f.get("rollout"):
+        out.append(f"- **Rollout:** {_flatten_cell(str(f['rollout']))}")
+    out += [f"- **Runner:** {_OPT83_RUNNER_CAVEAT}.",
+            f"- **Catalog (background + fix recipe):** {url}", "",
+            *_opt83_prompt(f, url), ""]
+    return out
+
+
+def _opt83_unrouted_block(findings: list[dict[str, Any]], catalog_url: str) -> list[str]:
+    """OPT83 findings whose pole is not one of the rendered long poles: their own
+    section, so a finding is never dropped and never dressed as hygiene."""
+    if not findings:
+        return []
+    out = ['<a id="parallel-steps"></a>', "",
+           "## 🔀 Independent steps on other long poles", "",
+           "> OPT83 findings on a drilled long pole that is not rendered above. "
+           "Uncredited, benchmark first, and not part of any total.", ""]
+    for f in findings:
+        out += _opt83_card(f, catalog_url)
+    return out
+
+
 def _also_noticed_block(findings: list[dict[str, Any]],
                         catalog_url: str,
                         shallow_note: str = "",
@@ -8316,6 +8551,7 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             and not _tier2_owned_here(f)                          # Tier-2-owned → own section
             and str(f.get("pattern", "")) not in _WAIT_PATTERNS  # → its own §
             and str(f.get("pattern", "")) != "OPT81"             # → its pole / own §
+            and str(f.get("pattern", "")) != "OPT83"             # → its pole / own §
             and not _on_pole_job(f)                               # valueless + all-pole-job → already AS a pole (#5)
             and not _is_opt79_pole_finding(f)]                    # OPT79 pole cache → its own block (at its pole, or `_opt79_off_pole_block`)
     if not elig:
@@ -9630,6 +9866,9 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     _o81_lines = _opt81_unrouted_block(_opt81_findings(all_findings), catalog_url)
     if _o81_lines:
         out += ["---", "", *_o81_lines]
+    _o83_lines = _opt83_unrouted_block(_opt83_findings(all_findings), catalog_url)
+    if _o83_lines:
+        out += ["---", "", *_o83_lines]
     if also_lines:
         out += ["---", "", *also_lines]
     # Measured net-negative caches that could not be PRICED (three cases: the
@@ -10843,6 +11082,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     out += _bimodal_note(src, _num(blocker.get("p50_s")))
 
     opt81_rendered: set[int] = set()
+    opt83_rendered: set[int] = set()
     opt79_at_pole: set[str] = set()
     for i, p in enumerate(pole_wfs, 1):
         check = _clean_label(str(p.get("check", "")))
@@ -11276,6 +11516,13 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
             # to the off-pole section it would sit under "not one of the long
             # poles drilled above", which this job is.
             out += _opt80_tail_block(_opt80_tail_for(p, all_findings), catalog_url)
+            # An OPT83 card on the gate's own job belongs here for the same
+            # reason: the "other long poles" section says its pole is not
+            # rendered, and this one is.
+            for _o83 in _opt83_for_pole(p, all_findings):
+                if id(_o83) not in opt83_rendered:
+                    opt83_rendered.add(id(_o83))
+                    out += _opt83_card(_o83, catalog_url)
             continue
         out += _floor_note(p, floor_pool)
         # OPT80's tail line sits beside the pole's merge-wait figure, as its own
@@ -11432,6 +11679,14 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # observation below the prompt — never a silent drop of a real (if minority) finding.
         if offcat_leaf is not None:
             out += _offcategory_note_block(offcat_leaf, p)
+        # OPT83 on THIS pole: independent compute steps run one after another.
+        # After the pole's prompt (so after any OPT75 decomposition) and before
+        # OPT81, which stays the last option. Uncredited; one card per finding.
+        for _o83 in _opt83_for_pole(p, all_findings):
+            if id(_o83) in opt83_rendered:
+                continue
+            opt83_rendered.add(id(_o83))
+            out += _opt83_card(_o83, catalog_url)
         # OPT81 on THIS pole: the measured runner-class gap, or the runner-size
         # advisory as the LAST option — after the pole's own prompt and any OPT75
         # decomposition, never above a credited lever. A log-level leaf that
@@ -11516,6 +11771,12 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         catalog_url)
     if _o81_lines:
         out += ["---", "", *_o81_lines]
+    # OPT83 findings whose pole is not rendered above get their own section.
+    _o83_lines = _opt83_unrouted_block(
+        [f for f in _opt83_findings(all_findings) if id(f) not in opt83_rendered],
+        catalog_url)
+    if _o83_lines:
+        out += ["---", "", *_o83_lines]
     if also_lines:
         out += ["---", "", *also_lines]
     if shallow_note and not queue_lines and not also_lines:
