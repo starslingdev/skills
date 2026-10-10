@@ -1477,7 +1477,10 @@ of runs that took the exact-hit path. Only successful job runs are
 classified (`occurrence_did_not_succeed` otherwise: a failed or cancelled run
 also skips the post save); a skipped occurrence is `occurrence_was_skipped`, and
 a block step whose timestamps are absent or unparseable withholds its occurrence
-as `step_timestamps_unparseable_in_this_occurrence`. An occurrence whose log was
+as `step_timestamps_unparseable_in_this_occurrence`, and one not reported as
+skipped whose timestamps parse to no in-window time (`_step_span`: a year-1
+placeholder start, or a start before its job) withholds it as
+`step_skipped_or_out_of_window`. An occurrence whose log was
 never fetched is counted as unread rather than folded into a population;
 an occurrence past the per-job 8-log cap is tallied
 `beyond_the_per_job_log_probe_cap`, not as unread. When
@@ -1505,7 +1508,8 @@ match the cache withholds (`install_package_manager_does_not_match_cache`); and
 more than one cache, counting the on-by-default and self-caching ones, withholds.
 
 Three things keep it honest. The step set comes from the YAML and a step the run
-RENDERED but did not time counts as 0s, so GitHub's one-second granularity cannot
+RENDERED but ran under a second, or that GitHub reports as skipped, counts as 0s,
+so GitHub's one-second granularity cannot
 change which steps are being compared between runs. "Rendered sub-second" and
 "not there at all" are kept apart, because conflating them fails OPEN on the term
 that matters most: on `actions/cache` the save runs on a MISS, so a post step

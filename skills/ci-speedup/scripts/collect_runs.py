@@ -18883,8 +18883,9 @@ def _opt79_block_durations(job: dict[str, Any], block: dict[str, Any]
     """`({restore, install, post}, {slot: present}, "")` in seconds for one job
     occurrence, else `({}, {}, gate)`.
 
-    A step the YAML declares that the run RENDERED but did not time measures
-    0.0s: `_step_durations` drops every 0-duration step, and letting that drop
+    A step the YAML declares that the run RENDERED with an in-window span but
+    no measurable length (sub-second), or that GitHub reports as `skipped`,
+    measures 0.0s: `_step_durations` drops every 0-duration step, and letting that drop
     change the block would make a sub-second restore look like a different job
     shape. A name that appears TWICE in the timed list is unattributable and
     withholds the occurrence rather than picking one.
@@ -18901,10 +18902,18 @@ def _opt79_block_durations(job: dict[str, Any], block: dict[str, Any]
     completed withholds the occurrence outright.
 
     Likewise a rendered block step whose timestamps do not parse (or are absent)
-    did not measure 0s; it did not measure, and withholds the occurrence."""
+    did not measure 0s; it did not measure, and withholds the occurrence.
+
+    So does a step whose timestamps parse but carry no in-window span under the
+    shared rule (`_step_span`): a `started_at` at the year-1 sentinel, or before
+    the job's own start, on a step GitHub did NOT report as skipped. That step
+    may well have run; its time is simply unknown, and zeroing it would drop the
+    post save off the miss side. It withholds as `step_skipped_or_out_of_window`.
+    Only a step GitHub reports as `skipped` keeps 0s: it genuinely ran nothing."""
     rendered: set[str] = set()
     incomplete: set[str] = set()
     unparseable: set[str] = set()
+    no_span: set[str] = set()
     for s in job.get("steps") or []:
         if not isinstance(s, dict):
             continue
@@ -18914,6 +18923,9 @@ def _opt79_block_durations(job: dict[str, Any], block: dict[str, Any]
             incomplete.add(nm)
         elif _duration_s(s.get("started_at"), s.get("completed_at")) is None:
             unparseable.add(nm)
+        elif (_step_span(s, job) is None
+              and str(s.get("conclusion") or "").lower() != "skipped"):
+            no_span.add(nm)
     timed: dict[str, list[float]] = {}
     for name, dur in _step_durations(job):
         timed.setdefault(" ".join(str(name).split()), []).append(float(dur))
@@ -18932,6 +18944,8 @@ def _opt79_block_durations(job: dict[str, Any], block: dict[str, Any]
             return {}, {}, "step_did_not_complete_in_this_occurrence"
         if label in unparseable:
             return {}, {}, "step_timestamps_unparseable_in_this_occurrence"
+        if label in no_span:
+            return {}, {}, "step_skipped_or_out_of_window"
         vals = timed.get(label) or []
         if len(vals) > 1:
             return {}, {}, "step_measured_more_than_once_in_one_occurrence"
@@ -19810,9 +19824,12 @@ def _detect_opt79_net_negative_cache(
             "hit and a miss line, or restored a fallback key rather than the "
             "exact one (a partial restore-keys hit), is excluded, not guessed. "
             "Only successful runs are compared. Both paths measure the "
-            "SAME three steps, identified in the workflow file — a step the run "
-            "did not time counts as 0s, so GitHub's one-second step granularity "
-            "cannot change which steps are compared. ")
+            "SAME three steps, identified in the workflow file — a step that ran "
+            "for under a second, or that GitHub reports as skipped, counts as "
+            "0s, so GitHub's one-second step granularity cannot change which "
+            "steps are compared; a run where one of those steps has no usable "
+            "time (missing, a placeholder start, or a start before its job) is "
+            "left out, not counted as 0s. ")
         _note_guardrail = (
             "GUARDRAIL: re-key or narrow the cache FIRST and re-measure — cache "
             f"`{ref}` on this job, scoped to the package manager's store or to "

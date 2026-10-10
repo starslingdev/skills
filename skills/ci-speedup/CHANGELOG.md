@@ -1002,6 +1002,12 @@ unversioned and updates by reinstall from `main`.
   whose step has no usable in-window time. A slow-checkout (OPT80) occurrence
   whose checkout was skipped or ran outside its job is now withheld as
   `checkout_step_skipped_or_out_of_window`, not as an unparseable duration.
+  In the cache-costs-more-than-it-saves check (OPT79), a cache, install or
+  post-save step that GitHub did not report as skipped but whose start is the
+  year-1 placeholder or falls before its job is withheld as
+  `step_skipped_or_out_of_window` instead of measuring 0s; read as 0s, a missing
+  post save dropped the miss side's save cost and inflated the reported excess.
+  A step GitHub reports as skipped still counts as 0s.
   Each job's longest sampled run is stamped (`per_workflow_timing[wf].job_max`).
   The report checker gains two checks that fail (never skip) when a finding
   cites, or the engine stamps, a step longer than its job's longest sampled

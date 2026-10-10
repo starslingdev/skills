@@ -534,10 +534,10 @@ family reads, so retuning it there moves this gate too.
    a slow runner against a miss on a fast one is not a cache comparison.
 5. Both paths measure the **same three steps** — restore + install + the post
    save — identified in step 1 and summed per run. A step the run **rendered**
-   but did not time counts as **0s**: GitHub stamps step timestamps at one-second
-   granularity and drops a sub-second step from the timing data entirely, so
-   reading the step set from what happened to be timed would let that noise
-   change *which* steps are being compared.
+   that ran for under a second, or that GitHub reports as `skipped`, counts as
+   **0s**: GitHub stamps step timestamps at one-second granularity, so reading
+   the step set from what happened to be timed would let that noise change
+   *which* steps are being compared.
 
    A step that was **never rendered at all** is a different fact, and it fails
    open on the term that matters most: on `actions/cache` the save runs on a
@@ -545,7 +545,11 @@ family reads, so retuning it there moves this gate too.
    manufactures the excess. A post step that started and never completed
    withholds the occurrence; a block step whose timestamps are missing or do
    not parse did not measure 0s, it did not measure, and withholds the
-   occurrence as `step_timestamps_unparseable_in_this_occurrence`; a post label
+   occurrence as `step_timestamps_unparseable_in_this_occurrence`; a block step
+   that GitHub did **not** report as skipped but whose timestamps parse to no
+   in-window time (a year-1 placeholder start, or a start before its own job)
+   did not measure either, and withholds the occurrence as
+   `step_skipped_or_out_of_window`; a post label
    that matched **no** occurrence
    withholds the job; and `actions/cache/restore`, which has no post phase at
    all, records that there is no save rather than inventing a step name. That
