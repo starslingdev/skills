@@ -996,17 +996,26 @@ unversioned and updates by reinstall from `main`.
   workflow (meant for reusable-workflow callers) then picked up the namesake.
   Both the sizing door and the final check now treat a templated job that
   misses its own workflow's rows as unmeasured (a disclosed coverage gap), never
-  as a namesake from another file. Separately, every modeled or flat estimate on
-  the `not_spine_derivable` list (the `direct`, `runner-min-only`, `measured`
-  and `parallel-rebalance` sizing models plus OPT70-72/74/75/77/79/80/82/83) is
-  now capped at its affected jobs' measured monthly billable compute whenever
-  those jobs are found in the cost data and the estimate exceeds it: the figure
-  drops to the measured compute, the basis reads `measured_spine_clamped`, and
-  the finding's size note states the original estimate and the cap. Before, only
-  OPT73 was capped, so any other flat estimate on a small job could fail the
-  final check and block the report. Re-checked on the saved curl data: the
-  final check passes (7 savings within measured compute, 4 disclosed coverage
-  gaps) and no curl figure changes. Surfaces: `scripts/collect_runs.py`,
+  as a namesake from another file. Separately, a modeled estimate on the
+  `not_spine_derivable` list (the `direct`, `runner-min-only` and
+  `parallel-rebalance` sizing models, plus the step-decomposition levers
+  OPT70-72/74/75) is now capped at its affected jobs' measured monthly billable
+  compute when the estimate exceeds it: the figure drops to the measured
+  compute, the basis reads `measured_spine_clamped`, and the finding's size note
+  states the original estimate and the cap. The cap only lowers a figure on the
+  whole truth: every affected job must be found in its own workflow's cost data
+  (by job key, or by the `name:` the workflow file gives it). A same-named job
+  in another workflow, or only some of the affected jobs, leaves the estimate
+  as is, since either would cut a correct saving. A measured figure, or one
+  carrying a wall-clock-neutral certificate (OPT57, OPT65, OPT77, OPT79, OPT80
+  and the other measured detectors), is never capped: the final check
+  re-derives those from their own measurements and would refuse a lowered one.
+  Before, only OPT73 was capped, so a flat estimate on a small job could fail
+  the final check and block the report. On curl the cap never fires: the
+  templated-name rule above is what resolves OPT16, as a coverage gap. Re-checked
+  on the saved curl data: the final check passes (7 savings within measured
+  compute, 4 disclosed coverage gaps) and no curl figure changes. Surfaces:
+  `scripts/collect_runs.py`,
   `tests/verify_report.py`, ARCHITECTURE §5.1.
 - **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
   no longer invisible to the audit.** Since 2026-06-25 a step may be a

@@ -5781,12 +5781,75 @@ def _templated_job_bases(job_graph: Any, wf: str) -> frozenset[str]:
         return frozenset()
     out = set()
     for jid, meta in jobs.items():
-        meta = meta if isinstance(meta, dict) else {}
-        if "${{" in str(meta.get("name") or "") and not meta.get("reusable"):
+        if _job_name_is_templated(meta):
             base = _whole_run_cancel_base_key(str(jid))
             if base:
                 out.add(base)
     return frozenset(out)
+
+
+def _job_name_is_templated(meta: Any) -> bool:
+    """A job declared under a `${{ }}`-templated `name:` that is not a
+    reusable-workflow caller. MIRROR of `verify_report._job_name_is_templated`
+    (verify_report is import-free); a coupling test pins the two."""
+    meta = meta if isinstance(meta, dict) else {}
+    return "${{" in str(meta.get("name") or "") and not meta.get("reusable")
+
+
+def _own_workflow_job_identities(job_graph: Any, wf: str, job: str) -> list[str]:
+    """Join bases `job` may appear under in `wf`'s OWN spine rows: the literal base
+    first, then the `workflow_job_graph` counterpart (YAML key -> declared `name:`,
+    display name -> key). A display name shared by two keys in `wf` yields no alias
+    (it would sum both jobs). MIRROR of `verify_report._spine_job_identities` on the
+    door's join key; a coupling test pins the two."""
+    b = _whole_run_cancel_base_key(job)
+    out = [b] if b else []
+    jobs = job_graph.get(wf) if isinstance(job_graph, dict) else None
+    if not isinstance(jobs, dict):
+        return out
+    names: dict[str, int] = {}
+    resolved: list[tuple[str, str]] = []
+    for jid, meta in jobs.items():
+        meta = meta if isinstance(meta, dict) else {}
+        nm = _whole_run_cancel_base_key(str(meta.get("name") or jid))
+        resolved.append((_whole_run_cancel_base_key(str(jid)), nm))
+        if nm:
+            names[nm] = names.get(nm, 0) + 1
+    for kb, nm in resolved:
+        if names.get(nm, 0) > 1:
+            continue
+        for alias in ((nm,) if kb == b else ((kb,) if nm == b else ())):
+            if alias and alias not in out:
+                out.append(alias)
+    return out
+
+
+def _own_workflow_billable(
+        wf: str, jobs: "list[str]",
+        by_wf_job: dict[tuple[str, str], float],
+        job_graph: Any) -> tuple[float, int, int]:
+    """`(measured, matched, distinct)` over `wf`'s OWN spine rows only, each
+    affected job resolved through `_own_workflow_job_identities`. No cross-workflow
+    fallback: a namesake in another file is a different job. The not-derivable cap
+    uses this, and only when matched == distinct — a cap LOWERS a credited figure,
+    so an understated sum (a foreign namesake, a subset of the jobs) would cut a
+    correct saving."""
+    measured = 0.0
+    matched = 0
+    seen: set[str] = set()
+    for j in jobs:
+        cands = _own_workflow_job_identities(job_graph, wf, j)
+        if not cands:
+            continue
+        key = next(((wf, c) for c in cands if (wf, c) in by_wf_job), None)
+        ident = key[1] if key else cands[0]
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if key:
+            matched += 1
+            measured += by_wf_job[key]
+    return measured, matched, len(seen)
 
 
 def _measured_billable_for_jobs(
@@ -5987,10 +6050,14 @@ def _reground_runner_minute_savings(
            discipline: omit rather than fake).
          - NOT-DERIVABLE patterns → retained, stamped `not_spine_derivable` with the
            whitelist reason recorded in `runner_min_door_note` (visible, never a
-           silent bypass) — but CAPPED at the affected jobs' measured billable when
-           they join the spine and the estimate exceeds it (`measured_spine_clamped`,
-           cap disclosed in `size_note`; curl OPT16: a flat ~10 s x 1463 runs
-           credited 243.8 min/mo). No join → kept (the guard reports a coverage gap).
+           silent bypass) — but a figure the verifier does not re-derive is CAPPED
+           at the affected jobs' measured billable when EVERY affected job resolves
+           to its own workflow's rows and the estimate exceeds it
+           (`measured_spine_clamped`, cap disclosed in `size_note`; see
+           `_cap_at_measured_compute`). Anything less (no join, a partial join, a
+           foreign namesake) → kept, and the guard reports the gap. curl's OPT16
+           (a flat ~10 s x 1463 runs = 243.8 min/mo) is NOT a cap case: its job's
+           name is templated, so it resolves to no rows and stays a coverage gap.
          - a pattern with NO declared policy → stamped `UNCLASSIFIED_door_policy`
            so verify_report FAILs (the door cannot be silently skipped).
 
@@ -6101,29 +6168,46 @@ def _cap_at_measured_compute(
         f: dict[str, Any], saving: float,
         index: "tuple[dict[tuple[str, str], float], dict[str, list[float]]] | None",
         job_graph: Any) -> None:
-    """Cap a NOT-DERIVABLE (modeled / flat per-run) estimate at its affected jobs'
-    measured billable compute. Below the cap the estimate keeps its own model; only
-    an overshoot is lowered — a fix cannot save more minutes than the jobs consume,
-    whatever the model says. Stamps `measured_spine_clamped` and discloses the cap."""
+    """Cap a NOT-DERIVABLE modeled estimate at its affected jobs' measured billable
+    compute. Below the cap the estimate keeps its own model; only an overshoot is
+    lowered — a fix cannot save more minutes than the jobs consume, whatever the
+    model says. Stamps `measured_spine_clamped` and discloses the cap.
+
+    Two guards, because a cap LOWERS a credited figure:
+      - EXEMPT: a figure the verifier re-derives from stamped evidence and requires
+        to match exactly — `sizing_basis == "measured"` (every `_SIZING` model
+        "measured" pattern, e.g. OPT46/47/64/65, plus OPT57/77/79/80 when credited)
+        or a Tier-2 `tier2_neutrality` certificate
+        (`verify_report.check_tier2_neutrality_derived` re-derives OPT57, OPT65,
+        OPT77, OPT79 and OPT80 and their inner blocks). Capping those would fail
+        the verifier and refuse the report.
+      - WHOLE TRUTH ONLY: the sum must cover EVERY affected job, each resolved in
+        its OWN workflow (`_own_workflow_billable`). A foreign namesake or a subset
+        understates the jobs' compute and would cut a correct saving, so either
+        leaves the estimate as is (the guard reports the gap)."""
     if index is None:
+        return
+    if f.get("sizing_basis") == "measured":
+        return
+    cert = f.get("tier2_neutrality")
+    if isinstance(cert, dict) and cert:
         return
     wf = str(f.get("workflow_file") or "")
     jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j).strip()]
     if not jobs:
         return
-    by_wf_job, by_job = index
-    measured, matched, distinct = _measured_billable_for_jobs(
-        wf, jobs, by_wf_job, by_job, _templated_job_bases(job_graph, wf))
+    by_wf_job, _by_job = index
+    measured, matched, distinct = _own_workflow_billable(wf, jobs, by_wf_job, job_graph)
     measured = round(measured, 1)
-    if matched == 0 or measured <= 0 or float(saving) <= measured + 1e-9:
+    if (distinct == 0 or matched != distinct or measured <= 0
+            or float(saving) <= measured + 1e-9):
         return
     f["runner_min_saving"] = measured
     f["runner_min_basis"] = "measured_spine_clamped"
-    cov = "" if matched == distinct else f" ({matched}/{distinct} affected jobs measured)"
     f["size_note"] = (
         (str(f.get("size_note") or "") + "; " if f.get("size_note") else "")
-        + f"modeled estimate of {float(saving):g} min/mo capped at the affected jobs' "
-        f"MEASURED monthly billable compute ({measured:g} min/mo from the cost spine){cov} "
+        + f"estimate of {float(saving):g} min/mo capped at the affected jobs' "
+        f"MEASURED monthly billable compute ({measured:g} min/mo from the cost spine) "
         "— a fix cannot save more minutes than the jobs consume")
 
 

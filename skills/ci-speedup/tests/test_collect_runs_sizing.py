@@ -2193,17 +2193,23 @@ def test_door_stamps_not_derivable_whitelist_with_reason():
 
 
 # curl/curl validation run (2026-10-10): OPT16's flat estimate (~10 s per run x
-# 1463 runs/month / 60 = 243.8 min/mo, basis `not_spine_derivable`) on a job
-# that measures 155.5 min/mo of billable compute FAILed
-# `check_saving_within_measured_compute`, so phase 5 refused the whole report.
+# 1463 runs/month / 60 = 243.8 min/mo, basis `not_spine_derivable`) on
+# http3-linux.yml's `linux` was bounded by an UNRELATED job's 155.5 min/mo and
+# FAILed `check_saving_within_measured_compute`, so phase 5 refused the whole
+# report. The real fix for curl is the templated-name rule
+# (test_templated_job_name_never_binds_a_foreign_namesake): `linux` resolves to no
+# rows of its own, so it is a coverage gap and the cap never fires on curl. The
+# cap test below reuses curl's numbers on a HYPOTHETICAL shape whose own rows
+# measure 155.5 min/mo.
 _CURL_WF = ".github/workflows/http3-linux.yml"
 _CURL_FLAT_SAVING = round(10 * 1463 / 60, 1)   # 243.8
 
 
 def test_not_spine_derivable_flat_estimate_capped_at_measured_compute(tmp_path):
-    # Every NOT-DERIVABLE (modeled / flat) estimate is CAPPED at its affected jobs'
-    # measured billable when they join the spine — a fix cannot save more minutes
-    # than the jobs consume — and the cap is disclosed on the finding.
+    # A NOT-DERIVABLE modeled estimate the verifier does not re-derive is CAPPED
+    # at its affected jobs' measured billable when every one of them joins its own
+    # workflow's rows — a fix cannot save more minutes than the jobs consume — and
+    # the cap is disclosed on the finding.
     from collect_runs import _reground_runner_minute_savings
     f = {"pattern": "OPT16", "workflow_file": _CURL_WF, "affected_jobs": ["linux"],
          "runner_min_saving": _CURL_FLAT_SAVING, "sizing_basis": "modeled"}
@@ -2254,14 +2260,153 @@ def test_templated_job_name_never_binds_a_foreign_namesake(tmp_path):
     _reground_runner_minute_savings(doc["findings"], spine, job_graph=graph)
     assert f["runner_min_saving"] == _CURL_FLAT_SAVING
     assert f["runner_min_basis"] == "not_spine_derivable"
-    # A job NOT declared under a templated name keeps the cross-workflow fallback
-    # (reusable-workflow callers lose their workflow_file): narrowing is templated only.
+    # A job NOT declared under a templated name keeps the guard's cross-workflow
+    # fallback (reusable-workflow callers lose their workflow_file): the guard's
+    # narrowing is templated only. The CAP never uses that fallback: a namesake's
+    # compute is not proven to be this job's, so the estimate is left as is.
     g = {"pattern": "OPT16", "workflow_file": ".github/workflows/caller.yml",
          "affected_jobs": ["Linux"],
          "runner_min_saving": _CURL_FLAT_SAVING}
     _reground_runner_minute_savings([g], spine, job_graph=graph)
-    assert g["runner_min_basis"] == "measured_spine_clamped"
-    assert g["runner_min_saving"] <= 155.5
+    assert g["runner_min_saving"] == _CURL_FLAT_SAVING
+    assert g["runner_min_basis"] == "not_spine_derivable"
+
+
+# The cap LOWERS a credited saving, so it may only use a sum that is the whole
+# truth about the affected jobs. An understated sum (a foreign namesake, or only
+# some of the jobs) is safe for deriving a figure but cuts a correct saving when
+# used as a ceiling. biome's shape: `lint` in ci.yml renders as `Lint project`
+# (13,381.6 min/mo), while markdown.yml has an unrelated job literally named
+# `lint` (553 min/mo).
+_ALIAS_A = ".github/workflows/ci.yml"
+_ALIAS_B = ".github/workflows/markdown.yml"
+_ALIAS_GRAPH = {_ALIAS_A: {"lint": {"name": "Lint project"}}, _ALIAS_B: {"lint": {}}}
+
+
+def _alias_spine() -> dict:
+    return {"render_ready": True, "rows": [
+        {"workflow_file": _ALIAS_A, "job_name": "Lint project",
+         "billable_equiv_min_per_month": 13381.6},
+        {"workflow_file": _ALIAS_B, "job_name": "lint",
+         "billable_equiv_min_per_month": 553.0}]}
+
+
+def test_cap_never_uses_a_foreign_namesake_for_a_name_override():
+    # Within its own job's compute: the figure stands, uncapped. Capping it to
+    # markdown.yml's 553 would cut a correct saving by 72%.
+    from collect_runs import _reground_runner_minute_savings
+    f = {"pattern": "OPT16", "workflow_file": _ALIAS_A, "affected_jobs": ["lint"],
+         "runner_min_saving": 2000.0, "sizing_basis": "modeled"}
+    _reground_runner_minute_savings([f], _alias_spine(), job_graph=_ALIAS_GRAPH)
+    assert f["runner_min_saving"] == 2000.0
+    assert f["runner_min_basis"] == "not_spine_derivable"
+    assert "size_note" not in f
+
+
+def test_cap_resolves_a_name_override_to_its_own_rows():
+    # Above its own job's compute: capped at THAT job's measured billable, found
+    # through the declared `name:`, never at the namesake's.
+    from collect_runs import _reground_runner_minute_savings
+    f = {"pattern": "OPT16", "workflow_file": _ALIAS_A, "affected_jobs": ["lint"],
+         "runner_min_saving": 20000.0, "sizing_basis": "modeled"}
+    _reground_runner_minute_savings([f], _alias_spine(), job_graph=_ALIAS_GRAPH)
+    assert f["runner_min_saving"] == 13381.6
+    assert f["runner_min_basis"] == "measured_spine_clamped"
+
+
+def test_cap_needs_every_affected_job_measured():
+    # Three affected jobs, only one found in the cost data: the measured sum is
+    # a floor, not a ceiling, so the 120 min/mo estimate stands uncapped.
+    from collect_runs import _reground_runner_minute_savings
+    spine = {"render_ready": True, "rows": [
+        {"workflow_file": _ALIAS_A, "job_name": "a", "billable_equiv_min_per_month": 50.0}]}
+    graph = {_ALIAS_A: {"a": {}, "b": {}, "c": {"name": "${{ matrix.x }}"}}}
+    g = {"pattern": "OPT16", "workflow_file": _ALIAS_A, "affected_jobs": ["a", "b", "c"],
+         "runner_min_saving": 120.0, "sizing_basis": "modeled"}
+    _reground_runner_minute_savings([g], spine, job_graph=graph)
+    assert g["runner_min_saving"] == 120.0
+    assert g["runner_min_basis"] == "not_spine_derivable"
+    assert "size_note" not in g
+
+
+def test_cap_skips_a_figure_the_verifier_rederives():
+    # OPT77's credited minutes are re-derived by the verifier from the stamped
+    # setup_consolidation block and must equal it exactly. Lowering the figure to
+    # the jobs' billable would fail that re-derivation and refuse the report, so a
+    # measured (or Tier-2 certified) figure is never capped.
+    from collect_runs import _reground_runner_minute_savings
+    vr = _load_verify_report_for_bounds()
+    wf = ".github/workflows/ci.yml"
+    jobs = ["audit", "lint", "typecheck"]
+    f = {"id": "f1", "pattern": "OPT77", "workflow_file": wf, "affected_jobs": list(jobs),
+         "runner_min_saving": 266.7, "wall_clock_p50_s": 0.0, "sizing_basis": "measured",
+         "tier2_neutrality": {"proof": "below_cluster_floor", "margin_s": 510.0},
+         "setup_consolidation": {
+             "kind": "opt77_repeated_setup", "credited_jobs": list(jobs),
+             "runner_label": "ubuntu-latest", "removed_setup_payments": 2,
+             "setup_p50_s": 80.0,
+             "per_job": {n: {"setup_p50_s": 80.0, "useful_work_p50_s": 10.0,
+                             "setup_steps": ["set up job", "actions/checkout"]}
+                         for n in jobs},
+             "shared_setup_steps": ["set up job", "actions/checkout"],
+             "projected_consolidated_p50_s": 90.0, "remaining_tallest_job": "test",
+             "remaining_tallest_p50_s": 600.0, "remaining_eligible_jobs": ["test"],
+             "remaining_excluded_jobs": {}, "occurrences": 2, "sampled_saved_s": 320.0,
+             "sampled_successful_run_count": 2, "monthly_volume": 100, "scale": 50.0,
+             "runner_min_saving": 266.7}}
+    data = {"per_workflow_timing": {wf: {
+        "floor_p50": 600.0,
+        "job_p50": {"audit": 90.0, "lint": 90.0, "typecheck": 90.0, "test": 600.0}}}}
+    _reground_runner_minute_savings(
+        [f], _door_spine({"audit": 40.0, "lint": 40.0, "typecheck": 20.0}, wf=wf))  # Σ 100
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert problems == [] and margin == 510.0
+    assert f["runner_min_saving"] == 266.7
+    assert f["runner_min_basis"] == "not_spine_derivable"
+
+
+# verify_report is import-free, so the door MIRRORS two of its job-identity rules.
+# These pin each mirror to the verifier's own function over the same shapes, so
+# the two cannot drift apart silently.
+_IDENTITY_GRAPH = {
+    ".github/workflows/ci.yml": {
+        "lint": {"name": "Lint project"},                    # key -> display name
+        "build": {},                                          # no override
+        "a": {"name": "Shared"}, "b": {"name": "Shared"},     # ambiguous display name
+        "linux": {"name": "${{ matrix.os }} build"},          # templated
+        "call": {"name": "${{ inputs.x }}", "reusable": True},  # reusable caller
+        "test": {"name": "Unit tests (fast)"},                # matrix-style suffix
+    },
+}
+
+
+def test_door_job_identities_mirror_the_verifier():
+    import re
+    from collect_runs import _own_workflow_job_identities
+    vr = _load_verify_report_for_bounds()
+
+    def base(job):
+        return vr._cmp_name(re.sub(r"\s*\([^()]*\)\s*$", "", str(job or "")).strip())
+
+    wf = ".github/workflows/ci.yml"
+    for graph in (_IDENTITY_GRAPH, {}, None):
+        for job in ("lint", "Lint project", "build", "a", "Shared", "linux",
+                    "call", "test", "Unit tests", "missing", "build (ubuntu)"):
+            assert (_own_workflow_job_identities(graph, wf, job)
+                    == vr._spine_job_identities(graph or {}, wf, job, base)), (graph, job)
+
+
+def test_door_templated_name_rule_mirrors_the_verifier():
+    from collect_runs import _job_name_is_templated
+    vr = _load_verify_report_for_bounds()
+    shapes = [{}, {"name": "Lint"}, {"name": "${{ matrix.os }}"},
+              {"name": "${{ inputs.x }}", "reusable": True},
+              {"name": "x ${{ a }} y", "reusable": False}, {"reusable": True},
+              None, "not-a-dict"]
+    for jobs in _IDENTITY_GRAPH.values():
+        shapes.extend(jobs.values())
+    for meta in shapes:
+        assert _job_name_is_templated(meta) == vr._job_name_is_templated(meta), meta
 
 
 def test_door_policy_is_total_and_flags_unclassified():
