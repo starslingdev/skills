@@ -103,6 +103,24 @@ def test_long_pole_is_decomposed_to_its_dominant_step():
     assert d["redundant_ratio"] == 4.0
 
 
+def test_dominant_lead_falls_back_past_control_steps_never_crowns_one():
+    """All-boilerplate job with a long `wait-all`: the fallback set drops the
+    control step (it runs nothing), so the crown goes to real boilerplate."""
+    lead = cr._dominant_category_lead(
+        [("Set up job", 3.0), ("wait-all", 50.0), ("Checkout", 5.0)])
+    assert lead == ("Checkout", 5.0), lead
+    # nothing but control steps: no step does the work
+    assert cr._dominant_category_lead([("wait", 5.0), ("wait-all", 3.0)]) is None
+
+
+def test_decompose_job_of_only_control_steps_returns_none():
+    d = cr._decompose_job_steps([_job("waits", [("wait", 5), ("wait-all", 3)])])
+    assert d is None
+    d = cr._decompose_job_steps([_job("noop", [("Set up job", 3), ("wait-all", 50),
+                                               ("Checkout", 5)])])
+    assert d is not None and d["dominant_step"] == "Checkout", d
+
+
 def test_decompose_aggregates_same_category_steps_not_single_max():
     # A multi-step pole with NO single dominant step: the job runs the same suite
     # back-to-back under four state-backend configs (four sequential `test` steps,
@@ -4913,3 +4931,161 @@ def test_cache_distribution_keeps_warm_runs_reaches_mostly_warm(tmp_path: Path):
     # churn. That demotion is the whole point of F2.
     assert cd["pr"]["upstream_median"] < 40.0
     assert cd["verdict"] in ("miss-tail", "mostly-warm") and cd["verdict"] != "churn", cd["verdict"]
+
+
+# --------------------------------------------------------------------------- #
+# Parallel steps: a `wait` step blocks on background work and does none itself
+# --------------------------------------------------------------------------- #
+
+def test_a_wait_step_is_never_crowned_the_dominant_step():
+    """With `background:` steps, a `wait` / `wait-all` step's duration is the
+    time it spent BLOCKED on other steps. Crowning it would hand the agent a
+    step that does no work. How the jobs API records overlapping steps is not
+    yet probed, so this is a guard only: the name is excluded from the crown."""
+    for wait_name in ("wait", "wait-all", "cancel", "Wait",
+                      "Wait for all background steps to complete"):
+        steps = [("Checkout", 10), ("Start db", 5), ("Run tests", 60),
+                 (wait_name, 300)]
+        d = cr._decompose_job_steps([_job("integration", steps)])
+        assert d is not None
+        assert d["dominant_step"] == "Run tests", (wait_name, d)
+        lead = cr._dominant_category_lead([(n, float(p)) for n, p in steps])
+        assert lead is not None and lead[0] == "Run tests", (wait_name, lead)
+        dom = bp._dominant_step_from_timeline(
+            {"job_dur_s": 375, "steps": [{"name": n, "dur_s": p} for n, p in steps]})
+        assert dom is not None and dom[0] == "Run tests", (wait_name, dom)
+
+
+def test_a_wait_step_is_not_crowned_even_in_an_all_boilerplate_job():
+    steps = [("Set up job", 3), ("wait-all", 90), ("Checkout", 5)]
+    d = cr._decompose_job_steps([_job("noop", steps)])
+    assert d is not None and d["dominant_step"] == "Checkout", d
+
+
+def test_a_step_merely_named_like_wait_is_still_work():
+    steps = [("Checkout", 10), ("Wait for deployment to be healthy", 120),
+             ("Run tests", 60)]
+    d = cr._decompose_job_steps([_job("deploy", steps)])
+    assert d is not None and d["dominant_step"] == "Wait for deployment to be healthy", d
+
+
+# --------------------------------------------------------------------------- #
+# Parallel steps: a lever priced from step times that overlap is held back
+# --------------------------------------------------------------------------- #
+
+_PAR_WF = ".github/workflows/ci.yml"
+
+
+def _par_doc(build_in_group: bool) -> dict:
+    build = [{"name": "Build", "run": "make"}, {"name": "Run tests", "run": "make test"}]
+    tail = [{"parallel": build}] if build_in_group else build
+    return {"jobs": {
+        "build-and-test": {"steps": [{"name": "Checkout", "uses": "actions/checkout@v4"},
+                                     {"name": "Install deps", "run": "npm ci"}] + tail},
+        "lint": {"steps": [{"name": "Lint", "run": "npm run lint"}]}}}
+
+
+def _par_structural(doc: dict, withheld: list) -> list:
+    runs = [[_job("build-and-test", _BUILD_TEST), _job("lint", _LINT)]
+            for _ in range(5)]
+    crit_by_wf = {_PAR_WF: cr._critical_path(runs)}
+    pr_checks = (("build-and-test", 300.0), ("lint", 100.0))
+    return cr._detect_structural_candidates(
+        pr_checks, [], crit_by_wf, {_PAR_WF: runs},
+        cr.RequiredChecks(frozenset({"build-and-test", "lint"}), complete=True),
+        {_PAR_WF: {"pull_request"}}, {}, 0,
+        wf_docs={_PAR_WF: doc}, overlap_withheld=withheld)
+
+
+def test_a_structural_lever_whose_dominant_step_runs_in_a_group_is_held_back():
+    """The dominant step's saving is priced as if the job's steps ran one after
+    another; inside a `parallel:` group they overlap, so cutting it comes off
+    the job only on the slowest branch. The credited lever is held back with a
+    listed reason; the pole keeps the renderer's generic hand-off."""
+    withheld: list = []
+    out = _par_structural(_par_doc(True), withheld)
+    levers = [f for f in out if f["pattern"] in ("OPT70", "OPT72", "OPT75")
+              and "build-and-test" in (f.get("affected_jobs") or [])]
+    assert levers == [], [(f["pattern"], f.get("wall_clock_p50_s")) for f in levers]
+    assert {(w["workflow_file"], w["job"], w["gate"]) for w in withheld} == {
+        (_PAR_WF, "build-and-test", "dominant_step_runs_inside_a_parallel_group")}
+    # The same job written flat keeps its credited lever and holds nothing back.
+    withheld = []
+    out = _par_structural(_par_doc(False), withheld)
+    assert any(f["pattern"] in ("OPT70", "OPT72", "OPT75")
+               and "build-and-test" in (f.get("affected_jobs") or []) for f in out)
+    assert withheld == []
+
+
+def test_opt24_holds_back_a_test_payload_that_runs_in_a_group():
+    runs = [[_job("test", [("Checkout", 20), ("Run tests", 420)])] for _ in range(3)]
+    flat = {"jobs": {"test": {"steps": [{"name": "Checkout", "uses": "actions/checkout@v4"},
+                                        {"name": "Run tests", "run": "pytest"}]}}}
+    grouped = {"jobs": {"test": {"steps": [
+        {"name": "Checkout", "uses": "actions/checkout@v4"},
+        {"parallel": [{"name": "Run tests", "run": "pytest"},
+                      {"name": "Lint", "run": "ruff ."}]}]}}}
+    assert cr._detect_opt24_long_test_no_sharding("ci.yml", runs, 0, wf_doc=flat)
+    withheld: list = []
+    out = cr._detect_opt24_long_test_no_sharding("ci.yml", runs, 0, wf_doc=grouped,
+                                                 overlap_withheld=withheld)
+    assert out == [], [f.get("wall_clock_p50_s") for f in out]
+    assert [(w["job"], w["gate"]) for w in withheld] == [
+        ("test", "dominant_step_runs_inside_a_parallel_group")]
+
+
+def test_a_named_control_step_is_never_crowned_the_dominant_step():
+    """S8: `- name: Wait for lint` / `wait: lint` renders under its `name:`, which
+    the bare control-name pattern cannot see. The collector reads the repo's
+    named control steps from the workflow YAML and never crowns one. A work
+    step merely named "Wait for ..." in a repo without such a control step is
+    still work (`test_a_step_merely_named_like_wait_is_still_work`)."""
+    doc = {"jobs": {"it": {"steps": [
+        {"run": "npm run lint", "id": "lint", "background": True},
+        {"name": "Run tests", "run": "npm test"},
+        {"name": "Wait for  lint", "wait": "lint"}]}}}
+    steps = [("Checkout", 10), ("Run tests", 60), ("Wait for lint", 300)]
+    saved = set(cr._YAML_CONTROL_STEP_NAMES)
+    try:
+        cr._set_yaml_control_step_names({_PAR_WF: doc})
+        d = cr._decompose_job_steps([_job("it", steps)])
+        assert d is not None and d["dominant_step"] == "Run tests", d
+        lead = cr._dominant_category_lead([(n, float(p)) for n, p in steps])
+        assert lead is not None and lead[0] == "Run tests", lead
+    finally:
+        cr._YAML_CONTROL_STEP_NAMES.clear()
+        cr._YAML_CONTROL_STEP_NAMES.update(saved)
+
+
+def _load_vr():
+    import importlib.util
+    name = "ci_speedup_verify_report_structural"
+    spec = importlib.util.spec_from_file_location(
+        name, _SKILL_DIR / "tests" / "verify_report.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_parallel_steps_held_back_row_renders_and_verifies(tmp_path):
+    """Collector, renderer and verifier name the same list and the same reason,
+    and the row the renderer writes passes the verifier; a report that drops
+    it fails."""
+    vr = _load_vr()
+    key = cr._PARALLEL_STEPS_WITHHELD_DOC_KEY
+    assert key == bp._PARALLEL_STEPS_WITHHELD_DOC_KEY == vr._VR_PARALLEL_STEPS_WITHHELD_DOC_KEY
+    assert bp._PARALLEL_STEPS_WITHHOLD_PHRASES == vr._VR_PARALLEL_STEPS_WITHHOLD_PHRASES
+    assert set(bp._PARALLEL_STEPS_WITHHOLD_PHRASES) == {cr._DOMINANT_STEP_OVERLAP_GATE}
+    rows = [{"workflow_file": _PAR_WF, "job": "build-and-test", "pattern": "OPT72",
+             "gate": cr._DOMINANT_STEP_OVERLAP_GATE}]
+    doc = {"data_sources": {}, key: rows}
+    path = tmp_path / "findings.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    footer = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    assert "| parallel steps: held back | 1 candidate lever(s) held back " \
+           "(build-and-test): the job's slowest steps run side by side" in footer, footer
+    assert vr.check_coverage_disclosed(footer, path).ok
+    dropped = "\n".join(ln for ln in footer.splitlines()
+                        if not ln.startswith("| parallel steps: held back"))
+    assert not vr.check_coverage_disclosed(dropped, path).ok

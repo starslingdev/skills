@@ -3155,6 +3155,28 @@ jobs:
     assert "OPT76" in _scan_one(tmp_path, pos)
 
 
+def test_opt76_reads_a_group_level_if_that_names_the_payload(tmp_path: Path):
+    """S16: a group's `if:` gates its children (as the walker assumes), so a
+    group gated on `hashFiles('vendor/protos/**')` references the submodule;
+    OPT76's "no step references it" would be false."""
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    neg = """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - if: hashFiles('vendor/protos/**') != ''
+        parallel:
+          - run: make proto
+          - run: make lint
+"""
+    assert "OPT76" not in _scan_one(tmp_path, neg)
+
+
 def test_opt76_suppressed_when_a_step_builds_from_the_submodule(tmp_path: Path):
     """The submodule payload is LOAD-BEARING when a step reads it — dropping
     `submodules:` would break the job, so OPT76 must NOT fire."""
@@ -4007,3 +4029,562 @@ jobs:
                       if ln.strip() == "fetch-depth: 0")
     assert len(opt28) == 1, opt28
     assert opt28[0]["line"] == depth_line
+
+
+# =============================================================================
+# Parallel steps (GitHub Actions `parallel:` groups, `background:`, `wait:`)
+#
+# A `- parallel:` item holds a LIST of ordinary child steps. A reader that walks
+# `job.steps` as a flat list sees that item as one step with no `run:`/`uses:`,
+# so every child is invisible. Each test below takes an existing fixture, wraps
+# the DECISIVE step in a `parallel:` group, and asserts the finding is unchanged.
+# =============================================================================
+
+def test_opt16_duplicate_command_inside_a_parallel_group_is_read(tmp_path: Path):
+    pos = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm run build:packages
+      - parallel:
+          - run: pnpm run build:packages
+          - run: pnpm run lint
+"""
+    assert "OPT16" in _scan_one(tmp_path, pos)
+
+
+def test_opt2_uncached_install_inside_a_parallel_group_is_read(tmp_path: Path):
+    pos = """name: CI
+on: push
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - parallel:
+          - run: npx playwright install
+          - run: pnpm run build
+      - run: npx playwright test
+"""
+    assert "OPT2" in _scan_one(tmp_path, pos)
+
+
+def test_opt5_cache_inside_a_parallel_group_still_counts_as_configured(tmp_path: Path):
+    neg = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: pnpm/action-setup@v4
+      - parallel:
+          - uses: actions/setup-node@v4
+            with:
+              node-version: 20
+              cache: pnpm
+          - run: echo warming
+      - run: pnpm install
+"""
+    assert "OPT5" not in _scan_one(tmp_path, neg)
+
+
+def test_opt28_full_history_checkout_inside_a_parallel_group_is_read(tmp_path: Path):
+    pos = """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - uses: actions/checkout@v4
+            with:
+              fetch-depth: 0
+          - run: echo prepare
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", pos)
+    opt28 = [f for f in _scan(tmp_path)["findings"] if f["pattern"] == "OPT28"]
+    assert len(opt28) == 1, opt28
+    depth_line = next(i + 1 for i, ln in enumerate(pos.split("\n"))
+                      if ln.strip() == "fetch-depth: 0")
+    assert opt28[0]["line"] == depth_line
+
+
+def test_control_steps_never_crash_the_scan_and_are_counted(tmp_path: Path):
+    """`wait:` / `wait-all:` / `cancel:` steps carry no `run:`/`uses:`. The
+    scan must read straight past them, and say how many it skipped."""
+    yml = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start db
+        id: db
+        run: docker run -d postgres:15
+        background: true
+      - wait: db
+      - wait-all:
+      - cancel: db
+      - run: pnpm run build:packages
+      - run: pnpm run build:packages
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    assert "OPT16" in _patterns(data)
+    ps = data["parallel_steps"]
+    assert ps["control_steps"] == 3 and ps["groups"] == 0, ps
+    assert ps["steps_in_groups"] == 0 and ps["malformed_groups"] == 0, ps
+
+
+def test_steps_read_inside_parallel_groups_are_disclosed(tmp_path: Path):
+    yml = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - run: pnpm run lint
+          - run: pnpm run typecheck
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    ps = data["parallel_steps"]
+    assert ps["steps_in_groups"] == 2 and ps["groups"] == 1, ps
+    assert ps["malformed_files"] == [], ps
+    assert data["scan_incomplete"] == []
+
+
+def test_no_parallel_stamp_when_the_repo_does_not_use_the_syntax(tmp_path: Path):
+    """Recorded only when the syntax is used, so every other findings document
+    is byte-identical to before."""
+    _write_workflow(tmp_path, "ci.yml", """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm test
+""")
+    assert "parallel_steps" not in _scan(tmp_path)
+
+
+def test_a_malformed_parallel_group_is_disclosed_not_read_as_clean(tmp_path: Path):
+    """A `parallel:` that is not a list of steps cannot be read. Its children
+    are unknown, so the file is a coverage gap — never a clean scan."""
+    yml = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          run: pnpm run lint
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    ps = data["parallel_steps"]
+    assert ps["malformed_groups"] == 1, ps
+    assert ps["malformed_files"] == [".github/workflows/ci.yml"], ps
+    assert ps["malformed_jobs"][0]["job"] == "build", ps
+    gaps = [g for g in data["scan_incomplete"] if g["path"] == ".github/workflows/ci.yml"]
+    assert gaps and "parallel" in gaps[0]["reason"], data["scan_incomplete"]
+
+
+def test_a_job_with_an_unreadable_group_gets_no_absence_finding(tmp_path: Path):
+    """A malformed group's steps were never read, so "the job does X nowhere"
+    cannot be known for that job. Here the unread group runs `git describe`,
+    which needs full history: OPT28's "drop `fetch-depth: 0`" would break it.
+    Every finding for the job is held back with a listed reason instead."""
+    yml = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - parallel:
+          run: git describe --tags
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    assert "OPT28" not in _patterns(data), [f["pattern"] for f in data["findings"]]
+    gaps = [g for g in data["scan_incomplete"] if g["path"] == ".github/workflows/ci.yml"]
+    assert gaps and "job_has_an_unreadable_parallel_group" in gaps[0]["reason"], gaps
+
+
+def test_opt28_reads_a_history_op_in_a_group_written_on_a_run_step(tmp_path: Path):
+    """`parallel:` beside `run:` on one step is rejected by GitHub, but the walk
+    reads its children anyway: the `git log` inside makes `fetch-depth: 0`
+    load-bearing, so OPT28 must stay silent. Its steps WERE read, so it is not
+    a coverage gap ("could not be scanned" would be false, S9): the invalid
+    group is named in the stamp, which the Data sources row renders."""
+    yml = """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: pnpm test
+        parallel:
+          - run: git log --oneline -5
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    assert "OPT28" not in _patterns(data)
+    assert data["scan_incomplete"] == [], data["scan_incomplete"]
+    ps = data["parallel_steps"]
+    assert ps["invalid_files"] == [".github/workflows/ci.yml"], ps
+    assert [(r["job"], r["count"]) for r in ps["invalid_jobs"]] == [("test", 1)], ps
+
+
+def test_a_malformed_group_gap_names_its_kind(tmp_path: Path):
+    """S14: the coverage-gap reason names WHY the group was not read."""
+    yml = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: &s
+      - parallel: *s
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    gaps = [g for g in data["scan_incomplete"] if g["path"] == ".github/workflows/ci.yml"]
+    assert gaps and "the list contains itself" in gaps[0]["reason"], gaps
+    assert "not a list of steps" not in gaps[0]["reason"], gaps
+
+
+def test_a_parallel_group_that_contains_itself_never_stops_the_scan(tmp_path: Path):
+    """A YAML alias can make a `parallel:` list contain itself. The scan must
+    finish, and name the file as a coverage gap rather than crash."""
+    yml = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: &s
+      - parallel: *s
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    gaps = [g for g in data["scan_incomplete"] if g["path"] == ".github/workflows/ci.yml"]
+    assert gaps and "`build`" in gaps[0]["reason"], data["scan_incomplete"]
+
+
+def test_opt31_install_in_a_gated_group_is_not_unconditional(tmp_path: Path):
+    """GitHub documents no group-level `if:`; the walk treats one as inherited
+    by the group's children, so an install inside a gated group is not
+    reported as running unconditionally."""
+    neg = """name: CI
+on: pull_request
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event_name == 'push'
+        parallel:
+          - run: npx playwright install --with-deps chromium
+          - run: pnpm run build
+      - if: env.CLERK_SECRET_KEY != ''
+        run: npx playwright test smoke
+"""
+    assert "OPT31" not in _scan_one(tmp_path, neg)
+
+
+def test_opt31_fires_when_the_consumer_sits_in_a_gated_group(tmp_path: Path):
+    """T5: the consumer's gate is written on its GROUP; the walker hands it to
+    the child, so an unconditional install whose only consumer runs in that
+    gated group is an OPT31 finding."""
+    pos = """name: CI
+on: pull_request
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx playwright install --with-deps chromium
+      - if: env.CLERK_SECRET_KEY != ''
+        parallel:
+          - run: npx playwright test smoke
+          - run: pnpm run lint
+"""
+    assert "OPT31" in _scan_one(tmp_path, pos)
+
+
+def test_opt29_reads_a_merge_group_skip_written_on_a_group(tmp_path: Path):
+    pos = """name: CI
+on:
+  pull_request:
+  merge_group:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event_name != 'merge_group'
+        parallel:
+          - run: pnpm test
+          - run: pnpm lint
+"""
+    assert "OPT29" in _scan_one(tmp_path, pos)
+
+
+def test_opt2_cache_beside_the_install_in_one_group_does_not_precede_it(tmp_path: Path):
+    """Siblings in a `parallel:` group run at the same time: the cache has not
+    been restored when the install starts, so it is not a preceding cache."""
+    pos = """name: CI
+on: push
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - parallel:
+          - uses: actions/cache@v4
+            with:
+              path: ~/.cache/ms-playwright
+              key: pw-${{ hashFiles('pnpm-lock.yaml') }}
+          - run: npx playwright install
+      - run: npx playwright test
+"""
+    assert "OPT2" in _scan_one(tmp_path, pos)
+
+
+@pytest.mark.parametrize("bg, wait", [
+    ("true", "      - wait-all:\n"),
+    ("true", "      - wait: pwcache\n"),
+    ('"True"', ""),
+    ("true", ""),
+])
+def test_opt2_a_background_cache_declared_before_the_install_counts_as_cached(
+        tmp_path: Path, bg: str, wait: str):
+    """OPT2 claims "no preceding `actions/cache`". A `background: true` cache
+    declared before the install is usually awaited (`wait-all:` / `wait:`) before
+    it, and whether the restore has finished cannot be shown from the YAML
+    either way, so the claim fails CLOSED: any declared cache before the install
+    counts. (Only a sibling in the install's own group is excluded.)"""
+    neg = f"""name: CI
+on: push
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: pwcache
+        background: {bg}
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{{{ hashFiles('pnpm-lock.yaml') }}}}
+{wait}      - run: npx playwright install
+      - run: npx playwright test
+"""
+    assert "OPT2" not in _scan_one(tmp_path, neg)
+
+
+def test_opt2_cache_in_one_group_and_install_in_the_next_counts_as_cached(tmp_path: Path):
+    neg = """name: CI
+on: push
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - uses: actions/cache@v4
+            with:
+              path: ~/.cache/ms-playwright
+              key: pw-${{ hashFiles('pnpm-lock.yaml') }}
+          - run: pnpm run build
+      - parallel:
+          - run: npx playwright install
+          - run: pnpm run lint
+      - run: npx playwright test
+"""
+    assert "OPT2" not in _scan_one(tmp_path, neg)
+
+
+def test_opt2_cache_in_an_earlier_group_still_precedes_the_install(tmp_path: Path):
+    """A group ends with an implicit wait, so a cache in an EARLIER group has
+    finished before a later install starts."""
+    neg = """name: CI
+on: push
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - parallel:
+          - uses: actions/cache@v4
+            with:
+              path: ~/.cache/ms-playwright
+              key: pw-${{ hashFiles('pnpm-lock.yaml') }}
+          - run: pnpm run build
+      - run: npx playwright install
+      - run: npx playwright test
+"""
+    assert "OPT2" not in _scan_one(tmp_path, neg)
+
+
+def test_opt12_preamble_stops_at_the_first_parallel_group(tmp_path: Path):
+    """A composite action cannot hold a `parallel:` group, so a "shared
+    preamble" that reaches into one is not extractable as written: the
+    preamble is the leading steps BEFORE the first group."""
+    neg = """name: CI
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - parallel:
+          - uses: actions/setup-node@v4
+          - run: pnpm install
+      - run: pnpm build
+      - run: pnpm test
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - parallel:
+          - uses: actions/setup-node@v4
+          - run: pnpm install
+      - run: pnpm build
+      - run: pnpm lint
+"""
+    assert "OPT12" not in _scan_one(tmp_path, neg)
+
+
+def test_opt12_fires_on_a_preamble_that_ends_at_a_group(tmp_path: Path):
+    """T7: two jobs share [checkout, setup-node] and THEN a group: the preamble
+    before the group is extractable, so OPT12 still fires."""
+    pos = """name: CI
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - parallel:
+          - run: pnpm build
+          - run: pnpm test
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - parallel:
+          - run: pnpm build
+          - run: pnpm lint
+"""
+    assert "OPT12" in _scan_one(tmp_path, pos)
+
+
+def test_opt12_a_background_step_does_not_end_the_preamble(tmp_path: Path):
+    """T7: only a `parallel:` group ends the preamble; a top-level
+    `background: true` step is an ordinary step of it (kills the
+    `in_parallel_group` -> `background` mutant)."""
+    pos = """name: CI
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run -d postgres:15
+        background: true
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm test
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run -d postgres:15
+        background: true
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm lint
+"""
+    assert "OPT12" in _scan_one(tmp_path, pos)
+
+
+def test_opt12_lists_a_job_whose_first_step_is_in_a_group(tmp_path: Path):
+    """S13: a job whose very first step sits in a `parallel:` group has no
+    extractable preamble; it is not silently dropped but listed under the
+    stamp's `held_back` with its reason."""
+    yml = """name: CI
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - uses: actions/checkout@v4
+          - uses: actions/setup-node@v4
+      - run: pnpm install
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm lint
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    held = data["parallel_steps"]["held_back"]
+    assert held == [{"pattern": "OPT12", "path": ".github/workflows/ci.yml", "job": "a",
+                     "reason": "first_step_inside_a_parallel_group"}], held
+
+
+def test_opt5_two_setup_actions_in_one_group_run_side_by_side(tmp_path: Path):
+    """Item 4: siblings in one group do not run one before the other."""
+    yml = """name: CI
+on: push
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - uses: actions/setup-node@v4
+          - uses: pnpm/action-setup@v4
+      - run: pnpm install
+"""
+    data = _scan_dir_with(tmp_path, yml)
+    ev = [f["evidence"] for f in data["findings"] if f["pattern"] == "OPT5"]
+    assert ev and "run side by side" in ev[0], ev
+    assert "runs before" not in ev[0], ev
+
+
+def test_opt12_flat_preamble_still_fires(tmp_path: Path):
+    pos = """name: CI
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm build
+      - run: pnpm test
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm build
+      - run: pnpm lint
+"""
+    assert "OPT12" in _scan_one(tmp_path, pos)

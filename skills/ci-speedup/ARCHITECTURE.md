@@ -2983,6 +2983,105 @@ present; OPT75's presence does not (it renders first), though an OPT75 credit of
 half the pole's median or more does, like any credited finding. It renders after
 the pole's own prompt and its OPT75 block. See [§5.4](#54-opt81--a-runner-class-gap-measured-from-the-repos-own-runs-and-the-last-resort-runner-advisory).
 
+### Parallel steps: the YAML side is walked, the run-data side is not (yet)
+
+GitHub Actions parallel steps (2026-06-25) let a step be a `- parallel:` group
+(a list of ordinary child steps run concurrently, then an implicit wait), let a
+step carry `background: true`, and add control steps (`wait:`, `wait-all:`,
+`cancel:`) that run nothing.
+
+- **YAML side — fixed.** `scripts/workflow_steps.py` is the one reader of a
+  job's `steps:` list. It returns every leaf step in declaration order with each
+  group's children spliced in (nested groups too), skips-but-counts control
+  steps (keeping a control step's `name:`), and tags each leaf
+  `in_parallel_group` / `background`. Every static reader goes through it:
+  `scan.py`'s `_steps` / `_steps_with_if` / `job_walk` (so every per-job
+  detector, OPT28's checkout loop, OPT17's sleep loop, `_job_needs_git_history`
+  and `_index_local_git_actions`), and in `collect_runs.py` the OPT77 setup
+  fingerprint, OPT79's cache block and its `package.json` probe, OPT80's
+  checkout and retry readers, OPT82's lint-step read and the OPT24 shard check.
+- **Malformed and invalid groups.** A group is MALFORMED, its steps not read,
+  when its `parallel:` value is not a list, the list contains itself through a
+  YAML alias, it is nested more than 64 groups deep, the walk has already read
+  `WALK_MAX_NODES` (10,000) leaves and groups (a list reused through aliases is
+  read again at each use, so sibling groups aliasing one list double per level),
+  or it holds an item that is not a step. Each records its kind. The file lands
+  in `scan_incomplete` with the kind named, and every finding of a detector
+  whose claim is an ABSENCE (OPT1, OPT2, OPT5, OPT14, OPT21, OPT28, OPT29,
+  OPT31, OPT39, OPT76) is held back for that job, listed on its gap record as
+  `job_has_an_unreadable_parallel_group`; OPT79 and OPT80 return the same
+  reason rather than "no steps" / "no checkout". A group on a step that also
+  has `run:` / `uses:` is INVALID (GitHub rejects it): its command is a leaf and
+  its children are read as the group's children (tagged in-group), so
+  order-free verdicts such as the git-history check match a flat read. It is
+  not a coverage gap; the Parallel steps row names it.
+- **Order-aware readers use the tags.** OPT2 fails closed: any cache declared
+  before the install counts as preceding it, background included; only a
+  sibling in the install's own group is excluded. OPT5 says two setup actions
+  in one group run side by side. OPT12's preamble ends at the first group, and
+  a job whose first step is in a group is listed under `parallel_steps.held_back`
+  (`first_step_inside_a_parallel_group`). OPT79 holds back a cache whose
+  restore or install runs in a group or in the background, or that shares a
+  group with its install (the overlap reason is named before any install-shape
+  reason).
+- **Provenance.** When a repo uses the syntax (groups, control steps or
+  background steps), `scan.py` stamps `parallel_steps`: the counts (`groups`,
+  `steps_in_groups`, `control_steps`, `background_steps`), `malformed_groups` /
+  `_files` / `_jobs` / `_reasons`, `invalid_groups` / `_files` / `_jobs`, the job
+  lists `jobs_with_groups`, `jobs_with_background` and (in a file holding either)
+  `sequential_jobs`, and `held_back`. Otherwise the key is absent and the scan
+  output is byte-identical to before. The Data sources table renders a "Parallel
+  steps" row from it (`workflow_steps.parallel_steps_disclosure`).
+- **Run-data side — NOT changed.** `_decompose_job_steps` still sums per-step
+  p50s into the job p50, and `_step_timeline` still lays steps out end to end.
+  With overlapping steps both are wrong (the sum over-counts, the timeline
+  draws concurrent steps in sequence), but how the jobs API records a parallel
+  child, a background step or the implicit group wait is not documented, so it
+  needs a live probe before the timing model changes. Until then the guards
+  are:
+  - a credited lever priced from step medians (OPT24 sharding, the structural
+    OPT70/72/75 route) is HELD BACK when the step it is priced from runs in a
+    group or in the background, or the job cannot be pinned to its YAML in a
+    workflow that uses the syntax (`dominant_step_runs_inside_a_parallel_group`,
+    the "parallel steps: held back" row); the pole keeps the renderer's generic
+    dominant-step hand-off;
+  - the pole drill never says a job's steps run one after another when the stamp
+    names it as overlapping, and says they "may" overlap when the pole's
+    workflow holds an overlapping job it cannot match to one (`_pole_steps_overlap`:
+    job key, display name, matrix leg, a `${{ }}`-templated name, a
+    reusable-workflow callee's ` / <job>` tail; never across workflow files; a
+    pole with no known workflow file only ever gets the hedged wording);
+  - a control step is never crowned the dominant step. A control step's duration
+    is time spent blocked on other steps. The bare names `wait`, `wait-all`,
+    `cancel` and a name starting "Wait for all background steps" are an
+    assumption about how run data labels control steps and the implicit group
+    wait (no GitHub source states them); a control step the author NAMED is read
+    from the repo's YAML and excluded by that name. Both the collector's crown
+    and the renderer's fallbacks skip them; a work step that merely starts
+    "Wait for" stays eligible.
+- **Known limits.** OPT77's setup fingerprint sums setup seconds that may
+  overlap in a group, so it can overstate. An unnamed `wait: server` may show up
+  in run data under a generated name such as "Wait for server"; that is
+  unprobed, so it can still be picked as dominant. A user step literally named
+  `Wait`, `Cancel` or `wait-all` is excluded from dominant-step picking. Timing
+  (step-sum p50, timeline) is unchanged and needs the live probe.
+- **Group-level keys are an assumption.** GitHub does not document `if:`,
+  `continue-on-error` or `timeout-minutes` on a `parallel:` group. The walker
+  treats a group-level `if:` as inherited by its children — an ASSUMPTION,
+  marked unverified — so an install in a gated group is not reported as
+  unconditional, and OPT76 searches that `if:` for a payload path.
+- **Other engines.** The leaf / group / control / malformed / invalid semantics
+  follow ci-score's `_walk_steps` from PR #120, and ci-secure's walker from PR
+  #121 uses a depth cap of the same number in different units (it counts every
+  YAML node with `> 64`; this walker counts `parallel:` nesting with `>= 64`).
+  Neither is on `main` yet, so the parity this section relies on is pinned only
+  by the repo-root git-history parity test.
+- **Independent check.** `verify_report` re-derives the whole Parallel steps row
+  on its own (its own copy of the malformed-kind phrases, pinned equal), fails a
+  row with no stamp, and fails a pole whose `file ▸ check` heading the stamp names
+  as overlapping when its drill says the steps run one after another; it imports
+  nothing from the skill.
+
 ## 12. The blocking-path report (`blocking_path.py`)
 
 `blocking_path.py` is the skill's **single, data-first renderer** (§2) — answering

@@ -724,6 +724,20 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-10-09** — **The fix recipes now name GitHub's native parallel steps.**
+  OPT77 (repeated setup across small jobs) prefers a `parallel:` step group over
+  shell `&` (separate logs, and a failing task fails the job on its own) and
+  states what the runner release notes show (the background-step engine in
+  self-hosted `actions/runner` 2.335.0, the cancelled-step fix in 2.336.0, so
+  2.336.0 or later; documented for github.com and GitHub Enterprise Cloud, not
+  Enterprise Server) and the 10-concurrent-background-step limit. OPT75 gains an
+  in-job `parallel:` route for a slow job made of several independent steps,
+  with an independence checklist and the note that "sum minus the slowest step"
+  is an upper bound until benchmarked. OPT24 and OPT73 name in-job parallel
+  steps as the alternative when the pieces are few and the setup is large;
+  OPT17 notes that a `background:` service step still needs a readiness probe.
+  (#122)
+
 - **2026-10-07** — **A slow cache on a job that is not the workflow's slowest is
   now priced in runner-minutes.** When the cache check (OPT79) measured a cache
   that costs more than it saves on a job at or above the workflow's
@@ -926,6 +940,71 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
+  no longer invisible to the audit.** Since 2026-06-25 a step may be a
+  `- parallel:` group holding a list of ordinary steps, a step may carry
+  `background: true`, and `wait:`, `wait-all:` and `cancel:` steps run nothing.
+  Every static reader treated a job's steps as a flat list, so a duplicate
+  build, an uncached install, a `fetch-depth: 0` checkout, a lint command, a
+  cache step or the git-history command that makes `fetch-depth: 0` necessary
+  went unread whenever it sat inside a group. (#122)
+  - One shared step walker (`scripts/workflow_steps.py`) now feeds every static
+    detector and every YAML step read in the collector (OPT16, OPT2, OPT5,
+    OPT28 and the other per-job detectors; OPT77's setup comparison, OPT79's
+    cache block, OPT80's checkout, OPT82's lint step, the OPT24 shard check).
+    A group-level `if:` is read as gating its steps (an assumption: GitHub does
+    not document it), including where OPT76 searches for a payload path.
+  - A group that cannot be read (its value is not a list, it contains itself
+    through a YAML alias, it is nested more than 64 deep, an item in it is not a
+    step, or a YAML alias fan-out would expand past 10,000 steps) is named with
+    its kind as incomplete coverage, and the scan no longer hangs or stops on
+    one. For that job, every finding that rests on a step being absent (OPT1,
+    OPT2, OPT5, OPT14, OPT21, OPT28, OPT29, OPT31, OPT39, OPT76) is held back
+    and listed as `job_has_an_unreadable_parallel_group`; OPT79 and OPT80 give
+    the same reason instead of "no steps" or "no checkout".
+  - A step that has `parallel:` plus `run:` / `uses:` (GitHub rejects it) is
+    still read, its command and its children, and is named in the Parallel
+    steps row rather than as incomplete coverage. The incomplete-coverage
+    banner now counts files, not records.
+  - Order-aware checks use the overlap. OPT2 fails closed: any cache declared
+    before the install counts, a background one included; only a cache running
+    beside the install in its own group does not. OPT5 says two setup actions
+    in one group run side by side. OPT12's shared preamble stops at the first
+    group, and a job whose first step is in a group is listed with
+    `first_step_inside_a_parallel_group`. OPT79 holds back a cache whose
+    restore or install runs in a group or in the background, naming the
+    overlap before any install-shape reason, and no longer reads `package.json`
+    through a checkout that may still be running beside the setup step.
+  - A saving priced from step times that overlap is held back, not claimed:
+    when the step OPT24 (sharding) or the long-pole lever (OPT70/72/75) is
+    priced from runs in a group or in the background, the lever is listed in a
+    new "parallel steps: held back" Data sources row
+    (`dominant_step_runs_inside_a_parallel_group`) and the pole keeps the
+    generic dominant-step hand-off.
+  - The pole drill never says a job's steps run one after another when the
+    job runs a group or a background step (matched by job key, display name,
+    matrix leg, a `${{ }}`-templated name or a reusable-workflow callee), and
+    says they "may" overlap when the pole's workflow uses the syntax but the
+    job cannot be matched.
+  - A control step is never crowned a slow job's dominant step, in the
+    collector or in the renderer's fallbacks: `wait`, `wait-all`, `cancel` and
+    "Wait for all background steps…" (names assumed for the run data,
+    unverified until a live probe), and any control step the author named in
+    the YAML. A work step that merely starts "Wait for" stays eligible.
+  - A repo that uses the syntax gets a "Parallel steps" row in Data sources:
+    steps read inside groups, the groups seen, background and control steps,
+    each malformed group's kind and files, and any invalid group.
+    `verify_report` re-derives the whole row, fails a row with no stamp, and
+    fails a pole drill that calls an overlapping job sequential. A repo that
+    does not use the syntax gets a byte-identical scan output; the rendered
+    report can still differ where a step is literally named `wait`, `wait-all`
+    or `cancel` (it is no longer picked as the dominant step) or where one
+    workflow file carried several coverage-gap records.
+  - **Not changed yet:** how the run timing records overlapping steps is
+    undocumented, so the per-step decomposition still adds step times as if
+    they ran one after another; that needs a live probe first. OPT77's setup
+    comparison can still overstate a saving whose setup steps overlap.
 
 - **2026-10-07** — **A slow lint job flagged by OPT82 no longer reads as a
   coverage gap, and a cache cost off the long poles no longer lands inside the

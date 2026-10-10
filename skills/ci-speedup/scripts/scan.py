@@ -45,6 +45,21 @@ except ImportError:  # pragma: no cover — surfaced loudly if missing
           file=sys.stderr)
     sys.exit(1)
 
+# The ONE reader for a job's `steps:` list (descends `parallel:` groups, skips
+# `wait:`/`wait-all:`/`cancel:` control steps). This directory goes first on
+# sys.path so `workflow_steps` imports even when scan.py is itself loaded by
+# file path (the repo-root parity test).
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workflow_steps import (  # noqa: E402
+    effective_if,
+    job_leaf_steps,
+    job_walk,
+    MALFORMED_KINDS,
+    parallel_steps_stats,
+    parallel_steps_used,
+)
+
 
 # =============================================================================
 # Catalog parsing
@@ -546,9 +561,7 @@ def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
         if _job_needs_git_history(job, job_name):
             continue  # depth:0 is load-bearing here — removing it breaks the job
         checkout_index = 0  # Track which checkout step this is (1-based)
-        for step in (job.get("steps") or []):
-            if not isinstance(step, dict):
-                continue
+        for step in _steps(job):
             uses = str(step.get("uses") or "")
             if not uses.startswith("actions/checkout"):
                 continue
@@ -733,11 +746,13 @@ def _job_payload_blob(job: dict) -> "str | None":
         vals = job.get(block)
         if vals is not None:
             parts.append(_yaml_text(vals))
-    for s in _steps(job):
+    for s, s_if in _steps_with_if(job):
         parts.append(_run(s))
         parts.append(str(s.get("working-directory") or ""))
         parts.append(str(s.get("name") or ""))
-        parts.append(str(s.get("if") or ""))
+        # The step's own `if:` AND its enclosing groups' (`effective_if`), so a
+        # path named only in a group-level gate is searched too.
+        parts.append(str(s_if or ""))
         uses = _uses(s)
         parts.append(uses)
         for block in ("with", "env"):
@@ -1231,7 +1246,7 @@ def _detect_opt17(doc: dict, raw: str) -> list[Hit]:
         # Job-level docker context: has `services:` block OR any step starts a
         # container OR runs docker compose / docker run.
         job_has_services = isinstance(job.get("services"), dict) and job.get("services")
-        steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+        steps = _steps(job)
         run_blobs = " ".join(
             s.get("run") for s in steps if isinstance(s.get("run"), str)
         )
@@ -1378,7 +1393,17 @@ def _on_schedules(on: Any) -> list[dict]:
 # =============================================================================
 
 def _steps(job: dict) -> list[dict]:
-    return [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+    # Leaf steps in declaration order, children of `parallel:` groups included.
+    return job_leaf_steps(job)
+
+
+def _steps_with_if(job: dict) -> list[tuple[dict, str | None]]:
+    """Leaf steps paired with the condition each runs under: its own `if:`
+    AND any enclosing `parallel:` group's `if:` (an assumption — GitHub
+    documents no group-level `if:`; see `workflow_steps`). A hygiene rule that
+    asks "is this step unconditional?" reads this, never `step.get("if")`
+    alone. The parsed YAML is not mutated."""
+    return [(leaf.step, effective_if(leaf)) for leaf in job_walk(job).leaves]
 
 
 def _uses(step: dict) -> str:
@@ -1478,12 +1503,19 @@ def _detect_opt2(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        steps = _steps(job)
-        install_idx = next(
-            (i for i, s in enumerate(steps) if _PW_INSTALL_RE.search(_run(s))), None)
-        if install_idx is None:
+        leaves = job_walk(job).leaves
+        install = next((lf for lf in leaves if _PW_INSTALL_RE.search(_run(lf.step))), None)
+        if install is None:
             continue
-        if any("actions/cache" in _uses(s) for s in steps[:install_idx]):
+        # The claim is "no preceding cache", so it fails CLOSED: any cache
+        # declared before the install counts, `background: true` included (it is
+        # usually awaited by a `wait:` / `wait-all:` before the install, and the
+        # YAML cannot show otherwise). Only a sibling in the install's own
+        # `parallel:` group is excluded: those two run at the same time, so the
+        # restore cannot have happened first. A cache in an EARLIER group counts.
+        if any("actions/cache" in _uses(lf.step)
+               and not (install.group is not None and lf.group == install.group)
+               for lf in leaves[:install.index]):
             continue  # cached already
         hits.append(Hit(
             line=_line_of_in_job(raw, job_name, "playwright install"),
@@ -1508,7 +1540,8 @@ def _detect_opt5(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        steps = _steps(job)
+        leaves = job_walk(job).leaves
+        steps = [lf.step for lf in leaves]
         pnpm_setup_idx = node_setup_idx = cache_idx = None
         node_cache_val = ""
         pnpm_setup_cache = False  # pnpm/action-setup with `cache: true`
@@ -1535,8 +1568,16 @@ def _detect_opt5(doc: dict, raw: str) -> list[Hit]:
         reasons: list[str] = []
         if (node_setup_idx is not None and pnpm_setup_idx is not None
                 and node_setup_idx < pnpm_setup_idx):
-            reasons.append("`actions/setup-node` runs before `pnpm/action-setup` "
-                           "(store path unavailable for the cache key)")
+            g = leaves[node_setup_idx].group
+            if g is not None and leaves[pnpm_setup_idx].group == g:
+                # Siblings in one `parallel:` group start together: neither runs
+                # first, so pnpm is still not set up when setup-node reads it.
+                reasons.append("`actions/setup-node` and `pnpm/action-setup` run side "
+                               "by side in one `parallel:` group (store path "
+                               "unavailable for the cache key)")
+            else:
+                reasons.append("`actions/setup-node` runs before `pnpm/action-setup` "
+                               "(store path unavailable for the cache key)")
         if (node_setup_idx is not None and node_cache_val.lower() != "pnpm"
                 and cache_idx is None):
             reasons.append("`actions/setup-node` has no `cache: 'pnpm'` and no "
@@ -1841,8 +1882,8 @@ def _detect_opt29(doc: dict, raw: str) -> list[Hit]:
         if not isinstance(job, dict) or "if" in job:
             continue
         step_skips = any(
-            isinstance(s.get("if"), str) and _MERGE_GROUP_REF_RE.search(s.get("if"))
-            for s in _steps(job))
+            cond is not None and _MERGE_GROUP_REF_RE.search(cond)
+            for _s, cond in _steps_with_if(job))
         if step_skips:
             hits.append(Hit(
                 # Anchor on the job's OWN header, not the file-global first
@@ -1887,29 +1928,29 @@ def _detect_opt31(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        steps = _steps(job)
-        for i, s in enumerate(steps):
-            if "if" in s:
-                continue
+        steps = _steps_with_if(job)
+        for i, (s, s_if) in enumerate(steps):
+            if "if" in s or s_if is not None:
+                continue  # gated, on the step or on its enclosing group
             run = _run(s)
             if not _OPT31_INSTALL_RE.search(run):
                 continue
             tokens = _opt31_tokens(run)
             if not tokens:
                 continue
-            consumer = next(
-                (c for c in steps[i + 1:]
-                 if isinstance(c.get("if"), str) and _OPT31_GATE_RE.search(c.get("if"))
+            consumer_if = next(
+                (c_if for c, c_if in steps[i + 1:]
+                 if c_if is not None and _OPT31_GATE_RE.search(c_if)
                  and any(tok in _run(c).lower() for tok in tokens)),
                 None)
-            if consumer is not None:
+            if consumer_if is not None:
                 first = (run.splitlines() or [""])[0].strip()
                 hits.append(Hit(
                     line=_line_of_in_job(raw, job_name, first),
                     affected_jobs=[job_name],
                     evidence=(f"job `{job_name}` runs an unconditional install "
                               f"step (`{first[:60]}`) whose only consumer is a "
-                              f"later step gated on `{consumer.get('if')[:50]}` — "
+                              f"later step gated on `{consumer_if[:50]}` — "
                               f"the install runs even when the consumer is skipped"),
                     match_text=job_name,
                 ))
@@ -2139,7 +2180,13 @@ def _detect_opt12(doc: dict, raw: str) -> list[Hit]:
     for name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        steps = _steps(job)[:4]
+        # The preamble ends at the first `parallel:` group: a composite action
+        # cannot hold one, so a "shared preamble" reaching into a group is not
+        # extractable as written (and a flat read never counted its children).
+        leaves = job_walk(job).leaves
+        flat = next((i for i, lf in enumerate(leaves) if lf.in_parallel_group),
+                    len(leaves))
+        steps = [lf.step for lf in leaves[:flat]][:4]
         if len(steps) < 2:
             continue
         sig = tuple(_step_sig(s) for s in steps)
@@ -2156,6 +2203,18 @@ def _detect_opt12(doc: dict, raw: str) -> list[Hit]:
             match_text="(workflow)",
         ))
     return hits
+
+
+def _opt12_first_step_in_a_group(doc: dict) -> list[str]:
+    """The jobs OPT12 cannot read a preamble from because their FIRST step is
+    inside a `parallel:` group (a composite action cannot hold one). Listed
+    under the stamp's `held_back`, so the job is not silently skipped."""
+    out: list[str] = []
+    for name, job in _jobs_from_doc(doc).items():
+        leaves = job_walk(job).leaves if isinstance(job, dict) else []
+        if leaves and leaves[0].in_parallel_group:
+            out.append(str(name))
+    return out
 
 
 # ---- OPT6 — Cache Key Entropy Too High or Unstable ---------------------------
@@ -2201,6 +2260,41 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 
 # Dispatch table — OPT-id → detector function. Patterns declared in the catalog
 # but missing here are logged at scan time and skipped (no fabrication).
+# Detectors whose claim rests on a step being ABSENT from the job ("no cache
+# precedes the install", "no step reads the history", "no step uses the
+# payload"). A job with a malformed `parallel:` group has steps that were never
+# read, so absence cannot be known there: these patterns' findings for that job
+# are held back, and the job's scan_incomplete record names them with the
+# reason below. Presence-based and job-config patterns (a duplicate build, a
+# missing concurrency group) stay true whatever the unread group holds.
+_ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
+    "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
+    "OPT39", "OPT76"})
+UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
+
+
+def _hold_back_unreadable(pattern: str, hits: list[Hit], rel: str,
+                          unreadable_jobs: dict[tuple[str, str], dict[str, Any]]
+                          ) -> list[Hit]:
+    """Drop the hits naming a job whose `parallel:` group could not be read,
+    recording each on that job's scan_incomplete record (never silent)."""
+    kept: list[Hit] = []
+    for hit in hits:
+        recs = [unreadable_jobs[(rel, j)] for j in hit.affected_jobs
+                if (rel, j) in unreadable_jobs]
+        if not recs:
+            kept.append(hit)
+            continue
+        for rec in recs:
+            held = rec.setdefault("held_back", [])
+            if pattern not in held:
+                held.append(pattern)
+                rec["reason"] = rec["reason"].split("; held back:")[0] + (
+                    f"; held back: {', '.join(held)} "
+                    f"({UNREADABLE_GROUP_HELD_BACK_REASON})")
+    return kept
+
+
 _DETECTORS: dict[str, Any] = {
     "OPT1": _detect_opt1,
     "OPT6": _detect_opt6,
@@ -4423,10 +4517,6 @@ def _wf_jobs(doc: dict) -> dict[str, dict]:
     return {str(k): v for k, v in jobs.items() if isinstance(v, dict)} if isinstance(jobs, dict) else {}
 
 
-def _job_steps(job: dict) -> list[dict]:
-    return [s for s in (job.get("steps") or []) if isinstance(s, dict)]
-
-
 def _step_uses(step: dict) -> tuple[str, str] | None:
     """(action, ref) for a remote `uses:`; None for local (./) / docker:// /
     run steps."""
@@ -4545,6 +4635,26 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
             continue
         parsed.append((rel, doc, raw))
 
+    # What the step walker read inside GitHub Actions `parallel:` groups, and
+    # the control steps it skipped. A malformed group (`MALFORMED_KINDS`: not a
+    # list, contains itself, nested too deep, too many steps to read, or holding
+    # an item that is not a step) could not be read, so its file is a coverage
+    # gap, never clean, with the kind named. An INVALID group (`parallel:`
+    # beside `run:`/`uses:` on one step, which GitHub rejects) WAS read, so it is
+    # not a gap: the stamp names it and the Data sources row renders it.
+    parallel_stats = parallel_steps_stats((rel, doc) for rel, doc, _raw in parsed)
+    # (file, job key) → its scan_incomplete record, so a finding held back for
+    # that job (see _ABSENCE_STEP_PATTERNS) is named on the job's own record.
+    unreadable_jobs: dict[tuple[str, str], dict[str, Any]] = {}
+    for mj in parallel_stats["malformed_jobs"]:
+        kinds = "; ".join(MALFORMED_KINDS.get(k, k) for k in mj.get("reasons") or [])
+        rec = {
+            "path": mj["path"],
+            "reason": (f"job `{mj['job']}`: {mj['count']} `parallel:` group(s) not "
+                       f"read ({kinds}), so the steps inside were not read")}
+        scan_incomplete.append(rec)
+        unreadable_jobs[(mj["path"], mj["job"])] = rec
+
     findings: list[dict[str, Any]] = []
     finding_idx = 0
 
@@ -4593,6 +4703,8 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
                     hits = list(_declarative_hits(entry, doc, raw))
             else:
                 continue
+            if unreadable_jobs and entry.pattern in _ABSENCE_STEP_PATTERNS:
+                hits = _hold_back_unreadable(entry.pattern, hits, rel, unreadable_jobs)
             for hit in hits:
                 finding_idx += 1
                 f = _emit(entry, hit, rel, finding_idx)
@@ -4641,7 +4753,22 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
     # install seconds / runner-minutes are credited once, not double-counted.
     findings = _reconcile_opt1_opt2(findings)
 
+    # Candidates a detector could not read because of the syntax, with the
+    # reason (stamped with the rest of `parallel_steps`, only when used).
+    held_back = [{"pattern": "OPT12", "path": rel, "job": job,
+                  "reason": "first_step_inside_a_parallel_group"}
+                 for rel, doc, _raw in parsed for job in _opt12_first_step_in_a_group(doc)]
+    if held_back:
+        parallel_stats["held_back"] = held_back
+    extra: dict[str, Any] = {}
+    if parallel_steps_used(parallel_stats):
+        # Stamped only when the syntax is used, so every other findings
+        # document is byte-identical to before. Rendered as the "Parallel steps"
+        # row of the report's Data sources table.
+        extra["parallel_steps"] = parallel_stats
+
     return {
+        **extra,
         "findings": findings,
         "scanned_workflows": len(files),
         "scan_incomplete": scan_incomplete,

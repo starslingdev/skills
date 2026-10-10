@@ -36,6 +36,8 @@ from typing import Any, Callable, NamedTuple
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
+from workflow_steps import (  # same-skill module; step walker
+    parallel_steps_disclosure, parallel_steps_used)
 
 _LBLW = 33
 _BARW = 22
@@ -3025,8 +3027,17 @@ def _addressable_plain(pole: dict[str, Any], candidates: list[dict[str, Any]]) -
 # Setup/teardown step names that are NOT the load-bearing work, so they're skipped
 # when picking a pole's "dominant step" for the generic hand-off (mirrors the same
 # constant in collect_runs - kept in sync, not cross-imported, per the skill layout).
+# Includes the parallel-step control names (`wait`, `wait-all`, `cancel`, the
+# implicit group wait): they run nothing and are never the dominant step.
 _NON_WORK_STEP_RE = re.compile(
-    r"^(set up job|complete job|post\b|checkout\b|set up |setup [a-z]*node)",
+    r"^(set up job|complete job|post\b|checkout\b|set up |setup [a-z]*node"
+    r"|(?:wait|wait-all|cancel)\s*$|wait for all background steps)",
+    re.IGNORECASE)
+# The control names alone (collect_runs `_CONTROL_STEP_NAME_RE`, pinned equal by
+# a test): the drill's "longest step" fallbacks skip these even when every
+# other step is boilerplate, so a step that only waits is never marked.
+_CONTROL_STEP_NAME_RE = re.compile(
+    r"^(?:(?:wait|wait-all|cancel)\s*$|wait for all background steps)",
     re.IGNORECASE)
 
 
@@ -3749,7 +3760,12 @@ def _dom_index(steps: list[dict[str, Any]], dom_name: str) -> int:
         return -1
     work = [i for i, s in enumerate(steps)
             if not _NON_WORK_STEP_RE.match(_clean_label(str(s.get("name", ""))))]
-    pool = work or list(range(len(steps)))
+    # All boilerplate: any step but a control step (it only waits). Nothing
+    # but control steps: no step is the dominant one.
+    pool = work or [i for i, s in enumerate(steps) if not _CONTROL_STEP_NAME_RE.match(
+        _clean_label(str(s.get("name", ""))))]
+    if not pool:
+        return -1
     return max(pool, key=lambda i: _num(steps[i].get("dur_s")) or 0.0)
 
 
@@ -3767,18 +3783,21 @@ def _dom_lead_idx(steps: list[dict[str, Any]], dom_cat: str) -> int:
     boilerplate step that happens to share `dom_cat` — e.g. "Set up job" (category
     `setup`) or "Complete job" (`other`) outranking the real work lead — would be marked
     here while the prose/prompt named the work step, re-opening the very disagreement this
-    closes. Falls back to 0 (the longest step) when there's no category info or no
+    closes. Falls back to the longest step when there's no category info or no
     non-boilerplate row matches — degrading to the old behaviour rather than marking
-    nothing."""
-    if not dom_cat:
-        return 0
-    for i, s in enumerate(steps):
+    nothing. The fallback row is the first that is not a control step (`wait`,
+    `wait-all`, `cancel`): a step that only waits is never marked the lever."""
+    def _label(s: dict[str, Any]) -> str:
         # Pole steps key the label as "step"; some callers use "name" — accept either.
-        label = _clean_label(str(s.get("step") or s.get("name") or ""))
-        if (str(s.get("category", "")) == dom_cat
-                and not _NON_WORK_STEP_RE.match(label)):
-            return i
-    return 0
+        return _clean_label(str(s.get("step") or s.get("name") or ""))
+
+    if dom_cat:
+        for i, s in enumerate(steps):
+            if (str(s.get("category", "")) == dom_cat
+                    and not _NON_WORK_STEP_RE.match(_label(s))):
+                return i
+    return next((i for i, s in enumerate(steps)
+                 if not _CONTROL_STEP_NAME_RE.match(_label(s))), 0)
 
 
 def _collapse_timeline(steps: list[dict[str, Any]], dom_idx: int,
@@ -3846,6 +3865,94 @@ _OPT82_POLE_POINTER = ("(no log-level detector fired, but a **catalog pattern** 
                        "lint step - see its card in the **Also noticed** section below.)")
 
 
+def _stamp_job_matches(row: dict[str, Any], targets: list[str]) -> bool:
+    """Whether a stamped job row (`{"job", "name"?}`) is the job behind any of
+    the pole's labels: the YAML key or display name exactly or label-cleaned, a
+    matrix leg of it (`test (ubuntu, 3.12)`), a display name templated with
+    `${{ }}` (`Test ${{ matrix.os }}` is the check `Test ubuntu-latest`), or a
+    reusable-workflow callee (`caller / build` is the job `build`)."""
+    expanded: list[str] = []
+    for t in targets:
+        expanded.append(t)
+        if " / " in t:
+            expanded.append(t.rsplit(" / ", 1)[-1])
+    for j in (str(row.get("job") or ""), str(row.get("name") or "")):
+        if not j:
+            continue
+        if "${{" in j:
+            parts = re.split(r"\$\{\{.*?\}\}", j)
+            pat = re.compile(".+?".join(re.escape(_clean_label(x)) for x in parts),
+                             re.IGNORECASE)
+            if any(pat.fullmatch(_clean_label(t)) for t in expanded):
+                return True
+            continue
+        if any(j == t or _matrix_base(t) == j.lower()
+               or _clean_label(j).lower() == _clean_label(t).lower()
+               for t in expanded):
+            return True
+    return False
+
+
+# How the step drill words a pole whose steps may overlap, by the kind
+# `_pole_steps_overlap` returns. Each clause ends where the caller adds ":".
+_STEPS_OVERLAP_CLAUSE: dict[str, str] = {
+    "group": ("This job runs some steps side by side in a `parallel:` group, so step "
+              "times overlap and do not add up to the job time, and time cut from a "
+              "step comes off the job only if it is on the slowest branch"),
+    "background": ("This job runs some steps in the background (`background: true`), "
+                   "so step times overlap and do not add up to the job time, and time "
+                   "cut from a step comes off the job only if it is on the slowest branch"),
+    "maybe": ("This job's workflow runs some steps side by side (a `parallel:` group or "
+              "`background: true`) and this job could not be matched to its YAML, so "
+              "its step times may overlap and need not add up to the job time, and time "
+              "cut from a step may come off the job only if it is on the slowest branch"),
+}
+
+
+def _pole_steps_overlap(pole: dict[str, Any] | None,
+                        doc: dict[str, Any] | None) -> str | None:
+    """Whether this pole's job may run steps side by side, from the scan's
+    `parallel_steps` stamp: `"group"` (a `parallel:` group, `jobs_with_groups`),
+    `"background"` (`background: true`, `jobs_with_background`), `"maybe"`, or
+    None (its steps run one after another, as before the syntax existed).
+
+    Then its step times overlap: they do not add up to the job, and time cut
+    from a step comes off the job only if it is on the slowest branch, so the
+    step drill must not say the steps run one after another. Joined by
+    `_stamp_job_matches`, never across workflow files. FAIL CLOSED: a pole in a
+    workflow holding an overlapping job that matches neither that job nor one
+    the stamp records as sequential (`sequential_jobs`) is `"maybe"`. A pole
+    with no known workflow file cannot be pinned to a YAML job, so a name match
+    there only hedges the wording (`"maybe"`), it never asserts the overlap."""
+    if not isinstance(pole, dict) or not isinstance(doc, dict):
+        return None
+    stats = doc.get("parallel_steps")
+    if not isinstance(stats, dict):
+        return None
+    targets = [t for t in (str(pole.get("check") or ""), str(pole.get("job") or "")) if t]
+
+    def _rows(key: str) -> list[dict[str, Any]]:
+        v = stats.get(key)
+        return [r for r in v if isinstance(r, dict)] if isinstance(v, list) else []
+
+    over = [("group", r) for r in _rows("jobs_with_groups")] + [
+        ("background", r) for r in _rows("jobs_with_background")]
+    if not over or not targets:
+        return None
+    pole_wf = str(pole.get("workflow_file") or "")
+    if not pole_wf:
+        return ("maybe" if any(_stamp_job_matches(r, targets) for _k, r in over)
+                else None)
+    here = [(k, r) for k, r in over if not _wf_conflict(pole_wf, str(r.get("path") or ""))]
+    for kind, r in here:
+        if _stamp_job_matches(r, targets):
+            return kind
+    if any(not _wf_conflict(pole_wf, str(r.get("path") or ""))
+           and _stamp_job_matches(r, targets) for r in _rows("sequential_jobs")):
+        return None
+    return "maybe" if here else None
+
+
 def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                     timeline: dict[str, Any] | None = None,
                     log_present: bool = False,
@@ -3855,7 +3962,8 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                     data_driven_on_path: bool = True,
                      data_driven_patterns: "tuple[str, ...] | list[str]" = (),
                      opt79_present: bool = False,
-                     opt82_present: bool = False) -> list[str]:
+                     opt82_present: bool = False,
+                     steps_overlap: "str | None" = None) -> list[str]:
     """The ASCII waterfall for one pole (no code fence): the blocking job's steps,
     then - when a log was captured - the dominant step's internals down to the
     root cause.
@@ -3865,6 +3973,11 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
     each bar offset to when it actually starts - making explicit that steps (unlike
     the concurrent jobs in level 1) do not overlap. Without one it falls back to
     P50 bars sorted by duration.
+
+    `steps_overlap` (`_pole_steps_overlap`): the job runs, or may run, some steps
+    side by side, so the "one after another / sums to the job / comes straight
+    off the wall-clock" lead is replaced by its honest form
+    (`_STEPS_OVERLAP_CLAUSE`).
 
     `data_driven_on_path` mirrors the appendix: a data-driven catalog match on a pole the spine
     DEMOTES as opt-in/rare (`spine_rare`) is still catalog coverage (never a gap), but the
@@ -3931,13 +4044,23 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
         _steps_phrase = ("its **steps** (not checks) run one after another"
                          if _check_step_collision(pole, timeline)[0]
                          else "its steps run **one after another**")
-        lines = [
-            f"Level 2 — inside that one job, {_steps_phrase} "
-            f"(← {_mmss(0)} job start … {_mmss(tl_dur)} → ; `░` = time already elapsed, "
-            f"`█` = the step running) and sum to the job's **{_clock(tl_dur)}** wall "
-            f"time on this run - {_rep2}. Because "
-            "they're sequential, time cut from any step comes straight off the job's "
-            "wall-clock (and off the merge wait, down to the next concurrent check):", ""]
+        if steps_overlap:
+            _steps_noun = ("its **steps** (not checks)"
+                           if _check_step_collision(pole, timeline)[0] else "its steps")
+            lines = [
+                f"Level 2 — inside that one job, {_steps_noun} on this run - {_rep2} "
+                f"(← {_mmss(0)} job start … {_mmss(tl_dur)} → ; `░` = time already "
+                f"elapsed, `█` = the step running; job wall **{_clock(tl_dur)}**). "
+                f"{_STEPS_OVERLAP_CLAUSE.get(steps_overlap, _STEPS_OVERLAP_CLAUSE['maybe'])}:",
+                ""]
+        else:
+            lines = [
+                f"Level 2 — inside that one job, {_steps_phrase} "
+                f"(← {_mmss(0)} job start … {_mmss(tl_dur)} → ; `░` = time already elapsed, "
+                f"`█` = the step running) and sum to the job's **{_clock(tl_dur)}** wall "
+                f"time on this run - {_rep2}. Because "
+                "they're sequential, time cut from any step comes straight off the job's "
+                "wall-clock (and off the merge wait, down to the next concurrent check):", ""]
         # Reconcile with the check-gate clock (the Contents critical-path value, which
         # excludes the runner setup/teardown steps) up front, before the bars, so it
         # doesn't break the connector wire that hangs off the dominant step.
@@ -4028,10 +4151,14 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
     # which rarely equals the job's own P50 (no single run sits at the median of
     # every step at once). Say so rather than claiming a clean "adds up to the job".
     gap = step_total and abs(step_total - job_total) > max(3.0, 0.04 * job_total)
-    recon = (f" — each step's P50 is measured on its own, so they sum to "
-             f"~{_clock(step_total)} vs the job's own {_clock(job_total)} P50; "
-             "read the bars as proportions, not an exact sum" if gap else
-             "; they run in sequence and roughly add up to the job")
+    if steps_overlap:
+        _clause = _STEPS_OVERLAP_CLAUSE.get(steps_overlap, _STEPS_OVERLAP_CLAUSE["maybe"])
+        recon = "; " + _clause[0].lower() + _clause[1:]
+    else:
+        recon = (f" — each step's P50 is measured on its own, so they sum to "
+                 f"~{_clock(step_total)} vs the job's own {_clock(job_total)} P50; "
+                 "read the bars as proportions, not an exact sum" if gap else
+                 "; they run in sequence and roughly add up to the job")
     lines = [f"Where the job's ~{_clock(job_total)} goes - every step, slowest "
              f"first{recon}:", ""]
     if not deeper:
@@ -5248,6 +5375,7 @@ _OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 _OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
 _OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 _OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
+_PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
 class WithheldRow(NamedTuple):
     """One pattern's whole registration in the held-back disclosure.
 
@@ -5288,6 +5416,13 @@ _WITHHELD_ROWS: tuple[WithheldRow, ...] = (
     WithheldRow(_OPT82_WITHHELD_DOC_KEY, "type-aware lint: held back",
                 "candidate lint job(s)",
                 "Why a slow lint job with type-aware ESLint produced no finding",
+                "job"),
+    # A credited lever (OPT24 sharding, the structural OPT70/72/75 route) whose
+    # saving is priced from step medians on a job whose steps overlap.
+    WithheldRow(_PARALLEL_STEPS_WITHHELD_DOC_KEY, "parallel steps: held back",
+                "candidate lever(s)",
+                "Why a lever priced from step times on a job that runs steps side by "
+                "side claims no saving",
                 "job"),
 )
 
@@ -5429,8 +5564,17 @@ _OPT82_WITHHOLD_PHRASES: dict[str, str] = {
 # Every pattern's gate→phrase table, by doc key. OPT79's table is defined with
 # the rest of its code further down and registers itself there, so this one dict
 # is the single place the renderer looks a reason up.
+# The one reason a credited lever is held back on a job whose steps overlap
+# (collect_runs `_DOMINANT_STEP_OVERLAP_GATE`); verify_report carries an equal copy.
+_PARALLEL_STEPS_WITHHOLD_PHRASES: dict[str, str] = {
+    "dominant_step_runs_inside_a_parallel_group":
+        "the job's slowest steps run side by side with other steps (in a "
+        "parallel step group or in the background), so their times overlap and "
+        "cutting one does not come straight off the job; no saving is claimed",
+}
 _WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
     _OPT77_WITHHELD_DOC_KEY: _OPT77_WITHHOLD_PHRASES,
+    _PARALLEL_STEPS_WITHHELD_DOC_KEY: _PARALLEL_STEPS_WITHHOLD_PHRASES,
     _OPT80_WITHHELD_DOC_KEY: _OPT80_WITHHOLD_PHRASES,
     _OPT81_WITHHELD_DOC_KEY: _OPT81_WITHHOLD_PHRASES,
     _OPT82_WITHHELD_DOC_KEY: _OPT82_WITHHOLD_PHRASES,
@@ -5695,6 +5839,16 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
             _parts.append(f"{_api} from the gh contents API (default branch HEAD)")
         rows.append(("workflow YAML", " / ".join(_parts),
                      "`on:` triggers, matrix/shard axes, job timeouts (detector inputs)"))
+    # GitHub Actions `parallel:` step groups: every static detector read the
+    # steps inside them through one walker (`workflow_steps`). Stamped by the
+    # scan only when the repo uses the syntax, so every other report is
+    # unchanged; a malformed group (not a list) is named here as not read.
+    # `verify_report` requires this row whenever the stamp is present.
+    _par = parallel_steps_disclosure(doc.get("parallel_steps"))
+    if _par:
+        rows.append(("Parallel steps", _par,
+                     "Static detectors read each step inside a `parallel:` group "
+                     "as its own step"))
     # Candidates a pattern measured and then HELD BACK because it could not
     # decide them — a candidate cache (OPT79), a group of small jobs sharing one
     # setup (OPT77), a checkout with a slow tail (OPT80). Without these rows the
@@ -5858,8 +6012,12 @@ def _coverage_gap_banner(scan_incomplete: list[dict[str, Any]] | None) -> list[s
     scan_incomplete = scan_incomplete or []
     if not scan_incomplete:
         return []
+    # Files, not records: one file can carry several (one per job with an
+    # unreadable `parallel:` group).
+    n_files = len({str(e.get("path") or e.get("workflow_file") or "?")
+                   for e in scan_incomplete if isinstance(e, dict)})
     lines = ["> [!WARNING]",
-             f"> **Incomplete coverage - {len(scan_incomplete)} workflow file(s) could "
+             f"> **Incomplete coverage - {n_files} workflow file(s) could "
              "not be statically scanned.** These files are **not** known to be clean - "
              "fix the cause and re-run before relying on this report.", ">",
              "> _Static scan could not read/parse:_"]
@@ -6150,6 +6308,9 @@ def _opt79_uncredited_row_is_renderable(r: Any) -> bool:
 # checker) and a test pins the two equal and complete. An unmapped gate renders
 # the shared fallback phrase and FAILS `verify_report`: a code is never printed.
 _OPT79_HELD_BACK_REASONS: dict[str, str] = {
+    "job_has_an_unreadable_parallel_group":
+        "some of the job's steps sit in a parallel step group that could not be "
+        "read, so whether a cache feeds an install could not be told",
     # held back before any log was read
     "cache_is_saved_by_a_separate_step":
         "the cache is saved by its own separate step, so one restore-and-save "
@@ -6171,6 +6332,17 @@ _OPT79_HELD_BACK_REASONS: dict[str, str] = {
     "install_step_also_runs_non_install_commands":
         "the install step also runs other commands, so its time is not just "
         "the install",
+    "cache_and_install_run_in_the_same_parallel_group":
+        "the cache and the install run side by side in one parallel step "
+        "group, so the restore does not happen before the install",
+    "cache_restore_runs_in_a_parallel_group_or_background":
+        "the cache restore runs side by side with other steps (in a parallel "
+        "step group or in the background), so restore-then-install is not one "
+        "sequential block and its saving could not be priced",
+    "install_runs_in_a_parallel_group_or_background":
+        "the install runs side by side with other steps (in a parallel step "
+        "group or in the background), so its time does not simply follow the "
+        "cache restore and could not be priced",
     "no_install_step_after_the_cache_step":
         "no dependency install follows the cache, so the cache is not shown to "
         "speed anything up",
@@ -9281,9 +9453,15 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # something to say too: without counting it, an OPT81-only doc collapsed to
     # the one-line note and its "Runner class comparisons" section was dropped.
     opt81_n = len(_opt81_findings(all_findings))
+    # The scan's `parallel_steps` stamp (the repo uses `parallel:` groups or
+    # control steps) is a disclosure the verifier REQUIRES as a Data sources
+    # row. A quiet repo with the stamp and nothing else collapsed to the
+    # one-line note, dropping the footer and failing its own verifier.
+    parallel_n = parallel_steps_used(doc.get("parallel_steps"))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
-            and not withheld_n and not opt79_off_pole and not opt81_n):
+            and not withheld_n and not opt79_off_pole and not opt81_n
+            and not parallel_n):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")
@@ -10559,7 +10737,12 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                            _HIERARCHY_GLOSSARY, "",
                            "```text"]
         if _cascade:
-            _l2_lead = f"Level 2 — inside {_dcheck}, steps run one after another:"
+            _ov = _pole_steps_overlap(_descent, doc)
+            _l2_lead = (f"Level 2 — inside {_dcheck}, some steps may run side by side:"
+                        if _ov == "maybe" else
+                        f"Level 2 — inside {_dcheck}, some steps run side by side:"
+                        if _ov else
+                        f"Level 2 — inside {_dcheck}, steps run one after another:")
             _fence: list[str] = []
             if len(_rows1) >= 2 and _d_idx is not None:
                 _fence += [_l1_lead, ""]
@@ -11113,7 +11296,9 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                                                 {str(f.get("pattern", ""))
                                                  for f in data_driven})),
                                             opt79_present=bool(_opt79_pole_covers(opt79_pole)),
-                                            opt82_present=bool(opt82_pole)),
+                                            opt82_present=bool(opt82_pole),
+                                            steps_overlap=_pole_steps_overlap(
+                                                p, doc)),
                 "```", ""]
         # The cross-run magnitude check (rendered below) - compute now so the footer
         # only promises it when it actually appears (a categorical finding has none).

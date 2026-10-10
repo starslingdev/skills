@@ -66,6 +66,12 @@ from wall_clock import (  # noqa: E402
     size_wall_clock,
 )
 
+# Every read of a job's YAML `steps:` list goes through the one walker, so the
+# children of a GitHub Actions `parallel:` group are seen and `wait:` /
+# `wait-all:` / `cancel:` control steps are skipped. (The RUN-DATA side — the
+# jobs API's `steps` with timestamps — is a different list and is not walked.)
+from workflow_steps import job_walk  # noqa: E402
+
 
 # =============================================================================
 # gh client — minimal wrapper around the gh CLI
@@ -6621,7 +6627,10 @@ def _decompose_job_steps(
     lever (sizing/evidence/audit would scale to one 23%-of-job step instead of the
     ~77% test phase), so comparable same-category steps are aggregated.
 
-    Returns None when there are no step timings. Otherwise a dict:
+    Returns None when there are no step timings, or when every timed step is a
+    control step (`wait` / `wait-all` / `cancel` or a named one): no step does
+    the work, so the WHOLE decomposition is dropped, not just the crown.
+    Otherwise a dict:
       dominant_step (the slowest step in the dominant category, OR an aggregate label
         "<step> + N more <cat> steps" when the category spans several comparable steps)
       dominant_category / dominant_p50 (the category aggregate) / dominant_share
@@ -6676,8 +6685,14 @@ def _decompose_job_steps(
     # `Title Check`: setup 5s out-aggregated the addressable `Install commitlint`
     # 4s). Boilerplate still counts toward `setup_build_s` / `redundant_ratio`
     # below — it's real cost — just not an addressable dominant lever. Fall back to
-    # the full set only when a job is ALL boilerplate (nothing else to crown).
-    sel = [s for s in steps if not _NON_WORK_STEP_RE.match(s[0])] or steps
+    # every NON-CONTROL step only when a job is ALL boilerplate (nothing else to
+    # crown); a control step (`_is_control_step_name`) only waits, so it is never
+    # in either set, and a job of nothing but control steps has no decomposition.
+    sel = ([s for s in steps if not _NON_WORK_STEP_RE.match(s[0])
+            and not _is_control_step_name(s[0])]
+           or [s for s in steps if not _is_control_step_name(s[0])])
+    if not sel:
+        return None  # nothing but control steps: no step does the work
     cat_p50: dict[str, float] = {}
     for _n, c, p in sel:
         cat_p50[c] = cat_p50.get(c, 0.0) + p
@@ -6712,9 +6727,10 @@ def _decompose_job_steps(
 def _dominant_category_lead(named_durs: "list[tuple[str, float]]") -> "tuple[str, float] | None":
     """The LEAD step (name, dur) of the dominant CATEGORY — the SAME crown
     `_decompose_job_steps` uses (the category with the largest non-boilerplate aggregate
-    p50, then its slowest step; boilerplate `_NON_WORK_STEP_RE` excluded; fall back to
-    the full set only when a job is all-boilerplate). Returns None when there are no
-    positive-duration steps.
+    p50, then its slowest step; boilerplate `_NON_WORK_STEP_RE` and control steps
+    excluded; fall back to every non-control step only when a job is
+    all-boilerplate). Returns None when there are no positive-duration steps, or
+    when only control steps remain.
 
     Single source of truth so the cross-run magnitude check (`_dominant_step_sample`) and
     the agent prompt validate/name the SAME step the structural decomposition crowns —
@@ -6725,7 +6741,11 @@ def _dominant_category_lead(named_durs: "list[tuple[str, float]]") -> "tuple[str
     items = [(n, d) for n, d in named_durs if isinstance(d, (int, float)) and d > 0]
     if not items:
         return None
-    work = [(n, d) for n, d in items if not _NON_WORK_STEP_RE.match(n)] or items
+    work = ([(n, d) for n, d in items if not _NON_WORK_STEP_RE.match(n)
+             and not _is_control_step_name(n)]
+            or [(n, d) for n, d in items if not _is_control_step_name(n)])
+    if not work:
+        return None
     cat_p50: dict[str, float] = {}
     for n, d in work:
         cat_p50[_step_category(n)] = cat_p50.get(_step_category(n), 0.0) + d
@@ -8390,6 +8410,51 @@ def _consolidation_yaml_key(job_name: str, wf_doc: dict[str, Any]) -> str | None
     return hits[0] if len(hits) == 1 else None
 
 
+# A credited wall-clock lever priced from a job's per-step medians assumes the
+# steps run one after another, so a step's saving comes straight off the job.
+# GitHub documents that steps in a `parallel:` group (and `background: true`
+# steps) overlap, so that assumption is broken for them whatever the jobs API
+# records. Such a lever is HELD BACK under this list and reason, rendered as the
+# "parallel steps: held back" Data sources row (blocking_path `_WITHHELD_ROWS`,
+# mirrored in verify_report).
+_PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
+_DOMINANT_STEP_OVERLAP_GATE = "dominant_step_runs_inside_a_parallel_group"
+
+
+def _steps_overlap_in_yaml(wf_doc: dict[str, Any] | None, job_name: str,
+                           step_names: "list[str] | tuple[str, ...]") -> bool:
+    """Whether any of `step_names` (run-data step names of the observed job
+    `job_name`) may run side by side with other steps: inside a `parallel:`
+    group or with `background: true`.
+
+    False whenever the workflow runs nothing side by side, so a repo without the
+    syntax is unchanged. Otherwise FAIL CLOSED: True when the observed job cannot
+    be pinned to one YAML job (a templated matrix name, a reusable-workflow
+    callee), or a named step matches no step run in sequence."""
+    jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
+    if not isinstance(jobs, dict):
+        return False
+    overlapping = {str(k) for k, spec in jobs.items()
+                   if any(lf.background for lf in job_walk(spec).leaves)}
+    if not overlapping:
+        return False
+    key = _consolidation_yaml_key(job_name, wf_doc)
+    if key is None:
+        base = re.sub(r"\s*\(.*\)\s*$", "", job_name).strip()
+        key = _consolidation_yaml_key(base, wf_doc) if base != job_name else None
+    if key is None:
+        return True
+    if key not in overlapping:
+        return False
+    seq: set[str] = set()
+    over: set[str] = set()
+    for lf in job_walk(jobs.get(key)).leaves:
+        d = _opt79_yaml_step_display(lf.step)
+        if d:
+            (over if lf.background else seq).add(d)
+    return any(n in over or n not in seq for n in step_names)
+
+
 def _consolidation_group_is_independent(keys: list[str],
                                         wf_doc: dict[str, Any]) -> str | None:
     """None when the group is safe to consolidate, else the NAME of the gate that
@@ -8491,8 +8556,8 @@ def _consolidation_yaml_setup_fingerprint(
     divergence."""
     jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
     spec = jobs.get(key) if isinstance(jobs, dict) else None
-    steps = (spec if isinstance(spec, dict) else {}).get("steps")
-    if not isinstance(steps, list) or not steps:
+    steps = job_walk(spec).steps()
+    if not steps:
         return None
     defaults = (spec.get("defaults") if isinstance(spec.get("defaults"), dict) else {}) or {}
     drun = defaults.get("run") if isinstance(defaults.get("run"), dict) else {}
@@ -9452,13 +9517,15 @@ def _opt80_checkout_step(job_spec: dict[str, Any],
     A `git clone` in a `run:` block is deliberately NOT matched: its fix is a
     different edit (flags on the user's own command), and `actions/checkout` is
     what the recipe below configures."""
-    steps = job_spec.get("steps")
-    if not isinstance(steps, list):
+    if not isinstance(job_spec.get("steps"), list):
         return "job_declares_no_steps"
+    walk = job_walk(job_spec)
+    if walk.malformed_groups:
+        # A checkout inside the unread group cannot be ruled out (nor its
+        # settings read): never "no checkout step".
+        return "job_has_an_unreadable_parallel_group"
     found: list[tuple[str, str, str, dict[str, Any]]] = []
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
+    for step in walk.steps():
         uses = str(step.get("uses") or "").strip()
         if not uses:
             continue
@@ -9541,12 +9608,9 @@ def _opt80_retry_already_configured(wf_doc: dict[str, Any], job_spec: dict[str, 
         if isinstance(env_block, dict) and any(
                 str(k).upper() in _OPT80_RETRY_ENV_KEYS for k in env_block):
             return True
-    steps = job_spec.get("steps")
-    if not isinstance(steps, list):
+    if not isinstance(job_spec.get("steps"), list):
         return None
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
+    for step in job_walk(job_spec).steps():
         is_checkout = checkout_step is not None and step is checkout_step
         # Step-level env is scoped to its own step: only the checkout's counts.
         env_reaches_checkout = is_checkout or checkout_step is None
@@ -12398,9 +12462,7 @@ def _detect_opt82_type_aware_lint(
         found: "tuple[str, str, list[str]] | None" = None
         lint_step: dict[str, Any] = {}
         wd = ""
-        for step in spec["steps"]:
-            if not isinstance(step, dict):
-                continue
+        for step in job_walk(spec).steps():
             if not isinstance(step.get("run"), str):
                 # An action step that lints: one whose name or reference says
                 # ESLint, or a LOCAL action named lint. What it runs lives in
@@ -15519,6 +15581,8 @@ def _detect_structural_candidates(
     chain_win_s: float = 0.0,
     check_pole_freq: dict[str, int] | None = None,
     triaged_fast_workflows: "set[str] | list[str] | None" = None,
+    wf_docs: "dict[str, dict[str, Any]] | None" = None,
+    overlap_withheld: "list[dict[str, Any]] | None" = None,
 ) -> list[dict[str, Any]]:
     """Route the top measured critical-path checks into STRUCTURAL candidates
     instead of the old inherent-cost dead-end. For each top check: map it to its
@@ -15632,8 +15696,18 @@ def _detect_structural_candidates(
                 # OPT70's "scope/drop your tests" + HIGH coverage-loss framing when
                 # the real fix is, e.g., turning on intra-shard parallelism.
                 sp = "OPT75"
-            raw_s, assum_s = _structural_raw_estimate(decomp)
-            picks.append((sp, raw_s, assum_s, "cascade"))
+            dom_names = [n for n, c, _p in decomp["steps"] if c == dom]
+            if _steps_overlap_in_yaml((wf_docs or {}).get(wf_path), job_name, dom_names):
+                # The dominant step runs side by side with other steps, so its
+                # saving does not come straight off the job: HELD BACK, listed.
+                # The pole keeps the renderer's generic dominant-step hand-off.
+                if overlap_withheld is not None:
+                    overlap_withheld.append({
+                        "workflow_file": wf_path, "job": job_name, "pattern": sp,
+                        "gate": _DOMINANT_STEP_OVERLAP_GATE})
+            else:
+                raw_s, assum_s = _structural_raw_estimate(decomp)
+                picks.append((sp, raw_s, assum_s, "cascade"))
         elif mapping is None:
             # No SAMPLED job/steps for this check (`_map_check_to_job` returned None).
             # STILL route a speed-up by the check NAME's category, and let the user's
@@ -16392,6 +16466,7 @@ def _detect_opt24_long_test_no_sharding(
     wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
     monthly_volume: int | None = None, sharded_bases: "set[str] | None" = None,
     wf_doc: "dict[str, Any] | None" = None,
+    overlap_withheld: "list[dict[str, Any]] | None" = None,
 ) -> list[dict[str, Any]]:
     """Long test jobs with no sharding — catalog body OPT24.
 
@@ -16485,6 +16560,19 @@ def _detect_opt24_long_test_no_sharding(
         short = [d for d in durs if d < max(90.0, 0.25 * p50)]
         if len(short) >= max(2, round(0.2 * len(durs))):
             continue
+        decomp = _decompose_job_steps(inst_by_base.get(base, []))
+        # The saving below halves the test payload's summed step medians, which
+        # assumes the steps run one after another. A payload step inside a
+        # `parallel:` group (or `background: true`) overlaps others, so the
+        # saving is HELD BACK and listed (unknown steps fail closed).
+        _payload = ([n for n, c, _p in decomp["steps"] if c in _PAYLOAD_CATEGORIES]
+                    if decomp is not None else ["(no step timings)"])
+        if _steps_overlap_in_yaml(wf_doc, base, _payload):
+            if overlap_withheld is not None:
+                overlap_withheld.append({"workflow_file": wf_path, "job": base,
+                                         "pattern": "OPT24",
+                                         "gate": _DOMINANT_STEP_OVERLAP_GATE})
+            continue
         idx += 1
         # Wall-clock saving from sharding: split the job across N shards (assume
         # N=2 conservative). Sharding does not save runner-min (catalog body
@@ -16499,7 +16587,6 @@ def _detect_opt24_long_test_no_sharding(
         # payload (never more than half the whole job). Falls back to p50/2 only
         # when there are no step timings to decompose.
         wc = round(p50 / 2.0, 1)
-        decomp = _decompose_job_steps(inst_by_base.get(base, []))
         if decomp is not None and decomp["payload_s"] > 0:
             shardable = min(decomp["payload_s"], p50)
             wc = round(shardable / 2.0, 1)
@@ -16996,8 +17083,8 @@ def _sharded_bases(doc: dict[str, Any]) -> set[str]:
             _SPLIT_AXIS_RE.search(str(k)) for k in matrix
             if k not in ("include", "exclude"))
         cmd_sharded = any(
-            isinstance(s, dict) and _SHARD_CMD_RE.search(str(s.get("run", "") or ""))
-            for s in (job.get("steps") or []))
+            _SHARD_CMD_RE.search(str(s.get("run", "") or ""))
+            for s in job_walk(job).steps())
         if not (axis_sharded or cmd_sharded):
             continue
         name = job.get("name")
@@ -17598,6 +17685,7 @@ _OPT79_NOT_A_CANDIDATE_GATES = frozenset({"job_has_no_yaml_steps",
 # Candidates held back BEFORE any log is read: the job's YAML shows a cache, and
 # the job then falls out on its shape, runner, or the per-workflow probe budget.
 _OPT79_EARLY_HELD_BACK_GATES = frozenset({
+    "job_has_an_unreadable_parallel_group",
     "cache_is_saved_by_a_separate_step",
     "setup_cache_input_is_an_unevaluated_expression",
     "job_declares_more_than_one_cache_restore_step",
@@ -17605,6 +17693,9 @@ _OPT79_EARLY_HELD_BACK_GATES = frozenset({
     "cache_action_is_not_one_this_pattern_measures",
     "cache_step_has_no_renderable_name",
     "install_step_also_runs_non_install_commands",
+    "cache_and_install_run_in_the_same_parallel_group",
+    "cache_restore_runs_in_a_parallel_group_or_background",
+    "install_runs_in_a_parallel_group_or_background",
     "no_install_step_after_the_cache_step",
     "first_step_after_cache_is_not_a_recognised_install",
     "cache_path_names_no_known_package_store",
@@ -17803,6 +17894,36 @@ def _opt79_checkout_state(state: str, step: dict[str, Any]) -> str:
     return "moved" if state == "moved" else "root"
 
 
+def _opt79_workspace_states(leaves: list[Any]) -> list[str]:
+    """`_opt79_checkout_state` as seen by EACH leaf step, honouring overlap: only
+    a checkout known to have FINISHED before the step counts (one earlier in
+    sequence, or in an earlier `parallel:` group, which ends in an implicit
+    wait). A checkout that may still be running beside the step (a sibling in
+    its own group, or a top-level `background: true` checkout before it) leaves
+    the workspace unknown, returned as `racing` (never `root`), so setup-node's
+    package.json read fails closed rather than trusting declaration order. A
+    background checkout leaves EVERY later step racing, even after a
+    `wait-all:`: control steps are not in the leaf list, so the wait that would
+    end the race cannot be seen."""
+    states: list[str] = []
+    done = "none"
+    racing_bg = False
+    for i, lf in enumerate(leaves):
+        step = lf.step if isinstance(lf.step, dict) else {}
+        g = lf.group
+        racing = racing_bg or (g is not None and any(
+            o.group == g and o is not lf and isinstance(o.step, dict)
+            and _opt79_checkout_state("none", o.step) != "none" for o in leaves))
+        states.append("racing" if racing else done)
+        if _opt79_checkout_state("none", step) == "none":
+            continue
+        if g is None and lf.background:
+            racing_bg = True
+        else:
+            done = _opt79_checkout_state(done, step)
+    return states
+
+
 def _opt79_cache_ecosystem(step: dict[str, Any]) -> str | None:
     """The package-manager ecosystem a cache step serves, or None when the
     workflow does not say (an `actions/cache` path naming no known store, or
@@ -17845,6 +17966,8 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
     Fail-closed at each of the following, each its own gate so a zero firing
     rate is attributable:
 
+      * `job_has_an_unreadable_parallel_group` — a malformed `parallel:` group's
+        steps were never read, so no absence below can be known.
       * `job_has_no_yaml_steps` — nothing to read the block from.
       * `cache_is_saved_by_a_separate_step` — an `actions/cache/save` step. Its
         save runs on the miss path but is not the restore's post phase, so the
@@ -17870,6 +17993,20 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
         `run:` block runs more than the install.
       * `no_install_step_after_the_cache_step` — the cache is not paying for an
         install, so the two-path model does not describe it.
+      * `cache_and_install_run_in_the_same_parallel_group` — the cache and the
+        install are siblings in one `parallel:` group, so they run together.
+      * `cache_restore_runs_in_a_parallel_group_or_background` — the restore
+        runs in a `parallel:` group (install after the group) or with
+        `background: true`, so it overlaps other steps and restore-then-install
+        is not a sequential block. Held until a jobs-API probe shows how
+        overlapping steps are timed. A sibling of the cache in its own group is
+        never counted as a step "between" the cache and the install.
+      * `install_runs_in_a_parallel_group_or_background` — the restore runs in
+        sequence but the install runs in a later `parallel:` group or with
+        `background: true`, so it overlaps other steps: held back the same way.
+        The overlap reasons are checked before the install's own shape
+        (`install_step_also_runs_non_install_commands`), and an install
+        declared BEFORE the cache in its own group is a same-group case too.
       * `first_step_after_cache_is_not_a_recognised_install` — a `run:` step the
         install matcher does not recognise (`cd web && npm ci`, `corepack enable`
         then `pnpm install`) sits between the cache and the install chosen. It
@@ -17892,8 +18029,19 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
     """
     jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
     spec = jobs.get(key) if isinstance(jobs, dict) else None
-    steps = (spec if isinstance(spec, dict) else {}).get("steps")
-    if not isinstance(steps, list) or not steps:
+    # Leaf steps, children of `parallel:` groups included; `groups[i]` is the
+    # id of the group a step runs in (None when it is not inside a `parallel:`
+    # group).
+    walk = job_walk(spec)
+    if walk.malformed_groups:
+        # Some steps were never read (a malformed `parallel:` group), so "no
+        # cache", "no install after it" or "no steps" cannot be known: held
+        # back with the scan's reason, never an absence verdict.
+        return None, "job_has_an_unreadable_parallel_group"
+    leaves = walk.leaves
+    steps = [lf.step for lf in leaves]
+    groups = [lf.group for lf in leaves]
+    if not steps:
         return None, "job_has_no_yaml_steps"
 
     displays: list[str | None] = [_opt79_yaml_step_display(s) for s in steps]
@@ -17902,11 +18050,13 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
     possible = 0
     other = 0
     cache_ref = ""
-    workspace = "none"
+    # Where the workspace stands as each step starts; a checkout that may still
+    # be running beside the step leaves it unknown (`_opt79_workspace_states`).
+    ws_states = _opt79_workspace_states(leaves)
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
             continue
-        workspace = _opt79_checkout_state(workspace, step)
+        workspace = ws_states[i]
         uses = str(step.get("uses") or "").strip()
         if not uses:
             continue
@@ -17951,11 +18101,31 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
         return None, "cache_step_has_no_renderable_name"
     install = None
     install_cmd: str | None = None
+    install_j: int | None = None
     unrecognised_between = False
+
+    def _is_install_step(j: int) -> bool:
+        d = displays[j]
+        if not d:
+            return False
+        cmd = _opt79_yaml_step_command(steps[j])
+        return bool(_OPT79_INSTALL_RE.match(cmd)) if cmd \
+            else bool(_OPT79_INSTALL_RE.match(d))
+
+    # An install declared BEFORE the cache but in the cache's own group runs
+    # beside the restore: name that overlap, not "no install after the cache".
+    if groups[ci] is not None and any(
+            groups[j] == groups[ci] and _is_install_step(j) for j in range(ci)):
+        return None, "cache_and_install_run_in_the_same_parallel_group"
     for j in range(ci + 1, len(steps)):
         d = displays[j]
         if not d:
             continue
+        # A sibling of the cache in its own `parallel:` group runs BESIDE the
+        # restore, not between it and a step after the group: it is never an
+        # "unrecognised step between". (A sibling that is the install still
+        # reaches the same-group exit below.)
+        sibling = groups[ci] is not None and groups[j] == groups[ci]
         # Classify on the COMMAND, and ONLY on the command when there is one: a
         # named step (`name: Install dependencies`) hides its verb, an unnamed
         # one is its verb — but a step NAMED `npm ci` that RUNS `npm run build`
@@ -17966,16 +18136,34 @@ def _opt79_cache_block(key: str, wf_doc: dict[str, Any],
             else bool(_OPT79_INSTALL_RE.match(d))
         if not is_install:
             step_j = steps[j] if isinstance(steps[j], dict) else {}
-            if str(step_j.get("run") or "").strip() \
+            if not sibling and str(step_j.get("run") or "").strip() \
                     and not str(step_j.get("uses") or "").strip():
                 unrecognised_between = True
             continue
-        if _opt79_run_is_only_installs(steps[j]) is False:
-            return None, "install_step_also_runs_non_install_commands"
-        install, install_cmd = d, cmd or d
+        if sibling:
+            # Siblings in one `parallel:` group run at the same time: the
+            # restore does not happen BEFORE the install, so the restore-then-
+            # install block this pattern prices does not exist. Checked before
+            # the install's own shape, so the overlap is the reason named.
+            return None, "cache_and_install_run_in_the_same_parallel_group"
+        install, install_cmd, install_j = d, cmd or d, j
         break
-    if not install:
+    if not install or install_j is None:
         return None, "no_install_step_after_the_cache_step"
+    if leaves[ci].background:
+        # The restore runs in a `parallel:` group (beside siblings that may be
+        # longer) or with `background: true` (while the next steps start), so
+        # restore-then-install is not the sequential block this pattern prices:
+        # its seconds would overstate what removing the cache saves. Fail
+        # closed until a jobs-API timing probe shows how overlapping steps are
+        # recorded.
+        return None, "cache_restore_runs_in_a_parallel_group_or_background"
+    if leaves[install_j].background:
+        # The same, on the install's side: an install in a later `parallel:`
+        # group or with `background: true` overlaps other steps.
+        return None, "install_runs_in_a_parallel_group_or_background"
+    if _opt79_run_is_only_installs(steps[install_j]) is False:
+        return None, "install_step_also_runs_non_install_commands"
     if unrecognised_between:
         return None, "first_step_after_cache_is_not_a_recognised_install"
     cache_eco = _opt79_cache_ecosystem(steps[ci])
@@ -18424,12 +18612,9 @@ def _opt79_package_json_needed(wf_docs: dict[str, Any]) -> bool:
     for doc in (wf_docs or {}).values():
         jobs = doc.get("jobs") if isinstance(doc, dict) else None
         for spec in (jobs.values() if isinstance(jobs, dict) else ()):
-            steps = spec.get("steps") if isinstance(spec, dict) else None
-            workspace = "none"
-            for step in (steps if isinstance(steps, list) else ()):
-                if not isinstance(step, dict):
-                    continue
-                workspace = _opt79_checkout_state(workspace, step)
+            leaves = [lf for lf in job_walk(spec).leaves if isinstance(lf.step, dict)]
+            for lf, workspace in zip(leaves, _opt79_workspace_states(leaves)):
+                step = lf.step
                 uses = str(step.get("uses") or "").strip()
                 if workspace != "root" or not _OPT79_SETUP_USES_RE.match(uses):
                     continue
@@ -19512,9 +19697,46 @@ def _opt79_pole_finding(
 
 # Setup/teardown step names that are NOT the load-bearing work, so they don't get
 # picked as a pole's "dominant step" for the generic cross-run check.
-_NON_WORK_STEP_RE = _re.compile(
-    r"^(set up job|complete job|post\b|checkout\b|set up |setup [a-z]*node)",
+# GitHub Actions parallel-step CONTROL steps (`wait:`, `wait-all:`, `cancel:`,
+# and the implicit wait GitHub may render for a group, matched by a name that
+# STARTS "Wait for all background steps") run nothing: a `wait` step's duration
+# is time spent BLOCKED on background steps. How the jobs API records
+# overlapping steps has not been probed yet, so this is a guard only — such a
+# step is never crowned the dominant step. (`Wait for deployment` is work and
+# stays eligible: only these names, and the repo's own named control steps
+# below, match.)
+_CONTROL_STEP_NAME_RE = _re.compile(
+    r"^(?:(?:wait|wait-all|cancel)\s*$|wait for all background steps)",
     _re.IGNORECASE)
+_NON_WORK_STEP_RE = _re.compile(
+    r"^(set up job|complete job|post\b|checkout\b|set up |setup [a-z]*node"
+    r"|(?:wait|wait-all|cancel)\s*$|wait for all background steps)",
+    _re.IGNORECASE)
+
+# A control step the author NAMED (`- name: Wait for lint` / `wait: lint`) may
+# render under that name, which `_CONTROL_STEP_NAME_RE` cannot see, while a
+# work step can legitimately be called `Wait for deployment`. So the repo's own
+# named control steps are read from its workflow YAML once per collection
+# (`_set_yaml_control_step_names`) and excluded by name, whitespace-collapsed
+# and case-folded. Empty for a repo with no named control step, so every
+# other repo's crown is unchanged.
+_YAML_CONTROL_STEP_NAMES: set[str] = set()
+
+
+def _set_yaml_control_step_names(wf_docs: dict[str, Any] | None) -> None:
+    _YAML_CONTROL_STEP_NAMES.clear()
+    for doc in (wf_docs or {}).values():
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        for spec in (jobs.values() if isinstance(jobs, dict) else ()):
+            for nm in job_walk(spec).control_names:
+                _YAML_CONTROL_STEP_NAMES.add(" ".join(nm.split()).lower())
+
+
+def _is_control_step_name(name: str) -> bool:
+    """A step that only waits on or stops background steps: a bare control name
+    (`_CONTROL_STEP_NAME_RE`) or one of the repo's named control steps."""
+    return bool(_CONTROL_STEP_NAME_RE.match(name)) or (
+        " ".join(str(name).split()).lower() in _YAML_CONTROL_STEP_NAMES)
 
 
 def _dominant_step_sample(
@@ -19535,7 +19757,8 @@ def _dominant_step_sample(
         except (TypeError, ValueError):
             return None
     steps = [s for s in timeline.get("steps", [])
-             if _f(s.get("dur_s")) and not _NON_WORK_STEP_RE.match(str(s.get("name", "")))]
+             if _f(s.get("dur_s")) and not _NON_WORK_STEP_RE.match(str(s.get("name", "")))
+             and not _is_control_step_name(str(s.get("name", "")))]
     if not steps:
         return None
     # Validate the step the structural decomposition CROWNS — the lead step of the
@@ -21187,6 +21410,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 "contents API (default-branch HEAD)",
                 workflow_yaml_source.get("checkout", 0),
                 workflow_yaml_source.get("api", 0))
+    # The repo's NAMED control steps, so none is ever crowned a dominant step.
+    _set_yaml_control_step_names(_wf_docs)
+    # Credited levers held back because their steps run side by side (OPT24,
+    # the structural OPT70/72/75 route): `_PARALLEL_STEPS_WITHHELD_DOC_KEY`.
+    _overlap_withheld: list[dict[str, Any]] = []
     # The job keys each workflow DECLARES, stamped straight off the parsed YAML
     # here — once, before any detector runs, and independent of all of them.
     # OPT77's whole-workflow gate rests entirely on "these are every job the
@@ -21916,7 +22144,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         new = _detect_opt24_long_test_no_sharding(
             wf_path, jobs_per_run, next_id, monthly,
             sharded_bases=_sharded_bases(_wf_docs.get(wf_path, {})),
-            wf_doc=_wf_docs.get(wf_path, {}))
+            wf_doc=_wf_docs.get(wf_path, {}),
+            overlap_withheld=_overlap_withheld)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
@@ -22453,7 +22682,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         check_pole_freq=check_pole_freq,
         triaged_fast_workflows=triaged_fast_workflows,
         chain_members=_chain_ctx_members, chain_p50_s=_chain_ctx_p50,
-        chain_win_s=_chain_ctx_win)
+        chain_win_s=_chain_ctx_win,
+        wf_docs=_wf_docs, overlap_withheld=_overlap_withheld)
+    # Stamped only when a lever was held back, so a repo without `parallel:`
+    # groups or background steps keeps a byte-identical findings document.
+    if _overlap_withheld:
+        findings_doc[_PARALLEL_STEPS_WITHHELD_DOC_KEY] = _overlap_withheld
     # Record the analysis depth so the report can distinguish a check that was
     # structurally analyzed and found genuinely inherent from one ranked below
     # this depth that was never examined (don't claim "inherent cost" for it).

@@ -6007,6 +6007,34 @@ def test_opt79_counts_setup_node_s_automatic_cache_when_package_json_turns_it_on
     assert gate == "" and block["cache_ref"] == "actions/setup-node@v5", gate
 
 
+def test_opt79_a_checkout_running_beside_setup_node_leaves_its_cache_unknown():
+    """setup-node v5+ turns its automatic cache on from the checked-out
+    package.json. A checkout that runs BESIDE it (a sibling in one `parallel:`
+    group, or a top-level `background: true` checkout before it) may not have
+    landed when setup-node reads the file, so whether the cache is on is not
+    known from the YAML. The declaration-order walk read it as checked out and
+    counted (and priced) the cache; it must fail closed instead."""
+    npm = {"packageManager": "npm@10.8.2"}
+    want = "setup_action_cache_default_depends_on_repository_files"
+    for wf in (
+        _opt79_steps({"parallel": [_OPT79_CHECKOUT, {"uses": "actions/setup-node@v5"}]},
+                     {"run": "npm ci"}),
+        _opt79_steps(dict(_OPT79_CHECKOUT, background=True),
+                     {"uses": "actions/setup-node@v5"}, {"run": "npm ci"}),
+    ):
+        block, gate = cr._opt79_cache_block(_OPT79_JOB, wf, package_json=npm)
+        assert block is None and gate == want, (wf["jobs"], gate)
+        # and the per-repo package.json read is not spent on a job it cannot decide
+        assert cr._opt79_package_json_needed({"ci.yml": wf}) is False
+    # control: the checkout in a group that ENDS before setup-node (the group's
+    # implicit wait), so the file is known and the cache counts.
+    wf = _opt79_steps({"parallel": [_OPT79_CHECKOUT, {"run": "echo warm"}]},
+                      {"uses": "actions/setup-node@v5"}, {"run": "npm ci"})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf, package_json=npm)
+    assert gate == "" and block.get("setup_node_auto_cache") is True, gate
+    assert cr._opt79_package_json_needed({"ci.yml": wf}) is True
+
+
 def test_opt79_measures_setup_node_s_automatic_cache_from_its_own_log_lines():
     """End to end through the detector: the automatic cache prints setup-node's
     own hit / miss wording, is priced like any other cache, and the recipe says
@@ -9842,3 +9870,281 @@ def test_opt79_off_pole_block_does_not_claim_its_job_is_not_a_long_pole():
     out = "\n".join(bp._opt79_off_pole_block([f], "https://example.invalid/c"))
     assert "<!-- opt79-pole:f9 -->" in out
     assert "not one of the long poles drilled above" not in out, out
+
+
+# ============ parallel steps: the YAML readers see inside `parallel:` groups ============
+#
+# A `- parallel:` item holds a LIST of child steps. Each test wraps the decisive
+# step of an existing fixture in a group and asserts the result is unchanged.
+
+def test_opt77_reads_setup_steps_inside_a_parallel_group():
+    """Every job runs setup-python + the install as a `parallel:` group. A flat
+    reader stopped at the group (no `run:`/`uses:`), so all three fingerprints
+    read as `checkout` only and AGREED, crediting a consolidation across three
+    different Python versions. Reading inside the group must withhold it."""
+    names = ("lint", "typecheck", "audit")
+    steps = [("Set up job", 5.0), ("Run actions/checkout@v4", 10.0),
+             ("Run actions/setup-python@v5", 15.0), ("Run pip install -r r.txt", 50.0)]
+    runs = [[_setup_job_named(n, steps, 10.0) for n in names] for _ in range(2)]
+    crit = _opt77_crit(names=names, setup_s=80.0, work_s=10.0)
+
+    def _job_steps(py):
+        return [{"uses": "actions/checkout@v4"},
+                {"parallel": [
+                    {"uses": "actions/setup-python@v5", "with": {"python-version": py}},
+                    {"run": "pip install -r r.txt"}]}]
+
+    def _wf(by_job):
+        wf = _opt77_wf(names=names)
+        for k, v in by_job.items():
+            wf["jobs"][k]["steps"] = v
+        return wf
+
+    same = {n: _job_steps("3.12") for n in names}
+    assert len(_opt77(jpr=runs, crit=crit, wf=_wf(same))) == 1, "control"
+    diverged = dict(same, audit=_job_steps("3.9"))
+    assert _opt77(jpr=runs, crit=crit, wf=_wf(diverged)) == [], "input inside the group"
+    fp = cr._consolidation_yaml_setup_fingerprint("audit", _wf(diverged))
+    assert fp is not None and len(fp) == 3, fp
+
+
+def test_opt79_reads_a_cache_step_inside_a_parallel_group():
+    """The cache restore runs in a `parallel:` group beside an unrelated step,
+    then the install follows the group. The reader SEES the cache (it is not
+    "no cache"), but the restore runs beside a sibling that may be longer, so
+    pricing restore-then-install in sequence would overstate the block until a
+    jobs-API timing probe shows how overlapping steps are recorded: held back."""
+    wf = _opt79_steps(
+        {"parallel": [{"run": "npm run lint:md"}, dict(_OPT79_NODE_CACHE)]},
+        {"run": "npm ci"}, {"run": "npm test"})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None
+    assert gate == "cache_restore_runs_in_a_parallel_group_or_background", gate
+    assert gate in cr._OPT79_EARLY_HELD_BACK_GATES
+
+
+def test_opt79_withholds_a_background_cache_restore_before_the_install():
+    """`background: true` at top level (no group): the restore runs while the
+    following steps start, so restore-then-install is not a sequential block.
+    The walker tags it `background`; the block used to ignore that and price it."""
+    bg = dict(_OPT79_NODE_CACHE, background=True)
+    wf = _opt79_steps(bg, {"run": "npm ci"}, {"run": "npm test"})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None
+    assert gate == "cache_restore_runs_in_a_parallel_group_or_background", gate
+    # control: the same job without the flag still prices
+    block, gate = cr._opt79_cache_block(
+        _OPT79_JOB, _opt79_steps(dict(_OPT79_NODE_CACHE), {"run": "npm ci"},
+                                 {"run": "npm test"}))
+    assert gate == "" and block["install"] == "Run npm ci", gate
+
+
+def test_opt79_a_sibling_of_the_cache_in_its_group_is_not_a_step_between():
+    """Cache first in a group, an unrelated sibling after it IN the group, the
+    install after the group's implicit wait. The sibling runs beside the
+    restore, not between it and the install, so it must not trip the
+    "first step after the cache is not an install" exit: the true reason is
+    that the restore runs in a parallel group."""
+    wf = _opt79_steps(
+        {"parallel": [dict(_OPT79_NODE_CACHE), {"run": "npm run lint:md"}]},
+        {"run": "npm ci"}, {"run": "npm test"})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None
+    assert gate == "cache_restore_runs_in_a_parallel_group_or_background", gate
+
+
+def test_opt79_parallel_or_background_hold_back_renders_a_plain_english_line():
+    gate = "cache_restore_runs_in_a_parallel_group_or_background"
+    phrase = bp._OPT79_HELD_BACK_REASONS.get(gate)
+    assert phrase and "_" not in phrase, phrase
+    vr = _load_verify_report_for_opt79()
+    assert vr._VR_OPT79_HELD_BACK_REASONS.get(gate) == phrase
+    line = bp._WITHHELD_PHRASES_BY_KEY[bp._OPT79_WITHHELD_DOC_KEY].get(gate)
+    assert line == phrase
+
+
+def test_opt79_withholds_a_cache_and_install_that_run_side_by_side():
+    """Siblings in one `parallel:` group run at the same time: the restore does
+    not happen BEFORE the install, so the restore-then-install block this
+    pattern prices does not exist. Withhold rather than price it."""
+    wf = _opt79_steps(
+        {"parallel": [dict(_OPT79_NODE_CACHE), {"run": "npm ci"}]},
+        {"run": "npm test"})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None and gate == "cache_and_install_run_in_the_same_parallel_group"
+
+
+def test_opt79_a_background_checkout_leaves_later_steps_racing_even_after_wait_all():
+    """T10: control steps are not surfaced to the leaf list, so a `wait-all:`
+    after a `background: true` checkout cannot clear the race: every later
+    step stays `racing` (fail closed: setup-node's package.json is unknown)."""
+    from workflow_steps import job_walk
+    job = {"steps": [{"uses": "actions/checkout@v4", "background": True},
+                     {"wait-all": None},
+                     {"uses": "actions/setup-node@v5"}]}
+    leaves = job_walk(job).leaves
+    assert cr._opt79_workspace_states(leaves) == ["none", "racing"]
+
+
+_OPT79_CACHE_STEP = {"uses": "actions/cache@v4",
+                     "with": {"path": "node_modules",
+                              "key": "node-modules-${{ hashFiles('**/package-lock.json') }}"}}
+
+
+@pytest.mark.parametrize("gate, steps", [
+    ("cache_and_install_run_in_the_same_parallel_group",
+     [{"parallel": [_OPT79_CACHE_STEP, {"run": "npm ci"}]}, {"run": "npm test"}]),
+    ("cache_restore_runs_in_a_parallel_group_or_background",
+     [dict(_OPT79_CACHE_STEP, background=True), {"run": "npm ci"}, {"run": "npm test"}]),
+    ("install_runs_in_a_parallel_group_or_background",
+     [_OPT79_CACHE_STEP, {"parallel": [{"run": "npm ci"}, {"run": "npm run docs"}]},
+      {"run": "npm test"}]),
+    ("job_has_an_unreadable_parallel_group",
+     [_OPT79_CACHE_STEP, {"parallel": "npm ci"}, {"run": "npm test"}]),
+])
+def test_opt79_grouped_cache_is_held_back_end_to_end(tmp_path, gate, steps):
+    """T9: the measured sample, through the detector, into the withheld list,
+    rendered as the held-back row, accepted by the verifier; and the verifier
+    rejects the row with its reason swapped for the gate name."""
+    jpr, logs = _opt79_sample()
+    held: list = []
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), _opt79_wf(steps=steps), 100, 0,
+        logs_by_job_id=logs, withheld_candidates=held)
+    assert out == [], out
+    assert [c["gate"] for c in held] == [gate], held
+    doc = {"data_sources": {}, bp._OPT79_WITHHELD_DOC_KEY: held}
+    fp = tmp_path / "findings.json"
+    import json as _json
+    fp.write_text(_json.dumps(doc), encoding="utf-8")
+    footer = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    phrase = bp._OPT79_HELD_BACK_REASONS[gate]
+    assert phrase in footer, footer
+    vr = _load_verify_report_for_opt79()
+    report = "## 🗄️ Data sources\n" + footer
+    assert vr.check_coverage_disclosed(report, fp).ok
+    assert not vr.check_coverage_disclosed(report.replace(phrase, gate), fp).ok
+
+
+@pytest.mark.parametrize("label, install_steps", [
+    ("install in a group after the cache",
+     [{"parallel": [{"run": "npm ci"}, {"run": "./long-build.sh"}]}]),
+    ("install in the background",
+     [{"run": "npm ci", "background": True}, {"run": "./long-build.sh"}]),
+    ("install in the background (quoted)",
+     [{"run": "npm ci", "background": "true"}, {"run": "./long-build.sh"}]),
+])
+def test_opt79_holds_back_an_install_that_runs_side_by_side(label, install_steps):
+    """The restore is sequential, but the INSTALL runs in a `parallel:` group or
+    with `background: true`: it overlaps other steps, so restore-then-install is
+    not the sequential block this pattern prices. Held back, never priced."""
+    wf = _opt79_steps(dict(_OPT79_NODE_CACHE), *install_steps)
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None, (label, block)
+    assert gate == "install_runs_in_a_parallel_group_or_background", (label, gate)
+    assert gate in cr._OPT79_EARLY_HELD_BACK_GATES
+    phrase = bp._OPT79_HELD_BACK_REASONS.get(gate)
+    assert phrase and "_" not in phrase, phrase
+    assert _load_verify_report_for_opt79()._VR_OPT79_HELD_BACK_REASONS.get(gate) == phrase
+
+
+def test_opt79_the_side_by_side_reason_wins_over_the_install_shape_reasons():
+    """A grouped install that ALSO runs other commands, and a sibling install
+    declared BEFORE the cache in its group, are side-by-side cases first: the
+    reason names the overlap, not a masking shape gate."""
+    wf = _opt79_steps(
+        {"parallel": [dict(_OPT79_NODE_CACHE), {"run": "npm ci\nnpm run build"}]},
+        {"run": "npm test"})
+    _block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert gate == "cache_and_install_run_in_the_same_parallel_group", gate
+    wf = _opt79_steps(
+        {"parallel": [{"run": "npm ci"}, dict(_OPT79_NODE_CACHE)]},
+        {"run": "npm test"})
+    _block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert gate == "cache_and_install_run_in_the_same_parallel_group", gate
+    wf = _opt79_steps(dict(_OPT79_NODE_CACHE),
+                      {"run": "npm ci\nnpm run build", "background": True},
+                      {"run": "npm test"})
+    _block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert gate == "install_runs_in_a_parallel_group_or_background", gate
+
+
+def test_opt80_finds_the_checkout_step_inside_a_parallel_group():
+    wf = _opt80_wf(steps=[{"parallel": [{"uses": "actions/checkout@v4"},
+                                        {"run": "echo warm"}]},
+                          {"run": "npm test"}])
+    out, _gh = _opt80(wf=wf)
+    assert len(out) == 1, out
+    assert out[0]["affected_jobs"] == ["build"]
+
+
+def test_sharded_bases_reads_a_shard_command_inside_a_parallel_group():
+    doc = {"jobs": {"tests": {"steps": [
+        {"uses": "actions/checkout@v4"},
+        {"parallel": [{"run": "echo warm"},
+                      {"run": "uv run pytest --splits 2 --group 1"}]}]}}}
+    assert "tests" in cr._sharded_bases(doc)
+
+
+def test_opt79_package_json_needed_reads_setup_node_inside_a_parallel_group():
+    wf = _opt79_steps(_OPT79_CHECKOUT,
+                      {"parallel": [{"uses": "actions/setup-node@v5"},
+                                    {"run": "echo warm"}]},
+                      {"run": "npm ci"})
+    assert cr._opt79_package_json_needed({"ci.yml": wf}) is True
+
+
+def test_opt80_retry_env_on_a_checkout_inside_a_parallel_group_is_read():
+    co = {"uses": "actions/checkout@v4", "env": {"GIT_HTTP_LOW_SPEED_LIMIT": "1000"}}
+    wf = _opt80_wf(steps=[{"parallel": [co, {"run": "echo warm"}]},
+                          {"run": "npm test"}])
+    job = wf["jobs"]["build"]
+    assert cr._opt80_retry_already_configured(wf, job, None, checkout_step=co) is True
+
+
+def test_opt79_cache_in_an_outer_group_and_install_in_a_nested_group_run_together():
+    """Nested groups carry their top-level group's ordinal: an install in a
+    group nested inside the cache's group still runs beside the restore."""
+    wf = _opt79_steps(
+        {"parallel": [dict(_OPT79_NODE_CACHE),
+                      {"parallel": [{"run": "npm ci"}, {"run": "echo warm"}]}]},
+        {"run": "npm test"})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None and gate == "cache_and_install_run_in_the_same_parallel_group", gate
+
+
+def test_non_work_step_pattern_is_identical_in_collector_and_renderer():
+    assert cr._NON_WORK_STEP_RE.pattern == bp._NON_WORK_STEP_RE.pattern
+    assert cr._NON_WORK_STEP_RE.flags == bp._NON_WORK_STEP_RE.flags
+
+
+@pytest.mark.parametrize("steps", [
+    ({"parallel": {"uses": "actions/checkout@v4"}},),
+    ({"uses": "actions/checkout@v4"}, dict(_OPT79_NODE_CACHE), {"parallel": "npm ci"},
+     {"run": "npm ci"}),
+])
+def test_a_job_with_an_unreadable_group_is_held_back_not_called_empty(steps):
+    """S17/S1: the steps inside a malformed `parallel:` group were never read,
+    so "the job has no YAML steps" / "no checkout step" / "no install after the
+    cache" may all be false. OPT79 holds the candidate back, and OPT80 records
+    the same reason, rather than an absence verdict."""
+    wf = _opt79_steps(*steps)
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    assert block is None and gate == "job_has_an_unreadable_parallel_group", gate
+    assert gate in cr._OPT79_EARLY_HELD_BACK_GATES
+    phrase = bp._OPT79_HELD_BACK_REASONS.get(gate)
+    assert phrase and "_" not in phrase, phrase
+    assert _load_verify_report_for_opt79()._VR_OPT79_HELD_BACK_REASONS.get(gate) == phrase
+    got = cr._opt80_checkout_step(wf["jobs"][_OPT79_JOB], None)
+    assert got == "job_has_an_unreadable_parallel_group", got
+
+
+def test_a_control_step_only_job_never_crashes_the_yaml_readers():
+    """`wait:` / `wait-all:` / `cancel:` steps carry no `run:`/`uses:`."""
+    wf = _opt79_steps({"wait-all": None}, {"cancel": "db"}, {"wait": ["a", "b"]})
+    block, gate = cr._opt79_cache_block(_OPT79_JOB, wf)
+    # No step does any work, so there is no candidate to hold back.
+    assert block is None and gate == "job_has_no_yaml_steps"
+    assert gate in cr._OPT79_NOT_A_CANDIDATE_GATES
+    assert cr._consolidation_yaml_setup_fingerprint(_OPT79_JOB, wf) is None
+    assert cr._opt80_checkout_step(wf["jobs"][_OPT79_JOB], None) is None

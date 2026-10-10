@@ -758,6 +758,9 @@ _VR_OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 # A recorded gate with no phrase FAILS the check: the report may never print a
 # raw gate name, and a fallback here would let it.
 _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
+    "job_has_an_unreadable_parallel_group":
+        "some of the job's steps sit in a parallel step group that could not be "
+        "read, so whether a cache feeds an install could not be told",
     "cache_is_saved_by_a_separate_step":
         "the cache is saved by its own separate step, so one restore-and-save "
         "measurement can't cover it",
@@ -778,6 +781,17 @@ _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
     "install_step_also_runs_non_install_commands":
         "the install step also runs other commands, so its time is not just "
         "the install",
+    "cache_and_install_run_in_the_same_parallel_group":
+        "the cache and the install run side by side in one parallel step "
+        "group, so the restore does not happen before the install",
+    "cache_restore_runs_in_a_parallel_group_or_background":
+        "the cache restore runs side by side with other steps (in a parallel "
+        "step group or in the background), so restore-then-install is not one "
+        "sequential block and its saving could not be priced",
+    "install_runs_in_a_parallel_group_or_background":
+        "the install runs side by side with other steps (in a parallel step "
+        "group or in the background), so its time does not simply follow the "
+        "cache restore and could not be priced",
     "no_install_step_after_the_cache_step":
         "no dependency install follows the cache, so the cache is not shown to "
         "speed anything up",
@@ -896,6 +910,7 @@ _VR_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _VR_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
 _VR_OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 _VR_OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
+_VR_PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
 # (doc key, Data sources row label, counted noun, "Used for" cell) — as
 # blocking_path renders them. ONE re-derivation serves all three patterns.
 # The fourth field is carried HERE, not just pinned: it is the column that tells
@@ -938,6 +953,11 @@ _VR_WITHHELD_ROWS = (
     _VrWithheldRow(_VR_OPT82_WITHHELD_DOC_KEY, "type-aware lint: held back",
                    "candidate lint job(s)",
                    "Why a slow lint job with type-aware ESLint produced no finding",
+                   "job"),
+    _VrWithheldRow(_VR_PARALLEL_STEPS_WITHHELD_DOC_KEY, "parallel steps: held back",
+                   "candidate lever(s)",
+                   "Why a lever priced from step times on a job that runs steps side by "
+                   "side claims no saving",
                    "job"),
 )
 _VR_WITHHELD_SHAPE_BY_KEY = {r.doc_key: r.entry_shape for r in _VR_WITHHELD_ROWS}
@@ -1069,8 +1089,15 @@ _VR_OPT82_WITHHOLD_PHRASES = {
         "type-aware parsing is on, but no type-aware rule could be named from "
         "the config",
 }
+_VR_PARALLEL_STEPS_WITHHOLD_PHRASES = {
+    "dominant_step_runs_inside_a_parallel_group":
+        "the job's slowest steps run side by side with other steps (in a "
+        "parallel step group or in the background), so their times overlap and "
+        "cutting one does not come straight off the job; no saving is claimed",
+}
 _VR_WITHHELD_PHRASES_BY_KEY = {
     _VR_OPT77_WITHHELD_DOC_KEY: _VR_OPT77_WITHHOLD_PHRASES,
+    _VR_PARALLEL_STEPS_WITHHELD_DOC_KEY: _VR_PARALLEL_STEPS_WITHHOLD_PHRASES,
     _VR_OPT79_WITHHELD_DOC_KEY: _VR_OPT79_HELD_BACK_REASONS,
     _VR_OPT80_WITHHELD_DOC_KEY: _VR_OPT80_WITHHOLD_PHRASES,
     _VR_OPT81_WITHHELD_DOC_KEY: _VR_OPT81_WITHHOLD_PHRASES,
@@ -1231,6 +1258,121 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
     return None, note
 
 
+# The verifier's own copy of `workflow_steps.MALFORMED_KINDS` (a coupling test
+# pins them equal) and of the row's "Used for" cell.
+_VR_MALFORMED_KINDS = {
+    "not_a_list": "the value is not a list of steps",
+    "contains_itself": "the list contains itself",
+    "nested_too_deep": "nested more than 64 groups deep",
+    "too_many_steps": "more steps than the walk reads (a YAML alias fan-out)",
+    "non_mapping_step": "an item in it is not a step",
+}
+_VR_PARALLEL_STEPS_FEEDS = ("Static detectors read each step inside a `parallel:` group "
+                            "as its own step")
+# What the step drill says only of a job whose steps run one after another.
+_VR_SEQUENTIAL_STEP_PHRASES = ("run **one after another**", "run one after another",
+                               "they run in sequence and roughly add up",
+                               "Because they're sequential")
+
+
+def _vr_parallel_steps_used(stamp: Any) -> bool:
+    return isinstance(stamp, dict) and bool(
+        stamp.get("groups") or stamp.get("control_steps") or stamp.get("background_steps"))
+
+
+def _vr_files_cell(files: Any) -> str:
+    files = [f for f in (files or []) if isinstance(f, str)]
+    shown = ", ".join(f"`{f}`" for f in files[:3])
+    if len(files) > 3:
+        shown += f", and {len(files) - 3} more file(s)"
+    return shown
+
+
+def _vr_parallel_steps_cell(stamp: dict[str, Any]) -> str:
+    """The whole "Parallel steps" Coverage cell, re-derived from the stamp with
+    this file's own code (twin of `workflow_steps.parallel_steps_disclosure`)."""
+    parts = [f"{int(stamp.get('steps_in_groups') or 0)} step(s) inside `parallel:` "
+             f"groups read ({int(stamp.get('groups') or 0)} `parallel:` group(s) seen)"]
+    bg = int(stamp.get("background_steps") or 0)
+    if bg:
+        parts.append(f"{bg} `background: true` step(s) read (they run beside the "
+                     "steps after them)")
+    control = int(stamp.get("control_steps") or 0)
+    if control:
+        parts.append(f"{control} `wait`/`wait-all`/`cancel` control step(s) skipped "
+                     "(they run nothing)")
+    bad = int(stamp.get("malformed_groups") or 0)
+    if bad:
+        kinds = "; ".join(_VR_MALFORMED_KINDS.get(str(k), str(k))
+                          for k in (stamp.get("malformed_reasons") or [])) or \
+            "the value is not a readable list of steps"
+        files = _vr_files_cell(stamp.get("malformed_files"))
+        parts.append(f"**{bad} malformed `parallel:` group(s) not read** ({kinds})"
+                     f"{' in ' + files if files else ''}")
+    inv = int(stamp.get("invalid_groups") or 0)
+    if inv:
+        files = _vr_files_cell(stamp.get("invalid_files"))
+        parts.append(f"**{inv} invalid `parallel:` group(s)** (on a step that also "
+                     "has `run:` or `uses:`, which GitHub rejects; the steps inside "
+                     f"were read as the group's children){' in ' + files if files else ''}")
+    return " · ".join(parts)
+
+
+def _parallel_steps_violation(report: str, findings_path: Path | None
+                              ) -> tuple[str | None, str]:
+    """When the scan stamped `parallel_steps` (the repo uses GitHub Actions
+    `parallel:` groups, `background: true` steps, or `wait`/`wait-all`/`cancel`
+    control steps), the Data sources table must carry a "Parallel steps" row
+    whose WHOLE text is re-derived from the stamp: the steps read inside groups,
+    the groups seen, the background and control steps, each malformed group's
+    kind and files, and any invalid group. A row with no stamp behind it fails.
+
+    And a pole whose job the stamp names as running steps side by side (its
+    `workflow file ▸ check` heading equals a `jobs_with_groups` /
+    `jobs_with_background` row's file and job or name) must not say its steps
+    run one after another. This is an exact-name subset of the renderer's join
+    (which also folds matrix legs, templates and callees), so it never fails a
+    pole the renderer could not match. Standalone (no import of the renderer)."""
+    if not findings_path:
+        return None, ""
+    try:
+        data = json.loads(Path(findings_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, ""  # unreadable findings are reported by the other re-derivations
+    stamp = data.get("parallel_steps") if isinstance(data, dict) else None
+    row = next((ln for ln in report.splitlines() if ln.startswith("| Parallel steps |")), None)
+    if not _vr_parallel_steps_used(stamp):
+        if row is not None:
+            return ("the Data sources table has a Parallel steps row but the findings "
+                    "carry no `parallel_steps` stamp"), ""
+        return None, ""
+    if row is None:
+        return ("findings carry a `parallel_steps` stamp but the Data sources table "
+                "has no Parallel steps row"), ""
+    want = f"| Parallel steps | {_vr_parallel_steps_cell(stamp)} | {_VR_PARALLEL_STEPS_FEEDS} |"
+    if row.strip() != want:
+        return f"Parallel steps row is not the one the stamp derives: {row!r} != {want!r}", ""
+    over = [r for key in ("jobs_with_groups", "jobs_with_background")
+            for r in (stamp.get(key) or []) if isinstance(r, dict)]
+    headers = re.findall(r"^##\s+.*?(Long pole \d+:.*)$", report, re.MULTILINE)
+    for hdr, body in zip(headers, _pole_sections(report)):
+        m = re.search(r"Long pole \d+:\s*`([^`]+)`\s*▸\s*`([^`]+)`", hdr)
+        if not m:
+            continue
+        wf, label = m.group(1), m.group(2).strip().lower()
+        for r in over:
+            if _wf_base(str(r.get("path") or "")) != wf:
+                continue
+            names = {str(r.get(k) or "").strip().lower() for k in ("job", "name")} - {""}
+            # A check-run label may carry its workflow's name (`CI / test`).
+            if label in names or label.rsplit(" / ", 1)[-1] in names:
+                hit = next((ph for ph in _VR_SEQUENTIAL_STEP_PHRASES if ph in body), None)
+                if hit:
+                    return (f"{hdr.strip()}: the stamp says this job runs steps side by "
+                            f"side, but its drill says {hit!r}"), ""
+    return None, "; parallel-step read disclosed"
+
+
 def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> Check:
     """The report must disclose its data basis (a provenance block or the Data
     sources footer), any incomplete-coverage banner must name the unscanned file(s)
@@ -1261,6 +1403,10 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
     if withheld_violation:
         return Check(name, False, withheld_violation)
     skip_note += withheld_note
+    par_violation, par_note = _parallel_steps_violation(report, findings_path)
+    if par_violation:
+        return Check(name, False, par_violation)
+    skip_note += par_note
     if "Incomplete coverage" in report:
         banner = _section_quote(report, "Incomplete coverage")
         if "**" not in banner:
