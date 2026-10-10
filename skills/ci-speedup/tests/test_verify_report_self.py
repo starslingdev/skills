@@ -1513,6 +1513,37 @@ def test_poles_complete_exempts_a_bare_push_floor_pole(tmp_path: Path):
     assert _tag_for(bare, _POLES, tmp_path, findings=case1_bare) == "FAIL"
 
 
+def test_poles_complete_exempts_a_pole_whose_every_step_was_dropped(tmp_path: Path):
+    """A pole stamped `no_step_measured_in_sample` has no step to break down: its body
+    says so ("No step could be measured: …") and its prompt carries the no-breakdown
+    line. That is an honest pole, not a stunted drill; the same body without its
+    stamp, or the stamp without the line, still FAILs."""
+    note = "No step could be measured: 2 skipped, 1 with no usable time."
+    body = (
+        "# demo - why is CI slow on a PR?\n\n"
+        "> **Bottom line.** A typical PR waits **51m 30s** for all checks to finish; trace below.\n\n"
+        '<a id="pole-1"></a>\n\n## Long pole 1: `ci.yml` ▸ test - 51m 30s\n\n'
+        f"```text\n{note}\n\n(captured this job's log but matched no known root-cause "
+        "pattern — no drill-down available; this is a coverage gap, not a clean job. The "
+        "detector set may need extending for this stack.)\n```\n\n"
+        "```text\nWHERE THE TIME GOES\n- No per-step breakdown was captured for this job; "
+        "profile its slowest step in the repo.\n```\n\n"
+        "#### 🤖 Prompt for your coding agent\n\n```text\ninvestigate it.\n```\n\n"
+        "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n| --- | --- | --- |\n"
+        "| ci-speedup static scan (skill commit `0000000`) | all | scan |\n")
+    def doc(**stamp) -> dict:
+        return {"pr_critical_path": {"poles": [dict(
+            {"check": "test", "workflow_file": ".github/workflows/ci.yml",
+             "p50_s": 3090.0}, **stamp)]},
+            "per_workflow_timing": {".github/workflows/ci.yml": {
+                "event_scope": "pull_request", "long_pole_job": "test"}}}
+    dropped = doc(step_decomposition_reason="no_step_measured_in_sample",
+                  skipped_steps=2, unmeasured_steps=1)
+    assert _tag_for(body, _POLES, tmp_path, findings=dropped) == "PASS"
+    assert _tag_for(body, _POLES, tmp_path, findings=doc()) == "FAIL"
+    assert _tag_for(body.replace(note, ""), _POLES, tmp_path, findings=dropped) == "FAIL"
+
+
 def test_poles_complete_fails_on_a_pole_with_a_prompt_but_no_drill(tmp_path: Path):
     # The bitmovin hole: a pole that HANDS OFF a prompt but whose body carries the renderer's
     # own "No per-step breakdown was captured" admission (no captured timeline AND no sampled

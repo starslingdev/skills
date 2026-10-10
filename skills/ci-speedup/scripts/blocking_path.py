@@ -3996,13 +3996,16 @@ def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                     *args: Any, **kwargs: Any) -> list[str]:
     """`_pole_waterfall_body`, plus the line saying how many declared steps the step list
     leaves out (`_omitted_steps_note`). A pole whose every declared step was dropped, with
-    no drilled timeline to draw, renders that line alone: an empty "every step" list would
-    read as a job with no steps."""
+    no drilled timeline to draw, leads with that line in place of the step header and
+    rows (an empty "every step" list would read as a job with no steps); the body's
+    pointer lines (coverage gap, LLM analysis, catalog matches, the `--log` hint) and a
+    Level-3 log drill still follow it."""
     note = _omitted_steps_note(pole)
     if (pole.get("step_decomposition_reason") == _NO_STEP_MEASURED_REASON
             and not pole.get("steps") and not pole.get("job_timing_unavailable")
             and not ((timeline or {}).get("steps"))):
-        return [note] if note else []
+        return ([note] if note else []) + _pole_waterfall_body(
+            pole, leaf, timeline, *args, steps_dropped=True, **kwargs)
     lines = _pole_waterfall_body(pole, leaf, timeline, *args, **kwargs)
     if note and not pole.get("job_timing_unavailable"):
         lines += ["", note]
@@ -4019,7 +4022,8 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
                      data_driven_patterns: "tuple[str, ...] | list[str]" = (),
                      opt79_present: bool = False,
                      opt82_present: bool = False,
-                     steps_overlap: "str | None" = None) -> list[str]:
+                     steps_overlap: "str | None" = None,
+                     steps_dropped: bool = False) -> list[str]:
     """The ASCII waterfall for one pole (no code fence): the blocking job's steps,
     then - when a log was captured - the dominant step's internals down to the
     root cause.
@@ -4038,7 +4042,10 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
     `data_driven_on_path` mirrors the appendix: a data-driven catalog match on a pole the spine
     DEMOTES as opt-in/rare (`spine_rare`) is still catalog coverage (never a gap), but the
     "no gap — see Also noticed" pointer must NOT claim the pole "sits ON the critical path"
-    while the spine footnote demotes it (the paradedb `Test pg_search` double-framing)."""
+    while the spine footnote demotes it (the paradedb `Test pg_search` double-framing).
+
+    `steps_dropped` (`_pole_waterfall`, a pole whose every step was dropped): no step
+    header and no step rows, only the pointer lines and a Level-3 log drill."""
     # The pointer tail for a data-driven catalog match — on-path for a typical pole, opt-in/rare
     # for a `spine_rare` pole. Never a coverage gap either way (a measured catalog lever matched).
     # Where the data-driven match renders: OPT81 renders at its pole, not in the appendix.
@@ -4215,8 +4222,9 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
                  f"~{_clock(step_total)} vs the job's own {_clock(job_total)} P50; "
                  "read the bars as proportions, not an exact sum" if gap else
                  "; they run in sequence and roughly add up to the job")
-    lines = [f"Where the job's ~{_clock(job_total)} goes - every step, slowest "
-             f"first{recon}:", ""]
+    lines = ([] if steps_dropped else
+             [f"Where the job's ~{_clock(job_total)} goes - every step, slowest "
+              f"first{recon}:", ""])
     if not deeper:
         # No drill: no captured log, a captured-but-unrecognized log, or a step-level
         # root cause (categorical leaf - the fix follows below). Show the steps
@@ -4228,9 +4236,10 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
         # (the dominant_step-disagreement class). rows2 mirrors steps[:TOP], so the
         # lead's index in `steps` is its row; fall back to 0 if it's rolled into the
         # tail, mirroring the old single-longest-step behaviour.
-        _emit_level(lines, rows2, header_below=None,
-                    mark_idx=_dom_lead_idx(steps[:TOP],
-                                           str(pole.get("dominant_category", ""))))
+        if not steps_dropped:
+            _emit_level(lines, rows2, header_below=None,
+                        mark_idx=_dom_lead_idx(steps[:TOP],
+                                               str(pole.get("dominant_category", ""))))
         if structural_present and leaf is None:
             # A structural catalog pattern matched this pole even though no log-level
             # detector fired — not a coverage gap; the structural root-cause renders below.
@@ -4251,8 +4260,9 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
         elif opt82_present and leaf is None:
             lines += ["", _OPT82_POLE_POINTER]
         elif not log_present:
+            _target = "this job" if steps_dropped else f"`{dom}`"
             lines += ["", f"(no captured log for this job — run with `--log "
-                      f"{wf_base.split('.')[0]}=<job log>` to drill into `{dom}`.)"]
+                      f"{wf_base.split('.')[0]}=<job log>` to drill into {_target}.)"]
         elif leaf is None and analysis_present:
             lines += ["", "(no catalog pattern matched this job's log - see the **LLM "
                       "root-cause analysis** below, which reads the captured log "
@@ -4264,13 +4274,20 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
         return lines
     # Drill into the BIGGEST step (it's only part of the job - the other steps are
     # above it in the bars).
-    deeper[0]["header"] = f"Level 3 — inside `{_lbl(dom)}`: {leaf['unit_label']}"
-    _emit_level(lines, rows2, header_below=deeper[0]["header"])
+    if steps_dropped:
+        # No step was measured, so there is no step row to hang the drill off: the
+        # log drill is headed by the job itself, and a level scaled to the step's wall
+        # stays unscaled (that wall is unknown).
+        deeper[0]["header"] = f"Level 3 — inside this job's log: {leaf['unit_label']}"
+        lines += ["", f"   ▼ {deeper[0]['header']}", ""]
+    else:
+        deeper[0]["header"] = f"Level 3 — inside `{_lbl(dom)}`: {leaf['unit_label']}"
+        _emit_level(lines, rows2, header_below=deeper[0]["header"])
     for i, lvl in enumerate(deeper):
         last = i == len(deeper) - 1
         scale = lvl.get("scale_to_secs")
         if scale is None and lvl.get("scale_to_step"):
-            scale = dom_p50
+            scale = None if steps_dropped else dom_p50
         _emit_level(lines, lvl["rows"],
                     header_below=None if last else deeper[i + 1]["header"],
                     blocker_note=lvl["blocker_note"] if last else "",

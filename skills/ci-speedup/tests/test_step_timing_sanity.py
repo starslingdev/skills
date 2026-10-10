@@ -574,7 +574,49 @@ def test_pole_whose_every_step_dropped_says_no_step_could_be_measured():
     pole.update(step_decomposition_reason="no_step_measured_in_sample",
                 skipped_steps=2, unmeasured_steps=1)
     lines = _bp()._pole_waterfall(pole, leaf=None, timeline=None, log_present=False)
-    assert lines == ["No step could be measured: 2 skipped, 1 with no usable time."], lines
+    assert lines[0] == "No step could be measured: 2 skipped, 1 with no usable time.", lines
+    # No step header and no step rows: there is no step to list.
+    assert not [ln for ln in lines if "every step" in ln or "Level 2" in ln], lines
+    assert lines[1:] == ["", "(no captured log for this job — run with `--log "
+                         "ci=<job log>` to drill into this job.)"], lines
+
+
+def _dropped_pole() -> dict:
+    pole = {k: v for k, v in _POLE.items()
+            if k not in ("steps", "dominant_step", "dominant_category", "dominant_p50_s")}
+    pole.update(step_decomposition_reason="no_step_measured_in_sample",
+                skipped_steps=2, unmeasured_steps=1)
+    return pole
+
+
+def test_all_dropped_pole_with_a_captured_log_still_says_it_is_a_coverage_gap():
+    """The note does not replace the pointer lines: a captured log no detector matched
+    is still a coverage gap, and the LLM analysis and catalog pointers still render."""
+    bp = _bp()
+    note = "No step could be measured: 2 skipped, 1 with no usable time."
+    lines = bp._pole_waterfall(_dropped_pole(), leaf=None, timeline=None, log_present=True)
+    assert lines[0] == note, lines
+    assert any("this is a coverage gap, not a clean job" in ln for ln in lines), lines
+    lines = bp._pole_waterfall(_dropped_pole(), leaf=None, timeline=None,
+                               log_present=True, analysis_present=True)
+    assert any("LLM root-cause analysis" in ln for ln in lines), lines
+    lines = bp._pole_waterfall(_dropped_pole(), leaf=None, timeline=None,
+                               log_present=True, structural_present=True)
+    assert any("structural catalog pattern" in ln for ln in lines), lines
+    lines = bp._pole_waterfall(_dropped_pole(), leaf=None, timeline=None,
+                               log_present=True, opt79_present=True)
+    assert any("OPT79" in ln for ln in lines), lines
+
+
+def test_all_dropped_pole_with_a_log_drill_still_renders_level_three():
+    leaf = {"unit_label": "slowest test files", "search": [],
+            "deeper": [{"header": "files", "blocker_note": "the slowest file",
+                        "rows": [("a.test.ts", 50.0, None), ("b.test.ts", 20.0, None)]}]}
+    lines = _bp()._pole_waterfall(_dropped_pole(), leaf=leaf, timeline=None,
+                                  log_present=True)
+    assert lines[0].startswith("No step could be measured:"), lines
+    assert any("Level 3" in ln and "slowest test files" in ln for ln in lines), lines
+    assert any("a.test.ts" in ln for ln in lines), lines
 
 
 # --------------------------------------------------------------------------- #

@@ -2181,6 +2181,25 @@ def _push_floor_pole_keys(findings_path: Path | None) -> set[tuple[str, str]]:
     return keys
 
 
+def _all_dropped_pole_keys(findings_path: Path | None) -> set[tuple[str, str]]:
+    """`(workflow-basename, _cmp_name(check))` for each `pr_critical_path.poles[*]` stamped
+    `step_decomposition_reason == "no_step_measured_in_sample"`: every declared step of
+    the job was dropped in the sample, so a "no per-step breakdown" body is the honest
+    state, not a stunted drill. The stunted-pole guard exempts such a pole only when its
+    section also carries the renderer's "No step could be measured:" line
+    (`_vr_omitted_steps_note`). Empty set when none / unreadable."""
+    if not findings_path:
+        return set()
+    try:
+        data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    return {(_wf_base(str(p.get("workflow_file") or "")), _cmp_name(str(p.get("check") or "")))
+            for p in _as_list(_as_dict(data.get("pr_critical_path")).get("poles"))
+            if isinstance(p, dict)
+            and p.get("step_decomposition_reason") == "no_step_measured_in_sample"}
+
+
 def _triaged_pole_offenders(findings_path: Path | None) -> list[str] | None:
     """Re-derive the triaged-fast-pole contradiction from the findings JSON (never a
     rendered-text proxy). A workflow disclosed in `data_sources.triaged_fast_workflows`
@@ -2595,11 +2614,16 @@ def check_speed_poles_complete(report: str, findings_path: Path | None) -> Check
     # here while check_primary_section_present REQUIRES the spine would be an unsatisfiable gate (the
     # push-only-repo contradiction). Mapped findings→render by `(wf-base, _cmp_name(check))`; only the
     # NARROW push flag is exempt, so a case-1/1b structural pole that renders bare is still caught.
+    # A pole whose every step was dropped in the sample (stamped, AND its section says
+    # "No step could be measured:") is exempt for the same reason: no step to break down.
     _push_floor = _push_floor_pole_keys(findings_path)
+    _all_dropped = _all_dropped_pole_keys(findings_path)
     stunted = [f"`{wf}` ▸ {check}"
                for wf, check, body in _pole_header_sections(report)
                if _NO_PER_STEP_DRILL in body
-               and (_wf_base(wf), _cmp_name(check)) not in _push_floor]
+               and (_wf_base(wf), _cmp_name(check)) not in _push_floor
+               and not ((_wf_base(wf), _cmp_name(check)) in _all_dropped
+                        and "No step could be measured: " in body)]
     if stunted:
         return Check(name, False, f"long pole(s) {stunted} carry NO per-step breakdown - a "
                      "bare/stunted pole (a timeline with no drill, per SKILL.md 5a), not the "
