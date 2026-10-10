@@ -11,6 +11,46 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-09** — **Fixed** (#120): steps inside a GitHub Actions
+  `parallel:` group (shipped by GitHub 2026-06-25 on github.com and GHEC; not
+  GHES) were invisible to every check that reads
+  steps. A `- parallel:` entry carries neither `run:` nor `uses:`, so its
+  child steps were skipped: the only cache step, an unpinned action, a
+  `fetch-depth: 0` checkout, the history op that exempts it, a `--filter`
+  build or a test command could sit inside a group unseen, and the check
+  passed or failed on a step it never read. One step walker now yields every
+  leaf step in declaration order, and every step read routes through it:
+  dependency caching (and its applicability signal), build caching, shallow
+  checkout (and its git-history exemption), change-scoped builds, pinned
+  action SHAs, and the automation-only refusal's test/build/install signals.
+  The `wait:` / `wait-all:` / `cancel:` steps are skipped and counted;
+  `background: true` steps are ordinary steps and were already read. Inside
+  `parallel:` groups nothing is skipped without being counted and named by
+  file, job, step position and reason: a group in a shape GitHub does not
+  document (inside a local composite action, a group inside a group, beside
+  `run:` / `uses:` on one step, or a single step where a list belongs) is
+  read anyway, defensively, and kept out of the side-by-side count; a group
+  that cannot be read (not a list, empty, contains itself through a YAML
+  alias, nested more than 64 deep, or past a 10,000-entry read limit per
+  job) is counted as unread; a non-step entry inside a group is counted. The
+  depth cap and read limit mean a hostile alias chain can neither crash the
+  run nor stall it, and any failure in the step walk is now a
+  `data_sources.ci_score_error` marker (exit 3), never a traceback. Unread
+  groups are disclosed, not scored around, matching how an unparseable
+  workflow file is handled. A job whose `steps:` is not a list and a local
+  composite action that fails to parse are now recorded by name too
+  (`data_sources.unreadable_step_lists`, `data_sources.composite_parse_errors`,
+  present only when non-empty). The
+  findings document records `data_sources.parallel_steps` whenever a repo has
+  a `parallel:` key, readable or not, and the report header carries a "Parallel steps" row;
+  `verify_report.py` re-derives that row on its own and fails a report whose
+  row is missing, altered, or present without the record. Repos with no
+  `parallel:` group (including ones using only `background:` with `wait:` /
+  `cancel:`) produce byte-identical output. No `spec_version` bump: verdicts
+  move only for repositories using `parallel:`, and the census over the
+  calibration controls (31 controls, 1 using `parallel:` on its default
+  branch as of this change: getsentry/sentry) re-read that one control with
+  all eleven verdicts unchanged, so the registry is unchanged.
 - **2026-09-30** — **Changed**: the Dependency caching check's "Why it matters" text (engine, methodology, example report) now states its exception: a cache that measurably costs more than it saves should be removed, this check reads configuration only and cannot see that measurement, and a repo that removed such a cache still loses the point. Documentation only; no scoring change, no `spec_version` bump.
 - **2026-09-02** — **Changed**: the CI Score registry is bumped to
   `ci-score-v0.1.4` (OD-CS22). The two shallow-clone exemptions below move a

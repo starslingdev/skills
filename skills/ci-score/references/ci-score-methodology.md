@@ -25,6 +25,21 @@ repo's own workflow files, verifiable by the maintainer in under a minute.
 Pass or fail; a check whose subject doesn't exist in the repo (no build tool,
 no dependency manifest to cache, no test job to shard, no OIDC use, no
 third-party actions) is **not applicable** and leaves the denominator.
+Steps inside a GitHub Actions `parallel:` group are read exactly like any
+other step (the `wait:` / `wait-all:` / `cancel:` steps only wait for or
+cancel background steps, run no code of their own, and are skipped), and the
+report header states how many steps were read from parallel groups. It names,
+by file, job, step position and reason, every `parallel:` in a shape GitHub
+does not document whose steps were read anyway (inside a composite action, a
+group inside a group, a `parallel:` beside `run:` / `uses:` on the same step,
+or a single step where a list belongs); every `parallel:` that could not be
+read, so its steps were not checked (not a list of steps, empty, a group that
+contains itself, nested more than 64 deep, or past the 10,000-entry read
+limit per job); and every entry inside a group that is not a step. These
+unread groups are disclosed, not scored around: like a workflow file that
+fails to parse (recorded in the findings document, the repo still scored from
+what was readable), the verdicts are computed from the steps that could be
+read.
 
 ```
 score = round-half-up( 100 × checks passed ÷ checks applicable )

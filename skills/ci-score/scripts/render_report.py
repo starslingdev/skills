@@ -349,6 +349,98 @@ def _handoff_prompt(rec_no: int, chk: dict, meta: dict, url: str,
     ]
 
 
+def parallel_steps_disclosure(doc: dict[str, Any]) -> str | None:
+    """The provenance cell for GitHub Actions `parallel:` step groups, read off
+    `data_sources.parallel_steps` (the collector's record of what the step
+    walker read). None when there is no record. Every group in a shape GitHub
+    does not document, every group that could not be read, and every non-step
+    entry inside a group is counted and named — file, job, step position and
+    reason — the first three, then how many more, so the maintainer is told.
+    verify_report.py re-derives this exact row with its own code (same
+    wording), so changing one means changing both."""
+    rec = (doc.get("data_sources") or {}).get("parallel_steps")
+    if not isinstance(rec, dict):
+        return None
+
+    def count(key: str) -> int:
+        v = rec.get(key)
+        return v if isinstance(v, int) and not isinstance(v, bool) else 0
+
+    parts: list[str] = []
+    groups = count("groups")
+    if groups:
+        parts.append(f"{count('steps_in_groups')} step(s) in {groups} `parallel:` "
+                     "group(s) checked like any other step (GitHub runs a group's steps "
+                     "side by side, up to 10 at a time)")
+    control = count("control_steps")
+    if control:
+        parts.append(f"{control} `wait`/`wait-all`/`cancel` step(s) skipped: they only "
+                     "wait for or cancel background steps and run no code of their own")
+    for n_key, list_key, lead in (
+            ("invalid_groups", "invalid",
+             "`parallel:` group(s) in a shape GitHub does not document were read anyway"),
+            ("malformed_groups", "malformed",
+             "`parallel:` group(s) could not be read, so their steps were not checked"),
+            ("skipped_children", "skipped",
+             "entr(ies) inside `parallel:` groups are not steps and were not checked")):
+        n = count(n_key)
+        if n:
+            parts.append(f"**{n} {lead}**{_entries_clause(rec.get(list_key))}")
+    return " · ".join(parts) or None
+
+
+# Plain-English text for each reason code the step walker records
+# (`practice_facts._new_step_stats` lists them); an unknown code is shown as is.
+_PARALLEL_REASONS = {
+    "in_composite": "inside a composite action",
+    "nested": "a group inside a group",
+    "beside_run_uses": "beside `run:`/`uses:` on one step",
+    "not_a_list:mapping": "a single step, not a list",
+    "null": "empty",
+    "cyclic": "contains itself",
+    "too_deep": "nested more than 64 deep",
+    "over_budget": "past the 10,000-entry read limit",
+}
+
+
+def _md_name(name: Any) -> str:
+    """A name safe inside a table cell and the header region: `|` cannot
+    split the row, and a backtick (```) cannot end the header early."""
+    return str(name).replace("|", "\\|").replace("`", "\\`")
+
+
+def _reason_text(code: Any) -> str:
+    code = str(code)
+    if code in _PARALLEL_REASONS:
+        return _PARALLEL_REASONS[code]
+    kind, _, typ = code.partition(":")
+    if kind == "not_a_list" and typ:
+        return f"a {_md_name(typ)}, not a list of steps"
+    if kind == "not_a_step" and typ:
+        return f"a {_md_name(typ)}, not a step"
+    return _md_name(code)
+
+
+def _entries_clause(entries: Any) -> str:
+    """`: `file` job `j` step 2.1 (reason), ... and N more` — table-safe."""
+    items = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+    if not items:
+        return ""
+    shown = []
+    for e in items[:3]:
+        text = f"`{_md_name(e.get('file'))}`"
+        if e.get("job") is not None:
+            text += f" job `{_md_name(e['job'])}`"
+        if e.get("step") is not None:
+            text += f" step {_md_name(e['step'])}"
+        reasons = e.get("reasons") if isinstance(e.get("reasons"), list) else []
+        if reasons:
+            text += " (" + "; ".join(_reason_text(r) for r in reasons) + ")"
+        shown.append(text)
+    more = f" and {len(items) - 3} more" if len(items) > 3 else ""
+    return ": " + ", ".join(shown) + more
+
+
 def _render_header(doc: dict[str, Any]) -> list[str]:
     """Title + provenance table, ci-speedup-house-style: `# <repo> — how does
     your CI configuration score?` over a metadata table naming exactly what
@@ -389,6 +481,9 @@ def _render_header(doc: dict[str, Any]) -> list[str]:
     if "scanned_workflows" in doc:
         n = doc.get("scanned_workflows")
         lines += [f"| **Workflows scanned** | {n} workflow file(s) under `.github/workflows/` |"]
+    par = parallel_steps_disclosure(doc)
+    if par:
+        lines += [f"| **Parallel steps** | {par} |"]
     stamp = doc.get("ci_score")
     if isinstance(stamp, dict) and stamp.get("spec_version"):
         n_checks = len(stamp.get("checks") or [])

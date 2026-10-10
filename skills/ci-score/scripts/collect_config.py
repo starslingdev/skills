@@ -251,12 +251,40 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
     pf_mod = _load_sibling("ci_score_practice_facts", "practice_facts.py")
     cs_mod = _load_sibling("ci_score_ci_score", "ci_score.py")
 
-    doc["practice_facts"] = pf_mod._practice_facts(parsed, root)
-    if logger.isEnabledFor(logging.DEBUG):
-        states = {k: v.get("state") for k, v in doc["practice_facts"].items()}
-        logger.debug("practice facts: %s", states)
-
     try:
+        # The step walk runs INSIDE the scoring try: it is bounded (depth cap +
+        # step budget in practice_facts.py), but any RecursionError /
+        # MemoryError it could still raise must become an honest
+        # ci_score_error marker, never a traceback with no output.
+        doc["practice_facts"] = pf_mod._practice_facts(parsed, root)
+        # Parallel steps (GitHub Actions `parallel:` groups and their wait/cancel
+        # control steps): every check reads the child steps through one walker;
+        # record what it read so the report header can disclose it — including a
+        # `parallel:` that could not be read, or one in a shape GitHub does not
+        # document. Recorded only when the repo has a `parallel:` key, readable
+        # or not: `wait:` / `cancel:` beside `background: true` steps (no group)
+        # changes no read — background steps are ordinary steps — so that
+        # document, like every other, is byte-identical to before.
+        walk = pf_mod._step_walk_stats(parsed, root)
+        if walk["groups"] or walk["malformed_groups"] or walk["invalid_groups"]:
+            doc["data_sources"]["parallel_steps"] = walk
+            logger.debug("parallel steps: %d group(s), %d child step(s), %d control "
+                         "step(s), %d undocumented, %d unreadable, %d non-step "
+                         "entr(ies)", walk["groups"], walk["steps_in_groups"],
+                         walk["control_steps"], walk["invalid_groups"],
+                         walk["malformed_groups"], walk["skipped_children"])
+        # Step lists that are not lists and composite actions that do not
+        # parse read as "no steps"; recorded by name exactly like
+        # workflow_parse_errors, and only when there are any.
+        bad_lists, composite_errors = pf_mod._unreadable_step_sources(parsed, root)
+        if bad_lists:
+            doc["data_sources"]["unreadable_step_lists"] = bad_lists
+        if composite_errors:
+            doc["data_sources"]["composite_parse_errors"] = composite_errors
+        if logger.isEnabledFor(logging.DEBUG):
+            states = {k: v.get("state") for k, v in doc["practice_facts"].items()}
+            logger.debug("practice facts: %s", states)
+
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
         # OD-CS20: a repo whose workflows do NO project build or test (only
         # bots, releases, triage) is refused rather than given an absurd-but-
@@ -267,7 +295,7 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
         doc["automation_only"] = pf_mod._automation_only(parsed, root)
         logger.debug("automation_only=%s", doc["automation_only"])
         stamp = cs_mod.compute_ci_score(doc, spec)
-    except Exception as exc:  # scoring failure → marker, never a partial stamp
+    except Exception as exc:  # scoring failure (RecursionError, MemoryError included) → marker, never a partial stamp
         doc["data_sources"]["ci_score_error"] = f"{type(exc).__name__}: {exc}"
         logger.debug("scoring failed: %s", doc["data_sources"]["ci_score_error"])
         return doc, 3
