@@ -3171,6 +3171,20 @@ def test_leading_setup_prefix_counts_only_the_leading_run():
     assert list(sig) == ["set up job", "actions/checkout"], sig
 
 
+def test_leading_setup_prefix_skips_a_year_one_skipped_setup_step():
+    """A setup step GitHub skipped carries `started_at: 0001-01-01T00:00:00Z`. It
+    stays in the prefix's SHAPE (the job declares it) but adds no seconds: read as a
+    duration it would price the prefix at ~63.9 billion seconds."""
+    job = _jitter_job("lint", [
+        ("Set up job", 2.0), ("Run actions/setup-node@v4", 0.0),
+        ("Run actions/checkout@v4", 3.0), ("Run tests", 5.0)])
+    job["steps"][1]["conclusion"] = "skipped"
+    job["steps"][1]["started_at"] = "0001-01-01T00:00:00Z"
+    sig, _shown, total = cr._leading_setup_prefix(job)
+    assert list(sig) == ["set up job", "actions/setup-node", "actions/checkout"], sig
+    assert total == 5.0, total
+
+
 def test_opt77_prefix_of_purely_human_authored_names_is_not_evidence():
     """A prefix with no recognizable action and no install command is not
     evidence that two jobs do the same setup work — and a group formed on the

@@ -124,7 +124,55 @@ def test_year_one_start_is_dropped_even_without_job_timestamps():
                          "completed_at": _ts(40)})
     durs = dict(cr._step_durations(job))
     assert "no-job-window sentinel" not in durs
+    # Non-vacuous: the real steps are still measured without a job window.
+    assert durs["build"] == 121.0, durs
     assert all(d < 10 * 365 * 86400 for d in durs.values()), durs
+
+
+def test_start_cutoff_is_year_1970_inclusive():
+    """A `started_at` in 1970 is a placeholder (an epoch-zero stamp), not a start;
+    1971 is the first year read as a real start. No job window, so only the
+    sentinel rule is in play."""
+    def step(start: str, end: str) -> dict:
+        return {"name": "s", "conclusion": "success", "started_at": start,
+                "completed_at": end}
+    assert cr._step_duration_s(step("1970-01-01T00:00:00Z", "1970-01-01T00:00:10Z"),
+                               None) is None
+    assert cr._step_duration_s(step("1970-12-31T23:59:50Z", "1971-01-01T00:00:00Z"),
+                               None) is None
+    assert cr._step_duration_s(step("1971-01-01T00:00:00Z", "1971-01-01T00:00:10Z"),
+                               None) == 10.0
+
+
+def _window_job(*steps: dict) -> dict:
+    """A job running from _ts(10) to _ts(110), carrying `steps`."""
+    return {"name": "w", "started_at": _ts(10), "completed_at": _ts(110),
+            "steps": list(steps)}
+
+
+def test_step_starting_within_one_second_before_its_job_is_clamped_to_the_job_start():
+    """Step and job stamps round independently, so a step starting 0.5s before its
+    job is rounding: it keeps its duration, clamped to the job's start. Two seconds
+    before is a step that did not start inside this job: no duration."""
+    j0 = _BASE + _dt.timedelta(seconds=10)
+    half = (j0 - _dt.timedelta(seconds=0.5)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    rounding = {"name": "rounding", "conclusion": "success", "started_at": half,
+                "completed_at": _ts(30)}
+    early = {"name": "early", "conclusion": "success", "started_at": _ts(8),
+             "completed_at": _ts(30)}
+    job = _window_job(rounding, early)
+    assert cr._step_duration_s(rounding, job) == 20.0
+    assert cr._step_duration_s(early, job) is None
+    assert dict(cr._step_durations(job)) == {"rounding": 20.0}
+
+
+def test_reversed_step_timestamps_have_no_duration():
+    """A step whose `completed_at` precedes its `started_at` has no span, with or
+    without the job's window."""
+    step = {"name": "reversed", "conclusion": "success", "started_at": _ts(50),
+            "completed_at": _ts(40)}
+    assert cr._step_duration_s(step, _window_job(step)) is None
+    assert cr._step_duration_s(step, None) is None
 
 
 def test_step_durations_never_exceed_the_job_window():
@@ -227,6 +275,36 @@ def test_decomposition_job_total_stays_inside_the_job_window():
     assert d["skipped_steps"] == 5, d.get("skipped_steps")
 
 
+def test_skipped_steps_counts_only_current_steps_that_never_ran():
+    """`skipped_steps` counts a step the CURRENT workflow version declares and that
+    GitHub skipped on every sampled run. A step skipped in some runs but run in
+    others is in `steps` already; a skipped step only an older version declared
+    (absent from the newest run) is not the job's any more."""
+    def job(i: int, steps: list[tuple[str, int, int, str]]) -> dict:
+        day = _dt.timedelta(days=i)
+        def t(sec: int) -> str:
+            return (_BASE + day + _dt.timedelta(seconds=sec)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+        return {"id": i, "name": "j", "conclusion": "success",
+                "started_at": t(0), "completed_at": t(100),
+                "steps": [{"name": n, "number": k + 1, "conclusion": c,
+                           "started_at": t(a), "completed_at": t(b)}
+                          for k, (n, a, b, c) in enumerate(steps)]}
+    old = [("Set up job", 0, 2, "success"), ("build", 2, 60, "success"),
+           ("retired", 60, 60, "skipped"), ("gate", 60, 60, "skipped"),
+           ("flaky", 60, 60, "skipped")]
+    # The newest run declares as many steps (so it anchors the current version):
+    # `retired` is gone, `new step` is added, and `flaky` ran this time.
+    new = [("Set up job", 0, 2, "success"), ("build", 2, 60, "success"),
+           ("new step", 60, 70, "success"), ("gate", 70, 70, "skipped"),
+           ("flaky", 70, 90, "success")]
+    d = cr._decompose_job_steps([job(1, old), job(2, old), job(3, new)])
+    assert d is not None
+    assert "flaky" in {n for n, _c, _p in d["steps"]}, d["steps"]
+    # Only `gate`: declared now, skipped on every sampled run.
+    assert d["skipped_steps"] == 1, d.get("skipped_steps")
+
+
 def _cluster(build_names: tuple[str, str], tags: tuple[str, str] = ("", "")):
     runs = [[_clang_tidy_job(10 * r + 1, "CM clang-tidy", build_names[0], tags[0]),
              _clang_tidy_job(10 * r + 2, "CM openssl torture 2", build_names[1], tags[1])]
@@ -257,6 +335,49 @@ def test_shared_real_step_finding_cites_only_in_window_numbers():
     assert "`build`" in f["evidence"], f["evidence"]
     wf = (f.get("measured_evidence") or {}).get("waterfall") or {}
     assert wf.get("job_p50_s", 0) <= _JOB_WINDOW_S, wf.get("job_p50_s")
+    # Non-vacuous: the waterfall carries steps for the loop below to bound.
+    assert wf.get("steps"), wf
     for s in wf.get("steps") or []:
         assert s["p50_s"] <= _JOB_WINDOW_S, s
     assert f["runner_min_saving"] < 1519 * 2 * _JOB_WINDOW_S / 60.0, f["runner_min_saving"]
+
+
+# --------------------------------------------------------------------------- #
+# OPT82: the lint step's own p50 reads step durations under the same rule
+# --------------------------------------------------------------------------- #
+
+def _opt82_fixtures():
+    """The OPT82 suite's repo-tree and run builders, loaded under a private name so
+    its tests are not collected twice."""
+    import importlib.util
+    name = "_opt82_fixtures_for_step_timing"
+    mod = sys.modules.get(name)
+    if mod is None:
+        spec = importlib.util.spec_from_file_location(
+            name, Path(__file__).resolve().parent / "test_opt82_type_aware_lint.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    return mod
+
+
+def test_opt82_lint_step_p50_ignores_a_skipped_year_one_lint_step(tmp_path):
+    """In two of three sampled runs GitHub skipped the lint step and stamped its
+    `started_at` at the year-1 placeholder. Those runs carry no lint-step duration;
+    the ceiling is the one run that linted (78s), never a ~63.9-billion-second p50."""
+    import scan
+    fx = _opt82_fixtures()
+    runs = fx._runs(95, 20)
+    for run in runs[:2]:
+        lint = next(s for s in run[0]["steps"] if s["name"] == "Lint")
+        lint["conclusion"] = "skipped"
+        lint["started_at"] = _SENTINEL
+    crit = cr._critical_path(runs)
+    block = scan._read_type_aware_lint(fx._tree(tmp_path))
+    withheld: dict = {}
+    out = cr._detect_opt82_type_aware_lint(
+        ".github/workflows/lint.yml", runs, crit, fx._WF, block, 0, withheld=withheld)
+    assert len(out) == 1, withheld
+    tal = out[0]["type_aware_lint"]
+    assert tal["lint_step_p50_s"] == 78.0, tal["lint_step_p50_s"]
+    assert tal["ceiling_basis"] == "lint_step" and tal["ceiling_s"] == 78.0, tal

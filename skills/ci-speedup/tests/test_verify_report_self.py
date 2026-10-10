@@ -11555,6 +11555,64 @@ def test_stamped_decomposition_step_beyond_its_job_fails(tmp_path: Path):
                     findings=_step_window_doc()) == "SKIP"
 
 
+def test_stamped_step_overrun_inside_the_absolute_bound_fails(tmp_path: Path):
+    """Overruns the 5-day absolute bound alone would let through: a pole step longer
+    than its job's longest sampled run, and a drilled-run timeline step that outlasts,
+    or ends after, that one run."""
+    def pole(step_s: float) -> dict:
+        return {"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                           "job": "CM clang-tidy", "p50_s": 277.0,
+                           "steps": [{"step": "test-linter", "category": "test",
+                                      "p50_s": step_s}]}]}
+
+    check = _run_stamp_check(tmp_path, _step_window_doc(pr_critical_path=pole(400.0)))
+    assert not check.ok and not check.skipped, check
+    assert "outlasts the job's longest sampled run (290s)" in check.detail, check
+    check = _run_stamp_check(tmp_path, _step_window_doc(pr_critical_path=pole(290.5)))
+    assert check.ok and not check.skipped, check
+
+    data = tmp_path / "findings.data"
+    data.mkdir()
+
+    def timeline(start_s: float, dur_s: float) -> dict:
+        (data / "t.steps.json").write_text(json.dumps({
+            "job": "CM clang-tidy", "job_dur_s": 209.0,
+            "steps": [{"name": "test-linter", "number": 44, "start_s": start_s,
+                       "dur_s": dur_s}]}), encoding="utf-8")
+        return {"logs_dir": str(data),
+                "logs": [{"job": "CM clang-tidy", "check": "CM clang-tidy",
+                          "workflow_file": _LINUX, "steps_file": "t.steps.json"}]}
+
+    # A step longer than its run.
+    check = _run_stamp_check(tmp_path, _step_window_doc(data_bundle=timeline(0.0, 250.0)))
+    assert not check.ok and not check.skipped, check
+    assert "outlasts the job's longest sampled run (209s)" in check.detail, check
+    # A step that fits inside its run's length but ends after the run did.
+    check = _run_stamp_check(tmp_path, _step_window_doc(data_bundle=timeline(200.0, 30.0)))
+    assert not check.ok and not check.skipped, check
+    assert "it ends at 230s, after the job's 209s run" in check.detail, check
+    check = _run_stamp_check(tmp_path, _step_window_doc(data_bundle=timeline(170.0, 30.0)))
+    assert check.ok and not check.skipped, check
+
+
+def test_step_citation_without_a_stamped_window_passes(tmp_path: Path):
+    """Findings written before `job_max` was stamped carry no per-job window. Their
+    in-range step figures PASS: a missing window is unknown, never a 0s bound."""
+    doc = _step_window_doc(_opt73(60.0, job_s=250.0))
+    del doc["per_workflow_timing"][_LINUX]["job_max"]
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_verify_report().check_step_cited_within_job_window(fp)
+    assert check.ok and not check.skipped, check
+    # A pole step under a missing window is bounded by the absolute job limit only.
+    doc["pr_critical_path"] = {"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                                          "job": "CM clang-tidy", "p50_s": 277.0,
+                                          "steps": [{"step": "build", "category": "build",
+                                                     "p50_s": 400.0}]}]}
+    check = _run_stamp_check(tmp_path, doc)
+    assert check.ok and not check.skipped, check
+
+
 def _declared_timeline_doc(logs_dir: str) -> dict:
     return _step_window_doc(
         pr_critical_path={"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
@@ -11651,6 +11709,12 @@ def test_conditional_step_longer_than_the_job_median_is_not_a_failure(tmp_path: 
     decomp = cr._decompose_job_steps([r[0] for r in runs],
                                      bimodal=crit["job_bimodal"].get("test"))
     assert crit["job_p50"]["test"] == 16.0 and not crit["job_bimodal"]
+    # The bound the checks read: the job's longest sampled run (the two 296s runs
+    # that ran `run tests`), stamped for every job and never below its p50.
+    assert crit["job_max"]["test"] == 296.0, crit["job_max"]
+    assert set(crit["job_max"]) == set(crit["job_p50"]), crit["job_max"]
+    for job_name, p50 in crit["job_p50"].items():
+        assert crit["job_max"][job_name] >= p50, (job_name, crit["job_max"], p50)
     assert ("run tests", "test", 280.0) in decomp["steps"]
     steps = [{"step": n, "category": c, "p50_s": p} for n, c, p in decomp["steps"]]
     doc = {"per_workflow_timing": {"ci.yml": crit},
