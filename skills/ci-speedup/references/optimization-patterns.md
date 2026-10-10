@@ -4952,7 +4952,7 @@ These verdicts are counted only, never listed: no candidate step; none of the st
 
 - orgorgtheorg/orgorg (2026-05): `npx prettier --check` 24.3s average became `oxfmt --check` 5.7s (4.27×); 27 files (about 1% of the tree) reformatted in their own commit.
 - Kismet: lint 139s to 3s after ESLint → oxlint, rules carried over at the same severity and the custom rule kept; type-check 440s to 14s with TypeScript 7 plus a runner move (TypeScript 7 alone on the same runner: 177s to 30s cold, 26s to 11s warm), with a 12 GB memory override removed.
-- Linear ([CI bottleneck reworked](https://linear.app/now/ci-bottleneck-reworked)): tsgo cut the weekly median type-check 73%; AST-only lint rules cut API lint 68% and full-repo lint 55%, and Oxlint came after.
+- Linear, ["AI coding has made CI a bottleneck, so we reworked ours to keep up"](https://linear.app/now/ci-bottleneck-reworked) (2026-09-21): tsgo cut the weekly median type-check 73%; AST-only lint rules cut API lint 68% and full-repo lint 55%, and Oxlint came after.
 
 **Mandatory guardrail (this pattern is invalid without it)**: a benchmark of both tools on the same commit and runner class, and a diff of their output, before the old tool is removed; the dual-run shape whenever an ESLint gate in the detection table fires.
 
