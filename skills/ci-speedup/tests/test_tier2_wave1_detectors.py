@@ -9974,6 +9974,46 @@ def test_opt79_withholds_a_cache_and_install_that_run_side_by_side():
     assert block is None and gate == "cache_and_install_run_in_the_same_parallel_group"
 
 
+_OPT79_CACHE_STEP = {"uses": "actions/cache@v4",
+                     "with": {"path": "node_modules",
+                              "key": "node-modules-${{ hashFiles('**/package-lock.json') }}"}}
+
+
+@pytest.mark.parametrize("gate, steps", [
+    ("cache_and_install_run_in_the_same_parallel_group",
+     [{"parallel": [_OPT79_CACHE_STEP, {"run": "npm ci"}]}, {"run": "npm test"}]),
+    ("cache_restore_runs_in_a_parallel_group_or_background",
+     [dict(_OPT79_CACHE_STEP, background=True), {"run": "npm ci"}, {"run": "npm test"}]),
+    ("install_runs_in_a_parallel_group_or_background",
+     [_OPT79_CACHE_STEP, {"parallel": [{"run": "npm ci"}, {"run": "npm run docs"}]},
+      {"run": "npm test"}]),
+    ("job_has_an_unreadable_parallel_group",
+     [_OPT79_CACHE_STEP, {"parallel": "npm ci"}, {"run": "npm test"}]),
+])
+def test_opt79_grouped_cache_is_held_back_end_to_end(tmp_path, gate, steps):
+    """T9: the measured sample, through the detector, into the withheld list,
+    rendered as the held-back row, accepted by the verifier; and the verifier
+    rejects the row with its reason swapped for the gate name."""
+    jpr, logs = _opt79_sample()
+    held: list = []
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), _opt79_wf(steps=steps), 100, 0,
+        logs_by_job_id=logs, withheld_candidates=held)
+    assert out == [], out
+    assert [c["gate"] for c in held] == [gate], held
+    doc = {"data_sources": {}, bp._OPT79_WITHHELD_DOC_KEY: held}
+    fp = tmp_path / "findings.json"
+    import json as _json
+    fp.write_text(_json.dumps(doc), encoding="utf-8")
+    footer = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    phrase = bp._OPT79_HELD_BACK_REASONS[gate]
+    assert phrase in footer, footer
+    vr = _load_verify_report_for_opt79()
+    report = "## 🗄️ Data sources\n" + footer
+    assert vr.check_coverage_disclosed(report, fp).ok
+    assert not vr.check_coverage_disclosed(report.replace(phrase, gate), fp).ok
+
+
 @pytest.mark.parametrize("label, install_steps", [
     ("install in a group after the cache",
      [{"parallel": [{"run": "npm ci"}, {"run": "./long-build.sh"}]}]),
