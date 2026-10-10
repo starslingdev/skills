@@ -729,8 +729,8 @@ def test_p14_9_concurrency_arms_a_local_action_and_a_repository_checkout(
     tmp_path: Path, executes: str, key: str, value: str,
 ) -> None:
     """Every arm of the concurrent loop: a local `./` action, a
-    self-repository `$/` action (its definition is the base repository's,
-    its steps run on the fork's tree) and a `run:` step as the executing
+    self-repository `$/` action (its definition is the base repository's;
+    it runs on the fork's tree) and a `run:` step as the executing
     step, and a head checkout named by `repository:`. Each is written ABOVE
     the checkout in one group; the flat negative control also pins that the
     same step written before the checkout, outside a group, stays silent."""

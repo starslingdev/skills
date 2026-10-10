@@ -5006,8 +5006,8 @@ def _job_checkout_head_then_executes(
     `actions/checkout` of the attacker's head ref FOLLOWED BY, or possibly
     running at the same time as (a `parallel:` sibling, a `background:` step
     still running), a step that executes from the working tree (`run:`, a
-    local `./action`, or a self-repository `$/action`, whose own steps run in
-    the working directory the fork's tree now occupies).
+    local `./action`, or a self-repository `$/action`, which runs in the
+    working directory the fork's tree now occupies).
 
     The execution leg is a deliberate, documented over-approximation: a
     post-checkout `run:` step almost always executes tree-controlled content
