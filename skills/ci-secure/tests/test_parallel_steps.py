@@ -1099,6 +1099,67 @@ def test_a_group_key_the_scan_does_not_model_is_disclosed(
     assert stats.malformed == want, stats
 
 
+_SELF_REFERENCING_STEPS = """\
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps: &s
+      - run: echo hi
+      - parallel: *s
+      - parallel: *s
+"""
+
+
+def _exponential_steps(levels: int) -> str:
+    """No cycle, but each level holds the one below twice: 2**levels leaves
+    from a few dozen lines of text."""
+    out = ["on: push", "x-l0: &l0", "  - run: echo hi"]
+    for n in range(1, levels + 1):
+        out += [f"x-l{n}: &l{n}", f"  - parallel: *l{n - 1}",
+                f"  - parallel: *l{n - 1}"]
+    out += ["jobs:", "  a:", "    runs-on: ubuntu-latest",
+            f"    steps: *l{levels}", ""]
+    return "\n".join(out)
+
+
+_WALK_BOTH = """\
+import sys, yaml
+sys.path.insert(0, sys.argv[1])
+from _scan_import import load_scan
+scan = load_scan()
+text = open(sys.argv[2]).read()
+job = yaml.safe_load(text)["jobs"]["a"]
+stats = scan._StepWalkStats()
+leaves = [s.step.get("run") for s in scan._iter_job_steps(job, stats)]
+steps_node = scan._node_keys(scan._job_nodes(text)["a"])["steps"]
+nodes = list(scan._iter_step_nodes(steps_node))
+print(len(leaves), len(nodes), sorted({s for _, s in stats.malformed or []}))
+"""
+
+
+@pytest.mark.parametrize("name", ["cycle", "exponential"])
+def test_both_walkers_finish_on_alias_bombs_and_disclose_it(
+    tmp_path: Path, name: str,
+) -> None:
+    """A step list that holds itself through an alias, or one that doubles
+    at every level, must neither hang the scan nor read as clean: both
+    walkers stop at the same point and the walk records why."""
+    text = (_SELF_REFERENCING_STEPS if name == "cycle"
+            else _exponential_steps(40))
+    wf = tmp_path / "a.yml"
+    wf.write_text(text)
+    script = tmp_path / "walk.py"
+    script.write_text(_WALK_BOTH)
+    out = subprocess.run(
+        [sys.executable, str(script), _TESTS_DIR, str(wf)],
+        capture_output=True, text=True, timeout=20, check=True).stdout.split(
+        " ", 2)
+    assert out[0] == out[1], out
+    want = scan._GROUP_CYCLE if name == "cycle" else scan._GROUP_OVER_BUDGET
+    assert want in out[2], out
+
+
 def test_a_pin_with_no_known_line_is_treated_as_racing() -> None:
     """P14.24: a pin suppresses a fetch only when it provably lands between
     the fetch and the execution. A pin whose line is unknown is not provably

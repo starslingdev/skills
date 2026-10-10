@@ -1674,16 +1674,53 @@ def _iter_job_steps(
     """
     steps = job.get("steps") if isinstance(job, dict) else None
     if isinstance(steps, list):
-        yield from _iter_step_list(steps, (), (), stats, 0)
+        yield from _iter_step_list(steps, (), (), stats, 0,
+                                   _WalkGuard({id(steps)}))
+
+
+# A YAML alias can make a step list hold itself (`steps: &s [..., {parallel:
+# *s}]`), or hold the level below it twice at every level: the depth cap alone
+# bounds neither (2**64 leaves). Each walk of one job therefore refuses to
+# re-enter a list already on its path, and stops descending once it has
+# visited `_WALK_MAX_ENTRIES` entries. Both walkers apply the same guard at the
+# same points, entry for entry, so they stay in lockstep.
+_WALK_MAX_ENTRIES = 10_000
+_GROUP_CYCLE = "cycle"
+_GROUP_OVER_BUDGET = "over-budget"
+
+
+@dataclass
+class _WalkGuard:
+    on_path: set[int]
+    entries: int = 0
+    over_budget_noted: bool = False
+
+    def blocked(self, children: Any) -> str | None:
+        """Why this group's children must not be descended, if they must not."""
+        if id(children) in self.on_path:
+            return _GROUP_CYCLE
+        if self.entries >= _WALK_MAX_ENTRIES:
+            return _GROUP_OVER_BUDGET
+        return None
+
+
+def _note_blocked(stats: _StepWalkStats | None, path: tuple[int, ...],
+                  guard: _WalkGuard, why: str) -> None:
+    if why == _GROUP_OVER_BUDGET:
+        if guard.over_budget_noted:         # one note per walk, not thousands
+            return
+        guard.over_budget_noted = True
+    _note_malformed(stats, path, why)
 
 
 def _iter_step_list(
     steps: list[Any], prefix: tuple[int, ...],
     groups: tuple[dict[str, Any], ...], stats: _StepWalkStats | None,
-    depth: int,
+    depth: int, guard: _WalkGuard,
 ) -> Iterator[_JobStep]:
     group = groups[-1] if groups else None
     for i, step in enumerate(steps):
+        guard.entries += 1
         path = prefix + (i,)
         if not isinstance(step, dict):
             if group is not None:
@@ -1700,9 +1737,13 @@ def _iter_step_list(
                 _note_malformed(stats, path, _GROUP_NOT_A_LIST)
             elif depth >= _WALK_MAX_DEPTH:
                 _note_malformed(stats, path, _GROUP_TOO_DEEP)
+            elif (why := guard.blocked(children)) is not None:
+                _note_blocked(stats, path, guard, why)
             else:
+                guard.on_path.add(id(children))
                 yield from _iter_step_list(children, path, groups + (step,),
-                                           stats, depth + 1)
+                                           stats, depth + 1, guard)
+                guard.on_path.discard(id(children))
             continue
         if _is_control_step(step):
             if stats is not None:
@@ -1729,10 +1770,14 @@ def _iter_step_list(
                 _note_malformed(stats, path, _GROUP_ALSO_A_STEP_NOT_A_LIST)
             elif depth >= _WALK_MAX_DEPTH:
                 _note_malformed(stats, path, _GROUP_ALSO_A_STEP_TOO_DEEP)
+            elif (why := guard.blocked(children)) is not None:
+                _note_blocked(stats, path, guard, why)
             else:
                 _note_malformed(stats, path, _GROUP_ALSO_A_STEP)
+                guard.on_path.add(id(children))
                 yield from _iter_step_list(children, path, groups + (step,),
-                                           stats, depth + 1)
+                                           stats, depth + 1, guard)
+                guard.on_path.discard(id(children))
 
 
 def _job_steps(job: Any) -> list[dict[str, Any]]:
@@ -1872,28 +1917,41 @@ def _lines_concurrent(spans: list[_StepSpan], a: int, b: int) -> bool:
             and sa.job == sb.job and _steps_concurrent(sa.timing, sb.timing))
 
 
-def _iter_step_nodes(steps_node: Any, depth: int = 0) -> Iterator[Any]:
+def _iter_step_nodes(steps_node: Any, depth: int = 0,
+                     guard: _WalkGuard | None = None) -> Iterator[Any]:
     """The composed-node twin of `_iter_job_steps`: every leaf step MappingNode
     of a `steps:` SequenceNode, in order, descending into `parallel:` lists, so
     a child step's source line is the child's own. Must yield exactly the
     leaves `_iter_step_list` yields, in the same order, with the same depth
-    cap: line attribution pairs the two by position."""
+    cap and the same `_WalkGuard` (cycle and entry budget): line attribution
+    pairs the two by position."""
     if not isinstance(steps_node, yaml.SequenceNode):
         return
+    if guard is None:
+        guard = _WalkGuard({id(steps_node)})
+
+    def _descend(children: Any) -> Iterator[Any]:
+        if not isinstance(children, yaml.SequenceNode) \
+                or depth >= _WALK_MAX_DEPTH or guard.blocked(children):
+            return
+        guard.on_path.add(id(children))
+        yield from _iter_step_nodes(children, depth + 1, guard)
+        guard.on_path.discard(id(children))
+
     for node in steps_node.value:
+        guard.entries += 1
         if not isinstance(node, yaml.MappingNode):
             continue
         keys = _node_keys(node)
         if _PARALLEL_KEY in keys and "run" not in keys and "uses" not in keys:
-            if depth < _WALK_MAX_DEPTH:
-                yield from _iter_step_nodes(keys[_PARALLEL_KEY], depth + 1)
+            yield from _descend(keys[_PARALLEL_KEY])
             continue
         if "run" not in keys and "uses" not in keys \
                 and any(k in keys for k in _PARALLEL_CONTROL_KEYS):
             continue
         yield node
-        if _PARALLEL_KEY in keys and depth < _WALK_MAX_DEPTH:
-            yield from _iter_step_nodes(keys[_PARALLEL_KEY], depth + 1)
+        if _PARALLEL_KEY in keys:
+            yield from _descend(keys[_PARALLEL_KEY])
 
 
 def _node_keys(node: Any) -> dict[Any, Any]:
@@ -1987,6 +2045,14 @@ _GROUP_GAP_SENTENCE = {
         "`if:`, `name:`, `id:`, `continue-on-error:` or `background:`; its "
         "child steps were scanned, but what that key does to them was not "
         "modelled — review it manually"),
+    _GROUP_CYCLE: (
+        "is a `parallel:` group whose steps are, through a YAML alias, a list "
+        "that already holds this group, so it was not entered again; it "
+        + _NOT_READ_AS_STEPS),
+    _GROUP_OVER_BUDGET: (
+        f"is where the walk of this job passed {_WALK_MAX_ENTRIES:,} step "
+        "entries (YAML aliases can repeat one group many times), so this "
+        "group and every later group in the job " + _NOT_READ_AS_STEPS),
     _STEP_BACKGROUND_EXPRESSION: (
         "has a `background:` value chosen at run time; it was scanned, and "
         "treated as running in the background until a top-level `wait:` "
