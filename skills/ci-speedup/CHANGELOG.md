@@ -1000,6 +1000,10 @@ unversioned and updates by reinstall from `main`.
   references too: a composite action that calls another local action
   running `git diff origin/main...HEAD` no longer leaves `fetch-depth: 0`
   looking removable, and an unreadable nested reference fails closed.
+  Nested references written with a quoted `"uses":` key are followed too,
+  and a nested reference that resolves outside the repository root
+  (`$/../x`, `$//abs`) or cannot be opened at all fails closed in every
+  local-action read instead of reading as clean or stopping the scan.
 
 - **2026-10-10** — **A report is no longer refused because a modeled saving
   was checked against the wrong job.** On curl/curl the final check blocked

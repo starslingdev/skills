@@ -28,6 +28,7 @@ with ci-speedup at runtime.
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -388,10 +389,10 @@ def _remote_reusable_refs(parsed: list[tuple[str, dict, str]]) -> list[str]:
     for _rel, doc, _raw in parsed:
         for job in _wf_jobs(doc).values():
             uses = job.get("uses")
-            # A self-repository `$/…` call never reaches the append: GitHub
-            # rejects an `@ref` suffix on `$/` ("must not include an `@{ref}`
-            # suffix"), so the `"@" in uses` guard already excludes it.
-            if isinstance(uses, str) and not uses.startswith("./") and "@" in uses:
+            # A self-repository `$/…` call is local, never remote. GitHub
+            # rejects an `@ref` suffix on `$/`, but a malformed one must still
+            # stay out of this list, where it could flip the no-CI refusal.
+            if isinstance(uses, str) and not _is_local_uses(uses) and "@" in uses:
                 refs.append(uses.split("@")[0])
     return sorted(set(refs))
 
@@ -627,10 +628,13 @@ def _step_uses(step: dict) -> tuple[str, str] | None:
 #
 # CANONICAL SOURCE: `skills/ci-speedup/scripts/scan.py` — `_GIT_HISTORY_RE`,
 # `_HISTORY_JOB_NAME_RE`, `_LINE_CONTINUATION_RE`, `_has_git_history_op`,
-# `_NESTED_LOCAL_USES_RE`, `_MAX_LOCAL_ACTION_DEPTH`, `_read_local_history_file`,
-# `_local_action_needs_history`, `_index_local_git_actions` and
-# `_job_needs_git_history`. What follows is a
+# `_NESTED_LOCAL_USES_RE`, `_MAX_LOCAL_ACTION_DEPTH`, `_local_ref_path`,
+# `_read_local_history_file`, `_local_action_needs_history`,
+# `_index_local_git_actions` and `_job_needs_git_history`. What follows is a
 # deliberate VERBATIM COPY of that predicate, not an import.
+# `_LOCAL_USES_PREFIXES` and `_is_local_uses` are duplicated separately (they
+# sit with the pinning helpers above, not in this block), copied from the same
+# canonical source.
 #
 # ONE KNOWN DIVERGENCE: the step reader is NOT part of the copy. Here
 # `_job_steps` routes through `_walk_steps`; ci-speedup walks through its own
@@ -733,23 +737,41 @@ def _step_uses_ref(step: dict) -> str:
 
 # A local `uses:` reference written inside an action or reusable-workflow file
 # (`./…` or the self-repository `$/…`), quoted or bare.
-_NESTED_LOCAL_USES_RE = re.compile(r"uses:\s*['\"]?((?:\./|\$/)[^\s'\"#]+)")
+_NESTED_LOCAL_USES_RE = re.compile(r"['\"]?uses['\"]?:\s*['\"]?((?:\./|\$/)[^\s'\"#]+)")
 # How many local references deep the history read follows a chain before it
 # gives up. Past the cap the chain is unproven, so it fails CLOSED.
 _MAX_LOCAL_ACTION_DEPTH = 16
 
 
+def _local_ref_path(root: Path, ref: str) -> "Path | None":
+    """`<root>/<ref[2:]>` for a local ref (`./…` or `$/…`), or None when that
+    path lands outside the repository root (`$/../x`, `$//abs`): a file there
+    is not this repository's, so the caller fails CLOSED on it."""
+    base = root / ref[2:]  # strip leading "./" or "$/"
+    try:
+        root_n = os.path.normpath(os.path.abspath(root))
+        base_n = os.path.normpath(os.path.abspath(base))
+        if os.path.commonpath([root_n, base_n]) != root_n:
+            return None
+    except ValueError:
+        return None
+    return base
+
+
 def _read_local_history_file(root: Path, ref: str) -> "str | None":
     """Text of the file a local ref names: `<root>/<ref[2:]>` itself when it is
     a `.yml`/`.yaml` (a reusable workflow), else that directory's `action.yml`
-    or `action.yaml`. None when no candidate file is readable."""
-    base = root / ref[2:]  # strip leading "./" or "$/"
+    or `action.yaml`. None when no candidate file is readable, or when the
+    ref resolves outside the repository root."""
+    base = _local_ref_path(root, ref)
+    if base is None:
+        return None
     candidates = [base] if base.suffix in (".yml", ".yaml") else [
         base / "action.yml", base / "action.yaml"]
     for cand in candidates:
         try:
             return cand.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except (OSError, ValueError):   # ValueError: an embedded NUL byte
             continue
     return None
 
@@ -804,7 +826,8 @@ def _job_needs_git_history(job: dict, job_name: str = "",
     if _has_git_history_op(blob) or _has_git_history_op(uses_blob):
         return True
     # A local composite action the job invokes may run the git op internally
-    # (the workflow yaml shows only `uses: ./…`). Consult the per-scan index.
+    # (the workflow yaml shows only `uses: ./…` or `uses: $/…`). Consult the
+    # per-scan index.
     if local_history_actions:
         for s in _job_steps(job):
             if _step_uses_ref(s).split("@")[0].strip() in local_history_actions:

@@ -110,3 +110,53 @@ def test_opt80_reads_the_abort_from_a_self_repository_composite(tmp_path):
     job = {"steps": [{"uses": "$/.github/actions/net"}, co, {"run": "npm test"}]}
     assert cr._opt80_retry_already_configured(
         {"jobs": {"build": job}}, job, tmp_path, checkout_step=co) is True
+
+
+# A quoted `"uses":` key (flow-style YAML) names the same nested reference as
+# a bare `uses:`; every nested-follow read must see it.
+_QUOTED = '    - "uses": "$/.github/actions/inner"\n'
+
+
+def test_payload_walk_follows_a_quoted_uses_key(tmp_path):
+    _composite(tmp_path, "outer", _QUOTED)
+    _composite(tmp_path, "inner", "    - run: ls vendor/inner-marker\n      shell: bash\n")
+    job = {"steps": [{"uses": "./.github/actions/outer"}]}
+    idx = scan._index_local_action_text(tmp_path, _parsed({"a": job}))
+    assert "vendor/inner-marker" in (idx.get("./.github/actions/outer") or ""), idx
+
+
+def test_opt80_follows_a_quoted_uses_key(tmp_path):
+    _composite(tmp_path, "outer", _QUOTED)
+    _composite(tmp_path, "inner", "    - uses: actions/checkout@v4\n")
+    text = cr._opt80_local_action_text(tmp_path, "./.github/actions/outer")
+    assert text is not None and "actions/checkout" in text, text
+
+
+def _outside_and_repo(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.joinpath("action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - uses: actions/checkout@v4\n",
+        encoding="utf-8")
+    return tmp_path / "repo", outside
+
+
+@pytest.mark.parametrize("escape", ["../outside", "ABS"])
+def test_a_ref_resolving_outside_the_root_fails_closed(tmp_path, escape):
+    root, outside = _outside_and_repo(tmp_path)
+    ref = "$/" + (outside.as_posix() if escape == "ABS" else escape)
+    _composite(root, "outer", f"    - uses: {ref}\n")
+    job = {"steps": [{"uses": "./.github/actions/outer"}]}
+    assert scan._read_local_action(root, ref) is None
+    assert scan._index_local_action_text(root, _parsed({"a": job})) == {
+        "./.github/actions/outer": None}
+    assert cr._opt80_local_action_text(root, ref) is None
+    assert cr._opt80_local_action_text(root, "./.github/actions/outer") is None
+
+
+def test_an_embedded_nul_in_a_nested_ref_fails_closed_without_crashing(tmp_path):
+    _composite(tmp_path, "outer", "    - uses: ./.github/actions/in\x00ner\n")
+    job = {"steps": [{"uses": "./.github/actions/outer"}]}
+    assert scan._index_local_action_text(tmp_path, _parsed({"a": job})) == {
+        "./.github/actions/outer": None}
+    assert cr._opt80_local_action_text(tmp_path, "./.github/actions/outer") is None

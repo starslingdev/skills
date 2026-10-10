@@ -380,11 +380,14 @@ _GIT_HISTORY_RE = re.compile(
 _HISTORY_JOB_NAME_RE = re.compile(
     r"changeset|changelog|release|version|snapshot|publish", re.I)
 
-# Local composite actions (`uses: ./.github/actions/foo`) whose action.yml runs a
-# git-history op. A job that invokes one needs `fetch-depth: 0` even though no
-# git op appears in the WORKFLOW yaml — the op is hidden in the action (mastra's
-# `./.github/actions/turbo-changed` runs `git checkout origin/main`). Populated
-# once per scan() from the referenced action files; consulted by
+# Local composite actions (`uses: ./.github/actions/foo` or the self-repository
+# `uses: $/.github/actions/foo`) whose action.yml runs a git-history op, directly
+# or through a nested local reference. A job that invokes one needs
+# `fetch-depth: 0` even though no git op appears in the WORKFLOW yaml — the op
+# is hidden in the action (mastra's `./.github/actions/turbo-changed` runs
+# `git checkout origin/main`). An action that cannot be read, or a chain deeper
+# than `_MAX_LOCAL_ACTION_DEPTH`, is included too (fail closed). Populated once
+# per scan() from the referenced action files; consulted by
 # `_job_needs_git_history` so OPT28 never recommends shallowing such a job.
 _GIT_HISTORY_LOCAL_ACTIONS: set[str] = set()
 
@@ -416,23 +419,41 @@ def _has_git_history_op(text: str) -> bool:
 
 # A local `uses:` reference written inside an action or reusable-workflow file
 # (`./…` or the self-repository `$/…`), quoted or bare.
-_NESTED_LOCAL_USES_RE = re.compile(r"uses:\s*['\"]?((?:\./|\$/)[^\s'\"#]+)")
+_NESTED_LOCAL_USES_RE = re.compile(r"['\"]?uses['\"]?:\s*['\"]?((?:\./|\$/)[^\s'\"#]+)")
 # How many local references deep the history read follows a chain before it
 # gives up. Past the cap the chain is unproven, so it fails CLOSED.
 _MAX_LOCAL_ACTION_DEPTH = 16
 
 
+def _local_ref_path(root: Path, ref: str) -> "Path | None":
+    """`<root>/<ref[2:]>` for a local ref (`./…` or `$/…`), or None when that
+    path lands outside the repository root (`$/../x`, `$//abs`): a file there
+    is not this repository's, so the caller fails CLOSED on it."""
+    base = root / ref[2:]  # strip leading "./" or "$/"
+    try:
+        root_n = os.path.normpath(os.path.abspath(root))
+        base_n = os.path.normpath(os.path.abspath(base))
+        if os.path.commonpath([root_n, base_n]) != root_n:
+            return None
+    except ValueError:
+        return None
+    return base
+
+
 def _read_local_history_file(root: Path, ref: str) -> "str | None":
     """Text of the file a local ref names: `<root>/<ref[2:]>` itself when it is
     a `.yml`/`.yaml` (a reusable workflow), else that directory's `action.yml`
-    or `action.yaml`. None when no candidate file is readable."""
-    base = root / ref[2:]  # strip leading "./" or "$/"
+    or `action.yaml`. None when no candidate file is readable, or when the
+    ref resolves outside the repository root."""
+    base = _local_ref_path(root, ref)
+    if base is None:
+        return None
     candidates = [base] if base.suffix in (".yml", ".yaml") else [
         base / "action.yml", base / "action.yaml"]
     for cand in candidates:
         try:
             return cand.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except (OSError, ValueError):   # ValueError: an embedded NUL byte
             continue
     return None
 
@@ -486,7 +507,8 @@ def _job_needs_git_history(job: dict, job_name: str = "") -> bool:
     if _has_git_history_op(blob) or _has_git_history_op(uses_blob):
         return True
     # A local composite action the job invokes may run the git op internally
-    # (the workflow yaml shows only `uses: ./…`). Consult the per-scan index.
+    # (the workflow yaml shows only `uses: ./…` or `uses: $/…`). Consult the
+    # per-scan index.
     if _GIT_HISTORY_LOCAL_ACTIONS:
         for s in _steps(job):
             if _uses(s).split("@")[0].strip() in _GIT_HISTORY_LOCAL_ACTIONS:
@@ -653,13 +675,14 @@ def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
 # objects that are ALREADY local, so it downloads nothing and flagging it would
 # assert a network payload we never established.
 _LFS_RUN_RE = re.compile(r"git\s+lfs\s+(pull|fetch)\b", re.I)
-_LOCAL_USES_RE = re.compile(r"uses:\s*['\"]?((?:\./|\$/)[^\s'\"#]+)")
+_LOCAL_USES_RE = re.compile(r"['\"]?uses['\"]?:\s*['\"]?((?:\./|\$/)[^\s'\"#]+)")
 
 # Populated once per scan() from the repo root (see the scan() wiring below).
 _SUBMODULE_PATHS: list[str] = []
 _LFS_PATH_HINTS: list[str] = []
-# Local `uses: ./…` ref → its action file text (plus the text of every local
-# action it transitively invokes), or None when any link is unreadable.
+# Local `uses: ./…` / `uses: $/…` ref → its action file text (plus the text of
+# every local action it transitively invokes), or None when any link is
+# unreadable.
 _LOCAL_ACTION_TEXT: dict[str, "str | None"] = {}
 
 
@@ -719,14 +742,17 @@ def _parse_lfs_attributes(text: str) -> list[str]:
 
 def _read_local_action(root: Path, ref: str) -> "str | None":
     """The action file's text for a local `uses: ./…` (or self-repository
-    `uses: $/…`) ref, or None when no candidate file is readable."""
-    base = root / ref[2:]
+    `uses: $/…`) ref, or None when no candidate file is readable or the ref
+    resolves outside the repository root."""
+    base = _local_ref_path(root, ref)
+    if base is None:
+        return None
     candidates = [base] if base.suffix in (".yml", ".yaml") else [
         base / "action.yml", base / "action.yaml"]
     for cand in candidates:
         try:
             return cand.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except (OSError, ValueError):   # ValueError: an embedded NUL byte
             continue
     return None
 

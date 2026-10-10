@@ -121,6 +121,30 @@ def test_fires_on_pull_request_target_head_and_self_repository_action(tmp_path):
     assert len(hits) == 1
 
 
+def test_self_repository_evidence_claims_only_what_is_known(tmp_path):
+    # Where the definition loads from depends on the trigger (the merge ref,
+    # fork-controlled, on pull_request_review), and only a composite action
+    # has steps of its own; the evidence must not assert either beyond that.
+    hits = _hits(tmp_path, """\
+        on: pull_request_review
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{ github.event.pull_request.head.sha }}
+              - uses: $/.github/actions/build
+    """)
+    assert len(hits) == 1
+    ev = hits[0].evidence
+    assert ("a `$/` action: it runs in the working directory, which now holds "
+            "the fork's checked-out tree; its definition comes from the running "
+            "commit, which on `pull_request_target`/`workflow_run` is the base "
+            "repository's") in ev, ev
+    assert "its own steps" not in ev, ev
+
+
 def test_silent_on_a_self_repository_action_before_the_head_checkout(tmp_path):
     # Order still decides for `$/`: written (and run) before the head
     # checkout, the action's steps see the base tree, not the fork's.

@@ -146,13 +146,16 @@ entries are dated (UTC). Format loosely follows
   executed with privileges, exactly like a `./` action or a `run:` step.** A
   `$/` reference loads the action's definition from the commit the workflow
   runs at, so on `pull_request_target` / `workflow_run` the definition is the
-  base repository's even after the head checkout, but the action's own `run:`
-  steps execute in the job's working directory, where the fork's tree now
-  sits; where the definition loads from does not change what it runs on.
+  base repository's even after the head checkout, but the action runs in the
+  job's working directory, where the fork's tree now sits (a composite's own
+  `run:` steps execute there); where the definition loads from does not
+  change what it runs on.
   Verdict change: a repository that uses a `$/` action after a head checkout
   on these triggers now gets this finding, and its evidence names the `$/`
-  action and why it runs on the fork's tree. Workflows written before July
-  2026 cannot use the syntax, so earlier results are unchanged. The
+  action, that it runs in the working directory holding the fork's tree, and
+  that its definition comes from the running commit (the base repository's
+  on `pull_request_target` / `workflow_run`). Workflows written before
+  2026-07-30 cannot use the syntax, so earlier results are unchanged. The
   impostor-commit check still never reads a `$/` reference as a pinned
   action, and the report's "What is not scanned" row now names the `$/`
   spelling too.

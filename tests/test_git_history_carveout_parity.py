@@ -424,6 +424,14 @@ def _nested_tree(tmp_path: Path) -> None:
     _composite(tmp_path, "outer-self", "    - uses: $/.github/actions/inner\n")
     # a `./` outer whose `$/` inner cannot be read (fail closed)
     _composite(tmp_path, "self-dangling", "    - uses: $/.github/actions/missing\n")
+    # a quoted `"uses":` key (flow-style YAML) naming a history-running inner
+    _composite(tmp_path, "quoted-key", '    - "uses": "$/.github/actions/inner"\n')
+    # nested refs that resolve OUTSIDE the repository root: unproven, fail closed
+    _composite(tmp_path, "escapes-up", "    - uses: $/../outside\n")
+    _composite(tmp_path, "escapes-abs",
+               f"    - uses: $/{(tmp_path.parent / 'outside').as_posix()}\n")
+    # an embedded NUL in a nested ref cannot be opened: fail closed, never crash
+    _composite(tmp_path, "nul-ref", "    - uses: ./.github/actions/in\x00ner\n")
 
 
 # (outer ref a workflow step names, must the history index hold it?)
@@ -434,19 +442,32 @@ _NESTED_ROWS = [
     ("$/.github/actions/self-outer", True),    # `$/` outer, `./` inner
     ("./.github/actions/outer-self", True),    # `./` outer, `$/` inner
     ("./.github/actions/self-dangling", True), # unreadable `$/` inner: fail closed
+    ("./.github/actions/quoted-key", True),    # quoted `"uses":` key is followed
+    ("./.github/actions/escapes-up", True),    # `$/../x` leaves the root: fail closed
+    ("./.github/actions/escapes-abs", True),   # `$//abs` leaves the root: fail closed
+    ("./.github/actions/nul-ref", True),       # unopenable ref: fail closed
 ]
 
 
 @pytest.mark.parametrize("ref,expected", _NESTED_ROWS,
                          ids=["nested-history", "nested-unreadable",
                               "cycle-no-history", "self-prefix-outer",
-                              "self-prefix-inner", "self-prefix-inner-unreadable"])
+                              "self-prefix-inner", "self-prefix-inner-unreadable",
+                              "quoted-uses-key", "escapes-root-up",
+                              "escapes-root-absolute", "nul-in-ref"])
 def test_nested_local_references_are_followed(sides, tmp_path: Path, ref, expected):
     """A composite action that delegates to ANOTHER local action: the history
     op (or the unreadable file) can sit one reference deeper than the action
     the workflow step names. Both engines must follow the chain, fail closed on
     an unreadable link, and terminate on a cycle."""
     speed, score = sides
+    tmp_path = tmp_path / "repo"
+    # A clean action outside the repository root, so an escaping ref that is
+    # followed reads as clean (fail open) instead of failing closed.
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(parents=True)
+    outside.joinpath("action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - run: npm ci\n      shell: bash\n")
     _nested_tree(tmp_path)
     job = {"steps": [{"uses": ref}]}
     parsed = [(".github/workflows/ci.yml",

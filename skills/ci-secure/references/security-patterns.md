@@ -179,7 +179,7 @@ correlation: untrusted-checkout-executes
 **attacker's code** (`actions/checkout` with `ref:` pointing at the PR head —
 `github.event.pull_request.head.sha`, `github.head_ref`,
 `github.event.workflow_run.head_*`), and then **executes in that tree** (a
-`run:` step or a local `./action`). These triggers run in the BASE repo's
+`run:` step or a local `./` or `$/` action). These triggers run in the BASE repo's
 context — write `GITHUB_TOKEN`, repo secrets — so the attacker's code runs
 with your credentials. This is the "pwn request" class: the single most
 exploited GitHub Actions mistake in public incident history.
@@ -197,9 +197,10 @@ subsequent step that executes from the working tree (`run:`, `uses: ./…`,
 or `uses: $/…`). Each condition alone can be legitimate; together they hand
 the runner to the fork. A self-repository action (`uses: $/…`, GitHub
 2026-07-30) counts as condition (3) just like a `./` action: its definition
-loads from the commit the workflow runs at, which on these triggers is the
-base repository's, but its own `run:` steps execute in the job's working
-directory, where the fork's tree sits after the checkout. That is the same
+loads from the commit the workflow runs at, which on `pull_request_target` and
+`workflow_run` is the base repository's, but the action runs in the job's
+working directory, where the fork's tree sits after the checkout, and a
+composite's own `run:` steps execute there. That is the same
 over-approximation the check makes for an inline `run:` step; where the
 definition loads from does not change what it runs on. The finding's
 evidence says so when a `$/` action is the step that executes.

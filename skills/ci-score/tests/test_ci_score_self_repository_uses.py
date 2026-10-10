@@ -85,3 +85,11 @@ def test_an_unreadable_self_repository_action_fails_closed(tmp_path):
              {"uses": "$/.github/actions/missing"}]
     assert pf_mod._index_local_git_actions(tmp_path, _parsed(steps)) == {
         "$/.github/actions/missing"}
+
+
+def test_a_malformed_self_repository_call_is_never_a_remote_reusable_ref():
+    # GitHub rejects `@ref` on `$/`, but a malformed one must not land in the
+    # remote list, where it can flip the no-CI refusal predicate.
+    raw = yaml.safe_dump({"on": {"pull_request": None}, "jobs": {
+        "c": {"uses": "$/.github/workflows/ci.yml@main"}}}, sort_keys=False)
+    assert pf_mod._remote_reusable_refs([("ci.yml", yaml.safe_load(raw), raw)]) == []

@@ -4975,11 +4975,13 @@ def _attacker_head_ref(value: Any) -> bool:
 # head checkout that definition is the fork's. The self-repository prefix
 # `uses: $/path` (GitHub, 2026-07-30) loads the definition from the commit the
 # WORKFLOW runs at, which under `pull_request_target` / `workflow_run` is the
-# base repository's, but the action's own `run:` steps still execute in the
-# job's working directory, where the fork's tree sits after the checkout. That
-# is the same over-approximation this check already makes for an inline `run:`
-# step: where the definition loads from does not change what it runs on. The
-# check does not open the action to prove which file its steps touch.
+# base repository's (on other triggers, such as `pull_request_review`, the
+# running commit can be the fork-controlled merge ref), but the action still
+# runs in the job's working directory, where the fork's tree sits after the
+# checkout, and a composite's own `run:` steps execute there. That is the same
+# over-approximation this check already makes for an inline `run:` step: where
+# the definition loads from does not change what it runs on. The check does
+# not open the action to prove which file it touches.
 _SELF_REPOSITORY_ACTION_PREFIX = "$/"
 _LOCAL_ACTION_PREFIXES = ("./", _SELF_REPOSITORY_ACTION_PREFIX)
 
@@ -5009,8 +5011,8 @@ def _job_checkout_head_then_executes(
 
     The execution leg is a deliberate, documented over-approximation: a
     post-checkout `run:` step almost always executes tree-controlled content
-    (install scripts, Makefiles, test suites), so we do not try to prove which
-    file it touches. A checkout with no `ref:` (base/merge ref) never
+    (install scripts, Makefiles, test suites), so the check does not try to
+    prove which file it touches. A checkout with no `ref:` (base/merge ref) never
     qualifies. Returns (checkout_step_index, ref_text, concurrent,
     self_repository) or None; `concurrent` is True when only the
     possibly-at-the-same-time reading qualifies, so the evidence does not
@@ -5090,9 +5092,11 @@ def _correlation_untrusted_checkout_executes(file_path: Path) -> Iterator[RawHit
                 "from the tree" if concurrent
                 else "then executes from the tree")
         if self_repository:
-            then += (" (a `$/` action: its definition is the base "
-                     "repository's, but its own steps run in the working "
-                     "directory, on the fork's checked-out tree)")
+            then += (" (a `$/` action: it runs in the working directory, "
+                     "which now holds the fork's checked-out tree; its "
+                     "definition comes from the running commit, which on "
+                     "`pull_request_target`/`workflow_run` is the base "
+                     "repository's)")
         yield RawHit(
             line=line,
             evidence=(

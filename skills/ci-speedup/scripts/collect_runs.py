@@ -9832,7 +9832,7 @@ _OPT80_GIT_CONFIG_RE = _re.compile(
     r"^[ \t]*(?:[^\n#'\"]*?(?:&&|\|\||;|run:)[ \t]*)?(?:sudo[ \t]+)?"
     r"git[ \t]+config\b(?![^\n]*--(?:unset|unset-all|get|get-all|list))"
     r"[^\n]*http\.lowspeed(?:limit|time)", _re.I | _re.M)
-_OPT80_LOCAL_USES_RE = _re.compile(r"uses:\s*['\"]?((?:\./|\$/)[^\s'\"#]+)")
+_OPT80_LOCAL_USES_RE = _re.compile(r"['\"]?uses['\"]?:\s*['\"]?((?:\./|\$/)[^\s'\"#]+)")
 # A `uses:` naming THIS repository: `./path`, or the self-repository prefix
 # `$/path` GitHub shipped 2026-07-30 (same commit, same files, no checkout
 # needed). Both resolve to `<repo root>/path`, so `ref[2:]` strips either.
@@ -9929,6 +9929,14 @@ def _opt80_local_action_text(root: "Path | None", ref: str,
         return ""
     seen.add(ref)
     base = Path(root) / ref[2:]
+    # A ref that lands outside the repository root (`$/../x`, `$//abs`) is not
+    # this repository's file: fail CLOSED, as for an unreadable link.
+    try:
+        root_n = os.path.normpath(os.path.abspath(root))
+        if os.path.commonpath([root_n, os.path.normpath(os.path.abspath(base))]) != root_n:
+            return None
+    except ValueError:
+        return None
     candidates = ([base] if base.suffix in (".yml", ".yaml")
                   else [base / "action.yml", base / "action.yaml"])
     text: str | None = None
@@ -9936,7 +9944,7 @@ def _opt80_local_action_text(root: "Path | None", ref: str,
         try:
             text = cand.read_text(encoding="utf-8", errors="replace")
             break
-        except OSError:
+        except (OSError, ValueError):   # ValueError: an embedded NUL byte
             continue
     if text is None:
         return None
