@@ -616,11 +616,13 @@ def _step_uses(step: dict) -> tuple[str, str] | None:
 # deliberate VERBATIM COPY of that predicate, not an import.
 #
 # ONE KNOWN DIVERGENCE: the step reader is NOT part of the copy. Here
-# `_job_steps` routes through `_walk_steps`, so a history op inside a GitHub
-# Actions `parallel:` group counts; ci-speedup still reads `steps:` flat. The
-# parity test pins that gap as a non-strict xfail (non-strict on purpose: the
-# ci-speedup `parallel:` change, PR #122, is in flight too); delete the marker
-# once both are merged.
+# `_job_steps` routes through `_walk_steps`; ci-speedup walks through its own
+# `job_leaf_steps`. Both read a history op inside a GitHub Actions `parallel:`
+# LIST. They differ on a `parallel:` value that is one step MAPPING (an
+# undocumented shape): this walker reads it as a list of one, ci-speedup counts
+# the group malformed and holds its shallow-checkout pattern back on the job.
+# The repo-root parity test pins that gap as a STRICT xfail; delete the marker
+# when ci-speedup reads the mapping.
 #
 # WHY A COPY. Every skill in this repo installs and runs standalone, so
 # ci-score may not import ci-speedup at runtime (the same rule that made this

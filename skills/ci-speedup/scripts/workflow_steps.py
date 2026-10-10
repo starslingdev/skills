@@ -61,16 +61,21 @@ only place in this skill that knows the shape:
     coverage gap, since its steps were read.
 
 The leaf/group/control/malformed/invalid semantics follow ci-score's
-`_walk_steps` from PR #120 (skills/ci-score/scripts/practice_facts.py, not yet
-on `main`) so the two engines read one repository's steps the same way; the
-repo-root parity test pins the git-history verdicts that depend on it. The
-stats share ci-score's key names (`groups`, `steps_in_groups`, `control_steps`,
-`malformed_groups`/`_files`, `invalid_groups`/`_files`) and add their own
-(`background_steps`, `malformed_jobs`, `malformed_reasons`, `invalid_jobs`,
-`jobs_with_groups`, `jobs_with_background`, `sequential_jobs`). One count
-differs: ci-score's `groups` counts only groups whose children were read, while
-here `groups` also counts malformed ones (it is the count of `parallel:` keys
-seen).
+`_walk_steps` (skills/ci-score/scripts/practice_facts.py, PR #120) so the two
+engines read one repository's steps the same way; the repo-root parity test
+pins the git-history verdicts that depend on it. The stats share ci-score's
+COUNTER names (`groups`, `steps_in_groups`, `control_steps`,
+`malformed_groups`, `invalid_groups`, pinned by that parity test) and record
+what was unreadable in their own shape: files, jobs and reasons here
+(`malformed_files`/`_jobs`/`_reasons`, `invalid_files`/`_jobs`), one record per
+entry there (`invalid`, `malformed`, `skipped`). The counts are NOT comparable
+across engines: ci-score's `groups` counts only groups whose children were
+read, while here `groups` also counts malformed ones (it is the count of
+`parallel:` keys seen); a group that is one step mapping is `invalid` there
+and `malformed` here; a non-step item inside a group is `skipped` there and
+makes the group `malformed` here. The stats also add their own lists
+(`background_steps`, `jobs_with_groups`, `jobs_with_background`,
+`sequential_jobs`).
 
 The returned step mappings are the ORIGINAL objects from the parsed YAML (never
 copied or mutated), so a caller comparing by identity (`step is checkout_step`)
@@ -264,8 +269,8 @@ def job_leaf_steps(job: Any) -> list[dict[str, Any]]:
 
 
 def parallel_steps_stats(docs: Iterable[tuple[str, Any]]) -> dict[str, Any]:
-    """Repo-wide provenance for the step walk (key names shared with ci-score,
-    see the module docstring): `parallel:` groups, steps read inside them, control steps skipped, malformed groups
+    """Repo-wide provenance for the step walk (counter names shared with
+    ci-score, see the module docstring): `parallel:` groups, steps read inside them, control steps skipped, malformed groups
     (with their files and jobs) whose contents could not be read, invalid
     groups (read anyway, with their files and jobs), and the three job lists a
     renderer needs to word a pole's step drill honestly:
