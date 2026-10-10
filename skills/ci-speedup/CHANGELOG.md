@@ -13,6 +13,27 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-10** — **The audit now points out when a slow step on the slowest
+  merge-gating job runs a tool that has a native, much faster drop-in.** New
+  catalog pattern OPT84 looks at each slowest job the audit measured on the
+  pull-request path. When a lint, format or type-check step takes at least 20
+  seconds and at least 15% of the job, and its command (directly or through the
+  repo's `package.json` scripts) runs Prettier, ESLint or `tsc --noEmit`, the
+  report adds a card at that job naming the step, its measured time, the tool,
+  its drop-in (oxfmt, oxlint, TypeScript 7) and a link to the drop-in's own
+  migration docs. The card credits no saving: its only number is the step's
+  measured time, shown as the most the swap could remove, and it asks for a
+  benchmark of both tools on the same runner first. Every rule, plugin, file
+  set and check stays; when the drop-in lacks something the repo relies on
+  (ESLint custom rules or plugins), the card says to run both tools, and that
+  case is marked high risk. A repo already on the drop-in hears nothing about
+  it, and ESLint with type-aware rules is left to OPT82. Anything the audit
+  cannot read for certain (a `${{ }}` expression in the command, a script it
+  cannot follow, an action step, a lint config it could not fully read) holds
+  the job back, listed in the Data sources row as "tool swap: held back".
+  Babel and Webpack stay in the catalog's swap table as recipes only. The
+  catalog now has 82 patterns (73 hygiene, 9 structural). (#TBD)
+
 - **2026-10-09** — **The audit now spots a slow merge-gating job whose
   independent steps run one after another, and shows the most a `parallel:`
   group could take off its time.** New catalog pattern OPT83 looks at each
@@ -766,6 +787,12 @@ unversioned and updates by reinstall from `main`.
   re-rendered. (#72)
 
 ### Changed
+
+- **2026-10-10** — **OPT14 is now only about repeated checkout and setup.** Its
+  title drops "(and Slow Tool Replacement)" and becomes "Repeated
+  Checkout/Setup Without Artifact Handoff"; the tool-swap table that lived
+  under it moved to OPT84, and OPT14 now links there. Its `fix_strategy` is
+  unchanged, so older findings files still match it. (#TBD)
 
 - **2026-10-10** — **The "Parallel steps" Data sources row says what the repo
   actually uses.** Its "Used for" cell always described `parallel:` groups, so
