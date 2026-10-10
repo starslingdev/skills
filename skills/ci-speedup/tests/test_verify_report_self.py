@@ -11283,7 +11283,7 @@ def test_parallel_steps_row_is_rendered_and_required(tmp_path):
     doc = {"parallel_steps": dict(_PARALLEL_STAMP), "data_sources": {}}
     footer = "\n".join(bp._data_sources_footer(doc, "o/r"))
     row = next(ln for ln in footer.splitlines() if ln.startswith("| Parallel steps |"))
-    assert "5 step(s) inside `parallel:` groups read (2 group(s))" in row
+    assert "5 step(s) inside `parallel:` groups read (2 `parallel:` group(s) seen)" in row
     assert "**1 malformed `parallel:` group(s) not read**" in row
     assert "`.github/workflows/ci.yml`" in row
     fp = tmp_path / "findings.json"
@@ -11347,3 +11347,70 @@ def test_no_parallel_steps_row_without_the_stamp(tmp_path):
     fp = tmp_path / "findings.json"
     fp.write_text(json.dumps({"data_sources": {}}), encoding="utf-8")
     assert vr._parallel_steps_violation(footer, fp) == (None, "")
+
+
+_FULL_STAMP = {"groups": 4, "steps_in_groups": 2, "control_steps": 1,
+               "background_steps": 1,
+               "malformed_groups": 1, "malformed_reasons": ["contains_itself"],
+               "malformed_files": [".github/workflows/a.yml"],
+               "malformed_jobs": [{"path": ".github/workflows/a.yml", "job": "x",
+                                   "count": 1, "reasons": ["contains_itself"]}],
+               "invalid_groups": 1, "invalid_files": [".github/workflows/b.yml"],
+               "invalid_jobs": [{"path": ".github/workflows/b.yml", "job": "y", "count": 1}],
+               "jobs_with_groups": [{"path": ".github/workflows/a.yml", "job": "x"}],
+               "jobs_with_background": [], "sequential_jobs": []}
+
+
+def _row_and_path(tmp_path, stamp):
+    bp = _load_blocking_path()
+    doc = {"parallel_steps": dict(stamp), "data_sources": {}}
+    footer = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    return footer, fp
+
+
+def test_parallel_steps_row_is_compared_whole_not_by_substring(tmp_path):
+    """S10: "12 step(s)" contains "2 step(s)", so a substring check passed a
+    wrong count. The whole row is re-derived; a changed count, a dropped
+    malformed file or kind, or a dropped invalid group each fail."""
+    vr = _load_verify_report()
+    footer, fp = _row_and_path(tmp_path, _FULL_STAMP)
+    assert vr._parallel_steps_violation(footer, fp)[0] is None, footer
+    for old, new in (("| 2 step(s)", "| 12 step(s)"),
+                     (" in `.github/workflows/a.yml`", ""),
+                     ("the list contains itself", "the value is not a list of steps"),
+                     (" · **1 invalid `parallel:` group(s)**", " · ")):
+        assert old in footer, old
+        bad = footer.replace(old, new)
+        assert vr._parallel_steps_violation(bad, fp)[0], (old, new)
+
+
+def test_a_parallel_steps_row_with_no_stamp_fails(tmp_path):
+    vr = _load_verify_report()
+    footer, _fp = _row_and_path(tmp_path, _FULL_STAMP)
+    bare = tmp_path / "bare.json"
+    bare.write_text(json.dumps({"data_sources": {}}), encoding="utf-8")
+    assert "no `parallel_steps` stamp" in (vr._parallel_steps_violation(footer, bare)[0] or "")
+
+
+def test_a_pole_the_stamp_names_as_overlapping_must_not_read_as_sequential(tmp_path):
+    vr = _load_verify_report()
+    footer, fp = _row_and_path(tmp_path, _FULL_STAMP)
+    pole = ("## 🟠 Long pole 1: `a.yml` ▸ `x` - 4m 15s\n\n"
+            "Level 2 - inside that one job, its steps run **one after another** ...\n")
+    assert "one after another" in (vr._parallel_steps_violation(pole + footer, fp)[0] or "")
+    other = pole.replace("▸ `x`", "▸ `z`")
+    assert vr._parallel_steps_violation(other + footer, fp)[0] is None
+
+
+def test_parallel_steps_row_twin_matches_the_walker(tmp_path):
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SCRIPTS))
+    import workflow_steps as ws
+    assert vr._VR_MALFORMED_KINDS == ws.MALFORMED_KINDS
+    many = dict(_FULL_STAMP, malformed_files=[f"w{i}.yml" for i in range(5)],
+                malformed_reasons=["not_a_list", "too_many_steps"])
+    for stamp in (_FULL_STAMP, many, _PARALLEL_STAMP,
+                  {"groups": 0, "steps_in_groups": 0, "background_steps": 2}):
+        assert vr._vr_parallel_steps_cell(stamp) == ws.parallel_steps_disclosure(stamp)

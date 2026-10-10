@@ -55,6 +55,7 @@ from workflow_steps import (  # noqa: E402
     effective_if,
     job_leaf_steps,
     job_walk,
+    MALFORMED_KINDS,
     parallel_steps_stats,
     parallel_steps_used,
 )
@@ -4616,31 +4617,24 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
         parsed.append((rel, doc, raw))
 
     # What the step walker read inside GitHub Actions `parallel:` groups, and
-    # the control steps it skipped. A malformed group (its `parallel:` value is
-    # not a list, contains itself through a YAML alias, or is nested too deep)
-    # could not be read, so its file is a coverage gap — never clean. An invalid
-    # group (`parallel:` beside `run:`/`uses:` on one step, which GitHub
-    # rejects) was read anyway, but the job is not one GitHub would run as
-    # written, so it is named too.
+    # the control steps it skipped. A malformed group (`MALFORMED_KINDS`: not a
+    # list, contains itself, nested too deep, too many steps to read, or holding
+    # an item that is not a step) could not be read, so its file is a coverage
+    # gap, never clean, with the kind named. An INVALID group (`parallel:`
+    # beside `run:`/`uses:` on one step, which GitHub rejects) WAS read, so it is
+    # not a gap: the stamp names it and the Data sources row renders it.
     parallel_stats = parallel_steps_stats((rel, doc) for rel, doc, _raw in parsed)
     # (file, job key) → its scan_incomplete record, so a finding held back for
     # that job (see _ABSENCE_STEP_PATTERNS) is named on the job's own record.
     unreadable_jobs: dict[tuple[str, str], dict[str, Any]] = {}
     for mj in parallel_stats["malformed_jobs"]:
+        kinds = "; ".join(MALFORMED_KINDS.get(k, k) for k in mj.get("reasons") or [])
         rec = {
             "path": mj["path"],
-            "reason": (f"job `{mj['job']}`: {mj['count']} `parallel:` group(s) whose "
-                       "value is not a readable list of steps (not a list, nested in "
-                       "itself, nested too deep, or too many steps to read), so the "
-                       "steps inside were not read")}
+            "reason": (f"job `{mj['job']}`: {mj['count']} `parallel:` group(s) not "
+                       f"read ({kinds}), so the steps inside were not read")}
         scan_incomplete.append(rec)
         unreadable_jobs[(mj["path"], mj["job"])] = rec
-    for ij in parallel_stats["invalid_jobs"]:
-        scan_incomplete.append({
-            "path": ij["path"],
-            "reason": (f"job `{ij['job']}`: {ij['count']} `parallel:` group(s) on a step "
-                       "that also has `run:` or `uses:`, which GitHub rejects; the "
-                       "steps inside were read anyway, as if written flat")})
 
     findings: list[dict[str, Any]] = []
     finding_idx = 0

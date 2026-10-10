@@ -1323,7 +1323,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     _par = data.get("parallel_steps") or {}
     assert _par.get("groups") == 1 and _par.get("steps_in_groups") == 2, _par
     assert ("| Parallel steps | 2 step(s) inside `parallel:` groups read "
-            "(1 group(s)) |") in report
+            "(1 `parallel:` group(s) seen) |") in report
 
     # OPT82 reaches the READER as its own card: the ledger requirement, the
     # SIZING ceiling, the benchmark, and never "disable" about rules.

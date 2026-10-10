@@ -6012,8 +6012,12 @@ def _coverage_gap_banner(scan_incomplete: list[dict[str, Any]] | None) -> list[s
     scan_incomplete = scan_incomplete or []
     if not scan_incomplete:
         return []
+    # Files, not records: one file can carry several (one per job with an
+    # unreadable `parallel:` group).
+    n_files = len({str(e.get("path") or e.get("workflow_file") or "?")
+                   for e in scan_incomplete if isinstance(e, dict)})
     lines = ["> [!WARNING]",
-             f"> **Incomplete coverage - {len(scan_incomplete)} workflow file(s) could "
+             f"> **Incomplete coverage - {n_files} workflow file(s) could "
              "not be statically scanned.** These files are **not** known to be clean - "
              "fix the cause and re-run before relying on this report.", ">",
              "> _Static scan could not read/parse:_"]

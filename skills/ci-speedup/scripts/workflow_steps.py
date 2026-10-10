@@ -84,6 +84,17 @@ WALK_MAX_DEPTH = 64
 # docstring): far above any real job, far below an alias fan-out's 2**n.
 WALK_MAX_NODES = 10_000
 
+# Why a `parallel:` group was not (fully) read, in plain words: the gap record
+# and the Data sources row print these, never the key. `verify_report` carries
+# an equal copy (pinned by a coupling test).
+MALFORMED_KINDS: dict[str, str] = {
+    "not_a_list": "the value is not a list of steps",
+    "contains_itself": "the list contains itself",
+    "nested_too_deep": f"nested more than {WALK_MAX_DEPTH} groups deep",
+    "too_many_steps": "more steps than the walk reads (a YAML alias fan-out)",
+    "non_mapping_step": "an item in it is not a step",
+}
+
 
 @dataclass(frozen=True)
 class LeafStep:
@@ -109,6 +120,9 @@ class StepWalk:
     control_steps: int = 0      # `wait:` / `wait-all:` / `cancel:` skipped
     malformed_groups: int = 0   # not a list / contains itself / too deep: not read
     invalid_groups: int = 0     # beside `run:`/`uses:` on one step: read anyway
+    # One kind per malformed group, in walk order (`MALFORMED_KINDS`), so a gap
+    # says WHY its steps were not read.
+    malformed_reasons: list[str] = field(default_factory=list)
     # The `name:` of each control step that has one: GitHub may render the step
     # under it (`Wait for lint`), which no bare control-name pattern can see.
     control_names: list[str] = field(default_factory=list)
@@ -188,6 +202,7 @@ def walk_steps(steps: Any) -> StepWalk:
                 if depth > 0 and not dropped_child:
                     dropped_child = True
                     walk.malformed_groups += 1
+                    walk.malformed_reasons.append("non_mapping_step")
                 continue
             if is_group_step(item):
                 if len(walk.leaves) + walk.groups >= WALK_MAX_NODES:
@@ -195,15 +210,19 @@ def walk_steps(steps: Any) -> StepWalk:
                     # unread one, and nothing after it is read either.
                     walk.groups += 1
                     walk.malformed_groups += 1
+                    walk.malformed_reasons.append("too_many_steps")
                     stopped = True
                     return
                 walk.groups += 1
                 if _is_leaf(item):
                     _leaf(item, group, cond)
                 children = item.get(PARALLEL_KEY)
-                if (not isinstance(children, list) or id(children) in path
-                        or depth >= WALK_MAX_DEPTH):
+                bad = ("not_a_list" if not isinstance(children, list)
+                       else "contains_itself" if id(children) in path
+                       else "nested_too_deep" if depth >= WALK_MAX_DEPTH else None)
+                if bad:
                     walk.malformed_groups += 1
+                    walk.malformed_reasons.append(bad)
                     continue
                 if _is_leaf(item):
                     walk.invalid_groups += 1
@@ -251,7 +270,8 @@ def parallel_steps_stats(docs: Iterable[tuple[str, Any]]) -> dict[str, Any]:
     out: dict[str, Any] = {"groups": 0, "steps_in_groups": 0, "control_steps": 0,
                            "background_steps": 0,
                            "malformed_groups": 0, "malformed_files": [],
-                           "malformed_jobs": [], "invalid_groups": 0,
+                           "malformed_jobs": [], "malformed_reasons": [],
+                           "invalid_groups": 0,
                            "invalid_files": [], "invalid_jobs": [],
                            "jobs_with_groups": [], "jobs_with_background": [],
                            "sequential_jobs": []}
@@ -285,7 +305,13 @@ def parallel_steps_stats(docs: Iterable[tuple[str, Any]]) -> dict[str, Any]:
                 if not n:
                     continue
                 out[f"{kind}_groups"] += n
-                out[f"{kind}_jobs"].append({"path": rel, "job": str(key), "count": n})
+                jrow: dict[str, Any] = {"path": rel, "job": str(key), "count": n}
+                if kind == "malformed":
+                    jrow["reasons"] = list(dict.fromkeys(w.malformed_reasons))
+                    for r in jrow["reasons"]:
+                        if r not in out["malformed_reasons"]:
+                            out["malformed_reasons"].append(r)
+                out[f"{kind}_jobs"].append(jrow)
                 if rel not in out[f"{kind}_files"]:
                     out[f"{kind}_files"].append(rel)
         if overlapping:
@@ -300,15 +326,31 @@ def parallel_steps_used(stats: dict[str, Any] | None) -> bool:
                                             or stats.get("background_steps"))
 
 
+def _files_cell(files: Any) -> str:
+    """At most three files in backticks, then "and N more file(s)"."""
+    files = [f for f in (files or []) if isinstance(f, str)]
+    shown = ", ".join(f"`{f}`" for f in files[:3])
+    if len(files) > 3:
+        shown += f", and {len(files) - 3} more file(s)"
+    return shown
+
+
 def parallel_steps_disclosure(stats: Any) -> str | None:
     """The Data sources cell for the step walk, or None when nothing to say.
-    The renderer calls this; `verify_report` re-derives the same row with its
-    own code and imports nothing from the skill, so a drift fails the check."""
+    The renderer calls this; `verify_report` re-derives the WHOLE cell with its
+    own code and imports nothing from the skill, so a drift fails the check.
+
+    It names the steps read inside groups and how many `parallel:` keys were
+    SEEN (malformed and invalid ones included), the background and control
+    steps, each malformed group's kind (`MALFORMED_KINDS`) and files, and any
+    invalid group (beside `run:`/`uses:` on one step: read, but GitHub rejects
+    the workflow), with its files."""
     if not parallel_steps_used(stats):
         return None
     n = int(stats.get("steps_in_groups") or 0)
     groups = int(stats.get("groups") or 0)
-    parts = [f"{n} step(s) inside `parallel:` groups read ({groups} group(s))"]
+    parts = [f"{n} step(s) inside `parallel:` groups read ({groups} `parallel:` "
+             "group(s) seen)"]
     bg = int(stats.get("background_steps") or 0)
     if bg:
         parts.append(f"{bg} `background: true` step(s) read (they run beside the "
@@ -319,7 +361,16 @@ def parallel_steps_disclosure(stats: Any) -> str | None:
                      "(they run nothing)")
     bad = int(stats.get("malformed_groups") or 0)
     if bad:
-        files = ", ".join(f"`{f}`" for f in (stats.get("malformed_files") or [])[:3])
-        parts.append(f"**{bad} malformed `parallel:` group(s) not read** (the value "
-                     f"is not a readable list of steps){' in ' + files if files else ''}")
+        kinds = "; ".join(MALFORMED_KINDS.get(str(k), str(k))
+                          for k in (stats.get("malformed_reasons") or [])) or \
+            "the value is not a readable list of steps"
+        files = _files_cell(stats.get("malformed_files"))
+        parts.append(f"**{bad} malformed `parallel:` group(s) not read** ({kinds})"
+                     f"{' in ' + files if files else ''}")
+    inv = int(stats.get("invalid_groups") or 0)
+    if inv:
+        files = _files_cell(stats.get("invalid_files"))
+        parts.append(f"**{inv} invalid `parallel:` group(s)** (on a step that also "
+                     "has `run:` or `uses:`, which GitHub rejects; the steps inside "
+                     f"were read as the group's children){' in ' + files if files else ''}")
     return " · ".join(parts)

@@ -9420,6 +9420,15 @@ def test_the_drill_fallbacks_never_mark_a_control_step_as_dominant():
     assert bp._dom_index([{"name": "wait", "dur_s": 9}], "x") == -1
 
 
+def test_coverage_banner_counts_files_not_records():
+    """S9: two gap records for one file (two jobs with unreadable groups) are
+    one file that could not be fully scanned, not two."""
+    lines = bp._coverage_gap_banner([
+        {"path": ".github/workflows/ci.yml", "reason": "job `a`: x"},
+        {"path": ".github/workflows/ci.yml", "reason": "job `b`: y"}])
+    assert "Incomplete coverage - 1 workflow file(s)" in lines[1], lines
+
+
 def test_control_step_pattern_is_identical_in_collector_and_renderer():
     assert cr._CONTROL_STEP_NAME_RE.pattern == bp._CONTROL_STEP_NAME_RE.pattern
     assert cr._CONTROL_STEP_NAME_RE.flags == bp._CONTROL_STEP_NAME_RE.flags

@@ -1255,13 +1255,81 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
     return None, note
 
 
+# The verifier's own copy of `workflow_steps.MALFORMED_KINDS` (a coupling test
+# pins them equal) and of the row's "Used for" cell.
+_VR_MALFORMED_KINDS = {
+    "not_a_list": "the value is not a list of steps",
+    "contains_itself": "the list contains itself",
+    "nested_too_deep": "nested more than 64 groups deep",
+    "too_many_steps": "more steps than the walk reads (a YAML alias fan-out)",
+    "non_mapping_step": "an item in it is not a step",
+}
+_VR_PARALLEL_STEPS_FEEDS = ("Static detectors read each step inside a `parallel:` group "
+                            "as its own step")
+# What the step drill says only of a job whose steps run one after another.
+_VR_SEQUENTIAL_STEP_PHRASES = ("run **one after another**", "run one after another",
+                               "they run in sequence and roughly add up",
+                               "Because they're sequential")
+
+
+def _vr_parallel_steps_used(stamp: Any) -> bool:
+    return isinstance(stamp, dict) and bool(
+        stamp.get("groups") or stamp.get("control_steps") or stamp.get("background_steps"))
+
+
+def _vr_files_cell(files: Any) -> str:
+    files = [f for f in (files or []) if isinstance(f, str)]
+    shown = ", ".join(f"`{f}`" for f in files[:3])
+    if len(files) > 3:
+        shown += f", and {len(files) - 3} more file(s)"
+    return shown
+
+
+def _vr_parallel_steps_cell(stamp: dict[str, Any]) -> str:
+    """The whole "Parallel steps" Coverage cell, re-derived from the stamp with
+    this file's own code (twin of `workflow_steps.parallel_steps_disclosure`)."""
+    parts = [f"{int(stamp.get('steps_in_groups') or 0)} step(s) inside `parallel:` "
+             f"groups read ({int(stamp.get('groups') or 0)} `parallel:` group(s) seen)"]
+    bg = int(stamp.get("background_steps") or 0)
+    if bg:
+        parts.append(f"{bg} `background: true` step(s) read (they run beside the "
+                     "steps after them)")
+    control = int(stamp.get("control_steps") or 0)
+    if control:
+        parts.append(f"{control} `wait`/`wait-all`/`cancel` control step(s) skipped "
+                     "(they run nothing)")
+    bad = int(stamp.get("malformed_groups") or 0)
+    if bad:
+        kinds = "; ".join(_VR_MALFORMED_KINDS.get(str(k), str(k))
+                          for k in (stamp.get("malformed_reasons") or [])) or \
+            "the value is not a readable list of steps"
+        files = _vr_files_cell(stamp.get("malformed_files"))
+        parts.append(f"**{bad} malformed `parallel:` group(s) not read** ({kinds})"
+                     f"{' in ' + files if files else ''}")
+    inv = int(stamp.get("invalid_groups") or 0)
+    if inv:
+        files = _vr_files_cell(stamp.get("invalid_files"))
+        parts.append(f"**{inv} invalid `parallel:` group(s)** (on a step that also "
+                     "has `run:` or `uses:`, which GitHub rejects; the steps inside "
+                     f"were read as the group's children){' in ' + files if files else ''}")
+    return " · ".join(parts)
+
+
 def _parallel_steps_violation(report: str, findings_path: Path | None
                               ) -> tuple[str | None, str]:
     """When the scan stamped `parallel_steps` (the repo uses GitHub Actions
-    `parallel:` groups or `wait`/`wait-all`/`cancel` control steps), the Data
-    sources table must carry a "Parallel steps" row naming how many steps were
-    read inside groups, and naming any malformed group as not read. Re-derived
-    from the stamp's own counts; standalone (no import of the renderer)."""
+    `parallel:` groups, `background: true` steps, or `wait`/`wait-all`/`cancel`
+    control steps), the Data sources table must carry a "Parallel steps" row
+    whose WHOLE text is re-derived from the stamp: the steps read inside groups,
+    the groups seen, the background and control steps, each malformed group's
+    kind and files, and any invalid group. A row with no stamp behind it fails.
+
+    And a pole whose job the stamp names as running steps side by side (its
+    `workflow file ▸ check` heading equals a `jobs_with_groups` /
+    `jobs_with_background` row's file and job or name) must not say its steps
+    run one after another. This is an exact-name subset of the renderer's join
+    (which also folds matrix legs, templates and callees), so it never fails a
+    pole the renderer could not match. Standalone (no import of the renderer)."""
     if not findings_path:
         return None, ""
     try:
@@ -1269,24 +1337,35 @@ def _parallel_steps_violation(report: str, findings_path: Path | None
     except (OSError, json.JSONDecodeError):
         return None, ""  # unreadable findings are reported by the other re-derivations
     stamp = data.get("parallel_steps") if isinstance(data, dict) else None
-    if not isinstance(stamp, dict) or not (stamp.get("groups") or stamp.get("control_steps")
-                                           or stamp.get("background_steps")):
-        return None, ""
     row = next((ln for ln in report.splitlines() if ln.startswith("| Parallel steps |")), None)
+    if not _vr_parallel_steps_used(stamp):
+        if row is not None:
+            return ("the Data sources table has a Parallel steps row but the findings "
+                    "carry no `parallel_steps` stamp"), ""
+        return None, ""
     if row is None:
         return ("findings carry a `parallel_steps` stamp but the Data sources table "
                 "has no Parallel steps row"), ""
-    want = [f"{int(stamp.get('steps_in_groups') or 0)} step(s) inside `parallel:` groups "
-            f"read ({int(stamp.get('groups') or 0)} group(s))"]
-    if stamp.get("background_steps"):
-        want.append(f"{int(stamp['background_steps'])} `background: true` step(s) read")
-    if stamp.get("control_steps"):
-        want.append(f"{int(stamp['control_steps'])} `wait`/`wait-all`/`cancel` control step(s)")
-    if stamp.get("malformed_groups"):
-        want.append(f"**{int(stamp['malformed_groups'])} malformed `parallel:` group(s) not read**")
-    missing = [w for w in want if w not in row]
-    if missing:
-        return f"Parallel steps row does not say {missing[0]!r}: {row!r}", ""
+    want = f"| Parallel steps | {_vr_parallel_steps_cell(stamp)} | {_VR_PARALLEL_STEPS_FEEDS} |"
+    if row.strip() != want:
+        return f"Parallel steps row is not the one the stamp derives: {row!r} != {want!r}", ""
+    over = [r for key in ("jobs_with_groups", "jobs_with_background")
+            for r in (stamp.get(key) or []) if isinstance(r, dict)]
+    headers = re.findall(r"^##\s+.*?(Long pole \d+:.*)$", report, re.MULTILINE)
+    for hdr, body in zip(headers, _pole_sections(report)):
+        m = re.search(r"Long pole \d+:\s*`([^`]+)`\s*▸\s*`([^`]+)`", hdr)
+        if not m:
+            continue
+        wf, label = m.group(1), m.group(2).strip().lower()
+        for r in over:
+            if _wf_base(str(r.get("path") or "")) != wf:
+                continue
+            names = {str(r.get(k) or "").strip().lower() for k in ("job", "name")} - {""}
+            if label in names:
+                hit = next((ph for ph in _VR_SEQUENTIAL_STEP_PHRASES if ph in body), None)
+                if hit:
+                    return (f"{hdr.strip()}: the stamp says this job runs steps side by "
+                            f"side, but its drill says {hit!r}"), ""
     return None, "; parallel-step read disclosed"
 
 

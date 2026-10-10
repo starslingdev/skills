@@ -4202,7 +4202,9 @@ jobs:
 def test_opt28_reads_a_history_op_in_a_group_written_on_a_run_step(tmp_path: Path):
     """`parallel:` beside `run:` on one step is rejected by GitHub, but the walk
     reads its children anyway: the `git log` inside makes `fetch-depth: 0`
-    load-bearing, so OPT28 must stay silent, and the job is named as a gap."""
+    load-bearing, so OPT28 must stay silent. Its steps WERE read, so it is not
+    a coverage gap ("could not be scanned" would be false, S9): the invalid
+    group is named in the stamp, which the Data sources row renders."""
     yml = """name: CI
 on: pull_request
 jobs:
@@ -4219,8 +4221,28 @@ jobs:
     _write_workflow(tmp_path, "ci.yml", yml)
     data = _scan(tmp_path)
     assert "OPT28" not in _patterns(data)
+    assert data["scan_incomplete"] == [], data["scan_incomplete"]
+    ps = data["parallel_steps"]
+    assert ps["invalid_files"] == [".github/workflows/ci.yml"], ps
+    assert [(r["job"], r["count"]) for r in ps["invalid_jobs"]] == [("test", 1)], ps
+
+
+def test_a_malformed_group_gap_names_its_kind(tmp_path: Path):
+    """S14: the coverage-gap reason names WHY the group was not read."""
+    yml = """name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: &s
+      - parallel: *s
+      - run: pnpm test
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
     gaps = [g for g in data["scan_incomplete"] if g["path"] == ".github/workflows/ci.yml"]
-    assert gaps and "`test`" in gaps[0]["reason"], data["scan_incomplete"]
+    assert gaps and "the list contains itself" in gaps[0]["reason"], gaps
+    assert "not a list of steps" not in gaps[0]["reason"], gaps
 
 
 def test_a_parallel_group_that_contains_itself_never_stops_the_scan(tmp_path: Path):

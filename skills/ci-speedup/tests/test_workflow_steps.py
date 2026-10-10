@@ -179,3 +179,89 @@ def test_a_non_mapping_child_inside_a_group_marks_the_group_malformed():
     assert [leaf.step["run"] for leaf in w.leaves] == ["npm run lint", "npm test"]
     # A non-mapping item at the TOP level is skipped as before: not a group.
     assert ws.job_walk({"steps": [{"run": "a"}, "stray"]}).malformed_groups == 0
+
+
+def _nested(levels: int) -> dict:
+    node: list = [{"run": "deep"}]
+    for _ in range(levels):
+        node = [{"parallel": node}]
+    return {"steps": node}
+
+
+def test_malformed_groups_record_which_kind_they_are():
+    """S14: each malformed group carries its kind, so the coverage-gap record and
+    the row say WHY the steps were not read, not always "not a readable list"."""
+    yaml = pytest.importorskip("yaml")
+    cases = {
+        "not_a_list": {"steps": [{"parallel": "nope"}]},
+        "contains_itself": yaml.safe_load(
+            "jobs:\n  a:\n    steps: &s\n      - parallel: *s\n")["jobs"]["a"],
+        "nested_too_deep": _nested(65),
+        "too_many_steps": yaml.safe_load(_alias_fanout_doc(16))["jobs"]["j"],
+        "non_mapping_step": {"steps": [{"parallel": [{"run": "a"}, "b"]}]},
+    }
+    for kind, job in cases.items():
+        w = ws.job_walk(job)
+        assert w.malformed_reasons == [kind], (kind, w.malformed_reasons)
+        stats = ws.parallel_steps_stats([("x.yml", {"jobs": {"j": job}})])
+        assert stats["malformed_jobs"][0]["reasons"] == [kind], stats["malformed_jobs"]
+
+
+def test_the_row_names_malformed_kinds_more_files_and_invalid_groups():
+    """S9/S14/D7: the Data sources cell says how many groups were SEEN (malformed
+    and invalid included), names each malformed kind, lists at most three files
+    then "and N more", and names invalid groups (read, but GitHub rejects them)."""
+    docs = [(f"w{i}.yml", {"jobs": {"j": {"steps": [{"parallel": "nope"}]}}})
+            for i in range(4)]
+    docs.append(("v.yml", {"jobs": {"k": {"steps": [{"run": "a",
+                                                    "parallel": [{"run": "b"}]}]}}}))
+    row = ws.parallel_steps_disclosure(ws.parallel_steps_stats(docs))
+    assert row == (
+        "1 step(s) inside `parallel:` groups read (5 `parallel:` group(s) seen)"
+        " · **4 malformed `parallel:` group(s) not read** (the value is not a list"
+        " of steps) in `w0.yml`, `w1.yml`, `w2.yml`, and 1 more file(s)"
+        " · **1 invalid `parallel:` group(s)** (on a step that also has `run:` or"
+        " `uses:`, which GitHub rejects; the steps inside were read as the group's"
+        " children) in `v.yml`"), row
+
+
+def test_an_indirect_cycle_is_malformed_and_the_rest_is_read_once():
+    """T4: `&s [{parallel: [{parallel: *s}]}, {run: npm test}]` loops through
+    an intermediate group; the walk stops at the repeat and reads `npm test`
+    exactly once (a double read would be a false duplicate-build finding)."""
+    yaml = pytest.importorskip("yaml")
+    doc = yaml.safe_load("jobs:\n  a:\n    steps: &s\n"
+                         "      - parallel:\n          - parallel: *s\n"
+                         "      - run: npm test\n")
+    w = ws.job_walk(doc["jobs"]["a"])
+    assert w.malformed_groups == 1, w
+    assert [lf.step.get("run") for lf in w.leaves].count("npm test") == 1, w.leaves
+
+
+def test_a_shared_acyclic_list_used_twice_is_read_twice_and_is_valid():
+    yaml = pytest.importorskip("yaml")
+    doc = yaml.safe_load("x: &x [{run: lint}]\n"
+                         "jobs: {a: {steps: [{parallel: *x}, {parallel: *x}]}}\n")
+    w = ws.job_walk(doc["jobs"]["a"])
+    assert w.malformed_groups == 0 and len(w.leaves) == 2, w
+
+
+def test_the_depth_cap_reads_64_nested_levels_and_stops_at_65():
+    assert ws.job_walk(_nested(64)).malformed_groups == 0
+    assert ws.job_walk(_nested(65)).malformed_groups == 1
+
+
+def test_walker_small_shapes():
+    """T10: a non-list `parallel:` on a run step is a leaf plus a malformed (not
+    invalid) group; nested groups each count; background is tagged and counted
+    (a string "true" in any case); a blank or non-string `if:` adds nothing."""
+    w = ws.job_walk({"steps": [{"run": "x", "parallel": "nope"}]})
+    assert [lf.step["run"] for lf in w.leaves] == ["x"]
+    assert (w.malformed_groups, w.invalid_groups) == (1, 0), w
+    w = ws.job_walk({"steps": [{"parallel": [{"parallel": [{"run": "a"}]}]}]})
+    assert w.groups == 2 and w.steps_in_groups == 1, w
+    w = ws.job_walk({"steps": [{"run": "a", "background": "TRUE"}, {"run": "b"}]})
+    assert w.background == 1 and w.leaves[0].background and not w.leaves[1].background
+    assert ws._truthy("true") and ws._truthy(" True ") and not ws._truthy("yes")
+    assert ws._and_if(None, "") is None and ws._and_if("a", "  ") == "a"
+    assert ws._and_if(None, True) == "True" and ws._and_if("a", True) == "(a) && (True)"
