@@ -767,6 +767,13 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-10-10** — **The "Parallel steps" Data sources row says what the repo
+  actually uses.** Its "Used for" cell always described `parallel:` groups, so
+  a repo with `background: true` steps and no group read as though the
+  detectors had walked groups it does not have. The cell now names groups,
+  background steps, or both, from the scan's own counts; the report verifier
+  re-derives the same text and fails a row that does not match.
+
 - **2026-10-09** — **The fix recipes now name GitHub's native parallel steps.**
   OPT77 (repeated setup across small jobs) prefers a `parallel:` step group over
   shell `&` (separate logs, and a failing task fails the job on its own) and
@@ -983,6 +990,17 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-10-10** — **`STARSLING_LOG_LEVEL=DEBUG` now prints the debug trace.**
+  The variable was documented as the opt-in for the scripts' diagnostic output,
+  but no script read it, so every debug line was unreachable and stderr stayed
+  empty. Each program the skill runs (`run.py`, `scan.py`, `collect_runs.py`,
+  `blocking_path.py`, `summary.py`, `record_timing.py`) now sets its log level
+  from the variable through one shared helper (`scripts/log_level.py`). Unset
+  means WARNING, as before; a name that is not a log level also means WARNING,
+  with one line saying the value was ignored. What is logged is unchanged:
+  endpoints, sizes and pattern / workflow names, never gh response bodies.
+  Warnings that already printed now carry a `WARNING <module>:` prefix.
 
 - **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
   no longer invisible to the audit.** Since 2026-06-25 a step may be a

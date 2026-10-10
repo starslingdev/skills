@@ -37,7 +37,7 @@ from typing import Any, Callable, NamedTuple
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
 from workflow_steps import (  # same-skill module; step walker
-    parallel_steps_disclosure, parallel_steps_used)
+    parallel_steps_disclosure, parallel_steps_used, parallel_steps_used_for)
 
 _LBLW = 33
 _BARW = 22
@@ -5916,16 +5916,16 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
             _parts.append(f"{_api} from the gh contents API (default branch HEAD)")
         rows.append(("workflow YAML", " / ".join(_parts),
                      "`on:` triggers, matrix/shard axes, job timeouts (detector inputs)"))
-    # GitHub Actions `parallel:` step groups: every static detector read the
-    # steps inside them through one walker (`workflow_steps`). Stamped by the
+    # GitHub Actions `parallel:` step groups and `background: true` steps: every
+    # static detector read them through one walker (`workflow_steps`), and the
+    # "Used for" cell names whichever of the two the repo uses. Stamped by the
     # scan only when the repo uses the syntax, so every other report is
     # unchanged; a malformed group (not a list) is named here as not read.
     # `verify_report` requires this row whenever the stamp is present.
     _par = parallel_steps_disclosure(doc.get("parallel_steps"))
     if _par:
         rows.append(("Parallel steps", _par,
-                     "Static detectors read each step inside a `parallel:` group "
-                     "as its own step"))
+                     parallel_steps_used_for(doc.get("parallel_steps"))))
     # Candidates a pattern measured and then HELD BACK because it could not
     # decide them — a candidate cache (OPT79), a group of small jobs sharing one
     # setup (OPT77), a checkout with a slow tail (OPT80). Without these rows the
@@ -12417,4 +12417,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    from log_level import configure_logging  # STARSLING_LOG_LEVEL opt-in
+    configure_logging()
     raise SystemExit(main())

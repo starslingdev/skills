@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-# Module logger — inherits the entry point's logging config (INFO by default,
+# Module logger — inherits the entry point's logging config (WARNING by default,
 # DEBUG under STARSLING_LOG_LEVEL). Used for diagnosable-but-non-fatal gh paths
 # (e.g. an expected-absent rulesets endpoint) so a real collection failure is
 # traceable without spamming the default run.
@@ -23910,4 +23910,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    from log_level import configure_logging  # STARSLING_LOG_LEVEL opt-in
+    configure_logging()
     sys.exit(main())
