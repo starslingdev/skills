@@ -6428,6 +6428,10 @@ def _step_span_verdict(step: dict[str, Any], job: dict[str, Any] | None
     every trim is logged at DEBUG naming the job and the step, never a response body."""
     span, why = _step_span_core(step, job)
     if why:
+        # One line per reader per step: several readers (`_step_durations`, the
+        # verdict counts, the timeline, OPT79) judge the same step, so the number of
+        # these lines is not the number of dropped steps; the counts on the
+        # decomposition are.
         logger.debug("step timing %s: job %r step %r (started_at=%s completed_at=%s)",
                      "trimmed to its job's end" if span else f"dropped ({why})",
                      str((job or {}).get("name", "")), str(step.get("name", "")),
@@ -6451,6 +6455,10 @@ def _step_span_core(step: dict[str, Any], job: dict[str, Any] | None
     j1 = _utc(_parse_dt((job or {}).get("completed_at")))
     if j0 and j0.year > _STEP_START_SENTINEL_MAX_YEAR:
         if (j0 - st).total_seconds() > _STEP_JOB_START_SLACK_S:
+            return None, _SPAN_STARTED_BEFORE_JOB
+        if en < j0:
+            # Inside the rounding slack, but over before the job began: it lies before
+            # the job, so it is labelled that way, not as starting after the job ended.
             return None, _SPAN_STARTED_BEFORE_JOB
         st = max(st, j0)
     why = ""
@@ -6500,7 +6508,8 @@ def _step_durations(job: dict[str, Any]) -> list[tuple[str, float]]:
     """`(name, seconds)` for every step that ran a measurable span inside its job under
     `_step_span`. Omitted: a skipped step, a step whose `started_at` is in 1970 or earlier,
     one that started more than 1s before the job, one with reversed or unparseable
-    timestamps, and a zero-length step. A step starting within 1s before its job is
+    timestamps, one that starts after its job ended (or is left no time inside it once
+    its end is cut back), and a zero-length step. A step starting within 1s before its job is
     clamped to the job's start, and one ending after its job is clamped to the job's end;
     neither is omitted. `_decompose_job_steps` counts the declared steps omitted here."""
     out: list[tuple[str, float]] = []
@@ -6587,8 +6596,8 @@ def _step_timeline(job: dict[str, Any], job_name: str,
       - a step GitHub reports `skipped` whose timestamps would otherwise be in-window
         keeps its place in the succession, drawn at 0s (it did not run);
       - a step with no in-window span at all (a `started_at` in 1970 or earlier, a start
-        more than 1s before the job, reversed or unparseable timestamps, skipped or
-        not) is left off the timeline.
+        more than 1s before the job, a start after the job ended, reversed or
+        unparseable timestamps, skipped or not) is left off the timeline.
     A job `started_at` in 1970 or earlier is a placeholder: offsets are then 0."""
     j0 = _utc(_parse_dt(job.get("started_at")))
     if j0 is not None and j0.year <= _STEP_START_SENTINEL_MAX_YEAR:
@@ -8625,9 +8634,9 @@ def _leading_setup_prefix(
     inside it was reported as contiguous.
 
     The SIGNATURE is the ordered tuple of those steps' identities
-    (`_setup_step_identity`), used only for comparison and grouping; the display
-    names are the same steps as written, so the rendered evidence can name the
-    prefix without lowercasing it. It is what lets the caller show that two jobs
+    (`_setup_step_identity`), used for comparison and grouping; the display names
+    are the steps this occurrence paid for, as written, and the caller renders the
+    identities of the ones some sampled run paid for. The signature is what lets the caller show that two jobs
     re-pay the SAME setup rather than merely equally expensive ones. Duration alone
     cannot: a Node check, a Python check and a Go check can each spend 80s
     installing entirely different dependencies, and consolidating those removes
@@ -8645,9 +8654,10 @@ def _leading_setup_prefix(
             break
         # The SHAPE keeps every declared setup step (a step skipped by its `if:` in one
         # run and run in the next is the same job), but the DISPLAY names only steps
-        # this occurrence paid: one skipped, placeholder-started or outside the job
-        # adds 0s to the total, so naming it would describe steps the seconds omit.
-        # A step with no timestamps at all keeps its place in both, as before.
+        # this occurrence paid: one skipped, placeholder-started, outside the job or
+        # with reversed timestamps adds 0s to the total, so naming it would describe
+        # steps the seconds omit. A step whose timestamps are absent or do not parse
+        # keeps its display name (its time is unknown, not known to be 0s).
         sig.append(_setup_step_identity(name))
         span, why = _step_span_verdict(step, job)
         if span is None and why != _SPAN_UNPARSEABLE:
@@ -19995,7 +20005,9 @@ def _detect_opt79_net_negative_cache(
             # unparseable or reversed timestamps, a step that never completed, an
             # install that measured 0s). None of it says how often this cache
             # hits. When the step-time gates set aside more runs than the rest
-            # together, the withhold names them, not the logs.
+            # together (log gates, another runner, and a step measured more than
+            # once in one occurrence, `step_measured_more_than_once_in_one_occurrence`),
+            # the withhold names them, not the logs; a tie names the excluded runs.
             _step_time = sum(n for g, n in excluded_by.items()
                              if g in _OPT79_STEP_TIME_GATES)
             _ctx = {"excluded": excluded, "by_gate": dict(sorted(excluded_by.items())),
@@ -20077,8 +20089,9 @@ def _detect_opt79_net_negative_cache(
             "skipped step with parseable timestamps, counts as 0s, so GitHub's "
             "one-second step granularity cannot change which steps are compared; "
             "a run where one of those steps has no usable time (timestamps "
-            "missing or unparseable, a step that never completed, a placeholder "
-            "start, or a start before its job) is left out, not counted as 0s. ")
+            "missing, unparseable or reversed, a step that never completed, a "
+            "placeholder start, a start before its job, or a start after its job "
+            "ended) is left out, not counted as 0s. ")
         _note_guardrail = (
             "GUARDRAIL: re-key or narrow the cache FIRST and re-measure — cache "
             f"`{ref}` on this job, scoped to the package manager's store or to "

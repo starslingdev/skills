@@ -2,7 +2,9 @@
 
 A cache block step GitHub did NOT report as skipped, whose timestamps parse
 but carry no in-window span (a `started_at` in 1970 or earlier, the year-1
-placeholder included, or a start more than 1s before its own job), did not
+placeholder included, a start more than 1s before its own job, or a start
+after its job ended or in its last second with no time left once its end is
+cut back), did not
 measure. It must withhold the occurrence as `step_has_no_in_window_time`,
 never read as its raw duration (about 63.9 billion seconds from year 1) nor as
 0s: a 0s post save on a miss run removes the miss-side save cost and inflates

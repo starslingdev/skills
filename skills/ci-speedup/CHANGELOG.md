@@ -997,23 +997,33 @@ unversioned and updates by reinstall from `main`.
   are reversed or do not parse contributes no time; a step's end is clamped to
   its job's end, so no step outlasts the job that contains it; and a timestamp
   with no timezone is read as UTC rather than failing beside one that has one.
-  The 1s allowance rests on a census of 3,208 real steps across 176 jobs in
-  curl, playwright, flask and mastra: none started before its job, none ended
-  after it, and every year-1 start was on a skipped step.
+  The 1s allowance rests on a census of 3,208 real steps across 176 sampled job
+  runs in curl, playwright, flask and mastra: in that sample none started
+  before its job, none ended after it, and every year-1 start was on a skipped
+  step. A step that starts in its job's last second and ends more than 1s past
+  it has no time left inside the job once its end is cut back, so it counts as
+  no usable time (and OPT79 withholds it) rather than as a 0s step.
   Nothing is dropped silently any more. Each dropped step, and each step whose
   end is cut back to its job's end by more than 1s, is logged at DEBUG (job,
   step and reason; never a response body). A pole's step breakdown records how
-  many declared steps it left out: those GitHub skipped on every sampled run
-  (`skipped_steps`), those with no usable time (`unmeasured_steps`), and those
-  timed only up to the job's end (`trimmed_steps`), each stamped only when
-  non-zero, and the pole's step list in the report says so in one line (for
-  example "2 declared step(s) skipped on every sampled run and 1 with no usable
-  time are not timed here"). A job whose every step was dropped now says "No
-  step could be measured: N skipped, M with no usable time" instead of quietly
-  having no step breakdown. The per-run step timeline the report draws keeps a
+  many skipped or untimeable declared steps it left out or timed from fewer
+  runs: those GitHub skipped on every sampled run they appeared in
+  (`skipped_steps`), those never measured with no usable time in some run
+  (`unmeasured_steps`; a step skipped in one run and untimeable in another
+  counts here, not as skipped), those measured in only some runs, whose figure
+  comes from those runs (`partially_measured_steps`), and those timed only up
+  to the job's end (`trimmed_steps`), each stamped only when non-zero. A step
+  that measured 0s in every run it ran in took no time and is in no count. The
+  pole's step list in the report says so in one line (for example "2 declared
+  step(s) skipped on every sampled run and 1 with no usable time are not timed
+  here; 1 step(s) were timed in only some sampled runs"). A job whose every step
+  was dropped now says "No step could be measured: N skipped, M with no usable
+  time" instead of quietly having no step breakdown, and the coverage-gap,
+  LLM-analysis and catalog pointers, the `--log` hint and any log drill still
+  follow that line. The per-run step timeline the report draws keeps a
   skipped step in its place at 0s and drops one with no usable time. A
-  repeated-setup (OPT77) prefix no longer names a setup step that has no time
-  in that run while adding 0s for it. The cross-run check on a pole's
+  repeated-setup (OPT77) finding no longer names a setup step that had no time
+  in every sampled run while adding 0s for it. The cross-run check on a pole's
   dominant step counts a run where that step was skipped as 0s (it did not
   run), leaves out another run whose step has no usable in-window time, and
   keeps the drilled run itself, with no value, rather than omitting it.
@@ -1050,7 +1060,10 @@ unversioned and updates by reinstall from `main`.
   with no bundle directory anywhere (a findings-only artifact such as a
   committed example), the figure check still passes on the pole figures it
   did check and says how many timelines went unchecked. A further check
-  re-derives each pole's omitted-steps line from its stamp.
+  re-derives each pole's omitted-steps line from its stamp and says how many
+  pole sections it could not judge (a key two poles share, or an aggregation
+  gate); the bare-pole check accepts a pole whose every step was dropped when
+  its section says so.
 
 - **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
   no longer invisible to the audit.** Since 2026-06-25 a step may be a

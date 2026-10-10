@@ -2024,19 +2024,24 @@ to `CASCADE` + its test; it then flows through every finding.
     one rule (`_step_span`): a `skipped` step, a step whose `started_at` falls in
     1970 or earlier (the API's year-1 placeholder included), one with reversed
     or unparseable timestamps, or one that starts more than 1s before its job
-    has no duration; a step's end is clamped to its job's `completed_at`, and
-    naive and timezone-aware stamps are both read as UTC. The 1s slack rests on
-    a real-data census of 3,208 steps across 176 jobs in curl, playwright, flask
-    and mastra: 0 steps started before their job, 0 ended after it, and all 136
-    year-0001 starts were on skipped steps, so the slack only absorbs
-    whole-second rounding and never rescues a real out-of-window step. Every
+    has no duration; a step's end is clamped to its job's `completed_at` (a
+    step left with no time by that clamp has no duration either), and a naive
+    stamp is read as UTC. The 1s slack rests on a real-data census of 3,208
+    steps across 176 sampled job runs in curl, playwright, flask and mastra: 0
+    steps started before their job, 0 ended after it, and all 136 year-0001
+    starts were on skipped steps, so in that sample the slack never applied
+    beyond whole-second rounding. Every
     dropped step and every end cut back by more than 1s is logged at DEBUG
     (job, step, reason; never a response body) and counted on the job's
     decomposition and its pole (`skipped_steps`, `unmeasured_steps`,
-    `trimmed_steps`, each stamped only when non-zero; a job whose every step
-    was dropped stamps `step_decomposition_reason: no_step_measured_in_sample`
-    instead of a step list), and the pole's step list carries one line saying
-    how many declared steps it leaves out, which `verify_report` re-derives. The
+    `partially_measured_steps`, `trimmed_steps`; the decomposition always
+    stamps `skipped_steps` and the others only when non-zero, and the pole
+    stamp carries each only when non-zero; a job whose every step was dropped
+    stamps `step_decomposition_reason: no_step_measured_in_sample` instead of a
+    step list, and its pole keeps its pointer lines and log drill), and the
+    pole's step list carries one line saying how many skipped or untimeable
+    declared steps it leaves out or times from fewer runs, which
+    `verify_report` re-derives. The
     drawn per-run timeline keeps an in-window skipped step in its place at 0s;
     the dominant step's cross-run sample counts a skipped run as 0s and keeps
     the drilled run with no value when its own step has no usable time. Each

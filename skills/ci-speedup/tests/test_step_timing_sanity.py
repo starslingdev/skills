@@ -22,8 +22,11 @@ job. These tests pin the rule every step-timing reader shares:
     cut of more than 1s is counted (`trimmed_steps`) and logged;
   - the per-run timeline the report draws applies the same rule, and keeps a
     skipped step whose timestamps sit inside the job in its place at 0s;
-  - every declared step left out is counted (`skipped_steps`,
-    `unmeasured_steps`), logged at DEBUG, and named in one line on the pole;
+  - every skipped or untimeable declared step left out is counted
+    (`skipped_steps`, `unmeasured_steps`), a step measured in only some runs is
+    counted (`partially_measured_steps`), each drop is logged at DEBUG, and the
+    counts are named in one line on the pole (a step that measured 0s in every
+    run it ran in took no time and is in no count);
   - a step that only carries the sentinel can never become a cluster finding.
 
 Run from the repo root:

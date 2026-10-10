@@ -827,8 +827,9 @@ _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
         "against a miss",
     "population_truncated_by_unmeasurable_step_times":
         "too many sampled runs had a cache, install or save step whose time did "
-        "not measure (a placeholder start, a start outside its job, or "
-        "timestamps that did not parse) to compare a hit against a miss",
+        "not measure (a placeholder start, a start outside its job, timestamps "
+        "that did not parse, a step that never completed, or an install that "
+        "measured 0 s) to compare a hit against a miss",
     "fewer_than_min_hit_runs_classified":
         "too few sampled runs hit the cache to compare a hit against a miss",
     "fewer_than_min_miss_runs_classified":
@@ -11471,7 +11472,8 @@ def check_step_cited_within_job_window(findings_path: Path | None) -> Check:
     return Check(name, True,
                  f"{in_window} step figure(s) inside their job's longest run; {only_ceiling} "
                  "held only to the 5-day ceiling (no stamped job window)"
-                 + (f"; {sums} job-level sum(s) held to the 5-day ceiling" if sums else ""))
+                 + (f"; {sums} job-level and category sum(s) held to the 5-day ceiling"
+                    if sums else ""))
 
 
 def _vr_declared_timelines(data: dict, findings_path: Path | None
@@ -11686,7 +11688,7 @@ def check_pole_omitted_steps_line(report: str, findings_path: Path | None) -> Ch
     matched to their section on (workflow file name, check), as the other pole checks do;
     an aggregation-gate pole (no step list) and a section two stamped poles share are not
     judged, and the detail says how many sections that left out."""
-    name = "a pole's step list says how many declared steps it leaves out"
+    name = "a pole's step list says how many skipped or untimeable steps it leaves out"
     data, err = _load_findings_doc(findings_path)
     if err:
         return Check(name, True, err, skipped=True)

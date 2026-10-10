@@ -11804,7 +11804,7 @@ def test_step_window_pass_details_separate_window_from_ceiling(tmp_path: Path):
 
 # --- the omitted-steps line on a pole's step list ------------------------------
 
-_OMITTED = "a pole's step list says how many declared steps it leaves out"
+_OMITTED = "a pole's step list says how many skipped or untimeable steps it leaves out"
 
 
 def _omitted_report(note: str | None) -> str:

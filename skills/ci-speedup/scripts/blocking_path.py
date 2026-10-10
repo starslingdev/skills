@@ -6529,8 +6529,9 @@ _OPT79_HELD_BACK_REASONS: dict[str, str] = {
         "against a miss",
     "population_truncated_by_unmeasurable_step_times":
         "too many sampled runs had a cache, install or save step whose time did "
-        "not measure (a placeholder start, a start outside its job, or "
-        "timestamps that did not parse) to compare a hit against a miss",
+        "not measure (a placeholder start, a start outside its job, timestamps "
+        "that did not parse, a step that never completed, or an install that "
+        "measured 0 s) to compare a hit against a miss",
     "fewer_than_min_hit_runs_classified":
         "too few sampled runs hit the cache to compare a hit against a miss",
     "fewer_than_min_miss_runs_classified":
