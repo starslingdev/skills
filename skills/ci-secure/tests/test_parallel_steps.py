@@ -1097,3 +1097,14 @@ def test_a_group_key_the_scan_does_not_model_is_disclosed(
         {"steps": [{"parallel": [{"run": "a"}], key: "x"}]}, stats))
     want = [("1", scan._GROUP_UNKNOWN_KEY)] if noted else None
     assert stats.malformed == want, stats
+
+
+def test_a_pin_with_no_known_line_is_treated_as_racing() -> None:
+    """P14.24: a pin suppresses a fetch only when it provably lands between
+    the fetch and the execution. A pin whose line is unknown is not provably
+    anywhere, so in a job with concurrent steps it is racing (fail safe). In
+    a job with no concurrency the command order alone decides, as before."""
+    never = lambda a, b: False                         # noqa: E731
+    assert scan._pin_races(None, (10, 12), never, concurrency=True)
+    assert not scan._pin_races(None, (10, 12), never, concurrency=False)
+    assert not scan._pin_races(11, (10, 12), never, concurrency=True)

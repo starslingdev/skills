@@ -4504,8 +4504,9 @@ def _mutable_fetch_executions(
                     hit[0] + 1) - 1
             pin_at = next((p for p in pinned.get(dest, ())
                            if window_start < p < hit[0]
-                           and not _racing(pos_line.get(p, -1), hit[1])
-                           and not _racing(pos_line.get(p, -1), cand.line)),
+                           and not _pin_races(pos_line.get(p),
+                                              (hit[1], cand.line), _racing,
+                                              bool(spans))),
                           None)
             if pin_at is not None:
                 suppressed_line = cand.line
@@ -4521,6 +4522,17 @@ def _mutable_fetch_executions(
                 f"deliberately not reported",
                 kind=_KIND_SUPPRESSED)
     return sorted(pairs, key=lambda p: p[0].line)
+
+
+def _pin_races(pin_line: int | None, lines: tuple[int, ...],
+               racing: Callable[[int, int], bool], concurrency: bool) -> bool:
+    """A pin may run at the same time as one of `lines` (the fetch, the
+    execution). Fail safe: in a job with concurrent steps, a pin whose source
+    line is unknown is not provably in between, so it counts as racing; with
+    no concurrency the command order alone already places it."""
+    if pin_line is None:
+        return concurrency
+    return any(racing(pin_line, ln) for ln in lines)
 
 
 def _correlation_unverified_remote_code_execution(
