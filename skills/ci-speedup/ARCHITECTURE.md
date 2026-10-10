@@ -1476,11 +1476,13 @@ and two-verdict runs stay in the hit share's denominator
 of runs that took the exact-hit path. Only successful job runs are
 classified (`occurrence_did_not_succeed` otherwise: a failed or cancelled run
 also skips the post save); a skipped occurrence is `occurrence_was_skipped`, and
-a block step whose timestamps are absent or unparseable withholds its occurrence
-as `step_timestamps_unparseable_in_this_occurrence`, and one not reported as
-skipped whose timestamps parse to no in-window time (`_step_span`: a year-1
-placeholder start, or a start before its job) withholds it as
-`step_skipped_or_out_of_window`. An occurrence whose log was
+a block step whose timestamps are absent, unparseable or reversed (end before
+start) withholds its occurrence as
+`step_timestamps_unparseable_in_this_occurrence`, and one not reported as
+skipped whose timestamps parse and run forward to no in-window time
+(`_step_span`: a `started_at` in 1970 or earlier, the year-1 placeholder
+included, or a start more than 1s before its job or after it ended) withholds it
+as `step_has_no_in_window_time`. An occurrence whose log was
 never fetched is counted as unread rather than folded into a population;
 an occurrence past the per-job 8-log cap is tallied
 `beyond_the_per_job_log_probe_cap`, not as unread. When
@@ -1488,7 +1490,13 @@ unread occurrences leave either population short the withhold says
 `population_truncated_by_unread_logs` rather than blaming a thin sample; runs
 that were read and then set aside (no restore group, no cache line, two
 verdicts, a partial restore, another runner, a block that did not measure) do
-the same as `population_truncated_by_excluded_runs`.
+the same as `population_truncated_by_excluded_runs`, or as
+`population_truncated_by_unmeasurable_step_times` when the block-step time gates
+(no in-window time, unparseable or reversed timestamps, a step that never
+completed, an install that measured 0s) set aside more runs than the rest
+together. Every finding and uncredited row stamps the runs it set aside per gate
+(`excluded_runs_by_gate`, only when one was), so a population thinned on one
+side is auditable.
 
 The install step is recognised from what it RUNS, never from its display name —
 so the near-universal `name: Install dependencies` spelling is found, and a step
@@ -1508,8 +1516,9 @@ match the cache withholds (`install_package_manager_does_not_match_cache`); and
 more than one cache, counting the on-by-default and self-caching ones, withholds.
 
 Three things keep it honest. The step set comes from the YAML and a step the run
-RENDERED but ran under a second, or that GitHub reports as skipped, counts as 0s,
-so GitHub's one-second granularity cannot
+RENDERED stamped with no measurable length (start and end in the same second), or
+a skipped step with parseable timestamps, counts as 0s, so GitHub's one-second
+granularity cannot
 change which steps are being compared between runs. "Rendered sub-second" and
 "not there at all" are kept apart, because conflating them fails OPEN on the term
 that matters most: on `actions/cache` the save runs on a MISS, so a post step
@@ -2013,13 +2022,26 @@ to `CASCADE` + its test; it then flows through every finding.
     (`_critical_path`, `_percentile`);
   - per-step durations (from the job JSON, no extra API calls), all read through
     one rule (`_step_span`): a `skipped` step, a step whose `started_at` falls in
-    1970 or earlier (the API's year-1 placeholder included), or one that starts
-    more than 1s (whole-second rounding slack) before its job has no duration,
-    and a step's end is clamped to its job's `completed_at`. The drawn per-run
-    timeline keeps an in-window skipped step in its place at 0s; the dominant
-    step's cross-run sample counts a skipped run as 0s. Each job's longest
-    sampled run is stamped (`per_workflow_timing[wf].job_max`) as the bound
-    `verify_report` holds any one step to;
+    1970 or earlier (the API's year-1 placeholder included), one with reversed
+    or unparseable timestamps, or one that starts more than 1s before its job
+    has no duration; a step's end is clamped to its job's `completed_at`, and
+    naive and timezone-aware stamps are both read as UTC. The 1s slack rests on
+    a real-data census of 3,208 steps across 176 jobs in curl, playwright, flask
+    and mastra: 0 steps started before their job, 0 ended after it, and all 136
+    year-0001 starts were on skipped steps, so the slack only absorbs
+    whole-second rounding and never rescues a real out-of-window step. Every
+    dropped step and every end cut back by more than 1s is logged at DEBUG
+    (job, step, reason; never a response body) and counted on the job's
+    decomposition and its pole (`skipped_steps`, `unmeasured_steps`,
+    `trimmed_steps`, each stamped only when non-zero; a job whose every step
+    was dropped stamps `step_decomposition_reason: no_step_measured_in_sample`
+    instead of a step list), and the pole's step list carries one line saying
+    how many declared steps it leaves out, which `verify_report` re-derives. The
+    drawn per-run timeline keeps an in-window skipped step in its place at 0s;
+    the dominant step's cross-run sample counts a skipped run as 0s and keeps
+    the drilled run with no value when its own step has no usable time. Each
+    job's longest sampled run is stamped (`per_workflow_timing[wf].job_max`) as
+    the bound `verify_report` holds any one step to;
   - trigger events that actually fired each workflow (`run.event`, collected
     into `events_by_wf`);
   - cache hit/miss and install/build log lines (`--with-logs` for the cache

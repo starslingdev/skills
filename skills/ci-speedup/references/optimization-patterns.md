@@ -516,7 +516,9 @@ family reads, so retuning it there moves this gate too.
    so it is excluded from both paths rather than counted as a hit, and still
    counts in the hit share's denominator. When excluded runs leave too few hits
    or misses, the job withholds as `population_truncated_by_excluded_runs`, not
-   as a thin sample.
+   as a thin sample, or as `population_truncated_by_unmeasurable_step_times`
+   when runs set aside because a block step's time did not measure outnumber
+   the rest. The runs set aside are stamped per gate (`excluded_runs_by_gate`).
 
    Only **successful** job runs are classified: a failed or cancelled run's
    step timings are truncated and its post save does not run, so it is withheld
@@ -534,22 +536,25 @@ family reads, so retuning it there moves this gate too.
    a slow runner against a miss on a fast one is not a cache comparison.
 5. Both paths measure the **same three steps** — restore + install + the post
    save — identified in step 1 and summed per run. A step the run **rendered**
-   that ran for under a second, or that GitHub reports as `skipped`, counts as
-   **0s**: GitHub stamps step timestamps at one-second granularity, so reading
-   the step set from what happened to be timed would let that noise change
-   *which* steps are being compared.
+   stamped with no measurable length (start and end in the same second), or a
+   skipped step with parseable timestamps, counts as **0s**: GitHub stamps step
+   timestamps at one-second granularity and a zero-length span is dropped from
+   the timed set, so reading the step set from what happened to be timed would
+   let that noise change *which* steps are being compared.
 
    A step that was **never rendered at all** is a different fact, and it fails
    open on the term that matters most: on `actions/cache` the save runs on a
    MISS, so silently zeroing it removes the biggest miss-side term and
    manufactures the excess. A post step that started and never completed
-   withholds the occurrence; a block step whose timestamps are missing or do
-   not parse did not measure 0s, it did not measure, and withholds the
-   occurrence as `step_timestamps_unparseable_in_this_occurrence`; a block step
-   that GitHub did **not** report as skipped but whose timestamps parse to no
-   in-window time (a year-1 placeholder start, or a start before its own job)
-   did not measure either, and withholds the occurrence as
-   `step_skipped_or_out_of_window`; a post label
+   withholds the occurrence; a block step whose timestamps are missing, do not
+   parse or run backwards (end before start) did not measure 0s, it did not
+   measure, and withholds the occurrence as
+   `step_timestamps_unparseable_in_this_occurrence`; a block step that GitHub
+   did **not** report as skipped but whose timestamps parse and run forward to
+   no in-window time (a `started_at` in 1970 or earlier, the year-1 placeholder
+   included, or a start more than 1s before its own job or after it ended) did
+   not measure either, and withholds the occurrence as
+   `step_has_no_in_window_time`; a post label
    that matched **no** occurrence
    withholds the job; and `actions/cache/restore`, which has no post phase at
    all, records that there is no save rather than inventing a step name. That
@@ -2138,8 +2143,11 @@ repository (that is [OPT28](#opt28--full-git-history-checkout)'s lever and
    the identity still matches no observed step, that is counted as
    `checkout_step_identity_never_matched_in_steps` /
    `checkout_step_measured_on_no_sampled_run`, never as "the job ran too rarely".
-   A checkout that was skipped, or whose times fall outside its job, did not run
-   in that occurrence and is counted as `checkout_step_skipped_or_out_of_window`.
+   A checkout that was skipped, or whose start is a placeholder (1970 or
+   earlier) or falls outside its job, did not run in that occurrence and is
+   counted as `checkout_step_skipped_or_out_of_window`; one whose timestamps do
+   not parse or run backwards (end before start) is counted as
+   `checkout_step_duration_unparseable`.
 2. At least **6** sampled occurrences of the job, all on **one** known
    per-minute-billed runner label. A "tail" that is really some runs on a
    different runner class is a runner comparison, not a stall.
