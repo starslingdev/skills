@@ -75,6 +75,26 @@ The one non-scripted field. Written once per pattern group and merged onto
   its `Coverage:` line rather than recomputing one.
 - `suppressed_findings` — matches the engine deliberately withheld, with the
   reason each was withheld. Not a coverage gap, but not nothing either.
+- `parallel_steps` — `steps_scanned` (steps read inside GitHub Actions
+  `parallel:` groups), `control_steps` (`wait:` / `wait-all:` / `cancel:`,
+  which hold no code), `background_steps` (top-level steps written with any
+  `background:` value but a literal `false`; a child of a `parallel:` group
+  is counted in `steps_scanned` only, background or not) and the
+  `workflows` holding at least one of those counted steps. The key is
+  always present (all zeros for a repository without the syntax).
+  Informational, never a coverage gap: the leaf steps counted were scanned
+  like any other; control steps hold no code. A `parallel:` group or
+  background step the walker cannot fully read as written lands in
+  `coverage_notes` instead, tagged `scope: "parallel-group"`: a group
+  whose value is not a list, nested past the depth cap, carrying `run:` /
+  `uses:` beside `parallel:`, holding an entry that is not a step, carrying
+  a key the scan does not model (anything but `parallel:`, `if:`, `name:`,
+  `id:`, `continue-on-error:`, `background:`), re-entering itself through a
+  YAML alias, or past the walk's entry budget; a `background:` value chosen
+  at run time; or a job whose concurrent steps' source lines could not be
+  found. Its file is not listed in `workflows` unless it also holds counted
+  steps. Parallel steps are a github.com / GitHub Enterprise Cloud feature;
+  the scan reads the syntax wherever it appears.
 - `security_score` — present in the JSON and **never rendered**. Phase 3
   forbids a score, ratio or `N/100` anywhere the user sees. It is listed here
   so it is recognized as out of bounds rather than mistaken for a summary

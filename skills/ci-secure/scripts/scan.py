@@ -690,8 +690,6 @@ def detect_yaml_on_trigger(
         yield RawHit(line=located, evidence=evidence, match_text=trigger)
 
 
-_RUN_KEY_RE = re.compile(r"^\s*-?\s*run\s*:", re.MULTILINE)
-
 # Context fields GitHub generates itself, whose VALUE SHAPE cannot carry shell
 # metacharacters: integers (`.number`, `.id`), 40-hex object ids (`.sha`,
 # `.head_sha`, `.merge_commit_sha`) and booleans (`.repo.fork`, `.merged`).
@@ -794,6 +792,11 @@ _ATTACKER_FILLED_PREFIXES = (
 _KIND_UNANCHORED = "unanchored-run-step"
 _KIND_NOT_SCANNED = "not-scanned"
 _KIND_SUPPRESSED = "suppressed"
+#   PARALLEL_GROUP  a `parallel:` group the step walker could not read as
+#               written. A coverage note, but tagged `scope: parallel-group` so
+#               the report headlines it as a group, not as a step that "was
+#               read but carries a value this scan cannot know".
+_KIND_PARALLEL_GROUP = "parallel-group"
 
 _DROPPED_MATCHES: list[dict[str, str]] = []
 
@@ -887,20 +890,21 @@ def detect_yaml_run_injection(
     — those don't expose shell. The regex is meant for shell-injection
     sinks, and only ``run:`` scalars are shell.
 
-    Line numbers are computed by walking a forward-only cursor through
-    the file: for each step's run scalar, the cursor advances past the
-    next ``run:`` key in the file before snippet search starts. This
-    keeps the same template expression appearing earlier (in ``env:``
-    or ``with:``) from stealing the line attribution of the real
-    shell sink.
+    Line numbers come from the composed YAML: each leaf step is paired, by
+    position, with its node from `_iter_step_nodes` (the lockstep twin of
+    `_iter_job_steps`), and a snippet is searched for only inside that step's
+    own ``run:`` scalar span. The same template expression appearing earlier
+    (in ``env:`` or ``with:``) cannot steal the attribution, and neither can
+    a flow-style ``{run: ...}`` child, a group the walker could not read, or
+    a ``parallel:`` key written above its step's own ``run:`` — the raw-text
+    cursor this replaced was misled by all three.
 
-    The parsed step list can be LONGER than the file's raw ``run:`` tokens —
-    a YAML alias (``steps: *common``) expands into as many parsed steps as the
-    anchor holds while contributing no new raw ``run:`` line. Once the cursor
-    passes the last raw token, every remaining run scalar is unanchorable, so
-    those steps are recorded as dropped matches (a coverage gap the report
-    names) rather than skipped in silence — silence rendered as complete
-    coverage over steps nothing ever scanned.
+    A YAML alias (``steps: *common``) expands into parsed steps whose ``run:``
+    node is one an earlier step already used: that node is attributed once,
+    and every later use is recorded as a dropped match (a coverage gap the
+    report names) rather than skipped in silence — silence rendered as
+    complete coverage over steps nothing ever scanned. A step whose node
+    cannot be found at all is recorded the same way.
     """
     text = _read_text_safe(file_path)
     if not text:
@@ -914,28 +918,35 @@ def detect_yaml_run_injection(
     compiled = re.compile(pattern)
     lines = text.splitlines()
     triggers = _on_trigger_names(_get_on_node(doc))
-    file_cursor = 0
+    job_nodes = _job_nodes(text)
+    seen_runs: set[int] = set()
     unanchored_reported = False
-    for job in jobs.values():
+    for job_key, job in jobs.items():
         if not isinstance(job, dict):
             continue
-        steps = job.get("steps")
-        if not isinstance(steps, list):
-            continue
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
+        leaves = list(_iter_job_steps(job))
+        nodes = list(_iter_step_nodes(
+            _node_keys(job_nodes[job_key]).get("steps")
+            if job_key in job_nodes else None))
+        if len(nodes) != len(leaves):
+            nodes = []                      # unpaired: anchor nothing
+        for k, job_step in enumerate(leaves):
+            step = job_step.step
             run_text = step.get("run")
             if not isinstance(run_text, str):
                 continue
-            run_anchor = _RUN_KEY_RE.search(text, file_cursor)
-            if run_anchor is None:
-                # Unable to locate the run: key textually — we cannot scan
-                # this step's shell without risking attribution to an earlier
-                # non-run occurrence. This is a HOLE, not a clean step, so it
-                # is recorded as a coverage gap. Once per file: after the
-                # cursor runs past the last raw `run:` token every remaining
-                # parsed step lands here, and one honest line beats a hundred.
+            run_node = _node_keys(nodes[k]).get("run") if nodes else None
+            if not isinstance(run_node, yaml.ScalarNode) \
+                    or id(run_node) in seen_runs:
+                run_node = None
+            if run_node is None:
+                # No source line of its own for this run: scalar (an alias
+                # re-use of a node already attributed, or no node found) — we
+                # cannot scan this step's shell without risking attribution to
+                # another step. This is a HOLE, not a clean step, so it is
+                # recorded as a coverage gap. Once per file: an alias can
+                # expand into many such steps, and one honest line beats a
+                # hundred.
                 if not unanchored_reported:
                     unanchored_reported = True
                     logger.warning(
@@ -954,8 +965,12 @@ def detect_yaml_run_injection(
                         "step manually",
                     )
                 continue
-            file_cursor = run_anchor.end()
-            search_cursor = file_cursor
+            seen_runs.add(id(run_node))
+            # Search only the scalar's own source span: a snippet that is not
+            # there verbatim is a drop, never a match borrowed from a later
+            # step.
+            search_cursor = run_node.start_mark.index
+            run_end = run_node.end_mark.index
             for m in compiled.finditer(run_text):
                 snippet = m.group(0)
                 if _is_shape_safe_expression(snippet):
@@ -965,7 +980,7 @@ def detect_yaml_run_injection(
                         snippet, file_path,
                     )
                     continue
-                idx = text.find(snippet, search_cursor)
+                idx = text.find(snippet, search_cursor, run_end)
                 if idx < 0:
                     # The match exists in the parsed scalar but not
                     # verbatim in the raw file. This happens with YAML
@@ -1019,7 +1034,7 @@ def detect_yaml_run_injection(
                 # step with its own `if:` withdraws the verdict entirely: the
                 # finding is the STEP, so a statement about who reaches the
                 # JOB would talk past the live control.
-                gate = "" if step.get("if") is not None else _gate_note(
+                gate = "" if job_step.gated else _gate_note(
                     job, triggers, dead_field_only=True,
                 )
                 yield RawHit(
@@ -1478,14 +1493,10 @@ def _path_matches_any_glob(rel_path: str, globs: list[str]) -> bool:
 
 
 def _job_step_uses_prefixes(job: dict[str, Any], prefixes: tuple[str, ...]) -> list[int]:
-    """Return 1-based step indices whose `uses:` starts with any prefix."""
+    """Return 1-based ordinals, in walker (leaf) order, of the steps whose
+    `uses:` starts with any prefix — not `steps:` positions."""
     hits: list[int] = []
-    steps = job.get("steps")
-    if not isinstance(steps, list):
-        return hits
-    for i, step in enumerate(steps, start=1):
-        if not isinstance(step, dict):
-            continue
+    for i, step in enumerate(_job_steps(job), start=1):
         uses = step.get("uses", "")
         if isinstance(uses, str) and any(uses.startswith(p) for p in prefixes):
             hits.append(i)
@@ -1504,12 +1515,7 @@ def _job_uses_cache(job: dict[str, Any]) -> bool:
         ("actions/cache@", "actions/cache/", "pnpm/action-setup", "gradle/actions/setup-gradle"),
     ):
         return True
-    steps = job.get("steps")
-    if not isinstance(steps, list):
-        return False
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
+    for step in _job_steps(job):
         uses = step.get("uses", "")
         if not isinstance(uses, str):
             continue
@@ -1537,6 +1543,555 @@ def _walk_jobs(doc: Any) -> Iterator[tuple[str, dict[str, Any]]]:
     for job_name, job in jobs.items():
         if isinstance(job, dict):
             yield str(job_name), job
+
+
+# --- the one step walker -----------------------------------------------------
+#
+# GitHub Actions parallel steps (2026-06-25): a step may be `- parallel:`
+# followed by a LIST of ordinary child steps, and a job may carry pure control
+# steps (`wait:`, `wait-all:`, `cancel:`) with no `run:` and no `uses:`. The
+# `parallel:` entry itself has neither key, so every detector that walked
+# `job.steps` as a flat list skipped every child step in silence — a template
+# injection or a curl|bash written inside a parallel group read as clean.
+# Every detector that walks a job's steps reads them through
+# `_iter_job_steps`, so the next step syntax is taught in three walkers that
+# must agree (`_iter_job_steps`, its node twin `_iter_step_nodes`, and
+# `_step_spans`, which pairs the two), not twenty.
+_PARALLEL_KEY = "parallel"
+_PARALLEL_CONTROL_KEYS = frozenset({"wait", "wait-all", "cancel"})
+
+
+@dataclass(frozen=True)
+class _JobStep:
+    """One leaf step, as the job declares it."""
+    step: dict[str, Any]
+    path: tuple[int, ...]               # 0-based index at each nesting level
+    in_parallel_group: bool
+    # Possibly running in the background: the step, or a group holding it,
+    # carries any `background:` value but a literal `false` (fail safe).
+    background: bool
+    group: dict[str, Any] | None        # innermost enclosing `parallel:` entry
+    # Every enclosing `parallel:` entry, outermost first.
+    groups: tuple[dict[str, Any], ...] = ()
+    # The `id:` a top-level `wait:` names to join this background step: its
+    # own when it is itself background, else the innermost background group's.
+    background_id: Any = None
+
+    @property
+    def gated(self) -> bool:
+        """The step, or a parallel group holding it, has its own `if:`."""
+        return self.step.get("if") is not None or any(
+            g.get("if") is not None for g in self.groups)
+
+    @property
+    def group_continue_on_error(self) -> bool:
+        """A group holding the step is written `continue-on-error: true`; a
+        failure of the step is then swallowed as surely as its own would be."""
+        return any(g.get("continue-on-error") is True for g in self.groups)
+
+    @property
+    def label(self) -> str:
+        """1-based position, dotted through groups: step 3.2 = group 3, child 2."""
+        return ".".join(str(i + 1) for i in self.path)
+
+
+@dataclass
+class _StepWalkStats:
+    """What the walker saw beyond plain steps, for the report to disclose."""
+    in_parallel: int = 0
+    control: int = 0
+    background: int = 0
+    # (dotted step label, shape) per group the walker could not read as
+    # written; shape is one of the _GROUP_* constants below.
+    malformed: list[tuple[str, str]] | None = None
+
+
+_GROUP_NOT_A_LIST = "not-a-list"
+_GROUP_TOO_DEEP = "too-deep"
+_GROUP_ALSO_A_STEP = "also-a-step"
+_GROUP_ALSO_A_STEP_NOT_A_LIST = "also-a-step-not-a-list"
+_GROUP_ALSO_A_STEP_TOO_DEEP = "also-a-step-too-deep"
+_GROUP_CHILD_NOT_A_STEP = "child-not-a-step"
+_GROUP_UNKNOWN_KEY = "unknown-key"
+_STEP_BACKGROUND_EXPRESSION = "background-expression"
+
+# Keys on a `parallel:` entry this scan models. GitHub has not documented
+# which keys a group accepts; any other key is disclosed, not ignored.
+_GROUP_KNOWN_KEYS = frozenset({_PARALLEL_KEY, "if", "name", "id",
+                               "continue-on-error", "background"})
+
+
+def _may_run_in_background(entry: dict[str, Any]) -> bool:
+    """Fail safe: only an absent `background:` or a literal `false` proves the
+    entry finishes before the next step; `"true"`, `null` and an expression
+    all may leave it running."""
+    return "background" in entry and entry["background"] is not False
+
+
+def _note_background_expression(stats: _StepWalkStats | None,
+                                 path: tuple[int, ...],
+                                 entry: dict[str, Any]) -> None:
+    value = entry.get("background")
+    if isinstance(value, str) and "${{" in value:
+        _note_malformed(stats, path, _STEP_BACKGROUND_EXPRESSION)
+
+
+def _is_parallel_group(step: dict[str, Any]) -> bool:
+    return _PARALLEL_KEY in step and "run" not in step and "uses" not in step
+
+
+def _is_step_with_group(step: dict[str, Any]) -> bool:
+    """`parallel:` beside `run:` / `uses:` — not a shape GitHub accepts. Its
+    own command is scanned as a step AND its children are walked, so neither
+    half hides behind the other."""
+    return _PARALLEL_KEY in step and ("run" in step or "uses" in step)
+
+
+def _note_malformed(stats: _StepWalkStats | None, path: tuple[int, ...],
+                    shape: str) -> None:
+    if stats is not None:
+        if stats.malformed is None:
+            stats.malformed = []
+        stats.malformed.append((".".join(str(n + 1) for n in path), shape))
+
+
+def _is_control_step(step: dict[str, Any]) -> bool:
+    return ("run" not in step and "uses" not in step
+            and _PARALLEL_KEY not in step
+            and any(k in step for k in _PARALLEL_CONTROL_KEYS))
+
+
+def _iter_job_steps(
+    job: Any, stats: _StepWalkStats | None = None,
+) -> Iterator[_JobStep]:
+    """Every leaf step of a job, in declaration order.
+
+    Descends into `parallel:` lists (nesting is not documented by GitHub; it
+    is descended anyway: skipping it would be the silent drop this walker
+    exists to end). Control steps carry nothing to scan and are
+    skipped, but counted in ``stats``. A `parallel:` whose value is not a list,
+    or that sits ``_WALK_MAX_DEPTH`` groups deep, cannot be read; a `parallel:`
+    beside `run:` / `uses:` is read both ways (the step itself, then its
+    children). All three are recorded in ``stats.malformed`` — the caller that
+    owns disclosure turns each into a coverage note, never a clean step.
+    """
+    steps = job.get("steps") if isinstance(job, dict) else None
+    if isinstance(steps, list):
+        yield from _iter_step_list(steps, (), (), stats, 0,
+                                   _WalkGuard({id(steps)}))
+
+
+# A YAML alias can make a step list hold itself (`steps: &s [..., {parallel:
+# *s}]`), or hold the level below it twice at every level: the depth cap alone
+# bounds neither (2**64 leaves). Each walk of one job therefore refuses to
+# re-enter a list already on its path, and stops descending once it has
+# visited `_WALK_MAX_ENTRIES` entries. Both walkers apply the same guard at the
+# same points, entry for entry, so they stay in lockstep.
+_WALK_MAX_ENTRIES = 10_000
+_GROUP_CYCLE = "cycle"
+_GROUP_OVER_BUDGET = "over-budget"
+
+
+@dataclass
+class _WalkGuard:
+    on_path: set[int]
+    entries: int = 0
+    over_budget_noted: bool = False
+
+    def blocked(self, children: Any) -> str | None:
+        """Why this group's children must not be descended, if they must not."""
+        if id(children) in self.on_path:
+            return _GROUP_CYCLE
+        if self.entries >= _WALK_MAX_ENTRIES:
+            return _GROUP_OVER_BUDGET
+        return None
+
+
+def _note_blocked(stats: _StepWalkStats | None, path: tuple[int, ...],
+                  guard: _WalkGuard, why: str) -> None:
+    if why == _GROUP_OVER_BUDGET:
+        if guard.over_budget_noted:         # one note per walk, not thousands
+            return
+        guard.over_budget_noted = True
+    _note_malformed(stats, path, why)
+
+
+def _iter_step_list(
+    steps: list[Any], prefix: tuple[int, ...],
+    groups: tuple[dict[str, Any], ...], stats: _StepWalkStats | None,
+    depth: int, guard: _WalkGuard,
+) -> Iterator[_JobStep]:
+    group = groups[-1] if groups else None
+    for i, step in enumerate(steps):
+        guard.entries += 1
+        path = prefix + (i,)
+        if not isinstance(step, dict):
+            if group is not None:
+                # A nested list or a bare string inside a group is not a
+                # step; skipping it in silence read it as clean.
+                _note_malformed(stats, path, _GROUP_CHILD_NOT_A_STEP)
+            continue
+        if _is_parallel_group(step):
+            if any(k not in _GROUP_KNOWN_KEYS for k in step):
+                _note_malformed(stats, path, _GROUP_UNKNOWN_KEY)
+            _note_background_expression(stats, path, step)
+            children = step.get(_PARALLEL_KEY)
+            if not isinstance(children, list):
+                _note_malformed(stats, path, _GROUP_NOT_A_LIST)
+            elif depth >= _WALK_MAX_DEPTH:
+                _note_malformed(stats, path, _GROUP_TOO_DEEP)
+            elif (why := guard.blocked(children)) is not None:
+                _note_blocked(stats, path, guard, why)
+            else:
+                guard.on_path.add(id(children))
+                yield from _iter_step_list(children, path, groups + (step,),
+                                           stats, depth + 1, guard)
+                guard.on_path.discard(id(children))
+            continue
+        if _is_control_step(step):
+            if stats is not None:
+                stats.control += 1
+            continue
+        _note_background_expression(stats, path, step)
+        own_background = _may_run_in_background(step)
+        background_id = step.get("id") if own_background else next(
+            (g.get("id") for g in reversed(groups)
+             if _may_run_in_background(g)), None)
+        background = own_background or any(
+            _may_run_in_background(g) for g in groups)
+        if stats is not None:
+            stats.in_parallel += group is not None
+            # A group's child is counted in `in_parallel` only, background
+            # or not (scan-output.md), so no step is counted twice.
+            stats.background += own_background and group is None
+        yield _JobStep(step=step, path=path, in_parallel_group=group is not None,
+                       background=background, group=group, groups=groups,
+                       background_id=background_id)
+        if _is_step_with_group(step):
+            children = step.get(_PARALLEL_KEY)
+            if not isinstance(children, list):
+                _note_malformed(stats, path, _GROUP_ALSO_A_STEP_NOT_A_LIST)
+            elif depth >= _WALK_MAX_DEPTH:
+                _note_malformed(stats, path, _GROUP_ALSO_A_STEP_TOO_DEEP)
+            elif (why := guard.blocked(children)) is not None:
+                _note_blocked(stats, path, guard, why)
+            else:
+                _note_malformed(stats, path, _GROUP_ALSO_A_STEP)
+                guard.on_path.add(id(children))
+                yield from _iter_step_list(children, path, groups + (step,),
+                                           stats, depth + 1, guard)
+                guard.on_path.discard(id(children))
+
+
+def _job_steps(job: Any) -> list[dict[str, Any]]:
+    """The leaf step dicts of a job, for callers that need nothing else."""
+    return [s.step for s in _iter_job_steps(job)]
+
+
+# Declaration order is not execution order once a job uses `parallel:` or
+# `background:`. Siblings in one group run at the same time (the group ends
+# with an implicit wait, so they are finished before the next top-level step),
+# and a background step keeps running past the steps declared after it until
+# a top-level `wait-all:` (empty or literally `true`) or a `wait:` naming its
+# `id` (anything else — `cancel:`, `wait-all: false`, an expression — is
+# treated as still running: fail safe). A step is background when it, or a
+# group holding it, carries any `background:` value but a literal `false`. A
+# child that is itself background is treated as running past the group's end,
+# until a top-level wait (fail safe). The detectors that reason about ORDER
+# answer with this, and over-report rather than miss: "did X run after the
+# checkout/fetch?" counts a concurrent X as after, and "did protection P
+# finish before the install?" counts P only when it is declared earlier AND
+# not concurrent with the install. With neither syntax present nothing is
+# concurrent and every answer is the declaration order.
+@dataclass(frozen=True)
+class _StepTiming:
+    top: int                    # index of the top-level `steps:` entry
+    grouped: bool               # a child of a `parallel:` group
+    # background only: index of the top-level wait that joins it, or
+    # len(steps) when none does; None when not background.
+    until: int | None
+
+
+def _joins_all(control: dict[str, Any]) -> bool:
+    """`wait-all:` written empty or literally `true`; `false` or an
+    expression proves nothing has finished."""
+    return "wait-all" in control and control["wait-all"] in (None, True)
+
+
+def _step_timing(job_step: _JobStep, steps: list[Any]) -> _StepTiming:
+    top = job_step.path[0]
+    until: int | None = None
+    if job_step.background:
+        until = len(steps)
+        sid = job_step.background_id
+        for j in range(top + 1, len(steps)):
+            s = steps[j]
+            if not (isinstance(s, dict) and _is_control_step(s)):
+                continue
+            waits = s.get("wait")
+            waits = waits if isinstance(waits, list) else [waits]
+            if _joins_all(s) or (
+                    sid is not None and str(sid) in [str(w) for w in waits]):
+                until = j
+                break
+    return _StepTiming(top, job_step.in_parallel_group, until)
+
+
+def _steps_concurrent(a: _StepTiming, b: _StepTiming) -> bool:
+    """Two DIFFERENT leaf steps of one job may be running at the same time."""
+    if a.top > b.top:
+        a, b = b, a
+    if a.top == b.top:
+        return a.grouped and b.grouped
+    return a.until is not None and b.top < a.until
+
+
+def _job_step_timings(job: Any) -> list[tuple[_JobStep, _StepTiming]]:
+    steps = job.get("steps") if isinstance(job, dict) else None
+    if not isinstance(steps, list):
+        return []
+    return [(s, _step_timing(s, steps)) for s in _iter_job_steps(job)]
+
+
+@dataclass(frozen=True)
+class _StepSpan:
+    """A leaf step's source lines, with its timing, for line-based detectors."""
+    job: str
+    start_line: int
+    end_line: int
+    timing: _StepTiming
+
+
+def _step_spans(text: str,
+                unmatched: list[str] | None = None) -> list[_StepSpan]:
+    """Every leaf step's source span, for each job that holds at least one
+    grouped or background step.
+
+    Empty (and nothing is parsed) unless the text contains the word
+    `parallel` or `background`, so plain workflows keep their exact
+    behaviour. Jobs are found by `_job_nodes` (keyed as the loader keys them)
+    and keys resolve through `_node_keys`, so `<<:` merges at the job or the
+    step level are followed; each leaf is paired by position with its node
+    from `_iter_step_nodes`, the lockstep twin of `_iter_job_steps`. A job
+    that holds concurrent steps but whose nodes cannot be paired is named in
+    ``unmatched`` — its concurrency would otherwise fall back to declaration
+    order in silence.
+    """
+    if "parallel" not in text and "background" not in text:
+        return []
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return []
+    if not (isinstance(doc, dict) and isinstance(doc.get("jobs"), dict)):
+        return []
+    job_nodes = _job_nodes(text)
+    out: list[_StepSpan] = []
+    for name, job in doc["jobs"].items():
+        timings = _job_step_timings(job)
+        if not any(t.grouped or t.until is not None for _, t in timings):
+            continue
+        job_node = job_nodes.get(name)
+        nodes = list(_iter_step_nodes(
+            _node_keys(job_node).get("steps")
+            if isinstance(job_node, yaml.MappingNode) else None))
+        if len(nodes) != len(timings):
+            if unmatched is not None:
+                unmatched.append(str(name))
+            continue
+        for (_, timing), node in zip(timings, nodes):
+            out.append(_StepSpan(str(name), node.start_mark.line + 1,
+                                 node.end_mark.line + 1, timing))
+    return out
+
+
+def _lines_concurrent(spans: list[_StepSpan], a: int, b: int) -> bool:
+    """The steps holding source lines `a` and `b` may run at the same time.
+    Lines of ONE step are ordered by line as before."""
+    def _at(line: int) -> _StepSpan | None:
+        # A node's end mark can sit on the next step's first line, so the
+        # last span in declaration order that CONTAINS the line is the one
+        # holding it.
+        return next((s for s in reversed(spans)
+                     if s.start_line <= line <= s.end_line), None)
+    sa, sb = _at(a), _at(b)
+    return (sa is not None and sb is not None and sa is not sb
+            and sa.job == sb.job and _steps_concurrent(sa.timing, sb.timing))
+
+
+def _iter_step_nodes(steps_node: Any, depth: int = 0,
+                     guard: _WalkGuard | None = None) -> Iterator[Any]:
+    """The composed-node twin of `_iter_job_steps`: every leaf step MappingNode
+    of a `steps:` SequenceNode, in order, descending into `parallel:` lists, so
+    a child step's source line is the child's own. Must yield exactly the
+    leaves `_iter_step_list` yields, in the same order, with the same depth
+    cap and the same `_WalkGuard` (cycle and entry budget): line attribution
+    pairs the two by position."""
+    if not isinstance(steps_node, yaml.SequenceNode):
+        return
+    if guard is None:
+        guard = _WalkGuard({id(steps_node)})
+
+    def _descend(children: Any) -> Iterator[Any]:
+        if not isinstance(children, yaml.SequenceNode) \
+                or depth >= _WALK_MAX_DEPTH or guard.blocked(children):
+            return
+        guard.on_path.add(id(children))
+        yield from _iter_step_nodes(children, depth + 1, guard)
+        guard.on_path.discard(id(children))
+
+    for node in steps_node.value:
+        guard.entries += 1
+        if not isinstance(node, yaml.MappingNode):
+            continue
+        keys = _node_keys(node)
+        if _PARALLEL_KEY in keys and "run" not in keys and "uses" not in keys:
+            yield from _descend(keys[_PARALLEL_KEY])
+            continue
+        if "run" not in keys and "uses" not in keys \
+                and any(k in keys for k in _PARALLEL_CONTROL_KEYS):
+            continue
+        yield node
+        if _PARALLEL_KEY in keys:
+            yield from _descend(keys[_PARALLEL_KEY])
+
+
+def _node_keys(node: Any) -> dict[Any, Any]:
+    """A composed mapping's keys, with `<<:` merges resolved the way the
+    loader resolves them (own keys win, then earlier merge sources), so the
+    node walker sees the same shape as the loaded dict."""
+    own: dict[Any, Any] = {}
+    merged: dict[Any, Any] = {}
+    for k, v in node.value:
+        key = getattr(k, "value", None)
+        if key == "<<" and getattr(k, "tag", "") == "tag:yaml.org,2002:merge":
+            sources = v.value if isinstance(v, yaml.SequenceNode) else [v]
+            for src in sources:
+                if isinstance(src, yaml.MappingNode):
+                    for mk, mv in _node_keys(src).items():
+                        merged.setdefault(mk, mv)
+        else:
+            own[key] = v
+    merged.update(own)
+    return merged
+
+
+def _job_nodes(text: str) -> dict[Any, Any]:
+    """Each job's composed node, keyed exactly as `yaml.safe_load` keys the
+    job (a `yes:` job is `True`, not "yes"), with `<<:` merges and duplicate
+    keys resolved the way the loader resolves them. Empty when the text does
+    not compose."""
+    try:
+        root = yaml.compose(text)
+    except yaml.YAMLError:
+        return {}
+    jobs = _node_keys(root).get("jobs") if isinstance(
+        root, yaml.MappingNode) else None
+    if not isinstance(jobs, yaml.MappingNode):
+        return {}
+    loader = yaml.SafeLoader("")
+    own: dict[Any, Any] = {}
+    merged: dict[Any, Any] = {}
+
+    def _key(k: Any) -> Any:
+        try:
+            key = loader.construct_object(k, deep=True)
+            hash(key)
+            return key
+        except Exception:                       # unhashable or unconstructable
+            return None
+
+    for k, v in jobs.value:
+        if getattr(k, "tag", "") == "tag:yaml.org,2002:merge":
+            sources = v.value if isinstance(v, yaml.SequenceNode) else [v]
+            for src in sources:
+                if isinstance(src, yaml.MappingNode):
+                    for mk, mv in src.value:
+                        merged.setdefault(_key(mk), mv)
+            continue
+        own[_key(k)] = v
+    merged.update(own)
+    merged.pop(None, None)
+    return merged
+
+
+# Raw-text checks read a file's text whatever its step shape, so text the
+# walker could not read as steps may still have been matched by one of them;
+# no sentence here claims that NO detector saw it.
+_NOT_READ_AS_STEPS = ("was not read as steps; some raw-text checks may still "
+                      "have matched inside it — review it manually")
+_GROUP_GAP_SENTENCE = {
+    _GROUP_NOT_A_LIST: (
+        "is a `parallel:` group whose value is not a list of steps, so it "
+        + _NOT_READ_AS_STEPS),
+    _GROUP_TOO_DEEP: (
+        "is a `parallel:` group nested more than {depth} groups "
+        "deep, so it " + _NOT_READ_AS_STEPS),
+    _GROUP_ALSO_A_STEP: (
+        "is a `parallel:` group that also carries `run:`/`uses:`, which "
+        "GitHub does not accept; its own command and its child steps were "
+        "scanned, but review it manually"),
+    _GROUP_ALSO_A_STEP_NOT_A_LIST: (
+        "is a step that also carries `parallel:`, which GitHub does not "
+        "accept; its own command was scanned, but its `parallel:` value is "
+        "not a list of steps, so that value " + _NOT_READ_AS_STEPS),
+    _GROUP_ALSO_A_STEP_TOO_DEEP: (
+        "is a step that also carries `parallel:`, which GitHub does not "
+        "accept; its own command was scanned, but it sits more than {depth} "
+        "groups deep, so its `parallel:` value " + _NOT_READ_AS_STEPS),
+    _GROUP_CHILD_NOT_A_STEP: (
+        "is an entry of a `parallel:` group that is not a step (a mapping), "
+        "so it " + _NOT_READ_AS_STEPS),
+    _GROUP_UNKNOWN_KEY: (
+        "is a `parallel:` group carrying a key other than `parallel:`, "
+        "`if:`, `name:`, `id:`, `continue-on-error:` or `background:`; its "
+        "child steps were scanned, but what that key does to them was not "
+        "modelled — review it manually"),
+    _GROUP_CYCLE: (
+        "is a `parallel:` group whose steps are, through a YAML alias, a list "
+        "that already holds this group, so it was not entered again; it "
+        + _NOT_READ_AS_STEPS),
+    _GROUP_OVER_BUDGET: (
+        f"is where the walk of this job passed {_WALK_MAX_ENTRIES:,} step "
+        "entries (YAML aliases can repeat one group many times), so this "
+        "group and every later group in the job " + _NOT_READ_AS_STEPS),
+    _STEP_BACKGROUND_EXPRESSION: (
+        "has a `background:` value chosen at run time; it was scanned, and "
+        "treated as running in the background until a top-level `wait:` "
+        "naming it or `wait-all:` — review it manually"),
+}
+
+
+def _parallel_step_stats(
+    file_path: Path,
+) -> tuple[_StepWalkStats, list[str]]:
+    """One file's parallel-step census, and a sentence per unreadable group.
+
+    Run once per workflow by `scan()`, separately from the detectors, so the
+    counts are not multiplied by the number of detectors that walk steps.
+    """
+    stats = _StepWalkStats()
+    gaps: list[str] = []
+    text = _read_text_safe(file_path)
+    doc = _parse_yaml_text(text, file_path, quiet=True) if text else None
+    for job_name, job in _walk_jobs(doc):
+        before = len(stats.malformed or [])
+        for _ in _iter_job_steps(job, stats):
+            pass
+        for label, shape in (stats.malformed or [])[before:]:
+            gaps.append(f"jobs.{job_name} step {label} "
+                        + _GROUP_GAP_SENTENCE[shape].format(
+                            depth=_WALK_MAX_DEPTH))
+    unmatched: list[str] = []
+    if text:
+        _step_spans(text, unmatched)
+    for job_name in unmatched:
+        gaps.append(
+            f"jobs.{job_name} holds `parallel:` or background steps whose "
+            "source lines could not be found, so which of its steps may run "
+            "at the same time was not modelled and the order-dependent "
+            "checks fell back to declaration order — review it manually")
+    return stats, gaps
 
 
 def _job_line_in_text(text: str, job_name: str) -> int:
@@ -1601,12 +2156,7 @@ def _correlation_credential_file_in_cache_or_artifact(
     if not isinstance(doc, dict):
         return
     for job_name, job in _walk_jobs(doc):
-        steps = job.get("steps")
-        if not isinstance(steps, list):
-            continue
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
+        for step in _job_steps(job):
             uses = step.get("uses", "")
             if not isinstance(uses, str) or not any(
                 uses.startswith(p) for p in _CACHE_UPLOAD_PREFIXES
@@ -2540,11 +3090,20 @@ def _allowlist_writes(
 
 
 def _builds_disabled_at(
-    writes: list[tuple[int, bool, str]], install_line: int
+    writes: list[tuple[int, bool, str]], install_line: int,
+    concurrent: Callable[[int, int], bool] | None = None,
 ) -> str | None:
     """The verbatim line that leaves builds disabled at `install_line`, if the
-    LAST allowlist write above it is a disable."""
-    prior = [w for w in writes if w[0] < install_line]
+    LAST allowlist write above it is a disable.
+
+    A write in a step that may run at the same time as the install (see
+    `_StepTiming`) is not known to land before it: it never counts as the
+    protecting write, and if it re-enables builds the install is exposed."""
+    def _racing(w: tuple[int, bool, str]) -> bool:
+        return concurrent is not None and concurrent(w[0], install_line)
+    if any(_racing(w) and not w[1] for w in writes):
+        return None
+    prior = [w for w in writes if w[0] < install_line and not _racing(w)]
     if prior and prior[-1][1]:
         return prior[-1][2]
     return None
@@ -2686,15 +3245,7 @@ def _manager_condition_note(
 
 
 def _job_run_texts(job: Any) -> list[str]:
-    if not isinstance(job, dict):
-        return []
-    steps = job.get("steps")
-    if not isinstance(steps, list):
-        return []
-    return [
-        s["run"] for s in steps
-        if isinstance(s, dict) and isinstance(s.get("run"), str)
-    ]
+    return [s["run"] for s in _job_steps(job) if isinstance(s.get("run"), str)]
 
 
 def _correlation_install_scripts_in_privileged_job(
@@ -2765,6 +3316,7 @@ def _correlation_install_scripts_in_privileged_job(
         # here would be a false positive against the repo's own mitigation.
         if manager == "pnpm" and pin and pin[0] == "pnpm" and pin[1] >= 10:
             allowlist_writes = _allowlist_writes(text, ranges.get(job_name))
+            spans = _step_spans(text)
             # Mitigation is decided PER INSTALL, by the last allowlist write
             # above it — a job can turn builds off, install, put them back and
             # install again. Report the first install that is exposed, so the
@@ -2775,7 +3327,9 @@ def _correlation_install_scripts_in_privileged_job(
             exposed = next(
                 (c for c in candidates
                  if _install_manager(c[2]) != "pnpm"
-                 or _builds_disabled_at(allowlist_writes, c[0]) is None),
+                 or _builds_disabled_at(
+                     allowlist_writes, c[0],
+                     lambda a, b: _lines_concurrent(spans, a, b)) is None),
                 None,
             )
             if exposed is None:
@@ -3511,12 +4065,7 @@ def _step_marks(text: str) -> list[_StepMark] | None:
         return None
     out: list[_StepMark] = []
     for job_key, job_node in jobs.value:
-        steps = _child(job_node, "steps")
-        if not isinstance(steps, yaml.SequenceNode):
-            continue
-        for step in steps.value:
-            if not isinstance(step, yaml.MappingNode):
-                continue
+        for step in _iter_step_nodes(_child(job_node, "steps")):
             run = _child(step, "run")
             uses = _child(step, "uses")
             wd = _child(step, "working-directory")
@@ -3667,8 +4216,8 @@ def _checkout_fetches(
     own repository. Both are the overwhelmingly common case and neither is this
     vector.
     """
-    steps = job.get("steps") if isinstance(job, dict) else None
-    if not isinstance(steps, list):
+    steps = _job_steps(job)
+    if not steps:
         return []
     lines = text.splitlines()
     start, end = job_range if job_range else (1, len(lines))
@@ -3689,8 +4238,6 @@ def _checkout_fetches(
     out: list[_RemoteFetch] = []
     index = -1
     for step in steps:
-        if not isinstance(step, dict):
-            continue
         uses = step.get("uses")
         if not (isinstance(uses, str) and uses.startswith("actions/checkout")):
             continue
@@ -3976,6 +4523,15 @@ def _mutable_fetch_executions(
                 f"visible in this YAML, so whether it runs out of a fetched "
                 f"tree was NOT checked — review it by hand")
 
+    # Steps that may run at the same time (`_StepTiming`): an execution racing
+    # the fetch counts as after it, and a pin racing either half pins nothing
+    # knowably in between.
+    spans = _step_spans(text)
+    pos_line = dict(command_lines)
+
+    def _racing(a: int, b: int) -> bool:
+        return _lines_concurrent(spans, a, b)
+
     pairs: list[tuple[_RemoteFetch, int, str]] = []
     for dest, fetch in fetches.items():
         # The last unpinned fetch into a destination is the tree that ran — but
@@ -3996,7 +4552,8 @@ def _mutable_fetch_executions(
                     # A shell fetch is ordered by position in the command stream
                     # (both halves can share a line); a checkout step has no
                     # position there, so it is ordered by line.
-                    if (line > cand.line if cand.pos < 0 else at > cand.pos)
+                    if ((line > cand.line if cand.pos < 0 else at > cand.pos)
+                        or _racing(cand.line, line))
                     and _under(dest, resolved)
                 ),
                 None,
@@ -4023,7 +4580,11 @@ def _mutable_fetch_executions(
                     (at for at, line in command_lines if line > cand.line),
                     hit[0] + 1) - 1
             pin_at = next((p for p in pinned.get(dest, ())
-                           if window_start < p < hit[0]), None)
+                           if window_start < p < hit[0]
+                           and not _pin_races(pos_line.get(p),
+                                              (hit[1], cand.line), _racing,
+                                              bool(spans))),
+                          None)
             if pin_at is not None:
                 suppressed_line = cand.line
                 continue
@@ -4038,6 +4599,17 @@ def _mutable_fetch_executions(
                 f"deliberately not reported",
                 kind=_KIND_SUPPRESSED)
     return sorted(pairs, key=lambda p: p[0].line)
+
+
+def _pin_races(pin_line: int | None, lines: tuple[int, ...],
+               racing: Callable[[int, int], bool], concurrency: bool) -> bool:
+    """A pin may run at the same time as one of `lines` (the fetch, the
+    execution). Fail safe: in a job with concurrent steps, a pin whose source
+    line is unknown is not provably in between, so it counts as racing; with
+    no concurrency the command order alone already places it."""
+    if pin_line is None:
+        return concurrency
+    return any(racing(pin_line, ln) for ln in lines)
 
 
 def _correlation_unverified_remote_code_execution(
@@ -4398,25 +4970,28 @@ def _attacker_head_ref(value: Any) -> bool:
     return any(n in value for n in needles)
 
 
-def _job_checkout_head_then_executes(job: dict[str, Any]) -> tuple[int, str] | None:
+def _job_checkout_head_then_executes(
+    job: dict[str, Any],
+) -> tuple[int, str, bool] | None:
     """The load-bearing predicate of P14.9: within ONE job, an
-    `actions/checkout` of the attacker's head ref FOLLOWED by a step that
-    executes from the working tree (`run:` or a local `./action`).
+    `actions/checkout` of the attacker's head ref FOLLOWED BY, or possibly
+    running at the same time as (a `parallel:` sibling, a `background:` step
+    still running), a step that executes from the working tree (`run:` or a
+    local `./action`).
 
     The execution leg is a deliberate, documented over-approximation: a
     post-checkout `run:` step almost always executes tree-controlled content
     (install scripts, Makefiles, test suites), so we do not try to prove which
     file it touches. A checkout with no `ref:` (base/merge ref) never
-    qualifies. Returns (checkout_step_index, ref_text) or None.
+    qualifies. Returns (checkout_step_index, ref_text, concurrent) or None;
+    `concurrent` is True when only the possibly-at-the-same-time reading
+    qualifies, so the evidence does not claim an order it cannot know.
+    The index is a 0-based ordinal in walker (leaf) order, not a `steps:`
+    position.
     """
-    steps = job.get("steps")
-    if not isinstance(steps, list):
-        return None
     checkout_idx: int | None = None
     ref_text = ""
-    for i, step in enumerate(steps):
-        if not isinstance(step, dict):
-            continue
+    for i, step in enumerate(_job_steps(job)):
         uses = step.get("uses")
         if isinstance(uses, str) and uses.startswith("actions/checkout"):
             with_block = step.get("with")
@@ -4432,7 +5007,26 @@ def _job_checkout_head_then_executes(job: dict[str, Any]) -> tuple[int, str] | N
                 and step["uses"].startswith("./")
             )
             if executes:
-                return checkout_idx, ref_text
+                return checkout_idx, ref_text, False
+    # Declared after is not the only "after": a step that may run at the same
+    # time as the head checkout (a `parallel:` sibling written above it, a
+    # `background:` step still running) can execute the fork's tree too.
+    timed = _job_step_timings(job)
+    for i, (c, c_timing) in enumerate(timed):
+        uses, with_block = c.step.get("uses"), c.step.get("with")
+        if not (isinstance(uses, str) and uses.startswith("actions/checkout")
+                and isinstance(with_block, dict)):
+            continue
+        ref = next((with_block.get(k) for k in ("ref", "repository")
+                    if _attacker_head_ref(with_block.get(k))), None)
+        if ref is None:
+            continue
+        for e, e_timing in timed:
+            e_uses = e.step.get("uses")
+            if e is not c and ("run" in e.step or (
+                    isinstance(e_uses, str) and e_uses.startswith("./"))) \
+                    and _steps_concurrent(c_timing, e_timing):
+                return i, str(ref), True
     return None
 
 
@@ -4443,8 +5037,9 @@ def _correlation_untrusted_checkout_executes(file_path: Path) -> Iterator[RawHit
     trigger that carries the BASE repo's context (write token, secrets);
     (2) `actions/checkout` pulls the attacker's head code (`ref:` /
     `repository:` naming pull_request.head.*, github.head_ref, or
-    workflow_run.head_*); (3) a later step in the same job executes from the
-    working tree. One hit per qualifying job. The bare trigger without the
+    workflow_run.head_*); (3) a step in the same job that runs after it, or
+    may run at the same time as it (a `parallel:` sibling, a background step
+    still running), executes from the working tree. One hit per qualifying job. The bare trigger without the
     head checkout is NOT a finding here — that presence fact belongs to the
     scored config checks.
     """
@@ -4463,13 +5058,16 @@ def _correlation_untrusted_checkout_executes(file_path: Path) -> Iterator[RawHit
         hit = _job_checkout_head_then_executes(job)
         if hit is None:
             continue
-        _, ref_text = hit
+        _, ref_text, concurrent = hit
         line = _job_line_in_text(text, job_name)
+        then = ("and a step that may run after or alongside it executes "
+                "from the tree" if concurrent
+                else "then executes from the tree")
         yield RawHit(
             line=line,
             evidence=(
                 f"{line:>4}: job `{job_name}` on `{trig}` checks out "
-                f"`{ref_text}` then executes from the tree <-- here"
+                f"`{ref_text}` {then} <-- here"
                 + _gate_note(job, sorted(triggers))
             ),
             match_text=job_name,
@@ -5160,6 +5758,26 @@ def scan(
         len(catalog), len(workflow_files), root,
     )
 
+    # Parallel-step census, once per file. Every detector that walks a job's
+    # steps reads them through `_iter_job_steps`, so children of a
+    # `parallel:` group ARE scanned; this
+    # records that they were, so the report can say so rather than leave a
+    # reader to wonder whether the newer syntax was understood. A group the
+    # walker could not read is a coverage gap, recorded as one.
+    parallel_steps: dict[str, Any] = {
+        "steps_scanned": 0, "control_steps": 0, "background_steps": 0,
+        "workflows": [],
+    }
+    for wf in workflow_files:
+        stats, gaps = _parallel_step_stats(wf)
+        parallel_steps["steps_scanned"] += stats.in_parallel
+        parallel_steps["control_steps"] += stats.control
+        parallel_steps["background_steps"] += stats.background
+        if stats.in_parallel or stats.control or stats.background:
+            parallel_steps["workflows"].append(_repo_relative(str(wf), root))
+        for reason in gaps:
+            _record_dropped_match(wf, reason, kind=_KIND_PARALLEL_GROUP)
+
     # Wall-clock anchor for end-to-end timing: report.py (always the last step)
     # computes total_run_s from this. It lives in scan.py — not just the run.py
     # driver — so the number is captured whether the orchestrator runs run.py or
@@ -5459,6 +6077,7 @@ def scan(
     _by_kind = {
         _KIND_UNANCHORED: dropped_matches,
         _KIND_NOT_SCANNED: coverage_notes,
+        _KIND_PARALLEL_GROUP: coverage_notes,
         _KIND_SUPPRESSED: suppressed_findings,
     }
     for dropped in _DROPPED_MATCHES:
@@ -5470,6 +6089,8 @@ def scan(
         else:
             logger.debug("suppressed finding: %s — %s", rel, dropped["reason"])
         entry = {"workflow_file": rel, "reason": dropped["reason"]}
+        if kind == _KIND_PARALLEL_GROUP:
+            entry["scope"] = _KIND_PARALLEL_GROUP
         bucket = _by_kind.get(kind, dropped_matches)
         if entry not in bucket:
             bucket.append(entry)
@@ -5529,9 +6150,17 @@ def scan(
         "dropped_matches": dropped_matches,
         # A real coverage gap that is NOT an unanchorable run step — a
         # computed `working-directory:`, a `ref:` chosen at run time, shell
-        # that would not parse. Its own key so the report can name it in its
-        # own words instead of under a headline that misdescribes it.
+        # that would not parse — or, tagged `scope: parallel-group`, a
+        # `parallel:` group or background step whose steps may not have been
+        # scanned as steps. Its own key so the report can name it in its own
+        # words instead of under a headline that misdescribes it.
         "coverage_notes": coverage_notes,
+        # Steps read inside GitHub Actions `parallel:` groups, plus the
+        # control (`wait:`/`wait-all:`/`cancel:`) and `background: true` steps
+        # seen. Informational: the leaf steps counted were scanned like any
+        # other (control steps hold no code), and the count is disclosed so
+        # that is never left implicit.
+        "parallel_steps": parallel_steps,
         # Findings the scanner REACHED and deliberately did not report, above
         # all a fetch pinned to a full commit id. Informational: this must
         # never degrade coverage, or a repository that did exactly what the fix
