@@ -2192,6 +2192,78 @@ def test_door_stamps_not_derivable_whitelist_with_reason():
     assert f["runner_min_door_note"]   # a reason is recorded
 
 
+# curl/curl validation run (2026-10-10): OPT16's flat estimate (~10 s per run x
+# 1463 runs/month / 60 = 243.8 min/mo, basis `not_spine_derivable`) on a job
+# that measures 155.5 min/mo of billable compute FAILed
+# `check_saving_within_measured_compute`, so phase 5 refused the whole report.
+_CURL_WF = ".github/workflows/http3-linux.yml"
+_CURL_FLAT_SAVING = round(10 * 1463 / 60, 1)   # 243.8
+
+
+def test_not_spine_derivable_flat_estimate_capped_at_measured_compute(tmp_path):
+    # Every NOT-DERIVABLE (modeled / flat) estimate is CAPPED at its affected jobs'
+    # measured billable when they join the spine — a fix cannot save more minutes
+    # than the jobs consume — and the cap is disclosed on the finding.
+    from collect_runs import _reground_runner_minute_savings
+    f = {"pattern": "OPT16", "workflow_file": _CURL_WF, "affected_jobs": ["linux"],
+         "runner_min_saving": _CURL_FLAT_SAVING, "sizing_basis": "modeled"}
+    doc = {"findings": [f], "runner_minute_spine": _door_spine(
+        {"linux (a)": 100.0, "linux (b)": 55.5}, wf=_CURL_WF)}   # Σ = 155.5
+    assert _bounds_tag(doc, tmp_path) == "FAIL"   # the uncapped shape the guard rejects
+    _reground_runner_minute_savings(doc["findings"], doc["runner_minute_spine"])
+    assert f["runner_min_saving"] == 155.5, "capped at the measured billable"
+    assert f["runner_min_basis"] == "measured_spine_clamped"
+    assert "modeled" in f["runner_min_door_note"], "the original basis stays disclosed"
+    assert "155.5 min/mo" in f["size_note"]
+    assert "cannot save more minutes than the jobs consume" in f["size_note"]
+    assert _bounds_tag(doc, tmp_path) == "PASS"
+
+
+def test_not_spine_derivable_within_measured_compute_is_untouched():
+    # The cap only ever lowers: a flat estimate already within the measured
+    # billable keeps its figure and its whitelist basis.
+    from collect_runs import _reground_runner_minute_savings
+    f = {"pattern": "OPT16", "workflow_file": _CURL_WF, "affected_jobs": ["linux"],
+         "runner_min_saving": 100.0}
+    _reground_runner_minute_savings([f], _door_spine({"linux": 155.5}, wf=_CURL_WF))
+    assert f["runner_min_saving"] == 100.0
+    assert f["runner_min_basis"] == "not_spine_derivable"
+    assert "size_note" not in f
+
+
+def test_templated_job_name_never_binds_a_foreign_namesake(tmp_path):
+    # curl's real shape: http3-linux.yml's `linux` job renders under a templated
+    # `name:` (`AM awslc`, `CM openssl`, ...), so its key misses its own
+    # workflow's rows, and the cross-workflow fallback bound configure-vs-cmake.yml's
+    # unrelated `Linux` job (154.0 + 1.54 = 155.5). That foreign figure is not this
+    # job's compute: the guard must treat it as a coverage gap (no FAIL), and the
+    # door must not cap the finding to it.
+    from collect_runs import _reground_runner_minute_savings
+    graph = {_CURL_WF: {"linux": {
+        "name": "${{ matrix.build.generate && 'CM' || 'AM' }} ${{ matrix.build.name }}"}}}
+    rows = [(_CURL_WF, "AM awslc", 2926.0), (_CURL_WF, "CM openssl", 1536.15),
+            (".github/workflows/configure-vs-cmake.yml", "Linux", 154.0),
+            (".github/workflows/configure-vs-cmake.yml", "Linux", 1.54)]
+    spine = {"render_ready": True, "rows": [
+        {"workflow_file": w, "job_name": j, "billable_equiv_min_per_month": b}
+        for w, j, b in rows]}
+    f = {"pattern": "OPT16", "workflow_file": _CURL_WF, "affected_jobs": ["linux"],
+         "runner_min_saving": _CURL_FLAT_SAVING}
+    doc = {"findings": [f], "runner_minute_spine": spine, "workflow_job_graph": graph}
+    assert _bounds_tag(doc, tmp_path) != "FAIL"
+    _reground_runner_minute_savings(doc["findings"], spine, job_graph=graph)
+    assert f["runner_min_saving"] == _CURL_FLAT_SAVING
+    assert f["runner_min_basis"] == "not_spine_derivable"
+    # A job NOT declared under a templated name keeps the cross-workflow fallback
+    # (reusable-workflow callers lose their workflow_file): narrowing is templated only.
+    g = {"pattern": "OPT16", "workflow_file": ".github/workflows/caller.yml",
+         "affected_jobs": ["Linux"],
+         "runner_min_saving": _CURL_FLAT_SAVING}
+    _reground_runner_minute_savings([g], spine, job_graph=graph)
+    assert g["runner_min_basis"] == "measured_spine_clamped"
+    assert g["runner_min_saving"] <= 155.5
+
+
 def test_door_policy_is_total_and_flags_unclassified():
     # A rm-crediting pattern with NO declared door policy stamps the loud
     # UNCLASSIFIED sentinel (so verify_report FAILs) — a new pattern cannot ship

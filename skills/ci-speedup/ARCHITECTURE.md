@@ -2087,11 +2087,16 @@ family):
 |---|---|---|---|
 | **derive** | OPT45 | `hit_rate × Σ(measured billable)` | `measured_spine_billable` |
 | **clamp** | OPT73 | `min(modeled, Σ(measured billable))` | `measured_spine_clamped` (or `measured_spine_billable` when already within) |
-| **not_spine_derivable** (the EXPLICIT whitelist) | the measured run-elimination detectors (OPT46/47/64/65 — basis is the eliminated-runs slice, not per-job billable); the measured setup-prefix detector (OPT77 — basis is the per-job leading setup prefix); the measured cache-block detector (OPT79 — basis is one job's restore + install + post-save timings split by the run log's own cache hit/miss line); the measured checkout tail-excess detector (OPT80 — basis is one step's mean-minus-p50 across the sample); the modeled-static patterns (`direct` / `runner-min-only`, disclosed as modeled in the report's sized-of-total ratio); the other structural step-decomposition levers (OPT70/71/72/74/75, per-job step basis) | retained, with the reason recorded in `runner_min_door_note` | `not_spine_derivable` |
+| **not_spine_derivable** (the EXPLICIT whitelist) | the measured run-elimination detectors (OPT46/47/64/65 — basis is the eliminated-runs slice, not per-job billable); the measured setup-prefix detector (OPT77 — basis is the per-job leading setup prefix); the measured cache-block detector (OPT79 — basis is one job's restore + install + post-save timings split by the run log's own cache hit/miss line); the measured checkout tail-excess detector (OPT80 — basis is one step's mean-minus-p50 across the sample); the modeled-static patterns (`direct` / `runner-min-only`, disclosed as modeled in the report's sized-of-total ratio); the other structural step-decomposition levers (OPT70/71/72/74/75, per-job step basis) | retained, with the reason recorded in `runner_min_door_note`; **capped** at `Σ(measured billable)` when the affected jobs join the spine and the estimate exceeds it (cap stated in `size_note`) | `not_spine_derivable` (`measured_spine_clamped` when capped) |
 
 The whitelist is **visible, not a silent bypass**: a reasoned entry per family,
-and tightening the modeled/structural families from whitelist → clamp is tracked
-follow-up. A rm-crediting pattern with NO declared policy stamps the loud
+and its own model stands below the physical cap: whatever the model, a whitelisted
+estimate never exceeds the measured compute of jobs the spine can see (curl OPT16,
+2026-10-10: a flat ~10 s × 1463 runs credited 243.8 min/mo). A job declared under a
+`${{ }}`-templated `name:` that misses its own workflow's rows never takes the
+cross-workflow same-name fallback, in the door or the guard: its rows carry the
+rendered name, so a namesake in another file is a different job (an honest
+coverage gap instead). A rm-crediting pattern with NO declared policy stamps the loud
 `UNCLASSIFIED_door_policy` sentinel, and `check_saving_carries_measured_basis`
 (`verify_report`) FAILs on it — so **a new pattern cannot ship its own unmeasured
 sizing path**. Two more invariants complete the class cut:

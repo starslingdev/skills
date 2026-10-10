@@ -984,6 +984,30 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-10** — **A report is no longer refused because a modeled saving
+  was checked against the wrong job.** On curl/curl the final check blocked
+  the whole audit: a duplicate-command finding (OPT16, a flat estimate of about
+  10 s per run over 1,463 runs, 243.8 min/mo) on `http3-linux.yml`'s `linux`
+  job was compared with 155.5 min/mo that actually belongs to
+  `configure-vs-cmake.yml`'s unrelated `Linux` job. The `linux` job is named in
+  the workflow file by a `${{ }}` template, so its measured rows carry the
+  rendered names (`AM awslc`, `CM openssl`, ...) and its key matched nothing in
+  its own workflow; the fallback that looks for the same job name in any
+  workflow (meant for reusable-workflow callers) then picked up the namesake.
+  Both the sizing door and the final check now treat a templated job that
+  misses its own workflow's rows as unmeasured (a disclosed coverage gap), never
+  as a namesake from another file. Separately, every modeled or flat estimate on
+  the `not_spine_derivable` list (the `direct`, `runner-min-only`, `measured`
+  and `parallel-rebalance` sizing models plus OPT70-72/74/75/77/79/80/82/83) is
+  now capped at its affected jobs' measured monthly billable compute whenever
+  those jobs are found in the cost data and the estimate exceeds it: the figure
+  drops to the measured compute, the basis reads `measured_spine_clamped`, and
+  the finding's size note states the original estimate and the cap. Before, only
+  OPT73 was capped, so any other flat estimate on a small job could fail the
+  final check and block the report. Re-checked on the saved curl data: the
+  final check passes (7 savings within measured compute, 4 disclosed coverage
+  gaps) and no curl figure changes. Surfaces: `scripts/collect_runs.py`,
+  `tests/verify_report.py`, ARCHITECTURE §5.1.
 - **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
   no longer invisible to the audit.** Since 2026-06-25 a step may be a
   `- parallel:` group holding a list of ordinary steps, a step may carry

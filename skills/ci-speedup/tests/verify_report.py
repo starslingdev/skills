@@ -4409,6 +4409,14 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
                     out.append(alias)
         return out
 
+    def _templated_in_wf(wf: str, b: str) -> bool:
+        for jid, info in _as_dict(graph.get(wf)).items():
+            info = _as_dict(info)
+            if (_base(jid) == b and "${{" in str(info.get("name") or "")
+                    and not info.get("reusable")):
+                return True
+        return False
+
     compute: dict[tuple[str, str], float] = {}
     for r in rows:
         r = _as_dict(r)
@@ -4466,8 +4474,13 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
             if key:
                 matched += 1
                 bound += compute[key]
-            else:
+            elif not _templated_in_wf(wf, b):
                 # Job base present under ANY workflow file (a reusable-workflow caller loses the wf).
+                # NOT for a job declared in `wf` under a `${{ }}`-templated `name:` (and not a
+                # reusable caller): its rows carry the RENDERED name, so a key miss is an
+                # unresolvable identity, not a lost wf — a literal namesake elsewhere is a
+                # different job (curl: http3-linux.yml `linux` bound configure-vs-cmake.yml's
+                # `Linux`, 155.5 min/mo, and false-FAILed). It stays an honest coverage gap.
                 # LITERAL base only — graph aliases are same-workflow evidence and must not widen
                 # this cross-workflow match (see `_identities`); a job with no row in its own
                 # workflow stays an honest coverage gap rather than binding a foreign namesake.
