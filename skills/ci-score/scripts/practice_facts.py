@@ -366,6 +366,18 @@ def _wf_is_pr_gating(doc: dict) -> bool:
     return False
 
 
+# A `uses:` naming THIS repository: `./path`, or the self-repository prefix
+# `$/path` GitHub shipped 2026-07-30 (same commit, same files, no checkout
+# needed). Both resolve to `<repo root>/path`, so `ref[2:]` strips either.
+_LOCAL_USES_PREFIXES = ("./", "$/")
+
+
+def _is_local_uses(uses: str) -> bool:
+    """True for a `uses:` that names an action or reusable workflow in this
+    repository (`./…` or the self-repository `$/…`)."""
+    return uses.startswith(_LOCAL_USES_PREFIXES)
+
+
 def _remote_reusable_refs(parsed: list[tuple[str, dict, str]]) -> list[str]:
     """Cross-repo reusable workflows this repo's jobs delegate to
     (`uses: org/repo/.github/workflows/x.yml@ref` at JOB level). Their
@@ -376,7 +388,7 @@ def _remote_reusable_refs(parsed: list[tuple[str, dict, str]]) -> list[str]:
     for _rel, doc, _raw in parsed:
         for job in _wf_jobs(doc).values():
             uses = job.get("uses")
-            if isinstance(uses, str) and not uses.startswith("./") and "@" in uses:
+            if isinstance(uses, str) and not _is_local_uses(uses) and "@" in uses:
                 refs.append(uses.split("@")[0])
     return sorted(set(refs))
 
@@ -599,10 +611,10 @@ def _step_walk_stats(parsed: list[tuple[str, dict, str]], root: Path) -> dict[st
 
 
 def _step_uses(step: dict) -> tuple[str, str] | None:
-    """(action, ref) for a remote `uses:`; None for local (./) / docker:// /
-    run steps."""
+    """(action, ref) for a remote `uses:`; None for local (`./`, `$/`) /
+    docker:// / run steps."""
     uses = step.get("uses")
-    if not isinstance(uses, str) or uses.startswith("./") or uses.startswith("docker://"):
+    if not isinstance(uses, str) or _is_local_uses(uses) or uses.startswith("docker://"):
         return None
     action, _, ref = uses.partition("@")
     return (action, ref) if action else None
@@ -709,25 +721,26 @@ def _has_git_history_op(text: str) -> bool:
 
 
 def _step_uses_ref(step: dict) -> str:
-    """The raw `uses:` string (local `./...` refs included, unlike
+    """The raw `uses:` string (local `./...` / `$/...` refs included, unlike
     `_step_uses`, which is scoped to remote actions)."""
     return str(step.get("uses") or "")
 
 
 def _index_local_git_actions(root: Path,
                              parsed: list[tuple[str, dict, str]]) -> set[str]:
-    """Return the set of local `uses:` refs (e.g. `./.github/actions/changed`)
-    whose composite-action file performs a git-history op."""
+    """Return the set of local `uses:` refs (e.g. `./.github/actions/changed`,
+    or the self-repository `$/.github/actions/changed`) whose composite-action
+    file performs a git-history op."""
     refs: set[str] = set()
     for _rel, doc, _raw in parsed:
         for job in _wf_jobs(doc).values():
             for s in _job_steps(job):
                 u = _step_uses_ref(s).split("@")[0].strip()
-                if u.startswith("./"):
+                if _is_local_uses(u):
                     refs.add(u)
     out: set[str] = set()
     for ref in refs:
-        rel = ref[2:]  # strip leading "./"
+        rel = ref[2:]  # strip leading "./" or "$/"
         base = root / rel
         candidates = [base] if base.suffix in (".yml", ".yaml") else [
             base / "action.yml", base / "action.yaml"]

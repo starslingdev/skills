@@ -81,6 +81,28 @@ def test_fires_on_workflow_run_head_and_local_action(tmp_path):
     assert len(hits) == 1
 
 
+def test_silent_on_a_self_repository_action_after_a_head_checkout(tmp_path):
+    # `uses: $/path` (GitHub's self-repository prefix, 2026-07-30) loads the
+    # action from the commit the WORKFLOW runs at, not from the workspace: on
+    # workflow_run that is the base repository's commit, so the head checkout
+    # never changes what runs. The same shape with `./` fires (test above).
+    hits = _hits(tmp_path, """\
+        on:
+          workflow_run:
+            workflows: [CI]
+            types: [completed]
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{ github.event.workflow_run.head_sha }}
+              - uses: $/.github/actions/build
+    """)
+    assert hits == []
+
+
 def test_fires_on_refs_pull_merge_ref(tmp_path):
     hits = _hits(tmp_path, """\
         on: pull_request_target
@@ -189,6 +211,14 @@ def test_collect_sha_pins_finds_only_forty_hex_remote_pins(tmp_path):
         ("evil/fork-action", "aaaa"),
         ("actions/checkout", "8ade"),
     ]
+
+
+def test_collect_sha_pins_never_reads_a_self_repository_ref_as_a_pin(tmp_path):
+    _wf(tmp_path, "ci.yml", PINNED.replace(
+        "- uses: ./local/action", "- uses: $/.github/actions/local"))
+    pins = scan._collect_sha_pins(tmp_path, scan.all_workflow_files(tmp_path))
+    assert all(not repo.startswith("$") for _, _, repo, _ in pins), pins
+    assert len(pins) == 3, pins
 
 
 NOT_REALLY_PINS = """\

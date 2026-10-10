@@ -984,6 +984,19 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-10** — **Actions and reusable workflows referenced with GitHub's
+  self-repository prefix (`uses: $/path`, shipped 2026-07-30) are read as the
+  local files they are.** Every local-action read matched only `./`, so a
+  `$/` reference was never opened: a git-history command inside a `$/`
+  composite action did not protect the job's `fetch-depth: 0` from the
+  shallow-checkout recommendation, the submodule / LFS payload check never
+  searched a `$/` composite's body, the checkout-stall pattern missed a
+  checkout (or an already-applied retry) behind a `$/` composite, a `$/`
+  action named lint was not recognised as delegated lint, and a reusable
+  workflow called as `$/.github/workflows/x.yml` was missing from the call
+  graph. `$/x` now resolves to `<repo root>/x` everywhere `./x` does,
+  including references nested inside composite actions.
+
 - **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
   no longer invisible to the audit.** Since 2026-06-25 a step may be a
   `- parallel:` group holding a list of ordinary steps, a step may carry

@@ -4970,6 +4970,16 @@ def _attacker_head_ref(value: Any) -> bool:
     return any(n in value for n in needles)
 
 
+# The execution leg's local-action arm is `./` ONLY, on purpose. `uses: ./path`
+# loads the action from the WORKSPACE, so after a head checkout it is the
+# fork's code. The self-repository prefix `uses: $/path` (GitHub, 2026-07-30)
+# loads it from the commit the WORKFLOW runs at, with no checkout involved;
+# under `pull_request_target` / `workflow_run` that is the base repository's
+# commit, never the fork's, so a `$/` step does not execute the checked-out
+# tree and naming it as the execution would be a false finding.
+_WORKSPACE_ACTION_PREFIX = "./"
+
+
 def _job_checkout_head_then_executes(
     job: dict[str, Any],
 ) -> tuple[int, str, bool] | None:
@@ -5004,7 +5014,7 @@ def _job_checkout_head_then_executes(
         if checkout_idx is not None and i > checkout_idx:
             executes = "run" in step or (
                 isinstance(step.get("uses"), str)
-                and step["uses"].startswith("./")
+                and step["uses"].startswith(_WORKSPACE_ACTION_PREFIX)
             )
             if executes:
                 return checkout_idx, ref_text, False
@@ -5024,7 +5034,8 @@ def _job_checkout_head_then_executes(
         for e, e_timing in timed:
             e_uses = e.step.get("uses")
             if e is not c and ("run" in e.step or (
-                    isinstance(e_uses, str) and e_uses.startswith("./"))) \
+                    isinstance(e_uses, str)
+                    and e_uses.startswith(_WORKSPACE_ACTION_PREFIX))) \
                     and _steps_concurrent(c_timing, e_timing):
                 return i, str(ref), True
     return None

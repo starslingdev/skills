@@ -277,15 +277,20 @@ def test_local_composite_action_indexing_agrees(sides, tmp_path: Path):
         "a": {"steps": [{"uses": "./.github/actions/changed"}]},
         "b": {"steps": [{"uses": "./.github/actions/plain"}]},
         "c": {"steps": [{"uses": "./.github/actions/missing"}]},   # unreadable → fail closed
+        # The self-repository prefix (GitHub, 2026-07-30) names the same files.
+        "d": {"steps": [{"uses": "$/.github/actions/changed"}]},
+        "e": {"steps": [{"uses": "$/.github/actions/plain"}]},
+        "f": {"steps": [{"uses": "$/.github/actions/missing"}]},
     }}
     parsed = [(".github/workflows/ci.yml", doc, "")]
 
     speed_idx = speed._index_local_git_actions(tmp_path, parsed)
     score_idx = score._index_local_git_actions(tmp_path, parsed)
     assert speed_idx == score_idx, "the local composite-action index diverged"
-    assert "./.github/actions/changed" in score_idx
-    assert "./.github/actions/missing" in score_idx   # fail closed
-    assert "./.github/actions/plain" not in score_idx
+    for prefix in ("./", "$/"):
+        assert f"{prefix}.github/actions/changed" in score_idx
+        assert f"{prefix}.github/actions/missing" in score_idx   # fail closed
+        assert f"{prefix}.github/actions/plain" not in score_idx
 
     speed._GIT_HISTORY_LOCAL_ACTIONS = speed_idx
     for jid, job in doc["jobs"].items():

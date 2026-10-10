@@ -141,6 +141,15 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-10-10** — **GitHub's self-repository prefix (`uses: $/path`, shipped
+  2026-07-30) is now documented and pinned by tests; no verdict changes.** A
+  `$/` reference loads the action from the commit the workflow runs at, not
+  from the workspace, so on `pull_request_target` / `workflow_run` it is the
+  base repository's code even after a checkout of the fork's head. The
+  fork-code-executed-with-privileges check therefore keeps counting only
+  `run:` steps and workspace (`./`) actions as the execution, and the
+  impostor-commit check never reads a `$/` reference as a pinned action.
+
 - **2026-10-09** — **Steps inside a GitHub Actions `parallel:` group are
   scanned.** (#121) Parallel steps (GitHub, 2026-06-25; github.com and
   GitHub Enterprise Cloud) let a job write `- parallel:` followed by a list

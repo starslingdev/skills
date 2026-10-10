@@ -1172,6 +1172,8 @@ def test_a_lint_script_delegated_to_another_tool_is_held_back(tmp_path, body):
     {"run": "turbo run lint"}, {"run": "npx nx lint web"},
     {"run": "make lint"}, {"run": "pnpm turbo lint"},
     {"uses": "./.github/actions/lint"},
+    # The self-repository prefix (GitHub, 2026-07-30) is the same local action.
+    {"uses": "$/.github/actions/lint"},
 ])
 def test_a_lint_step_delegated_to_another_tool_is_held_back(tmp_path, step):
     wf = _wf_with(step.get("run"), uses=step.get("uses"))

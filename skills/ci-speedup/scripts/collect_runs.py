@@ -9394,7 +9394,12 @@ _OPT80_GIT_CONFIG_RE = _re.compile(
     r"^[ \t]*(?:[^\n#'\"]*?(?:&&|\|\||;|run:)[ \t]*)?(?:sudo[ \t]+)?"
     r"git[ \t]+config\b(?![^\n]*--(?:unset|unset-all|get|get-all|list))"
     r"[^\n]*http\.lowspeed(?:limit|time)", _re.I | _re.M)
-_OPT80_LOCAL_USES_RE = _re.compile(r"uses:\s*['\"]?(\./[^\s'\"#]+)")
+_OPT80_LOCAL_USES_RE = _re.compile(r"uses:\s*['\"]?((?:\./|\$/)[^\s'\"#]+)")
+# A `uses:` naming THIS repository: `./path`, or the self-repository prefix
+# `$/path` GitHub shipped 2026-07-30 (same commit, same files, no checkout
+# needed). Both resolve to `<repo root>/path`, so `ref[2:]` strips either.
+# Mirrors `scan.py::_LOCAL_USES_PREFIXES` (separate module, separate phase).
+_LOCAL_USES_PREFIXES = ("./", "$/")
 _OPT80_CHECKOUT_USES_RE = _re.compile(r"^actions/checkout(@|$)", _re.I)
 
 
@@ -9461,7 +9466,7 @@ class _Opt80CyclicAction(Exception):
 def _opt80_local_action_text(root: "Path | None", ref: str,
                              _seen: "set[str] | None" = None,
                              _stack: "tuple[str, ...]" = ()) -> "str | None":
-    """A local `uses: ./…` action's text CONCATENATED with the text of every local
+    """A local `uses: ./…` (or `uses: $/…`) action's text CONCATENATED with the text of every local
     action it transitively invokes, or None when any link is unreadable.
 
     Mirrors `scan.py::_index_local_action_text` (OPT76's index). It is
@@ -9539,7 +9544,7 @@ def _opt80_checkout_step(job_spec: dict[str, Any],
         provenance = ""
         if _OPT80_CHECKOUT_USES_RE.match(uses):
             provenance = "actions/checkout"
-        elif uses.startswith("./"):
+        elif uses.startswith(_LOCAL_USES_PREFIXES):
             try:
                 body = _opt80_local_action_text(root, uses.split("@")[0].strip())
             except _Opt80CyclicAction:
@@ -9630,7 +9635,7 @@ def _opt80_retry_already_configured(wf_doc: dict[str, Any], job_spec: dict[str, 
         uses = str(step.get("uses") or "").strip()
         if is_checkout and uses and _OPT80_RETRY_WRAPPER_RE.search(uses):
             return True
-        if uses.startswith("./"):
+        if uses.startswith(_LOCAL_USES_PREFIXES):
             try:
                 body = _opt80_local_action_text(root, uses.split("@")[0].strip())
             except _Opt80CyclicAction:
@@ -12485,7 +12490,8 @@ def _detect_opt82_type_aware_lint(
                 uses = str(step.get("uses") or "")
                 label = (uses + " " + str(step.get("name") or "")).lower()
                 if uses and ("eslint" in label
-                             or (uses.startswith("./") and "lint" in label)):
+                             or (uses.startswith(_LOCAL_USES_PREFIXES)
+                                 and "lint" in label)):
                     if found is None:
                         found, lint_step, wd = ("unresolvable", "delegated", []), step, ""
                 continue
