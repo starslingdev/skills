@@ -746,11 +746,13 @@ def _job_payload_blob(job: dict) -> "str | None":
         vals = job.get(block)
         if vals is not None:
             parts.append(_yaml_text(vals))
-    for s in _steps(job):
+    for s, s_if in _steps_with_if(job):
         parts.append(_run(s))
         parts.append(str(s.get("working-directory") or ""))
         parts.append(str(s.get("name") or ""))
-        parts.append(str(s.get("if") or ""))
+        # The step's own `if:` AND its enclosing groups' (`effective_if`), so a
+        # path named only in a group-level gate is searched too.
+        parts.append(str(s_if or ""))
         uses = _uses(s)
         parts.append(uses)
         for block in ("with", "env"):
@@ -4513,10 +4515,6 @@ def _reconcile_opt1_opt2(findings: list[dict[str, Any]]) -> list[dict[str, Any]]
 def _wf_jobs(doc: dict) -> dict[str, dict]:
     jobs = doc.get("jobs")
     return {str(k): v for k, v in jobs.items() if isinstance(v, dict)} if isinstance(jobs, dict) else {}
-
-
-def _job_steps(job: dict) -> list[dict]:
-    return job_leaf_steps(job)
 
 
 def _step_uses(step: dict) -> tuple[str, str] | None:

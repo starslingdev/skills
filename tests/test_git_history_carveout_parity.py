@@ -50,6 +50,19 @@ def sides():
     return speed, score
 
 
+@pytest.fixture(autouse=True)
+def _restore_local_action_index(request):
+    """Several tests set ci-speedup's module-level local-action index; put it
+    back afterwards so no test's verdict depends on the order tests ran in."""
+    if "sides" not in request.fixturenames:
+        yield
+        return
+    speed = request.getfixturevalue("sides")[0]
+    saved = getattr(speed, "_GIT_HISTORY_LOCAL_ACTIONS", None)
+    yield
+    speed._GIT_HISTORY_LOCAL_ACTIONS = saved
+
+
 # Where a `$` or a `HEAD` SITS on the command line decides whether it says
 # anything about history, and these rows pin that by VERDICT, not only by
 # agreement between the two engines. They carry expected values because the

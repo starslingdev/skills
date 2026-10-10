@@ -3155,6 +3155,28 @@ jobs:
     assert "OPT76" in _scan_one(tmp_path, pos)
 
 
+def test_opt76_reads_a_group_level_if_that_names_the_payload(tmp_path: Path):
+    """S16: a group's `if:` gates its children (as the walker assumes), so a
+    group gated on `hashFiles('vendor/protos/**')` references the submodule;
+    OPT76's "no step references it" would be false."""
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    neg = """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - if: hashFiles('vendor/protos/**') != ''
+        parallel:
+          - run: make proto
+          - run: make lint
+"""
+    assert "OPT76" not in _scan_one(tmp_path, neg)
+
+
 def test_opt76_suppressed_when_a_step_builds_from_the_submodule(tmp_path: Path):
     """The submodule payload is LOAD-BEARING when a step reads it — dropping
     `submodules:` would break the job, so OPT76 must NOT fire."""
@@ -4281,6 +4303,25 @@ jobs:
         run: npx playwright test smoke
 """
     assert "OPT31" not in _scan_one(tmp_path, neg)
+
+
+def test_opt31_fires_when_the_consumer_sits_in_a_gated_group(tmp_path: Path):
+    """T5: the consumer's gate is written on its GROUP; the walker hands it to
+    the child, so an unconditional install whose only consumer runs in that
+    gated group is an OPT31 finding."""
+    pos = """name: CI
+on: pull_request
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx playwright install --with-deps chromium
+      - if: env.CLERK_SECRET_KEY != ''
+        parallel:
+          - run: npx playwright test smoke
+          - run: pnpm run lint
+"""
+    assert "OPT31" in _scan_one(tmp_path, pos)
 
 
 def test_opt29_reads_a_merge_group_skip_written_on_a_group(tmp_path: Path):
