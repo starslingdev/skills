@@ -6458,8 +6458,10 @@ def _step_span_core(step: dict[str, Any], job: dict[str, Any] | None
         if (en - j1).total_seconds() > _STEP_JOB_START_SLACK_S:
             why = _SPAN_TRIMMED
         en = j1
-    if en < st:
-        # Raw timestamps run forward, but the step starts after its job ended.
+    if en < st or (why == _SPAN_TRIMMED and en <= st):
+        # Raw timestamps run forward, but the step starts after its job ended, or in its
+        # last second with an end cut back by more than the slack: no time is left inside
+        # the job, so it has no span (a zero-length trimmed span would read as 0s).
         return None, _SPAN_STARTED_AFTER_JOB
     return (st, en), why
 

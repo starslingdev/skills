@@ -96,3 +96,13 @@ def test_reversed_cache_step_timestamps_withhold_as_unparseable():
                 "completed_at": "2026-06-01T00:01:11Z"})
     _durs, _present, gate = cr._opt79_block_durations(job, _BLOCK)
     assert gate == "step_timestamps_unparseable_in_this_occurrence", gate
+
+
+def test_post_step_starting_at_the_job_end_and_running_past_it_withholds():
+    """A step that starts in the job's last second and ends well past it has no time
+    left inside the job once its end is cut back: no span, so OPT79 withholds rather
+    than reading a 0s post save on the miss side."""
+    job = _job({"conclusion": "success", "started_at": "2026-06-01T00:02:00Z",
+                "completed_at": "2026-06-01T00:02:30Z"})
+    durs, present, gate = cr._opt79_block_durations(job, _BLOCK)
+    assert gate == "step_has_no_in_window_time", (durs, present, gate)

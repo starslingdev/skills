@@ -575,3 +575,24 @@ def test_pole_whose_every_step_dropped_says_no_step_could_be_measured():
                 skipped_steps=2, unmeasured_steps=1)
     lines = _bp()._pole_waterfall(pole, leaf=None, timeline=None, log_present=False)
     assert lines == ["No step could be measured: 2 skipped, 1 with no usable time."], lines
+
+
+# --------------------------------------------------------------------------- #
+# A step whose start is the job's last second and whose end runs past it
+# --------------------------------------------------------------------------- #
+
+def _late_job(i: int) -> dict:
+    """A job running _ts(0).._ts(60) whose `late` step starts at the job's end second
+    and ends 30s past it: cut back to the job's end it has no time left."""
+    return {"id": i, "name": "late", "conclusion": "success",
+            "started_at": _ts(0), "completed_at": _ts(60),
+            "steps": [_step(1, "work", 0, 60), _step(2, "late", 60, 90)]}
+
+
+def test_step_trimmed_to_nothing_has_no_span_and_counts_as_unmeasured():
+    job = _late_job(1)
+    late = job["steps"][1]
+    assert cr._step_span_verdict(late, job) == (None, "started_after_job")
+    d = cr._decompose_job_steps([_late_job(i) for i in range(1, 4)])
+    assert d is not None
+    assert d.get("unmeasured_steps") == 1 and "trimmed_steps" not in d, d
