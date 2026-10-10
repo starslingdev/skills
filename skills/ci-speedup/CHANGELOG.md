@@ -1000,6 +1000,93 @@ unversioned and updates by reinstall from `main`.
   references too: a composite action that calls another local action
   running `git diff origin/main...HEAD` no longer leaves `fetch-depth: 0`
   looking removable, and an unreadable nested reference fails closed.
+- **2026-10-10** — **A step GitHub skipped no longer reads as a step that ran
+  for two thousand years.** The jobs API reports a skipped step (for example a
+  `background: true` step whose `if:` was false) with a start time of year 1
+  and a real end time. Read naively, that is a 63.9-billion-second step: on
+  curl/curl it produced a HIGH "shared step recurs across the cluster" finding
+  worth 145,186 runner-min/mo for a `test-linter` step that never ran in the
+  job it was charged to. Every place the audit reads step timings now applies
+  one rule: a skipped step contributes no time; a step whose start falls in
+  1970 or earlier (the year-1 placeholder included), more than 1s before its
+  own job, or after its job ended contributes no time; a step whose timestamps
+  are reversed or do not parse contributes no time; a step's end is clamped to
+  its job's end, so no step outlasts the job that contains it; and a timestamp
+  with no timezone is read as UTC rather than failing beside one that has one.
+  The 1s allowance rests on a census of 3,208 real steps across 176 sampled job
+  runs in curl, playwright, flask and mastra: in that sample none started
+  before its job, none ended after it, and every year-1 start was on a skipped
+  step. A step that starts in its job's last second and ends more than 1s past
+  it has no time left inside the job once its end is cut back, so it counts as
+  no usable time (and OPT79 withholds it) rather than as a 0s step.
+  Nothing is dropped silently any more. Each dropped step, and each step whose
+  end is cut back to its job's end by more than 1s, is logged at DEBUG (job,
+  step and reason; never a response body). A pole's step breakdown records how
+  many skipped or untimeable declared steps it left out or timed from fewer
+  runs: those GitHub skipped on every sampled run they appeared in
+  (`skipped_steps`), those never measured with no usable time in some run
+  (`unmeasured_steps`; a step skipped in one run and untimeable in another
+  counts here, not as skipped), those timed in some sampled runs and skipped
+  or untimeable in others they appeared in, whose figure comes from the runs
+  that timed them (`partially_measured_steps`; a step missing from some runs'
+  step lists is not counted), and those timed only up to the job's end
+  (`trimmed_steps`), each stamped only when non-zero. A step that measured 0s
+  in every run it ran in took no time and is in no count. The pole's step list
+  in the report says so in one line (for example "2 declared step(s) skipped
+  on every sampled run and 1 with no usable time are not timed here; 1 step(s)
+  were timed in some sampled runs and skipped or untimeable in others"). A job
+  whose every step was dropped now says "No step could be measured: N skipped,
+  M with no usable time" instead of quietly having no step breakdown, and the
+  coverage-gap, LLM-analysis and catalog pointers, the `--log` hint and any
+  log drill still follow that line. In that log drill, a level that splits the
+  step's time by each phase's share of summed worker time (the vitest coverage
+  compile/test split) shows the shares without seconds, under a header saying
+  the step's own time is unknown, instead of printing the summed worker
+  seconds as if they were the step's time.
+  The per-run step timeline the report draws keeps a
+  skipped step in its place at 0s and drops one with no usable time. A
+  repeated-setup (OPT77) finding no longer names a setup step that had no time
+  in every sampled run while adding 0s for it. The cross-run check on a pole's
+  dominant step counts a run where that step was skipped as 0s (it did not
+  run), leaves out another run whose step has no usable in-window time, and
+  keeps the drilled run itself, with no value, rather than omitting it.
+  A slow-checkout (OPT80) occurrence whose checkout was skipped, started at a
+  placeholder or ran outside its job is withheld as
+  `checkout_step_skipped_or_out_of_window`; one whose timestamps are reversed
+  or do not parse stays `checkout_step_duration_unparseable`.
+  In the cache-costs-more-than-it-saves check (OPT79), a cache, install or
+  post-save step that GitHub did not report as skipped but whose start falls
+  in 1970 or earlier, or outside its job, previously read as its raw duration
+  (for a year-0001 start, about 63.9 billion seconds, which on the hit side
+  manufactured an excess); it is now withheld as `step_has_no_in_window_time`.
+  A cache step with reversed timestamps is withheld as
+  `step_timestamps_unparseable_in_this_occurrence`. A step GitHub reports as
+  skipped with parseable timestamps now counts as 0s. When runs set aside for
+  step times that did not measure are what leave too few hits or misses, the
+  withhold says so (`population_truncated_by_unmeasurable_step_times`) rather
+  than blaming the logs, and every OPT79 finding and uncredited row stamps the
+  runs it set aside per reason (`excluded_runs_by_gate`).
+  Each job's longest sampled run is stamped (`per_workflow_timing[wf].job_max`).
+  The report checker gains checks that fail (never skip) when a finding cites,
+  or the engine stamps, a step longer than its job's longest sampled run, or
+  longer than any GitHub Actions job may run (5 days); a drilled-run timeline
+  step is held to that one run's length, and a timeline with no run length or
+  a step with no numeric duration fails. A step that runs on only some runs
+  may correctly be longer than the job's median, so the median is never the
+  bound. Their passing detail now counts the figures held to a job's longest
+  run apart from those held only to the 5-day ceiling (no longest run
+  stamped), rather than calling every figure "inside its job's window". A
+  declared drilled-run timeline is never passed over silently: a separate
+  check fails when, with its bundle directory present (the stamped `logs_dir`
+  or the `<findings>.data/` sibling), a timeline file is missing, unreadable,
+  not JSON or the wrong shape, naming the pole, the run and every path tried;
+  with no bundle directory anywhere (a findings-only artifact such as a
+  committed example), the figure check still passes on the pole figures it
+  did check and says how many timelines went unchecked. A further check
+  re-derives each pole's omitted-steps line from its stamp and says how many
+  pole sections it could not judge (a key two poles share, or an aggregation
+  gate); the bare-pole check accepts a pole whose every step was dropped when
+  its section says so.
 
 - **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
   no longer invisible to the audit.** Since 2026-06-25 a step may be a
