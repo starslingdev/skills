@@ -5740,7 +5740,9 @@ _OPT84_WITHHOLD_PHRASES: dict[str, str] = {
         "the long pole's workflow file could not be read, so what the slow step "
         "runs is unknown",
     "pole_job_not_matched_in_yaml":
-        "the long pole could not be matched to one job in its workflow file",
+        "the pole's job could not be tied to one job in its workflow file (a job "
+        "produced through a reusable workflow call, for example), so the step's "
+        "command could not be read",
     "measured_step_not_matched_in_yaml":
         "the slow step could not be matched to exactly one step in the workflow "
         "file, so what it runs is unknown",
