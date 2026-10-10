@@ -11402,6 +11402,9 @@ def test_a_pole_the_stamp_names_as_overlapping_must_not_read_as_sequential(tmp_p
     assert "one after another" in (vr._parallel_steps_violation(pole + footer, fp)[0] or "")
     other = pole.replace("▸ `x`", "▸ `z`")
     assert vr._parallel_steps_violation(other + footer, fp)[0] is None
+    # a check-run label carrying its workflow's name is the same job
+    named = pole.replace("▸ `x`", "▸ `CI / x`")
+    assert "one after another" in (vr._parallel_steps_violation(named + footer, fp)[0] or "")
 
 
 def test_parallel_steps_row_twin_matches_the_walker(tmp_path):

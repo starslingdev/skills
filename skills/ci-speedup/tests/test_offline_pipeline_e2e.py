@@ -193,6 +193,15 @@ jobs:
         run: npm ci
       - name: Run tests
         run: npm test
+      # A `parallel:` group and a `wait-all:` on the POLE job (T8): the stamp
+      # names this job in `jobs_with_groups`, so the step drill and the long-pole
+      # map must word its steps as overlapping, end to end through the verifier.
+      - parallel:
+          - name: Docs
+            run: npm run docs
+          - name: Bundle size
+            run: npm run size
+      - wait-all:
 """
 
 # PR-H1: the second workflow (wf id 1002). Three tiny same-SKU matrix legs
@@ -1321,9 +1330,22 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
         f"{verify.stdout}\n{verify.stderr}")
     # The corpus's `parallel:` group reaches the stamp, the row and the verifier.
     _par = data.get("parallel_steps") or {}
-    assert _par.get("groups") == 1 and _par.get("steps_in_groups") == 2, _par
-    assert ("| Parallel steps | 2 step(s) inside `parallel:` groups read "
-            "(1 `parallel:` group(s) seen) |") in report
+    assert _par.get("groups") == 2 and _par.get("steps_in_groups") == 4, _par
+    assert _par.get("control_steps") == 1, _par
+    assert {"path": ".github/workflows/ci.yml", "job": "test"} in _par["jobs_with_groups"]
+    assert ("| Parallel steps | 4 step(s) inside `parallel:` groups read "
+            "(2 `parallel:` group(s) seen) · 1 `wait`/`wait-all`/`cancel` control "
+            "step(s) skipped (they run nothing) |") in report
+    # T8: the POLE job (`ci.yml` ▸ `test`) runs a group, so its drill never says
+    # the steps run one after another, and the verifier re-derived that.
+    _pole = re.search(r"^##\s+.*Long pole \d+: `ci\.yml` ▸ `CI / test`.*?(?=^##\s|\Z)",
+                      report, re.S | re.M)
+    assert _pole, re.findall(r"^##.*$", report, re.M)
+    for _ph in ("one after another", "they run in sequence and roughly add up",
+                "Because they're sequential"):
+        assert _ph not in _pole.group(0), _ph
+    assert "side by side in a `parallel:` group" in _pole.group(0)
+    assert "parallel-step read disclosed" in verify.stdout, verify.stdout[-2000:]
 
     # OPT82 reaches the READER as its own card: the ledger requirement, the
     # SIZING ceiling, the benchmark, and never "disable" about rules.

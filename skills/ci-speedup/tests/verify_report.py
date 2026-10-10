@@ -1364,7 +1364,8 @@ def _parallel_steps_violation(report: str, findings_path: Path | None
             if _wf_base(str(r.get("path") or "")) != wf:
                 continue
             names = {str(r.get(k) or "").strip().lower() for k in ("job", "name")} - {""}
-            if label in names:
+            # A check-run label may carry its workflow's name (`CI / test`).
+            if label in names or label.rsplit(" / ", 1)[-1] in names:
                 hit = next((ph for ph in _VR_SEQUENTIAL_STEP_PHRASES if ph in body), None)
                 if hit:
                     return (f"{hdr.strip()}: the stamp says this job runs steps side by "
