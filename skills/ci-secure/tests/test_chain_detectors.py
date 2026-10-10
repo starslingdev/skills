@@ -121,6 +121,23 @@ def test_fires_on_pull_request_target_head_and_self_repository_action(tmp_path):
     assert len(hits) == 1
 
 
+def test_silent_on_a_self_repository_action_before_the_head_checkout(tmp_path):
+    # Order still decides for `$/`: written (and run) before the head
+    # checkout, the action's steps see the base tree, not the fork's.
+    hits = _hits(tmp_path, """\
+        on: pull_request_target
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: $/.github/actions/build
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{ github.event.pull_request.head.sha }}
+    """)
+    assert hits == []
+
+
 def test_evidence_plain_for_a_run_step_after_a_head_checkout(tmp_path):
     # The `$/` explanation is appended only when a `$/` step is the execution.
     hits = _hits(tmp_path, VULNERABLE)

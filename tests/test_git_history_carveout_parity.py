@@ -412,7 +412,7 @@ def _nested_tree(tmp_path: Path) -> None:
     _composite(tmp_path, "outer", "    - uses: ./.github/actions/inner\n")
     _composite(tmp_path, "inner",
                "    - run: git log --oneline\n      shell: bash\n")
-    # outer → a local action that does not exist (fail closed)
+    # dangling → a local action that does not exist (fail closed)
     _composite(tmp_path, "dangling", "    - uses: ./.github/actions/missing\n")
     # a two-action cycle with no history command anywhere
     _composite(tmp_path, "ping", "    - uses: ./.github/actions/pong\n",
@@ -420,6 +420,10 @@ def _nested_tree(tmp_path: Path) -> None:
     _composite(tmp_path, "pong", "    - uses: $/.github/actions/ping\n")
     # a `$/` outer whose `./` inner runs the history command
     _composite(tmp_path, "self-outer", "    - uses: './.github/actions/inner'\n")
+    # a `./` outer whose `$/` inner runs the history command
+    _composite(tmp_path, "outer-self", "    - uses: $/.github/actions/inner\n")
+    # a `./` outer whose `$/` inner cannot be read (fail closed)
+    _composite(tmp_path, "self-dangling", "    - uses: $/.github/actions/missing\n")
 
 
 # (outer ref a workflow step names, must the history index hold it?)
@@ -428,12 +432,15 @@ _NESTED_ROWS = [
     ("./.github/actions/dangling", True),      # unreadable nested ref: fail closed
     ("./.github/actions/ping", False),         # history-free cycle terminates
     ("$/.github/actions/self-outer", True),    # `$/` outer, `./` inner
+    ("./.github/actions/outer-self", True),    # `./` outer, `$/` inner
+    ("./.github/actions/self-dangling", True), # unreadable `$/` inner: fail closed
 ]
 
 
 @pytest.mark.parametrize("ref,expected", _NESTED_ROWS,
                          ids=["nested-history", "nested-unreadable",
-                              "cycle-no-history", "self-prefix-outer"])
+                              "cycle-no-history", "self-prefix-outer",
+                              "self-prefix-inner", "self-prefix-inner-unreadable"])
 def test_nested_local_references_are_followed(sides, tmp_path: Path, ref, expected):
     """A composite action that delegates to ANOTHER local action: the history
     op (or the unreadable file) can sit one reference deeper than the action
@@ -454,6 +461,31 @@ def test_nested_local_references_are_followed(sides, tmp_path: Path, ref, expect
     speed._GIT_HISTORY_LOCAL_ACTIONS = speed_idx
     assert speed._job_needs_git_history(job, "j") is expected
     assert score._job_needs_git_history(job, "j", score_idx) is expected
+
+
+def _clean_chain(tmp_path: Path, references: int) -> list:
+    """`link0` reaches `link<references>` through that many nested local
+    references; no link runs a history op."""
+    n = references + 1
+    for i in range(n):
+        _composite(tmp_path, f"link{i}", f"    - uses: ./.github/actions/link{i + 1}\n"
+                   if i + 1 < n else "    - run: npm ci\n      shell: bash\n")
+    return [(".github/workflows/ci.yml",
+             {"jobs": {"j": {"steps": [{"uses": "./.github/actions/link0"}]}}}, "")]
+
+
+@pytest.mark.parametrize("extra,flagged", [(0, False), (1, True)],
+                         ids=["at-the-cap-read", "one-past-the-cap-fails-closed"])
+def test_the_depth_cap_boundary(sides, tmp_path: Path, extra, flagged):
+    """A clean chain exactly `_MAX_LOCAL_ACTION_DEPTH` references deep is read
+    to its end and proven clean; one reference deeper is unproven and fails
+    closed. Both engines, same boundary."""
+    speed, score = sides
+    assert speed._MAX_LOCAL_ACTION_DEPTH == score._MAX_LOCAL_ACTION_DEPTH == 16
+    parsed = _clean_chain(tmp_path, speed._MAX_LOCAL_ACTION_DEPTH + extra)
+    for engine in sides:
+        assert ("./.github/actions/link0" in engine._index_local_git_actions(
+            tmp_path, parsed)) is flagged, engine.__name__
 
 
 def test_a_chain_past_the_depth_cap_fails_closed(sides, tmp_path: Path):
