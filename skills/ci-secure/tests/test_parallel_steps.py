@@ -369,10 +369,9 @@ def _give_each_group_a_run(wrapped: str) -> str:
 def test_a_parallel_group_that_also_carries_run_is_scanned_and_disclosed(
     tmp_path: Path,
 ) -> None:
-    """A `parallel:` entry that ALSO has `run:` (or `uses:`) used to be read as
-    an ordinary step: its own command was scanned, its children never were,
-    and nothing said so. Its children must be scanned at their own lines, and
-    the shape must surface as a coverage note so the report is not clean."""
+    """A `parallel:` entry that ALSO has `run:` (or `uses:`) has its own
+    command scanned AND its children scanned at their own lines, and the
+    shape surfaces as a coverage note, so the report is never clean over it."""
     fixture = "p14_10_template_injection.yml.fixture"
     text = (_CLOAKED / fixture).read_text(encoding="utf-8")
     wrapped, inserted_after = _wrap_steps_in_parallel(text)

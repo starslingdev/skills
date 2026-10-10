@@ -1493,7 +1493,8 @@ def _path_matches_any_glob(rel_path: str, globs: list[str]) -> bool:
 
 
 def _job_step_uses_prefixes(job: dict[str, Any], prefixes: tuple[str, ...]) -> list[int]:
-    """Return 1-based step indices whose `uses:` starts with any prefix."""
+    """Return 1-based ordinals, in walker (leaf) order, of the steps whose
+    `uses:` starts with any prefix — not `steps:` positions."""
     hits: list[int] = []
     for i, step in enumerate(_job_steps(job), start=1):
         uses = step.get("uses", "")
@@ -1552,8 +1553,10 @@ def _walk_jobs(doc: Any) -> Iterator[tuple[str, dict[str, Any]]]:
 # `parallel:` entry itself has neither key, so every detector that walked
 # `job.steps` as a flat list skipped every child step in silence — a template
 # injection or a curl|bash written inside a parallel group read as clean.
-# Every detector reads steps through `_iter_job_steps` so the next step syntax
-# is taught in one place, not twenty.
+# Every detector that walks a job's steps reads them through
+# `_iter_job_steps`, so the next step syntax is taught in three walkers that
+# must agree (`_iter_job_steps`, its node twin `_iter_step_nodes`, and
+# `_step_spans`, which pairs the two), not twenty.
 _PARALLEL_KEY = "parallel"
 _PARALLEL_CONTROL_KEYS = frozenset({"wait", "wait-all", "cancel"})
 
@@ -1663,9 +1666,9 @@ def _iter_job_steps(
 ) -> Iterator[_JobStep]:
     """Every leaf step of a job, in declaration order.
 
-    Descends into `parallel:` lists (a nested `parallel:` is not valid GitHub
-    syntax, but it is descended anyway: skipping it would be the silent drop
-    this walker exists to end). Control steps carry nothing to scan and are
+    Descends into `parallel:` lists (nesting is not documented by GitHub; it
+    is descended anyway: skipping it would be the silent drop this walker
+    exists to end). Control steps carry nothing to scan and are
     skipped, but counted in ``stats``. A `parallel:` whose value is not a list,
     or that sits ``_WALK_MAX_DEPTH`` groups deep, cannot be read; a `parallel:`
     beside `run:` / `uses:` is read both ways (the step itself, then its
@@ -1907,7 +1910,8 @@ def _lines_concurrent(spans: list[_StepSpan], a: int, b: int) -> bool:
     Lines of ONE step are ordered by line as before."""
     def _at(line: int) -> _StepSpan | None:
         # A node's end mark can sit on the next step's first line, so the
-        # LAST span starting at or above the line is the one holding it.
+        # last span in declaration order that CONTAINS the line is the one
+        # holding it.
         return next((s for s in reversed(spans)
                      if s.start_line <= line <= s.end_line), None)
     sa, sb = _at(a), _at(b)
@@ -5754,8 +5758,9 @@ def scan(
         len(catalog), len(workflow_files), root,
     )
 
-    # Parallel-step census, once per file. Every detector reads steps through
-    # `_iter_job_steps`, so children of a `parallel:` group ARE scanned; this
+    # Parallel-step census, once per file. Every detector that walks a job's
+    # steps reads them through `_iter_job_steps`, so children of a
+    # `parallel:` group ARE scanned; this
     # records that they were, so the report can say so rather than leave a
     # reader to wonder whether the newer syntax was understood. A group the
     # walker could not read is a coverage gap, recorded as one.
@@ -6145,13 +6150,16 @@ def scan(
         "dropped_matches": dropped_matches,
         # A real coverage gap that is NOT an unanchorable run step — a
         # computed `working-directory:`, a `ref:` chosen at run time, shell
-        # that would not parse. Its own key so the report can name it in its
-        # own words instead of under a headline that misdescribes it.
+        # that would not parse — or, tagged `scope: parallel-group`, a
+        # `parallel:` group or background step whose steps may not have been
+        # scanned as steps. Its own key so the report can name it in its own
+        # words instead of under a headline that misdescribes it.
         "coverage_notes": coverage_notes,
         # Steps read inside GitHub Actions `parallel:` groups, plus the
         # control (`wait:`/`wait-all:`/`cancel:`) and `background: true` steps
-        # seen. Informational: these steps were scanned like any other, and
-        # the count is disclosed so that is never left implicit.
+        # seen. Informational: the leaf steps counted were scanned like any
+        # other (control steps hold no code), and the count is disclosed so
+        # that is never left implicit.
         "parallel_steps": parallel_steps,
         # Findings the scanner REACHED and deliberately did not report, above
         # all a fetch pinned to a full commit id. Informational: this must

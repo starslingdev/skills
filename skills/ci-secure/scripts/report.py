@@ -1296,17 +1296,17 @@ def _finding_group_section(
 def _parallel_steps_cell(parallel_steps: dict[str, Any] | None) -> str:
     """The provenance line for GitHub Actions parallel steps, or "".
 
-    Steps inside a `parallel:` group are scanned like any other step; this
-    says so out loud, because a reader who knows the syntax is new has no other
-    way to tell it was understood rather than skipped.
+    The leaf steps counted were scanned like any other; control steps hold
+    no code. This says so out loud, because a reader who knows the syntax is
+    new has no other way to tell it was understood rather than skipped.
     """
     stats = parallel_steps or {}
     n = int(stats.get("steps_scanned") or 0)
     n_control = int(stats.get("control_steps") or 0)
     n_background = int(stats.get("background_steps") or 0)
-    # One clause per non-zero count, so the row covers exactly the files the
-    # JSON's `workflows` lists — and never opens with "0 step(s) … scanned",
-    # which reads as "nothing was scanned".
+    # One clause per non-zero count, so the row appears exactly when the
+    # JSON's `workflows` is non-empty — and never opens with "0 step(s) …
+    # scanned", which reads as "nothing was scanned".
     parts: list[str] = []
     if n:
         parts.append(f"{n} step(s) inside `parallel:` groups scanned")
@@ -2372,7 +2372,8 @@ def _coverage_is_complete(
     - ``coverage_notes`` — the step was read, but something in it was not
       knowable from the YAML (a computed ``working-directory:``, a ``ref:``
       chosen at run time, shell that would not parse), so part of it went
-      unchecked.
+      unchecked; or, scoped ``parallel-group``, a `parallel:` group or
+      background step whose steps may not have been scanned as steps.
 
     ``suppressed_findings`` is deliberately NOT here. That list is the
     scanner reaching a finding and choosing not to report it — a fetch pinned

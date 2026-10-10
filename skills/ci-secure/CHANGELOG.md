@@ -142,32 +142,50 @@ entries are dated (UTC). Format loosely follows
 ### Fixed
 
 - **2026-10-09** — **Steps inside a GitHub Actions `parallel:` group are
-  scanned.** Parallel steps (GitHub, 2026-06-25) let a job write
-  `- parallel:` followed by a list of ordinary steps, plus control steps
-  (`wait:`, `wait-all:`, `cancel:`) that carry no code. The group entry has
-  no `run:` and no `uses:`, and every detector walked a job's steps as a flat
-  list, so every child step was skipped in silence: template injection,
-  curl|bash, cache writes on an untrusted trigger, fork-code execution,
-  credential files in a cache or artifact path, and install scripts in a job
-  with secrets all read clean inside a group. Every detector and config fact
-  that walks a job's steps (the raw-text checks never depended on step shape)
-  now reads them through one shared walker that descends into `parallel:`
-  lists in declaration order, skips (and counts) control steps, and keeps
-  each child step's own source line. The report's provenance table gains a
-  `Parallel steps` row ("N step(s) inside `parallel:` groups scanned") and the
-  findings JSON a `parallel_steps` record; a `parallel:` whose value is not a
-  list is a coverage note, never a clean step. A `parallel:` entry that also
-  carries `run:` or `uses:` (a shape GitHub rejects) has its own command and
-  its child steps scanned, and is named in a coverage note too. Steps in one
-  group, and a `background: true` step until a `wait:` naming it or a
-  `wait-all:`, are treated as possibly running at the same time, so the
-  checks that depend on order (fork code run after its checkout, a fetched
-  tree run after the fetch, builds disabled before an install) over-report
-  rather than miss: a step written above the checkout in the same group still
-  counts as running after it, and a disable racing the install no longer
-  silences the finding. Every fixture in the corpus keeps its findings with
-  its steps wrapped in a `parallel:` group; the one that gains a finding is a
-  pinned clone whose run step, as a sibling, can start before the pin lands.
+  scanned.** (#121) Parallel steps (GitHub, 2026-06-25; github.com and
+  GitHub Enterprise Cloud) let a job write `- parallel:` followed by a list
+  of ordinary steps, plus control steps (`wait:`, `wait-all:`, `cancel:`)
+  that carry no code. The group entry has no `run:` and no `uses:`, and
+  every detector that walks a job's steps did so as a flat list, so every
+  child step was skipped in silence: template injection, curl|bash, cache
+  writes on an untrusted trigger, fork-code execution, credential files in
+  a cache or artifact path, and install scripts in a job with secrets all
+  read clean inside a group. Every detector and config fact that walks a
+  job's steps (the raw-text checks never depended on step shape) now reads
+  them through one shared walker that descends into `parallel:` lists in
+  declaration order, skips (and counts) control steps, and keeps each child
+  step's own source line (P14.9 and P14.19 still anchor at the job line).
+  Template-injection lines now come from the parsed YAML node of each
+  step's own `run:`, so a flow-style `{run: ...}` child, a group the scan
+  could not read, or a `parallel:` key written above its step's `run:` no
+  longer moves a finding onto another step or job. The report's provenance
+  table gains a `Parallel steps` row ("N step(s) inside `parallel:` groups
+  scanned"), shown only when the syntax is present, and the findings JSON
+  an always-present `parallel_steps` record. Anything the walker cannot
+  fully read is a coverage note, never a clean step: a `parallel:` whose
+  value is not a list, a group nested past the depth cap, a group entry
+  that is not a step, a `parallel:` beside `run:`/`uses:` (a shape GitHub
+  rejects; its own command and, when they can be read, its children are
+  scanned), a group key the scan does not model, a `background:` value
+  chosen at run time, a YAML alias that makes a step list hold itself or
+  blows past a 10,000-entry walk budget, and a job whose concurrent steps'
+  lines could not be found. Steps in one group, and a background step
+  until a `wait:` naming its `id` or a `wait-all:` that is empty or `true`,
+  are treated as possibly running at the same time; anything not provably
+  finished counts as still running (`background: "true"`, an expression, a
+  `background:` group, `wait-all: false`, a pin whose line is unknown).
+  The checks that depend on order (fork code run after its checkout, a
+  fetched tree run after the fetch, builds disabled before an install)
+  over-report rather than miss: a step written above the checkout in the
+  same group still counts, with evidence saying it "may run after or
+  alongside" the checkout, and a disable racing the install no longer
+  silences the finding. `continue-on-error: true` on a group swallows its
+  children's suite in the test-failure check, named as group-level. Every
+  fixture in the corpus keeps its findings with its steps wrapped in a
+  `parallel:` group; the one that gains a finding is a pinned clone whose
+  run step, as a sibling, can start before the pin lands. For a repository
+  without the syntax the findings array and the rendered report are
+  unchanged.
 
 - **2026-09-03** — **A required check produced by a matrix-templated job name
   now resolves to its job.** `sec.required-checks.skippable` matched a job's
