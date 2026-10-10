@@ -833,3 +833,69 @@ def test_mastodon_npm_alias_to_typescript6_fires_the_tsc_row():
         block=_block(tool_versions={"": {"typescript":
                                          "npm:@typescript/typescript6@6.0.2"}}))
     assert len(out) == 1 and _rows(out[0]) == ["tsc"], withheld
+
+
+# ---- action steps: held back only when the action plausibly lints / formats ------
+
+@pytest.mark.parametrize("step", [
+    {"uses": "github/codeql-action/analyze@v3", "name": "Perform CodeQL Analysis"},
+    {"uses": "actions/upload-artifact@v4", "name": "Upload results"},
+    {"uses": "./.github/actions/build", "name": "Build"},
+])
+def test_an_action_that_cannot_be_a_tool_swap_is_a_verdict_not_listed(step):
+    doc = _doc({})
+    doc["jobs"]["lint"]["steps"][2] = step | {"name": step.get("name", _STEP)}
+    pole = _pole(step=step.get("name", _STEP))
+    out, withheld, cands = _run(None, doc=doc, pole=pole)
+    assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
+    assert cands == []
+
+
+@pytest.mark.parametrize("step", [
+    {"uses": "./.github/actions/lint"},
+    {"uses": "./.github/actions/setup", "name": "Run checks"},
+    {"uses": "$/.github/actions/format-check"},
+    {"uses": "wearerequired/lint-action@v2"},
+    {"uses": "creyD/prettier_action@v4"},
+    {"uses": "some/action@v1", "name": "Typecheck"},
+])
+def test_an_action_that_plausibly_lints_formats_or_type_checks_stays_held_back(step):
+    name = step.get("name", _STEP)
+    doc = _doc({})
+    doc["jobs"]["lint"]["steps"][2] = step | {"name": name}
+    out, withheld, cands = _run(None, doc=doc, pole=_pole(step=name))
+    assert out == [] and withheld == {"candidate_is_an_action": 1}, withheld
+    assert cands == [{"workflow_file": _WF, "job": "Lint",
+                      "gate": "candidate_is_an_action", "step": name}]
+
+
+# ---- a directory change inside a resolved script ---------------------------------
+
+_SVELTE = {"": {"check": "cd packages/svelte && pnpm build && cd ../../ && pnpm -r check",
+                "lint": "eslint && prettier --check ."},
+           "packages/svelte": {"build": "rollup -c", "check": "tsc --noEmit"}}
+
+
+@pytest.mark.parametrize("run,scripts", [
+    ("pnpm check", _SVELTE),
+    ("pnpm fmt", {"": {"fmt": "pushd web && prettier --check . && popd"}}),
+    ("pnpm lint", {"": {"lint": "pnpm run inner", "inner": "cd web && eslint ."},
+                   "web": {}}),
+])
+def test_a_directory_change_inside_a_resolved_script_is_command_changes_directory(
+        run, scripts):
+    out, withheld, cands = _run({"run": run}, block=_block(scripts=scripts))
+    assert out == [] and withheld == {"command_changes_directory": 1}, withheld
+    assert _held(cands, "command_changes_directory")
+
+
+# ---- the share floor is one constant ---------------------------------------------
+
+def test_the_share_floor_is_decided_by_one_constant(monkeypatch):
+    # sveltejs: `lint` is 29s of a 318.5s job (9.1%): below today's 15% floor.
+    pole = _pole(step_p50=29.0, job_p50=318.5)
+    out, withheld, _c = _run({"run": "npx eslint ."}, pole=pole)
+    assert out == [] and withheld == {"no_candidate_step": 1}
+    monkeypatch.setattr(cr, "_OPT84_MIN_SHARE", 0.0)
+    out, withheld, _c = _run({"run": "npx eslint ."}, pole=pole)
+    assert len(out) == 1, withheld
