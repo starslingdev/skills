@@ -13,6 +13,49 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-09** — **The audit now spots a slow merge-gating job whose
+  independent steps run one after another, and shows the most a `parallel:`
+  group could take off its time.** New catalog pattern OPT83 looks at each
+  slowest job the audit measured on the pull-request path. When two or more
+  compute steps (build, test, scan or package, each at least 20 seconds and at
+  least 15% of the job) sit directly next to each other in the workflow file,
+  and the file shows they do not depend on each other, the report adds a card
+  at that job naming the steps, why they look independent, and a rewrite into
+  one `parallel:` group using GitHub's new parallel steps. Independence is
+  read from the workflow file, never guessed from timings. Steps with anything
+  between them (a step, a group or a wait) are not reported (counted only).
+  Anything unclear holds the job back: a step reading another's outputs, or one
+  writing GITHUB_ENV / GITHUB_OUTPUT / GITHUB_PATH for a later one; a shared
+  cache or artifact; an action; a step that publishes, deploys or uploads; a
+  `${{ }}` expression (an inherited working directory is read before it is
+  tidied, so `${{ inputs.dir }}/..` still counts), a `background:` written as
+  an expression, or a directory change; a step-level `if:`; a step allowed to
+  fail (`continue-on-error`), since that changes what a failing step does to
+  the job once the steps run side by side; a build whose folder overlaps
+  another step's; a service container, two Docker steps, or the same Cargo,
+  Maven, Gradle, .NET, sbt, Swift, Mix or Xcode build or coverage tool twice in
+  one folder; a step that also installs dependencies (`npm ci && ...`); a
+  container or background server started earlier in the job; unreadable
+  timings or step records; a job that more than one workflow produces; a job
+  holding a `parallel:` group that could not be read, whose steps were never
+  seen (`job_has_an_unreadable_parallel_group`). A new
+  "independent steps: held back" row in Data sources names those jobs, and the
+  steps when the run was found, with the reason; only the run with the largest
+  upper bound is checked. The card is not counted as a saving: it shows an
+  upper bound (the steps' times summed minus the longest, assuming each keeps
+  its solo speed) and asks for a benchmark first, and no number reaches a
+  total, the headline or Tier 2. It renders inside its job's section (an
+  aggregation-gate job included), before any bigger-runner suggestion (OPT81),
+  which still shows beside it: OPT83 needs a benchmark first, so the reader
+  sees both. On self-hosted runners, run actions/runner 2.336.0 or
+  newer (its release notes add background steps in 2.335.0 and, in 2.336.0,
+  stop a cancelled background step from affecting the job result); the feature
+  is documented for github.com and GitHub Enterprise Cloud, not GitHub
+  Enterprise Server. `verify_report.py` re-checks every OPT83 finding against
+  its job's measured steps and its card, fails a card outside its job's
+  section, any percentage on it, a rendered card whose findings cannot be read,
+  and a held-back count that disagrees with the held-back list; a check that
+  crashes names the job it skipped. (#123)
 - **2026-10-07** — **The audit can now say a job is measurably faster on another
   runner, from the repository's own runs, and names a different or larger runner
   class as the last option only when nothing cheaper is left.** New catalog pattern OPT81 has two

@@ -4607,7 +4607,9 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
     # OPT78 (vitest per-file isolation) is not routed here either: it is emitted
     # by a drill-time log leaf in blocking_path.py, gated on this scan's
     # `test_runner_isolation` block.
-    structural_detected = {"OPT70", "OPT71", "OPT72", "OPT73", "OPT75"}
+    # OPT83 (independent steps on a pole) is routed by collect_runs from each
+    # drilled pole's step decomposition plus the workflow YAML.
+    structural_detected = {"OPT70", "OPT71", "OPT72", "OPT73", "OPT75", "OPT83"}
     structural_without_detector = sorted(
         c.pattern for c in catalog
         if c.finding_class == "structural" and c.pattern not in structural_detected)

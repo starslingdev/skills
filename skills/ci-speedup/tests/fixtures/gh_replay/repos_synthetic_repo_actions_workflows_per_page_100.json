@@ -1,5 +1,5 @@
 {
- "total_count": 7,
+ "total_count": 8,
  "workflows": [
   {
    "id": 1001,
@@ -41,6 +41,12 @@
    "id": 1007,
    "name": "Bench",
    "path": ".github/workflows/bench.yml",
+   "state": "active"
+  },
+  {
+   "id": 1008,
+   "name": "Quality",
+   "path": ".github/workflows/quality.yml",
    "state": "active"
   }
  ]

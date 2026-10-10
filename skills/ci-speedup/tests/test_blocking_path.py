@@ -9027,10 +9027,10 @@ def test_no_collector_path_can_record_a_held_back_entry_with_no_job():
         elif (isinstance(n, ast.Assign)
               and any(_is_target(t) for t in n.targets)):
             writes.append(("=", n))
-    # 77, 79 pre-probe, 79 post-probe, 80, 81 A1, 81 A2, 82 (guarded by `and job`
-    # in its `_no` helper) — and every one of them an `append(<dict literal>)`,
-    # never an `extend`, an `insert` or a `+=`.
-    assert len(writes) == 7, [(k, ast.dump(n)[:60]) for k, n in writes]
+    # 77, 79 pre-probe, 79 post-probe, 80, 81 A1, 81 A2, 82 and 83 (both guarded
+    # by `and job` in their `_no` helpers) — and every one of them an
+    # `append(<dict literal>)`, never an `extend`, an `insert` or a `+=`.
+    assert len(writes) == 8, [(k, ast.dump(n)[:60]) for k, n in writes]
     for kind, n in writes:
         assert kind == "append", (kind, ast.dump(n)[:80])
         d = n.args[0]
@@ -9404,6 +9404,25 @@ def test_grouped_job_elsewhere_leaves_the_pole_text_byte_identical():
                        "2026-06-08", {"pipeline": _TIMELINE})
         assert _strip(md) == _strip(base), (path, job)
         assert "comes straight off the job's wall-clock" in md
+
+
+def test_opt83_card_renders_at_its_pole_and_never_in_also_noticed():
+    """OPT83 is uncredited and routed from a pole: excluded from the hygiene
+    appendix whatever it carries, and joined only to its own pole's job."""
+    f = {"id": "f7", "pattern": "OPT83", "title": "t", "risk": "MEDIUM",
+         "workflow_file": ".github/workflows/q.yml", "affected_jobs": ["q"],
+         "wall_clock_p50_s": None, "runner_min_saving": None,
+         "independent_steps": {"job": "q", "yaml_job": "q", "ceiling_s": 50.0,
+                               "steps": [{"step": "A", "p50_s": 30.0},
+                                         {"step": "B", "p50_s": 25.0},
+                                         {"step": "C", "p50_s": 25.0}]}}
+    lines, n, _wc = bp._also_noticed_block([f], "https://x/c.md")
+    assert (lines, n) == ([], 0)
+    pole = {"check": "q", "job": "q", "workflow_file": ".github/workflows/q.yml"}
+    assert bp._opt83_for_pole(pole, [f]) == [f]
+    assert bp._opt83_for_pole({**pole, "job": "r"}, [f]) == []
+    card = "\n".join(bp._opt83_card(f, "https://x/c.md"))
+    assert card.startswith('<a id="opt83-f7"></a>') and "up to 50s sooner" in card
 
 
 def test_the_drill_fallbacks_never_mark_a_control_step_as_dominant():
