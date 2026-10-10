@@ -11,6 +11,24 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-10** — **Fixed**: actions referenced with GitHub's
+  self-repository prefix (`uses: $/path`, shipped 2026-07-30) are local to
+  the repository, exactly like `uses: ./path`, but were counted as unpinned
+  remote actions. A repository using the prefix in 24 steps read "111 of 135
+  remote action references SHA-pinned" and failed the pinning check, with
+  fix advice naming files that had nothing to pin; it now reads "111 of 111"
+  and passes. The shallow-checkout check's git-history exemption also now
+  opens a `$/`-referenced composite action (and fails closed when it cannot
+  be read), as it already did for `./`, and follows nested references: a
+  git-history command inside a local action that the named action itself
+  calls (`./` or `$/`, with a bare or quoted `uses:` key) exempts the
+  full-history checkout too, and an
+  unreadable nested reference fails closed the same way. A nested
+  reference that resolves outside the repository root (`$/../x`, `$//abs`)
+  or cannot be opened at all also fails closed instead of reading as clean
+  or stopping the scan. A malformed `$/` job call carrying an `@ref` suffix
+  is no longer listed as a delegated remote reusable workflow.
+
 - **2026-10-09** — **Fixed** (#120): steps inside a GitHub Actions
   `parallel:` group (shipped by GitHub 2026-06-25 on github.com and GHEC; not
   GHES) were invisible to every check that reads
