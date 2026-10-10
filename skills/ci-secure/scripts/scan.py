@@ -4966,16 +4966,24 @@ def _attacker_head_ref(value: Any) -> bool:
     return any(n in value for n in needles)
 
 
-def _job_checkout_head_then_executes(job: dict[str, Any]) -> tuple[int, str] | None:
+def _job_checkout_head_then_executes(
+    job: dict[str, Any],
+) -> tuple[int, str, bool] | None:
     """The load-bearing predicate of P14.9: within ONE job, an
-    `actions/checkout` of the attacker's head ref FOLLOWED by a step that
-    executes from the working tree (`run:` or a local `./action`).
+    `actions/checkout` of the attacker's head ref FOLLOWED BY, or possibly
+    running at the same time as (a `parallel:` sibling, a `background:` step
+    still running), a step that executes from the working tree (`run:` or a
+    local `./action`).
 
     The execution leg is a deliberate, documented over-approximation: a
     post-checkout `run:` step almost always executes tree-controlled content
     (install scripts, Makefiles, test suites), so we do not try to prove which
     file it touches. A checkout with no `ref:` (base/merge ref) never
-    qualifies. Returns (checkout_step_index, ref_text) or None.
+    qualifies. Returns (checkout_step_index, ref_text, concurrent) or None;
+    `concurrent` is True when only the possibly-at-the-same-time reading
+    qualifies, so the evidence does not claim an order it cannot know.
+    The index is a 0-based ordinal in walker (leaf) order, not a `steps:`
+    position.
     """
     checkout_idx: int | None = None
     ref_text = ""
@@ -4995,7 +5003,7 @@ def _job_checkout_head_then_executes(job: dict[str, Any]) -> tuple[int, str] | N
                 and step["uses"].startswith("./")
             )
             if executes:
-                return checkout_idx, ref_text
+                return checkout_idx, ref_text, False
     # Declared after is not the only "after": a step that may run at the same
     # time as the head checkout (a `parallel:` sibling written above it, a
     # `background:` step still running) can execute the fork's tree too.
@@ -5014,7 +5022,7 @@ def _job_checkout_head_then_executes(job: dict[str, Any]) -> tuple[int, str] | N
             if e is not c and ("run" in e.step or (
                     isinstance(e_uses, str) and e_uses.startswith("./"))) \
                     and _steps_concurrent(c_timing, e_timing):
-                return i, str(ref)
+                return i, str(ref), True
     return None
 
 
@@ -5025,8 +5033,9 @@ def _correlation_untrusted_checkout_executes(file_path: Path) -> Iterator[RawHit
     trigger that carries the BASE repo's context (write token, secrets);
     (2) `actions/checkout` pulls the attacker's head code (`ref:` /
     `repository:` naming pull_request.head.*, github.head_ref, or
-    workflow_run.head_*); (3) a later step in the same job executes from the
-    working tree. One hit per qualifying job. The bare trigger without the
+    workflow_run.head_*); (3) a step in the same job that runs after it, or
+    may run at the same time as it (a `parallel:` sibling, a background step
+    still running), executes from the working tree. One hit per qualifying job. The bare trigger without the
     head checkout is NOT a finding here — that presence fact belongs to the
     scored config checks.
     """
@@ -5045,13 +5054,16 @@ def _correlation_untrusted_checkout_executes(file_path: Path) -> Iterator[RawHit
         hit = _job_checkout_head_then_executes(job)
         if hit is None:
             continue
-        _, ref_text = hit
+        _, ref_text, concurrent = hit
         line = _job_line_in_text(text, job_name)
+        then = ("and a step that may run after or alongside it executes "
+                "from the tree" if concurrent
+                else "then executes from the tree")
         yield RawHit(
             line=line,
             evidence=(
                 f"{line:>4}: job `{job_name}` on `{trig}` checks out "
-                f"`{ref_text}` then executes from the tree <-- here"
+                f"`{ref_text}` {then} <-- here"
                 + _gate_note(job, sorted(triggers))
             ),
             match_text=job_name,

@@ -519,7 +519,10 @@ def _joined(*parts: list[str]) -> str:
 
 def _patterns(root: Path, text: str, pattern: str) -> list[dict]:
     _write(root, "a.yml", text)
-    return [f for f in _scan_root(root)["findings"] if f["pattern"] == pattern]
+    data = _scan_root(root)
+    # An empty answer must be the detector's, not a file that never parsed.
+    assert data["scan_incomplete"] == [], data["scan_incomplete"]
+    return [f for f in data["findings"] if f["pattern"] == pattern]
 
 
 _P14_9 = (_CLOAKED / "p14_7_pr_target_writes_cache.yml.fixture").read_text()
@@ -537,7 +540,12 @@ def test_p14_9_a_sibling_declared_before_the_head_checkout_still_runs_it(
     flat = _joined(head, *runs, checkout, setup, tail)
     assert _patterns(tmp_path / "flat", flat, "P14.9") == []
     grouped = _joined(head, _grouped([*runs, checkout, setup], ind), tail)
-    assert len(_patterns(tmp_path / "grp", grouped, "P14.9")) == 1
+    hits = _patterns(tmp_path / "grp", grouped, "P14.9")
+    assert len(hits) == 1
+    # The evidence must not claim the run came AFTER the checkout: it is
+    # written above it, and runs alongside it.
+    assert "a step that may run after or alongside it executes from the " \
+        "tree" in hits[0]["evidence"], hits[0]["evidence"]
 
 
 def test_p14_9_a_background_step_started_before_the_checkout_still_runs(
