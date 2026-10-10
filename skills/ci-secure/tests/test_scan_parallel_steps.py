@@ -722,19 +722,27 @@ _P14_9_ARMS = """\
      "${{ github.event.pull_request.head.sha }}"),
     ("run: make", "repository",
      "${{ github.event.pull_request.head.repo.full_name }}"),
+    ("uses: $/.github/actions/setup", "ref",
+     "${{ github.event.pull_request.head.sha }}"),
 ])
 def test_p14_9_concurrency_arms_a_local_action_and_a_repository_checkout(
     tmp_path: Path, executes: str, key: str, value: str,
 ) -> None:
-    """Both arms of the concurrent loop: a local `./` action as the
-    executing step, and a head checkout named by `repository:`. Each is
-    written ABOVE the checkout in one group."""
+    """Every arm of the concurrent loop: a local `./` action, a
+    self-repository `$/` action (its definition is the base repository's;
+    it runs on the fork's tree) and a `run:` step as the executing
+    step, and a head checkout named by `repository:`. Each is written ABOVE
+    the checkout in one group; the flat negative control also pins that the
+    same step written before the checkout, outside a group, stays silent."""
     text = _P14_9_ARMS.format(executes=executes, key=key, value=value)
     head, items, tail, ind = _split_steps(text)
     assert _patterns(tmp_path / "flat", _joined(head, *items, tail),
                      "P14.9") == []
     grouped = _joined(head, _grouped(items, ind), tail)
-    assert len(_patterns(tmp_path / "grp", grouped, "P14.9")) == 1
+    hits = _patterns(tmp_path / "grp", grouped, "P14.9")
+    assert len(hits) == 1
+    if executes.startswith("uses: $/"):
+        assert "`$/` action" in hits[0]["evidence"], hits[0]["evidence"]
 
 
 _P14_24_CLONE = (_CLOAKED / "p14_24_mutable_fetch_exec.yml.fixture").read_text()

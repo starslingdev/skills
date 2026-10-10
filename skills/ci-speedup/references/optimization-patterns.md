@@ -1968,7 +1968,7 @@ grep -rn 'fetch-depth' .github/workflows/
 
 **Fix**:
 
-- **Delete the checkout step outright** if no step in the job reads a file from the checkout (a job that only calls an API, downloads an artifact, or runs a container image). The cheapest checkout is none. Check first that nothing needs the repo indirectly: a local action (`uses: ./...`) or reusable-workflow path, `hashFiles()` in a cache key, a `run:` that calls `git` or a repo script, or a `gh` command relying on the current repo (it then needs `--repo` or `GH_REPO`). A missing file fails the job, so delete only when every step is accounted for.
+- **Delete the checkout step outright** if no step in the job reads a file from the checkout (a job that only calls an API, downloads an artifact, or runs a container image). The cheapest checkout is none. Check first that nothing needs the repo indirectly: a local action (`uses: ./...`) or reusable-workflow path (a self-repository `uses: $/...` action's definition loads without the checkout, but its steps may still read repo files, so open it before deleting), `hashFiles()` in a cache key, a `run:` that calls `git` or a repo script, or a `gh` command relying on the current repo (it then needs `--repo` or `GH_REPO`). A missing file fails the job, so delete only when every step is accounted for.
 - Use `fetch-depth: 1` (default) unless the job needs git history (e.g., changelogs, blame). For PR diff detection against the merge commit's parents, `fetch-depth: 2` suffices — but change-scoped runners that diff against the BASE BRANCH (`turbo --filter=...[origin/main]`, `nx affected`, `vitest --changed` — see OPT34/OPT70) need the base ref fetched (`fetch-depth: 0` or a targeted base-ref fetch); do not shallow those jobs.
 - **Sparse / blobless checkout** is the option between a full clone and depth 1 for diff-based gates that need history but not every file: `filter: blob:none` (with `fetch-depth: 0`, full history with file contents fetched on demand) or `sparse-checkout:` (newline-separated patterns; only those paths materialized) on `actions/checkout`. Both are real inputs; the action's own docs say `filter` "overrides sparse-checkout if set", so verify a combination on the job rather than assume it. Confirm the job's steps only touch the sparse paths, or a missing file fails the job.
 
@@ -3940,7 +3940,7 @@ the read could not see is a held-back "could not tell", never a verdict):
    working directory (`lint_step_uses_runtime_expression`); and lint handed to
    another tool or action (`turbo`, `nx`, `lerna`, `make`, `next lint`,
    `run-p` / `npm-run-all`, a `node` script, an action step whose name or
-   reference says ESLint, or a local `./` action named lint:
+   reference says ESLint, or a local `./` or `$/` action named lint:
    `lint_delegated_to_unread_tool`). A step that runs a linter that is not
    ESLint (golangci-lint, stylelint, biome, actionlint) is not a lint step here.
 2. The job is expensive: its measured p50 is at least 60s

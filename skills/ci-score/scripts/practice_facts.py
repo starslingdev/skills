@@ -28,6 +28,7 @@ with ci-speedup at runtime.
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -366,6 +367,18 @@ def _wf_is_pr_gating(doc: dict) -> bool:
     return False
 
 
+# A `uses:` naming THIS repository: `./path`, or the self-repository prefix
+# `$/path` GitHub shipped 2026-07-30 (same commit, same files, no checkout
+# needed). Both resolve to `<repo root>/path`, so `ref[2:]` strips either.
+_LOCAL_USES_PREFIXES = ("./", "$/")
+
+
+def _is_local_uses(uses: str) -> bool:
+    """True for a `uses:` that names an action or reusable workflow in this
+    repository (`./…` or the self-repository `$/…`)."""
+    return uses.startswith(_LOCAL_USES_PREFIXES)
+
+
 def _remote_reusable_refs(parsed: list[tuple[str, dict, str]]) -> list[str]:
     """Cross-repo reusable workflows this repo's jobs delegate to
     (`uses: org/repo/.github/workflows/x.yml@ref` at JOB level). Their
@@ -376,7 +389,10 @@ def _remote_reusable_refs(parsed: list[tuple[str, dict, str]]) -> list[str]:
     for _rel, doc, _raw in parsed:
         for job in _wf_jobs(doc).values():
             uses = job.get("uses")
-            if isinstance(uses, str) and not uses.startswith("./") and "@" in uses:
+            # A self-repository `$/…` call is local, never remote. GitHub
+            # rejects an `@ref` suffix on `$/`, but a malformed one must still
+            # stay out of this list, where it could flip the no-CI refusal.
+            if isinstance(uses, str) and not _is_local_uses(uses) and "@" in uses:
                 refs.append(uses.split("@")[0])
     return sorted(set(refs))
 
@@ -599,10 +615,10 @@ def _step_walk_stats(parsed: list[tuple[str, dict, str]], root: Path) -> dict[st
 
 
 def _step_uses(step: dict) -> tuple[str, str] | None:
-    """(action, ref) for a remote `uses:`; None for local (./) / docker:// /
-    run steps."""
+    """(action, ref) for a remote `uses:`; None for local (`./`, `$/`) /
+    docker:// / run steps."""
     uses = step.get("uses")
-    if not isinstance(uses, str) or uses.startswith("./") or uses.startswith("docker://"):
+    if not isinstance(uses, str) or _is_local_uses(uses) or uses.startswith("docker://"):
         return None
     action, _, ref = uses.partition("@")
     return (action, ref) if action else None
@@ -612,8 +628,13 @@ def _step_uses(step: dict) -> tuple[str, str] | None:
 #
 # CANONICAL SOURCE: `skills/ci-speedup/scripts/scan.py` — `_GIT_HISTORY_RE`,
 # `_HISTORY_JOB_NAME_RE`, `_LINE_CONTINUATION_RE`, `_has_git_history_op`,
+# `_NESTED_LOCAL_USES_RE`, `_MAX_LOCAL_ACTION_DEPTH`, `_local_ref_path`,
+# `_read_local_history_file`, `_local_action_needs_history`,
 # `_index_local_git_actions` and `_job_needs_git_history`. What follows is a
 # deliberate VERBATIM COPY of that predicate, not an import.
+# `_LOCAL_USES_PREFIXES` and `_is_local_uses` are duplicated separately (they
+# sit with the pinning helpers above, not in this block), copied from the same
+# canonical source.
 #
 # ONE KNOWN DIVERGENCE: the step reader is NOT part of the copy. Here
 # `_job_steps` routes through `_walk_steps`; ci-speedup walks through its own
@@ -709,43 +730,92 @@ def _has_git_history_op(text: str) -> bool:
 
 
 def _step_uses_ref(step: dict) -> str:
-    """The raw `uses:` string (local `./...` refs included, unlike
+    """The raw `uses:` string (local `./...` / `$/...` refs included, unlike
     `_step_uses`, which is scoped to remote actions)."""
     return str(step.get("uses") or "")
 
 
+# A local `uses:` reference written inside an action or reusable-workflow file
+# (`./…` or the self-repository `$/…`), quoted or bare.
+_NESTED_LOCAL_USES_RE = re.compile(r"['\"]?uses['\"]?:\s*['\"]?((?:\./|\$/)[^\s'\"#]+)")
+# How many local references deep the history read follows a chain before it
+# gives up. Past the cap the chain is unproven, so it fails CLOSED.
+_MAX_LOCAL_ACTION_DEPTH = 16
+
+
+def _local_ref_path(root: Path, ref: str) -> "Path | None":
+    """`<root>/<ref[2:]>` for a local ref (`./…` or `$/…`), or None when that
+    path lands outside the repository root (`$/../x`, `$//abs`): a file there
+    is not this repository's, so the caller fails CLOSED on it."""
+    base = root / ref[2:]  # strip leading "./" or "$/"
+    try:
+        root_n = os.path.normpath(os.path.abspath(root))
+        base_n = os.path.normpath(os.path.abspath(base))
+        if os.path.commonpath([root_n, base_n]) != root_n:
+            return None
+    except ValueError:
+        return None
+    return base
+
+
+def _read_local_history_file(root: Path, ref: str) -> "str | None":
+    """Text of the file a local ref names: `<root>/<ref[2:]>` itself when it is
+    a `.yml`/`.yaml` (a reusable workflow), else that directory's `action.yml`
+    or `action.yaml`. None when no candidate file is readable, or when the
+    ref resolves outside the repository root."""
+    base = _local_ref_path(root, ref)
+    if base is None:
+        return None
+    candidates = [base] if base.suffix in (".yml", ".yaml") else [
+        base / "action.yml", base / "action.yaml"]
+    for cand in candidates:
+        try:
+            return cand.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):   # ValueError: an embedded NUL byte
+            continue
+    return None
+
+
+def _local_action_needs_history(root: Path, ref: str) -> bool:
+    """True when the local action `ref` names, or any local action or reusable
+    workflow it reaches through nested `uses:` references, runs a git-history
+    op. A composite action routinely delegates to another local action, and the
+    inner one can be the step that walks history. Any link that cannot be read
+    (or a chain deeper than `_MAX_LOCAL_ACTION_DEPTH`) fails CLOSED: it cannot
+    be PROVEN history-free. A cycle terminates on the visited set."""
+    seen: set[str] = set()
+    queue: list[tuple[str, int]] = [(ref, 0)]
+    while queue:
+        cur, depth = queue.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        if depth > _MAX_LOCAL_ACTION_DEPTH:
+            return True
+        text = _read_local_history_file(root, cur)
+        if text is None or _has_git_history_op(text):
+            return True
+        queue += [(m.split("@")[0].strip(), depth + 1)
+                  for m in _NESTED_LOCAL_USES_RE.findall(text)]
+    return False
+
+
 def _index_local_git_actions(root: Path,
                              parsed: list[tuple[str, dict, str]]) -> set[str]:
-    """Return the set of local `uses:` refs (e.g. `./.github/actions/changed`)
-    whose composite-action file performs a git-history op."""
+    """Return the set of local `uses:` refs (e.g. `./.github/actions/changed`,
+    or the self-repository `$/.github/actions/changed`) whose composite-action
+    file performs a git-history op, directly or through a nested local
+    reference (`_local_action_needs_history`)."""
     refs: set[str] = set()
     for _rel, doc, _raw in parsed:
         for job in _wf_jobs(doc).values():
             for s in _job_steps(job):
                 u = _step_uses_ref(s).split("@")[0].strip()
-                if u.startswith("./"):
+                if _is_local_uses(u):
                     refs.add(u)
-    out: set[str] = set()
-    for ref in refs:
-        rel = ref[2:]  # strip leading "./"
-        base = root / rel
-        candidates = [base] if base.suffix in (".yml", ".yaml") else [
-            base / "action.yml", base / "action.yaml"]
-        for cand in candidates:
-            try:
-                text = cand.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            if _has_git_history_op(text):
-                out.add(ref)
-            break
-        else:
-            # No candidate file was readable — we can't PROVE the action is
-            # history-free. Fail CLOSED: assume it may run a git-history op so
-            # the job that invokes it is never called an offender. The cost is
-            # at most a missed finding, never advice that breaks a job.
-            out.add(ref)
-    return out
+    # Fail CLOSED on anything unproven (see `_local_action_needs_history`):
+    # the cost is at most a missed finding, never advice that breaks a job.
+    return {ref for ref in refs if _local_action_needs_history(root, ref)}
 
 
 def _job_needs_git_history(job: dict, job_name: str = "",
@@ -756,7 +826,8 @@ def _job_needs_git_history(job: dict, job_name: str = "",
     if _has_git_history_op(blob) or _has_git_history_op(uses_blob):
         return True
     # A local composite action the job invokes may run the git op internally
-    # (the workflow yaml shows only `uses: ./…`). Consult the per-scan index.
+    # (the workflow yaml shows only `uses: ./…` or `uses: $/…`). Consult the
+    # per-scan index.
     if local_history_actions:
         for s in _job_steps(job):
             if _step_uses_ref(s).split("@")[0].strip() in local_history_actions:

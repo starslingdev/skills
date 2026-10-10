@@ -1011,6 +1011,27 @@ unversioned and updates by reinstall from `main`.
   logging is configured, and prints bare as before. `summary.py` and
   `record_timing.py` still start under `python -P` (PYTHONSAFEPATH).
 
+- **2026-10-10** — **Actions and reusable workflows referenced with GitHub's
+  self-repository prefix (`uses: $/path`, shipped 2026-07-30) are read as the
+  local files they are.** Every local-action read matched only `./`, so a
+  `$/` reference was never opened: a git-history command inside a `$/`
+  composite action did not protect the job's `fetch-depth: 0` from the
+  shallow-checkout recommendation, the submodule / LFS payload check never
+  searched a `$/` composite's body, the checkout-stall pattern missed a
+  checkout (or an already-applied retry) behind a `$/` composite, a `$/`
+  action named lint was not recognised as delegated lint, and a reusable
+  workflow called as `$/.github/workflows/x.yml` was missing from the call
+  graph. `$/x` now resolves to `<repo root>/x` everywhere `./x` does,
+  including references nested inside composite actions. The git-history
+  read behind the shallow-checkout pattern (OPT28) follows those nested
+  references too: a composite action that calls another local action
+  running `git diff origin/main...HEAD` no longer leaves `fetch-depth: 0`
+  looking removable, and an unreadable nested reference fails closed.
+  Nested references written with a quoted `"uses":` key are followed too,
+  and a nested reference that resolves outside the repository root
+  (`$/../x`, `$//abs`) or cannot be opened at all fails closed in every
+  local-action read instead of reading as clean or stopping the scan.
+
 - **2026-10-10** — **A report is no longer refused because a modeled saving
   was checked against the wrong job.** On curl/curl the final check blocked
   the whole audit: a duplicate-command finding (OPT16, a flat estimate of about

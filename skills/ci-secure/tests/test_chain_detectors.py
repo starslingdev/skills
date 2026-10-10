@@ -81,6 +81,93 @@ def test_fires_on_workflow_run_head_and_local_action(tmp_path):
     assert len(hits) == 1
 
 
+def test_fires_on_a_self_repository_action_after_a_head_checkout(tmp_path):
+    # `uses: $/path` (GitHub's self-repository prefix, 2026-07-30) loads the
+    # action's definition from the commit the WORKFLOW runs at (the base
+    # repository's here), but the action's own `run:` steps execute in the
+    # job's working directory, where the fork's tree sits after the checkout.
+    # Same over-approximation as a `run:` step; mirror of the `./` test above.
+    hits = _hits(tmp_path, """\
+        on:
+          workflow_run:
+            workflows: [CI]
+            types: [completed]
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{ github.event.workflow_run.head_sha }}
+              - uses: $/.github/actions/build
+    """)
+    assert len(hits) == 1
+    assert "`$/` action" in hits[0].evidence
+    assert "fork's checked-out tree" in hits[0].evidence
+
+
+def test_fires_on_pull_request_target_head_and_self_repository_action(tmp_path):
+    hits = _hits(tmp_path, """\
+        on: pull_request_target
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{ github.event.pull_request.head.sha }}
+              - uses: $/.github/actions/build
+    """)
+    assert len(hits) == 1
+
+
+def test_self_repository_evidence_claims_only_what_is_known(tmp_path):
+    # Where the definition loads from depends on the trigger (the merge ref,
+    # fork-controlled, on pull_request_review), and only a composite action
+    # has steps of its own; the evidence must not assert either beyond that.
+    hits = _hits(tmp_path, """\
+        on: pull_request_review
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{ github.event.pull_request.head.sha }}
+              - uses: $/.github/actions/build
+    """)
+    assert len(hits) == 1
+    ev = hits[0].evidence
+    assert ("a `$/` action: it runs in the working directory, which now holds "
+            "the fork's checked-out tree; its definition comes from the running "
+            "commit, which on `pull_request_target`/`workflow_run` is the base "
+            "repository's") in ev, ev
+    assert "its own steps" not in ev, ev
+
+
+def test_silent_on_a_self_repository_action_before_the_head_checkout(tmp_path):
+    # Order still decides for `$/`: written (and run) before the head
+    # checkout, the action's steps see the base tree, not the fork's.
+    hits = _hits(tmp_path, """\
+        on: pull_request_target
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: $/.github/actions/build
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{ github.event.pull_request.head.sha }}
+    """)
+    assert hits == []
+
+
+def test_evidence_plain_for_a_run_step_after_a_head_checkout(tmp_path):
+    # The `$/` explanation is appended only when a `$/` step is the execution.
+    hits = _hits(tmp_path, VULNERABLE)
+    assert "`$/`" not in hits[0].evidence
+
+
 def test_fires_on_refs_pull_merge_ref(tmp_path):
     hits = _hits(tmp_path, """\
         on: pull_request_target
@@ -189,6 +276,19 @@ def test_collect_sha_pins_finds_only_forty_hex_remote_pins(tmp_path):
         ("evil/fork-action", "aaaa"),
         ("actions/checkout", "8ade"),
     ]
+
+
+def test_collect_sha_pins_never_reads_a_self_repository_ref_as_a_pin(tmp_path):
+    # GitHub rejects `@ref` on a `$/` reference, but the fixture carries a
+    # 40-hex suffix anyway so this guards the pin regexes: if either is ever
+    # widened to admit a `$` first segment, `$/...` would read as a pinned
+    # remote action and be sent to the impostor-commit check.
+    _wf(tmp_path, "ci.yml", PINNED.replace(
+        "- uses: ./local/action",
+        "- uses: $/.github/actions/local@" + "b" * 40))
+    pins = scan._collect_sha_pins(tmp_path, scan.all_workflow_files(tmp_path))
+    assert all(not repo.startswith("$") for _, _, repo, _ in pins), pins
+    assert len(pins) == 3, pins
 
 
 NOT_REALLY_PINS = """\

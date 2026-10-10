@@ -56,7 +56,8 @@ advisory, and manual-review), answer each as an adversarial question; a single
 
 6. **Fix applies to THIS repo verbatim & is safe.** Do the quoted "before"
    lines EXIST in the real file (including composite actions `./.github/actions/*`
-   and called workflows `uses: ./.github/workflows/*` — read those, the real
+   and called workflows `uses: ./.github/workflows/*`, or the same paths behind
+   the self-repository prefix `$/` — read those, the real
    edit site often lives there)? Would it break a required check / release /
    git-history step / matrix fan-in? Is the premise true (e.g. is the cache it
    says to add ALREADY present)?
