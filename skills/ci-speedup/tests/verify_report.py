@@ -9089,6 +9089,9 @@ _VR_OPT84_MIN_SHARE = 0.15
 _VR_OPT84_MIN_STEP_S = 20.0
 _VR_OPT84_ROWS = frozenset({"prettier", "eslint", "tsc"})
 _VR_OPT84_FITS = frozenset({"drop-in", "dual-run", "deferred_to_opt82"})
+# The ESLint fits that raise severity and risk to HIGH (collect_runs'
+# `_opt84_finding`: a live ESLint row, i.e. one not deferred to OPT82).
+_VR_OPT84_HIGH_FITS = frozenset({"drop-in", "dual-run"})
 _VR_OPT84_HELD_BACK_GATES = frozenset(_VR_OPT84_WITHHOLD_PHRASES)
 _VR_OPT84_VERDICT_GATES = frozenset({
     "pole_not_file_backed", "no_candidate_step", "tool_not_in_table",
@@ -9285,6 +9288,17 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
                     for o in all_findings):
                 bad.append(f"{fid}: tool {row!r} is deferred to OPT82, but the run "
                            f"has no OPT82 finding on `{wfb}` ▸ `{job}`")
+        # Severity and risk, re-derived by the engine's rule: HIGH only when an
+        # ESLint row is reported here (fit drop-in or dual-run: a rule silently
+        # missing after the swap is a coverage loss nobody sees); a row deferred
+        # to OPT82 does not raise it. Everything else is MEDIUM.
+        want_sev = "HIGH" if any(str(t.get("row") or "") == "eslint"
+                                 and str(t.get("fit") or "") in _VR_OPT84_HIGH_FITS
+                                 for t in tools) else "MEDIUM"
+        for key in ("severity", "risk"):
+            if f.get(key) != want_sev:
+                bad.append(f"{fid}: {key} {f.get(key)!r}, but the engine's rule gives "
+                           f"{want_sev!r} for its tool rows")
         if bool(ts.get("split_unknown")) != (len(tools) > 1):
             bad.append(f"{fid}: split_unknown {ts.get('split_unknown')!r} with "
                        f"{len(tools)} tool(s)")
@@ -9325,6 +9339,9 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
                 bad.append(f"{fid}: its anchor is named outside its own section")
                 break
         flat = " ".join(body.split())
+        if f"risk **{f.get('risk')}**" not in flat:
+            bad.append(f"{fid}: card states risk other than the finding's "
+                       f"{f.get('risk')!r}")
         ceil_line = next((" ".join(ln.split()) for ln in body.splitlines()
                           if ln.startswith("- **Ceiling:**")), "")
         if not ceil_line.startswith(f"- **Ceiling:** {d:.0f}s"):

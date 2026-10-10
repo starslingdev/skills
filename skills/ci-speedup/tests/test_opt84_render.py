@@ -74,8 +74,12 @@ def _finding(tools=None, fid="f84"):
         "fix_strategy": "slow-tool-on-pole-has-native-drop-in",
         "fix_recipe_anchor": "opt84--a-slow-step",
         "pattern_class": "structural", "sizing_basis": "uncredited",
-        "severity": "HIGH" if any(t["row"] == "eslint" for t in tools) else "MEDIUM",
-        "risk": "HIGH" if any(t["row"] == "eslint" for t in tools) else "MEDIUM",
+        # The engine's rule: HIGH only for an ESLint row it reports itself
+        # (drop-in or dual-run); one deferred to OPT82 does not raise it.
+        "severity": "HIGH" if any(t["row"] == "eslint" and t["fit"] != "deferred_to_opt82"
+                                  for t in tools) else "MEDIUM",
+        "risk": "HIGH" if any(t["row"] == "eslint" and t["fit"] != "deferred_to_opt82"
+                              for t in tools) else "MEDIUM",
         "guardrail": "g", "rollout": "r", "workflow_file": _WF,
         "affected_jobs": ["Lint"], "wall_clock_p50_s": None, "runner_min_saving": None,
         "tool_swap": {
@@ -478,6 +482,50 @@ def test_verifier_fails_a_card_after_opt81_on_its_pole(tmp_path):
     moved = report[:at] + '<a id="opt81-f81"></a>\n\nOPT81 card\n\n' + report[at:]
     c = _check(tmp_path, doc, moved)
     assert not c.ok and "after its pole's OPT81 card" in c.detail, c.detail
+
+
+# ---- severity / risk parity with the engine ----------------------------------
+
+_SEV_CASES = [
+    ([("eslint", "drop-in")], "HIGH"),
+    ([("eslint", "dual-run"), ("prettier", "drop-in")], "HIGH"),
+    ([("eslint", "deferred_to_opt82"), ("prettier", "drop-in")], "MEDIUM"),
+    ([("prettier", "drop-in")], "MEDIUM"),
+    ([("tsc", "drop-in")], "MEDIUM"),
+    ([("eslint", "deferred_to_opt82"), ("tsc", "drop-in")], "MEDIUM"),
+]
+
+
+@pytest.mark.parametrize("tools,want", _SEV_CASES)
+def test_engine_raises_severity_and_risk_only_for_a_live_eslint_row(tools, want):
+    ts = [_tool(r, fit) for r, fit in tools]
+    f = cr._opt84_finding(_pole(), _WF, "Lint", "lint", _STEP, "scan", 52.0, 162.0,
+                          "", "pnpm lint", [t["leaf_command"] for t in ts], ts, 84)
+    assert f["severity"] == f["risk"] == want
+
+
+@pytest.mark.parametrize("tools,want", _SEV_CASES)
+def test_verifier_rederives_the_engines_severity_rule(tmp_path, tools, want):
+    f = _finding([_tool(r, fit) for r, fit in tools])
+    f["severity"] = f["risk"] = want
+    extra = [_opt82()] if any(fit == "deferred_to_opt82" for _r, fit in tools) else []
+    doc, report = _doc_and_report(f, extra=extra)
+    c = _check(tmp_path, doc, report)
+    assert c.ok, c.detail
+    other = "MEDIUM" if want == "HIGH" else "HIGH"
+    for key in ("severity", "risk"):
+        bad = copy.deepcopy(f)
+        bad[key] = other
+        doc, report = _doc_and_report(bad, extra=extra)
+        c = _check(tmp_path, doc, report)
+        assert not c.ok and f"{key} {other!r}, but the engine's rule gives {want!r}" in (
+            c.detail), (key, c.detail)
+
+
+def test_verifier_fails_a_card_whose_risk_disagrees_with_the_finding(tmp_path):
+    doc, report = _doc_and_report()
+    c = _check(tmp_path, doc, report.replace("risk **HIGH**", "risk **MEDIUM**"))
+    assert not c.ok and "card states risk" in c.detail, c.detail
 
 
 def test_verifier_rejects_a_migration_guide_on_the_tsc_row(tmp_path):
