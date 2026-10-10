@@ -1006,7 +1006,12 @@ unversioned and updates by reinstall from `main`.
   whole truth: every affected job must be found in its own workflow's cost data
   (by job key, or by the `name:` the workflow file gives it). A same-named job
   in another workflow, or only some of the affected jobs, leaves the estimate
-  as is, since either would cut a correct saving. A measured figure, or one
+  as is, since either would cut a correct saving. When every affected job is
+  found but those rows measure no billable compute in the sample (0 min/mo, or
+  a sum that rounds to 0), that is a real bound: the estimate clamps to 0.0
+  under the same `measured_spine_clamped` basis, the size note says the jobs
+  measured no billable compute, and the finding renders as "no bill saving"
+  rather than failing the final check against the zero bound. A measured figure, or one
   carrying a wall-clock-neutral certificate (OPT57, OPT65, OPT77, OPT79, OPT80
   and the other measured detectors), is never capped: the final check
   re-derives those from their own measurements and would refuse a lowered one.

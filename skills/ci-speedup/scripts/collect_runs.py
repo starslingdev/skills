@@ -6198,17 +6198,24 @@ def _cap_at_measured_compute(
         return
     by_wf_job, _by_job = index
     measured, matched, distinct = _own_workflow_billable(wf, jobs, by_wf_job, job_graph)
-    measured = round(measured, 1)
-    if (distinct == 0 or matched != distinct or measured <= 0
+    # Every affected job joined its own rows, so a ZERO sum (or one that rounds to
+    # 0) is a real bound, not a missing one: the jobs measured no billable compute
+    # in the sample, and the saving clamps to 0.0. Leaving the estimate would fail
+    # the guard against that zero bound and refuse the report. "No match" is the
+    # separate, not-bounded path above (matched != distinct).
+    measured = max(round(measured, 1), 0.0)
+    if (distinct == 0 or matched != distinct
             or float(saving) <= measured + 1e-9):
         return
     f["runner_min_saving"] = measured
     f["runner_min_basis"] = "measured_spine_clamped"
+    cap = (f"MEASURED monthly billable compute ({measured:g} min/mo from the cost spine) "
+           "— a fix cannot save more minutes than the jobs consume") if measured > 0 else (
+           "MEASURED monthly billable compute, which is 0 min/mo: the affected jobs "
+           "measured no billable compute in the sample, so there is no bill saving")
     f["size_note"] = (
         (str(f.get("size_note") or "") + "; " if f.get("size_note") else "")
-        + f"estimate of {float(saving):g} min/mo capped at the affected jobs' "
-        f"MEASURED monthly billable compute ({measured:g} min/mo from the cost spine) "
-        "— a fix cannot save more minutes than the jobs consume")
+        + f"estimate of {float(saving):g} min/mo capped at the affected jobs' " + cap)
 
 
 def _round3(value: float) -> float:

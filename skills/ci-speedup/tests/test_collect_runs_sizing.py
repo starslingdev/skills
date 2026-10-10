@@ -2409,6 +2409,78 @@ def test_door_templated_name_rule_mirrors_the_verifier():
         assert _job_name_is_templated(meta) == vr._job_name_is_templated(meta), meta
 
 
+def test_cap_exemption_covers_every_finding_the_verifier_rederives(monkeypatch):
+    # PR #128 review: the cap must never lower a figure the verifier re-derives.
+    # Every re-derivation of a credited `runner_min_saving` (OPT57/65/77/79/80
+    # and the generic below-floor margin) runs only in the Tier-2 pass, over
+    # `_tier2_findings`, which selects on the SAME two fields the cap's exemption
+    # reads (`sizing_basis == "measured"` and a non-empty `tier2_neutrality`); the
+    # other re-derived arms (the OPT79 pole, OPT81, OPT82, OPT83) require
+    # `runner_min_saving` to be None, so the cap cannot reach them. Each of those
+    # detectors stamps "measured" at creation, before the door runs. This pins the
+    # selection to the exemption over every field combination and pattern: if the
+    # verifier ever selects a finding the cap would lower, this fails.
+    import copy
+    from collect_runs import _reground_runner_minute_savings
+    vr = _load_verify_report_for_bounds()
+    monkeypatch.setattr(vr, "_tier2_source_rows_cover_saving", lambda f, rows: True)
+    monkeypatch.setattr(vr, "_tier2_opt64_group_cover_ok", lambda f, data: True)
+    wf = ".github/workflows/ci.yml"
+    certs = (None, {}, {"proof": "below_cluster_floor", "margin_s": 1.0},
+             {"proof": "post_completion_waste"}, "not-a-dict")
+    seen_selected = seen_capped = 0
+    for pattern in ("OPT16", "OPT57", "OPT65", "OPT77", "OPT79", "OPT80"):
+        for basis in (None, "measured", "modeled", "uncredited", "advisory"):
+            for cert in certs:
+                f = {"id": "f1", "pattern": pattern, "workflow_file": wf,
+                     "affected_jobs": ["build"], "runner_min_saving": 500.0,
+                     "wall_clock_p50_s": 0.0}
+                if basis is not None:
+                    f["sizing_basis"] = basis
+                if cert is not None:
+                    f["tier2_neutrality"] = copy.deepcopy(cert)
+                selected = bool(vr._tier2_findings({"findings": [copy.deepcopy(f)]}))
+                _reground_runner_minute_savings([f], _door_spine({"build": 100.0}, wf=wf))
+                capped = f["runner_min_saving"] != 500.0
+                assert not (selected and capped), (pattern, basis, cert)
+                seen_selected += selected
+                seen_capped += capped
+    # Both sides of the predicate are exercised: the spine does cap, and the
+    # verifier does select.
+    assert seen_selected and seen_capped
+
+
+def test_zero_measured_compute_clamps_the_estimate_to_zero(tmp_path):
+    # PR #128 review: every affected job joins its own workflow's rows, but those
+    # rows measure NO billable compute in the sample. That is a real bound, not a
+    # missing one: a fix cannot save minutes the jobs do not consume. Leaving the
+    # flat estimate in place fails the physical-bounds guard against the zero
+    # bound and refuses the whole report.
+    import json
+    from collect_runs import _reground_runner_minute_savings
+    vr = _load_verify_report_for_bounds()
+    f = {"pattern": "OPT16", "workflow_file": _CURL_WF, "affected_jobs": ["linux"],
+         "runner_min_saving": 50.0, "sizing_basis": "modeled"}
+    doc = {"findings": [f], "runner_minute_spine": _door_spine(
+        {"linux (a)": 0.0, "linux (b)": 0.04}, wf=_CURL_WF)}   # sum 0.04 -> rounds to 0
+    assert _bounds_tag(doc, tmp_path) == "FAIL"   # the unclamped shape the guard rejects
+    _reground_runner_minute_savings(doc["findings"], doc["runner_minute_spine"])
+    assert f["runner_min_saving"] == 0.0
+    assert f["runner_min_basis"] == "measured_spine_clamped"
+    assert "measured no billable compute" in f["size_note"]
+    assert _bounds_tag(doc, tmp_path) != "FAIL"
+    fp = tmp_path / "zero-findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    assert vr.check_saving_carries_measured_basis("# report\n", fp).ok
+    # A job with NO row of its own stays the separate, not-bounded path.
+    g = {"pattern": "OPT16", "workflow_file": _CURL_WF, "affected_jobs": ["other"],
+         "runner_min_saving": 50.0, "sizing_basis": "modeled"}
+    _reground_runner_minute_savings([g], doc["runner_minute_spine"])
+    assert g["runner_min_saving"] == 50.0
+    assert g["runner_min_basis"] == "not_spine_derivable"
+    assert "size_note" not in g
+
+
 def test_door_policy_is_total_and_flags_unclassified():
     # A rm-crediting pattern with NO declared door policy stamps the loud
     # UNCLASSIFIED sentinel (so verify_report FAILs) — a new pattern cannot ship
