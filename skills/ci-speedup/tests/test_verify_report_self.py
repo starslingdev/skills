@@ -10975,6 +10975,9 @@ _FEEDS_BY_KEY = {
     "opt83_withheld_candidates":
         "Why a long pole whose compute steps run one after another produced "
         "no parallel-steps finding",
+    "opt84_withheld_candidates":
+        "Why a slow step on a long pole that may run a tool with a native "
+        "drop-in produced no tool-swap finding",
     "parallel_steps_withheld_candidates":
         "Why a lever priced from step times on a job that runs steps side by "
         "side claims no saving",
@@ -11169,7 +11172,7 @@ def test_withhold_phrase_tables_match_the_renderer_and_the_collector():
     assert list(vr._VR_WITHHELD_ROWS) == list(bp._WITHHELD_ROWS)
     for row in bp._WITHHELD_ROWS:
         assert row.feeds.strip(), f"{row.doc_key} registers an empty 'Used for' cell"
-        assert row.entry_shape in ("job", "group"), row
+        assert row.entry_shape in ("job", "group", "step"), row
     # the shape maps both twins dispatch on are derived from the registry, so a
     # pattern cannot be registered with one shape and rendered with another
     assert (bp._WITHHELD_SHAPE_BY_KEY == vr._VR_WITHHELD_SHAPE_BY_KEY
