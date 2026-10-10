@@ -984,6 +984,24 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-10** — **A step GitHub skipped no longer reads as a step that ran
+  for two thousand years.** The jobs API reports a skipped step (for example a
+  `background: true` step whose `if:` was false) with a start time of year 1
+  and a real end time. Read naively, that is a 63.9-billion-second step: on
+  curl/curl it produced a HIGH "shared step recurs across the cluster" finding
+  worth 145,186 runner-min/mo for a `test-linter` step that never ran in the
+  job it was charged to. Every place the audit reads step timings now applies
+  one rule: a skipped step contributes no time, a step that starts at the
+  year-1 placeholder or before its own job contributes no time, and a step's
+  end is clamped to its job's end, so no step outlasts the job that contains
+  it. The per-run step timeline the report draws keeps a skipped step in its
+  place at 0s and drops one with no usable time. A pole's step breakdown
+  leaves skipped steps out and records how many it left out
+  (`skipped_steps`). The report checker gains two checks that fail (never
+  skip) when a finding cites a step longer than its job's measured run time,
+  or when a stamped step breakdown or drilled-run timeline has a step longer
+  than its job.
+
 - **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
   no longer invisible to the audit.** Since 2026-06-25 a step may be a
   `- parallel:` group holding a list of ordinary steps, a step may carry

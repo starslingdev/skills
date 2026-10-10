@@ -6385,15 +6385,70 @@ def _classify_step(name: str) -> str:
     return "other"
 
 
+# A step `started_at` at or before this year is not a start time. The jobs API reports a
+# SKIPPED step (e.g. a `background: true` step whose `if:` was false) as
+# `started_at: 0001-01-01T00:00:00Z` beside a real `completed_at`; read naively that is a
+# ~63.9-billion-second step (curl/curl run 38018162993, `CM clang-tidy` / `test-linter`).
+_STEP_START_SENTINEL_MAX_YEAR = 1970
+# Step and job timestamps are both whole seconds; a step start this close before its job's
+# start is rounding, not a step that ran outside the job.
+_STEP_JOB_START_SLACK_S = 1.0
+
+
+def _step_span(step: dict[str, Any], job: dict[str, Any] | None
+               ) -> "tuple[_dt.datetime, _dt.datetime] | None":
+    """The `(start, end)` a step actually ran for, inside its job, else None.
+
+    The ONE rule every reader of jobs-API step timestamps shares:
+      - a step GitHub reports as `skipped` did not run: no span;
+      - a `started_at` at the year-1 sentinel (or any year <= 1970) is not a start: no span;
+      - a `started_at` before its job's own `started_at` (beyond 1s of rounding) is not a
+        start inside this job: no span;
+      - an end past the job's `completed_at` is clamped to it, so no step outlasts its job;
+      - unparseable or reversed timestamps: no span.
+    Job timestamps are optional (unit fixtures often omit them); without them only the
+    skipped and sentinel rules apply."""
+    if str(step.get("conclusion") or "").lower() == "skipped":
+        return None
+    st, en = _parse_dt(step.get("started_at")), _parse_dt(step.get("completed_at"))
+    if not st or not en or st.year <= _STEP_START_SENTINEL_MAX_YEAR:
+        return None
+    j0 = _parse_dt((job or {}).get("started_at"))
+    j1 = _parse_dt((job or {}).get("completed_at"))
+    if j0 and j0.year > _STEP_START_SENTINEL_MAX_YEAR:
+        if (j0 - st).total_seconds() > _STEP_JOB_START_SLACK_S:
+            return None
+        st = max(st, j0)
+    if j1 and j1.year > _STEP_START_SENTINEL_MAX_YEAR and en > j1:
+        en = j1
+    if en < st:
+        return None
+    return st, en
+
+
+def _step_duration_s(step: dict[str, Any], job: dict[str, Any] | None) -> float | None:
+    """Seconds a step ran inside its job (`_step_span`), else None."""
+    span = _step_span(step, job)
+    return (span[1] - span[0]).total_seconds() if span else None
+
+
 def _step_durations(job: dict[str, Any]) -> list[tuple[str, float]]:
+    """`(name, seconds)` for every step that ran a measurable, in-window span. Skipped,
+    sentinel-started, out-of-window and zero-length steps are omitted (`_step_span`)."""
     out: list[tuple[str, float]] = []
     for s in job.get("steps") or []:
         if not isinstance(s, dict):
             continue
-        d = _duration_s(s.get("started_at"), s.get("completed_at"))
+        d = _step_duration_s(s, job)
         if d is not None and d > 0:
             out.append((str(s.get("name", "")), d))
     return out
+
+
+def _skipped_step_names(job: dict[str, Any]) -> set[str]:
+    """Names of the steps GitHub reports as `skipped` in this job occurrence."""
+    return {str(s.get("name", "")) for s in (job.get("steps") or [])
+            if isinstance(s, dict) and str(s.get("conclusion") or "").lower() == "skipped"}
 
 
 def _step_timeline(job: dict[str, Any], job_name: str,
@@ -6402,23 +6457,28 @@ def _step_timeline(job: dict[str, Any], job_name: str,
     offset (from job start) and its duration. This is what lets the report draw the
     step level as a succession timeline (steps run one after another) rather than
     left-aligned bars. The jobs listing already carries started_at/completed_at, so
-    this costs no extra gh call."""
+    this costs no extra gh call. A step with no in-window span (`_step_span`: skipped,
+    year-1 sentinel start, started before the job) is left off the timeline, and an end
+    past the job's completion is clamped to it, so the drawn steps never outlast the job."""
     j0 = _parse_dt(job.get("started_at"))
     steps: list[dict[str, Any]] = []
     for s in job.get("steps") or []:
         if not isinstance(s, dict):
             continue
-        st = _parse_dt(s.get("started_at"))
-        en = _parse_dt(s.get("completed_at"))
-        if not st or not en:
+        # A skipped step whose timestamps are otherwise in-window keeps its place in the
+        # succession at 0s (it did not run); one with no in-window span at all is dropped.
+        skipped = str(s.get("conclusion") or "").lower() == "skipped"
+        span = _step_span({**s, "conclusion": None} if skipped else s, job)
+        if span is None:
             continue
+        st, en = span
         start = (st - j0).total_seconds() if j0 else 0.0
         # `number` is GitHub's 1-based step index, used to deep-link the job log at
         # `…/job/<id>#step:<number>:1` so the report's drill is auditable to the step.
         steps.append({"name": str(s.get("name", "")),
                       "number": s.get("number"),
                       "start_s": round(max(start, 0.0), 1),
-                      "dur_s": round((en - st).total_seconds(), 1)})
+                      "dur_s": 0.0 if skipped else round((en - st).total_seconds(), 1)})
     job_url = str(job.get("html_url", ""))
     return {
         "job": job_name,
@@ -6718,6 +6778,15 @@ def _decompose_job_steps(
     setup_build_s = sum(p for _n, c, p in steps if c in _SETUP_BUILD_CATEGORIES)
     payload_s = sum(p for _n, c, p in steps if c in _PAYLOAD_CATEGORIES)
     ratio = (setup_build_s / payload_s) if payload_s > 0 else float("inf")
+    # Steps the current version declares that GitHub reported `skipped` and that never ran a
+    # measurable span in the sample: omitted from `steps` (they cost nothing here), and
+    # counted so the decomposition's step list is not mistaken for every step the job has.
+    skipped_names: set[str] = set()
+    for j in job_instances:
+        skipped_names |= _skipped_step_names(j)
+    if current_steps is not None:
+        skipped_names &= current_steps
+    skipped_names -= set(by_step)
     return {
         "dominant_step": dom_name,
         "dominant_category": dom_cat,
@@ -6728,6 +6797,7 @@ def _decompose_job_steps(
         "redundant_ratio": (round(ratio, 2) if ratio != float("inf") else None),
         "steps": [(n, c, round(p, 1)) for n, c, p in steps],
         "job_p50": round(job_p50, 1),
+        "skipped_steps": len(skipped_names),
     }
 
 
@@ -8385,7 +8455,7 @@ def _leading_setup_prefix(
             break
         shown.append(" ".join(name.split()))
         sig.append(_setup_step_identity(name))
-        d = _duration_s(step.get("started_at"), step.get("completed_at"))
+        d = _step_duration_s(step, job)
         if d is not None and d > 0:
             total += d
     # An identity that normalizes to the empty string carries no information, and
@@ -10226,7 +10296,10 @@ def _detect_opt80_checkout_tail_stall(
             if match is None:
                 unmatched += 1
                 continue
-            dur = _duration_s(match.get("started_at"), match.get("completed_at"))
+            # `_step_span`: a skipped / sentinel-started / out-of-window checkout has
+            # no measurement in this occurrence.
+            span = _step_span(match, job)
+            dur = (span[1] - span[0]).total_seconds() if span else None
             if dur is None or dur < 0:
                 unparseable += 1
                 continue
@@ -10243,8 +10316,7 @@ def _detect_opt80_checkout_tail_stall(
                    "checkout_s": round(float(dur), 1)}
             # Kept off the stamped row (see below) — it exists only to clamp the
             # log search to this step's own window.
-            step_window[job_id] = (_parse_dt(match.get("started_at")),
-                                   _parse_dt(match.get("completed_at")))
+            step_window[job_id] = span
             per_run.append(row)
         if unmatched:
             _no("checkout_step_identity_never_matched_in_steps", job=job_name,
@@ -12629,7 +12701,7 @@ def _detect_opt82_type_aware_lint(
                     continue
                 for st in j.get("steps") or []:
                     if str(st.get("name") or "").strip() == step_name:
-                        d = _duration_s(st.get("started_at"), st.get("completed_at"))
+                        d = _step_duration_s(st, j)
                         if d is not None and d > 0:
                             step_durs.append(d)
         step_p50 = round(_percentile(step_durs, 50), 1) if step_durs else None
@@ -20380,7 +20452,7 @@ def _dominant_step_sample(
         best: float | None = None
         for s in job.get("steps") or []:
             if isinstance(s, dict) and str(s.get("name", "")) == name:
-                d = _duration_s(s.get("started_at"), s.get("completed_at"))
+                d = _step_duration_s(s, job)
                 if d is not None and (best is None or d > best):
                     best = d
         return best
@@ -22444,6 +22516,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     entry["headline_runner"] = crit["job_runner"][job_name]
                 entry["steps"] = [{"step": n, "category": c, "p50_s": round(p, 1)}
                                   for n, c, p in decomp["steps"]]
+                if decomp.get("skipped_steps"):
+                    # Declared steps GitHub skipped on every sampled run: not in `steps`.
+                    entry["skipped_steps"] = decomp["skipped_steps"]
         else:
             # Job-backed but file-AMBIGUOUS (issue #118): the check maps to no single
             # workflow file, yet it is NOT fileless/external — MORE THAN ONE workflow

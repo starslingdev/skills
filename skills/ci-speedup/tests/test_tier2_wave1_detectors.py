@@ -6867,9 +6867,9 @@ _OPT80_WIDE = (_dt.datetime(2026, 6, 1, 0, 0, 0, tzinfo=_dt.timezone.utc),
                _dt.datetime(2026, 6, 1, 23, 59, 0, tzinfo=_dt.timezone.utc))
 
 
-def _opt80_stamp(offset):
+def _opt80_stamp(offset, day="2026-06-01"):
     m, s = divmod(int(offset), 60)
-    return f"2026-06-01T00:{m:02d}:{s:02d}Z"
+    return f"{day}T00:{m:02d}:{s:02d}Z"
 
 
 def _opt80_job(job_id, checkout_s, runner="ubuntu-latest", name="build",
@@ -6880,15 +6880,17 @@ def _opt80_job(job_id, checkout_s, runner="ubuntu-latest", name="build",
     `started_at` is the job's own clock time (an ISO stamp). It defaults to the
     same instant for every job, which is what most cases want; the probe-order
     case passes distinct values, because ordering is only observable when the
-    jobs do not all start together."""
+    jobs do not all start together. The steps run inside that job's own window,
+    as they do in the jobs API (a step that starts before its job is not timed)."""
+    day = (started_at or "2026-06-01")[:10]
     t = 0.0
     steps = []
     for step_name, dur in (("Set up job", 1.0),
                            (checkout_step, float(checkout_s)),
                            ("Run tests", float(work_s))):
         steps.append({"name": step_name, "number": len(steps) + 1,
-                      "started_at": _opt80_stamp(t),
-                      "completed_at": _opt80_stamp(t + dur)})
+                      "started_at": _opt80_stamp(t, day),
+                      "completed_at": _opt80_stamp(t + dur, day)})
         t += dur
     return {
         "id": job_id,
@@ -6896,7 +6898,7 @@ def _opt80_job(job_id, checkout_s, runner="ubuntu-latest", name="build",
         "status": "completed",
         "conclusion": "success",
         "started_at": started_at or _opt80_stamp(0),
-        "completed_at": _opt80_stamp(t),
+        "completed_at": _opt80_stamp(t, day),
         "labels": [runner],
         "html_url": f"https://github.com/acme/app/actions/runs/{job_id}/job/{job_id}",
         "steps": steps,
@@ -7427,7 +7429,9 @@ def test_opt80_probes_the_newest_tail_runs_first():
     runs += [[_opt80_job(8200 + d, 120.0,
                          started_at=f"2026-06-{10 + d:02d}T00:00:00Z")]
              for d in order]
-    logs = {r[0]["id"]: _OPT80_STALLED_LOG for r in runs}
+    # Each job's log is stamped on that job's own day, inside its checkout step.
+    logs = {r[0]["id"]: _OPT80_STALLED_LOG.replace("2026-06-01", r[0]["started_at"][:10])
+            for r in runs}
     out, gh = _opt80(jpr=runs, logs=logs)
     assert len(out) == 1, out
     newest_first = [8200 + d for d in sorted(order, reverse=True)][:cr._OPT80_LOG_PROBE_MAX]

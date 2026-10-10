@@ -2007,7 +2007,10 @@ to `CASCADE` + its test; it then flows through every finding.
 - **Measured** (directly from sampled gh runs/jobs/logs):
   - per-job `started_at`/`completed_at` → per-job durations → p50/p95
     (`_critical_path`, `_percentile`);
-  - per-step durations (from the job JSON, no extra API calls);
+  - per-step durations (from the job JSON, no extra API calls), all read through
+    one rule (`_step_span`): a `skipped` step, a step whose `started_at` is the
+    API's year-1 placeholder or precedes its job's start has no duration, and a
+    step's end is clamped to its job's `completed_at`;
   - trigger events that actually fired each workflow (`run.event`, collected
     into `events_by_wf`);
   - cache hit/miss and install/build log lines (`--with-logs` for the cache
