@@ -6552,8 +6552,9 @@ def _measured_decomposition(decomp: dict[str, Any] | None) -> dict[str, Any] | N
 def _stamp_pole_decomposition(entry: dict[str, Any], decomp: dict[str, Any] | None) -> None:
     """Stamp a long pole's step breakdown from `_decompose_job_steps`: the dominant step
     and the per-step p50s when a step was measured, or `step_decomposition_reason` when
-    none was; and `skipped_steps` / `unmeasured_steps` / `trimmed_steps` when non-zero,
-    so the report can say how many declared steps the list leaves out."""
+    none was; and `skipped_steps` / `unmeasured_steps` / `partially_measured_steps` /
+    `trimmed_steps` when non-zero, so the report can say how many declared steps the
+    list leaves out or times from fewer runs."""
     if decomp is None:
         return
     if decomp.get("steps"):
@@ -6566,9 +6567,10 @@ def _stamp_pole_decomposition(entry: dict[str, Any], decomp: dict[str, Any] | No
                           for n, c, p in decomp["steps"]]
     elif decomp.get("reason"):
         entry["step_decomposition_reason"] = decomp["reason"]
-    # Declared steps GitHub reported skipped that never ran a measurable span in the
-    # sample, and declared steps with no usable time: neither is in `steps`.
-    for key in ("skipped_steps", "unmeasured_steps", "trimmed_steps"):
+    # Skipped and unmeasured steps are not in `steps`; partially measured and trimmed
+    # steps are, timed from fewer runs or only up to the job's end. Zeros are not stamped.
+    for key in ("skipped_steps", "unmeasured_steps", "partially_measured_steps",
+                "trimmed_steps"):
         if decomp.get(key):
             entry[key] = decomp[key]
 
@@ -6836,9 +6838,12 @@ def _decompose_job_steps(
       dominant_category / dominant_p50 (the category aggregate) / dominant_share
       setup_build_s / payload_s / redundant_ratio (setup+build ÷ payload)
       steps: [(name, category, p50)] slowest-first, job_p50;
-      skipped_steps: declared steps GitHub skipped on every sampled run (always stamped);
-      unmeasured_steps: declared steps not skipped but with no usable time in any run
-        (stamped only when non-zero);
+      skipped_steps: declared steps GitHub skipped on every sampled run they appeared in
+        (always stamped);
+      unmeasured_steps: declared steps never measured, with no usable time in at least
+        one run (stamped only when non-zero);
+      partially_measured_steps: measured steps skipped or with no usable time in another
+        run, so their p50 comes from fewer runs (stamped only when non-zero);
       trimmed_steps: measured steps whose end was clamped to the job's end by more
         than 1s in at least one run (stamped only when non-zero).
 
@@ -6865,29 +6870,54 @@ def _decompose_job_steps(
             if current_steps is not None and sname not in current_steps:
                 continue
             by_step.setdefault(sname, []).append(d)
-    # Declared steps the step list leaves out, counted so it is never mistaken for every
-    # step the job has: `skipped` = GitHub reported it skipped and it never ran a
-    # measurable span in the sample; `unmeasured` = not skipped, but no usable time
-    # (`_SPAN_NO_USABLE_TIME`) and never measured; `trimmed` = measured, with an end cut
-    # back to its job's end by more than the 1s slack in at least one run.
-    skipped_names: set[str] = set()
-    none_names: set[str] = set()
+    # Declared steps the step list leaves out or times from fewer runs, counted so it is
+    # never mistaken for every step the job has (`trimmed` = measured, with an end cut
+    # back to its job's end by more than the 1s slack in at least one run).
+    # Each run is judged per step NAME: measured (a positive in-window span), skipped
+    # (every occurrence in that run GitHub-skipped), or no usable time. A 0s span in a
+    # run is none of these: the step took no time there. Across runs, a name never
+    # measured counts as skipped only when it was skipped in EVERY run it appeared in;
+    # one with no usable time in any run counts as unmeasured; and a measured name that
+    # was skipped or had no usable time in another run is `partially_measured` (its p50
+    # comes from fewer runs). A name 0s in every run it ran (skipped in the others or
+    # not) is in no count: it took no time.
+    skip_runs: dict[str, int] = {}
+    none_runs: dict[str, int] = {}
+    seen_runs: dict[str, int] = {}
     trimmed_names: set[str] = set()
     for j in job_instances:
-        skipped_names |= _skipped_step_names(j)
-        _none, _trim = _step_verdict_names(j)
-        none_names |= _none
-        trimmed_names |= _trim
+        measured_here = {n for n, _d in _step_durations(j)}
+        skipped_here = _skipped_step_names(j)
+        ran_here = {str(s.get("name", "")) for s in (j.get("steps") or [])
+                    if isinstance(s, dict)
+                    and str(s.get("conclusion") or "").lower() != "skipped"}
+        none_here, trim_here = _step_verdict_names(j)
+        trimmed_names |= trim_here
+        for n in skipped_here | ran_here:
+            seen_runs[n] = seen_runs.get(n, 0) + 1
+            if n in measured_here:
+                continue
+            if n not in ran_here:
+                skip_runs[n] = skip_runs.get(n, 0) + 1
+            elif n in none_here:
+                none_runs[n] = none_runs.get(n, 0) + 1
+    names = set(seen_runs)
     if current_steps is not None:
-        skipped_names &= current_steps
-        none_names &= current_steps
+        names &= current_steps
         trimmed_names &= current_steps
-    skipped_names -= set(by_step)
-    none_names -= set(by_step) | skipped_names
-    trimmed_names &= set(by_step)
+    measured_names = set(by_step)
+    skipped_names = {n for n in names - measured_names
+                     if skip_runs.get(n, 0) == seen_runs[n]}
+    none_names = {n for n in names - measured_names - skipped_names
+                  if none_runs.get(n, 0)}
+    partial_names = {n for n in names & measured_names
+                     if none_runs.get(n, 0) or skip_runs.get(n, 0)}
+    trimmed_names &= measured_names
     counts = {"skipped_steps": len(skipped_names)}
     if none_names:
         counts["unmeasured_steps"] = len(none_names)
+    if partial_names:
+        counts["partially_measured_steps"] = len(partial_names)
     if trimmed_names:
         counts["trimmed_steps"] = len(trimmed_names)
     if not by_step:

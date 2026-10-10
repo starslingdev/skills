@@ -11816,12 +11816,36 @@ def test_pole_omitted_steps_line_must_match_its_stamp(tmp_path: Path):
     assert check.ok and check.skipped, check
 
 
+def test_pole_omitted_steps_line_names_steps_timed_in_only_some_runs(tmp_path: Path):
+    """A stamp with `partially_measured_steps` needs its clause in the line; a report
+    that leaves it out FAILs."""
+    doc = _omitted_doc(skipped_steps=2, partially_measured_steps=1)
+    plain = "(2 declared step(s) skipped on every sampled run are not timed here)"
+    full = plain[:-1] + "; 1 step(s) were timed in only some sampled runs)"
+    assert _run_omitted_check(tmp_path, full, doc).ok
+    assert not _run_omitted_check(tmp_path, plain, doc).ok
+    only = "(1 step(s) were timed in only some sampled runs)"
+    assert _run_omitted_check(tmp_path, only, _omitted_doc(partially_measured_steps=1)).ok
+    assert not _run_omitted_check(tmp_path, None, _omitted_doc(partially_measured_steps=1)).ok
+
+
+def test_pole_omitted_steps_line_says_how_many_sections_it_did_not_judge(tmp_path: Path):
+    """Two poles sharing one (workflow, check) key, or an aggregation-gate section,
+    are not judged; the detail says how many, never a silent pass."""
+    doc = _omitted_doc(skipped_steps=2)
+    doc["pr_critical_path"]["poles"].append(dict(doc["pr_critical_path"]["poles"][0]))
+    check = _run_omitted_check(tmp_path, None, doc)
+    assert check.ok and "1 section(s) not judged (shared key / aggregation gate)" \
+        in check.detail, check.detail
+
+
 def test_omitted_steps_line_twin_matches_the_renderer():
     bp, vr = _load_blocking_path(), _load_verify_report()
     import itertools
-    for sk, un, tr, reason in itertools.product((0, 1, 3), (0, 2), (0, 1),
-                                                (None, "no_step_measured_in_sample")):
-        pole = {"skipped_steps": sk, "unmeasured_steps": un, "trimmed_steps": tr}
+    for sk, un, tr, pm, reason in itertools.product(
+            (0, 1, 3), (0, 2), (0, 1), (0, 1), (None, "no_step_measured_in_sample")):
+        pole = {"skipped_steps": sk, "unmeasured_steps": un, "trimmed_steps": tr,
+                "partially_measured_steps": pm}
         if reason:
             pole["step_decomposition_reason"] = reason
         assert bp._omitted_steps_note(pole) == vr._vr_omitted_steps_note(pole), pole

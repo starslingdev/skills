@@ -3962,7 +3962,8 @@ def _omitted_steps_note(pole: dict[str, Any]) -> str | None:
     """The one line a pole's step list carries when declared steps are left out of it:
     `skipped_steps` (GitHub skipped them on every sampled run), `unmeasured_steps` (not
     skipped, but no usable time: a placeholder start, a start outside the job, reversed
-    or unparseable timestamps) and `trimmed_steps` (timed only up to the job's end). For
+    or unparseable timestamps), `partially_measured_steps` (timed only from the runs
+    that measured them) and `trimmed_steps` (timed only up to the job's end). For
     a pole whose every step was dropped, the "no step could be measured" line. None when
     nothing is left out. `verify_report._vr_omitted_steps_note` is its verbatim twin."""
     def _n(key: str) -> int:
@@ -3970,6 +3971,7 @@ def _omitted_steps_note(pole: dict[str, Any]) -> str | None:
         return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) \
             and v > 0 else 0
     sk, un, tr = _n("skipped_steps"), _n("unmeasured_steps"), _n("trimmed_steps")
+    pm = _n("partially_measured_steps")
     if pole.get("step_decomposition_reason") == _NO_STEP_MEASURED_REASON:
         return f"No step could be measured: {sk} skipped, {un} with no usable time."
     parts: list[str] = []
@@ -3981,6 +3983,8 @@ def _omitted_steps_note(pole: dict[str, Any]) -> str | None:
     out: list[str] = []
     if parts:
         out.append(" and ".join(parts) + " are not timed here")
+    if pm:
+        out.append(f"{pm} step(s) were timed in only some sampled runs")
     if tr:
         out.append(f"{tr} step(s) ran past the job's end in some run and are timed only "
                    "up to it")

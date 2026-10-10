@@ -589,6 +589,54 @@ def _late_job(i: int) -> dict:
             "steps": [_step(1, "work", 0, 60), _step(2, "late", 60, 90)]}
 
 
+def _mixed_job(i: int, flaky_start: int | None, gate: str = "skip") -> dict:
+    """A job with a measured `work` step, a `flaky` step whose start is the year-1
+    placeholder when `flaky_start` is None, and a `gate` step that GitHub skipped
+    (`gate="skip"`) or that claims success with the placeholder start (`"none"`)."""
+    flaky = _step(2, "flaky", flaky_start, 40)
+    gate_step = (_step(3, "gate", None, 50, "skipped") if gate == "skip"
+                 else _step(3, "gate", None, 50))
+    return {"id": i, "name": "mixed", "conclusion": "success",
+            "started_at": _ts(0), "completed_at": _ts(60),
+            "steps": [_step(1, "work", 0, 30), flaky, gate_step]}
+
+
+def test_a_step_measured_in_only_some_runs_is_counted_as_partially_measured():
+    """10 runs: `flaky` has the placeholder start in 7 and measures in 3. Its p50
+    comes from 3 runs, so the decomposition says so instead of counting it nowhere."""
+    jobs = [_mixed_job(i, None if i < 7 else 30) for i in range(10)]
+    d = cr._decompose_job_steps(jobs)
+    assert d is not None
+    assert "flaky" in {n for n, _c, _p in d["steps"]}, d["steps"]
+    assert d.get("partially_measured_steps") == 1, d
+    assert "unmeasured_steps" not in d and d["skipped_steps"] == 1, d
+    entry: dict = {}
+    cr._stamp_pole_decomposition(entry, d)
+    assert entry.get("partially_measured_steps") == 1, entry
+
+
+def test_no_partially_measured_count_when_every_run_measures_every_step():
+    d = cr._decompose_job_steps([_mixed_job(i, 30) for i in range(3)])
+    assert d is not None and "partially_measured_steps" not in d, d
+
+
+def test_a_step_skipped_in_one_run_and_untimed_in_another_is_not_called_skipped():
+    """`skipped_steps` means skipped on EVERY sampled run; a step skipped in one run
+    and claiming success with no usable time in the other has no usable time."""
+    d = cr._decompose_job_steps([_mixed_job(1, 30, "skip"), _mixed_job(2, 30, "none")])
+    assert d is not None
+    assert d["skipped_steps"] == 0 and d.get("unmeasured_steps") == 1, d
+
+
+def test_pole_note_names_steps_timed_in_only_some_runs():
+    pole = dict(_POLE, skipped_steps=0, partially_measured_steps=1)
+    lines = _bp()._pole_waterfall(pole, leaf=None, timeline=None, log_present=False)
+    assert "(1 step(s) were timed in only some sampled runs)" in lines, lines
+    pole = dict(_POLE, skipped_steps=2, unmeasured_steps=1, partially_measured_steps=1)
+    lines = _bp()._pole_waterfall(pole, leaf=None, timeline=None, log_present=False)
+    assert (_NOTE[:-1] + "; 1 step(s) were timed in only some sampled runs)") in lines, lines
+
+
 def test_step_trimmed_to_nothing_has_no_span_and_counts_as_unmeasured():
     job = _late_job(1)
     late = job["steps"][1]

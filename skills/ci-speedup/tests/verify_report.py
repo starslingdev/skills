@@ -11614,13 +11614,15 @@ def check_stamped_decomposition_within_job(findings_path: Path | None) -> Check:
 # --- The omitted-steps line on a pole's step list ----------------------------------------
 # A pole's step list leaves out the declared steps GitHub skipped on every sampled run
 # (`skipped_steps`), those with no usable time (`unmeasured_steps`) and, for a job whose
-# every step was dropped, all of them (`step_decomposition_reason`); it times steps that
+# every step was dropped, all of them (`step_decomposition_reason`); it times steps
+# measured in only some runs from those runs (`partially_measured_steps`) and steps that
 # ran past the job's end only up to it (`trimmed_steps`). The renderer says so in one line
 # (`blocking_path._omitted_steps_note`, of which `_vr_omitted_steps_note` is the verbatim
 # twin, pinned by `test_omitted_steps_line_twin_matches_the_renderer`).
 _VR_NO_STEP_MEASURED_REASON = "no_step_measured_in_sample"
 _VR_OMITTED_LINE_RE = re.compile(
-    r"^(?:\(\d+ declared step\(s\) |\(\d+ step\(s\) ran past the job's end |"
+    r"^(?:\(\d+ declared step\(s\) |"
+    r"\(\d+ step\(s\) (?:ran past the job's end|were timed in only some sampled runs)|"
     r"No step could be measured: )")
 
 
@@ -11631,6 +11633,7 @@ def _vr_omitted_steps_note(pole: dict) -> str | None:
         return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) \
             and v > 0 else 0
     sk, un, tr = _n("skipped_steps"), _n("unmeasured_steps"), _n("trimmed_steps")
+    pm = _n("partially_measured_steps")
     if pole.get("step_decomposition_reason") == _VR_NO_STEP_MEASURED_REASON:
         return f"No step could be measured: {sk} skipped, {un} with no usable time."
     parts: list[str] = []
@@ -11642,6 +11645,8 @@ def _vr_omitted_steps_note(pole: dict) -> str | None:
     out: list[str] = []
     if parts:
         out.append(" and ".join(parts) + " are not timed here")
+    if pm:
+        out.append(f"{pm} step(s) were timed in only some sampled runs")
     if tr:
         out.append(f"{tr} step(s) ran past the job's end in some run and are timed only "
                    "up to it")
@@ -11650,12 +11655,13 @@ def _vr_omitted_steps_note(pole: dict) -> str | None:
 
 def check_pole_omitted_steps_line(report: str, findings_path: Path | None) -> Check:
     """**Visible drops.** Each rendered long pole whose stamp leaves declared steps out of
-    its step list (`skipped_steps`, `unmeasured_steps`, `trimmed_steps`, or a
-    `step_decomposition_reason`) carries EXACTLY the one line `_vr_omitted_steps_note`
+    its step list or times from fewer runs (`skipped_steps`, `unmeasured_steps`,
+    `partially_measured_steps`, `trimmed_steps`, or a `step_decomposition_reason`)
+    carries EXACTLY the one line `_vr_omitted_steps_note`
     re-derives from that stamp, and a pole with nothing left out carries none. Poles are
     matched to their section on (workflow file name, check), as the other pole checks do;
     an aggregation-gate pole (no step list) and a section two stamped poles share are not
-    judged."""
+    judged, and the detail says how many sections that left out."""
     name = "a pole's step list says how many declared steps it leaves out"
     data, err = _load_findings_doc(findings_path)
     if err:
@@ -11665,11 +11671,14 @@ def check_pole_omitted_steps_line(report: str, findings_path: Path | None) -> Ch
         if isinstance(p, dict):
             by_key.setdefault((_wf_base(str(p.get("workflow_file") or "")),
                                _cmp_name(str(p.get("check") or ""))), []).append(p)
-    judged = carried = 0
+    judged = carried = unjudged = 0
     bad: list[str] = []
     for wf, check, body in _pole_header_sections(report):
         poles = by_key.get((_wf_base(wf), _cmp_name(check))) or []
-        if len(poles) != 1 or _AGG_GATE_ROLE_MARKER in body:
+        if len(poles) > 1 or (poles and _AGG_GATE_ROLE_MARKER in body):
+            unjudged += 1
+            continue
+        if not poles:
             continue
         want = _vr_omitted_steps_note(poles[0])
         got = [ln.strip() for ln in body.splitlines()
@@ -11683,14 +11692,17 @@ def check_pole_omitted_steps_line(report: str, findings_path: Path | None) -> Ch
                        + (repr(got) if got else "no such line"))
         elif want is not None:
             carried += 1
+    # Sections this check cannot pair with exactly one stamp are counted, never hidden.
+    tail = (f"; {unjudged} section(s) not judged (shared key / aggregation gate)"
+            if unjudged else "")
     if bad:
         return Check(name, False, "a pole's omitted-steps line does not match its stamp: "
-                     + "; ".join(bad[:6]))
+                     + "; ".join(bad[:6]) + tail)
     if not carried:
-        return Check(name, True, f"{judged} pole(s) judged; none leaves a declared step out",
-                     skipped=True)
+        return Check(name, True, f"{judged} pole(s) judged; none leaves a declared step out"
+                     + tail, skipped=True)
     return Check(name, True, f"{carried} pole(s) carry the omitted-steps line, each "
-                 f"matching its stamp; {judged - carried} leave nothing out")
+                 f"matching its stamp; {judged - carried} leave nothing out" + tail)
 
 
 # --- The payload-binned-as-build class (nrwl/nx `Run Checks/Lint/Test/Build`) --------
