@@ -26,9 +26,9 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against an 81-pattern
-catalog — 73 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81 and OPT82) plus 8 **structural /
-critical-path** patterns (OPT70–OPT75, OPT78 and OPT83, routed from the measured long pole; see
+ci-speedup audits a repository's GitHub Actions workflows against an 82-pattern
+catalog — 73 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81 and OPT82) plus 9 **structural /
+critical-path** patterns (OPT70–OPT75, OPT78, OPT83 and OPT84, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
 runner-minutes (the cloud bill). Detection, ranking, and every measured number
@@ -1132,10 +1132,10 @@ undecided tail runs could still have supplied the missing proof, named by their
 commonest reason). The per-gate tallies (`opt77_withheld_by_gate`,
 `opt80_withheld_by_gate`) are for maintainers; these lists reach the reader.
 
-The held-back disclosure is ONE mechanism shared by OPT77, OPT79, OPT80, OPT81, OPT82 and OPT83.
+The held-back disclosure is ONE mechanism shared by OPT77, OPT79, OPT80, OPT81, OPT82, OPT83 and OPT84.
 `blocking_path._WITHHELD_ROWS` is a `WithheldRow` per pattern — findings-doc
 key, Data sources row label, counted noun, "Used for" cell, and `entry_shape`
-(`"job"` for OPT79 / OPT80 / OPT81 / OPT82 / OPT83, `"group"` for OPT77). The shape is registered
+(`"job"` for OPT79 / OPT80 / OPT81 / OPT82 / OPT83 / OPT84, `"group"` for OPT77). The shape is registered
 rather than inferred: both twins used to decide it by comparing the key against
 OPT77's, so a fourth group-shaped pattern would have rendered `(unnamed job)`
 for every candidate in the renderer AND been re-derived the same wrong way in
@@ -1166,7 +1166,7 @@ the names and the "and K more" overflow come from; counted over raw rows it
 disagreed with its own job list whenever two rows deduplicated into one. A pattern contributes only its key, its
 row text and its gate→phrase table (registered in `_WITHHELD_PHRASES_BY_KEY`),
 never its own row builder. The phrase tables (`_OPT77_WITHHOLD_PHRASES`,
-`_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`, `_OPT81_WITHHOLD_PHRASES`, `_OPT82_WITHHOLD_PHRASES`, and `_OPT83_WITHHOLD_PHRASES`) map EVERY withhold gate
+`_OPT79_HELD_BACK_REASONS`, `_OPT80_WITHHOLD_PHRASES`, `_OPT81_WITHHOLD_PHRASES`, `_OPT82_WITHHOLD_PHRASES`, `_OPT83_WITHHOLD_PHRASES`, and `_OPT84_WITHHOLD_PHRASES`) map EVERY withhold gate
 their collector can record. What a test actually guarantees is narrower than
 "a new gate cannot ship without a phrase": it enumerates the gates it can READ
 from FOUR sources in the detectors' own code — the literals handed to
@@ -2782,7 +2782,7 @@ static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
 catalog match. The old catalog-spine report used to dead-end there ("inherent
-cost, outside this catalog"). The **structural track** (catalog category 14, OPT70–OPT75 plus OPT78 and OPT83,
+cost, outside this catalog"). The **structural track** (catalog category 14, OPT70–OPT75 plus OPT78, OPT83 and OPT84,
 `class: structural`) is a **second finding class that is not catalog-bound** —
 it is routed from the measured critical path instead of matched against YAML.
 OPT70–OPT75 are routed by the deterministic router described below; **OPT78** is
@@ -2790,6 +2790,8 @@ routed by the drill-time `vitest-isolate-pool` leaf detector (§12.3) and is
 reported by `scan.py` as having no critical-path router. **OPT83** is routed by
 its own per-pole pass (`_detect_opt83_parallel_steps`) over each pole's step
 decomposition, then checked for independence against the workflow YAML.
+**OPT84** is routed by its own per-pole pass (`_detect_opt84_tool_swap`) over the
+same decomposition, the workflow YAML and the repo's `package.json` scripts.
 
 ### Where it lives
 
@@ -3248,6 +3250,55 @@ findings file cannot be read, and a held-back counter that disagrees, gate by
 gate, with the held-back list. The phrase table is mirrored in `verify_report`
 and pinned like its siblings.
 
+### OPT84: a slow step on the long pole runs a tool that has a native drop-in
+
+OPT84 is the structural pattern for a drilled pole whose heavy step runs a
+JavaScript dev tool with a native drop-in (Prettier → oxfmt, ESLint → oxlint,
+`tsc --noEmit` → TypeScript 7). `_detect_opt84_tool_swap` runs once per drilled
+pole beside OPT83, after OPT82 has run on the same workflow, and makes no gh
+call of its own. It reads the pole's stamped step decomposition (`steps`,
+`job_p50_s`), the workflow file, and the scan's `type_aware_lint` block, which
+carries the `package.json` scripts per directory, the tool versions found in
+each manifest, and the ESLint config facts. A step is a candidate when it
+measures at least 20s and at least 15% of the pole's decomposed p50 (OPT83's
+floors), its category is `scan` or `build`, and it is a `run:` step. Its
+command is split into leaf commands, following package-manager script calls
+through `package.json` up to five levels deep (OPT82's resolver, shared) and
+unwrapping runner calls; the leaves are matched against the v1 rows of the
+catalog's swap table (Prettier, ESLint, `tsc --noEmit`; Babel and Webpack are
+recipe only).
+
+Verdicts, counted only: no candidate, no table tool on the step, the target
+already in use, a `tsc` that emits, or an ESLint leaf on a step OPT82 already
+reports (OPT82 is the finding; other table tools on that step still qualify).
+Held back, failing closed: unreadable step timings or workflow file, a check
+produced by more than one workflow, a pole or step not matched to exactly one
+YAML job or step, a `${{ }}` in the command, working directory, `env:` or
+`shell:`, a directory change, a script the resolver cannot follow (missing,
+too deep, unreadable `package.json`, or an unresolved delegator such as
+`turbo run`, `nx` or `node ./script/x.js`), a `uses:` step, an ESLint config
+that could not be fully read, an unreadable `typescript` version, or a working
+directory outside the checkout. Held-back poles are counted in
+`opt84_withheld_by_gate`, listed in `opt84_withheld_candidates`, and shown in
+the "tool swap: held back" Data sources row from the shared `_WITHHELD_ROWS`
+registry, with plain reasons from `_OPT84_WITHHOLD_PHRASES`.
+
+The finding is deliberately uncredited, like OPT83: no `_SIZING` key, no
+wall-clock or runner-minute saving, `sizing_basis` is `uncredited`, and the
+runner-minute door cannot derive it. Its only number is `ceiling_s`, the
+candidate step's measured p50: the most the swap can remove, not a forecast.
+The swap table's published speedup ranges are quoted as the catalog's, never as
+the repo's. When several table tools share one step there is one card and one
+ceiling, and the card says the split is unknown until measured. Risk is MEDIUM,
+HIGH on the ESLint row, whose recipe is dual-run whenever the config carries
+custom rules or plugins the target cannot replace. The card renders once in the
+pole's section, after any OPT83 card, and never in a total, Tier 2, the
+headline or Also noticed; it points at the target's own migration docs, carries
+the no-weakening rail, and tells the reader to benchmark both tools on the same
+runner class first. `verify_report.check_opt84_tool_swap` re-derives every card
+from the pole's stamped step p50 and the stamped command, scripts and config
+facts, and pins the held-back row like its siblings.
+
 ## 12. The blocking-path report (`blocking_path.py`)
 
 `blocking_path.py` is the skill's **single, data-first renderer** (§2) — answering
@@ -3669,6 +3720,9 @@ A detector with `magnitude: None` is **categorical only**: the cause is structur
 (visible in the timeline / config), so there's no scalar to validate and no
 single step is crowned for a drill.
 
+OPT83 and OPT84 (category 14) are not leaf detectors: they are routed
+from a pole's step decomposition and its workflow YAML (§11), never from its log.
+
 `install-lifecycle-build` fires only from a bare `<pm> install` step (no
 `--ignore-scripts`, no explicit `&&`/`;` chain, and — for a `run: |` multi-line block — no
 explicit build in the echoed command lines), with a real lifecycle-script marker in the
@@ -3935,7 +3989,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 81-pattern catalog (METADATA + body per pattern); the source of truth for
+  the 82-pattern catalog (METADATA + body per pattern); the source of truth for
   detection and the report's TL;DR / pattern background.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.
