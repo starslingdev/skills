@@ -11631,15 +11631,26 @@ def _run_stamp_check(tmp_path: Path, doc: dict):
     return _load_verify_report().check_stamped_decomposition_within_job(fp)
 
 
+def _run_readable_check(tmp_path: Path, doc: dict):
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    return _load_verify_report().check_declared_timelines_readable(fp)
+
+
 def test_declared_timeline_missing_from_a_present_bundle_fails(tmp_path: Path):
     """A declared `steps_file` the bundle should hold but does not is a FAIL naming the
-    pole and every path tried, never a silent pass over the poles alone."""
+    pole and every path tried, never a silent pass over the poles alone. It is a FAIL
+    of its own check (a bundle-copy problem), not of the figure check."""
     (tmp_path / "findings.data").mkdir()
-    check = _run_stamp_check(tmp_path, _declared_timeline_doc(str(tmp_path / "gone")))
+    doc = _declared_timeline_doc(str(tmp_path / "gone"))
+    check = _run_readable_check(tmp_path, doc)
     assert not check.ok and not check.skipped, check
     assert "CM clang-tidy" in check.detail and "38018162993" in check.detail
     assert str(tmp_path / "findings.data" / "t.steps.json") in check.detail
     assert str(tmp_path / "gone" / "t.steps.json") in check.detail
+    stamp = _run_stamp_check(tmp_path, doc)
+    assert stamp.ok and not stamp.skipped, stamp
+    assert "1 declared timeline(s) could not be read" in stamp.detail, stamp
 
 
 def test_declared_timeline_unreadable_or_wrong_shape_fails(tmp_path: Path):
@@ -11647,25 +11658,175 @@ def test_declared_timeline_unreadable_or_wrong_shape_fails(tmp_path: Path):
     data.mkdir()
     for body in ("{not json", "[1, 2]", '{"job": "x", "steps": 3}'):
         (data / "t.steps.json").write_text(body, encoding="utf-8")
-        check = _run_stamp_check(tmp_path, _declared_timeline_doc(str(data)))
+        check = _run_readable_check(tmp_path, _declared_timeline_doc(str(data)))
         assert not check.ok and not check.skipped, (body, check)
         assert "t.steps.json" in check.detail, (body, check)
+        stamp = _run_stamp_check(tmp_path, _declared_timeline_doc(str(data)))
+        assert stamp.ok, (body, stamp)
 
 
-def test_declared_timeline_with_no_bundle_anywhere_is_a_loud_skip(tmp_path: Path):
-    """A findings-only artifact (a committed example: `logs_dir` is a temp path from
-    another machine, no `<findings>.data/` sibling) cannot check its timelines. That is
-    a SKIP that says so and counts what went unchecked, not a PASS over the poles."""
-    check = _run_stamp_check(tmp_path, _declared_timeline_doc("/nonexistent/x.data"))
+def test_declared_timelines_readable_passes_and_skips(tmp_path: Path):
+    check = _run_readable_check(tmp_path, _step_window_doc())
     assert check.ok and check.skipped, check
-    assert "drilled-run timeline bundle is not present" in check.detail, check
-    assert "1 declared timeline(s) not checked" in check.detail, check
-    assert "only the 1 pole step figure(s) were checked" in check.detail, check
+    check = _run_readable_check(tmp_path, _declared_timeline_doc("/nonexistent/x.data"))
+    assert check.ok and check.skipped, check
+    assert "bundle is not present" in check.detail, check
+    data = tmp_path / "findings.data"
+    data.mkdir()
+    (data / "t.steps.json").write_text(json.dumps(
+        {"job": "CM clang-tidy", "job_dur_s": 209.0, "steps": []}), encoding="utf-8")
+    check = _run_readable_check(tmp_path, _declared_timeline_doc(str(data)))
+    assert check.ok and not check.skipped, check
+    assert "1 declared timeline(s) read" in check.detail, check
+
+
+def test_declared_timeline_with_no_bundle_still_passes_on_the_pole_figures(tmp_path: Path):
+    """A findings-only artifact (a committed example: `logs_dir` is a temp path from
+    another machine, no `<findings>.data/` sibling) cannot check its timelines, but its
+    pole figures WERE checked: a PASS that says how many timelines went unchecked."""
+    check = _run_stamp_check(tmp_path, _declared_timeline_doc("/nonexistent/x.data"))
+    assert check.ok and not check.skipped, check
+    assert "1 declared timeline(s) not checked (bundle not present" in check.detail, check
+    assert "1 step figure(s) inside their job's longest run" in check.detail, check
     # A pole that overruns its job still FAILs without the bundle.
     doc = _declared_timeline_doc("/nonexistent/x.data")
     doc["pr_critical_path"]["poles"][0]["steps"][0]["p50_s"] = _SENTINEL_S
     check = _run_stamp_check(tmp_path, doc)
     assert not check.ok and not check.skipped, check
+    # Nothing at all checked (no pole figures, timelines unreachable): a SKIP.
+    doc = _declared_timeline_doc("/nonexistent/x.data")
+    doc["pr_critical_path"]["poles"][0]["steps"] = []
+    check = _run_stamp_check(tmp_path, doc)
+    assert check.ok and check.skipped, check
+    assert "1 declared timeline(s) not checked" in check.detail, check
+
+
+def test_declared_timelines_read_but_all_empty_say_so(tmp_path: Path):
+    data = tmp_path / "findings.data"
+    data.mkdir()
+    (data / "t.steps.json").write_text(json.dumps(
+        {"job": "CM clang-tidy", "job_dur_s": 209.0, "steps": []}), encoding="utf-8")
+    doc = _declared_timeline_doc(str(data))
+    doc["pr_critical_path"]["poles"][0]["steps"] = []
+    check = _run_stamp_check(tmp_path, doc)
+    assert check.ok and check.skipped, check
+    assert "1 declared timeline(s) read, all empty" in check.detail, check
+
+
+def _timeline_bundle(tmp_path: Path, body: dict) -> dict:
+    data = tmp_path / "findings.data"
+    data.mkdir(exist_ok=True)
+    (data / "t.steps.json").write_text(json.dumps(body), encoding="utf-8")
+    return _declared_timeline_doc(str(data))
+
+
+def test_timeline_with_no_job_duration_fails_naming_it(tmp_path: Path):
+    """A drilled-run timeline with no `job_dur_s` cannot bound its steps by their run.
+    That is a FAIL naming the missing field, never a crash or a silent pass."""
+    for steps in ([{"name": "build", "start_s": 0.0, "dur_s": 121.0}],
+                  [{"name": "late", "start_s": _SENTINEL_S, "dur_s": 10.0}]):
+        doc = _timeline_bundle(tmp_path, {"job": "CM clang-tidy", "steps": steps})
+        check = _run_stamp_check(tmp_path, doc)
+        assert not check.ok and not check.skipped, check
+        assert "`job_dur_s`" in check.detail, check
+
+
+def test_timeline_step_with_a_malformed_duration_fails(tmp_path: Path):
+    for bad in ({"name": "build", "start_s": 0.0},
+                {"name": "build", "start_s": 0.0, "dur_s": "abc"}):
+        doc = _timeline_bundle(tmp_path, {"job": "CM clang-tidy", "job_dur_s": 209.0,
+                                          "steps": [bad]})
+        check = _run_stamp_check(tmp_path, doc)
+        assert not check.ok and not check.skipped, (bad, check)
+        assert "1 malformed timeline step(s)" in check.detail, (bad, check)
+
+
+def test_step_window_pass_details_separate_window_from_ceiling(tmp_path: Path):
+    """A PASS says how many figures were held to a stamped job window and how many only
+    to the 5-day ceiling; "all inside their job's measured window" over figures that had
+    no window was a claim the check never tested."""
+    vr = _load_verify_report()
+    fp = tmp_path / "findings.json"
+    doc = _step_window_doc(_opt73(60.0, job_s=250.0))
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    check = vr.check_step_cited_within_job_window(fp)
+    assert check.ok and not check.skipped, check
+    assert check.detail.startswith(
+        "3 step figure(s) inside their job's longest run; 0 held only to the 5-day "
+        "ceiling (no stamped job window)"), check.detail
+    del doc["per_workflow_timing"][_LINUX]["job_max"]
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    check = vr.check_step_cited_within_job_window(fp)
+    assert check.ok and not check.skipped, check
+    assert "0 step figure(s) inside their job's longest run; 3 held only to the 5-day " \
+           "ceiling (no stamped job window)" in check.detail, check.detail
+    assert "all inside" not in check.detail, check.detail
+    doc["pr_critical_path"] = {"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                                          "job": "CM clang-tidy", "p50_s": 277.0,
+                                          "steps": [{"step": "build", "category": "build",
+                                                     "p50_s": 121.0}]}]}
+    check = _run_stamp_check(tmp_path, doc)
+    assert check.ok and not check.skipped, check
+    assert "0 step figure(s) inside their job's longest run; 1 held only to the 5-day " \
+           "ceiling (no stamped job window)" in check.detail, check.detail
+
+
+# --- the omitted-steps line on a pole's step list ------------------------------
+
+_OMITTED = "a pole's step list says how many declared steps it leaves out"
+
+
+def _omitted_report(note: str | None) -> str:
+    body = ["## 🔴 Long pole 1: `ci.yml` ▸ `test` - 2m 00s", "", "```text",
+            "Where the job's ~2m 00s goes - every step, slowest first:", ""]
+    if note is not None:
+        body += ["", note]
+    return "\n".join(body + ["```", ""])
+
+
+def _omitted_doc(**counts) -> dict:
+    return {"pr_critical_path": {"poles": [dict(
+        {"check": "test", "job": "test", "workflow_file": ".github/workflows/ci.yml",
+         "p50_s": 120.0}, **counts)]}}
+
+
+def _run_omitted_check(tmp_path: Path, note: str | None, doc: dict):
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    return _load_verify_report().check_pole_omitted_steps_line(_omitted_report(note), fp)
+
+
+def test_pole_omitted_steps_line_must_match_its_stamp(tmp_path: Path):
+    good = ("(2 declared step(s) skipped on every sampled run and 1 with no usable time "
+            "are not timed here)")
+    doc = _omitted_doc(skipped_steps=2, unmeasured_steps=1)
+    check = _run_omitted_check(tmp_path, good, doc)
+    assert check.ok and not check.skipped, check
+    # Missing line, wrong numbers, a line with no stamp behind it: each FAILs.
+    assert not _run_omitted_check(tmp_path, None, doc).ok
+    assert not _run_omitted_check(tmp_path, good.replace("2 declared", "3 declared"), doc).ok
+    assert not _run_omitted_check(tmp_path, good, _omitted_doc()).ok
+    none = ("No step could be measured: 2 skipped, 1 with no usable time.")
+    doc = _omitted_doc(step_decomposition_reason="no_step_measured_in_sample",
+                       skipped_steps=2, unmeasured_steps=1)
+    assert _run_omitted_check(tmp_path, none, doc).ok
+    assert not _run_omitted_check(tmp_path, good, doc).ok
+    # No pole stamps a count and none renders a line: a SKIP.
+    check = _run_omitted_check(tmp_path, None, _omitted_doc())
+    assert check.ok and check.skipped, check
+
+
+def test_omitted_steps_line_twin_matches_the_renderer():
+    bp, vr = _load_blocking_path(), _load_verify_report()
+    import itertools
+    for sk, un, tr, reason in itertools.product((0, 1, 3), (0, 2), (0, 1),
+                                                (None, "no_step_measured_in_sample")):
+        pole = {"skipped_steps": sk, "unmeasured_steps": un, "trimmed_steps": tr}
+        if reason:
+            pole["step_decomposition_reason"] = reason
+        assert bp._omitted_steps_note(pole) == vr._vr_omitted_steps_note(pole), pole
+    for junk in ({"skipped_steps": True}, {"skipped_steps": "2"}, {"skipped_steps": -1}):
+        assert bp._omitted_steps_note(junk) == vr._vr_omitted_steps_note(junk), junk
 
 
 def _conditional_step_runs() -> list[list[dict]]:

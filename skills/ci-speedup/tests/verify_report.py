@@ -822,8 +822,13 @@ _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
         "too many of the sampled runs' logs could not be read to tell how often "
         "the cache hits",
     "population_truncated_by_excluded_runs":
-        "too many of the sampled runs had logs that could not tell a cache hit "
-        "from a miss",
+        "too many sampled runs had to be set aside (unreadable cache line, "
+        "another runner, or step times that did not measure) to compare a hit "
+        "against a miss",
+    "population_truncated_by_unmeasurable_step_times":
+        "too many sampled runs had a cache, install or save step whose time did "
+        "not measure (a placeholder start, a start outside its job, or "
+        "timestamps that did not parse) to compare a hit against a miss",
     "fewer_than_min_hit_runs_classified":
         "too few sampled runs hit the cache to compare a hit against a miss",
     "fewer_than_min_miss_runs_classified":
@@ -11364,24 +11369,32 @@ def check_step_cited_within_job_window(findings_path: Path | None) -> Check:
     """**The out-of-window step class (curl `test-linter`).** No finding may cite a step
     duration longer than its job's measured window. Covers the three places a finding cites a
     step: the `measured_evidence.waterfall` step list, the `measured_evidence.table` step
-    column (a `<step> p50` header next to a job column), and a structural `decomposition`'s
-    `dominant_p50_s`. Job-level sums the same evidence prints (a decomposition's summed
-    `job_p50_s`, the table's `Job p50` column) are a sum of per-step medians, not one step, so
-    they are bounded only by `_VR_JOB_RUN_MAX_S`. Re-derived from `per_workflow_timing`, not
-    from the finding's own figures (those are what went wrong)."""
+    column (a `<step> p50` header next to a job column), and, for a finding on exactly ONE
+    affected job, a structural `decomposition`'s `dominant_p50_s`. Job-level sums the same
+    evidence prints (the waterfall's summed `measured_evidence.waterfall.job_p50_s`, the
+    table's `Job p50` column) are a sum of per-step medians, not one step, so they are
+    bounded only by `_VR_JOB_RUN_MAX_S`; so is a `+ N more <cat> steps` category aggregate.
+    Re-derived from `per_workflow_timing`, not from the finding's own figures (those are what
+    went wrong). The PASS detail counts the step figures held to a stamped job window apart
+    from those held only to the 5-day ceiling (no `job_max` stamped for their job)."""
     name = "no finding cites a step longer than its job's measured window"
     data, err = _load_findings_doc(findings_path)
     if err:
         return Check(name, True, err, skipped=True)
-    cited = 0
+    in_window = only_ceiling = sums = 0
     offenders: list[str] = []
 
     def _cite(f: dict, job: object, label: str, value: float | None, step: bool) -> None:
-        nonlocal cited
+        nonlocal in_window, only_ceiling, sums
         if value is None:
             return
-        cited += 1
         window = _vr_job_window_s(data, f.get("workflow_file"), job) if step else None
+        if not step:
+            sums += 1
+        elif window is None:
+            only_ceiling += 1
+        else:
+            in_window += 1
         why = _vr_step_overrun(value, window)
         if why:
             offenders.append(f"{f.get('id') or f.get('pattern')} ({f.get('pattern')}) "
@@ -11423,68 +11436,45 @@ def check_step_cited_within_job_window(findings_path: Path | None) -> Check:
             dom = str(dec.get("dominant_step") or "")
             _cite(f, jobs[0], f"dominant step `{dom}`", _num(dec.get("dominant_p50_s")),
                   not _VR_AGGREGATE_STEP_RE.search(dom))
-    if not cited:
+    if not (in_window or only_ceiling or sums):
         return Check(name, True, "no finding cites a step duration", skipped=True)
-    return Check(name, not offenders,
-                 f"{cited} cited step figure(s), all inside their job's measured window"
-                 if not offenders else
-                 "finding(s) cite a step longer than the job that contains it (a skipped step's "
-                 "year-1 `started_at`, or a span outside its job, read as a duration): "
-                 + "; ".join(offenders[:8])
-                 + (f"; +{len(offenders) - 8} more" if len(offenders) > 8 else ""))
+    if offenders:
+        return Check(name, False,
+                     "finding(s) cite a step longer than the job that contains it (a skipped "
+                     "step's year-1 `started_at`, or a span outside its job, read as a "
+                     "duration): " + "; ".join(offenders[:8])
+                     + (f"; +{len(offenders) - 8} more" if len(offenders) > 8 else ""))
+    return Check(name, True,
+                 f"{in_window} step figure(s) inside their job's longest run; {only_ceiling} "
+                 "held only to the 5-day ceiling (no stamped job window)"
+                 + (f"; {sums} job-level sum(s) held to the 5-day ceiling" if sums else ""))
 
 
-def check_stamped_decomposition_within_job(findings_path: Path | None) -> Check:
-    """**The out-of-window step class, stamp side.** No per-step duration the engine stamps
-    may exceed its job: each `pr_critical_path.poles[].steps[].p50_s` is bounded by that pole
-    job's longest sampled run (`_vr_job_window_s`; never the pole's own `p50_s`, which a
-    conditional step's p50 may correctly exceed), and each drilled run's per-step timeline
-    (`data_bundle.logs[].steps_file`) is bounded by that ONE run's `job_dur_s`, both as a
-    duration and as `start_s + dur_s`. A declared timeline is never passed over silently:
-    with a bundle directory present (`logs_dir` or the `<findings>.data/` sibling) a missing,
-    unreadable, non-JSON or wrong-shape timeline FAILs; with no bundle directory anywhere (a
-    findings-only artifact) the result is a SKIP that counts the timelines left unchecked."""
-    name = "no stamped step decomposition outlasts its job"
-    data, err = _load_findings_doc(findings_path)
-    if err:
-        return Check(name, True, err, skipped=True)
-    seen = 0
-    offenders: list[str] = []
-    for p in _as_list(_as_dict(data.get("pr_critical_path")).get("poles")):
-        p = _as_dict(p)
-        window = _vr_job_window_s(data, p.get("workflow_file"), p.get("job"))
-        for s in _as_list(p.get("steps")):
-            s = _as_dict(s)
-            v = _num(s.get("p50_s"))
-            if v is None:
-                continue
-            seen += 1
-            why = _vr_step_overrun(v, window)
-            if why:
-                offenders.append(f"pole `{p.get('job') or p.get('check')}` step "
-                                 f"`{s.get('step')}`: {why}")
-    pole_seen = seen
+def _vr_declared_timelines(data: dict, findings_path: Path | None
+                           ) -> tuple[bool, list[Path], list[tuple[str, dict | None, str]]]:
+    """`(bundle_present, dirs_tried, [(who, timeline | None, why_unreadable)])` for every
+    drilled-run timeline `data_bundle.logs[].steps_file` declares. A timeline lives in the
+    stamped `logs_dir` or the `<findings>.data/` sibling; with neither present (a
+    findings-only artifact such as a committed example) nothing is read and the list is
+    empty. A timeline that is missing, unreadable, not JSON or not an object with a
+    `steps` list comes back as None with the reason, naming every path tried."""
     db = _as_dict(data.get("data_bundle"))
     logs_dir = db.get("logs_dir")
-    # The bundle directories a timeline may live in: `logs_dir` as stamped, then the
-    # `<findings>.data/` sibling. With neither present (a findings-only artifact such as a
-    # committed example) the timelines cannot be checked, and the result says so; with one
-    # present, a declared timeline that cannot be read is a FAIL, never a silent pass.
     dirs = [Path(str(logs_dir))] if logs_dir else []
     if findings_path is not None:
         dirs.append(findings_path.parent / (findings_path.name.rsplit(".", 1)[0] + ".data"))
     bundle_present = any(d.is_dir() for d in dirs)
-    declared = 0
+    out: list[tuple[str, dict | None, str]] = []
     for e in _as_list(db.get("logs")):
         e = _as_dict(e)
         sf = e.get("steps_file")
         if not sf:
             continue
-        declared += 1
-        if not bundle_present:
-            continue
         who = (f"pole `{e.get('job') or e.get('check')}`"
                + (f" run {e.get('run_id')}" if e.get("run_id") else ""))
+        if not bundle_present:
+            out.append((who, None, "bundle not present"))
+            continue
         tl, errs = None, []
         for c in (d / str(sf) for d in dirs):
             try:
@@ -11495,41 +11485,212 @@ def check_stamped_decomposition_within_job(findings_path: Path | None) -> Check:
             except json.JSONDecodeError:
                 errs.append(f"{c} (not JSON)")
         if tl is None:
-            offenders.append(f"{who}: declared timeline `{sf}` could not be read; tried "
-                             + ", ".join(errs))
-            continue
-        if not isinstance(tl, dict) or not isinstance(tl.get("steps"), list):
-            offenders.append(f"{who}: declared timeline `{sf}` is not a timeline object "
-                             f"with a `steps` list")
+            out.append((who, None, f"declared timeline `{sf}` could not be read; tried "
+                        + ", ".join(errs)))
+        elif not isinstance(tl, dict) or not isinstance(tl.get("steps"), list):
+            out.append((who, None, f"declared timeline `{sf}` is not a timeline object "
+                        "with a `steps` list"))
+        else:
+            out.append((who, tl, ""))
+    return bundle_present, dirs, out
+
+
+def check_declared_timelines_readable(findings_path: Path | None) -> Check:
+    """**A declared drilled-run timeline is never passed over silently.** With the bundle
+    directory present (`logs_dir` or the `<findings>.data/` sibling), every timeline
+    `data_bundle.logs[].steps_file` declares must read as a timeline object with a `steps`
+    list; a missing, unreadable, non-JSON or wrong-shape file FAILs, naming the pole, the
+    run and every path tried. That is a bundle-copy or harness fault, kept apart from
+    `check_stamped_decomposition_within_job`, which judges only the figures. With no bundle
+    directory anywhere (a findings-only artifact) the check SKIPs and says so."""
+    name = "declared drilled-run timelines are readable"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    present, dirs, tls = _vr_declared_timelines(data, findings_path)
+    if not tls:
+        return Check(name, True, "no drilled-run timeline declared", skipped=True)
+    if not present:
+        return Check(name, True, f"drilled-run timeline bundle is not present (tried "
+                     + ", ".join(str(d) for d in dirs)
+                     + f"): {len(tls)} declared timeline(s) not read", skipped=True)
+    bad = [f"{who}: {why}" for who, tl, why in tls if tl is None]
+    if bad:
+        return Check(name, False, "declared drilled-run timeline(s) could not be read: "
+                     + "; ".join(bad[:8])
+                     + (f"; +{len(bad) - 8} more" if len(bad) > 8 else ""))
+    return Check(name, True, f"{len(tls)} declared timeline(s) read")
+
+
+def check_stamped_decomposition_within_job(findings_path: Path | None) -> Check:
+    """**The out-of-window step class, stamp side.** No per-step duration the engine stamps
+    may exceed its job: each `pr_critical_path.poles[].steps[].p50_s` is bounded by that pole
+    job's longest sampled run (`_vr_job_window_s`; never the pole's own `p50_s`, which a
+    conditional step's p50 may correctly exceed), or only by the 5-day ceiling when no
+    longest run is stamped; and each drilled run's per-step timeline
+    (`data_bundle.logs[].steps_file`) is bounded by that ONE run's `job_dur_s`, both as a
+    duration and as `start_s + dur_s`. A timeline with no numeric `job_dur_s`, or a step
+    with no numeric `dur_s`, FAILs (the figure cannot be bounded). Whether each declared
+    timeline could be READ is `check_declared_timelines_readable`'s; here an unreadable one
+    is only counted. The PASS detail counts figures held to a job window apart from those
+    held only to the ceiling, and timelines left unchecked; SKIP only when nothing at all
+    was checked."""
+    name = "no stamped step decomposition outlasts its job"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    in_window = only_ceiling = 0
+    offenders: list[str] = []
+    for p in _as_list(_as_dict(data.get("pr_critical_path")).get("poles")):
+        p = _as_dict(p)
+        window = _vr_job_window_s(data, p.get("workflow_file"), p.get("job"))
+        for s in _as_list(p.get("steps")):
+            s = _as_dict(s)
+            v = _num(s.get("p50_s"))
+            if v is None:
+                continue
+            if window is None:
+                only_ceiling += 1
+            else:
+                in_window += 1
+            why = _vr_step_overrun(v, window)
+            if why:
+                offenders.append(f"pole `{p.get('job') or p.get('check')}` step "
+                                 f"`{s.get('step')}`: {why}")
+    present, dirs, tls = _vr_declared_timelines(data, findings_path)
+    unread = sum(1 for _w, tl, _why in tls if tl is None)
+    read = len(tls) - unread
+    timeline_steps = malformed = 0
+    for who, tl, _why in tls:
+        if tl is None:
             continue
         jd = _num(tl.get("job_dur_s"))
-        for s in _as_list(tl.get("steps")):
+        steps = _as_list(tl.get("steps"))
+        if steps and (jd is None or jd <= 0):
+            offenders.append(f"timeline `{tl.get('job')}` ({who}) stamps no numeric "
+                             f"`job_dur_s`, so its {len(steps)} step(s) cannot be bounded "
+                             "by their run")
+            continue
+        for s in steps:
             s = _as_dict(s)
             d = _num(s.get("dur_s"))
             if d is None:
+                malformed += 1
                 continue
-            seen += 1
+            timeline_steps += 1
             end = d + (_num(s.get("start_s")) or 0.0)
             why = _vr_step_overrun(d, jd) or (
                 _vr_step_overrun(end, jd) and f"it ends at {end:.0f}s, after the "
                 f"job's {jd:.0f}s run")
             if why:
-                offenders.append(f"timeline `{tl.get('job') or e.get('job')}` step "
+                offenders.append(f"timeline `{tl.get('job')}` step "
                                  f"`{s.get('name')}`: {why}")
-    if declared and not bundle_present and not offenders:
-        return Check(name, True,
-                     "drilled-run timeline bundle is not present (tried "
-                     + ", ".join(str(d) for d in dirs)
-                     + f"): {declared} declared timeline(s) not checked; only the "
-                     f"{pole_seen} pole step figure(s) were checked", skipped=True)
-    if not seen and not offenders:
-        return Check(name, True, "no stamped step decomposition or timeline", skipped=True)
-    return Check(name, not offenders,
-                 f"{seen} stamped step figure(s), all inside their job"
-                 if not offenders else
-                 "stamped step(s) outlast the job that contains them: "
-                 + "; ".join(offenders[:8])
-                 + (f"; +{len(offenders) - 8} more" if len(offenders) > 8 else ""))
+    if malformed:
+        offenders.append(f"{malformed} malformed timeline step(s) with no numeric `dur_s`")
+    if offenders:
+        return Check(name, False, "stamped step(s) outlast the job that contains them: "
+                     + "; ".join(offenders[:8])
+                     + (f"; +{len(offenders) - 8} more" if len(offenders) > 8 else ""))
+    tail = ""
+    if tls and not present:
+        tail = (f"; {len(tls)} declared timeline(s) not checked (bundle not present: tried "
+                + ", ".join(str(d) for d in dirs) + ")")
+    elif unread:
+        tail = (f"; {unread} declared timeline(s) could not be read (see "
+                "`declared drilled-run timelines are readable`)")
+    pole_seen = in_window + only_ceiling
+    if not pole_seen and not timeline_steps:
+        if read:
+            return Check(name, True, f"{read} declared timeline(s) read, all empty"
+                         + tail, skipped=True)
+        return Check(name, True, ("no stamped step decomposition or timeline" + tail)
+                     if tail else "no stamped step decomposition or timeline", skipped=True)
+    return Check(name, True,
+                 f"{in_window} step figure(s) inside their job's longest run; {only_ceiling} "
+                 "held only to the 5-day ceiling (no stamped job window); "
+                 f"{timeline_steps} drilled-run timeline step(s) inside their run" + tail)
+
+
+# --- The omitted-steps line on a pole's step list ----------------------------------------
+# A pole's step list leaves out the declared steps GitHub skipped on every sampled run
+# (`skipped_steps`), those with no usable time (`unmeasured_steps`) and, for a job whose
+# every step was dropped, all of them (`step_decomposition_reason`); it times steps that
+# ran past the job's end only up to it (`trimmed_steps`). The renderer says so in one line
+# (`blocking_path._omitted_steps_note`, of which `_vr_omitted_steps_note` is the verbatim
+# twin, pinned by `test_omitted_steps_line_twin_matches_the_renderer`).
+_VR_NO_STEP_MEASURED_REASON = "no_step_measured_in_sample"
+_VR_OMITTED_LINE_RE = re.compile(
+    r"^(?:\(\d+ declared step\(s\) |\(\d+ step\(s\) ran past the job's end |"
+    r"No step could be measured: )")
+
+
+def _vr_omitted_steps_note(pole: dict) -> str | None:
+    """Verbatim twin of `blocking_path._omitted_steps_note`."""
+    def _n(key: str) -> int:
+        v = pole.get(key)
+        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) \
+            and v > 0 else 0
+    sk, un, tr = _n("skipped_steps"), _n("unmeasured_steps"), _n("trimmed_steps")
+    if pole.get("step_decomposition_reason") == _VR_NO_STEP_MEASURED_REASON:
+        return f"No step could be measured: {sk} skipped, {un} with no usable time."
+    parts: list[str] = []
+    if sk:
+        parts.append(f"{sk} declared step(s) skipped on every sampled run")
+    if un:
+        parts.append(f"{un} with no usable time" if parts
+                     else f"{un} declared step(s) with no usable time")
+    out: list[str] = []
+    if parts:
+        out.append(" and ".join(parts) + " are not timed here")
+    if tr:
+        out.append(f"{tr} step(s) ran past the job's end in some run and are timed only "
+                   "up to it")
+    return "(" + "; ".join(out) + ")" if out else None
+
+
+def check_pole_omitted_steps_line(report: str, findings_path: Path | None) -> Check:
+    """**Visible drops.** Each rendered long pole whose stamp leaves declared steps out of
+    its step list (`skipped_steps`, `unmeasured_steps`, `trimmed_steps`, or a
+    `step_decomposition_reason`) carries EXACTLY the one line `_vr_omitted_steps_note`
+    re-derives from that stamp, and a pole with nothing left out carries none. Poles are
+    matched to their section on (workflow file name, check), as the other pole checks do;
+    an aggregation-gate pole (no step list) and a section two stamped poles share are not
+    judged."""
+    name = "a pole's step list says how many declared steps it leaves out"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    by_key: dict[tuple[str, str], list[dict]] = {}
+    for p in _as_list(_as_dict(data.get("pr_critical_path")).get("poles")):
+        if isinstance(p, dict):
+            by_key.setdefault((_wf_base(str(p.get("workflow_file") or "")),
+                               _cmp_name(str(p.get("check") or ""))), []).append(p)
+    judged = carried = 0
+    bad: list[str] = []
+    for wf, check, body in _pole_header_sections(report):
+        poles = by_key.get((_wf_base(wf), _cmp_name(check))) or []
+        if len(poles) != 1 or _AGG_GATE_ROLE_MARKER in body:
+            continue
+        want = _vr_omitted_steps_note(poles[0])
+        got = [ln.strip() for ln in body.splitlines()
+               if _VR_OMITTED_LINE_RE.match(ln.strip())]
+        judged += 1
+        if want is None and got:
+            bad.append(f"`{wf}` ▸ {check}: renders {got[0]!r} but its stamp leaves no "
+                       "step out")
+        elif want is not None and got != [want]:
+            bad.append(f"`{wf}` ▸ {check}: expected {want!r}, rendered "
+                       + (repr(got) if got else "no such line"))
+        elif want is not None:
+            carried += 1
+    if bad:
+        return Check(name, False, "a pole's omitted-steps line does not match its stamp: "
+                     + "; ".join(bad[:6]))
+    if not carried:
+        return Check(name, True, f"{judged} pole(s) judged; none leaves a declared step out",
+                     skipped=True)
+    return Check(name, True, f"{carried} pole(s) carry the omitted-steps line, each "
+                 f"matching its stamp; {judged - carried} leave nothing out")
 
 
 # --- The payload-binned-as-build class (nrwl/nx `Run Checks/Lint/Test/Build`) --------
@@ -12489,6 +12650,8 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_structural_pole_has_measured_step(findings_path),
         check_step_cited_within_job_window(findings_path),
         check_stamped_decomposition_within_job(findings_path),
+        check_declared_timelines_readable(findings_path),
+        check_pole_omitted_steps_line(report, findings_path),
         check_structural_step_category_not_payload_binned_as_build(findings_path),
         check_detector_leaf_agrees_with_dominant_category(report, findings_path),
         check_pole_ceiling_within_cooccurrence(report, findings_path),

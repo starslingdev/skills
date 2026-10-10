@@ -3953,8 +3953,60 @@ def _pole_steps_overlap(pole: dict[str, Any] | None,
     return "maybe" if here else None
 
 
+# The engine's reason for a pole whose every declared step was dropped
+# (`collect_runs._decompose_job_steps`).
+_NO_STEP_MEASURED_REASON = "no_step_measured_in_sample"
+
+
+def _omitted_steps_note(pole: dict[str, Any]) -> str | None:
+    """The one line a pole's step list carries when declared steps are left out of it:
+    `skipped_steps` (GitHub skipped them on every sampled run), `unmeasured_steps` (not
+    skipped, but no usable time: a placeholder start, a start outside the job, reversed
+    or unparseable timestamps) and `trimmed_steps` (timed only up to the job's end). For
+    a pole whose every step was dropped, the "no step could be measured" line. None when
+    nothing is left out. `verify_report._vr_omitted_steps_note` is its verbatim twin."""
+    def _n(key: str) -> int:
+        v = pole.get(key)
+        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) \
+            and v > 0 else 0
+    sk, un, tr = _n("skipped_steps"), _n("unmeasured_steps"), _n("trimmed_steps")
+    if pole.get("step_decomposition_reason") == _NO_STEP_MEASURED_REASON:
+        return f"No step could be measured: {sk} skipped, {un} with no usable time."
+    parts: list[str] = []
+    if sk:
+        parts.append(f"{sk} declared step(s) skipped on every sampled run")
+    if un:
+        parts.append(f"{un} with no usable time" if parts
+                     else f"{un} declared step(s) with no usable time")
+    out: list[str] = []
+    if parts:
+        out.append(" and ".join(parts) + " are not timed here")
+    if tr:
+        out.append(f"{tr} step(s) ran past the job's end in some run and are timed only "
+                   "up to it")
+    return "(" + "; ".join(out) + ")" if out else None
+
+
 def _pole_waterfall(pole: dict[str, Any], leaf: dict[str, Any] | None,
                     timeline: dict[str, Any] | None = None,
+                    *args: Any, **kwargs: Any) -> list[str]:
+    """`_pole_waterfall_body`, plus the line saying how many declared steps the step list
+    leaves out (`_omitted_steps_note`). A pole whose every declared step was dropped, with
+    no drilled timeline to draw, renders that line alone: an empty "every step" list would
+    read as a job with no steps."""
+    note = _omitted_steps_note(pole)
+    if (pole.get("step_decomposition_reason") == _NO_STEP_MEASURED_REASON
+            and not pole.get("steps") and not pole.get("job_timing_unavailable")
+            and not ((timeline or {}).get("steps"))):
+        return [note] if note else []
+    lines = _pole_waterfall_body(pole, leaf, timeline, *args, **kwargs)
+    if note and not pole.get("job_timing_unavailable"):
+        lines += ["", note]
+    return lines
+
+
+def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
+                         timeline: dict[str, Any] | None = None,
                     log_present: bool = False,
                     analysis_present: bool = False,
                     structural_present: bool = False,
@@ -6451,8 +6503,13 @@ _OPT79_HELD_BACK_REASONS: dict[str, str] = {
         "too many of the sampled runs' logs could not be read to tell how often "
         "the cache hits",
     "population_truncated_by_excluded_runs":
-        "too many of the sampled runs had logs that could not tell a cache hit "
-        "from a miss",
+        "too many sampled runs had to be set aside (unreadable cache line, "
+        "another runner, or step times that did not measure) to compare a hit "
+        "against a miss",
+    "population_truncated_by_unmeasurable_step_times":
+        "too many sampled runs had a cache, install or save step whose time did "
+        "not measure (a placeholder start, a start outside its job, or "
+        "timestamps that did not parse) to compare a hit against a miss",
     "fewer_than_min_hit_runs_classified":
         "too few sampled runs hit the cache to compare a hit against a miss",
     "fewer_than_min_miss_runs_classified":

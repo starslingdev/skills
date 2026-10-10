@@ -6486,6 +6486,55 @@ def test_opt79_withholds_a_step_whose_timestamps_do_not_parse():
     assert out == []
 
 
+def _opt79_sentinel_restore(run_jobs: list) -> None:
+    for st in run_jobs[0]["steps"]:
+        if st["name"] == "Run actions/cache@v4":
+            st["started_at"] = "0001-01-01T00:00:00Z"
+
+
+def test_opt79_withholds_a_restore_step_with_a_placeholder_start():
+    """A restore step GitHub did not skip, stamped with the year-1 placeholder
+    start, has no in-window time: the occurrence is withheld under its own gate,
+    never read as a 63.9-billion-second (or 0s) restore."""
+    jpr, logs = _opt79_sample()
+    for run_jobs in jpr[:2]:
+        _opt79_sentinel_restore(run_jobs)
+    out, w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert w.get("step_has_no_in_window_time") == 2, w
+    assert out == []
+
+
+def test_opt79_names_step_times_when_they_thin_the_population():
+    """When runs set aside for step times that did not measure are what left too
+    few hits, the withhold says so, not that the logs could not tell a hit from
+    a miss."""
+    jpr, logs = _opt79_sample(hits=4, misses=4)
+    for run_jobs in jpr[:4]:
+        _opt79_sentinel_restore(run_jobs)
+    withheld_candidates: list = []
+    w: dict = {}
+    out = cr._detect_opt79_net_negative_cache(
+        "ci.yml", jpr, _opt79_crit(), _opt79_wf(), 100, 0,
+        logs_by_job_id=logs, withheld=w, withheld_candidates=withheld_candidates)
+    assert out == []
+    assert w.get("population_truncated_by_unmeasurable_step_times") == 1, w
+    assert w.get("population_truncated_by_excluded_runs") is None, w
+    assert [c["gate"] for c in withheld_candidates] == [
+        "population_truncated_by_unmeasurable_step_times"]
+
+
+def test_opt79_stamps_the_runs_it_set_aside_per_gate():
+    """A surviving population thinned on one side is auditable from the stamp."""
+    jpr, logs = _opt79_sample(hits=5, misses=4)
+    _opt79_sentinel_restore(jpr[0])
+    out, _w = _opt79_withheld(jpr=jpr, logs=logs)
+    assert len(out) == 1, _w
+    cn = out[0]["cache_net_negative"]
+    assert cn.get("excluded_runs_by_gate") == {"step_has_no_in_window_time": 1}, cn
+    out, _w = _opt79_withheld()
+    assert "excluded_runs_by_gate" not in out[0]["cache_net_negative"]
+
+
 def test_opt79_classifies_only_occurrences_that_succeeded():
     """`actions/cache` saves in a post step that runs only on success, so a
     failed occurrence's miss path is missing its save — a shorter miss path
@@ -8267,6 +8316,18 @@ def test_opt80_names_a_skipped_or_out_of_window_checkout_as_its_own_reason():
     # One tally per job; the occurrence count rides in the debug context.
     assert counts.get("checkout_step_skipped_or_out_of_window") == 1, counts
     assert "checkout_step_duration_unparseable" not in counts, counts
+
+
+def test_opt80_names_a_reversed_checkout_span_as_unparseable():
+    """A checkout whose `completed_at` precedes its `started_at` (both parse) is a
+    broken duration, not a step that did not run: it keeps the unparseable reason."""
+    runs = _opt80_runs()
+    st = runs[0][0]["steps"][1]
+    st["started_at"], st["completed_at"] = st["completed_at"], st["started_at"]
+    counts: dict = {}
+    _opt80(jpr=runs, withheld=counts)
+    assert counts.get("checkout_step_duration_unparseable") == 1, counts
+    assert "checkout_step_skipped_or_out_of_window" not in counts, counts
 
 
 # ---- the "already configured" reader ------------------------------------------

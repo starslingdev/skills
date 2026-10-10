@@ -13,10 +13,17 @@ cluster" finding worth 145,186 runner-min/mo for a step that never ran in that
 job. These tests pin the rule every step-timing reader shares:
 
   - a step GitHub reports as `skipped` contributes no duration;
-  - a step whose `started_at` falls before its job's `started_at` (the year-1
-    sentinel included) contributes no duration;
-  - a step's span is clamped to its job's window, so no step outlasts its job;
-  - the per-run timeline the report draws applies the same rule;
+  - a step whose `started_at` falls in 1970 or earlier (the year-1 placeholder
+    included) contributes no duration, with or without the job's own window;
+  - a step starting more than 1s before its job's `started_at` contributes no
+    duration; within that 1s (whole-second rounding) it is clamped to the job's
+    start;
+  - a step's end is clamped to its job's end, so no step outlasts its job, and a
+    cut of more than 1s is counted (`trimmed_steps`) and logged;
+  - the per-run timeline the report draws applies the same rule, and keeps a
+    skipped step whose timestamps sit inside the job in its place at 0s;
+  - every declared step left out is counted (`skipped_steps`,
+    `unmeasured_steps`), logged at DEBUG, and named in one line on the pole;
   - a step that only carries the sentinel can never become a cluster finding.
 
 Run from the repo root:
@@ -381,3 +388,190 @@ def test_opt82_lint_step_p50_ignores_a_skipped_year_one_lint_step(tmp_path):
     tal = out[0]["type_aware_lint"]
     assert tal["lint_step_p50_s"] == 78.0, tal["lint_step_p50_s"]
     assert tal["ceiling_basis"] == "lint_step" and tal["ceiling_s"] == 78.0, tal
+
+
+# --------------------------------------------------------------------------- #
+# Every drop and every trim is counted and logged, never silent
+# --------------------------------------------------------------------------- #
+
+def _unmeasured_job(i: int) -> dict:
+    """`_clang_tidy_job` plus a step claiming success with the year-1 start, and a
+    step that starts a minute before its job: both declared, neither measurable."""
+    job = _clang_tidy_job(i)
+    job["steps"].append({"number": 60, "name": "early", "conclusion": "success",
+                         "started_at": "2026-10-10T02:45:00Z", "completed_at": _ts(30)})
+    job["steps"].append({"number": 61, "name": "sentinel success",
+                         "conclusion": "success", "started_at": _SENTINEL,
+                         "completed_at": _ts(40)})
+    return job
+
+
+def test_decomposition_counts_declared_steps_with_no_usable_time():
+    d = cr._decompose_job_steps([_unmeasured_job(i) for i in range(1, 4)])
+    assert d is not None
+    assert d.get("unmeasured_steps") == 2, d.get("unmeasured_steps")
+    # Skipped steps keep their own count; the two figures never overlap.
+    assert d["skipped_steps"] == 5, d["skipped_steps"]
+
+
+def test_decomposition_stamps_no_unmeasured_count_when_none_dropped():
+    d = cr._decompose_job_steps([_clang_tidy_job(i) for i in range(1, 4)])
+    assert d is not None
+    assert "unmeasured_steps" not in d and "trimmed_steps" not in d, d
+
+
+def test_decomposition_counts_a_step_trimmed_to_its_job_end():
+    jobs = [_clang_tidy_job(i) for i in range(1, 4)]
+    for j in jobs:
+        j["steps"].append(_step(70, "overshoot", 200, 400))
+    d = cr._decompose_job_steps(jobs)
+    assert d is not None and d.get("trimmed_steps") == 1, d
+
+
+def test_each_dropped_and_trimmed_step_is_logged_at_debug(caplog):
+    import logging
+    job = _unmeasured_job(1)
+    job["steps"].append(_step(70, "overshoot", 200, 400))
+    with caplog.at_level(logging.DEBUG, logger=cr.logger.name):
+        cr._step_durations(job)
+    msgs = [r.getMessage() for r in caplog.records]
+    for name, why in (("early", "started_before_job"),
+                      ("sentinel success", "placeholder_start"),
+                      ("test-linter", "skipped")):
+        assert any(f"'{name}'" in m and why in m and "CM clang-tidy" in m
+                   for m in msgs), (name, why, msgs)
+    assert any("'overshoot'" in m and "trimmed" in m for m in msgs), msgs
+
+
+def test_a_job_whose_every_step_dropped_still_stamps_a_decomposition():
+    """No step measured in the sample is a fact to state, not a missing breakdown."""
+    def job(i: int) -> dict:
+        return {"id": i, "name": "bg", "conclusion": "success",
+                "started_at": _ts(0), "completed_at": _ts(60),
+                "steps": [_step(1, "lint", None, 30, "skipped"),
+                          _step(2, "bench", None, 40, "skipped"),
+                          {"number": 3, "name": "probe", "conclusion": "success",
+                           "started_at": _SENTINEL, "completed_at": _ts(50)}]}
+    d = cr._decompose_job_steps([job(1), job(2)])
+    assert d is not None, "an all-dropped job must not vanish"
+    assert d["steps"] == [] and d["reason"] == "no_step_measured_in_sample", d
+    assert d["skipped_steps"] == 2 and d["unmeasured_steps"] == 1, d
+
+
+def test_pole_stamp_carries_the_counts_and_the_no_step_reason():
+    entry: dict = {}
+    cr._stamp_pole_decomposition(entry, {
+        "steps": [], "reason": "no_step_measured_in_sample",
+        "skipped_steps": 2, "unmeasured_steps": 1})
+    assert entry == {"step_decomposition_reason": "no_step_measured_in_sample",
+                     "skipped_steps": 2, "unmeasured_steps": 1}, entry
+    entry = {}
+    cr._stamp_pole_decomposition(entry, cr._decompose_job_steps(
+        [_unmeasured_job(i) for i in range(1, 4)]))
+    assert entry["skipped_steps"] == 5 and entry["unmeasured_steps"] == 2, entry
+    assert entry["steps"] and "step_decomposition_reason" not in entry, entry
+
+
+def test_callers_treat_an_all_dropped_decomposition_as_no_steps():
+    """A decomposition with no measured step crowns no dominant step: the structural
+    and runner-size callers see it the way they saw None."""
+    d = {"steps": [], "reason": "no_step_measured_in_sample",
+         "skipped_steps": 1, "unmeasured_steps": 0}
+    assert cr._measured_decomposition(d) is None
+    assert cr._measured_decomposition(None) is None
+    full = cr._decompose_job_steps([_clang_tidy_job(i) for i in range(1, 4)])
+    assert cr._measured_decomposition(full) is full
+
+
+# --------------------------------------------------------------------------- #
+# Timezones, the setup prefix, and the drilled run's own sample entry
+# --------------------------------------------------------------------------- #
+
+def test_naive_step_timestamp_beside_an_aware_job_still_measures():
+    """A step stamp without a timezone is read as UTC, not a TypeError."""
+    step = {"name": "naive", "conclusion": "success",
+            "started_at": "2026-10-10T02:46:20", "completed_at": "2026-10-10T02:46:50"}
+    assert cr._step_duration_s(step, _window_job(step)) == 30.0
+    job = _window_job(step)
+    job["started_at"] = "2026-10-10T02:46:10"
+    aware = {**step, "started_at": "2026-10-10T02:46:20Z",
+             "completed_at": "2026-10-10T02:46:50Z"}
+    assert cr._step_duration_s(aware, job) == 30.0
+
+
+def test_setup_prefix_does_not_show_a_setup_step_that_has_no_time():
+    """A setup step with no in-window span adds nothing to the prefix's seconds, so it
+    is not named in the prefix's display either: shown steps and total describe the
+    same steps. The signature keeps it, so the job's shape does not change between a
+    run that skipped it and one that ran it."""
+    job = {"name": "j", "started_at": _ts(0), "completed_at": _ts(100), "steps": [
+        _step(1, "Set up job", 0, 2),
+        _step(2, "Run actions/checkout@v4", 2, 5),
+        {"number": 3, "name": "Run actions/setup-node@v4", "conclusion": "success",
+         "started_at": _SENTINEL, "completed_at": _ts(9)},
+        _step(4, "npm test", 9, 90)]}
+    sig, shown, total = cr._leading_setup_prefix(job)
+    assert "Run actions/setup-node@v4" not in shown, shown
+    assert shown == ("Set up job", "Run actions/checkout@v4"), shown
+    assert len(sig) == 3 and total == 5.0, (sig, shown, total)
+
+
+def test_dominant_step_sample_keeps_the_drilled_run_when_its_step_has_no_time():
+    """The drilled run is always in the cross-run sample; with no usable time for its
+    own dominant step it is listed with no value, never silently omitted."""
+    drilled = _test_job(2, 280)
+    timeline = cr._step_timeline(drilled, "test", 286.0)
+    no_time = _test_job(2, 280, start=_SENTINEL)
+    sample = cr._dominant_step_sample(
+        timeline, [(16.0, _test_job(1, 10)), (286.0, no_time),
+                   (306.0, _test_job(3, 300))], no_time)
+    assert sample is not None
+    drilled_rows = [v for v in sample["values"] if v["drilled"]]
+    assert [(v["value"], v["drilled"]) for v in drilled_rows] == [(None, True)], (
+        sample["values"])
+
+
+# --------------------------------------------------------------------------- #
+# The report says how many declared steps a pole's step list leaves out
+# --------------------------------------------------------------------------- #
+
+def _bp():
+    import blocking_path
+    return blocking_path
+
+
+_POLE = {"check": "test", "job": "test", "workflow_file": ".github/workflows/ci.yml",
+         "p50_s": 120.0, "dominant_step": "run tests", "dominant_category": "test",
+         "dominant_p50_s": 100.0,
+         "steps": [{"step": "run tests", "category": "test", "p50_s": 100.0},
+                   {"step": "Set up job", "category": "setup", "p50_s": 20.0}]}
+_NOTE = ("(2 declared step(s) skipped on every sampled run and 1 with no usable time "
+         "are not timed here)")
+
+
+def test_pole_step_list_says_how_many_declared_steps_it_leaves_out():
+    pole = dict(_POLE, skipped_steps=2, unmeasured_steps=1)
+    lines = _bp()._pole_waterfall(pole, leaf=None, timeline=None, log_present=False)
+    assert [ln for ln in lines if "declared step(s)" in ln] == [_NOTE], lines
+
+
+def test_pole_timeline_says_how_many_declared_steps_it_leaves_out():
+    pole = dict(_POLE, skipped_steps=2, unmeasured_steps=1)
+    timeline = cr._step_timeline(_test_job(2, 100), "test", 106.0)
+    lines = _bp()._pole_waterfall(pole, leaf=None, timeline=timeline, log_present=False)
+    assert [ln for ln in lines if "declared step(s)" in ln] == [_NOTE], lines
+
+
+def test_pole_with_no_omitted_steps_renders_no_note():
+    lines = _bp()._pole_waterfall(dict(_POLE, skipped_steps=0), leaf=None,
+                                  timeline=None, log_present=False)
+    assert not [ln for ln in lines if "declared step" in ln or "no usable" in ln], lines
+
+
+def test_pole_whose_every_step_dropped_says_no_step_could_be_measured():
+    pole = {k: v for k, v in _POLE.items()
+            if k not in ("steps", "dominant_step", "dominant_category", "dominant_p50_s")}
+    pole.update(step_decomposition_reason="no_step_measured_in_sample",
+                skipped_steps=2, unmeasured_steps=1)
+    lines = _bp()._pole_waterfall(pole, leaf=None, timeline=None, log_present=False)
+    assert lines == ["No step could be measured: 2 skipped, 1 with no usable time."], lines
