@@ -46,7 +46,7 @@ import statistics
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 from pathlib import Path
 
 # Bounded exception to "this file never imports the renderer" (see the module
@@ -4372,6 +4372,44 @@ def check_headline_basis_excludes_fileless(report: str, findings_path: Path | No
                  f"and disclosed as PR-lifetime status-gating latency{_deg}")
 
 
+def _job_name_is_templated(info: object) -> bool:
+    """A job declared under a `${{ }}`-templated `name:` that is not a reusable-workflow
+    caller: its spine rows carry the RENDERED name, never its key. MIRRORED by
+    `collect_runs._job_name_is_templated` (the sizing door); a coupling test pins the two."""
+    info = _as_dict(info)
+    return "${{" in str(info.get("name") or "") and not info.get("reusable")
+
+
+def _spine_job_identities(graph: dict, wf: str, job: str,
+                          base: Callable[[str], str]) -> list[str]:
+    """Job bases `job` may appear under in `wf`'s spine rows, literal first (so an already-
+    matching name keeps today's binding), then the graph-resolved counterpart identity
+    (YAML key -> declared `name:`, and display name -> key). `base` is the caller's join key.
+    Only valid WITHIN `wf` — the cross-workflow fallback must not use these aliases.
+    An AMBIGUOUS display name (two job keys in `wf` rendering to the same name) yields no
+    alias: the spine indexes by that one name, so aliasing a key onto it would bound the
+    finding by BOTH jobs' summed compute and inflate the ceiling. Ambiguity stays an honest
+    coverage gap. MIRRORED by `collect_runs._own_workflow_job_identities` (the sizing door's
+    cap); a coupling test pins the two."""
+    b = base(job)
+    out = [b] if b else []
+    jobs_in_wf = _as_dict(_as_dict(graph).get(wf))
+    names: dict[str, int] = {}
+    for jid, info in jobs_in_wf.items():
+        nm = base(_as_dict(info).get("name") or jid)
+        if nm:
+            names[nm] = names.get(nm, 0) + 1
+    for jid, info in jobs_in_wf.items():
+        nm = base(_as_dict(info).get("name") or jid)
+        if names.get(nm, 0) > 1:
+            continue  # collision: this display name identifies more than one job — no alias.
+        # key → its `name:` override, and display name → its key; both directions, one pass.
+        for alias in ((nm,) if base(jid) == b else ((base(jid),) if nm == b else ())):
+            if alias and alias not in out:
+                out.append(alias)
+    return out
+
+
 def check_saving_within_measured_compute(report: str, findings_path: Path | None) -> Check:
     """**Physical bound (c) — a runner-minute saving never exceeds the compute it cuts.** A finding's
     credited `runner_min_saving` (monthly billable minutes it claims to remove) can never exceed the
@@ -4429,30 +4467,14 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
     graph = _as_dict(data.get("workflow_job_graph"))
 
     def _identities(wf: str, job: str) -> list[str]:
-        """Job bases `job` may appear under in `wf`'s spine rows, literal first (so an already-
-        matching name keeps today's binding), then the graph-resolved counterpart identity.
-        Only valid WITHIN `wf` — the cross-workflow fallback must not use these aliases.
-        An AMBIGUOUS display name (two job keys in `wf` rendering to the same name) yields no
-        alias: the spine indexes by that one name, so aliasing a key onto it would bound the
-        finding by BOTH jobs' summed compute and inflate the ceiling. Ambiguity stays an honest
-        coverage gap, same as the cross-workflow rule above."""
-        b = _base(job)
-        out = [b] if b else []
-        jobs_in_wf = _as_dict(graph.get(wf))
-        names: dict[str, int] = {}
-        for jid, info in jobs_in_wf.items():
-            nm = _base(_as_dict(info).get("name") or jid)
-            if nm:
-                names[nm] = names.get(nm, 0) + 1
-        for jid, info in jobs_in_wf.items():
-            nm = _base(_as_dict(info).get("name") or jid)
-            if names.get(nm, 0) > 1:
-                continue  # collision: this display name identifies more than one job — no alias.
-            # key → its `name:` override, and display name → its key; both directions, one pass.
-            for alias in ((nm,) if _base(jid) == b else ((_base(jid),) if nm == b else ())):
-                if alias and alias not in out:
-                    out.append(alias)
-        return out
+        # Same-workflow identities only (see `_spine_job_identities`).
+        return _spine_job_identities(graph, wf, job, _base)
+
+    def _templated_in_wf(wf: str, b: str) -> bool:
+        for jid, info in _as_dict(graph.get(wf)).items():
+            if _base(jid) == b and _job_name_is_templated(info):
+                return True
+        return False
 
     compute: dict[tuple[str, str], float] = {}
     for r in rows:
@@ -4511,8 +4533,13 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
             if key:
                 matched += 1
                 bound += compute[key]
-            else:
+            elif not _templated_in_wf(wf, b):
                 # Job base present under ANY workflow file (a reusable-workflow caller loses the wf).
+                # NOT for a job declared in `wf` under a `${{ }}`-templated `name:` (and not a
+                # reusable caller): its rows carry the RENDERED name, so a key miss is an
+                # unresolvable identity, not a lost wf — a literal namesake elsewhere is a
+                # different job (curl: http3-linux.yml `linux` bound configure-vs-cmake.yml's
+                # `Linux`, 155.5 min/mo, and false-FAILed). It stays an honest coverage gap.
                 # LITERAL base only — graph aliases are same-workflow evidence and must not widen
                 # this cross-workflow match (see `_identities`); a job with no row in its own
                 # workflow stays an honest coverage gap rather than binding a foreign namesake.

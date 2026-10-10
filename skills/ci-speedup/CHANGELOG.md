@@ -1002,6 +1002,45 @@ unversioned and updates by reinstall from `main`.
   endpoints, sizes and pattern / workflow names, never gh response bodies.
   Warnings that already printed now carry a `WARNING <module>:` prefix, except one emitted while the collector module is still loading, before logging is configured.
 
+- **2026-10-10** — **A report is no longer refused because a modeled saving
+  was checked against the wrong job.** On curl/curl the final check blocked
+  the whole audit: a duplicate-command finding (OPT16, a flat estimate of about
+  10 s per run over 1,463 runs, 243.8 min/mo) on `http3-linux.yml`'s `linux`
+  job was compared with 155.5 min/mo that actually belongs to
+  `configure-vs-cmake.yml`'s unrelated `Linux` job. The `linux` job is named in
+  the workflow file by a `${{ }}` template, so its measured rows carry the
+  rendered names (`AM awslc`, `CM openssl`, ...) and its key matched nothing in
+  its own workflow; the fallback that looks for the same job name in any
+  workflow (meant for reusable-workflow callers) then picked up the namesake.
+  Both the sizing door and the final check now treat a templated job that
+  misses its own workflow's rows as unmeasured (a disclosed coverage gap), never
+  as a namesake from another file. Separately, a modeled estimate on the
+  `not_spine_derivable` list (the `direct`, `runner-min-only` and
+  `parallel-rebalance` sizing models, plus the step-decomposition levers
+  OPT70-72/74/75) is now capped at its affected jobs' measured monthly billable
+  compute when the estimate exceeds it: the figure drops to the measured
+  compute, the basis reads `measured_spine_clamped`, and the finding's size note
+  states the original estimate and the cap. The cap only lowers a figure on the
+  whole truth: every affected job must be found in its own workflow's cost data
+  (by job key, or by the `name:` the workflow file gives it). A same-named job
+  in another workflow, or only some of the affected jobs, leaves the estimate
+  as is, since either would cut a correct saving. When every affected job is
+  found but those rows measure no billable compute in the sample (0 min/mo, or
+  a sum that rounds to 0), that is a real bound: the estimate clamps to 0.0
+  under the same `measured_spine_clamped` basis, the size note says the jobs
+  measured no billable compute, and the finding renders as "no bill saving"
+  rather than failing the final check against the zero bound. A measured figure, or one
+  carrying a wall-clock-neutral certificate (OPT57, OPT65, OPT77, OPT79, OPT80
+  and the other measured detectors), is never capped: the final check
+  re-derives those from their own measurements and would refuse a lowered one.
+  Before, only OPT73 was capped, so a flat estimate on a small job could fail
+  the final check and block the report. On curl the cap never fires: the
+  templated-name rule above is what resolves OPT16, as a coverage gap. Re-checked
+  on the saved curl data: the final check passes (7 savings within measured
+  compute, 4 disclosed coverage gaps) and no curl figure changes. Surfaces:
+  `scripts/collect_runs.py`,
+  `tests/verify_report.py`, ARCHITECTURE §5.1.
+
 - **2026-10-10** — **A step GitHub skipped no longer reads as a step that ran
   for two thousand years.** The jobs API reports a skipped step (for example a
   `background: true` step whose `if:` was false) with a start time of year 1
