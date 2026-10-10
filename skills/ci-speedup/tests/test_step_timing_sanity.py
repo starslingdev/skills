@@ -156,6 +156,62 @@ def test_step_timeline_agrees_with_step_durations():
             assert durs[s["name"]] == s["dur_s"], (s, durs.get(s["name"]))
 
 
+def test_in_window_skipped_step_stays_on_the_timeline_at_zero():
+    """A skipped step whose timestamps sit inside its job keeps its place in the
+    succession, drawn at 0s: it did not run, and that is shown, not hidden."""
+    job = _clang_tidy_job()
+    job["steps"].append(_step(50, "skipped but spanned", 100, 150, "skipped"))
+    tl = cr._step_timeline(job, "CM clang-tidy", _JOB_WINDOW_S)
+    by_name = {s["name"]: s for s in tl["steps"]}
+    for name, start in (("install prereqs (i686)", 31.0), ("run tests", 207.0),
+                        ("skipped but spanned", 100.0)):
+        assert name in by_name, (name, tl["steps"])
+        assert by_name[name]["dur_s"] == 0.0, by_name[name]
+        assert by_name[name]["start_s"] == start, by_name[name]
+
+
+# --------------------------------------------------------------------------- #
+# The dominant step's cross-run sample
+# --------------------------------------------------------------------------- #
+
+def _test_job(job_id: int, test_s: int | None, conclusion: str = "success",
+              start: str | None = None) -> dict:
+    """A job whose `run tests` step ran `test_s` seconds (`conclusion` as given)."""
+    end = 5 + (test_s or 0)
+    run_tests = _step(2, "run tests", 5, end, conclusion)
+    if start is not None:
+        run_tests["started_at"] = start
+    return {"id": job_id, "name": "test", "status": "completed", "conclusion": "success",
+            "html_url": f"https://github.com/acme/app/actions/runs/{job_id}/job/{job_id}",
+            "started_at": _ts(0), "completed_at": _ts(end + 1),
+            "steps": [_step(1, "Set up job", 0, 5), run_tests,
+                      _step(3, "Complete job", end, end + 1)]}
+
+
+def _dominant_sample(fastest: dict) -> list[dict]:
+    drilled = _test_job(2, 280)
+    slowest = _test_job(3, 300)
+    timeline = cr._step_timeline(drilled, "test", 286.0)
+    sample = cr._dominant_step_sample(
+        timeline, [(16.0, fastest), (286.0, drilled), (306.0, slowest)], drilled)
+    assert sample is not None and sample["label"] == "the `run tests` step (wall)"
+    return sample["values"]
+
+
+def test_dominant_step_sample_counts_a_skipped_run_as_zero():
+    """A run where GitHub skipped the dominant step is a truthful "did not run":
+    it contributes 0s to the cross-run sample, not nothing."""
+    values = _dominant_sample(_test_job(1, 0, "skipped", start=_SENTINEL))
+    assert [v["value"] for v in values] == [280.0, 0.0, 300.0], values
+
+
+def test_dominant_step_sample_drops_an_out_of_window_run():
+    """A step that claims to have run but carries the year-1 placeholder start has
+    no measurement: that run is left out of the sample, never read as a duration."""
+    values = _dominant_sample(_test_job(1, 10, start=_SENTINEL))
+    assert [v["value"] for v in values] == [280.0, 300.0], values
+
+
 # --------------------------------------------------------------------------- #
 # Downstream: decomposition and the cluster-floor (OPT73) finding
 # --------------------------------------------------------------------------- #

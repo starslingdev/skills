@@ -4748,6 +4748,12 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         bi = _bimodal_split(by_runner[dominant])
         if bi is not None:
             job_bimodal[name] = bi
+    # Each job's LONGEST sampled run, across every runner it ran on: the bound on any one
+    # step of that job. A step's p50 is taken over the runs it ran in, so a conditional
+    # step can legitimately exceed the job's all-runs p50, but never the job's longest
+    # sampled run (`_step_span` clamps a step to its own job). `verify_report` reads it.
+    job_max = {name: round(max(d for ds in by_runner.values() for d in ds), 1)
+               for name, by_runner in by_job_runner.items()}
     if not job_p50:
         return {"long_pole_job": "", "long_pole_p50": 0.0, "long_pole_p95": 0.0,
                 "floor_p50": 0.0, "job_p50": {}, "job_bimodal": {},
@@ -4765,6 +4771,7 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         "long_pole_p95": job_p95.get(long_pole[0], long_pole[1]),
         "floor_p50": floor,
         "job_p50": job_p50,
+        "job_max": job_max,
         "job_bimodal": job_bimodal,
         # Per-job dominant runner label string (job name -> sorted labels, e.g.
         # "ubuntu-latest"): the population each job's p50 above describes. Read by
@@ -10280,6 +10287,7 @@ def _detect_opt80_checkout_tail_stall(
         # reads as a quiet repo rather than as an identity that never matched.
         unmatched = 0
         unparseable = 0
+        not_run = 0
         observed_names: set[str] = set()
         for job in instances:
             match = None
@@ -10297,12 +10305,17 @@ def _detect_opt80_checkout_tail_stall(
                 unmatched += 1
                 continue
             # `_step_span`: a skipped / sentinel-started / out-of-window checkout has
-            # no measurement in this occurrence.
+            # no measurement in this occurrence. Its timestamps may parse fine, so it
+            # is tallied apart from a checkout whose timestamps do not parse.
             span = _step_span(match, job)
-            dur = (span[1] - span[0]).total_seconds() if span else None
-            if dur is None or dur < 0:
-                unparseable += 1
+            if span is None:
+                if (_parse_dt(match.get("started_at")) is None
+                        or _parse_dt(match.get("completed_at")) is None):
+                    unparseable += 1
+                else:
+                    not_run += 1
                 continue
+            dur = (span[1] - span[0]).total_seconds()
             job_id = job.get("id")
             if job_id is None or job_id in step_window:
                 # Without a usable id the log probe cannot look this occurrence's
@@ -10325,6 +10338,9 @@ def _detect_opt80_checkout_tail_stall(
         if unparseable:
             _no("checkout_step_duration_unparseable", job=job_name,
                 occurrences=unparseable)
+        if not_run:
+            _no("checkout_step_skipped_or_out_of_window", job=job_name,
+                occurrences=not_run)
         if not per_run and instances:
             # Its own gate: "the step was never found" is a different failure
             # from "the job did not run often enough", and only the second is a
@@ -20449,10 +20465,13 @@ def _dominant_step_sample(
         # the first textual match. Matching the first occurrence collapsed the cross-run
         # sample to the wrong (often zero-duration) leg, so the per-run values contradicted
         # this_run and the renderer wrongly reported the magnitude "stable across runs".
+        # A step GitHub reports `skipped` did not run in that occurrence: 0s, a truthful
+        # value. Only a step with no usable in-window span (`_step_span`) has none.
         best: float | None = None
         for s in job.get("steps") or []:
             if isinstance(s, dict) and str(s.get("name", "")) == name:
-                d = _step_duration_s(s, job)
+                d = (0.0 if str(s.get("conclusion") or "").lower() == "skipped"
+                     else _step_duration_s(s, job))
                 if d is not None and (best is None or d > best):
                     best = d
         return best

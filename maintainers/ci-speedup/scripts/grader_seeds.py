@@ -56,7 +56,7 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # The committed, reviewable TRIAGE ALLOWLIST. Keyed by the live `verify_report.Check.name` string
 # (what `run_checks` actually yields) so the classification can be applied at runtime and the
 # "every check is classified" invariant is directly testable; the originating `check_*` function
-# name is in the trailing comment for cross-reference with spec §2-A. 62 AUTO_SEED / 1 EXCLUDE /
+# name is in the trailing comment for cross-reference with spec §2-A. 71 AUTO_SEED / 1 EXCLUDE /
 # 2 TRIAGE — a new `verify_report` check makes `test_every_check_is_classified` go red until it's
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
@@ -93,6 +93,8 @@ TRIAGE_ALLOWLIST = {
     "Bottom-line crowned cluster lever is on the merge-gating spine (not off-spine)": AUTO_SEED,  # check_headline_cluster_lever_on_spine (issue #114)
     "headline leads with the observed wall when the chain sum diverges from the makespan": AUTO_SEED,  # check_headline_wait_is_divergence_correct (issue #115)
     "every file-backed structural lever carries a measured dominant step (no name-inferred OPT75)": AUTO_SEED,  # check_structural_pole_has_measured_step
+    "no finding cites a step longer than its job's measured window": AUTO_SEED,                  # check_step_cited_within_job_window
+    "no stamped step decomposition outlasts its job": AUTO_SEED,                                 # check_stamped_decomposition_within_job
     "no payload-bearing step is binned as `build` (redundant-work inflation → OPT72 misroute)": AUTO_SEED,  # check_structural_step_category_not_payload_binned_as_build
     "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)": AUTO_SEED,  # check_detector_leaf_agrees_with_dominant_category (issue #16)
     "pole addressable ceiling within the co-occurrence floor": AUTO_SEED,                            # check_pole_ceiling_within_cooccurrence
@@ -195,6 +197,8 @@ CHECK_CLASS = {
     "Bottom-line crowned cluster lever is on the merge-gating spine (not off-spine)": "mis-ranked-lever",  # issue #114: an off-spine cluster (its jobs dropped from the required-scoped spine, but its workflow hosts a required check) crowns the typical-PR headline over the real gating levers — a gating-path ranking error
     "headline leads with the observed wall when the chain sum diverges from the makespan": "mis-ranked-lever",  # issue #115: the chain-sum leads the "typical PR waits" headline while the measured makespan wall is materially bigger (queue gaps) — the wrong measured figure crowns the wait
     "every file-backed structural lever carries a measured dominant step (no name-inferred OPT75)": "estimated-not-measured",  # a lever asserted without a measured step
+    "no finding cites a step longer than its job's measured window": "fabricated-or-unsupported-finding",  # a cited step figure its job's own sampled run times contradict (a skipped step's year-1 start read as a duration)
+    "no stamped step decomposition outlasts its job": "fabricated-or-unsupported-finding",  # a stamped step figure its job's own sampled run times contradict
     "no payload-bearing step is binned as `build` (redundant-work inflation → OPT72 misroute)": "mis-ranked-lever",  # a payload step mis-binned as build inflates redundant-ratio and routes the pole to the wrong pattern (OPT72 not OPT75)
     "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)": "fabricated-or-unsupported-finding",  # issue #16: a leaf crowning a MEASURED CAUSE the pole's own dominant-step data contradicts (lint fix on a test-dominant pole)
     "pole addressable ceiling within the co-occurrence floor": "estimated-not-measured",  # an overstated ceiling not grounded in measured co-occurrence

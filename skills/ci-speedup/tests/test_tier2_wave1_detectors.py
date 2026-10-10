@@ -8241,6 +8241,20 @@ def test_opt80_names_an_identity_that_matched_no_observed_step():
     assert "fewer_sampled_occurrences_than_the_minimum" not in counts, counts
 
 
+def test_opt80_names_a_skipped_or_out_of_window_checkout_as_its_own_reason():
+    """A checkout GitHub reports `skipped`, or one whose `started_at` is the
+    year-1 placeholder, did not run in that occurrence. Its timestamps parse
+    fine, so tallying it as "duration unparseable" names the wrong cause."""
+    runs = _opt80_runs()
+    runs[0][0]["steps"][1]["conclusion"] = "skipped"
+    runs[1][0]["steps"][1]["started_at"] = "0001-01-01T00:00:00Z"
+    counts: dict = {}
+    _opt80(jpr=runs, withheld=counts)
+    # One tally per job; the occurrence count rides in the debug context.
+    assert counts.get("checkout_step_skipped_or_out_of_window") == 1, counts
+    assert "checkout_step_duration_unparseable" not in counts, counts
+
+
 # ---- the "already configured" reader ------------------------------------------
 
 def test_opt80_a_composite_that_unsets_the_abort_has_not_applied_it(tmp_path):

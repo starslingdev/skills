@@ -2008,9 +2008,14 @@ to `CASCADE` + its test; it then flows through every finding.
   - per-job `started_at`/`completed_at` → per-job durations → p50/p95
     (`_critical_path`, `_percentile`);
   - per-step durations (from the job JSON, no extra API calls), all read through
-    one rule (`_step_span`): a `skipped` step, a step whose `started_at` is the
-    API's year-1 placeholder or precedes its job's start has no duration, and a
-    step's end is clamped to its job's `completed_at`;
+    one rule (`_step_span`): a `skipped` step, a step whose `started_at` falls in
+    1970 or earlier (the API's year-1 placeholder included), or one that starts
+    more than 1s (whole-second rounding slack) before its job has no duration,
+    and a step's end is clamped to its job's `completed_at`. The drawn per-run
+    timeline keeps an in-window skipped step in its place at 0s; the dominant
+    step's cross-run sample counts a skipped run as 0s. Each job's longest
+    sampled run is stamped (`per_workflow_timing[wf].job_max`) as the bound
+    `verify_report` holds any one step to;
   - trigger events that actually fired each workflow (`run.event`, collected
     into `events_by_wf`);
   - cache hit/miss and install/build log lines (`--with-logs` for the cache

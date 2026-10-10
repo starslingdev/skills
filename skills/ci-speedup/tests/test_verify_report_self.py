@@ -11448,11 +11448,12 @@ _SENTINEL_S = 63927167070.0
 _LINUX = ".github/workflows/linux.yml"
 
 
-def _step_window_doc(*findings: dict, bimodal: dict | None = None, **extra) -> dict:
+def _step_window_doc(*findings: dict, **extra) -> dict:
     doc = {"pr_critical_path": {},
            "per_workflow_timing": {_LINUX: {
                "job_p50": {"CM clang-tidy": 277.0, "CM openssl torture 2": 277.0},
-               "job_bimodal": bimodal or {}}},
+               "job_max": {"CM clang-tidy": 290.0, "CM openssl torture 2": 290.0},
+               "job_bimodal": {}}},
            "findings": list(findings)}
     doc.update(extra)
     return doc
@@ -11481,7 +11482,7 @@ def test_step_cited_beyond_its_job_window_fails(tmp_path: Path):
     # FAIL: the curl shape, a year-1 sentinel step cited in the waterfall + table.
     assert _tag_for(rep, _STEP_CITE, tmp_path,
                     findings=_step_window_doc(_opt73(_SENTINEL_S))) == "FAIL"
-    # FAIL: an ordinary-looking step that still outlasts the measured 277s job.
+    # FAIL: an ordinary-looking step that still outlasts the job's longest sampled run.
     assert _tag_for(rep, _STEP_CITE, tmp_path,
                     findings=_step_window_doc(_opt73(400.0, job_s=500.0))) == "FAIL"
     # FAIL: only the evidence table carries the bogus figure.
@@ -11494,10 +11495,10 @@ def test_step_cited_beyond_its_job_window_fails(tmp_path: Path):
     # PASS: in-window figures.
     assert _tag_for(rep, _STEP_CITE, tmp_path,
                     findings=_step_window_doc(_opt73(60.0, job_s=250.0))) == "PASS"
-    # PASS: a bimodal job's slow-mode step is bounded by the slow mode's p50.
+    # PASS: a step longer than the job's 277s p50 but inside its 290s longest sampled
+    # run (a step that runs only on some runs has its p50 over those runs alone).
     assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
-        _opt73(300.0, job_s=330.0),
-        bimodal={"CM clang-tidy": {"high_p50_s": 340.0, "low_p50_s": 200.0}})) == "PASS"
+        _opt73(285.0, job_s=300.0))) == "PASS"
     # A structural decomposition's dominant figure: one step is bounded by the job's
     # window, a `+ N more <cat> steps` category aggregate (a sum of step medians, as on
     # pallets/flask `PyPy`) only by the absolute job limit.
@@ -11552,3 +11553,74 @@ def test_stamped_decomposition_step_beyond_its_job_fails(tmp_path: Path):
         data_bundle=timeline(30.0))) == "PASS"
     assert _tag_for(rep, _STEP_STAMP, tmp_path,
                     findings=_step_window_doc()) == "SKIP"
+
+
+def _conditional_step_runs() -> list[list[dict]]:
+    """Ten sampled runs of one job: a 280s `run tests` step runs in two of them and is
+    `skipped` in the other eight, so the job's p50 is 16s while the step's own p50 (over
+    the runs it ran in) is 280s. Two slow runs in ten is below the bimodal split's floor,
+    so no slow-mode window rescues the step."""
+    base = datetime(2026, 10, 1, tzinfo=timezone.utc)
+
+    def ts(day: int, s: int) -> str:
+        return (base + timedelta(days=day, seconds=s)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def job(i: int, runs_tests: bool) -> dict:
+        steps = [{"name": "Set up job", "number": 1, "conclusion": "success",
+                  "started_at": ts(i, 0), "completed_at": ts(i, 2)},
+                 {"name": "Run actions/checkout@v4", "number": 2, "conclusion": "success",
+                  "started_at": ts(i, 2), "completed_at": ts(i, 5)},
+                 {"name": "detect changes", "number": 3, "conclusion": "success",
+                  "started_at": ts(i, 5), "completed_at": ts(i, 15)}]
+        end = 295 if runs_tests else 15
+        steps.append({"name": "run tests", "number": 4,
+                      "conclusion": "success" if runs_tests else "skipped",
+                      "started_at": ts(i, 15), "completed_at": ts(i, end)})
+        steps.append({"name": "Complete job", "number": 5, "conclusion": "success",
+                      "started_at": ts(i, end), "completed_at": ts(i, end + 1)})
+        return {"id": 100 + i, "name": "test", "conclusion": "success",
+                "status": "completed", "labels": ["ubuntu-latest"],
+                "started_at": ts(i, 0), "completed_at": ts(i, end + 1), "steps": steps}
+
+    return [[job(i, i in (3, 7))] for i in range(10)]
+
+
+def test_conditional_step_longer_than_the_job_median_is_not_a_failure(tmp_path: Path):
+    """A step that runs in 2 of 10 sampled runs is longer than the job's all-runs
+    median, and that is a correct report. The bound for one step is the job's LONGEST
+    sampled run (`per_workflow_timing[wf].job_max`), stamped by the same engine pass
+    that measured the step."""
+    cr, vr = _load_collect_runs(), _load_verify_report()
+    runs = _conditional_step_runs()
+    crit = cr._critical_path(runs)
+    decomp = cr._decompose_job_steps([r[0] for r in runs],
+                                     bimodal=crit["job_bimodal"].get("test"))
+    assert crit["job_p50"]["test"] == 16.0 and not crit["job_bimodal"]
+    assert ("run tests", "test", 280.0) in decomp["steps"]
+    steps = [{"step": n, "category": c, "p50_s": p} for n, c, p in decomp["steps"]]
+    doc = {"per_workflow_timing": {"ci.yml": crit},
+           "pr_critical_path": {"poles": [{"check": "test", "workflow_file": "ci.yml",
+                                           "job": "test", "p50_s": crit["job_p50"]["test"],
+                                           "steps": steps}]},
+           "findings": [{"id": "f1", "pattern": "OPT75", "workflow_file": "ci.yml",
+                         "affected_jobs": ["test"],
+                         "measured_evidence": {"waterfall": {"job": "test", "steps": steps}},
+                         "decomposition": {"dominant_step": "run tests",
+                                           "dominant_p50_s": 280.0}}]}
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    for check in (vr.check_stamped_decomposition_within_job(fp),
+                  vr.check_step_cited_within_job_window(fp)):
+        assert check.ok and not check.skipped, check
+
+
+def test_curl_skipped_step_sentinel_still_fails():
+    """The pre-fix curl/curl findings (finding f148, OPT73, a skipped `test-linter`
+    step's year-1 `started_at` read as a 63.9-billion-second step) still FAIL: a job
+    with no stamped longest run is bounded by the longest a GitHub Actions job may run."""
+    vr = _load_verify_report()
+    fp = _SKILL_DIR / "tests" / "fixtures" / "curl_skipped_step_sentinel_findings.json"
+    check = vr.check_step_cited_within_job_window(fp)
+    assert not check.ok and not check.skipped, check
+    assert "test-linter" in check.detail
+    assert "longer than any GitHub Actions job may run" in check.detail

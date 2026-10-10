@@ -2134,6 +2134,8 @@ repository (that is [OPT28](#opt28--full-git-history-checkout)'s lever and
    the identity still matches no observed step, that is counted as
    `checkout_step_identity_never_matched_in_steps` /
    `checkout_step_measured_on_no_sampled_run`, never as "the job ran too rarely".
+   A checkout that was skipped, or whose times fall outside its job, did not run
+   in that occurrence and is counted as `checkout_step_skipped_or_out_of_window`.
 2. At least **6** sampled occurrences of the job, all on **one** known
    per-minute-billed runner label. A "tail" that is really some runs on a
    different runner class is a runner comparison, not a stall.

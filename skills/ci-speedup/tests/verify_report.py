@@ -11321,10 +11321,12 @@ def check_structural_pole_has_measured_step(findings_path: Path | None) -> Check
 # `completed_at`. Read naively that is a ~63.9-billion-second step, and on curl it crowned a
 # HIGH OPT73 "shared step recurs across the cluster" finding for a step that never ran. A single
 # step can never outlast the job that contains it, so every step figure the findings cite is
-# bounded by its job's MEASURED window: the job's p50 from `per_workflow_timing`, or the slow
-# mode's p50 when the job is bimodal (a slow-mode decomposition is drilled against the slow
-# mode). A job with no measured window is still bounded by the longest a GitHub Actions job may
-# run at all (`_VR_JOB_RUN_MAX_S`), which is what catches the year-1 sentinel on any job.
+# bounded by its job's MEASURED window: the job's LONGEST sampled run,
+# `per_workflow_timing[wf].job_max`. Never the job's p50: a step's p50 is taken only over the
+# runs it ran in, so a conditional step that runs in 2 of 10 runs (280s in a 16s-median job)
+# is correctly longer than the job's all-runs p50. A job with no stamped longest run is still
+# bounded by the longest a GitHub Actions job may run at all (`_VR_JOB_RUN_MAX_S`), which is
+# what catches the year-1 sentinel on any job.
 _VR_JOB_RUN_MAX_S = 5 * 86400.0   # the self-hosted job execution limit; hosted jobs stop at 6h
 _VR_STEP_ROUNDING_S = 1.0          # stamps round to 0.1s / whole seconds; never a real overrun
 _VR_DUR_TOKEN_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(h|m|s)\b")
@@ -11341,12 +11343,10 @@ def _vr_dur_cell_s(cell: object) -> float | None:
 
 
 def _vr_job_window_s(data: dict, wf: object, job: object) -> float | None:
-    """The job's measured p50 window (the slow mode's p50 when bimodal), else None."""
+    """The job's longest sampled run (`per_workflow_timing[wf].job_max[job]`), else None."""
     pwt = _as_dict(_as_dict(data.get("per_workflow_timing")).get(str(wf or "")))
-    vals = [_num(_as_dict(pwt.get("job_p50")).get(str(job or ""))),
-            _num(_as_dict(_as_dict(pwt.get("job_bimodal")).get(str(job or ""))).get("high_p50_s"))]
-    vals = [v for v in vals if v is not None and v > 0]
-    return max(vals) if vals else None
+    v = _num(_as_dict(pwt.get("job_max")).get(str(job or "")))
+    return v if v is not None and v > 0 else None
 
 
 def _vr_step_overrun(value: float | None, window: float | None) -> str | None:
@@ -11356,7 +11356,7 @@ def _vr_step_overrun(value: float | None, window: float | None) -> str | None:
     if value > _VR_JOB_RUN_MAX_S:
         return f"{value:.0f}s is longer than any GitHub Actions job may run"
     if window is not None and value > window + _VR_STEP_ROUNDING_S:
-        return f"{value:.0f}s outlasts the job's measured {window:.0f}s window"
+        return f"{value:.0f}s outlasts the job's longest sampled run ({window:.0f}s)"
     return None
 
 
@@ -11437,9 +11437,10 @@ def check_step_cited_within_job_window(findings_path: Path | None) -> Check:
 def check_stamped_decomposition_within_job(findings_path: Path | None) -> Check:
     """**The out-of-window step class, stamp side.** No per-step duration the engine stamps
     may exceed its job: each `pr_critical_path.poles[].steps[].p50_s` is bounded by that pole
-    job's measured window (`_vr_job_window_s`, falling back to the pole's own `p50_s`), and
-    each drilled run's per-step timeline (`data_bundle.logs[].steps_file`) is bounded by that
-    ONE run's `job_dur_s`, both as a duration and as `start_s + dur_s`."""
+    job's longest sampled run (`_vr_job_window_s`; never the pole's own `p50_s`, which a
+    conditional step's p50 may correctly exceed), and each drilled run's per-step timeline
+    (`data_bundle.logs[].steps_file`) is bounded by that ONE run's `job_dur_s`, both as a
+    duration and as `start_s + dur_s`."""
     name = "no stamped step decomposition outlasts its job"
     data, err = _load_findings_doc(findings_path)
     if err:
@@ -11448,8 +11449,7 @@ def check_stamped_decomposition_within_job(findings_path: Path | None) -> Check:
     offenders: list[str] = []
     for p in _as_list(_as_dict(data.get("pr_critical_path")).get("poles")):
         p = _as_dict(p)
-        window = (_vr_job_window_s(data, p.get("workflow_file"), p.get("job"))
-                  or _num(p.get("p50_s")))
+        window = _vr_job_window_s(data, p.get("workflow_file"), p.get("job"))
         for s in _as_list(p.get("steps")):
             s = _as_dict(s)
             v = _num(s.get("p50_s"))

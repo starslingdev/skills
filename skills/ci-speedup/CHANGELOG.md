@@ -997,10 +997,18 @@ unversioned and updates by reinstall from `main`.
   it. The per-run step timeline the report draws keeps a skipped step in its
   place at 0s and drops one with no usable time. A pole's step breakdown
   leaves skipped steps out and records how many it left out
-  (`skipped_steps`). The report checker gains two checks that fail (never
-  skip) when a finding cites a step longer than its job's measured run time,
-  or when a stamped step breakdown or drilled-run timeline has a step longer
-  than its job.
+  (`skipped_steps`). The cross-run check on a pole's dominant step counts a run
+  where that step was skipped as 0s (it did not run) and leaves out only a run
+  whose step has no usable in-window time. A slow-checkout (OPT80) occurrence
+  whose checkout was skipped or ran outside its job is now withheld as
+  `checkout_step_skipped_or_out_of_window`, not as an unparseable duration.
+  Each job's longest sampled run is stamped (`per_workflow_timing[wf].job_max`).
+  The report checker gains two checks that fail (never skip) when a finding
+  cites, or the engine stamps, a step longer than its job's longest sampled
+  run, or longer than any GitHub Actions job may run (5 days); a drilled-run
+  timeline step is held to that one run's length. A step that runs on only some
+  runs may correctly be longer than the job's median, so the median is never
+  the bound.
 
 - **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
   no longer invisible to the audit.** Since 2026-06-25 a step may be a
