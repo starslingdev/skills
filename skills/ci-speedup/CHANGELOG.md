@@ -1008,7 +1008,15 @@ unversioned and updates by reinstall from `main`.
   run, or longer than any GitHub Actions job may run (5 days); a drilled-run
   timeline step is held to that one run's length. A step that runs on only some
   runs may correctly be longer than the job's median, so the median is never
-  the bound.
+  the bound. A declared drilled-run timeline is never passed over silently:
+  with no timeline declared the check skips as before; with a timeline
+  declared and its bundle directory present (the stamped `logs_dir` or the
+  `<findings>.data/` sibling), a timeline file that is missing, unreadable,
+  not JSON or the wrong shape fails, naming the pole, the run and every path
+  tried; with a timeline declared and no bundle directory anywhere (a
+  findings-only artifact such as a committed example), the check skips and
+  says the bundle is not present, how many timelines went unchecked, and how
+  many pole step figures were checked.
 
 - **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
   no longer invisible to the audit.** Since 2026-06-25 a step may be a

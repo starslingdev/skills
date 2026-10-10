@@ -11440,7 +11440,10 @@ def check_stamped_decomposition_within_job(findings_path: Path | None) -> Check:
     job's longest sampled run (`_vr_job_window_s`; never the pole's own `p50_s`, which a
     conditional step's p50 may correctly exceed), and each drilled run's per-step timeline
     (`data_bundle.logs[].steps_file`) is bounded by that ONE run's `job_dur_s`, both as a
-    duration and as `start_s + dur_s`."""
+    duration and as `start_s + dur_s`. A declared timeline is never passed over silently:
+    with a bundle directory present (`logs_dir` or the `<findings>.data/` sibling) a missing,
+    unreadable, non-JSON or wrong-shape timeline FAILs; with no bundle directory anywhere (a
+    findings-only artifact) the result is a SKIP that counts the timelines left unchecked."""
     name = "no stamped step decomposition outlasts its job"
     data, err = _load_findings_doc(findings_path)
     if err:
@@ -11460,25 +11463,44 @@ def check_stamped_decomposition_within_job(findings_path: Path | None) -> Check:
             if why:
                 offenders.append(f"pole `{p.get('job') or p.get('check')}` step "
                                  f"`{s.get('step')}`: {why}")
+    pole_seen = seen
     db = _as_dict(data.get("data_bundle"))
     logs_dir = db.get("logs_dir")
+    # The bundle directories a timeline may live in: `logs_dir` as stamped, then the
+    # `<findings>.data/` sibling. With neither present (a findings-only artifact such as a
+    # committed example) the timelines cannot be checked, and the result says so; with one
+    # present, a declared timeline that cannot be read is a FAIL, never a silent pass.
+    dirs = [Path(str(logs_dir))] if logs_dir else []
+    if findings_path is not None:
+        dirs.append(findings_path.parent / (findings_path.name.rsplit(".", 1)[0] + ".data"))
+    bundle_present = any(d.is_dir() for d in dirs)
+    declared = 0
     for e in _as_list(db.get("logs")):
         e = _as_dict(e)
         sf = e.get("steps_file")
         if not sf:
             continue
-        cands = [Path(str(logs_dir)) / str(sf)] if logs_dir else []
-        if findings_path is not None:
-            cands.append(findings_path.parent / (findings_path.name.rsplit(".", 1)[0] + ".data")
-                         / str(sf))
-        tl = None
-        for c in cands:
+        declared += 1
+        if not bundle_present:
+            continue
+        who = (f"pole `{e.get('job') or e.get('check')}`"
+               + (f" run {e.get('run_id')}" if e.get("run_id") else ""))
+        tl, errs = None, []
+        for c in (d / str(sf) for d in dirs):
             try:
-                tl = _as_dict(json.loads(c.read_text(encoding="utf-8")))
+                tl = json.loads(c.read_text(encoding="utf-8"))
                 break
-            except (OSError, json.JSONDecodeError):
-                continue
-        if not tl:
+            except (OSError, UnicodeDecodeError) as exc:
+                errs.append(f"{c} ({type(exc).__name__})")
+            except json.JSONDecodeError:
+                errs.append(f"{c} (not JSON)")
+        if tl is None:
+            offenders.append(f"{who}: declared timeline `{sf}` could not be read; tried "
+                             + ", ".join(errs))
+            continue
+        if not isinstance(tl, dict) or not isinstance(tl.get("steps"), list):
+            offenders.append(f"{who}: declared timeline `{sf}` is not a timeline object "
+                             f"with a `steps` list")
             continue
         jd = _num(tl.get("job_dur_s"))
         for s in _as_list(tl.get("steps")):
@@ -11494,7 +11516,13 @@ def check_stamped_decomposition_within_job(findings_path: Path | None) -> Check:
             if why:
                 offenders.append(f"timeline `{tl.get('job') or e.get('job')}` step "
                                  f"`{s.get('name')}`: {why}")
-    if not seen:
+    if declared and not bundle_present and not offenders:
+        return Check(name, True,
+                     "drilled-run timeline bundle is not present (tried "
+                     + ", ".join(str(d) for d in dirs)
+                     + f"): {declared} declared timeline(s) not checked; only the "
+                     f"{pole_seen} pole step figure(s) were checked", skipped=True)
+    if not seen and not offenders:
         return Check(name, True, "no stamped step decomposition or timeline", skipped=True)
     return Check(name, not offenders,
                  f"{seen} stamped step figure(s), all inside their job"

@@ -11555,6 +11555,61 @@ def test_stamped_decomposition_step_beyond_its_job_fails(tmp_path: Path):
                     findings=_step_window_doc()) == "SKIP"
 
 
+def _declared_timeline_doc(logs_dir: str) -> dict:
+    return _step_window_doc(
+        pr_critical_path={"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                                     "job": "CM clang-tidy", "p50_s": 277.0,
+                                     "steps": [{"step": "build", "category": "build",
+                                                "p50_s": 121.0}]}]},
+        data_bundle={"logs_dir": logs_dir,
+                     "logs": [{"job": "CM clang-tidy", "check": "CM clang-tidy",
+                               "workflow_file": _LINUX, "run_id": 38018162993,
+                               "steps_file": "t.steps.json"}]})
+
+
+def _run_stamp_check(tmp_path: Path, doc: dict):
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    return _load_verify_report().check_stamped_decomposition_within_job(fp)
+
+
+def test_declared_timeline_missing_from_a_present_bundle_fails(tmp_path: Path):
+    """A declared `steps_file` the bundle should hold but does not is a FAIL naming the
+    pole and every path tried, never a silent pass over the poles alone."""
+    (tmp_path / "findings.data").mkdir()
+    check = _run_stamp_check(tmp_path, _declared_timeline_doc(str(tmp_path / "gone")))
+    assert not check.ok and not check.skipped, check
+    assert "CM clang-tidy" in check.detail and "38018162993" in check.detail
+    assert str(tmp_path / "findings.data" / "t.steps.json") in check.detail
+    assert str(tmp_path / "gone" / "t.steps.json") in check.detail
+
+
+def test_declared_timeline_unreadable_or_wrong_shape_fails(tmp_path: Path):
+    data = tmp_path / "findings.data"
+    data.mkdir()
+    for body in ("{not json", "[1, 2]", '{"job": "x", "steps": 3}'):
+        (data / "t.steps.json").write_text(body, encoding="utf-8")
+        check = _run_stamp_check(tmp_path, _declared_timeline_doc(str(data)))
+        assert not check.ok and not check.skipped, (body, check)
+        assert "t.steps.json" in check.detail, (body, check)
+
+
+def test_declared_timeline_with_no_bundle_anywhere_is_a_loud_skip(tmp_path: Path):
+    """A findings-only artifact (a committed example: `logs_dir` is a temp path from
+    another machine, no `<findings>.data/` sibling) cannot check its timelines. That is
+    a SKIP that says so and counts what went unchecked, not a PASS over the poles."""
+    check = _run_stamp_check(tmp_path, _declared_timeline_doc("/nonexistent/x.data"))
+    assert check.ok and check.skipped, check
+    assert "drilled-run timeline bundle is not present" in check.detail, check
+    assert "1 declared timeline(s) not checked" in check.detail, check
+    assert "only the 1 pole step figure(s) were checked" in check.detail, check
+    # A pole that overruns its job still FAILs without the bundle.
+    doc = _declared_timeline_doc("/nonexistent/x.data")
+    doc["pr_critical_path"]["poles"][0]["steps"][0]["p50_s"] = _SENTINEL_S
+    check = _run_stamp_check(tmp_path, doc)
+    assert not check.ok and not check.skipped, check
+
+
 def _conditional_step_runs() -> list[list[dict]]:
     """Ten sampled runs of one job: a 280s `run tests` step runs in two of them and is
     `skipped` in the other eight, so the job's p50 is 16s while the step's own p50 (over
