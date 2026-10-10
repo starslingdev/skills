@@ -190,23 +190,32 @@ def test_job_needs_git_history_agrees_on_every_battery_row(sides):
         f"{mismatches!r} — re-sync ci-score's copy with ci-speedup's scanner")
 
 
-# GitHub Actions `parallel:` groups (2026-06-25). ci-score walks into them;
-# ci-speedup still reads `steps:` flat, so on the two history rows ci-score
-# says the deep checkout is needed (a history op sits in a group: a list, or a
-# single step mapping, which ci-score reads defensively) and ci-speedup says
-# it is not. A KNOWN gap, pinned rather than hidden: a NON-strict xfail.
-# It is non-strict on purpose: the ci-speedup `parallel:` change (PR #122) is
-# in flight in parallel, and a strict marker would turn main red for whichever
-# of the two PRs lands second. Once both are on main, delete this marker and
-# the test becomes a plain agreement check. The other rows (a history op after
-# a control step, an unreadable group) must agree already, pinned by
-# `test_parallel_rows_that_already_agree` below.
+# GitHub Actions `parallel:` groups (2026-06-25). Both engines walk into them
+# (ci-score since #120, ci-speedup since #122), so a history op inside a
+# documented group — a `parallel:` LIST — must read the same on both sides.
+#
+# One shape still differs, and it is pinned rather than hidden: a `parallel:`
+# value that is a single step MAPPING instead of a list. GitHub documents only
+# the list form. ci-score reads the mapping defensively as a list of one and
+# sees the history op; ci-speedup counts the group MALFORMED (`not_a_list`),
+# reads nothing inside it, and holds its shallow-checkout pattern back on
+# that job (`job_has_an_unreadable_parallel_group`, along with every other
+# absence-based pattern, and files the job as a coverage gap), so it never
+# recommends shallowing it either — the two engines disagree on the
+# predicate but agree that the job must not be shallowed; what the user sees
+# differs (an exempted pass there, a coverage gap here). Whether ci-speedup
+# should read the mapping too is
+# an open product decision; until it is made, the row below is a STRICT
+# xfail: the day ci-speedup reads it, this test goes red and the marker is
+# deleted. The other rows (a history op after a control step, an unreadable
+# group) must agree already, pinned by `test_parallel_rows_that_already_agree`.
 _PARALLEL_HISTORY_ROWS = [
     ("parallel-history", {"steps": [
         {"uses": "actions/checkout@v4", "with": {"fetch-depth": 0}},
         {"parallel": [{"run": "git log --oneline"}, {"run": "true"}]}]}),
-    ("parallel-single-mapping", {"steps": [{"parallel": {"run": "git log"}}]}),
 ]
+_PARALLEL_SINGLE_MAPPING_ROW = (
+    "parallel-single-mapping", {"steps": [{"parallel": {"run": "git log"}}]})
 _PARALLEL_AGREEING_ROWS = [
     # A control step must not end the read: the history op after it counts.
     ("parallel-wait-all", {"steps": [
@@ -223,16 +232,12 @@ def test_parallel_rows_that_already_agree(sides):
             score._job_needs_git_history(job, name), name
     name, job = _PARALLEL_AGREEING_ROWS[0]
     assert score._job_needs_git_history(job, name) is True
-    # ci-score's side of the xfail below is pinned OUTSIDE it, so the xfail
-    # can only be explained by ci-speedup's flat read.
-    for name, job in _PARALLEL_HISTORY_ROWS:
+    # ci-score's side of the two tests below is pinned OUTSIDE them, so a
+    # disagreement can only be explained by ci-speedup's read.
+    for name, job in _PARALLEL_HISTORY_ROWS + [_PARALLEL_SINGLE_MAPPING_ROW]:
         assert score._job_needs_git_history(job, name) is True, name
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "ci-speedup's scanner does not read steps inside `parallel:` groups yet "
-    "(PR #122); ci-score does. Non-strict so neither PR reddens main when the "
-    "other lands; delete this marker once both are merged."))
 def test_job_needs_git_history_agrees_inside_parallel_groups(sides):
     speed, score = sides
     speed._GIT_HISTORY_LOCAL_ACTIONS = set()
@@ -240,6 +245,18 @@ def test_job_needs_git_history_agrees_inside_parallel_groups(sides):
         assert speed._job_needs_git_history(job, name) is True, (
             f"{name}: ci-speedup would recommend shallowing a job whose "
             "`parallel:` group walks git history")
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "a `parallel:` value that is one step mapping (undocumented shape): "
+    "ci-score reads it as a list of one; ci-speedup counts it malformed and "
+    "holds its shallow-checkout pattern back on the job instead. Open product "
+    "decision; delete this marker when ci-speedup reads the mapping."))
+def test_job_needs_git_history_agrees_on_a_single_mapping_group(sides):
+    speed, score = sides
+    speed._GIT_HISTORY_LOCAL_ACTIONS = set()
+    name, job = _PARALLEL_SINGLE_MAPPING_ROW
+    assert speed._job_needs_git_history(job, name) is True, name
 
 
 def test_local_composite_action_indexing_agrees(sides, tmp_path: Path):
@@ -322,8 +339,6 @@ def test_a_history_op_inside_a_parallel_group_needs_history(sides):
 
 def test_parallel_group_rows_agree_across_the_two_engines(sides):
     speed, score = sides
-    if not hasattr(score, "_walk_steps"):
-        pytest.skip("ci-score's step walker has not landed on this base yet")
     speed._GIT_HISTORY_LOCAL_ACTIONS = set()
     mismatches = [name for name, job in _PARALLEL_JOB_BATTERY
                   if speed._job_needs_git_history(job, name)
@@ -331,15 +346,36 @@ def test_parallel_group_rows_agree_across_the_two_engines(sides):
     assert not mismatches, mismatches
 
 
-def test_ci_speedup_records_every_step_stat_ci_score_records(sides):
-    """The two engines describe one walk with the same key names, so a reader
-    of either findings document finds the same provenance fields."""
+# The two walks record what they read under different shapes, by design:
+# ci-score keeps one record per unreadable or skipped entry (`invalid`,
+# `malformed`, `skipped` lists and `skipped_children`), ci-speedup keeps the
+# files, jobs and reasons involved (`invalid_files`, `invalid_jobs`,
+# `malformed_files`, `malformed_jobs`, `malformed_reasons`). The COUNTERS are
+# the shared vocabulary, and a reader of either findings document must find
+# them under one name and one type. The shared contract is the NAME and the
+# TYPE only: on one input the counts differ (a single-mapping group is
+# `invalid` in ci-score and `malformed` in ci-speedup, whose `groups` also
+# counts malformed ones), so never compare the two stamps' values.
+_SHARED_WALK_COUNTERS = frozenset({
+    "groups", "steps_in_groups", "control_steps",
+    "invalid_groups", "malformed_groups"})
+
+
+def test_both_engines_record_the_shared_walk_counters(sides):
     speed, score = sides
-    if not hasattr(score, "_new_step_stats"):
-        pytest.skip("ci-score's step walker has not landed on this base yet")
     speed_keys = set(speed.parallel_steps_stats([]))
-    missing = set(score._new_step_stats()) - speed_keys
-    assert not missing, f"ci-speedup's parallel_steps lacks ci-score keys: {missing}"
+    score_keys = set(score._new_step_stats())
+    assert not _SHARED_WALK_COUNTERS - speed_keys, (
+        f"ci-speedup's parallel_steps lacks shared counters: "
+        f"{sorted(_SHARED_WALK_COUNTERS - speed_keys)}")
+    assert not _SHARED_WALK_COUNTERS - score_keys, (
+        f"ci-score's parallel_steps lacks shared counters: "
+        f"{sorted(_SHARED_WALK_COUNTERS - score_keys)}")
+    # A counter named on one side must be a counter on the other too, not a
+    # list under the same name.
+    for key in _SHARED_WALK_COUNTERS:
+        assert type(speed.parallel_steps_stats([])[key]) is type(
+            score._new_step_stats()[key]), key
 
 
 def test_a_local_action_inside_a_parallel_group_is_indexed(sides, tmp_path: Path):
