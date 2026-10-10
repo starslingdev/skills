@@ -5985,6 +5985,12 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
               "uncredited parallel-steps detector — no runner-minute or wall-clock "
               "saving is credited; the candidate steps' p50 sum minus the slowest is "
               "stamped as an upper bound and the prompt requires a benchmark first"),
+    # NOT DERIVABLE — OPT84 credits nothing: the step's own measured p50 is
+    # stamped as a ceiling and a sandbox benchmark is required first.
+    "OPT84": (_RM_DOOR_NOT_DERIVABLE,
+              "uncredited tool-swap detector — no runner-minute or wall-clock saving "
+              "is credited; the step's measured p50 is stamped as a ceiling and the "
+              "prompt requires a sandbox benchmark first"),
     # NOT DERIVABLE — OPT80's basis is one STEP's tail excess (mean - p50 of the
     # checkout step), scaled by that job's own measured run frequency. It is
     # neither the per-job cost spine nor an eliminated-runs slice, so the generic
@@ -12564,9 +12570,16 @@ def _opt82_forwarded_args(toks: list[str], name: str) -> list[str]:
     return rest[1:] if rest[:1] == ["--"] else rest
 
 
-def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None"
+def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None",
+                      any_name: bool = False,
+                      bin_names: "frozenset[str]" = frozenset(),
                       ) -> "tuple[str, bool] | None":
-    """`(script name, scoped elsewhere?)` when `toks` runs a package script."""
+    """`(script name, scoped elsewhere?)` when `toks` runs a package script.
+
+    `any_name` (the all-leaves read, OPT84) also treats an undeclared name as a
+    script reference, so it fails closed, unless it is one of `bin_names` and
+    the package's scripts were read (`pnpm prettier --check .` runs the
+    binary). OPT82 calls it with the defaults, unchanged."""
     if not toks:
         return None
     pm, rest = toks[0], toks[1:]
@@ -12603,8 +12616,168 @@ def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None"
     # reference (it may be defined where this read cannot see).
     if scripts is not None and args[0] in scripts:
         return args[0], scoped
+    if any_name:
+        if scripts is not None and not scoped and args[0] in bin_names:
+            return None
+        return args[0], scoped
     if "lint" in args[0].lower():
         return args[0], scoped
+    return None
+
+
+@dataclass
+class ResolvedLeaves:
+    """What a step's `run:` command runs, read without running it.
+
+    `leaves`: every leaf command in order — `{"command", "tokens", "wd",
+    "runner", "chain"}`, `tokens` with any runner prefix (`npx`, `pnpm exec`,
+    `bunx`, ...) unwrapped, `wd` the directory it runs in after any literal
+    `cd` (None after a `cd` this read could not follow), `chain` the package
+    scripts followed to reach it. `unresolved`: every segment this read could
+    not follow — `{"kind", "reason", "segment", "chain", "tool", "wd"}`, `kind`
+    one of "expression", "cd", "delegated", "package_json", "script".
+    `verdict`: the early-stop result for a caller that passes `stop` (OPT82's
+    `_opt82_resolve_lint` tuple shape), else the first relevant unresolved."""
+    leaves: list
+    unresolved: list
+    verdict: "tuple | None" = None
+
+
+def _resolve_run_leaves(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
+                        scripts_unreadable: "frozenset[str]" = frozenset(), *,
+                        relevant: "Callable[[str], bool] | None" = None,
+                        stop: "Callable[..., tuple | None] | None" = None,
+                        bin_names: "frozenset[str]" = frozenset(),
+                        chain: "list[str] | None" = None, depth: int = 0,
+                        runner: str = "npx") -> ResolvedLeaves:
+    """Every leaf command `cmd` runs: split on `&&`, `||`, `;`, `|` and newlines,
+    package-manager script calls followed into `scripts_by_dir[wd]` up to
+    `_OPT82_MAX_SCRIPT_DEPTH`, runner wrappers unwrapped, a literal `cd`
+    followed. Segments it cannot follow are recorded with a reason.
+
+    `relevant` narrows which unfollowable segments count (OPT82 passes "is it
+    lint-named"; None = every one, the OPT84 read, which also treats any
+    undeclared package-manager name as a script unless it is in `bin_names`).
+    `stop(rest, wd, runner, chain)` ends the walk at the first leaf it returns
+    a tuple for (OPT82's ESLint leaf); the result is then `verdict`."""
+    acc = ResolvedLeaves([], [])
+    acc.verdict = _rl_walk(cmd, wd, scripts_by_dir, scripts_unreadable, relevant,
+                           stop, bin_names, chain, depth, runner, acc)
+    return acc
+
+
+def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
+             scripts_unreadable: "frozenset[str]",
+             relevant: "Callable[[str], bool] | None",
+             stop: "Callable[..., tuple | None] | None",
+             bin_names: "frozenset[str]",
+             chain: "list[str] | None", depth: int, runner: str,
+             acc: ResolvedLeaves) -> "tuple | None":
+    """One level of `_resolve_run_leaves`. Control flow is OPT82's original
+    resolver, verbatim, so its verdict is byte-identical (a snapshot test pins
+    it); the leaves and unresolved records are collected beside it."""
+    import shlex
+    chain = list(chain or [])
+    unresolvable: "tuple[str, str, list[str]] | None" = None
+    lost: "str | None" = None              # an untraceable `cd` target
+    rel = relevant if relevant is not None else (lambda _s: True)
+
+    def _found(res: tuple) -> tuple:
+        return ("unresolvable", f"cd {lost}".strip(), chain) if lost is not None \
+            else res
+
+    def _note(kind: str, reason: str, seg: str, tool: "str | None" = None) -> None:
+        acc.unresolved.append({"kind": kind, "reason": reason, "segment": seg,
+                               "chain": list(chain), "tool": tool,
+                               "wd": None if lost is not None else wd})
+
+    for seg in _OPT82_SEGMENT_SPLIT_RE.split(cmd or ""):
+        seg = seg.strip()
+        if not seg:
+            continue
+        if seg == "cd" or seg.startswith(("cd ", "cd\t")):
+            new_wd = None if lost is not None else _opt82_cd(wd, seg[2:].strip())
+            if new_wd is None:
+                if lost is None:
+                    _note("cd", "changes to a directory this read cannot follow", seg)
+                lost = lost if lost is not None else seg[2:].strip()
+            else:
+                wd = new_wd
+            continue
+        lintish = rel(seg)
+        if "${{" in seg:
+            if lintish:
+                _note("expression", "a ${{ }} expression only known at run time", seg)
+                unresolvable = unresolvable or ("unresolvable", "expression", chain)
+            continue
+        toks = _opt82_tokens(seg)
+        rest, seg_runner, call = _opt82_exec_call(toks, runner)
+        if call is not None:               # `npx -c '<command>'`
+            sub = _rl_walk(call, wd, scripts_by_dir, scripts_unreadable, relevant,
+                           stop, bin_names, chain, depth + 1, seg_runner, acc)
+            if sub is not None and sub[0] != "unresolvable":
+                return _found(sub)
+            if sub is not None:
+                unresolvable = unresolvable or sub
+            continue
+        if rest and stop is not None:
+            hit = stop(rest, wd, seg_runner, chain)
+            if hit is not None:
+                return _found(hit)
+        dlg = _opt82_delegator(toks)
+        if lintish and dlg:
+            _note("delegated", f"handed to `{dlg}`, whose own configuration decides "
+                  "what runs", seg, dlg)
+            unresolvable = unresolvable or ("unresolvable", "delegated", chain)
+            continue
+        scripts = scripts_by_dir.get(wd)
+        ref = _opt82_script_ref(toks, scripts, any_name=relevant is None,
+                                bin_names=bin_names)
+        if ref is None:
+            if rest:
+                acc.leaves.append({"command": shlex.join(rest), "tokens": list(rest),
+                                   "wd": None if lost is not None else wd,
+                                   "runner": seg_runner, "chain": list(chain)})
+            continue
+        name, scoped = ref
+        lint_named = rel(name)
+        body = (scripts or {}).get(name)
+        if scoped or body is None or depth >= _OPT82_MAX_SCRIPT_DEPTH:
+            if lint_named:
+                kind = ("package_json" if (scripts is None and not scoped
+                                           and wd in scripts_unreadable)
+                        else "script")
+                _note(kind,
+                      "the package.json defining it could not be read"
+                      if kind == "package_json"
+                      else "scoped to another package" if scoped
+                      else "not defined in this package's scripts" if body is None
+                      else "past the script depth cap", seg, name)
+                unresolvable = unresolvable or ("unresolvable", kind, chain)
+            continue
+        fwd = _opt82_forwarded_args(toks, name)
+        sub = _rl_walk(body + (" " + shlex.join(fwd) if fwd else ""),
+                       wd, scripts_by_dir, scripts_unreadable, relevant, stop,
+                       bin_names, chain + [f"{toks[0]} run {name}"], depth + 1,
+                       _OPT82_RUNNER_BY_PM.get(toks[0], "npx"), acc)
+        if sub is not None and sub[0] != "unresolvable":
+            return _found(sub)
+        if sub is not None and lint_named:
+            unresolvable = unresolvable or sub
+    return unresolvable
+
+
+def _opt82_lintish(s: str) -> bool:
+    return "lint" in s.lower()
+
+
+def _opt82_eslint_stop(rest: list[str], wd: str, runner: str,
+                       chain: list[str]) -> "tuple | None":
+    """OPT82's leaf: an ESLint invocation, as `_opt82_resolve_lint` returns it."""
+    import shlex
+    if _re.fullmatch(r"eslint(?:@[\w.^~<>=*-]+)?", rest[0].rsplit("/", 1)[-1]):
+        return ("eslint", shlex.join(["eslint", *rest[1:]]), chain,
+                {"wd": wd, "runner": runner})
     return None
 
 
@@ -12620,73 +12793,12 @@ def _opt82_resolve_lint(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, s
     script ...), "package_json" (the package.json defining the script could
     not be read), "script" (a lint-named script not defined here, scoped to
     another package, or past the depth cap) or "cd <target>" (lints after a
-    `cd` it cannot follow); None when it is not a lint step."""
-    import shlex
-    chain = list(chain or [])
-    unresolvable: "tuple[str, str, list[str]] | None" = None
-    lost: "str | None" = None              # an untraceable `cd` target
-
-    def _found(res: tuple) -> tuple:
-        return ("unresolvable", f"cd {lost}".strip(), chain) if lost is not None \
-            else res
-
-    for seg in _OPT82_SEGMENT_SPLIT_RE.split(cmd or ""):
-        seg = seg.strip()
-        if not seg:
-            continue
-        if seg == "cd" or seg.startswith(("cd ", "cd\t")):
-            new_wd = None if lost is not None else _opt82_cd(wd, seg[2:].strip())
-            if new_wd is None:
-                lost = lost if lost is not None else seg[2:].strip()
-            else:
-                wd = new_wd
-            continue
-        lintish = "lint" in seg.lower()
-        if "${{" in seg:
-            if lintish:
-                unresolvable = unresolvable or ("unresolvable", "expression", chain)
-            continue
-        toks = _opt82_tokens(seg)
-        rest, seg_runner, call = _opt82_exec_call(toks, runner)
-        if call is not None:               # `npx -c '<command>'`
-            sub = _opt82_resolve_lint(call, wd, scripts_by_dir, chain, depth + 1,
-                                      scripts_unreadable, runner=seg_runner)
-            if sub is not None and sub[0] == "eslint":
-                return _found(sub)
-            if sub is not None:
-                unresolvable = unresolvable or sub
-            continue
-        if rest and _re.fullmatch(r"eslint(?:@[\w.^~<>=*-]+)?", rest[0].rsplit("/", 1)[-1]):
-            return _found(("eslint", shlex.join(["eslint", *rest[1:]]), chain,
-                           {"wd": wd, "runner": seg_runner}))
-        if lintish and _opt82_delegator(toks):
-            unresolvable = unresolvable or ("unresolvable", "delegated", chain)
-            continue
-        scripts = scripts_by_dir.get(wd)
-        ref = _opt82_script_ref(toks, scripts)
-        if ref is None:
-            continue
-        name, scoped = ref
-        lint_named = "lint" in name.lower()
-        body = (scripts or {}).get(name)
-        if scoped or body is None or depth >= _OPT82_MAX_SCRIPT_DEPTH:
-            if lint_named:
-                kind = ("package_json" if (scripts is None and not scoped
-                                           and wd in scripts_unreadable)
-                        else "script")
-                unresolvable = unresolvable or ("unresolvable", kind, chain)
-            continue
-        fwd = _opt82_forwarded_args(toks, name)
-        sub = _opt82_resolve_lint(body + (" " + shlex.join(fwd) if fwd else ""),
-                                  wd, scripts_by_dir,
-                                  chain + [f"{toks[0]} run {name}"], depth + 1,
-                                  scripts_unreadable,
-                                  runner=_OPT82_RUNNER_BY_PM.get(toks[0], "npx"))
-        if sub is not None and sub[0] == "eslint":
-            return _found(sub)
-        if sub is not None and lint_named:
-            unresolvable = unresolvable or sub
-    return unresolvable
+    `cd` it cannot follow); None when it is not a lint step. A thin call
+    through the shared `_resolve_run_leaves`, narrowed to lint-named segments
+    and stopped at the first ESLint leaf."""
+    return _resolve_run_leaves(cmd, wd, scripts_by_dir, scripts_unreadable,
+                               relevant=_opt82_lintish, stop=_opt82_eslint_stop,
+                               chain=chain, depth=depth, runner=runner).verdict
 
 
 def _opt82_norm_dir(value: Any) -> "str | None":
@@ -16521,6 +16633,617 @@ def _detect_opt83_parallel_steps(
         }
         out.append(f)
     return out
+
+
+# =============================================================================
+# OPT84 — A Slow Step on the Long Pole Runs a Tool That Has a Native Drop-in
+# (uncredited; benchmark first)
+# =============================================================================
+# A heavy lint / format / type-check step on a drilled long pole that runs a
+# tool with a native, much faster drop-in: Prettier -> oxfmt, ESLint -> oxlint,
+# `tsc --noEmit` -> TypeScript 7. The finding tells an agent which tool the
+# step runs, which drop-in exists and where its docs are; the card is derived
+# from the stamped facts.
+#
+# ROUTED FROM THE MEASURED CRITICAL PATH, like OPT83: only the poles `collect()`
+# drilled, from each pole's stamped per-step p50 decomposition. A step is a
+# candidate when it is `scan` or `build` (`_OPT84_CATEGORIES`), at least
+# `_OPT84_MIN_STEP_S` seconds and at least `_OPT84_MIN_SHARE` of the pole's
+# decomposed p50 (OPT83's floors, so the two agree on what "heavy" means), and
+# a `run:` step. Unlike OPT83, a step inside a `parallel:` group still counts:
+# making a step faster does not depend on where it sits.
+#
+# What the step runs is read, never guessed: its `run:` is resolved through
+# package.json scripts by `_resolve_run_leaves` (OPT82's resolver, generalized)
+# and every leaf is matched against `_OPT84_TABLE`. Anything the read cannot
+# follow holds the step back (`_OPT84_HELD_BACK_GATES`, listed under
+# `opt84_withheld_candidates` with the job and step); the Babel and Webpack rows
+# of the catalog's table are recipe-only and never detected.
+#
+# SIZING — uncredited by design. Published speedups are other repos' numbers.
+# The finding carries no wall-clock and no runner-minute saving and has no
+# `_SIZING` row; it stamps the step's own measured p50 as `ceiling_s` (the most
+# the swap can remove), and the prompt asks for a benchmark first.
+_OPT84_TITLE = "A Slow Step on the Long Pole Runs a Tool That Has a Native Drop-in"
+_OPT84_FIX_STRATEGY = "slow-tool-on-pole-has-native-drop-in"
+_OPT84_MIN_SHARE = 0.15
+_OPT84_MIN_STEP_S = 20.0
+_OPT84_CATEGORIES = frozenset({"scan", "build"})
+_OPT84_CEILING_BASIS = (
+    "the step's own measured p50: the most swapping its tool can remove from this "
+    "pole, not a forecast of the saving")
+# The findings-doc key the collector writes OPT84's WITHHELD candidates under
+# (`[{workflow_file, job, gate, step?}]`). A STRING CONTRACT across the
+# collector, the renderer and the verifier.
+_OPT84_WITHHELD_DOC_KEY = "opt84_withheld_candidates"
+# Exits that are a VERDICT (nothing to say): counted, never listed.
+_OPT84_VERDICT_GATES = frozenset({
+    "pole_not_file_backed",
+    "no_candidate_step",
+    "tool_not_in_table",
+    "target_already_in_use",
+    "tsc_emits_not_in_v1",
+    "eslint_reported_by_opt82",
+})
+# Exits where the audit could not decide: counted AND listed with job + step.
+_OPT84_HELD_BACK_GATES = frozenset({
+    "pole_workflow_ambiguous",
+    "pole_step_entries_unreadable",
+    "pole_step_timings_unavailable",
+    "workflow_yaml_unavailable",
+    "pole_job_not_matched_in_yaml",
+    "measured_step_not_matched_in_yaml",
+    "command_has_expression",
+    "command_changes_directory",
+    "script_unresolvable",
+    "delegated_script_unresolved",
+    "package_json_unreadable",
+    "candidate_is_an_action",
+    "eslint_config_unreadable",
+    "typescript_version_unreadable",
+    "working_directory_unknown",
+})
+# The target tools' own documentation (each URL checked to answer 200 on
+# 2026-10-10). One table, so the card and the catalog cite the same pages.
+_OPT84_DOCS: dict[str, dict[str, "str | None"]] = {
+    "prettier": {
+        "docs_url": "https://oxc.rs/docs/guide/usage/formatter.html",
+        "migration_docs_url":
+            "https://oxc.rs/docs/guide/usage/formatter/migrate-from-prettier.html",
+    },
+    "eslint": {
+        "docs_url": "https://oxc.rs/docs/guide/usage/linter.html",
+        "migration_docs_url":
+            "https://oxc.rs/docs/guide/usage/linter/migrate-from-eslint.html",
+    },
+    "tsc": {
+        "docs_url": "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/",
+        "migration_docs_url": None,
+    },
+}
+# The swap table's DETECTED rows, as data. `binaries`: {leaf binary: flags of
+# which at least one must be present (empty = any invocation)}. `targets`: leaf
+# binaries meaning this row's swap is already done. `target_major`: a declared
+# `package` major at or above which the swap is already done.
+_OPT84_TABLE: dict[str, dict[str, Any]] = {
+    "prettier": {"source_tool": "Prettier", "package": "prettier", "target": "oxfmt",
+                 "binaries": {"prettier": ("--check", "-c", "--list-different", "-l"),
+                              "pretty-quick": ("--check",)},
+                 "targets": ("oxfmt",), "target_major": None,
+                 "published_range": "~4-30×"},
+    "eslint": {"source_tool": "ESLint", "package": "eslint", "target": "oxlint",
+               "binaries": {"eslint": ()}, "targets": ("oxlint",),
+               "target_major": None, "published_range": "~8-20×"},
+    "tsc": {"source_tool": "tsc", "package": "typescript", "target": "typescript@7",
+            "binaries": {"tsc": ("--noEmit",)}, "targets": (), "target_major": 7,
+            "published_range": "8-12× (vendor-stated)"},
+}
+# `published_range` is the catalog's published range for the swap: OTHER repos'
+# numbers, rendered as such, never this repo's saving.
+# Binaries a bare `pnpm <name>` / `yarn <name>` may run when no script of that
+# name exists: the table's sources and targets. Any other undeclared name is
+# read as a script this read could not find, and fails closed.
+_OPT84_BIN_NAMES = frozenset({"prettier", "pretty-quick", "eslint", "tsc", "oxfmt",
+                              "oxlint"})
+# ESLint plugins whose rules oxlint may not carry one for one: any of these on
+# the config makes the recipe a dual-run (oxlint first, a scoped ESLint after).
+_OPT84_FRAMEWORK_PLUGINS = frozenset({
+    "react", "react-hooks", "react-refresh", "react-native", "vue", "svelte",
+    "angular", "@angular-eslint", "next", "@next/next", "astro", "solid", "qwik",
+    "ember", "storybook"})
+# ESLint flags that take a value (the value is not a lint path).
+_OPT84_ESLINT_VALUE_FLAGS = frozenset({
+    "-c", "--config", "--ext", "-f", "--format", "--max-warnings", "-o",
+    "--output-file", "--rulesdir", "--resolve-plugins-relative-to", "--ignore-path",
+    "--ignore-pattern", "--parser", "--parser-options", "--plugin", "--rule", "--env",
+    "--global", "--cache-location", "--cache-strategy"})
+_OPT84_PRETTIER_VALUE_FLAGS = frozenset({
+    "--config", "--ignore-path", "--plugin", "--log-level", "--loglevel",
+    "--cache-location", "--cache-strategy", "--parser", "--stdin-filepath"})
+
+
+def _opt84_gate_for_unresolved(u: dict[str, Any]) -> str:
+    """The held-back gate for the first segment `_resolve_run_leaves` could not
+    follow. A local script run by node / tsx / ts-node is a script the read
+    cannot open; any other delegator (turbo, nx, lerna, make ...) is delegated."""
+    kind = str(u.get("kind") or "")
+    if kind == "expression":
+        return "command_has_expression"
+    if kind == "cd":
+        return "command_changes_directory"
+    if kind == "package_json":
+        return "package_json_unreadable"
+    if kind == "delegated":
+        return ("script_unresolvable" if u.get("tool") in ("node", "tsx", "ts-node")
+                else "delegated_script_unresolved")
+    return "script_unresolvable"
+
+
+def _opt84_leaf_tokens(tokens: list[str]) -> list[str]:
+    """A leaf's tokens with a bare `pnpm` / `bun` in front of a binary dropped."""
+    t = list(tokens)
+    if len(t) > 1 and t[0] in ("pnpm", "bun") and t[1] not in _OPT82_PM_BUILTINS:
+        t = t[1:]
+    return t
+
+
+def _opt84_binary(tokens: list[str]) -> str:
+    return tokens[0].rsplit("/", 1)[-1].split("@", 1)[0] if tokens else ""
+
+
+def _opt84_classify(tokens: list[str]) -> "tuple[str | None, str | None]":
+    """(row, kind) for one leaf: kind "row" (a table tool this row swaps),
+    "target" (the row's target already runs), "emits" (a `tsc` that is not a
+    `--noEmit` type-check), or (None, None) when the leaf is not in the table."""
+    t = _opt84_leaf_tokens(tokens)
+    b = _opt84_binary(t)
+    args = t[1:]
+    for row, spec in _OPT84_TABLE.items():
+        if b in spec["targets"]:
+            return row, "target"
+        if b not in spec["binaries"]:
+            continue
+        if row == "tsc":
+            if "--build" in args or "-b" in args or "--noEmit" not in args:
+                return row, "emits"
+            return row, "row"
+        need = spec["binaries"][b]
+        if not need or any(a in need for a in args):
+            return row, "row"
+    return None, None
+
+
+def _opt84_version(block: dict[str, Any], wd: str, package: str) -> "str | None":
+    """The `package` version spec the package.json nearest at or above `wd`
+    declares, or None when none does."""
+    versions = block.get("tool_versions") or {}
+    d = wd
+    while True:
+        spec = (versions.get(d) or {}).get(package) if isinstance(
+            versions.get(d), dict) else None
+        if isinstance(spec, str):
+            return spec
+        if not d:
+            return None
+        d = d.rsplit("/", 1)[0] if "/" in d else ""
+
+
+def _opt84_major(spec: "str | None") -> "int | None":
+    """The major of a plain semver spec (`^5.6.2`, `~7.0`, `5.6.2`, `>=5`), or None
+    for `workspace:*`, `catalog:`, a tag, a URL."""
+    if not isinstance(spec, str):
+        return None
+    m = _re.fullmatch(r"\s*(?:\^|~|>=|=|v)?\s*(\d+)(?:\.[\dx*]+){0,2}"
+                      r"(?:-[\w.]+)?\s*", spec)
+    return int(m.group(1)) if m else None
+
+
+def _opt84_paths(args: list[str], value_flags: "frozenset[str]") -> list[str]:
+    out: list[str] = []
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a in value_flags:
+            skip = True
+            continue
+        if a.startswith("-"):
+            continue
+        out.append(a)
+    return out
+
+
+def _opt84_benchmark_commands(row: str, tokens: list[str], runner: str,
+                              wd: str) -> list[str]:
+    """[as CI runs it, with the target] — both timed, both cold (`--cache`
+    dropped), from the step's own working directory."""
+    import shlex
+    t = _opt84_leaf_tokens(tokens)
+    args = t[1:]
+    if row == "eslint":
+        kept: list[str] = []
+        skip = False
+        for a in args:
+            if skip:
+                skip = False
+                continue
+            if a == "--cache":
+                continue
+            if a in _OPT82_CACHE_FLAGS_WITH_VALUE:
+                skip = True
+                continue
+            if a.split("=", 1)[0] in _OPT82_CACHE_FLAGS_WITH_VALUE:
+                continue
+            kept.append(a)
+        args = kept
+    base_tokens = [_opt84_binary(t), *args]
+    base = (shlex.join(tokens[:1] + base_tokens) if len(t) != len(tokens)
+            else f"{runner} " + shlex.join(base_tokens))
+    if row == "prettier":
+        paths = (_opt84_paths(args, _OPT84_PRETTIER_VALUE_FLAGS)
+                 if _opt84_binary(t) == "prettier" else []) or ["."]
+        target = "npx --yes oxfmt --check " + shlex.join(paths)
+    elif row == "eslint":
+        paths = _opt84_paths(args, _OPT84_ESLINT_VALUE_FLAGS) or ["."]
+        target = "npx --yes oxlint " + shlex.join(paths)
+    else:
+        target = "npx --yes -p typescript@7 tsc" + (
+            " " + shlex.join(args) if args else "")
+    pre = f"cd {shlex.quote(wd)} && " if wd else ""
+    return [f"({pre}time {base})", f"({pre}time {target})"]
+
+
+def _opt84_eslint_fit(block: dict[str, Any], configs: "list[dict[str, Any]]"
+                      ) -> list[str]:
+    """Why an oxlint swap of this ESLint run must be a dual-run (empty: plain
+    swap). Read from the scan's config facts; a config whose facts were not
+    read counts as a reason, so an unread config never reads as drop-in."""
+    facts_by_path = block.get("eslint_config_facts")
+    facts_by_path = facts_by_path if isinstance(facts_by_path, dict) else {}
+    reasons: list[str] = []
+
+    def _add(r: str) -> None:
+        if r not in reasons:
+            reasons.append(r)
+
+    for c in configs:
+        path = str(c.get("path") or "")
+        if c.get("custom_rules"):
+            _add(f"custom local rules in `{path}`")
+        facts = facts_by_path.get(path)
+        if not isinstance(facts, dict):
+            _add(f"`{path}`: its plugins and local rules were not read")
+        else:
+            if facts.get("local_rules"):
+                _add(f"custom local rules in `{path}`")
+            for p in facts.get("plugins") or []:
+                if p == "tailwindcss" or str(p).endswith("/tailwindcss"):
+                    _add(f"tailwindcss plugin in `{path}`")
+                elif p in _OPT84_FRAMEWORK_PLUGINS:
+                    _add(f"framework plugin {p} in `{path}`")
+            if facts.get("exhaustive_deps"):
+                _add(f"react-hooks/exhaustive-deps rule in `{path}`")
+        for s in c.get("shared_configs") or []:
+            _add(f"shareable config {s} not followed (`{path}`)")
+        if c.get("unresolved_imports"):
+            _add(f"a config import in `{path}` was not followed")
+    return reasons
+
+
+def _detect_opt84_tool_swap(
+    poles: list[dict[str, Any]],
+    wf_docs: dict[str, Any],
+    block: "dict[str, Any] | None",
+    opt82_findings: "list[dict[str, Any]] | None",
+    start_idx: int,
+    withheld: dict[str, int] | None = None,
+    withheld_candidates: list[dict[str, Any]] | None = None,
+    seen: "set[tuple[str, str]] | None" = None,
+) -> list[dict[str, Any]]:
+    """OPT84: on a drilled long pole, a heavy `scan` / `build` step whose command
+    runs Prettier (check), ESLint or `tsc --noEmit`, each of which has a native
+    drop-in. One finding per (workflow, job, step). Uncredited.
+
+    Every exit except a finding is counted into `withheld` (stamped as
+    `opt84_withheld_by_gate`): one count per pole for a pole-level exit, one
+    per candidate step otherwise. A held-back exit (`_OPT84_HELD_BACK_GATES`)
+    is also listed in `withheld_candidates`, naming the job and the step.
+    `opt82_findings` are this run's OPT82 findings: an ESLint run OPT82 already
+    reports on the same step is deferred to it."""
+    def _no(gate: str, wf: str = "", job: str = "", step: "str | None" = None,
+            **ctx: Any) -> None:
+        if withheld is not None:
+            withheld[gate] = withheld.get(gate, 0) + 1
+        if (withheld_candidates is not None and gate in _OPT84_HELD_BACK_GATES
+                and job):
+            withheld_candidates.append({"workflow_file": wf, "job": job, "gate": gate,
+                                        **({"step": step} if step else {})})
+        logger.debug("OPT84 %s %s %s: withheld by %s%s", wf, job, step or "", gate,
+                     (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items())) if ctx else "")
+
+    import shlex
+
+    tal: dict[str, Any] = block if isinstance(block, dict) else {}
+    scripts_by_dir = {str(k): v for k, v in (tal.get("package_scripts") or {}).items()
+                      if isinstance(v, dict)}
+    scripts_unreadable = frozenset(str(d) for d in
+                                   (tal.get("package_scripts_unreadable") or []))
+    alias_needed = any(isinstance(c, dict) and c.get("type_aware") == "on"
+                       for c in (tal.get("configs") or []))
+    opt82_steps = set()
+    for f82 in opt82_findings or []:
+        tl = f82.get("type_aware_lint") if isinstance(f82, dict) else None
+        if isinstance(tl, dict):
+            opt82_steps.add((str(f82.get("workflow_file") or ""),
+                             str(tl.get("yaml_job") or ""), str(tl.get("lint_step") or "")))
+
+    out: list[dict[str, Any]] = []
+    seen = set() if seen is None else seen
+    for p in poles or []:
+        if not isinstance(p, dict):
+            _no("pole_not_file_backed")
+            continue
+        wf = str(p.get("workflow_file") or "")
+        job = str(p.get("job") or "")
+        if not wf and p.get("ambiguous_workflows"):
+            name = job or str(p.get("check") or "")
+            if ("", name) in seen:
+                continue
+            seen.add(("", name))
+            _no("pole_workflow_ambiguous", "", name)
+            continue
+        if not wf or not job:
+            _no("pole_not_file_backed")
+            continue
+        if (wf, job) in seen:
+            continue
+        seen.add((wf, job))
+        raw_steps = p.get("steps")
+        steps = ([s for s in raw_steps if isinstance(s, dict)]
+                 if isinstance(raw_steps, list) else [])
+        _names = [str(s.get("step") or "").strip() for s in steps]
+        if steps and (len(steps) != len(raw_steps) or not all(_names)
+                      or len(set(_names)) != len(_names)
+                      or not all(str(s.get("category") or "").strip() for s in steps)):
+            _no("pole_step_entries_unreadable", wf, job)
+            continue
+
+        def _finite(v: Any) -> "float | None":
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                return None
+            return x if math.isfinite(x) else None
+        job_p50 = _finite(p.get("job_p50_s")) or 0.0
+        measured: list[tuple[str, str, float]] = []
+        unreadable = False
+        for s in steps:
+            d = _finite(s.get("p50_s"))
+            if d is None:
+                unreadable = True
+                break
+            measured.append((str(s.get("step") or "").strip(),
+                             str(s.get("category") or ""), d))
+        if not steps or job_p50 <= 0 or unreadable:
+            _no("pole_step_timings_unavailable", wf, job)
+            continue
+        cands = [(n, c, d) for n, c, d in measured
+                 if c in _OPT84_CATEGORIES and d >= _OPT84_MIN_STEP_S
+                 and d >= _OPT84_MIN_SHARE * job_p50]
+        if not cands:
+            _no("no_candidate_step", wf, job)
+            continue
+        doc = wf_docs.get(wf) if isinstance(wf_docs, dict) else None
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        if not isinstance(jobs, dict):
+            _no("workflow_yaml_unavailable", wf, job)
+            continue
+        hit = _opt83_match_yaml_job(jobs, job)
+        if hit is None:
+            _no("pole_job_not_matched_in_yaml", wf, job)
+            continue
+        yaml_key, spec = hit
+        walk = job_walk(spec)
+        by_name: dict[str, list[int]] = {}
+        for i, lf in enumerate(walk.leaves):
+            n = _opt79_yaml_step_display(lf.step)
+            if n:
+                by_name.setdefault(n, []).append(i)
+
+        def _defaults_wd(m: Any) -> Any:
+            d = m.get("defaults") if isinstance(m, dict) else None
+            r = d.get("run") if isinstance(d, dict) else None
+            return r.get("working-directory") if isinstance(r, dict) else None
+
+        for name, category, p50 in cands:
+            idx = by_name.get(name, [])
+            if len(idx) != 1:
+                _no("measured_step_not_matched_in_yaml", wf, job, name)
+                continue
+            st = walk.leaves[idx[0]].step
+            if st.get("uses") or not isinstance(st.get("run"), str):
+                _no("candidate_is_an_action", wf, job, name)
+                continue
+            run = str(st["run"])
+            raw_wd = st.get("working-directory",
+                            _defaults_wd(spec) if _defaults_wd(spec) is not None
+                            else _defaults_wd(doc))
+            if ("${{" in run or "${{" in str(raw_wd or "")
+                    or "${{" in json.dumps(st.get("env"), default=str)
+                    or "${{" in str(st.get("shell") or "")
+                    or "${{" in str(_defaults_wd(spec) or "")
+                    or "${{" in str(_defaults_wd(doc) or "")):
+                _no("command_has_expression", wf, job, name)
+                continue
+            if _OPT83_CD_RE.search(run):
+                _no("command_changes_directory", wf, job, name)
+                continue
+            wd_raw = str(raw_wd or "").strip()
+            wd = _opt82_norm_dir(raw_wd)
+            wd = _posixpath.normpath(wd) if wd else ""
+            if wd_raw.startswith(("/", "~")) or wd == ".." or wd.startswith("../"):
+                _no("working_directory_unknown", wf, job, name)
+                continue
+            wd = "" if wd == "." else wd
+            res = _resolve_run_leaves(run, wd, scripts_by_dir, scripts_unreadable,
+                                      bin_names=_OPT84_BIN_NAMES)
+            if res.unresolved:
+                _no(_opt84_gate_for_unresolved(res.unresolved[0]), wf, job, name,
+                    segment=res.unresolved[0].get("segment"))
+                continue
+            found: list[tuple[str, dict[str, Any]]] = []
+            targets: set[str] = set()
+            emits = False
+            for lf in res.leaves:
+                row, kind = _opt84_classify(lf["tokens"])
+                if kind == "target":
+                    targets.add(str(row))
+                elif kind == "emits":
+                    emits = True
+                elif kind == "row" and not any(r == row and x["command"] == lf["command"]
+                                               and x["wd"] == lf["wd"] for r, x in found):
+                    found.append((str(row), lf))
+            silenced = [r for r, _lf in found if r in targets]
+            found = [(r, lf) for r, lf in found if r not in targets]
+            deferred = (wf, yaml_key, name) in opt82_steps
+            tools: list[dict[str, Any]] = []
+            held: "str | None" = None
+            for row, lf in found:
+                spec_row = _OPT84_TABLE[row]
+                lwd = str(lf["wd"] or "")
+                version = _opt84_version(tal, lwd, spec_row["package"])
+                fit, reasons = "drop-in", []
+                if row == "tsc":
+                    major = _opt84_major(version)
+                    if major is None:
+                        held = held or "typescript_version_unreadable"
+                        continue
+                    if major >= spec_row["target_major"]:
+                        silenced.append(row)
+                        continue
+                elif row == "eslint":
+                    if deferred:
+                        fit = "deferred_to_opt82"
+                        reasons = ["OPT82 reports this ESLint run's type-aware rules "
+                                   "on the same step"]
+                    else:
+                        eslint_cmd = shlex.join(lf["tokens"])
+                        configs, bad = ([], []) if tal.get("error") else \
+                            _opt82_applicable_configs(tal, lwd,
+                                                      _opt82_config_flag(eslint_cmd))
+                        if (tal.get("error") or bad or not configs
+                                or (_opt82_walk_missed_dir(tal, lwd)
+                                    and not _opt82_config_flag(eslint_cmd))):
+                            held = held or "eslint_config_unreadable"
+                            continue
+                        reasons = _opt84_eslint_fit(tal, configs)
+                        fit = "dual-run" if reasons else "drop-in"
+                t = {"row": row, "leaf_command": lf["command"],
+                     "source_tool": spec_row["source_tool"],
+                     "target": spec_row["target"], "fit": fit,
+                     "fit_reasons": reasons, "source_version": version,
+                     "benchmark_commands": _opt84_benchmark_commands(
+                         row, lf["tokens"], lf["runner"], lwd),
+                     "published_range": spec_row["published_range"],
+                     "docs_url": _OPT84_DOCS[row]["docs_url"],
+                     "migration_docs_url": _OPT84_DOCS[row]["migration_docs_url"]}
+                if row == "tsc":
+                    t["typescript6_alias_needed"] = alias_needed
+                tools.append(t)
+            if held:
+                _no(held, wf, job, name)
+                continue
+            if not any(t["fit"] != "deferred_to_opt82" for t in tools):
+                if tools:
+                    _no("eslint_reported_by_opt82", wf, job, name)
+                elif silenced:
+                    _no("target_already_in_use", wf, job, name)
+                elif emits:
+                    _no("tsc_emits_not_in_v1", wf, job, name)
+                else:
+                    _no("tool_not_in_table", wf, job, name)
+                continue
+            out.append(_opt84_finding(
+                p, wf, job, yaml_key, name, category, p50, job_p50, wd, run,
+                [lf["command"] for lf in res.leaves], tools, start_idx + len(out) + 1))
+    return out
+
+
+def _opt84_finding(p: dict[str, Any], wf: str, job: str, yaml_key: str, name: str,
+                   category: str, p50: float, job_p50: float, wd: str, run: str,
+                   leaves: list[str], tools: list[dict[str, Any]],
+                   idx: int) -> dict[str, Any]:
+    """The OPT84 finding for one pole step. Every number in it is the pole's own
+    measurement; the step's p50 is a CEILING, never a saving."""
+    live = [t for t in tools if t["fit"] != "deferred_to_opt82"]
+    eslint_live = any(t["row"] == "eslint" for t in live)
+    sev = "HIGH" if eslint_live else "MEDIUM"
+    ceiling = round(p50, 1)
+    share = round(p50 / job_p50, 4) if job_p50 > 0 else 0.0
+    split_unknown = len(tools) > 1
+    command = " ".join(run.strip().split())
+    swaps = "; ".join(
+        f"{t['source_tool']} (`{t['leaf_command']}`) -> {t['target']}"
+        + (f", {t['fit']}" if t["fit"] != "drop-in" else "") for t in tools)
+    evidence = (
+        f"`{job}` is a measured long pole ({job_p50:.0f}s across its steps at p50). "
+        f"Its step `{name}` measures {p50:.0f}s at p50 ({share * 100:.0f}% of the pole) "
+        f"and runs `{command}`, which resolves to: {swaps}. Each has a native drop-in. "
+        f"{ceiling:.0f}s, the step's own p50, is the CEILING on what the swap can "
+        "remove, not a forecast"
+        + ("; the tools share one step, so how it splits between them is unknown "
+           "until measured" if split_unknown else "")
+        + ". No saving is credited until a benchmark measures it.")
+    me = _measured_evidence(
+        ["Tool", "Runs", "Native drop-in", "Fit"],
+        [[t["source_tool"], f"`{t['leaf_command']}`", t["target"], t["fit"]]
+         for t in tools],
+        summary=evidence,
+        note=("The step's p50 is the pole's own decomposition (jobs API steps[] "
+              "timestamps). What it runs is read from the workflow YAML and "
+              "package.json scripts, never from the timings."))
+    f = _new_finding(
+        "OPT84", sev, _OPT84_TITLE, wf, job, evidence, _OPT84_FIX_STRATEGY,
+        _catalog_anchor("OPT84", _OPT84_TITLE), idx, wc_p50=None, rm=None,
+        size_note=(f"uncredited. The step's measured p50 ({ceiling:.0f}s) is the "
+                   "CEILING, not a forecast; the saving needs a benchmark of both "
+                   "tools on the same commit and runner class before any number is "
+                   "claimed."),
+        realization="none", measured_evidence=me)
+    f["pattern_class"] = "structural"
+    f["sizing_basis"] = "uncredited"
+    f["risk"] = sev
+    f["guardrail"] = (
+        "Every rule, plugin, file set and check the repo relies on stays, and where "
+        "the target lacks one the recipe runs both tools (a dual-run) rather than "
+        "dropping it.")
+    f["rollout"] = (
+        "Benchmark both tools on the same commit and runner class before claiming a "
+        "number, and if the swap reformats files ship the recipe and the bulk "
+        "reformat as separate commits.")
+    f["tool_swap"] = {
+        "kind": "opt84_tool_swap",
+        "job": job,
+        "yaml_job": yaml_key,
+        "workflow_file": wf,
+        "pole_check": str(p.get("check") or ""),
+        "job_p50_s": job_p50,
+        "step": name,
+        "category": category,
+        "step_p50_s": ceiling,
+        "share": share,
+        "working_directory": wd,
+        "command": command,
+        "resolved_leaves": list(leaves),
+        "tools": tools,
+        "ceiling_s": ceiling,
+        "ceiling_basis": _OPT84_CEILING_BASIS,
+        "split_unknown": split_unknown,
+        "min_share": _OPT84_MIN_SHARE,
+        "min_step_s": _OPT84_MIN_STEP_S,
+    }
+    return f
 
 
 def _structural_pole_candidates(
@@ -23882,6 +24605,46 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             if act is not None:
                 f["workflow_activity"] = act
         _o83_next = max(_o83_next, max((int(f["id"][1:]) for f in new), default=_o83_next))
+        findings.extend(new)
+
+    # OPT84: a heavy scan / build step on a drilled long pole that runs a tool
+    # with a native drop-in (Prettier, ESLint, `tsc --noEmit`). Same poles and
+    # the same per-pole GUARDED call as OPT83, its own `seen` set; it reads the
+    # scan's `type_aware_lint` block and this run's OPT82 findings (an ESLint
+    # run OPT82 already reports on the same step is deferred to it). No gh
+    # call. Uncredited. It is NOT in `_OPT81_CHEAPER_STRUCTURAL`: like OPT83 it
+    # never suppresses OPT81's advisory on the same pole.
+    _o84_next = max((int(f["id"][1:]) for f in findings
+                     if f.get("id", "").startswith("f") and f["id"][1:].isdigit()),
+                    default=0)
+    _o84_opt82 = [f for f in findings if str(f.get("pattern")) == "OPT82"]
+    findings_doc.setdefault("opt84_withheld_by_gate", {})
+    findings_doc.setdefault(_OPT84_WITHHELD_DOC_KEY, [])
+    _o84_seen: set[tuple[str, str]] = set()
+    for _o84_pole in list((findings_doc.get("pr_critical_path") or {}).get("poles") or []):
+        try:
+            new = _detect_opt84_tool_swap(
+                [_o84_pole], _wf_docs, findings_doc.get("type_aware_lint"), _o84_opt82,
+                _o84_next,
+                withheld=findings_doc.setdefault("opt84_withheld_by_gate", {}),
+                withheld_candidates=findings_doc.setdefault(_OPT84_WITHHELD_DOC_KEY, []),
+                seen=_o84_seen)
+        except Exception as e:  # noqa: BLE001 — never take the data pass down
+            _o84_p = _o84_pole if isinstance(_o84_pole, dict) else {}
+            _o84_wf = str(_o84_p.get("workflow_file") or "")
+            _o84_job = _re.sub(r"[`\s]+", " ", str(_o84_p.get("job")
+                                                  or _o84_p.get("check") or "")).strip()
+            logger.warning("OPT84 detector failed on %s job %s: %s: %s",
+                           _o84_wf, _o84_job, type(e).__name__, e)
+            _skip_detectors(_o84_wf, ["OPT84"],
+                            f"the tool-swap check failed on job `{_o84_job}` "
+                            f"({type(e).__name__})")
+            new = []
+        for f in new:
+            act = activity_by_wf.get(str(f.get("workflow_file") or ""))
+            if act is not None:
+                f["workflow_activity"] = act
+        _o84_next = max(_o84_next, max((int(f["id"][1:]) for f in new), default=_o84_next))
         findings.extend(new)
 
     # OPT81 A2: the runner-size advisory, the lever of LAST RESORT on a

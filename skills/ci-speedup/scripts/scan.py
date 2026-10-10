@@ -3937,9 +3937,56 @@ def _tal_block(**overrides: Any) -> dict[str, Any]:
         "eslint_versions": {},
         "rules_source": "references/type-aware-lint-rules.tsv",
         "error": None,
+        # OPT84 (tool swap) reads the three below. {package dir: {package:
+        # version spec}} for the `_TAL_TOOL_PACKAGES` its package.json declares
+        # (dependencies + devDependencies, string specs only); a dir that
+        # declares none of them is absent.
+        "tool_versions": {},
+        # {package dir: sorted names of the formatter / compiler / framework
+        # config files beside its package.json (`_TAL_CONFIG_FILE_RE`)}.
+        "config_files": {},
+        # {ESLint config path: {"plugins", "local_rules", "exhaustive_deps"}}:
+        # what the config's own text names, never evaluated. OPT84 decides
+        # whether an oxlint swap is a plain swap or a dual-run from these.
+        "eslint_config_facts": {},
     }
     block.update(overrides)
     return block
+
+
+# The packages whose declared versions OPT84 reads: the tools it can swap, the
+# targets that mean "already swapped", and the recipe-only rows' tools.
+_TAL_TOOL_PACKAGES = ("typescript", "prettier", "oxfmt", "oxlint", "eslint",
+                      "@babel/core", "@swc/core", "webpack", "next")
+_TAL_CONFIG_FILE_RE = re.compile(
+    r"^(\.prettierrc.*|prettier\.config\..+|babel\.config\..+|\.babelrc.*"
+    r"|next\.config\..+)$")
+# An ESLint plugin named in a config's text: `eslint-plugin-x`,
+# `@scope/eslint-plugin(-x)`, or a string in a legacy `plugins: [...]` list.
+_TAL_PLUGIN_PKG_RE = re.compile(r"(?:@([\w.-]+)/)?eslint-plugin(?:-([\w.-]+))?")
+_TAL_PLUGINS_LIST_RE = re.compile(r"""["']?plugins["']?\s*:\s*\[([^\]]*)\]""")
+_TAL_QUOTED_RE = re.compile(r"""["']([^"']+)["']""")
+# A rule defined in the repo itself: a local-rules plugin, a rules directory, a
+# relative import of a rules / plugin module, or an inline rule (`create(context`).
+_TAL_LOCAL_RULES_RE = re.compile(
+    r"eslint-plugin-local|local-rules|rulesdir|rulesDirectory"
+    r"""|(?:from\s+|require\(\s*)["']\.{1,2}/[^"']*(?:rule|plugin)[^"']*["']"""
+    r"|\bcreate\s*\(\s*context\b")
+
+
+def _tal_fit_facts(text: str) -> dict[str, Any]:
+    """What an ESLint config's own text names, for OPT84's swap fit: the
+    plugins it loads, whether it defines rules locally, and whether it sets
+    `react-hooks/exhaustive-deps`. Read from text, never evaluated."""
+    plugins: set[str] = set()
+    for scope, name in _TAL_PLUGIN_PKG_RE.findall(text):
+        plugins.add((f"@{scope}" + (f"/{name}" if name else "")) if scope else name)
+    for body in _TAL_PLUGINS_LIST_RE.findall(text):
+        plugins.update(_TAL_QUOTED_RE.findall(body))
+    plugins.discard("")
+    return {"plugins": sorted(plugins),
+            "local_rules": bool(_TAL_LOCAL_RULES_RE.search(text)),
+            "exhaustive_deps": "react-hooks/exhaustive-deps" in text}
 
 
 def _read_type_aware_lint(root: Path) -> dict[str, Any]:
@@ -3974,6 +4021,9 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
     scripts: dict[str, dict[str, str]] = {}
     scripts_unreadable: list[str] = []
     eslint_versions: dict[str, str] = {}
+    tool_versions: dict[str, dict[str, str]] = {}
+    config_files: dict[str, list[str]] = {}
+    fit_facts: dict[str, dict[str, Any]] = {}
 
     def _finish(rel: str, fmt: str, read: dict[str, Any],
                 typed: "_TalCustomRules", imp_unresolved: list[str]) -> None:
@@ -4039,6 +4089,7 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
             unreadable.append(rel)
             continue
         flat = path.name.startswith("eslint.config.")
+        fit_facts[rel] = _tal_fit_facts(text)
         read = _tal_read_any(path, text, rel, flat)
         if read is None:
             unreadable.append(rel)
@@ -4063,10 +4114,21 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
                                                              dict) else {})}
         if isinstance(deps.get("eslint"), str):
             eslint_versions[_dir(rel)] = deps["eslint"]
+        tv = {k: deps[k] for k in _TAL_TOOL_PACKAGES if isinstance(deps.get(k), str)}
+        if tv:
+            tool_versions[_dir(rel)] = tv
+        try:
+            present = sorted(n for n in os.listdir(path.parent)
+                             if _TAL_CONFIG_FILE_RE.match(n))
+        except OSError:
+            present = []
+        if present:
+            config_files[_dir(rel)] = present
         sc = data.get("scripts")
         scripts[_dir(rel)] = ({str(k): str(v) for k, v in sc.items()
                                if isinstance(v, str)} if isinstance(sc, dict) else {})
         if isinstance(data.get("eslintConfig"), dict):
+            fit_facts[rel] = _tal_fit_facts(json.dumps(data["eslintConfig"]))
             _finish(rel, "package.json", _tal_read_obj(data["eslintConfig"], rel),
                     _TalCustomRules(), [])
     return _tal_block(
@@ -4076,6 +4138,9 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
         package_scripts=scripts,
         package_scripts_unreadable=sorted(scripts_unreadable),
         eslint_versions=eslint_versions,
+        tool_versions=tool_versions,
+        config_files=config_files,
+        eslint_config_facts=fit_facts,
     )
 
 
@@ -4676,8 +4741,11 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
     # by a drill-time log leaf in blocking_path.py, gated on this scan's
     # `test_runner_isolation` block.
     # OPT83 (independent steps on a pole) is routed by collect_runs from each
-    # drilled pole's step decomposition plus the workflow YAML.
-    structural_detected = {"OPT70", "OPT71", "OPT72", "OPT73", "OPT75", "OPT83"}
+    # drilled pole's step decomposition plus the workflow YAML. OPT84 (a slow
+    # pole step runs a tool with a native drop-in) is routed the same way, from
+    # the pole's step decomposition plus the workflow YAML and package scripts.
+    structural_detected = {"OPT70", "OPT71", "OPT72", "OPT73", "OPT75", "OPT83",
+                           "OPT84"}
     structural_without_detector = sorted(
         c.pattern for c in catalog
         if c.finding_class == "structural" and c.pattern not in structural_detected)
