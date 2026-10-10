@@ -95,7 +95,7 @@ TRIAGE_ALLOWLIST = {
     "every file-backed structural lever carries a measured dominant step (no name-inferred OPT75)": AUTO_SEED,  # check_structural_pole_has_measured_step
     "no finding cites a step longer than its job's measured window": AUTO_SEED,                  # check_step_cited_within_job_window
     "no stamped step decomposition outlasts its job": AUTO_SEED,                                 # check_stamped_decomposition_within_job
-    "a pole's step list says how many declared steps it leaves out": AUTO_SEED,                  # check_pole_omitted_steps_line
+    "a pole's step list says how many skipped or untimeable steps it leaves out": AUTO_SEED,                  # check_pole_omitted_steps_line
     "declared drilled-run timelines are readable": TRIAGE,                                        # check_declared_timelines_readable (a bundle-copy / harness fault, not a skill bug)
     "no payload-bearing step is binned as `build` (redundant-work inflation → OPT72 misroute)": AUTO_SEED,  # check_structural_step_category_not_payload_binned_as_build
     "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)": AUTO_SEED,  # check_detector_leaf_agrees_with_dominant_category (issue #16)
@@ -201,7 +201,7 @@ CHECK_CLASS = {
     "every file-backed structural lever carries a measured dominant step (no name-inferred OPT75)": "estimated-not-measured",  # a lever asserted without a measured step
     "no finding cites a step longer than its job's measured window": "fabricated-or-unsupported-finding",  # a cited step figure its job's own sampled run times contradict (a skipped step's year-1 start read as a duration)
     "no stamped step decomposition outlasts its job": "fabricated-or-unsupported-finding",  # a stamped step figure its job's own sampled run times contradict
-    "a pole's step list says how many declared steps it leaves out": "coverage-gap-dead-end",  # declared steps dropped from a pole's step list with no line saying so (an undisclosed gap)
+    "a pole's step list says how many skipped or untimeable steps it leaves out": "coverage-gap-dead-end",  # declared steps dropped from a pole's step list with no line saying so (an undisclosed gap)
     "no payload-bearing step is binned as `build` (redundant-work inflation → OPT72 misroute)": "mis-ranked-lever",  # a payload step mis-binned as build inflates redundant-ratio and routes the pole to the wrong pattern (OPT72 not OPT75)
     "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)": "fabricated-or-unsupported-finding",  # issue #16: a leaf crowning a MEASURED CAUSE the pole's own dominant-step data contradicts (lint fix on a test-dominant pole)
     "pole addressable ceiling within the co-occurrence floor": "estimated-not-measured",  # an overstated ceiling not grounded in measured co-occurrence
