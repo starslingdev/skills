@@ -1538,7 +1538,8 @@ def _detect_opt5(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        steps = _steps(job)
+        leaves = job_walk(job).leaves
+        steps = [lf.step for lf in leaves]
         pnpm_setup_idx = node_setup_idx = cache_idx = None
         node_cache_val = ""
         pnpm_setup_cache = False  # pnpm/action-setup with `cache: true`
@@ -1565,8 +1566,16 @@ def _detect_opt5(doc: dict, raw: str) -> list[Hit]:
         reasons: list[str] = []
         if (node_setup_idx is not None and pnpm_setup_idx is not None
                 and node_setup_idx < pnpm_setup_idx):
-            reasons.append("`actions/setup-node` runs before `pnpm/action-setup` "
-                           "(store path unavailable for the cache key)")
+            g = leaves[node_setup_idx].group
+            if g is not None and leaves[pnpm_setup_idx].group == g:
+                # Siblings in one `parallel:` group start together: neither runs
+                # first, so pnpm is still not set up when setup-node reads it.
+                reasons.append("`actions/setup-node` and `pnpm/action-setup` run side "
+                               "by side in one `parallel:` group (store path "
+                               "unavailable for the cache key)")
+            else:
+                reasons.append("`actions/setup-node` runs before `pnpm/action-setup` "
+                               "(store path unavailable for the cache key)")
         if (node_setup_idx is not None and node_cache_val.lower() != "pnpm"
                 and cache_idx is None):
             reasons.append("`actions/setup-node` has no `cache: 'pnpm'` and no "
@@ -2192,6 +2201,18 @@ def _detect_opt12(doc: dict, raw: str) -> list[Hit]:
             match_text="(workflow)",
         ))
     return hits
+
+
+def _opt12_first_step_in_a_group(doc: dict) -> list[str]:
+    """The jobs OPT12 cannot read a preamble from because their FIRST step is
+    inside a `parallel:` group (a composite action cannot hold one). Listed
+    under the stamp's `held_back`, so the job is not silently skipped."""
+    out: list[str] = []
+    for name, job in _jobs_from_doc(doc).items():
+        leaves = job_walk(job).leaves if isinstance(job, dict) else []
+        if leaves and leaves[0].in_parallel_group:
+            out.append(str(name))
+    return out
 
 
 # ---- OPT6 — Cache Key Entropy Too High or Unstable ---------------------------
@@ -4734,6 +4755,13 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
     # install seconds / runner-minutes are credited once, not double-counted.
     findings = _reconcile_opt1_opt2(findings)
 
+    # Candidates a detector could not read because of the syntax, with the
+    # reason (stamped with the rest of `parallel_steps`, only when used).
+    held_back = [{"pattern": "OPT12", "path": rel, "job": job,
+                  "reason": "first_step_inside_a_parallel_group"}
+                 for rel, doc, _raw in parsed for job in _opt12_first_step_in_a_group(doc)]
+    if held_back:
+        parallel_stats["held_back"] = held_back
     extra: dict[str, Any] = {}
     if parallel_steps_used(parallel_stats):
         # Stamped only when the syntax is used, so every other findings

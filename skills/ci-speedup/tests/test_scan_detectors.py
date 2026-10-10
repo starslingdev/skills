@@ -4425,6 +4425,106 @@ jobs:
     assert "OPT12" not in _scan_one(tmp_path, neg)
 
 
+def test_opt12_fires_on_a_preamble_that_ends_at_a_group(tmp_path: Path):
+    """T7: two jobs share [checkout, setup-node] and THEN a group: the preamble
+    before the group is extractable, so OPT12 still fires."""
+    pos = """name: CI
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - parallel:
+          - run: pnpm build
+          - run: pnpm test
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - parallel:
+          - run: pnpm build
+          - run: pnpm lint
+"""
+    assert "OPT12" in _scan_one(tmp_path, pos)
+
+
+def test_opt12_a_background_step_does_not_end_the_preamble(tmp_path: Path):
+    """T7: only a `parallel:` group ends the preamble; a top-level
+    `background: true` step is an ordinary step of it (kills the
+    `in_parallel_group` -> `background` mutant)."""
+    pos = """name: CI
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run -d postgres:15
+        background: true
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm test
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run -d postgres:15
+        background: true
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm lint
+"""
+    assert "OPT12" in _scan_one(tmp_path, pos)
+
+
+def test_opt12_lists_a_job_whose_first_step_is_in_a_group(tmp_path: Path):
+    """S13: a job whose very first step sits in a `parallel:` group has no
+    extractable preamble; it is not silently dropped but listed under the
+    stamp's `held_back` with its reason."""
+    yml = """name: CI
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - uses: actions/checkout@v4
+          - uses: actions/setup-node@v4
+      - run: pnpm install
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm lint
+"""
+    _write_workflow(tmp_path, "ci.yml", yml)
+    data = _scan(tmp_path)
+    held = data["parallel_steps"]["held_back"]
+    assert held == [{"pattern": "OPT12", "path": ".github/workflows/ci.yml", "job": "a",
+                     "reason": "first_step_inside_a_parallel_group"}], held
+
+
+def test_opt5_two_setup_actions_in_one_group_run_side_by_side(tmp_path: Path):
+    """Item 4: siblings in one group do not run one before the other."""
+    yml = """name: CI
+on: push
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - uses: actions/setup-node@v4
+          - uses: pnpm/action-setup@v4
+      - run: pnpm install
+"""
+    data = _scan_dir_with(tmp_path, yml)
+    ev = [f["evidence"] for f in data["findings"] if f["pattern"] == "OPT5"]
+    assert ev and "run side by side" in ev[0], ev
+    assert "runs before" not in ev[0], ev
+
+
 def test_opt12_flat_preamble_still_fires(tmp_path: Path):
     pos = """name: CI
 on: push
