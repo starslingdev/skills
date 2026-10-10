@@ -33,10 +33,8 @@ PINNED = "ci.security.pinned-action-shas"
 SHALLOW = "ci.checkout.shallow-clone"
 
 
-def _parsed(steps: list, job_uses: str | None = None) -> list[tuple[str, dict, str]]:
+def _parsed(steps: list) -> list[tuple[str, dict, str]]:
     jobs: dict = {"b": {"steps": steps}}
-    if job_uses:
-        jobs["c"] = {"uses": job_uses}
     raw = yaml.safe_dump({"on": {"pull_request": None}, "jobs": jobs},
                          sort_keys=False)
     return [("ci.yml", yaml.safe_load(raw), raw)]
@@ -69,11 +67,6 @@ def test_a_self_repository_ref_inside_a_composite_is_local_too(tmp_path):
     got = pf_mod._practice_facts(_parsed([{"uses": "$/.github/actions/outer"}]),
                                  tmp_path)[PINNED]
     assert got["state"] == "pass" and got["evidence"].startswith("1 of 1 "), got
-
-
-def test_a_self_repository_reusable_workflow_is_not_a_cross_repo_delegation():
-    parsed = _parsed([{"run": "true"}], job_uses="$/.github/workflows/build.yml")
-    assert pf_mod._remote_reusable_refs(parsed) == []
 
 
 def test_the_history_index_opens_a_self_repository_composite(tmp_path):

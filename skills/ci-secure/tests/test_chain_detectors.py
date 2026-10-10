@@ -83,9 +83,11 @@ def test_fires_on_workflow_run_head_and_local_action(tmp_path):
 
 def test_silent_on_a_self_repository_action_after_a_head_checkout(tmp_path):
     # `uses: $/path` (GitHub's self-repository prefix, 2026-07-30) loads the
-    # action from the commit the WORKFLOW runs at, not from the workspace: on
-    # workflow_run that is the base repository's commit, so the head checkout
-    # never changes what runs. The same shape with `./` fires (test above).
+    # action's definition from the commit the WORKFLOW runs at, not from the
+    # workspace, and is not counted as the execution today (current behaviour,
+    # pinned here). Its own `run:` steps could still execute the checked-out
+    # tree; the check does not open composite actions. The same shape with
+    # `./` fires (test above).
     hits = _hits(tmp_path, """\
         on:
           workflow_run:
@@ -214,8 +216,13 @@ def test_collect_sha_pins_finds_only_forty_hex_remote_pins(tmp_path):
 
 
 def test_collect_sha_pins_never_reads_a_self_repository_ref_as_a_pin(tmp_path):
+    # GitHub rejects `@ref` on a `$/` reference, but the fixture carries a
+    # 40-hex suffix anyway so this guards the pin regexes: if either is ever
+    # widened to admit a `$` first segment, `$/...` would read as a pinned
+    # remote action and be sent to the impostor-commit check.
     _wf(tmp_path, "ci.yml", PINNED.replace(
-        "- uses: ./local/action", "- uses: $/.github/actions/local"))
+        "- uses: ./local/action",
+        "- uses: $/.github/actions/local@" + "b" * 40))
     pins = scan._collect_sha_pins(tmp_path, scan.all_workflow_files(tmp_path))
     assert all(not repo.startswith("$") for _, _, repo, _ in pins), pins
     assert len(pins) == 3, pins

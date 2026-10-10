@@ -195,9 +195,12 @@ untrusted-event trigger with elevated context, (2) `actions/checkout` whose
 `ref:`/`repository:` resolves to attacker-controlled head code, (3) any
 subsequent step that executes from the working tree (`run:` or `uses: ./…`).
 Each condition alone can be legitimate; together they hand the runner to the
-fork. A self-repository action (`uses: $/…`, GitHub 2026-07-30) is not the
-execution leg: it loads from the commit the workflow runs at, which on these
-triggers is the base repository's, so the head checkout never changes it.
+fork. A self-repository action (`uses: $/…`, GitHub 2026-07-30) is not
+counted as condition (3) today: its definition loads from the commit the
+workflow runs at, which on these triggers is the base repository's, so the
+head checkout does not change it. Its own `run:` steps may still execute the
+fork's checked-out tree, though, and this check does not open composite
+actions to tell.
 
 **Detection**: deterministic three-way correlation, per job. Condition (3) is
 a deliberate over-approximation stated honestly: a post-checkout `run:` step

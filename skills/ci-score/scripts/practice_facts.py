@@ -388,7 +388,10 @@ def _remote_reusable_refs(parsed: list[tuple[str, dict, str]]) -> list[str]:
     for _rel, doc, _raw in parsed:
         for job in _wf_jobs(doc).values():
             uses = job.get("uses")
-            if isinstance(uses, str) and not _is_local_uses(uses) and "@" in uses:
+            # A self-repository `$/…` call never reaches the append: GitHub
+            # rejects an `@ref` suffix on `$/` ("must not include an `@{ref}`
+            # suffix"), so the `"@" in uses` guard already excludes it.
+            if isinstance(uses, str) and not uses.startswith("./") and "@" in uses:
                 refs.append(uses.split("@")[0])
     return sorted(set(refs))
 

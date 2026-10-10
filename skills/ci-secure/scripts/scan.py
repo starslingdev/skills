@@ -4970,13 +4970,15 @@ def _attacker_head_ref(value: Any) -> bool:
     return any(n in value for n in needles)
 
 
-# The execution leg's local-action arm is `./` ONLY, on purpose. `uses: ./path`
-# loads the action from the WORKSPACE, so after a head checkout it is the
-# fork's code. The self-repository prefix `uses: $/path` (GitHub, 2026-07-30)
-# loads it from the commit the WORKFLOW runs at, with no checkout involved;
-# under `pull_request_target` / `workflow_run` that is the base repository's
-# commit, never the fork's, so a `$/` step does not execute the checked-out
-# tree and naming it as the execution would be a false finding.
+# The execution leg's local-action arm is `./` only. `uses: ./path` loads the
+# action's definition from the WORKSPACE, so after a head checkout that
+# definition is the fork's. The self-repository prefix `uses: $/path` (GitHub,
+# 2026-07-30) loads the definition from the commit the WORKFLOW runs at, which
+# under `pull_request_target` / `workflow_run` is the base repository's, so a
+# `$/` step is not counted as the execution today. That does not make it safe:
+# a `$/` composite action's own `run:` steps still run in the job's working
+# directory and may execute the fork's checked-out tree, and this check does
+# not open composite actions to see whether they do.
 _WORKSPACE_ACTION_PREFIX = "./"
 
 
